@@ -1,0 +1,11 @@
+{
+  "$id": "ecology-research-result@1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "summary", "evidence"],
+  "properties": {
+    "schema_version": {"const": "ecology-research-result@1"},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 12000},
+    "evidence": {"type": "array", "maxItems": 64, "items": {"type": "object"}}
+  }
+}

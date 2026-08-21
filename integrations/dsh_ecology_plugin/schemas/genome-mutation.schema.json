@@ -1,0 +1,24 @@
+{
+  "$id": "ecology-genome-mutation@1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "operations"],
+  "properties": {
+    "schema_version": {"const": "ecologyrsi-dsh.genome-mutation/1"},
+    "operations": {
+      "type": "array", "minItems": 0, "maxItems": 16,
+      "items": {
+        "oneOf": [
+          {"type":"object","additionalProperties":false,"required":["op","name","value"],"properties":{"op":{"const":"set_bounded_parameter"},"name":{"type":"string","minLength":1,"maxLength":120},"value":{"type":"number"}}},
+          {"type":"object","additionalProperties":false,"required":["op","predictor_id"],"properties":{"op":{"const":"select_registered_pipeline"},"predictor_id":{"type":"string","minLength":1,"maxLength":160}}},
+          {"type":"object","additionalProperties":false,"required":["op","program_id"],"properties":{"op":{"enum":["select_registered_feature_policy","select_registered_fit_policy","select_registered_uncertainty_policy"]},"program_id":{"type":"string","minLength":1,"maxLength":160}}},
+          {"type":"object","additionalProperties":false,"required":["op","workflow_template_id"],"properties":{"op":{"const":"select_registered_workflow_template"},"workflow_template_id":{"type":"string","minLength":1,"maxLength":160}}},
+          {"type":"object","additionalProperties":false,"required":["op","name","value"],"properties":{"op":{"const":"set_bounded_workflow_parameter"},"name":{"type":"string","minLength":1,"maxLength":120},"value":{"type":"number"}}},
+          {"type":"object","additionalProperties":false,"required":["op","role","instruction_template_id"],"properties":{"op":{"const":"select_instruction_template"},"role":{"enum":["sample-planner","sample-repair"]},"instruction_template_id":{"type":"string","minLength":1,"maxLength":160}}},
+          {"type":"object","additionalProperties":false,"required":["op","role","name","value"],"properties":{"op":{"const":"set_instruction_parameter"},"role":{"enum":["sample-planner","sample-repair"]},"name":{"type":"string","minLength":1,"maxLength":120},"value":{"type":["string","number","integer","boolean"]}}},
+          {"type":"object","additionalProperties":false,"required":["op","role","enabled_tool_ids"],"properties":{"op":{"const":"narrow_role_tool_policy"},"role":{"enum":["sample-planner","sample-repair"]},"enabled_tool_ids":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":160}}}}
+        ]
+      }
+    }
+  }
+}

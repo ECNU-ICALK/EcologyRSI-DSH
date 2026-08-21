@@ -1,0 +1,130 @@
+{
+  "task": {
+    "task_id": "legacy-genome-with-snapshot",
+    "objective": "predict toy soil water",
+    "domain_pack": "crop-soil-water@toy",
+    "visible_datasets": ["generated-toy-series@1"],
+    "budget": {"max_candidates": 1},
+    "seed": 17,
+    "metadata": {
+      "prediction_model_id": "toy-rolling-water@1",
+      "evaluator_id": "toy_time_forward@1",
+      "dataset_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "split_manifest_digest": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+    }
+  },
+  "proposal": {
+    "proposal_id": "proposal:legacy-with-snapshot",
+    "run_id": "run:legacy-with-snapshot",
+    "generation": 0,
+    "title": "legacy toy registered program",
+    "changes": {"alpha": 0.4, "window": 5, "water_threshold": 0.35},
+    "parent_candidate_id": null,
+    "rationale": "frozen 0.2.2 proposal",
+    "metadata": {
+      "prediction_model_adoption": {
+        "schema_version": "ecologyrsi-dsh.predictor-adoption/1",
+        "status": "research_only",
+        "requested_id": "toy-rolling-water@1",
+        "adopted_id": "toy-rolling-water@1",
+        "adopted_digest": "c2bf5c28c3e35495e7b4c511c2f21285ecc317097e9364e64b543bac86d21f18",
+        "default_id": "toy-rolling-water@1",
+        "evaluator_id": "toy_time_forward@1",
+        "dataset_id": "generated-toy-series@1",
+        "catalog_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "plan_digest": "cc90536fc4327e5de232fca2cdfb28683aa8a8b624c238f6d66d54970b017f9d",
+        "parameter_schema_digest": "b46ba3f630dbad1a0659331964743440f7d470f6c21477cfc14306e6413c53c4",
+        "reason": "requested_predictor_is_not_in_frozen_compatible_catalog",
+        "security_boundary": {"registered_predictor_only": true, "model_generated_code_execution": false, "task_partitions_unchanged": true},
+        "adoption_digest": "17a98e0031d0ac0bf06ab8775fcd8be2194eef4a7646d41ff55189ed113b0b5f"
+      },
+      "derived_execution_plan": {
+        "schema_version": "ecologyrsi-dsh.derived-execution-plan/1",
+        "source_generation": null,
+        "source_analysis_digest": null,
+        "derived_from_feedback": false,
+        "execution_digest": "52b615bbef89ed28e87dc7e6b3c4b4e5faf93199c7fb10466c1065eb4d53e14c",
+        "failure_profile": [],
+        "sample_max_attempts": 3,
+        "plan_max_attempts": 3,
+        "retry_backoff_seconds": 0.0,
+        "repair_sequence": ["bounded-projection-repair", "bounded-persistence-fallback"],
+        "plan_digest": "7a65f7b44374ea1ae26383b27f2d00de0989594cb87f87de5674159a88f29a8a"
+      },
+      "plan": {
+        "prediction_model": {"id": "toy-rolling-water@1"},
+        "algorithm_blueprint": {
+          "schema_version": "ecologyrsi-dsh.algorithm-blueprint-request/1",
+          "pipeline_id": "toy-rolling-water@1",
+          "operator_ids": [
+            "host.feature.causal-window@1",
+            "host.predictor.toy-water-balance@1",
+            "host.postprocess.physical-bounds@1"
+          ],
+          "parameter_names": ["alpha", "window", "water_threshold"],
+          "evidence_refs": ["knowledge:toy-water"],
+          "rationale": "use the registered causal water balance"
+        },
+        "algorithm_synthesis": {
+          "schema_version": "ecologyrsi-dsh.algorithm-synthesis/1",
+          "pipeline_id": "toy-rolling-water@1",
+          "evidence_refs": ["knowledge:toy-water"],
+          "parameter_focus": ["alpha", "water_threshold"],
+          "rationale": "adjust bounded water balance parameters"
+        }
+      }
+    }
+  },
+  "knowledge_snapshot": {
+    "run_id": "run:legacy-with-snapshot",
+    "generation": 0,
+    "query_terms": ["toy water balance"],
+    "cards": [
+      {
+        "knowledge_id": "knowledge:toy-water",
+        "title": "Toy water balance",
+        "summary": "Registered causal water balance evidence.",
+        "source_url": "https://example.test/toy-water",
+        "source_kind": "curated",
+        "source_authority": "Legacy catalog",
+        "execution_status": "adopted",
+        "selection_reason": "Frozen legacy evidence.",
+        "algorithm_tags": ["water"],
+        "capability_kind": "predictor",
+        "capability_id": "toy-rolling-water@1"
+      }
+    ],
+    "online_enabled": false,
+    "provider": "legacy catalog",
+    "retrieval_status": "catalog_only",
+    "warnings": [],
+    "retrieved_at": "2026-01-01T00:00:00.000+00:00"
+  },
+  "legacy_algorithm_ir": {
+    "schema_version": "ecologyrsi-dsh.algorithm-ir/1",
+    "predictor_id": "toy-rolling-water@1",
+    "evaluator_id": "toy_time_forward@1",
+    "pipeline_version": "toy-water-operator-graph/1",
+    "parameters": {"alpha": 0.4, "water_threshold": 0.35, "window": 5},
+    "dataset_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "split_manifest_digest": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+    "allowed_partitions": ["training_fit", "training_feedback"],
+    "operators": [
+      {"operator_id": "host.feature.causal-window@1", "parameter_names": ["window"], "stage": "feature"},
+      {"operator_id": "host.predictor.toy-water-balance@1", "parameter_names": ["alpha", "water_threshold"], "stage": "predict"},
+      {"operator_id": "host.postprocess.physical-bounds@1", "parameter_names": [], "stage": "postprocess"}
+    ],
+    "evidence_mappings": [
+      {"decision": "adopted", "knowledge_id": "knowledge:toy-water"},
+      {"decision": "adopted", "knowledge_id": "model-blueprint:pipeline:toy-rolling-water@1"},
+      {"decision": "adopted", "knowledge_id": "model-plan:predictor:toy-rolling-water@1"}
+    ],
+    "source_plan_digest": "cc90536fc4327e5de232fca2cdfb28683aa8a8b624c238f6d66d54970b017f9d",
+    "knowledge_snapshot_digest": "c009ff9c8eab95fd6f5a63094b380b8a1ecc7438a6e2e9b67a74f7e564482fe6",
+    "lowering_policy": "host-registered-operator-lowering@1",
+    "security_boundary": {"registered_operators_only": true, "model_generated_code_execution": false, "dynamic_imports": false, "shell_execution": false},
+    "source_blueprint_digest": "e032c04a8eb5a58883b5bfe0b91b31086c4da3ae2bad62ac38a150e790fe888a",
+    "source_synthesis_digest": "864769c50e4cdb976ba7d95fac1c41efb44f41c9107d9fbbd7258182120c29eb",
+    "ir_digest": "58c3752ad31f88f0e72f6776909da3266e3a364de51a9cd8a7c31457bcaaccd1"
+  }
+}

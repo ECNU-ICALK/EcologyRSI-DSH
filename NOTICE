@@ -1,0 +1,50 @@
+EcologyRSI-DSH 0.3.15
+Copyright (c) 2026 EcologyRSI contributors.
+
+This repository is a new, minimal implementation. The original EcologyRSI
+project was reviewed as a source of architecture and contract ideas, but its
+runtime and frontend code are not bundled into this distribution.
+
+The current Python package has no third-party runtime dependencies. It ships
+only dataset catalogue metadata and adapters; Autonomous Greenhouse Challenge
+raw data are not redistributed. The generated crop-soil-water data remain
+engineering fixtures, not scientific observations or validated model output.
+
+The Ecology Evolution plugin integrates with DeepSeek Harness 0.1.0-rc.6 role
+presets, Agent sessions, subagents, Workflow Engine, context compaction, and
+provider-usage projections. DSH, DeepSeek, and other names may be trademarks
+of their respective owners; this project does not claim endorsement by them.
+
+External datasets, model services, papers, and future optional dependencies
+must be reviewed under their own licenses before use or redistribution.
+
+The model-selection, environmental-forcing, calibration/validation, and
+coupling guidance used while preparing the design documents is adapted from:
+
+  ECNU-ICALK/Ecology-Harness
+  commit e348b084e6d33f663a25aeb20d6c309b8476c4dc
+  https://github.com/ECNU-ICALK/Ecology-Harness
+
+That material is available under the following MIT License:
+
+MIT License
+
+Copyright (c) 2026 EcologyHarness Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

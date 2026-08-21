@@ -1,0 +1,26 @@
+{
+  "task_id": "example-soil-water",
+  "objective": "compare bounded soil-water parameter candidates",
+  "domain_pack": "crop-soil-water@toy",
+  "visible_datasets": [
+    "generated-toy-series@1"
+  ],
+  "budget": {
+    "max_generations": 2,
+    "candidates_per_generation": 3,
+    "max_candidates": 6
+  },
+  "seed": 7,
+  "seed_policy": "fixed",
+  "policy_version": "policy@1",
+  "metadata": {
+    "fixture_only": true,
+    "dataset_digest": "af2534320547eefabca79865a3bd22f63a56c6791bcda4f5d971a8cccffbc5a2",
+    "dataset_seed": 0,
+    "episode_id": "generated-toy-series@1:seed-0",
+    "scientific_scope": "prediction_demo_non_causal",
+    "evaluation_partition": "validation",
+    "time_step": "P1D",
+    "target_unit": "fraction"
+  }
+}

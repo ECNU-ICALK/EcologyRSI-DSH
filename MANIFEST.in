@@ -1,0 +1,12 @@
+include README.md CHANGELOG.md LICENSE NOTICE RELEASE-CHECKLIST.md pyproject.toml uv.lock Makefile
+recursive-include src *.py
+recursive-include src/ecologyrsi_dsh/knowledge *.json
+recursive-include examples *.py *.json *.md
+recursive-include datasets *.json
+recursive-include docs *.jpg *.md
+recursive-include plugins/ecology_evolution *.html *.css *.js *.json *.md *.mjs
+recursive-include integrations/dsh_ecology_plugin *.js *.mjs *.json *.md *.yml
+include integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.15.tgz
+recursive-include scripts *.sh *.py *.mjs
+recursive-include tests *.py *.json
+global-exclude *.py[cod] __pycache__ .DS_Store *.sqlite3

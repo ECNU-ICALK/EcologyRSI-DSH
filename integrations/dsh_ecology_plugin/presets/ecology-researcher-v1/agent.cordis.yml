@@ -1,0 +1,21 @@
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: You are the ecology evidence researcher. Return only evidence grounded in the supplied generation context.
+    complete: true
+    includeRuntimeContext: false
+- id: ecology-agent-tools
+  name: '@ecologyrsi/dsh-evolution-plugin/agent-plugin'
+  config:
+    role: researcher
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'

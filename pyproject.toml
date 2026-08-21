@@ -1,0 +1,103 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecologyrsi-dsh"
+version = "0.3.15"
+description = "A small, replayable evolution core for EcologyRSI-DSH"
+readme = "README.md"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.scripts]
+ecologyrsi-dsh = "ecologyrsi_dsh.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"ecologyrsi_dsh.knowledge" = ["*.json"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/ecologyrsi-dsh/datasets" = [
+    "datasets/autonomous_greenhouse.json",
+]
+"share/ecologyrsi-dsh/plugins/ecology_evolution" = [
+    "plugins/ecology_evolution/README.md",
+    "plugins/ecology_evolution/app.js",
+    "plugins/ecology_evolution/index.html",
+    "plugins/ecology_evolution/plugin.json",
+    "plugins/ecology_evolution/styles.css",
+]
+"share/ecologyrsi-dsh/plugins/ecology_evolution/assets/js" = [
+    "plugins/ecology_evolution/assets/js/*.js",
+]
+"share/ecologyrsi-dsh/plugins/ecology_evolution/test" = [
+    "plugins/ecology_evolution/test/smoke.mjs",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin" = [
+    "integrations/dsh_ecology_plugin/README.md",
+    "integrations/dsh_ecology_plugin/package.json",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib" = [
+    "integrations/dsh_ecology_plugin/lib/*.js",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib/runtime" = [
+    "integrations/dsh_ecology_plugin/lib/runtime/*.js",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib/sidecar" = [
+    "integrations/dsh_ecology_plugin/lib/sidecar/*.js",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib/tools" = [
+    "integrations/dsh_ecology_plugin/lib/tools/*.js",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib/web" = [
+    "integrations/dsh_ecology_plugin/lib/web/*.js",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/schemas" = [
+    "integrations/dsh_ecology_plugin/schemas/*.json",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v1" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-coordinator-v1/*.yml",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-researcher-v1" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-researcher-v1/*.yml",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v1" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v1/*.yml",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v1" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v1/*.yml",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v1" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v1/*.yml",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v1" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v1/*.yml",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/dist" = [
+    "integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.15.tgz",
+]
+"share/ecologyrsi-dsh/scripts" = [
+    "scripts/install_dsh_ecology_runtime.mjs",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

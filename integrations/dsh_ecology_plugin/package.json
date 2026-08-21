@@ -1,0 +1,70 @@
+{
+  "name": "@ecologyrsi/dsh-evolution-plugin",
+  "version": "0.3.15",
+  "description": "DeepSeek Harness host bridge for the EcologyRSI evolution workbench",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./agent-plugin": "./lib/tools/agent-plugin.js",
+    "./client": "./lib/client.js",
+    "./runtime/capabilities": "./lib/runtime/capabilities.js",
+    "./runtime/structured-roles": "./lib/runtime/structured-roles.js",
+    "./runtime/stage-runner": "./lib/runtime/stage-runner.js",
+    "./runtime/reconciliation": "./lib/runtime/reconciliation.js",
+    "./sidecar/client": "./lib/sidecar/client.js",
+    "./package.json": "./package.json"
+  },
+  "dependencies": {},
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-layout": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-host-webserver": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-agent": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-agent-presets": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-session": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-session-persistence": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-session-projections": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-subagent": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-token-meter": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "react": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/dsh-client-runtime": { "optional": true },
+    "@deepseek-ai/dsh-client-ui-layout": { "optional": true },
+    "@deepseek-ai/dsh-client-ui-primitives": { "optional": true },
+    "@deepseek-ai/dsh-client-ui-sidebar": { "optional": true },
+    "@deepseek-ai/dsh-host-webserver": { "optional": true },
+    "@deepseek-ai/dsh-agent": { "optional": true },
+    "@deepseek-ai/dsh-agent-presets": { "optional": true },
+    "@deepseek-ai/dsh-session": { "optional": true },
+    "@deepseek-ai/dsh-session-persistence": { "optional": true },
+    "@deepseek-ai/dsh-session-projections": { "optional": true },
+    "@deepseek-ai/dsh-subagent": { "optional": true },
+    "@deepseek-ai/dsh-token-meter": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true },
+    "react": { "optional": true }
+  },
+  "files": [
+    "lib/**/*.js",
+    "presets/**/*.yml",
+    "schemas/*.json"
+  ],
+  "license": "UNLICENSED"
+}

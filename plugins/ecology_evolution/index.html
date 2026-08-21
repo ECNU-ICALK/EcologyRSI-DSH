@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="description" content="生态模型进化工作台">
+    <title>生态模型进化工作台</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">生</span>
+          <div><strong>生态模型进化工作台</strong><span>DSH 数字科学枢纽插件</span></div>
+          <span class="mode-badge">模型驱动受限进化</span>
+        </div>
+        <div class="topbar-actions">
+          <span id="connection-status" class="connection-status is-muted" role="status" aria-live="polite"><span class="status-dot" aria-hidden="true"></span><span id="connection-label">正在检查服务</span></span>
+          <button id="refresh-button" class="button button-quiet" type="button">刷新数据</button>
+        </div>
+      </header>
+
+      <div class="workspace-layout">
+        <aside class="sidebar" aria-label="工作区导航">
+          <nav class="workspace-nav" role="tablist" aria-label="生态模型进化工作区">
+            <button id="tab-settings" class="nav-item is-active" data-workspace="settings" type="button" role="tab" aria-selected="true" aria-controls="workspace-settings"><span>01</span>运行设置</button>
+            <button id="tab-parameters" class="nav-item" data-workspace="parameters" type="button" role="tab" aria-selected="false" aria-controls="workspace-parameters" tabindex="-1"><span>02</span>参数设计</button>
+            <button id="tab-training" class="nav-item" data-workspace="training" type="button" role="tab" aria-selected="false" aria-controls="workspace-training" tabindex="-1"><span>03</span>训练数据</button>
+            <button id="tab-process" class="nav-item" data-workspace="process" type="button" role="tab" aria-selected="false" aria-controls="workspace-process" tabindex="-1"><span>04</span>进化过程</button>
+            <button id="tab-candidates" class="nav-item" data-workspace="candidates" type="button" role="tab" aria-selected="false" aria-controls="workspace-candidates" tabindex="-1"><span>05</span>候选评测</button>
+            <button id="tab-collaboration" class="nav-item" data-workspace="collaboration" type="button" role="tab" aria-selected="false" aria-controls="workspace-collaboration" tabindex="-1"><span>06</span>人工协作与治理</button>
+          </nav>
+          <div class="sidebar-note"><strong>数据边界</strong><span>训练拟合分区可查看；隐藏评测集、最终评测集和正式发布均由外部治理服务控制。</span></div>
+        </aside>
+
+        <main id="main-content" class="main-content" tabindex="-1">
+          <section class="context-bar" aria-label="当前运行上下文">
+            <div class="context-select">
+              <label for="run-select">当前进化运行</label>
+              <div class="run-picker-row">
+                <select id="run-select" aria-label="选择进化运行"><option value="">暂无进化运行</option></select>
+                <label id="cancelled-empty-filter" class="run-history-filter" title="这些运行仍保留在追加式审计账本中">
+                  <input id="show-cancelled-empty-runs" type="checkbox">
+                  <span>已取消空任务</span>
+                  <strong id="cancelled-empty-count">0</strong>
+                </label>
+                <label id="archived-filter" class="run-history-filter" title="归档运行默认隐藏，其历史证据仍保留">
+                  <input id="show-archived-runs" type="checkbox">
+                  <span>已归档</span>
+                  <strong id="archived-count">0</strong>
+                </label>
+              </div>
+            </div>
+            <div class="context-stat context-status"><span>运行状态</span><strong id="run-status">未创建</strong></div>
+            <div class="context-stat"><span>当前轮次</span><strong id="generation-label">0 / 0</strong></div>
+            <div class="context-stat context-stat-last"><span>候选方案</span><strong id="candidate-count-label">0 / 0</strong></div>
+            <div class="context-actions">
+              <button id="advance-button" class="button button-primary" type="button" disabled>执行下一轮</button>
+              <button id="pause-button" class="button button-secondary" type="button" disabled>暂停运行</button>
+              <button id="cancel-button" class="button button-danger" type="button" disabled>取消运行</button>
+              <button id="archive-button" class="button button-secondary" type="button" disabled>归档运行</button>
+              <button id="delete-button" class="button button-danger" type="button" disabled hidden>永久删除</button>
+            </div>
+          </section>
+
+          <section id="system-banner" class="system-banner is-loading" role="status" aria-live="polite">
+            <span class="system-indicator" aria-hidden="true"></span>
+            <div><strong id="system-title">正在连接服务网关</strong><span id="system-detail">正在读取可用配置目录和进化运行。</span></div>
+            <button id="retry-button" class="button button-secondary" type="button" hidden>重新连接</button>
+          </section>
+
+          <section id="workspace-settings" class="workspace-panel is-visible" data-panel="settings" role="tabpanel" aria-labelledby="tab-settings" tabindex="0">
+            <header class="page-heading"><div><span>01</span><h1>运行设置</h1><p>选择训练数据集、策略模型 API 和独立评审模型 API；研究领域由数据集自动推导，轮次、样本与并发预算在“参数设计”中统一配置。</p></div><span id="readiness-pill" class="pill pill-neutral">正在读取目录</span></header>
+            <div class="settings-layout">
+              <form id="start-form" class="panel settings-form">
+                <div class="panel-heading"><div><span>运行配置</span><h2>模型驱动进化任务</h2></div><strong>必填</strong></div>
+                <section class="autonomy-plan" aria-labelledby="autonomy-plan-title">
+                  <div class="autonomy-plan-heading"><div><span>执行方式</span><h3 id="autonomy-plan-title">模型驱动的受限进化闭环</h3></div><span class="pill pill-blue">宿主边界保护</span></div>
+                  <div class="autonomy-stage-list">
+                    <div class="autonomy-stage"><span>01</span><strong>知识检索</strong><small>检索公开元数据并冻结本轮可追溯知识快照。</small></div>
+                    <div class="autonomy-stage"><span>02</span><strong>能力编译</strong><small>策略模型形成结构化计划；宿主只采用已登记预测器和有界参数。</small></div>
+                    <div class="autonomy-stage"><span>03</span><strong>科学评测</strong><small>在授权训练反馈分区比较误差、基线、约束和可复现性。</small></div>
+                    <div class="autonomy-stage"><span>04</span><strong>轮末优化</strong><small>固定规则分析结果，生成多个版本并选择下一轮父方案。</small></div>
+                  </div>
+                </section>
+                <div class="form-grid">
+                  <label><span>训练数据集</span><select id="dataset-id" name="dataset_id" required></select><small id="dataset-help">仅显示服务端确认可运行的数据集；数据集同时决定研究领域和授权评测边界。</small></label>
+                  <label class="autonomy-model-field"><span>策略模型（API）</span><select id="policy-model-id" name="strategy_model_id" required></select><small id="policy-model-help">从 DSH 已登记模型目录选择；负责检索知识并提出结构化研究计划和有界候选参数。</small></label>
+                  <label class="autonomy-model-field"><span>独立评审模型（API）</span><select id="judge-model-id" name="review_model_id" required></select><small id="judge-model-help">从同一 DSH 模型目录选择；独立检查候选效果、科学约束与搜索保留结论。必须选择不同的模型目录 ID。</small></label>
+                </div>
+                <div class="auto-binding-note" role="note"><strong>自动绑定项</strong><span>研究领域由所选训练数据集自动推导；训练序列、预测模型、进化策略和评测器不会由用户指定，系统将依据数据边界和模型输出自动绑定，并在“进化过程”中记录实际版本、依据和改进结果。</span></div>
+                <div class="auto-binding-fields" aria-hidden="true">
+                  <label hidden><span>研究领域（自动推导）</span><select id="domain-pack" name="domain" required></select><small id="domain-pack-help">由所选训练数据集自动推导知识检索范围、科学约束和数据适配器。</small></label>
+                  <label hidden><span>训练序列／团队</span><select id="episode-id" name="episode_id"></select><small id="episode-help">由数据集自动冻结，不接受人工选择。</small></label>
+                  <label hidden><span>预测模型</span><select id="prediction-model-id" name="prediction_model_id"></select><small id="prediction-model-help">由策略模型提出，宿主从已登记预测模型中校验采用。</small></label>
+                  <label hidden><span>进化策略</span><select id="strategy-id" name="strategy_id"></select><small id="strategy-help">由策略模型提出搜索方向，宿主只执行已登记且有界的进化策略。</small></label>
+                  <label hidden><span>独立评测器</span><select id="evaluator-id" name="evaluator_id"></select><small id="evaluator-help">由系统依据数据和模型输出自动绑定。</small></label>
+                </div>
+                <input id="autonomous-mode" name="autonomous_mode" type="hidden" value="true">
+                <input id="research-domain-id" name="research_domain_id" type="hidden" value="">
+                <input id="model-workflow" name="model_workflow" type="hidden" value="research_compile_evolve@1">
+                <input id="slot" name="slot" type="hidden" value="bounded_predictor">
+                <div class="form-actions"><button id="start-button" class="button button-primary" type="submit" disabled>创建并启动进化运行</button><span id="create-hint">等待配置目录加载完成。</span></div>
+              </form>
+              <aside class="panel readiness-panel" aria-label="运行就绪检查">
+                <div class="panel-heading"><div><span>就绪检查</span><h2>启动条件</h2></div></div>
+                <ul id="readiness-list" class="check-list"></ul>
+                <dl id="selected-summary" class="key-values"></dl>
+                <section class="model-connections" aria-labelledby="model-connections-title">
+                  <div class="subsection-heading"><div><span>系统连接</span><h3 id="model-connections-title">所选模型连接</h3></div><strong id="model-connection-summary">正在读取</strong></div>
+                  <div id="model-connection-list" class="model-connection-list" aria-live="polite"></div>
+                </section>
+              </aside>
+            </div>
+          </section>
+
+          <section id="workspace-parameters" class="workspace-panel" data-panel="parameters" role="tabpanel" aria-labelledby="tab-parameters" tabindex="0" hidden>
+            <header class="page-heading"><div><span>02</span><h1>参数设计</h1><p>统一冻结下一次运行的进化规模、样本更新边界、网关吞吐和可复现策略；已启动运行不会被页面参数追溯修改。</p></div><span id="parameter-summary-pill" class="pill pill-blue">500 样本 / 更新</span></header>
+            <div class="parameters-layout">
+              <section class="panel parameter-form-panel" aria-labelledby="parameter-form-title">
+                <div class="panel-heading"><div><span>运行超参数</span><h2 id="parameter-form-title">更新与执行预算</h2></div><strong>应用于下次创建</strong></div>
+                <div class="form-grid parameter-grid">
+                  <label><span>最大进化轮数</span><input id="max-generations" name="rounds" form="start-form" type="number" min="1" max="50" value="5" required><small>每轮完成检索、候选生成、固定样本评测和轮末决策，达到上限后停止。</small></label>
+                  <label><span>每轮生成方案数</span><input id="candidates-per-generation" name="candidates_per_generation" form="start-form" type="number" min="1" max="8" value="4" required><small>同一轮的候选共享父方案和冻结样本集合，用于横向比较；不是样本 batch 大小。</small></label>
+                  <label><span>每次更新样本数</span><input id="samples-per-update" name="samples_per_update" form="start-form" type="number" min="1" max="100000" step="1" value="500" aria-describedby="samples-per-update-help" required><small id="samples-per-update-help">每轮为智能体冻结的 training_feedback 样本数；下限随评测目标和预测时距自动确定。</small></label>
+                  <label><span>请求微批样本数</span><input id="sample-agent-batch-size" name="sample_agent_batch_size" form="start-form" type="number" min="1" max="128" step="1" value="64" required><small>样本先按因果预测起点组成 origin wave，同组超过该上限时才继续切分；实际请求数以运行进度为准。</small></label>
+                  <label><span>逐样本并发请求数</span><input id="sample-concurrency" name="sample_concurrency" form="start-form" type="number" min="1" max="8" step="1" value="2" required><small>同时在飞的独立样本请求上限。多运行并行时默认 2，避免压满上游队列；不改变评测样本集合。</small></label>
+                  <label><span>候选总预算</span><input id="max-candidates" name="max_candidates" form="start-form" type="number" min="1" max="256" value="20" aria-describedby="max-candidates-help" required><small id="max-candidates-help">默认随轮数和每轮候选数同步；当前完整预算需要 20 个候选。</small></label>
+                </div>
+                <div class="parameter-switches">
+                  <label class="checkbox-row"><input id="fixed-seed" name="fixed_seed" form="start-form" type="checkbox" checked><span><strong>固定随机种子</strong><small>冻结样本抽取顺序与候选随机源，保证同配置可复现。</small></span></label>
+                  <label class="checkbox-row"><input id="knowledge-online-enabled" name="knowledge_online_enabled" form="start-form" type="checkbox" checked><span><strong>在线知识检索</strong><small>每轮检索公开论文元数据并冻结结果；网络失败时使用内置知识目录。</small></span></label>
+                </div>
+              </section>
+              <aside class="parameter-aside">
+                <section class="panel parameter-scope-panel" aria-labelledby="parameter-scope-title">
+                  <div class="panel-heading"><div><span>数据使用边界</span><h2 id="parameter-scope-title">拟合与更新分离</h2></div><span class="pill pill-green">同轮公平比较</span></div>
+                  <div class="parameter-scope-list">
+                    <div><span>预测器拟合</span><strong>全量 training_fit</strong><small>岭回归等已登记数值预测器可使用完整训练拟合分区训练参数。</small></div>
+                    <div><span>智能体更新</span><strong id="agent-update-scope">每轮固定 500 个样本</strong><small>智能体调用预测器后，只用本轮冻结的反馈样本形成 reward 和下一轮优化经验。</small></div>
+                  </div>
+                </section>
+                <section class="panel parameter-summary-panel" aria-labelledby="parameter-summary-title">
+                  <div class="panel-heading"><div><span>配置预估</span><h2 id="parameter-summary-title">下次运行</h2></div><strong id="parameter-budget-state">预算完整</strong></div>
+                  <dl id="parameter-summary" class="key-values"></dl>
+                </section>
+              </aside>
+            </div>
+          </section>
+
+          <section id="workspace-training" class="workspace-panel" data-panel="training" role="tabpanel" aria-labelledby="tab-training" tabindex="0" hidden>
+            <header class="page-heading"><div><span>03</span><h1>训练数据</h1><p>优先核验当前运行冻结的数据集与训练序列；暂无运行时预览待创建任务的数据。</p></div><span class="pill pill-blue">可见训练边界</span></header>
+            <div id="dataset-summary" class="stats-strip" aria-live="polite"></div>
+            <div id="dataset-context-note" class="dataset-context-note" role="status" aria-live="polite"></div>
+            <div id="source-integrity" class="source-integrity" aria-live="polite"></div>
+            <div id="dataset-error" class="dataset-error" role="alert" hidden>
+              <div><strong>训练数据读取失败</strong><span id="dataset-error-message">请重试。</span></div>
+              <button id="retry-dataset-button" class="button button-secondary" type="button">重新读取</button>
+            </div>
+            <section class="panel data-panel">
+              <div class="panel-heading"><div><span>字段说明</span><h2>数据结构</h2></div><span id="dataset-digest" class="technical-value">尚未加载</span></div>
+              <div id="schema-list" class="schema-list" aria-live="polite"></div>
+              <div class="table-heading"><div><span>样本预览</span><strong id="page-range">0–0，共 0 行</strong></div><div class="table-tools"><label id="field-visibility-control" class="field-visibility-control" hidden><input id="show-all-fields" type="checkbox"><span>显示全部字段</span></label><label class="dataset-partition-control"><span>查看分区</span><select id="dataset-partition" aria-label="选择训练数据分区"><option value="training_fit">训练拟合分区</option><option value="training_feedback">训练反馈分区</option></select></label><div class="pagination"><button id="previous-page" class="button button-quiet" type="button" disabled>上一页</button><button id="next-page" class="button button-quiet" type="button" disabled>下一页</button></div></div></div>
+              <div class="table-wrap" tabindex="0" aria-label="训练数据样本表，可横向滚动"><table id="training-table"><thead></thead><tbody></tbody></table></div>
+            </section>
+            <section class="panel training-assets-panel" aria-labelledby="training-assets-title">
+              <div class="panel-heading"><div><span>进化派生数据</span><h2 id="training-assets-title">进化训练资产</h2></div><span id="training-assets-count" class="technical-value">0 个样本</span></div>
+              <p class="training-boundary-note">每条资产是一条完整训练轨迹：从样本输入、智能体调研与提案，到宿主编译、预测反馈、参数优化和最终结果。它只记录迭代证据；未经外部治理审核，不是可直接用于正式监督微调（SFT）或偏好训练的数据集。</p>
+              <div class="table-wrap" tabindex="0" aria-label="进化训练资产表，可横向滚动"><table class="training-assets-table"><thead><tr><th>进化轮次</th><th>训练轨迹／候选方案</th><th>样本准入</th><th>策略／预测模型／评审</th><th>训练反馈</th><th>人工意见</th><th>溯源</th></tr></thead><tbody id="training-assets-table"></tbody></table></div>
+            </section>
+            <section class="panel dataset-inventory-panel" aria-labelledby="dataset-inventory-title">
+              <div class="panel-heading"><div><span>数据资产目录</span><h2 id="dataset-inventory-title">其他已登记数据集</h2></div><span class="technical-value">只读状态</span></div>
+              <div id="unavailable-dataset-list" class="dataset-inventory" aria-live="polite"></div>
+            </section>
+          </section>
+
+          <section id="workspace-process" class="workspace-panel" data-panel="process" role="tabpanel" aria-labelledby="tab-process" tabindex="0" hidden>
+            <header class="page-heading"><div><span>04</span><h1>进化过程</h1><p>查看知识快照、宿主能力编译、科学评测和轮末决策证据，核对每一轮候选得分与当前最优方案。</p></div><span id="process-status-pill" class="pill pill-neutral">暂无运行</span></header>
+            <div id="process-summary" class="stats-strip process-summary" aria-live="polite"></div>
+            <section class="panel autonomy-progress-panel" aria-labelledby="autonomy-progress-title">
+              <div class="panel-heading"><div><span>模型驱动执行</span><h2 id="autonomy-progress-title">本轮受限工作流</h2></div><span id="autonomy-progress-status" class="pill pill-neutral">等待运行</span></div>
+              <div id="autonomy-progress" class="autonomy-progress" aria-live="polite"></div>
+            </section>
+            <section class="panel execution-monitor-panel" aria-labelledby="execution-monitor-title">
+              <div class="panel-heading"><div><span>运行证据</span><h2 id="execution-monitor-title">实时执行监视</h2></div><span id="execution-monitor-status" class="pill pill-neutral">等待运行</span></div>
+              <div class="execution-progress-block" aria-live="polite">
+                <div class="execution-progress-heading"><div><span id="execution-progress-label">尚未开始</span><strong id="execution-progress-percent">0%</strong></div><span id="execution-progress-detail">等待模型提交第一轮执行</span></div>
+                <div id="execution-progress-track" class="execution-progress-track" role="progressbar" aria-label="进化总进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="execution-progress-fill" class="execution-progress-fill"></span></div>
+                <div class="execution-progress-meta"><span id="execution-generation-progress">进化轮次：0 / 0</span><span id="execution-candidate-progress">候选版本：0</span><span id="execution-sample-progress">预测样本：0</span><span id="execution-token-progress">DSH 上下文：等待 Session 计量</span><span id="execution-heartbeat">评测心跳：—</span><span id="execution-last-activity">最近活动：—</span></div>
+              </div>
+              <section class="execution-diagnostics" aria-labelledby="execution-diagnostics-title">
+                <div class="execution-diagnostics-heading"><div><span>可核验工作量</span><h3 id="execution-diagnostics-title">实际执行口径</h3></div><strong id="execution-diagnostics-summary">尚无执行证据</strong></div>
+                <div id="execution-diagnostics-grid" class="execution-diagnostics-grid" aria-live="polite"></div>
+              </section>
+              <div id="execution-stage-strip" class="execution-stage-strip" aria-label="当前候选阶段"></div>
+              <div class="execution-monitor-grid" aria-live="polite">
+                <section class="execution-monitor-column active-candidate-column" aria-labelledby="active-candidate-title">
+                  <div class="execution-column-heading"><div><span>当前对象</span><h3 id="active-candidate-title">活动候选</h3></div><span id="active-candidate-status" class="pill pill-neutral">暂无</span></div>
+                  <div id="active-candidate-summary" class="execution-column-body"><div class="empty-state">运行开始后显示正在处理的候选方案。</div></div>
+                </section>
+                <section class="execution-monitor-column sample-inference-column" aria-labelledby="sample-inference-title">
+                  <div class="execution-column-heading"><div><span>可复核的结构化轨迹</span><h3 id="sample-inference-title">样本推理与预测</h3></div><span id="sample-inference-count" class="technical-value">0 条</span></div>
+                  <p class="execution-column-note">仅展示输入摘要、模型预测和误差，不展示隐藏思维链或原始数据。</p>
+                  <div id="sample-inference-list" class="sample-inference-list"><div class="empty-state">候选完成评测后显示样本结果。</div></div>
+                </section>
+                <section class="execution-monitor-column implementation-column" aria-labelledby="implementation-title">
+                  <div class="execution-column-heading"><div><span>模型提出、宿主编译</span><h3 id="implementation-title">具体实现方案</h3></div><span id="implementation-status" class="pill pill-neutral">未生成</span></div>
+                  <div id="implementation-summary" class="execution-column-body"><div class="empty-state">候选提案生成后显示模型计划和参数修改。</div></div>
+                </section>
+              </div>
+            </section>
+            <section class="panel chart-panel">
+              <div class="panel-heading"><div><span>评测得分</span><h2>同轮候选散点与实际晋升序列</h2></div><div class="chart-legend"><span><i class="legend-candidate"></i>候选原始得分</span><span><i class="legend-best"></i>实际晋升序列</span></div></div>
+              <div id="trajectory-chart" class="trajectory-chart" aria-label="按轮次分组的候选原始得分散点与实际晋升序列"></div>
+            </section>
+            <section class="panel round-stage-panel">
+              <div class="panel-heading"><div><span>每轮执行证据</span><h2>轮次阶段</h2></div><span class="technical-value">提案 → 能力编译 → 训练 → 科学评测 → 独立评审 → 轮末决策</span></div>
+              <div id="round-stage-list" class="round-stage-list" aria-live="polite"></div>
+            </section>
+            <section class="panel process-log-panel">
+              <div class="panel-heading"><div><span>追加式事件记录</span><h2>进化事件</h2></div><div class="panel-heading-actions"><span id="projection-revision" class="technical-value">状态视图版本 —</span><button id="toggle-events-button" class="button button-quiet button-small" type="button" aria-expanded="false" hidden>查看全部事件</button></div></div>
+              <div id="event-list" class="event-list" aria-live="polite"></div>
+            </section>
+          </section>
+
+          <section id="workspace-candidates" class="workspace-panel" data-panel="candidates" role="tabpanel" aria-labelledby="tab-candidates" tabindex="0" hidden>
+            <header class="page-heading"><div><span>05</span><h1>候选评测</h1><p>比较候选方案的训练反馈得分、科学门禁、独立评审、参数修改和搜索保留结果。</p></div><button id="export-button" class="button button-secondary" type="button" disabled>导出运行摘要</button></header>
+            <section class="panel candidate-panel">
+              <div class="candidate-table-area">
+                <div class="table-heading"><div><span>候选方案列表</span><strong id="best-candidate-label">搜索保留最佳：尚未产生</strong></div></div>
+                <div class="table-wrap" tabindex="0" aria-label="候选方案评测表，可横向滚动"><table><thead><tr><th>候选编号</th><th>进化轮次</th><th>轮内槽位</th><th>父方案</th><th>轮内排名</th><th>状态</th><th>科学门禁</th><th>独立评审</th><th>约束违规</th><th>综合得分</th><th>选择结论</th></tr></thead><tbody id="candidate-table"></tbody></table></div>
+              </div>
+              <div id="candidate-detail" class="candidate-detail" aria-live="polite"></div>
+              <section id="candidate-samples" class="candidate-samples" aria-labelledby="candidate-samples-title">
+                <header class="candidate-samples-heading">
+                  <div><span>逐样本评测</span><h2 id="candidate-samples-title">样本结果</h2><small id="candidate-samples-candidate">请选择候选方案</small></div>
+                  <div class="candidate-samples-tools"><label class="candidate-follow-control"><input id="candidate-follow-active" type="checkbox" checked><span>跟随活动候选</span></label><span id="candidate-samples-status" class="pill pill-neutral" role="status" aria-live="polite">等待数据</span><strong id="candidate-samples-count">0 条</strong></div>
+                </header>
+                <div class="candidate-samples-table-wrap" tabindex="0" aria-label="候选方案逐样本结果表，可横向滚动">
+                  <table class="candidate-samples-table">
+                    <thead><tr><th>时间</th><th>目标</th><th>时距</th><th>真实值</th><th>预测值</th><th title="相对持续性基线的绝对误差改善，正值更好；保留目标原始单位，只能在同一目标内比较">Reward（原始单位）</th><th>状态</th></tr></thead>
+                    <tbody id="candidate-samples-table"><tr><td colspan="7" class="empty-state">选择候选方案后显示样本结果。</td></tr></tbody>
+                  </table>
+                </div>
+                <footer class="candidate-samples-footer"><span id="candidate-samples-page">0–0，共 0 条</span><div><button id="candidate-samples-retry" class="button button-quiet button-small" type="button" hidden>重试</button><button id="candidate-samples-previous" class="button button-quiet button-small" type="button" title="上一页" aria-label="上一页" disabled>&larr;</button><button id="candidate-samples-next" class="button button-quiet button-small" type="button" title="下一页" aria-label="下一页" disabled>&rarr;</button></div></footer>
+              </section>
+            </section>
+          </section>
+
+          <section id="workspace-collaboration" class="workspace-panel" data-panel="collaboration" role="tabpanel" aria-labelledby="tab-collaboration" tabindex="0" hidden>
+            <header class="page-heading"><div><span>06</span><h1>人工协作与治理</h1><p>模型可异步咨询专家并继续执行非阻塞工作；专家答复只进入后续轮次，不改写已完成候选。</p></div><span id="intervention-state-pill" class="pill pill-neutral">尚未创建运行</span></header>
+            <section class="panel consultation-panel consultation-pending-panel" aria-labelledby="pending-consultations-title">
+              <div class="panel-heading"><div><span>模型主动咨询</span><h2 id="pending-consultations-title">待专家答复</h2></div><span id="pending-consultation-count" class="pill pill-neutral">0 项</span></div>
+              <p class="consultation-section-note">问题会保留在运行投影中，不要求实时答复。非阻塞咨询不会暂停进化，答复从后续轮次开始生效。</p>
+              <div id="pending-consultations" class="consultation-list" aria-live="polite"></div>
+            </section>
+            <section class="panel consultation-panel consultation-answered-panel" aria-labelledby="answered-consultations-title">
+              <div class="panel-heading"><div><span>追加式审计记录</span><h2 id="answered-consultations-title">已答复</h2></div><span id="answered-consultation-count" class="pill pill-neutral">0 项</span></div>
+              <div id="answered-consultations" class="consultation-list" aria-live="polite"></div>
+            </section>
+            <div class="collaboration-section-heading"><div><span>专家主动输入</span><h2>专家主动意见</h2><p>需要主动调整方向时，可暂停运行并追加意见；历史候选和既有评测不会被改写。</p></div></div>
+            <div class="collaboration-layout">
+              <form id="intervention-form" class="panel intervention-form">
+                <div class="panel-heading"><div><span>专家主动意见</span><h2>记录下一轮方向</h2></div><strong>追加记录，不改写历史</strong></div>
+                <label><span>干预类型</span><select id="intervention-kind" name="kind"><option value="guidance">方向建议</option><option value="parameter_override">参数覆盖</option><option value="constraint">新增约束</option><option value="parent_selection">指定父方案</option></select></label>
+                <label id="target-candidate-field" hidden><span>下一轮父方案</span><select id="target-candidate-id" name="target_candidate_id" disabled><option value="">请选择候选方案</option></select><small>仅“指定父方案”使用；其他意见统一作用于下一轮提案。</small></label>
+                <label><span>意见说明</span><textarea id="intervention-message" name="message" rows="4" maxlength="1000" placeholder="说明继续、收缩或更换方向的原因和预期效果" required></textarea></label>
+                <label id="parameter-overrides-field" hidden><span>参数覆盖值</span><textarea id="parameter-overrides" name="parameter_overrides" rows="3" placeholder="每行一个参数，例如：window=6" aria-describedby="parameter-overrides-help"></textarea><small id="parameter-overrides-help">参数覆盖至少需要一行“参数=值”；内容仅作为下一轮输入。</small></label>
+                <label><span>记录人</span><input id="created-by" name="created_by" type="text" maxlength="120" placeholder="姓名或工作编号" required></label>
+                <div class="form-actions"><button id="submit-intervention" class="button button-primary" type="submit" disabled>提交专家意见</button><span id="intervention-hint">运行暂停后才能提交主动意见。</span></div>
+              </form>
+              <section class="panel governance-panel">
+                <div class="panel-heading"><div><span>权限与检查边界</span><h2>外部治理状态</h2></div><span class="pill pill-red">正式验证与发布受限</span></div>
+                <div id="gate-summary" class="gate-summary"></div>
+                <ul id="capability-list" class="permission-list"></ul>
+                <p class="governance-note">当前候选选择仅依据迭代训练反馈，不代表正式验证通过。插件不能读取隐藏评测集、最终评测集，也不能直接发布或回滚模型；这些操作由 DSH 数字科学枢纽治理服务审批。</p>
+              </section>
+            </div>
+            <section class="panel intervention-history-panel">
+              <div class="panel-heading"><div><span>专家主动意见记录</span><h2>已提交意见</h2></div><span class="technical-value">追加式执行记录</span></div>
+              <div id="intervention-history" class="intervention-history"></div>
+            </section>
+          </section>
+
+          <footer class="footer-note"><span>插件版本 0.3.15 · 可交付候选版（未签名）</span><span id="last-updated">尚未同步</span></footer>
+        </main>
+      </div>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script src="assets/js/host.js" defer></script>
+    <script src="assets/js/core.js" defer></script>
+    <script src="assets/js/demo.js" defer></script>
+    <script src="assets/js/catalog.js" defer></script>
+    <script src="assets/js/data.js" defer></script>
+    <script src="assets/js/commands.js" defer></script>
+    <script src="assets/js/render_shell.js" defer></script>
+    <script src="assets/js/render_training_trace.js" defer></script>
+    <script src="assets/js/render_training.js" defer></script>
+    <script src="assets/js/render_process.js" defer></script>
+    <script src="assets/js/render_candidates.js" defer></script>
+    <script src="assets/js/render_collaboration.js" defer></script>
+    <script src="app.js" defer></script>
+  </body>
+</html>

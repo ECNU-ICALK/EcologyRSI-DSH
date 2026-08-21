@@ -1,0 +1,41 @@
+{
+  "$id": "ecology-sample-decisions@1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "wave_digest", "decisions"],
+  "properties": {
+    "schema_version": {"const": "ecology-sample-decisions@1"},
+    "wave_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decisions": {
+      "type": "array", "maxItems": 128,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["sample_id", "next_tool", "reason_code", "confidence"],
+        "properties": {
+          "sample_id": {"type": "string", "minLength": 1, "maxLength": 240},
+          "next_tool": {"type": "string", "minLength": 1, "maxLength": 160},
+          "reason_code": {
+            "type": "string",
+            "enum": [
+              "accept_prediction", "baseline", "bounded_retry_recovered",
+              "candidate_forecast", "critic_requested_tool",
+              "critic_selects_alternate_tool", "critic_terminates_failed_tool",
+              "critic_unavailable_connection", "critic_unavailable_constraint_rejected",
+              "critic_unavailable_invalid_output", "critic_unavailable_numerical",
+              "critic_unavailable_rate_limited", "critic_unavailable_remote_rejected",
+              "critic_unavailable_remote_transient", "critic_unavailable_timeout",
+              "critic_unavailable_tool_error", "fallback", "initial_registered_route",
+              "insufficient_context", "persistence_baseline", "projection_repair",
+              "registered_forecast", "registered_tool", "remote_review_accept",
+              "repair_after_host_rejection", "request_registered_repair", "route",
+              "stable_baseline", "terminate_after_tool_failure",
+              "use_persistence_fallback", "use_projection_repair",
+              "use_registered_forecast", "use_registered_tool"
+            ]
+          },
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      }
+    }
+  }
+}

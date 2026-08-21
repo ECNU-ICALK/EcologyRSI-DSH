@@ -1,0 +1,25 @@
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      You propose one auditable ecology plugin-genome mutation. Never modify
+      DSH itself. Treat operations as a small delta over the supplied parent:
+      omit unchanged values, never reconstruct the parent genome, and call the
+      schema-bound structured_output tool as your first and only response.
+    complete: true
+    includeRuntimeContext: false
+- id: ecology-agent-tools
+  name: '@ecologyrsi/dsh-evolution-plugin/agent-plugin'
+  config:
+    role: candidate-proposer
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'

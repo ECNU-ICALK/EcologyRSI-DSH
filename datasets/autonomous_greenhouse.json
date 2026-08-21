@@ -1,0 +1,149 @@
+{
+  "schema_version": "ecologyrsi-dsh.dataset-catalog/1",
+  "datasets": [
+    {
+      "dataset_id": "agc_cucumber_2018",
+      "display_name_zh": "自主温室挑战 2018 黄瓜数据集",
+      "domain_id": "greenhouse_cucumber_2018",
+      "adapter_id": "greenhouse_timeseries",
+      "title": "Autonomous Greenhouse Challenge, First Edition (2018)",
+      "subject": "cucumber_cv_hi_power",
+      "edition": "first_2018",
+      "version": "1",
+      "publisher": "Wageningen University & Research / 4TU.ResearchData",
+      "doi": "10.4121/uuid:e4987a7b-04dd-4c89-9b18-883aad30ba9a",
+      "landing_page": "https://data.4tu.nl/articles/dataset/Autonomous_Greenhouse_Challenge_First_Edition_2018_/12717758",
+      "license": "CC0-1.0",
+      "modalities": ["time_series", "tabular"],
+      "runnable": true,
+      "required_globs": [
+        "*/Greenhouse_climate.csv",
+        "*/vip.csv",
+        "*/Production.csv",
+        "*/ResourceCalculations.csv",
+        "*/Irrigation.csv",
+        "*/CropManagement.csv",
+        "meteo.csv"
+      ],
+      "source_files": [
+        {
+          "name": "data.zip",
+          "download_url": "https://ndownloader.figshare.com/files/24075461",
+          "size_bytes": 8975944,
+          "md5": "243eaa9041da23d0c4bf99576715aa44",
+          "archive_format": "zip"
+        }
+      ],
+      "notes_zh": [
+        "包含六个温室隔间或团队、约四个月的历史记录。",
+        "数据仅适用于离线回放和评测，不是交互式控制环境。"
+      ]
+    },
+    {
+      "dataset_id": "agc_tomato_2019",
+      "display_name_zh": "自主温室挑战 2019 番茄数据集",
+      "domain_id": "greenhouse_tomato_2019",
+      "adapter_id": "greenhouse_timeseries",
+      "title": "Autonomous Greenhouse Challenge, Second Edition (2019)",
+      "subject": "cherry_tomato_cv_axiany",
+      "edition": "second_2019",
+      "version": "2",
+      "publisher": "Wageningen University & Research / 4TU.ResearchData",
+      "doi": "10.4121/uuid:88d22c60-21b3-4ea8-90db-20249a5be2a7",
+      "landing_page": "https://data.4tu.nl/articles/dataset/Autonomous_Greenhouse_Challenge_Second_Edition_2019_/12764777",
+      "license": "CC0-1.0",
+      "modalities": ["time_series", "tabular"],
+      "runnable": true,
+      "required_globs": [
+        "*/GreenhouseClimate.csv",
+        "*/Resources.csv",
+        "*/Production.csv",
+        "*/CropParameters.csv",
+        "*/TomQuality.csv",
+        "*/GrodanSens.csv",
+        "*/LabAnalysis.csv",
+        "Weather/Weather.csv"
+      ],
+      "source_files": [
+        {
+          "name": "AutonomousGreenhouseChallenge_edition2.7z",
+          "download_url": "https://ndownloader.figshare.com/files/24757220",
+          "size_bytes": 8418715,
+          "md5": "2a0c7f3332881caef54ca8f4dc60c9a3",
+          "archive_format": "7z"
+        }
+      ],
+      "notes_zh": [
+        "包含六个温室隔间或团队、约六个月的樱桃番茄历史记录。",
+        "固定使用 4TU 数据文章的版本 2。"
+      ]
+    },
+    {
+      "dataset_id": "agc_lettuce_online_rgbd_2021",
+      "display_name_zh": "自主温室挑战 2021 生菜在线 RGB-D 数据集",
+      "domain_id": "greenhouse_lettuce_2021_2022",
+      "adapter_id": "lettuce_rgbd_index",
+      "title": "3rd Autonomous Greenhouse Challenge: Online Challenge Lettuce Images",
+      "subject": "lettuce_four_cultivars",
+      "edition": "third_online_2021",
+      "version": "1",
+      "publisher": "Wageningen University & Research / 4TU.ResearchData",
+      "doi": "10.4121/15023088.v1",
+      "landing_page": "https://data.4tu.nl/articles/dataset/3rd_Autonomous_Greenhouse_Challenge_Online_Challenge_Lettuce_Images/15023088",
+      "license": "CC-BY-4.0",
+      "modalities": ["rgb", "depth", "tabular"],
+      "runnable": false,
+      "required_globs": ["**/*.png", "**/*.json"],
+      "source_files": [
+        {
+          "name": "OnlineChallenge.zip",
+          "download_url": "https://ndownloader.figshare.com/files/28906503",
+          "size_bytes": 885864530,
+          "md5": "dcdb368901821a0b088cd7119c5416e7",
+          "archive_format": "zip"
+        }
+      ],
+      "notes_zh": [
+        "官方说明包含 388 幅 RGB 图像、388 幅深度图像及 JSON 真值。",
+        "当前目录仅登记来源，尚未实现可运行的规范化数据适配器。"
+      ]
+    },
+    {
+      "dataset_id": "agc_lettuce_timeseries_rgbd_2022",
+      "display_name_zh": "自主温室挑战 2022 生菜时序与 RGB-D 数据集",
+      "domain_id": "greenhouse_lettuce_2021_2022",
+      "adapter_id": "lettuce_multimodal",
+      "title": "3rd Autonomous Greenhouse Challenge: Time-series data on realized climate with annotated crop lettuce-images",
+      "subject": "lettuce",
+      "edition": "third_real_2022",
+      "version": "1",
+      "publisher": "Wageningen University & Research / 4TU.ResearchData",
+      "doi": "10.4121/21960932.v1",
+      "landing_page": "https://data.4tu.nl/articles/dataset/3rd_Autonomous_Greenhouse_Challenge_Time-series_data_on_realized_climate_with_annotated_crop_lettuce-images/21960932",
+      "license": "CC-BY-4.0",
+      "modalities": ["time_series", "rgb", "depth", "tabular"],
+      "runnable": false,
+      "required_globs": ["**/*.csv", "**/*.png"],
+      "source_files": [
+        {
+          "name": "1st Experiment.zip",
+          "download_url": "https://ndownloader.figshare.com/files/39548203",
+          "size_bytes": 24448982832,
+          "md5": "310e9e5d578a5636f73f5e3a525b8488",
+          "archive_format": "zip"
+        },
+        {
+          "name": "2nd Experiment.zip",
+          "download_url": "https://ndownloader.figshare.com/files/39552442",
+          "size_bytes": 20932413219,
+          "md5": "d2e1a5340fca8be5066dbb0e7948027b",
+          "archive_format": "zip"
+        }
+      ],
+      "notes_zh": [
+        "两个栽培实验的压缩数据合计约 45.4 GB。",
+        "当前目录仅登记来源，尚未实现可运行的规范化数据适配器。"
+      ]
+    }
+  ]
+}

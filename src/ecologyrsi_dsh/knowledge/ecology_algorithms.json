@@ -1,0 +1,116 @@
+[
+  {
+    "knowledge_id": "sklearn-time-series-split",
+    "title_zh": "时间前向交叉验证",
+    "summary_zh": "时间有序样本应按时间向前划分，避免使用未来数据训练后再评测过去数据。",
+    "source_url": "https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html",
+    "source_kind": "官方文档",
+    "source_authority": "scikit-learn",
+    "algorithm_tags": ["time_series", "validation", "leakage_control"],
+    "domains": ["all"],
+    "execution_mapping": {
+      "kind": "evaluator",
+      "capability_ids": [
+        "toy_time_forward@1",
+        "greenhouse_time_forward@1",
+        "greenhouse_multihorizon_time_forward@1",
+        "greenhouse_multihorizon_time_forward@2"
+      ],
+      "parameter_hints": []
+    }
+  },
+  {
+    "knowledge_id": "sklearn-ridge",
+    "title_zh": "岭回归残差预测",
+    "summary_zh": "L2 正则化可改善共线特征下的数值条件并降低参数估计方差，适合有界外生特征残差预测。",
+    "source_url": "https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.Ridge.html",
+    "source_kind": "官方文档",
+    "source_authority": "scikit-learn",
+    "algorithm_tags": ["ridge", "regularization", "residual_forecast"],
+    "domains": ["greenhouse"],
+    "execution_mapping": {
+      "kind": "predictor",
+      "capability_ids": [
+        "greenhouse-exogenous-ridge@1",
+        "greenhouse-targetwise-ridge@1",
+        "greenhouse-horizon-targetwise-ridge@1"
+      ],
+      "parameter_hints": [
+        "ridge_alpha",
+        "history_steps",
+        "residual_scale",
+        "co2_concentration_1h_residual_scale"
+      ]
+    }
+  },
+  {
+    "knowledge_id": "host-bounded-parameter-sweep",
+    "title_zh": "有界单参数扫描",
+    "summary_zh": "围绕已完成父方案一次改变一个宿主许可参数，保持搜索可解释并降低同轮候选混杂。",
+    "source_url": "https://scikit-learn.org/stable/modules/grid_search.html",
+    "source_kind": "官方方法文档",
+    "source_authority": "scikit-learn",
+    "algorithm_tags": ["bounded_search", "parameter_sweep"],
+    "domains": ["all"],
+    "execution_mapping": {
+      "kind": "strategy",
+      "capability_id": "parameter_sweep@1",
+      "parameter_hints": ["window", "alpha", "ridge_alpha"]
+    }
+  },
+  {
+    "knowledge_id": "host-adaptive-local-search",
+    "title_zh": "评测反馈驱动的局部自适应搜索",
+    "summary_zh": "依据上一轮聚合弱点，在冻结参数边界内选择一个重点方向并使用多个局部槽位比较。",
+    "source_url": "https://docs.scipy.org/doc/scipy/reference/optimize.html",
+    "source_kind": "官方方法目录",
+    "source_authority": "SciPy",
+    "algorithm_tags": ["adaptive_search", "local_search", "bounded_optimization"],
+    "domains": ["all"],
+    "execution_mapping": {
+      "kind": "strategy",
+      "capability_id": "adaptive_local@1",
+      "parameter_hints": ["ridge_alpha", "window", "alpha"]
+    }
+  },
+  {
+    "knowledge_id": "optuna-tpe",
+    "title_zh": "TPE 贝叶斯参数搜索",
+    "summary_zh": "TPE 分别建模较优与其余参数分布，通过密度比选择后续参数；当前尚未接入本地执行适配器。",
+    "source_url": "https://optuna.readthedocs.io/en/stable/reference/samplers/generated/optuna.samplers.TPESampler.html",
+    "source_kind": "官方文档",
+    "source_authority": "Optuna",
+    "algorithm_tags": ["tpe", "bayesian_optimization"],
+    "domains": ["all"]
+  },
+  {
+    "knowledge_id": "pcse-wofost",
+    "title_zh": "PCSE/WOFOST 作物生长模型",
+    "summary_zh": "WOFOST 可描述作物生长、土壤水分和管理响应；当前数据契约与状态变量尚未完成适配。",
+    "source_url": "https://pcse.readthedocs.io/en/stable/",
+    "source_kind": "官方文档",
+    "source_authority": "PCSE",
+    "algorithm_tags": ["crop_growth", "soil_water", "process_model"],
+    "domains": ["crop_soil_water", "greenhouse"]
+  },
+  {
+    "knowledge_id": "aquacrop-ospy",
+    "title_zh": "AquaCrop-OSPy 水分生产力模型",
+    "summary_zh": "AquaCrop-OSPy 可用于作物水分生产力模拟；当前运行缺少所需作物、土壤和管理参数适配。",
+    "source_url": "https://aquacropos.github.io/aquacrop/",
+    "source_kind": "官方文档",
+    "source_authority": "AquaCrop-OSPy",
+    "algorithm_tags": ["crop_water", "irrigation", "process_model"],
+    "domains": ["crop_soil_water", "greenhouse"]
+  },
+  {
+    "knowledge_id": "greenlight-model",
+    "title_zh": "GreenLight 温室过程模型",
+    "summary_zh": "GreenLight 联合描述温室气候、作物生长、能耗和控制输入；当前运行尚未接入其状态方程与校准接口。",
+    "source_url": "https://github.com/davkat1/GreenLight",
+    "source_kind": "官方代码仓库",
+    "source_authority": "GreenLight",
+    "algorithm_tags": ["greenhouse", "crop_growth", "energy", "process_model"],
+    "domains": ["greenhouse"]
+  }
+]

@@ -1,0 +1,38 @@
+__pycache__/
+*.py[cod]
+*.sqlite3
+.pytest_cache/
+.cache/
+.runtime/
+.venv/
+build/
+dist/
+*.egg-info/
+.DS_Store
+
+# Local credentials and machine-specific security material.
+.env
+.env.*
+!.env.example
+.dsh/
+.ssh/
+.npmrc
+.pypirc
+*credentials*.yaml
+*credentials*.yml
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local implementation, migration, and delivery planning documents.
+EcologyRSI-DSH-完整框架与详细实施方案.md
+EcologyRSI-DSH-批次进化闭环实施方案.md
+EcologyRSI-DSH-旧API迁移映射与验收附录.md
+EcologyRSI-DSH-最终交付审查与运行说明.md
+EcologyRSI-DSH-迁移清单模板.yaml
+
+# The source installer requires the current bundled DSH plugin archive.
+!integrations/dsh_ecology_plugin/dist/
+integrations/dsh_ecology_plugin/dist/*
+!integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.15.tgz

@@ -1,0 +1,63 @@
+{
+  "schema_version": "ecologyrsi-dsh.legacy-program-catalog/0.2.2",
+  "no_snapshot_sentinel": "legacy-knowledge-snapshot-none@0.2.2",
+  "predictors": {
+    "toy-rolling-water@1": {
+      "pipeline_version": "toy-water-operator-graph/1",
+      "default_evaluator_id": "toy_time_forward@1",
+      "parameter_names": ["alpha", "window", "water_threshold"],
+      "operators": [
+        {"operator_id": "host.feature.causal-window@1", "stage": "feature", "parameter_names": ["window"]},
+        {"operator_id": "host.predictor.toy-water-balance@1", "stage": "predict", "parameter_names": ["alpha", "water_threshold"]},
+        {"operator_id": "host.postprocess.physical-bounds@1", "stage": "postprocess", "parameter_names": []}
+      ]
+    },
+    "greenhouse-rolling-residual@1": {
+      "pipeline_version": "greenhouse-rolling-operator-graph/1",
+      "default_evaluator_id": "greenhouse_multihorizon_time_forward@1",
+      "parameter_names": ["blend", "window", "bias_scale"],
+      "operators": [
+        {"operator_id": "host.feature.causal-rolling-window@1", "stage": "feature", "parameter_names": ["window"]},
+        {"operator_id": "host.fit.mean-residual-bias@1", "stage": "fit", "parameter_names": ["bias_scale"]},
+        {"operator_id": "host.predictor.rolling-residual@1", "stage": "predict", "parameter_names": ["blend"]},
+        {"operator_id": "host.postprocess.physical-bounds@1", "stage": "postprocess", "parameter_names": []}
+      ]
+    },
+    "greenhouse-exogenous-ridge@1": {
+      "pipeline_version": "greenhouse-ridge-operator-graph/1",
+      "default_evaluator_id": "greenhouse_multihorizon_time_forward@1",
+      "parameter_names": ["history_steps", "ridge_alpha", "residual_scale"],
+      "operators": [
+        {"operator_id": "host.feature.causal-lag-exogenous@1", "stage": "feature", "parameter_names": ["history_steps"]},
+        {"operator_id": "host.fit.partition-statistics@1", "stage": "fit", "parameter_names": []},
+        {"operator_id": "host.fit.closed-form-ridge@1", "stage": "fit", "parameter_names": ["ridge_alpha"]},
+        {"operator_id": "host.predictor.residual-correction@1", "stage": "predict", "parameter_names": ["residual_scale"]},
+        {"operator_id": "host.postprocess.physical-bounds@1", "stage": "postprocess", "parameter_names": []}
+      ]
+    },
+    "greenhouse-targetwise-ridge@1": {
+      "pipeline_version": "greenhouse-targetwise-ridge-operator-graph/1",
+      "default_evaluator_id": "greenhouse_multihorizon_time_forward@1",
+      "parameter_names": ["history_steps", "ridge_alpha", "air_temperature_residual_scale", "relative_humidity_residual_scale", "co2_concentration_residual_scale"],
+      "operators": [
+        {"operator_id": "host.feature.causal-lag-exogenous@1", "stage": "feature", "parameter_names": ["history_steps"]},
+        {"operator_id": "host.fit.partition-statistics@1", "stage": "fit", "parameter_names": []},
+        {"operator_id": "host.fit.closed-form-ridge@1", "stage": "fit", "parameter_names": ["ridge_alpha"]},
+        {"operator_id": "host.predictor.targetwise-residual-or-persistence@1", "stage": "predict", "parameter_names": ["air_temperature_residual_scale", "relative_humidity_residual_scale", "co2_concentration_residual_scale"]},
+        {"operator_id": "host.postprocess.physical-bounds@1", "stage": "postprocess", "parameter_names": []}
+      ]
+    },
+    "greenhouse-horizon-targetwise-ridge@1": {
+      "pipeline_version": "greenhouse-horizon-targetwise-ridge-operator-graph/1",
+      "default_evaluator_id": "greenhouse_multihorizon_time_forward@2",
+      "parameter_names": ["history_steps", "ridge_alpha", "air_temperature_1h_residual_scale", "air_temperature_6h_residual_scale", "air_temperature_24h_residual_scale", "relative_humidity_1h_residual_scale", "relative_humidity_6h_residual_scale", "relative_humidity_24h_residual_scale", "co2_concentration_1h_residual_scale", "co2_concentration_6h_residual_scale", "co2_concentration_24h_residual_scale"],
+      "operators": [
+        {"operator_id": "host.feature.causal-lag-exogenous@1", "stage": "feature", "parameter_names": ["history_steps"]},
+        {"operator_id": "host.fit.partition-statistics@1", "stage": "fit", "parameter_names": []},
+        {"operator_id": "host.fit.closed-form-ridge@1", "stage": "fit", "parameter_names": ["ridge_alpha"]},
+        {"operator_id": "host.predictor.horizon-targetwise-residual-or-persistence@1", "stage": "predict", "parameter_names": ["air_temperature_1h_residual_scale", "air_temperature_6h_residual_scale", "air_temperature_24h_residual_scale", "relative_humidity_1h_residual_scale", "relative_humidity_6h_residual_scale", "relative_humidity_24h_residual_scale", "co2_concentration_1h_residual_scale", "co2_concentration_6h_residual_scale", "co2_concentration_24h_residual_scale"]},
+        {"operator_id": "host.postprocess.physical-bounds@1", "stage": "postprocess", "parameter_names": []}
+      ]
+    }
+  }
+}

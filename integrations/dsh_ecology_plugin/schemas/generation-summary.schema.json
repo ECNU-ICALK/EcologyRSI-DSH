@@ -1,0 +1,12 @@
+{
+  "$id": "ecology-generation-summary@1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generation", "fitness_profile_digest", "candidates"],
+  "properties": {
+    "schema_version": {"const": "ecology-generation-summary@1"},
+    "generation": {"type": "integer", "minimum": 0},
+    "fitness_profile_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "candidates": {"type": "array", "maxItems": 256, "items": {"type": "object"}}
+  }
+}

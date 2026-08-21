@@ -1,0 +1,12 @@
+{
+  "$id": "ecology-generation-review@1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "accepted", "rationale", "flags"],
+  "properties": {
+    "schema_version": {"const": "ecology-generation-review@1"},
+    "accepted": {"type": "boolean"},
+    "rationale": {"type": "string", "minLength": 1, "maxLength": 8000},
+    "flags": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 400}}
+  }
+}

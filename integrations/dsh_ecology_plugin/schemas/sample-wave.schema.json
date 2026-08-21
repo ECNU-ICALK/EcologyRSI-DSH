@@ -1,0 +1,11 @@
+{
+  "$id": "ecology-sample-wave@1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "wave_digest", "samples"],
+  "properties": {
+    "schema_version": {"const": "ecology-sample-wave@1"},
+    "wave_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "samples": {"type": "array", "maxItems": 128, "items": {"type": "object"}}
+  }
+}

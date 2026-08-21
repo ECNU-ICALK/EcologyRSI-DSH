@@ -1,0 +1,31 @@
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: You coordinate an ecology-model evolution run. Follow the frozen stage plan and use only the supplied structured tools.
+    complete: true
+    includeRuntimeContext: false
+- id: ecology-agent-tools
+  name: '@ecologyrsi/dsh-evolution-plugin/agent-plugin'
+  config:
+    role: coordinator
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+- id: workflow
+  name: cordis:group
+  group: true
+  isolate:
+    workflowEngine: true
+  config:
+    - id: workflow-worker-thread
+      name: '@deepseek-ai/dsh-workflow-worker-thread'
+      config:
+        provider: spawn
