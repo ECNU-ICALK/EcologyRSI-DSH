@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import unittest
 
-from ecologyrsi_dsh.api.dsh_tools import DshToolService
+from ecologyrsi_dsh.api.dsh_tools import DshPredictionToolBinding, DshToolService
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.core.models import TaskManifest
@@ -324,6 +324,47 @@ def _request(sample_id: str) -> SamplePredictionRequest:
 
 
 class DshSampleExecutionTests(unittest.TestCase):
+    def test_fresh_planner_children_reuse_one_prediction_result_and_receipt(self) -> None:
+        calls = 0
+
+        def execute_prediction() -> dict:
+            nonlocal calls
+            calls += 1
+            return {
+                "origin-a": {
+                    "predicted": 21.5,
+                    "metadata": {"source_model_id": "registered-predictor"},
+                }
+            }
+
+        binding = DshPredictionToolBinding(
+            run_id="run-planner-missing-retry",
+            stage_attempt=1,
+            idempotency_key="sample-plan-wave-1",
+            wave_digest="f" * 64,
+            tool_id="registered-predictor@1",
+            sample_ids=("origin-a",),
+            executor=execute_prediction,
+        )
+        arguments = {
+            "tool_id": "registered-predictor@1",
+            "wave_digest": "f" * 64,
+        }
+
+        first = binding.execute(arguments, session_id="planner-child-1")
+        binding.set_receipt({
+            "event_id": "prediction-event-1",
+            "event_seq": 12,
+            "request_digest": binding.request_digest(),
+            "output_digest": first["output_digest"],
+            "execution_owner": "dsh_agent_tool_call",
+        })
+        second = binding.execute(arguments, session_id="planner-child-2")
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(second, first)
+        self.assertEqual(binding.audit_receipt()["event_id"], "prediction-event-1")
+
     def test_raw_native_sample_provider_requires_host_admission(self) -> None:
         native = DshNativeAgentRuntimeClient(
             "http://127.0.0.1:9",

@@ -107,6 +107,7 @@ const STAGES = Object.freeze({
     instruction: [
       "After loading the candidate-selected Skill, call ecology_execute_prediction_tool exactly once using the sole available tool_id and the exact wave_digest from context.",
       "Wait for its complete target-horizon vector result.",
+      "Copy the exact Host wave_digest and every exact Host samples[].sample_id into the structured result.",
       "Then call structured_output exactly once, selecting that same tool for every sample_id.",
       "Do not invent, replace, or calculate predictions yourself.",
     ].join(" "),
@@ -118,6 +119,7 @@ const STAGES = Object.freeze({
     skillName: "origin-vector-review",
     instruction: [
       "Review exactly the supplied immutable prediction decisions and use the exact wave_digest from context.",
+      "Copy the exact Host wave_digest and every exact Host samples[].sample_id into the structured result.",
       "Return one decision for every supplied sample_id and no additional decisions.",
       "Never call structured_output with empty arguments.",
       "If a skill or structured_output call is rejected, terminate the child turn immediately: emit no prose and do not retry; the Host will start a fresh bounded child attempt.",
@@ -130,6 +132,8 @@ const STAGES = Object.freeze({
     skillName: "origin-vector-review",
     instruction: [
       "Reflect on exactly one completed historical training-feedback forecast origin, including every supplied target-horizon cell.",
+      "Copy the exact Host wave_digest and the exact outer Host context.sample.sample_id into the structured result.",
+      "Never use context.sample.prediction_cells[].sample_id as the reflection sample_id.",
       "The prediction vector is already immutable; do not propose replacement values.",
       "Classify the outcome, identify the bounded error source, and suggest only a next-generation action.",
       "Do not make causal claims from observational prediction error."
@@ -222,7 +226,78 @@ function positiveStageAttempts(value) {
 
 function retryableStructuredStageError(error, stage) {
   return error?.code === "structured_child_model_error"
-    || (stage === "sample.critic" && error?.code === "structured_result_missing");
+    || (
+      ["sample.plan", "sample.critic", "sample.reflect"].includes(stage)
+      && error?.code === "structured_result_missing"
+    );
+}
+
+function sampleStageContextInvalid(detail) {
+  const error = new Error(`invalid sample stage Host context: ${detail}`);
+  error.code = "sample_stage_context_invalid";
+  return error;
+}
+
+function structuredResultMissing() {
+  const error = new Error("structured_result_missing");
+  error.code = "structured_result_missing";
+  return error;
+}
+
+function validSampleId(value) {
+  return typeof value === "string"
+    && value.trim().length > 0
+    && value.length <= 240;
+}
+
+function specializeSampleOutputSchema(stage, schema, context) {
+  if (!["sample.plan", "sample.critic", "sample.reflect"].includes(stage)) return schema;
+  const waveDigest = context?.wave_digest;
+  if (typeof waveDigest !== "string" || !/^[0-9a-f]{64}$/.test(waveDigest)) {
+    throw sampleStageContextInvalid("wave_digest must be lowercase SHA-256");
+  }
+  const properties = schema?.properties;
+  if (!properties?.wave_digest) {
+    throw new Error("sample output schema has no wave_digest property");
+  }
+  properties.wave_digest = {
+    ...properties.wave_digest,
+    const: waveDigest,
+  };
+  if (stage === "sample.reflect") {
+    const sampleId = context?.sample?.sample_id;
+    if (!validSampleId(sampleId)) {
+      throw sampleStageContextInvalid("outer sample.sample_id must be 1 to 240 characters");
+    }
+    if (!properties.sample_id) {
+      throw new Error("sample reflection schema has no sample_id property");
+    }
+    properties.sample_id = {
+      ...properties.sample_id,
+      const: sampleId,
+    };
+    return schema;
+  }
+  const samples = context?.samples;
+  if (!Array.isArray(samples) || samples.length < 1 || samples.length > 128) {
+    throw sampleStageContextInvalid("samples must contain 1 to 128 items");
+  }
+  const sampleIds = samples.map((sample) => sample?.sample_id);
+  if (!sampleIds.every(validSampleId)) {
+    throw sampleStageContextInvalid("sample_id must be a nonempty string up to 240 characters");
+  }
+  if (new Set(sampleIds).size !== sampleIds.length) {
+    throw sampleStageContextInvalid("sample_id values must be unique");
+  }
+  const sampleIdSchema = properties?.decisions?.items?.properties?.sample_id;
+  if (!sampleIdSchema) {
+    throw new Error("sample decision schema has no sample_id property");
+  }
+  properties.decisions.items.properties.sample_id = {
+    ...sampleIdSchema,
+    enum: sampleIds,
+  };
+  return schema;
 }
 
 function structuredOperationalTimeout() {
@@ -628,6 +703,8 @@ export class NativeStageRunner {
         () => this.schema(contract.file),
       );
       requireStructuredDeadline(lifecycle.deadline);
+      specializeSampleOutputSchema(binding.stage, outputSchema, request.context);
+      requireStructuredDeadline(lifecycle.deadline);
       const responseProtocol = [
         "Do not narrate analysis.",
         `Your first response must call skill exactly once with name ${skillName}.`,
@@ -928,11 +1005,11 @@ export class NativeStageRunner {
         throw error;
       }
       if (!Array.isArray(settled.value) || settled.value.length !== 1) {
-        throw new Error("structured workflow returned an invalid result batch");
+        throw structuredResultMissing();
       }
       const structured = settled.value[0];
       if (!structured || typeof structured !== "object" || Array.isArray(structured)) {
-        throw new Error("structured workflow child returned no schema-bound result");
+        throw structuredResultMissing();
       }
       throwIfExpired();
       if (!childSessionId) throw new Error("structured workflow did not publish a real child session");

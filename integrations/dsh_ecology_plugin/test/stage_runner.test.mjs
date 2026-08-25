@@ -95,7 +95,10 @@ function samplePlanContext() {
   return {
     schema_version: "ecologyrsi-dsh.sample-routing-wave/1",
     wave_digest: "f".repeat(64),
-    samples: [],
+    samples: [
+      { sample_id: "origin-a" },
+      { sample_id: "origin-b" },
+    ],
     context: {
       candidate_agent_profile: {
         schema_version: "ecologyrsi-dsh.candidate-agent-profile/1",
@@ -137,6 +140,7 @@ function workflowDeadlineHarness({
   runRegistry = { get: () => ({ status: "running" }) },
   persist = async (options) => ({ accepted: true, result_digest: options.body.result_digest }),
   onReservation = () => {},
+  maxAttempts = 1,
 } = {}) {
   const listeners = new Map();
   let reservationCount = 0;
@@ -171,7 +175,7 @@ function workflowDeadlineHarness({
       request: async (path, options) => {
         if (path.endsWith("/child-reservations")) {
           reservationCount += 1;
-          onReservation(options);
+          onReservation(options, reservationCount);
           return {
             accepted: true,
             admission_id: options.body.admission_id,
@@ -187,19 +191,110 @@ function workflowDeadlineHarness({
       },
     },
     structuredStageTimeoutMs: timeoutMs,
-    structuredStageMaxAttempts: 1,
+    structuredStageMaxAttempts: maxAttempts,
     providerStageGate: {
       run: async (_provider, operation) => operation(),
       penalize: () => {},
     },
   });
-  return { runner, listeners };
+  return { runner, listeners, sessions };
 }
 
-function publishWorkflowChild(listeners, request) {
-  const agent = { label: request.args.items[0].label, childId: "workflow-deadline-child" };
+function publishWorkflowChild(
+  listeners,
+  request,
+  childId = "workflow-deadline-child",
+) {
+  const agent = { label: request.args.items[0].label, childId };
   listeners.get("workflow/agent-start")?.({ meta: request.meta }, agent);
   listeners.get("workflow/agent-end")?.({ meta: request.meta }, agent);
+}
+
+function directSampleBinding(stage, context) {
+  const reflection = stage === "sample.reflect";
+  return {
+    run_id: `run-${stage}`,
+    stage,
+    admission_id: `admission-${stage}-1`,
+    run_state_revision: 7,
+    stage_attempt: 1,
+    ledger_expected_revision: 11,
+    idempotency_key: `${stage}-1`,
+    request: {
+      role: "sample-critic",
+      output_schema_id: reflection
+        ? "ecology-sample-reflection@1"
+        : "ecology-sample-review@1",
+      context,
+      context_canonical_json: canonicalJson(context),
+      context_digest: jsonDigest(context),
+      identity_digests: {
+        genome_digest: "a".repeat(64),
+        compiled_behavior_digest: "b".repeat(64),
+        phenotype_instance_digest: "c".repeat(64),
+      },
+    },
+  };
+}
+
+function directSampleHarness({ stage, results, maxAttempts = 2 }) {
+  const starts = [];
+  const reservations = [];
+  const persisted = [];
+  const sessions = new Map();
+  const roleHost = {
+    sessionId: `${stage}-parent`,
+    agent: { id: `${stage}-role-host` },
+    binding: { model: "pjlab/deepseek-v4-flash-0731" },
+  };
+  const runner = new NativeStageRunner({
+    sessions: { get: (id) => sessions.get(id) },
+    subagents: {
+      start: async (_provider, request) => {
+        const attempt = starts.length + 1;
+        const id = `${stage}-child-${attempt}`;
+        sessions.set(id, {
+          id,
+          events: skillFirstEvents("origin-vector-review"),
+        });
+        starts.push({ id, request });
+        return {
+          id,
+          result: Promise.resolve(results[attempt - 1]),
+          dispose: async () => {},
+        };
+      },
+    },
+  }, {
+    roleAgents: { get: () => roleHost },
+    runRegistry: { get: () => ({ status: "running" }) },
+    sidecar: {
+      request: async (path, options) => {
+        if (path.endsWith("/child-reservations")) {
+          const attempt = reservations.length + 1;
+          reservations.push({
+            reservation_id: `${stage}-reservation-${attempt}`,
+            launch_attempt: attempt,
+          });
+          return {
+            accepted: true,
+            admission_id: options.body.admission_id,
+            timeout_ms: options.body.timeout_ms,
+            launch: reservations.at(-1),
+            ledger_expected_revision: 20 + attempt,
+          };
+        }
+        persisted.push(options.body);
+        return { accepted: true, result_digest: options.body.result_digest };
+      },
+    },
+    structuredStageMaxAttempts: maxAttempts,
+    providerStageGate: {
+      run: async (_provider, operation) => operation(),
+      penalize: () => {},
+    },
+  });
+  return { runner, starts, reservations, persisted };
 }
 
 test("post-score sample reflection is a registered structured DSH stage", () => {
@@ -768,6 +863,7 @@ test("sample critic retries a normally-ended missing result in a fresh child", a
   let reservations = 0;
   let persisted = 0;
   let penalties = 0;
+  const childRequests = [];
   const runner = new NativeStageRunner({
     sessions: {
       get: (id) => (id.startsWith("critic-child-")
@@ -775,9 +871,10 @@ test("sample critic retries a normally-ended missing result in a fresh child", a
         : undefined),
     },
     subagents: {
-      start: async () => {
+      start: async (_provider, childRequest) => {
         starts += 1;
         const id = `critic-child-${starts}`;
+        childRequests.push(childRequest);
         return {
           id,
           result: Promise.resolve(
@@ -820,7 +917,10 @@ test("sample critic retries a normally-ended missing result in a fresh child", a
   const context = {
     schema_version: "ecologyrsi-dsh.sample-review-wave/1",
     wave_digest: waveDigest,
-    samples: [],
+    samples: [
+      { sample_id: "origin-a" },
+      { sample_id: "origin-b" },
+    ],
   };
 
   const result = await runner.run({
@@ -850,6 +950,354 @@ test("sample critic retries a normally-ended missing result in a fresh child", a
   assert.equal(reservations, 2);
   assert.equal(persisted, 1);
   assert.equal(penalties, 1);
+  for (const childRequest of childRequests) {
+    assert.deepEqual(childRequest.outputSchema.properties.wave_digest, {
+      type: "string",
+      const: waveDigest,
+    });
+    assert.deepEqual(
+      childRequest.outputSchema.properties.decisions.items.properties.sample_id,
+      { type: "string", enum: ["origin-a", "origin-b"] },
+    );
+    assert.match(
+      JSON.parse(childRequest.prompt[0].text).instruction,
+      /copy.*exact.*Host.*sample_id/i,
+    );
+  }
+});
+
+test("sample reflection binds the outer Host identity and retries one missing result", async () => {
+  const waveDigest = "e".repeat(64);
+  const structured = {
+    schema_version: "ecology-sample-reflection@1",
+    wave_digest: waveDigest,
+    sample_id: "origin-reflection",
+    outcome_class: "neutral",
+    error_source: "unknown",
+    next_action: "keep",
+    confidence: 0.8,
+    summary: "Keep the bounded configuration.",
+  };
+  const context = {
+    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    wave_digest: waveDigest,
+    sample: {
+      sample_id: "origin-reflection",
+      prediction_cells: [{ sample_id: "prediction-cell-that-must-not-bind" }],
+    },
+    outcome: { cells: [] },
+  };
+  const harness = directSampleHarness({
+    stage: "sample.reflect",
+    results: [
+      { stopReason: "completed" },
+      { stopReason: "completed", structured },
+    ],
+  });
+
+  const result = await harness.runner.run(directSampleBinding("sample.reflect", context));
+
+  assert.deepEqual(result.structured, structured);
+  assert.deepEqual(harness.reservations, [
+    { reservation_id: "sample.reflect-reservation-1", launch_attempt: 1 },
+    { reservation_id: "sample.reflect-reservation-2", launch_attempt: 2 },
+  ]);
+  assert.deepEqual(harness.starts.map(({ id }) => id), [
+    "sample.reflect-child-1",
+    "sample.reflect-child-2",
+  ]);
+  assert.equal(harness.persisted.length, 1);
+  for (const { request } of harness.starts) {
+    assert.deepEqual(request.outputSchema.properties.wave_digest, {
+      type: "string",
+      const: waveDigest,
+    });
+    assert.deepEqual(request.outputSchema.properties.sample_id, {
+      type: "string",
+      const: "origin-reflection",
+    });
+    assert.notEqual(
+      request.outputSchema.properties.sample_id.const,
+      "prediction-cell-that-must-not-bind",
+    );
+    assert.match(
+      JSON.parse(request.prompt[0].text).instruction,
+      /prediction_cells\[\]\.sample_id.*must not|never.*prediction_cells\[\]\.sample_id/i,
+    );
+  }
+});
+
+test("sample reflection stops after two missing structured outputs without persistence", async () => {
+  const context = {
+    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    wave_digest: "d".repeat(64),
+    sample: { sample_id: "origin-two-missing" },
+    outcome: { cells: [] },
+  };
+  const harness = directSampleHarness({
+    stage: "sample.reflect",
+    results: [
+      { stopReason: "completed" },
+      { stopReason: "completed" },
+    ],
+  });
+
+  await assert.rejects(
+    harness.runner.run(directSampleBinding("sample.reflect", context)),
+    (error) => error?.code === "structured_result_missing",
+  );
+  assert.equal(harness.reservations.length, 2);
+  assert.equal(harness.starts.length, 2);
+  assert.equal(harness.persisted.length, 0);
+});
+
+test("sample schema specialization is isolated to each schema clone", async () => {
+  const firstWave = "1".repeat(64);
+  const secondWave = "2".repeat(64);
+  const harness = directSampleHarness({
+    stage: "sample.critic",
+    results: [
+      {
+        stopReason: "completed",
+        structured: {
+          schema_version: "ecology-sample-review@1",
+          wave_digest: firstWave,
+          decisions: [],
+        },
+      },
+      {
+        stopReason: "completed",
+        structured: {
+          schema_version: "ecology-sample-review@1",
+          wave_digest: secondWave,
+          decisions: [],
+        },
+      },
+    ],
+  });
+
+  await harness.runner.run(directSampleBinding("sample.critic", {
+    schema_version: "ecologyrsi-dsh.sample-review-wave/1",
+    wave_digest: firstWave,
+    samples: [{ sample_id: "origin-first" }],
+  }));
+  await harness.runner.run(directSampleBinding("sample.critic", {
+    schema_version: "ecologyrsi-dsh.sample-review-wave/1",
+    wave_digest: secondWave,
+    samples: [{ sample_id: "origin-second" }],
+  }));
+
+  assert.deepEqual(
+    harness.starts.map(({ request }) => ({
+      wave: request.outputSchema.properties.wave_digest.const,
+      sampleIds: request.outputSchema.properties.decisions.items.properties.sample_id.enum,
+    })),
+    [
+      { wave: firstWave, sampleIds: ["origin-first"] },
+      { wave: secondWave, sampleIds: ["origin-second"] },
+    ],
+  );
+});
+
+test("malformed sample Host identities fail locally before child launch or persistence", async () => {
+  const validWave = "c".repeat(64);
+  const invalidContexts = [
+    {
+      name: "uppercase wave digest",
+      context: {
+        schema_version: "ecologyrsi-dsh.sample-review-wave/1",
+        wave_digest: "C".repeat(64),
+        samples: [{ sample_id: "origin-a" }],
+      },
+    },
+    {
+      name: "empty sample set",
+      context: {
+        schema_version: "ecologyrsi-dsh.sample-review-wave/1",
+        wave_digest: validWave,
+        samples: [],
+      },
+    },
+    {
+      name: "empty sample id",
+      context: {
+        schema_version: "ecologyrsi-dsh.sample-review-wave/1",
+        wave_digest: validWave,
+        samples: [{ sample_id: "" }],
+      },
+    },
+    {
+      name: "duplicate sample ids",
+      context: {
+        schema_version: "ecologyrsi-dsh.sample-review-wave/1",
+        wave_digest: validWave,
+        samples: [{ sample_id: "origin-a" }, { sample_id: "origin-a" }],
+      },
+    },
+    {
+      name: "overlong sample id",
+      context: {
+        schema_version: "ecologyrsi-dsh.sample-review-wave/1",
+        wave_digest: validWave,
+        samples: [{ sample_id: "x".repeat(241) }],
+      },
+    },
+    {
+      name: "too many sample ids",
+      context: {
+        schema_version: "ecologyrsi-dsh.sample-review-wave/1",
+        wave_digest: validWave,
+        samples: Array.from({ length: 129 }, (_, index) => ({
+          sample_id: `origin-${index}`,
+        })),
+      },
+    },
+  ];
+
+  for (const { name, context } of invalidContexts) {
+    const harness = directSampleHarness({
+      stage: "sample.critic",
+      results: [{ stopReason: "completed" }],
+    });
+    await assert.rejects(
+      harness.runner.run(directSampleBinding("sample.critic", context)),
+      (error) => error?.code === "sample_stage_context_invalid",
+      name,
+    );
+    assert.equal(harness.starts.length, 0, name);
+    assert.equal(harness.persisted.length, 0, name);
+    assert.equal(harness.reservations.length, 1, name);
+  }
+
+  const malformedReflection = directSampleHarness({
+    stage: "sample.reflect",
+    results: [{ stopReason: "completed" }],
+  });
+  await assert.rejects(
+    malformedReflection.runner.run(directSampleBinding("sample.reflect", {
+      schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+      wave_digest: validWave,
+      sample: {
+        prediction_cells: [{ sample_id: "prediction-cell-is-not-the-origin" }],
+      },
+      outcome: { cells: [] },
+    })),
+    (error) => error?.code === "sample_stage_context_invalid",
+  );
+  assert.equal(malformedReflection.starts.length, 0);
+  assert.equal(malformedReflection.persisted.length, 0);
+  assert.equal(malformedReflection.reservations.length, 1);
+});
+
+test("sample missing-output retry does not broaden to lifecycle or durable-boundary errors", async () => {
+  const nonRetryableCodes = [
+    "structured_child_aborted",
+    "structured_child_start_failed",
+    "structured_child_result_failed",
+    "structured_result_admission_closed",
+    "structured_role_operational_timeout",
+    "dsh_tool_authorization_error",
+    "provider_stage_admission_closed",
+    "structured_result_not_accepted",
+    "structured_result_persist_failed",
+    "dsh_native_runtime_http_error",
+  ];
+  const context = {
+    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    wave_digest: "b".repeat(64),
+    sample: { sample_id: "origin-no-retry" },
+    outcome: { cells: [] },
+  };
+
+  for (const code of nonRetryableCodes) {
+    let gateCalls = 0;
+    const runner = new NativeStageRunner({}, {
+      roleAgents: {
+        get: () => ({
+          sessionId: "sample-no-retry-parent",
+          agent: { id: "sample-no-retry-role-host" },
+          binding: { model: "pjlab/deepseek-v4-flash-0731" },
+        }),
+      },
+      runRegistry: { get: () => ({ status: "running" }) },
+      structuredStageMaxAttempts: 2,
+      providerStageGate: {
+        run: async () => {
+          gateCalls += 1;
+          const error = new Error(code);
+          error.code = code;
+          throw error;
+        },
+        penalize: () => {},
+      },
+    });
+    await assert.rejects(
+      runner.run(directSampleBinding("sample.reflect", context)),
+      (error) => error?.code === code,
+      code,
+    );
+    assert.equal(gateCalls, 1, code);
+  }
+});
+
+test("sample planner retries a missing Workflow result with a fresh reservation and session", async () => {
+  let workflowStarts = 0;
+  let persistCalls = 0;
+  const reservations = [];
+  const workflowRequests = [];
+  const childIds = [];
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  const { runner } = workflowDeadlineHarness({
+    timeoutMs: 1_000,
+    maxAttempts: 2,
+    onReservation: (_options, attempt) => reservations.push(attempt),
+    persist: async (options) => {
+      persistCalls += 1;
+      return { accepted: true, result_digest: options.body.result_digest };
+    },
+    startWorkflow: ({ request, listeners, sessions }) => {
+      workflowStarts += 1;
+      workflowRequests.push(request);
+      const childId = `workflow-retry-child-${workflowStarts}`;
+      childIds.push(childId);
+      sessions.set(childId, {
+        id: childId,
+        events: skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
+      });
+      publishWorkflowChild(listeners, request, childId);
+      return {
+        result: Promise.resolve(workflowStarts === 1
+          ? { value: [], stopReason: "completed" }
+          : { value: [structured], stopReason: "completed" }),
+        cancel: () => {},
+        dispose: async () => {},
+      };
+    },
+  });
+
+  const result = await runner.run(samplePlanBinding());
+
+  assert.deepEqual(result.structured, structured);
+  assert.deepEqual(reservations, [1, 2]);
+  assert.deepEqual(childIds, ["workflow-retry-child-1", "workflow-retry-child-2"]);
+  assert.equal(workflowStarts, 2);
+  assert.equal(persistCalls, 1);
+  for (const request of workflowRequests) {
+    const item = request.args.items[0];
+    assert.deepEqual(item.schema.properties.wave_digest, {
+      type: "string",
+      const: "f".repeat(64),
+    });
+    assert.deepEqual(item.schema.properties.decisions.items.properties.sample_id, {
+      type: "string",
+      enum: ["origin-a", "origin-b"],
+    });
+    assert.match(JSON.parse(item.prompt).instruction, /copy.*exact.*Host.*sample_id/i);
+  }
 });
 
 test("sample planner waves execute through the retained DSH Workflow Engine", async () => {
@@ -968,7 +1416,10 @@ test("sample planner waves execute through the retained DSH Workflow Engine", as
   const context = {
     schema_version: "ecologyrsi-dsh.sample-routing-wave/1",
     wave_digest: "f".repeat(64),
-    samples: [],
+    samples: [
+      { sample_id: "origin-a" },
+      { sample_id: "origin-b" },
+    ],
     context: {
       candidate_agent_profile: {
         schema_version: "ecologyrsi-dsh.candidate-agent-profile/1",
@@ -1003,6 +1454,14 @@ test("sample planner waves execute through the retained DSH Workflow Engine", as
   assert.equal(workflowRequest.parent, roleHost.agent);
   assert.match(workflowRequest.script, /parallel/);
   assert.equal(workflowRequest.args.items[0].schema.type, "object");
+  assert.deepEqual(workflowRequest.args.items[0].schema.properties.wave_digest, {
+    type: "string",
+    const: "f".repeat(64),
+  });
+  assert.deepEqual(
+    workflowRequest.args.items[0].schema.properties.decisions.items.properties.sample_id,
+    { type: "string", enum: ["origin-a", "origin-b"] },
+  );
   const plannerPrompt = JSON.parse(workflowRequest.args.items[0].prompt);
   assert.match(
     plannerPrompt.instruction,
@@ -1406,7 +1865,7 @@ test("sample critic uses its shorter independent operational timeout", async () 
   const context = {
     schema_version: "ecologyrsi-dsh.sample-review-wave/1",
     wave_digest: "f".repeat(64),
-    samples: [],
+    samples: [{ sample_id: "origin-timeout" }],
   };
   const startedAt = Date.now();
 

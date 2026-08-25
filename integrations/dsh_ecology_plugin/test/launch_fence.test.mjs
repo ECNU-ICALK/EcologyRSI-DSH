@@ -140,7 +140,7 @@ function stageBinding({ workflow = false, suffix = "race", revision = 7 } = {}) 
     ? {
       schema_version: "ecologyrsi-dsh.sample-routing-wave/1",
       wave_digest: "f".repeat(64),
-      samples: [],
+      samples: [{ sample_id: "origin-launch-race" }],
       context: {
         candidate_agent_profile: {
           schema_version: "ecologyrsi-dsh.candidate-agent-profile/1",
@@ -201,6 +201,21 @@ function launchRaceHarness({ workflow = false } = {}) {
       decisions: [],
     }
     : { schema_version: "ecology-research-result@1", findings: [] };
+  const outputSchema = workflow
+    ? {
+      type: "object",
+      properties: {
+        wave_digest: { type: "string" },
+        decisions: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: { sample_id: { type: "string" } },
+          },
+        },
+      },
+    }
+    : { type: "object", additionalProperties: true };
   let childStarts = 0;
   let workflowStarts = 0;
   let reservations = 0;
@@ -274,9 +289,9 @@ function launchRaceHarness({ workflow = false } = {}) {
     if (firstSchema) {
       firstSchema = false;
       schemaEntered.resolve();
-      return await releaseSchema.promise;
+      await releaseSchema.promise;
     }
-    return { type: "object", additionalProperties: true };
+    return structuredClone(outputSchema);
   };
   const controller = new RuntimeController(ctx, { registry, stageRunner: runner });
   controller.roleAgents = { quiesceRun: async () => {} };
