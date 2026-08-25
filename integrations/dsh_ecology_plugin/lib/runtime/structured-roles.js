@@ -5,19 +5,13 @@ import {
   validateStructuredDeadline,
   validateStructuredTimeoutMs,
 } from "./structured-deadline.js";
+import { structuredPhaseError } from "./structured-stage-errors.js";
 
 function structuredResult(run) {
   if (typeof run?.result === "function") return run.result();
   if (run?.result && typeof run.result.then === "function") return run.result;
   if (run?.result !== undefined) return run.result;
   return run;
-}
-
-function phaseError(code, cause) {
-  if (cause?.code) return cause;
-  const error = new Error(code, cause ? { cause } : undefined);
-  error.code = code;
-  return error;
 }
 
 function operationalTimeoutError() {
@@ -38,7 +32,14 @@ export async function runStructuredRole(
   roleHost,
   reservedBinding,
   request,
-  { pendingStarts, admission, persist, timeoutMs, deadline } = {},
+  {
+    pendingStarts,
+    admission,
+    persist,
+    timeoutMs,
+    deadline,
+    captureRejected,
+  } = {},
 ) {
   if (!roleHost?.agent) throw new Error("structured role requires a retained role-host Agent");
   if (!reservedBinding?.label) throw new Error("structured role requires a pre-registered child label");
@@ -129,39 +130,57 @@ export async function runStructuredRole(
       run = await withinDeadline(() => pending.promise);
     } catch (error) {
       if (deadlineExpired() || error === timeoutError) throw expireDeadline();
-      throw phaseError("structured_child_start_failed", error);
+      throw structuredPhaseError(
+        error?.code === "provider_stage_admission_closed" ? "control" : "start",
+        error,
+      );
     }
     let result;
     try {
       result = await withinDeadline(() => structuredResult(run));
     } catch (error) {
       if (deadlineExpired() || error === timeoutError) throw expireDeadline();
-      throw phaseError("structured_child_result_failed", error);
+      throw structuredPhaseError("result", error);
     }
     requireBeforeDeadline();
     const stopReason = result?.stopReason;
     requireBeforeDeadline();
-    if (stopReason && stopReason !== "completed") {
-      throw phaseError(
-        stopReason === "aborted"
-          ? "structured_child_aborted"
-          : "structured_child_model_error",
-      );
-    }
     const structured = result?.structured;
     requireBeforeDeadline();
-    if (!structured || typeof structured !== "object" || Array.isArray(structured)) {
-      throw phaseError("structured_result_missing");
+    const validStructured = structured
+      && typeof structured === "object"
+      && !Array.isArray(structured);
+    let rejectedCapture = false;
+    if (!validStructured && stopReason === "error" && typeof captureRejected === "function") {
+      try {
+        rejectedCapture = captureRejected({ run, result }) === true;
+      } catch {
+        rejectedCapture = false;
+      }
+    }
+    requireBeforeDeadline();
+    if (stopReason && stopReason !== "completed") {
+      if (stopReason === "aborted") throw structuredPhaseError("aborted");
+      if (rejectedCapture) throw structuredPhaseError("capture");
+      throw structuredPhaseError("model");
+    }
+    if (!validStructured) {
+      throw structuredPhaseError("capture");
     }
     let admissionOpen = true;
     if (admission?.isOpen) {
-      admissionOpen = await withinDeadline(
-        () => admission.isOpen(reservedBinding),
-      );
+      try {
+        admissionOpen = await withinDeadline(
+          () => admission.isOpen(reservedBinding),
+        );
+      } catch (error) {
+        if (deadlineExpired() || error === timeoutError) throw expireDeadline();
+        throw structuredPhaseError("admission", error);
+      }
     }
     requireBeforeDeadline();
     if (!admissionOpen) {
-      const error = phaseError("structured_result_admission_closed");
+      const error = structuredPhaseError("admission_closed");
       // Preserve the legacy message for callers that surface this safe state.
       error.message = "structured result admission is closed";
       throw error;
@@ -170,7 +189,7 @@ export async function runStructuredRole(
     // `childId` belongs to the continuable-start and Workflow event seams.
     const sessionId = String(run?.id || "");
     requireBeforeDeadline();
-    if (!sessionId) throw phaseError("structured_child_session_missing");
+    if (!sessionId) throw structuredPhaseError("child_session");
     const persistedStructured = structuredClone(structured);
     requireBeforeDeadline();
     const persistenceDeadline = deadlineAt === null ? null : Object.freeze({
@@ -187,13 +206,13 @@ export async function runStructuredRole(
       }, persistenceDeadline));
     } catch (error) {
       if (deadlineExpired() || error === timeoutError) throw expireDeadline();
-      throw phaseError("structured_result_persist_failed", error);
+      throw structuredPhaseError("persistence", error);
     }
     requireBeforeDeadline();
     const receiptAccepted = accepted?.accepted;
     requireBeforeDeadline();
     if (!accepted || receiptAccepted !== true) {
-      throw phaseError("structured_result_not_accepted");
+      throw structuredPhaseError("not_accepted");
     }
     const returnedStructured = structuredClone(structured);
     requireBeforeDeadline();

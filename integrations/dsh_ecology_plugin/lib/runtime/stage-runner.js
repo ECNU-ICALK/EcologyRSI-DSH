@@ -16,6 +16,10 @@ import {
   validateStructuredTimeoutMs,
 } from "./structured-deadline.js";
 import { runStructuredRole } from "./structured-roles.js";
+import {
+  isTrustedStructuredPhase,
+  structuredPhaseError,
+} from "./structured-stage-errors.js";
 import { PendingChildStarts, startHomogeneousWorkflow } from "./workflows.js";
 
 const STAGES = Object.freeze({
@@ -225,22 +229,16 @@ function positiveStageAttempts(value) {
 }
 
 function retryableStructuredStageError(error, stage) {
-  return error?.code === "structured_child_model_error"
+  return isTrustedStructuredPhase(error, "model")
     || (
       ["sample.plan", "sample.critic", "sample.reflect"].includes(stage)
-      && error?.code === "structured_result_missing"
+      && isTrustedStructuredPhase(error, "capture")
     );
 }
 
 function sampleStageContextInvalid(detail) {
   const error = new Error(`invalid sample stage Host context: ${detail}`);
   error.code = "sample_stage_context_invalid";
-  return error;
-}
-
-function structuredResultMissing() {
-  const error = new Error("structured_result_missing");
-  error.code = "structured_result_missing";
   return error;
 }
 
@@ -391,6 +389,23 @@ function toolResultIdentity(event) {
   const block = content.find((item) => item?.type === "tool-result");
   if (!block || typeof block.toolCallId !== "string") return null;
   return { callId: block.toolCallId, isError: block.isError === true };
+}
+
+function rejectedStructuredCapture(rawEvents) {
+  if (!Array.isArray(rawEvents)) return false;
+  const events = rawEvents
+    .map((event, index) => ({ event, seq: eventSequence(event, index) }))
+    .sort((left, right) => left.seq - right.seq);
+  const calls = events.filter((item) => (
+    item.event?.type === "tool/call"
+    && eventData(item.event).name === "structured_output"
+    && typeof eventData(item.event).callId === "string"
+  ));
+  return calls.some((call) => events.some((item) => {
+    if (item.event?.type !== "tool/result" || item.seq <= call.seq) return false;
+    const result = toolResultIdentity(item.event);
+    return result?.callId === eventData(call.event).callId && result.isError === true;
+  }));
 }
 
 function successfulResultAfter(events, call) {
@@ -834,6 +849,9 @@ export class NativeStageRunner {
               persistenceDeadline,
             ),
             deadline: lifecycle.deadline,
+            captureRejected: ({ run }) => rejectedStructuredCapture(
+              this.ctx?.sessions?.get?.(String(run?.id || ""))?.events,
+            ),
           },
         );
       requireStructuredDeadline(lifecycle.deadline);
@@ -974,66 +992,100 @@ export class NativeStageRunner {
     );
     try {
       throwIfExpired();
-      pendingWorkflow = this.pendingStarts.startWorkflow(
-        () => startHomogeneousWorkflow(
-          roleHost,
-          {
-            template_id: "ecology-one-shot-v1",
-            workflow_name: workflowName,
-            max_total_agents: 1,
-            max_concurrent: 1,
-            max_items: 1,
-            sync_timeout_ms: deadline.timeoutMs,
-          },
-          [{ label: reservation.label, prompt, schema: outputSchema }],
-        ),
-        { runId: binding.run_id, roleHostAgent: roleHost.agent },
-      );
+      try {
+        pendingWorkflow = this.pendingStarts.startWorkflow(
+          () => startHomogeneousWorkflow(
+            roleHost,
+            {
+              template_id: "ecology-one-shot-v1",
+              workflow_name: workflowName,
+              max_total_agents: 1,
+              max_concurrent: 1,
+              max_items: 1,
+              sync_timeout_ms: deadline.timeoutMs,
+            },
+            [{ label: reservation.label, prompt, schema: outputSchema }],
+          ),
+          { runId: binding.run_id, roleHostAgent: roleHost.agent },
+        );
+      } catch (error) {
+        throw structuredPhaseError(
+          error?.code === "provider_stage_admission_closed" ? "control" : "start",
+          error,
+        );
+      }
       workflow = pendingWorkflow.result;
       throwIfExpired();
       active = { runId: binding.run_id, workflow, lifecycle: pendingWorkflow };
       this.activeWorkflows.add(active);
-      const settled = await withinDeadline(() => workflow.result);
+      let settled;
+      try {
+        settled = await withinDeadline(() => workflow.result);
+      } catch (error) {
+        if (deadlineExpired() || error === timeoutError) throw expireDeadline();
+        throw structuredPhaseError("result", error);
+      }
       throwIfExpired();
+      const structured = Array.isArray(settled?.value) && settled.value.length === 1
+        ? settled.value[0]
+        : undefined;
+      const validStructured = structured
+        && typeof structured === "object"
+        && !Array.isArray(structured);
       if (settled?.stopReason !== "completed") {
-        const error = new Error(
-          `structured workflow failed: ${settled?.error || settled?.stopReason || "unknown"}`,
-        );
-        error.code = settled?.stopReason === "aborted"
-          ? "structured_child_aborted"
-          : "structured_child_model_error";
-        throw error;
+        if (settled?.stopReason === "aborted") throw structuredPhaseError("aborted");
+        if (
+          settled?.stopReason === "error"
+          && !validStructured
+          && rejectedStructuredCapture(
+            capturedSessionEvents
+              || this.ctx?.sessions?.get?.(childSessionId)?.events,
+          )
+        ) {
+          throw structuredPhaseError("capture");
+        }
+        throw structuredPhaseError("model");
       }
-      if (!Array.isArray(settled.value) || settled.value.length !== 1) {
-        throw structuredResultMissing();
-      }
-      const structured = settled.value[0];
-      if (!structured || typeof structured !== "object" || Array.isArray(structured)) {
-        throw structuredResultMissing();
+      if (!validStructured) {
+        throw structuredPhaseError("capture");
       }
       throwIfExpired();
-      if (!childSessionId) throw new Error("structured workflow did not publish a real child session");
-      const admissionOpen = await withinDeadline(() => admission.isOpen(reservation));
+      if (!childSessionId) throw structuredPhaseError("child_session");
+      let admissionOpen;
+      try {
+        admissionOpen = await withinDeadline(() => admission.isOpen(reservation));
+      } catch (error) {
+        if (deadlineExpired() || error === timeoutError) throw expireDeadline();
+        throw structuredPhaseError("admission", error);
+      }
       throwIfExpired();
       if (!admissionOpen) {
-        throw new Error("structured result admission is closed");
+        const error = structuredPhaseError("admission_closed");
+        error.message = "structured result admission is closed";
+        throw error;
       }
       const persistedStructured = structuredClone(structured);
       throwIfExpired();
-      const accepted = await withinDeadline(
-        () => persist(
-          persistedStructured,
-          childSessionId,
-          capturedSessionMetrics,
-          capturedSessionEvents,
-          persistenceDeadline,
-        ),
-      );
+      let accepted;
+      try {
+        accepted = await withinDeadline(
+          () => persist(
+            persistedStructured,
+            childSessionId,
+            capturedSessionMetrics,
+            capturedSessionEvents,
+            persistenceDeadline,
+          ),
+        );
+      } catch (error) {
+        if (deadlineExpired() || error === timeoutError) throw expireDeadline();
+        throw structuredPhaseError("persistence", error);
+      }
       throwIfExpired();
       const receiptAccepted = accepted?.accepted;
       throwIfExpired();
       if (!accepted || receiptAccepted !== true) {
-        throw new Error("structured result was not durably accepted");
+        throw structuredPhaseError("not_accepted");
       }
       const returnedStructured = structuredClone(structured);
       throwIfExpired();

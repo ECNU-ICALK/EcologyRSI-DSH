@@ -66,6 +66,25 @@ function skillFirstEvents(skillName, { prediction = false } = {}) {
   return events;
 }
 
+function schemaRejectedEvents(skillName, { prediction = false } = {}) {
+  const events = skillFirstEvents(skillName, { prediction });
+  events.push({
+    seq: prediction ? 6 : 4,
+    type: "tool/result",
+    data: {
+      message: {
+        content: [{
+          type: "tool-result",
+          toolCallId: "structured-call",
+          isError: true,
+          content: [{ type: "text", text: "private schema validation detail" }],
+        }],
+      },
+    },
+  });
+  return events;
+}
+
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object") {
@@ -237,7 +256,14 @@ function directSampleBinding(stage, context) {
   };
 }
 
-function directSampleHarness({ stage, results, maxAttempts = 2 }) {
+function directSampleHarness({
+  stage,
+  results,
+  maxAttempts = 2,
+  sessionEvents = () => skillFirstEvents("origin-vector-review"),
+  failurePhase = null,
+  failureCode = null,
+}) {
   const starts = [];
   const reservations = [];
   const persisted = [];
@@ -255,19 +281,39 @@ function directSampleHarness({ stage, results, maxAttempts = 2 }) {
         const id = `${stage}-child-${attempt}`;
         sessions.set(id, {
           id,
-          events: skillFirstEvents("origin-vector-review"),
+          events: sessionEvents(attempt),
         });
         starts.push({ id, request });
+        if (failurePhase === "start") {
+          const error = new Error(`private ${failurePhase} failure`);
+          error.code = failureCode;
+          throw error;
+        }
+        const result = failurePhase === "result"
+          ? Promise.reject(Object.assign(
+            new Error(`private ${failurePhase} failure`),
+            { code: failureCode },
+          ))
+          : Promise.resolve(results[attempt - 1]);
         return {
           id,
-          result: Promise.resolve(results[attempt - 1]),
+          result,
           dispose: async () => {},
         };
       },
     },
   }, {
     roleAgents: { get: () => roleHost },
-    runRegistry: { get: () => ({ status: "running" }) },
+    runRegistry: {
+      get: () => {
+        if (failurePhase === "admission") {
+          const error = new Error(`private ${failurePhase} failure`);
+          error.code = failureCode;
+          throw error;
+        }
+        return { status: "running" };
+      },
+    },
     sidecar: {
       request: async (path, options) => {
         if (path.endsWith("/child-reservations")) {
@@ -285,6 +331,11 @@ function directSampleHarness({ stage, results, maxAttempts = 2 }) {
           };
         }
         persisted.push(options.body);
+        if (failurePhase === "persistence") {
+          const error = new Error(`private ${failurePhase} failure`);
+          error.code = failureCode;
+          throw error;
+        }
         return { accepted: true, result_digest: options.body.result_digest };
       },
     },
@@ -1049,6 +1100,256 @@ test("sample reflection stops after two missing structured outputs without persi
   assert.equal(harness.reservations.length, 2);
   assert.equal(harness.starts.length, 2);
   assert.equal(harness.persisted.length, 0);
+});
+
+test("direct sample schema rejection is a bounded missing-capture retry", async () => {
+  const context = {
+    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    wave_digest: "a".repeat(64),
+    sample: { sample_id: "origin-direct-schema-rejection" },
+    outcome: { cells: [] },
+  };
+  const harness = directSampleHarness({
+    stage: "sample.reflect",
+    results: [
+      { stopReason: "error" },
+      { stopReason: "error" },
+    ],
+    sessionEvents: () => schemaRejectedEvents("origin-vector-review"),
+  });
+
+  await assert.rejects(
+    harness.runner.run(directSampleBinding("sample.reflect", context)),
+    (error) => error?.code === "structured_result_missing",
+  );
+  assert.equal(harness.reservations.length, 2);
+  assert.equal(harness.starts.length, 2);
+  assert.equal(harness.persisted.length, 0);
+});
+
+test("Workflow sample schema rejection is a bounded missing-capture retry", async () => {
+  let workflowStarts = 0;
+  let persistCalls = 0;
+  const reservations = [];
+  const { runner } = workflowDeadlineHarness({
+    timeoutMs: 1_000,
+    maxAttempts: 2,
+    onReservation: (_options, attempt) => reservations.push(attempt),
+    persist: async () => {
+      persistCalls += 1;
+      return { accepted: true };
+    },
+    startWorkflow: ({ request, listeners, sessions }) => {
+      workflowStarts += 1;
+      const childId = `workflow-schema-rejected-child-${workflowStarts}`;
+      sessions.set(childId, {
+        id: childId,
+        events: schemaRejectedEvents(
+          "origin-vector-forecasting-balanced",
+          { prediction: true },
+        ),
+      });
+      listeners.get("workflow/agent-start")?.(
+        { meta: request.meta },
+        { label: request.args.items[0].label, childId },
+      );
+      return {
+        result: Promise.resolve({ stopReason: "error" }),
+        cancel: () => {},
+        dispose: async () => {},
+      };
+    },
+  });
+
+  await assert.rejects(
+    runner.run(samplePlanBinding()),
+    (error) => error?.code === "structured_result_missing",
+  );
+  assert.deepEqual(reservations, [1, 2]);
+  assert.equal(workflowStarts, 2);
+  assert.equal(persistCalls, 0);
+});
+
+test("ordinary direct and Workflow error turns remain bounded model failures", async () => {
+  const context = {
+    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    wave_digest: "9".repeat(64),
+    sample: { sample_id: "origin-model-error" },
+    outcome: { cells: [] },
+  };
+  const direct = directSampleHarness({
+    stage: "sample.reflect",
+    results: [
+      { stopReason: "error", output: [{ type: "text", text: "private transport failure" }] },
+      { stopReason: "error", output: [{ type: "text", text: "private transport failure" }] },
+    ],
+  });
+  await assert.rejects(
+    direct.runner.run(directSampleBinding("sample.reflect", context)),
+    (error) => error?.code === "structured_child_model_error",
+  );
+  assert.equal(direct.reservations.length, 2);
+  assert.equal(direct.starts.length, 2);
+  assert.equal(direct.persisted.length, 0);
+
+  let workflowStarts = 0;
+  const workflowReservations = [];
+  const workflow = workflowDeadlineHarness({
+    timeoutMs: 1_000,
+    maxAttempts: 2,
+    onReservation: (_options, attempt) => workflowReservations.push(attempt),
+    startWorkflow: () => {
+      workflowStarts += 1;
+      return {
+        result: Promise.resolve({
+          stopReason: "error",
+          error: "private transport failure",
+        }),
+        cancel: () => {},
+        dispose: async () => {},
+      };
+    },
+  });
+  await assert.rejects(
+    workflow.runner.run(samplePlanBinding()),
+    (error) => error?.code === "structured_child_model_error",
+  );
+  assert.deepEqual(workflowReservations, [1, 2]);
+  assert.equal(workflowStarts, 2);
+});
+
+test("direct phase causes cannot spoof either retry allowlist code", async () => {
+  const context = {
+    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    wave_digest: "8".repeat(64),
+    sample: { sample_id: "origin-phase-spoof" },
+    outcome: { cells: [] },
+  };
+  const structured = {
+    schema_version: "ecology-sample-reflection@1",
+    wave_digest: "8".repeat(64),
+    sample_id: "origin-phase-spoof",
+    outcome_class: "neutral",
+    error_source: "unknown",
+    next_action: "keep",
+    confidence: 0.8,
+    summary: "Keep the bounded configuration.",
+  };
+  const expectedPhaseCode = {
+    start: "structured_child_start_failed",
+    result: "structured_child_result_failed",
+    admission: "structured_result_admission_failed",
+    persistence: "structured_result_persist_failed",
+  };
+
+  for (const phase of Object.keys(expectedPhaseCode)) {
+    for (const publicCode of [
+      "structured_result_missing",
+      "structured_child_model_error",
+    ]) {
+      const harness = directSampleHarness({
+        stage: "sample.reflect",
+        results: [{ stopReason: "completed", structured }],
+        failurePhase: phase,
+        failureCode: publicCode,
+      });
+      await assert.rejects(
+        harness.runner.run(directSampleBinding("sample.reflect", context)),
+        (error) => error?.code === expectedPhaseCode[phase]
+          && error?.cause === undefined
+          && !String(error).includes("private"),
+        `${phase}:${publicCode}`,
+      );
+      assert.equal(harness.reservations.length, 1, `${phase}:${publicCode}`);
+      assert.equal(harness.starts.length, 1, `${phase}:${publicCode}`);
+      assert.equal(
+        harness.persisted.length,
+        phase === "persistence" ? 1 : 0,
+        `${phase}:${publicCode}`,
+      );
+    }
+  }
+});
+
+test("Workflow phase causes cannot spoof retry or duplicate a post-commit persist", async () => {
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  const expectedPhaseCode = {
+    start: "structured_child_start_failed",
+    result: "structured_child_result_failed",
+    admission: "structured_result_admission_failed",
+    persistence: "structured_result_persist_failed",
+  };
+
+  for (const phase of Object.keys(expectedPhaseCode)) {
+    for (const publicCode of [
+      "structured_result_missing",
+      "structured_child_model_error",
+    ]) {
+      let workflowStarts = 0;
+      let persistCalls = 0;
+      const reservations = [];
+      const codedCause = () => Object.assign(
+        new Error(`private ${phase} failure after possible external effect`),
+        { code: publicCode },
+      );
+      const runRegistry = {
+        get: () => {
+          if (phase === "admission") throw codedCause();
+          return { status: "running" };
+        },
+      };
+      const harness = workflowDeadlineHarness({
+        timeoutMs: 1_000,
+        maxAttempts: 2,
+        runRegistry,
+        onReservation: (_options, attempt) => reservations.push(attempt),
+        persist: async () => {
+          persistCalls += 1;
+          if (phase === "persistence") throw codedCause();
+          return { accepted: true };
+        },
+        startWorkflow: ({ request, listeners, sessions }) => {
+          workflowStarts += 1;
+          if (phase === "start") throw codedCause();
+          const childId = `workflow-${phase}-child-${workflowStarts}`;
+          sessions.set(childId, {
+            id: childId,
+            events: skillFirstEvents(
+              "origin-vector-forecasting-balanced",
+              { prediction: true },
+            ),
+          });
+          publishWorkflowChild(listeners, request, childId);
+          return {
+            result: phase === "result"
+              ? Promise.reject(codedCause())
+              : Promise.resolve({ value: [structured], stopReason: "completed" }),
+            cancel: () => {},
+            dispose: async () => {},
+          };
+        },
+      });
+
+      await assert.rejects(
+        harness.runner.run(samplePlanBinding()),
+        (error) => error?.code === expectedPhaseCode[phase]
+          && error?.cause === undefined
+          && !String(error).includes("private"),
+        `${phase}:${publicCode}`,
+      );
+      assert.deepEqual(reservations, [1], `${phase}:${publicCode}`);
+      assert.equal(workflowStarts, 1, `${phase}:${publicCode}`);
+      assert.equal(
+        persistCalls,
+        phase === "persistence" ? 1 : 0,
+        `${phase}:${publicCode}`,
+      );
+    }
+  }
 });
 
 test("sample schema specialization is isolated to each schema clone", async () => {

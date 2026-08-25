@@ -172,3 +172,134 @@ does not enforce decision-array completeness or uniqueness after cardinality
 keywords are projected out. The Python/Host expected-contract validation
 remains authoritative for those properties; they are intentionally outside
 Task 4.
+
+## Fix Round 1/5 — trusted capture and phase provenance
+
+### Review findings addressed
+
+- A `stopReason: "error"` result is classified as a rejected schema capture
+  only when no valid structured object exists and Host-owned child session
+  events contain a `structured_output` tool call followed by its matching
+  `tool/result` with `isError: true`. Direct stages read the live child session;
+  Workflow stages use the end-event snapshot or the live session when result
+  settlement precedes `workflow/agent-end`. An ordinary error result without
+  this evidence remains `structured_child_model_error`.
+- Retry no longer trusts public `error.code`. A private runtime module owns a
+  `WeakMap` from freshly created phase errors to their immutable local phase.
+  The retry gate accepts only trusted `model` phase errors globally and trusted
+  `capture` phase errors for the three sample stages.
+- Direct and Workflow start, result, admission, persistence, not-accepted,
+  child-session, abort, and control boundaries now produce locally classified
+  errors. Every external cause is freshly wrapped; its private diagnostic data
+  is retained only inside the module-owned weak metadata and cannot forge the
+  wrapper's public phase.
+- Persistence failures are always the non-retryable
+  `structured_result_persist_failed`, even when a failure after a possible
+  durable commit carries either public allowlist code. No second reservation,
+  child/Workflow start, or persistence call follows that ambiguity.
+
+### RED evidence
+
+The first focused RED run, after adding capture and phase-spoof regressions but
+before production changes, was:
+
+```bash
+node --check integrations/dsh_ecology_plugin/test/stage_runner.test.mjs && \
+node --test integrations/dsh_ecology_plugin/test/stage_runner.test.mjs
+```
+
+```text
+tests 35
+pass 31
+fail 4
+duration_ms 438.162667
+```
+
+The four failures were the two independent defects on both launch paths:
+
+```text
+direct sample schema rejection is a bounded missing-capture retry
+  actual: structured_child_model_error
+  expected: structured_result_missing
+
+Workflow sample schema rejection is a bounded missing-capture retry
+  actual: structured_child_model_error
+  expected: structured_result_missing
+
+direct phase causes cannot spoof either retry allowlist code
+  actual: public start cause escaped with structured_result_missing
+  expected: structured_child_start_failed and one reservation/start
+
+Workflow phase causes cannot spoof retry or duplicate a post-commit persist
+  actual: public start cause escaped with structured_result_missing
+  expected: structured_child_start_failed and one reservation/start
+```
+
+A second TDD cycle tightened the Workflow capture test to the rc.6 ordering in
+which the live session contains the rejected tool result before the end-event
+snapshot is published:
+
+```bash
+node --test --test-name-pattern='Workflow sample schema rejection' \
+  integrations/dsh_ecology_plugin/test/stage_runner.test.mjs
+```
+
+```text
+tests 1
+pass 0
+fail 1
+actual: structured_child_model_error
+expected: structured_result_missing
+duration_ms 54.784208
+```
+
+### GREEN evidence
+
+Focused stage, structured-role, Workflow, and launch-fence run:
+
+```bash
+node --test \
+  integrations/dsh_ecology_plugin/test/stage_runner.test.mjs \
+  integrations/dsh_ecology_plugin/test/structured_roles.test.mjs \
+  integrations/dsh_ecology_plugin/test/workflow_lifecycle.test.mjs \
+  integrations/dsh_ecology_plugin/test/launch_fence.test.mjs
+```
+
+```text
+tests 68
+pass 68
+fail 0
+duration_ms 546.245042
+```
+
+Complete plugin Node suite:
+
+```bash
+node --test integrations/dsh_ecology_plugin/test/*.mjs
+```
+
+```text
+tests 164
+pass 164
+fail 0
+duration_ms 703.662584
+```
+
+Related Python sample and durable-tool contracts:
+
+```bash
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m unittest tests.test_dsh_sample_execution tests.test_dsh_tool_contracts -v
+```
+
+```text
+Ran 62 tests in 2.211s
+OK
+```
+
+The phase matrix injects both public allowlist codes independently at direct
+and Workflow start, result, admission, and persistence boundaries. Every case
+uses one reservation/start. Both post-commit persistence cases call persist
+exactly once and make zero fresh attempts. Legitimate local missing and model
+phases still consume exactly two fresh attempts; rejected captures make zero
+structured-result persistence calls.
