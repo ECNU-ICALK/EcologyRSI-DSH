@@ -3639,6 +3639,7 @@ def _mutation_contract_catalog(
 
 _DIAGNOSTIC_SELECTION_CLAIM_RE = re.compile(
     r"(?:\beligib(?:le|ility)\b|\bpromot(?:e|ion|ed)\b|"
+    r"\bgate\s+passage\b|"
     r"\b(?:selected|advance)\s+(?:for|to)\s+(?:the\s+)?next\s+generation\b|"
     r"\b(?:scientific|selection|statistical|evidence)\s+(?:gate|threshold)\b|"
     r"\b(?:pass|meet|satisfy|exceed)\w*\b[^.;。；]{0,40}"
@@ -3700,16 +3701,43 @@ _CLAIM_SCOPE_RESTART_RE = re.compile(
     re.IGNORECASE,
 )
 _CLAIM_NEGATED_ASSERTION_BEFORE_RE = re.compile(
-    r"(?:\b(?:do|does|did|will|would|should|must|can|could)\s+not\s+"
-    r"(?:claim|assert|imply)\b|\bwithout\s+(?:claiming|asserting|implying)\b|"
+    r"(?:\bno\s+(?:claim\s+of\s+)?(?:eligib\w*|promot\w*|gate\b|"
+    r"threshold\b|(?:scientific|selection|statistical|evidence)[-\s]+"
+    r"(?:gate|threshold|eligibility)\b|candidate[-\s]+"
+    r"(?:advancement|selection|promotion)\b|"
+    r"run[-\s]+level[-\s]+eligibility\b)|"
+    r"\b(?:do|does|did|will|would|should|must|can|could)\s+not\s+"
+    r"(?:claim|assert|imply|constitute)\b|"
+    r"\bwithout\s+(?:claiming|asserting|implying)\b|"
     r"(?:不|未|不会|不能|不得)\s*(?:声称|宣称|断言|暗示))"
     r"[^.;。；!?！？]*$",
     re.IGNORECASE,
 )
 _CLAIM_NEGATED_ENUMERATION_ITEM_RE = re.compile(
-    r"^(?:(?:and|or)\s+)?(?:eligib\w*|promot\w*|gate\b|threshold\b|"
-    r"(?:scientific|selection|statistical|evidence)[-\s]+(?:gate|threshold)\b|"
-    r"(?:门禁|门槛|阈值|晋级|入选|证据充足|样本量达标))",
+    r"^(?:(?:and|or)\s+)?"
+    r"(?:eligib\w*|promot\w*|gate(?:[-\s]+passage)?|"
+    r"threshold(?:[-\s]+satisfaction)?|"
+    r"(?:scientific|selection|statistical|evidence)[-\s]+"
+    r"(?:gate|threshold|eligibility)(?:[-\s]+(?:passage|satisfaction))?|"
+    r"candidate[-\s]+(?:advancement|selection|promotion)|"
+    r"run[-\s]+level[-\s]+eligibility|"
+    r"(?:门禁|门槛|阈值|晋级|入选|证据充足|样本量达标))"
+    r"(?:\s*(?:[,，]\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)"
+    r"(?:eligib\w*|promot\w*|gate(?:[-\s]+passage)?|"
+    r"threshold(?:[-\s]+satisfaction)?|"
+    r"(?:scientific|selection|statistical|evidence)[-\s]+"
+    r"(?:gate|threshold|eligibility)(?:[-\s]+(?:passage|satisfaction))?|"
+    r"candidate[-\s]+(?:advancement|selection|promotion)|"
+    r"run[-\s]+level[-\s]+eligibility|"
+    r"(?:门禁|门槛|阈值|晋级|入选|证据充足|样本量达标)))*"
+    r"(?:\s+(?:is|are|was|were)\s+"
+    r"(?:claimed|asserted|implied|made)\b)?"
+    r"(?:\s+(?:from|for|in|within|by|based\s+on)\b"
+    r"[^.;。；!?！？]{0,64})?$",
+    re.IGNORECASE,
+)
+_CLAIM_COMPLETED_ASSERTION_BEFORE_RE = re.compile(
+    r"\b(?:is|are|was|were)\s+(?:claimed|asserted|implied|made)\s*$",
     re.IGNORECASE,
 )
 
@@ -3737,7 +3765,8 @@ def _claim_scopes(text: str) -> tuple[str, ...]:
             prefix = clause[: boundary.start()]
             if (
                 _CLAIM_NEGATED_ASSERTION_BEFORE_RE.search(prefix)
-                and _CLAIM_NEGATED_ENUMERATION_ITEM_RE.match(suffix)
+                and not _CLAIM_COMPLETED_ASSERTION_BEFORE_RE.search(prefix)
+                and _CLAIM_NEGATED_ENUMERATION_ITEM_RE.fullmatch(suffix)
             ):
                 continue
             scopes.append(suffix)

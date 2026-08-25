@@ -757,6 +757,34 @@ class AutoProgressManager:
                 except (KeyError, ValueError):
                     recovery_state = None
                 recovery_stage = _latest_failed_stage(recovery_state)
+                research_contract_error = _exception_of_type(
+                    exc,
+                    ResearchResponseContractError,
+                )
+                if (
+                    recovery_stage == "research"
+                    and research_contract_error is not None
+                ):
+                    validation_detail = str(
+                        getattr(
+                            research_contract_error,
+                            "validation_detail",
+                            None,
+                        )
+                        or "宿主语义合同校验未通过"
+                    )[:500]
+                    with self.server.mutation_lock:
+                        latest = self._state_for_work_item(work_item)
+                        if latest.run.status is RunStatus.RUNNING:
+                            self.server.director.pause_run(
+                                work_item[0],
+                                code="research_contract_retry_exhausted",
+                                reason=(
+                                    "研究响应已用尽本轮语义修复预算："
+                                    f"{validation_detail}"
+                                )[:500],
+                            )
+                    return False
                 retryable = _progress_failure_retryable(
                     exc,
                     stage=recovery_stage,
@@ -1203,11 +1231,6 @@ def _progress_failure_retryable(
         # A transient ledger/IPC failure must be retried after a cooldown, not
         # converted into a terminal generation failure after three attempts.
         return True
-    if stage == "research" and _contains_exception_type(
-        exc,
-        ResearchResponseContractError,
-    ):
-        return True
     return not isinstance(exc, (KeyError, TypeError, ValueError))
 
 
@@ -1233,21 +1256,16 @@ def _retry_later_error(
         return exc
     if _contains_exception_type(exc, SampleResultCallbackError):
         return exc
-    if stage == "research" and _contains_exception_type(
-        exc,
-        ResearchResponseContractError,
-    ):
-        return exc
     return None
 
 
-def _contains_exception_type(
+def _exception_of_type(
     exc: BaseException,
     expected_type: type[BaseException],
     *,
     max_depth: int = 32,
-) -> bool:
-    """Return whether an exception chain contains ``expected_type``."""
+) -> BaseException | None:
+    """Return the first matching exception from a bounded exception graph."""
 
     pending: list[tuple[BaseException, int]] = [(exc, 0)]
     seen: set[int] = set()
@@ -1258,7 +1276,7 @@ def _contains_exception_type(
             continue
         seen.add(identity)
         if isinstance(current, expected_type):
-            return True
+            return current
         for related in (
             getattr(current, "__cause__", None),
             getattr(current, "__context__", None),
@@ -1270,7 +1288,21 @@ def _contains_exception_type(
             for related in related_group:
                 if isinstance(related, BaseException):
                     pending.append((related, depth + 1))
-    return False
+    return None
+
+
+def _contains_exception_type(
+    exc: BaseException,
+    expected_type: type[BaseException],
+    *,
+    max_depth: int = 32,
+) -> bool:
+    """Return whether an exception chain contains ``expected_type``."""
+    return _exception_of_type(
+        exc,
+        expected_type,
+        max_depth=max_depth,
+    ) is not None
 
 
 __all__ = ["AutoProgressManager", "auto_progress_enabled"]

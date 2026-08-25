@@ -1341,6 +1341,34 @@
     return {detail: detail.join(" · ")};
   }
 
+  function executionDshActivityPresentation(activity) {
+    if (!activity || typeof activity !== "object") { return null; }
+    var stateValue = String(activity.state || "").toLowerCase();
+    var stage = compactTechnicalText(activity.dsh_stage || activity.evolution_stage || "DSH");
+    var role = compactTechnicalText(activity.role || "");
+    var roleText = role ? " · 角色 " + role : "";
+    var attempt = Number(activity.launch_attempt);
+    var attemptText = Number.isInteger(attempt) && attempt > 0 ? " · 第 " + formatNumber(attempt) + " 次" : "";
+    var startedAt = Date.parse(activity.started_at || "");
+    var elapsedText = Number.isFinite(startedAt)
+      ? " · 已运行 " + autonomyWaitDurationText(Math.max(0, Date.now() - startedAt))
+      : "";
+    var updatedText = activity.updated_at ? " · DSH 更新 " + formatTime(activity.updated_at) : "";
+    var labels = {
+      model_running: "DSH 子模型执行中",
+      model_retry_running: "DSH 子模型重试中",
+      host_validating: "Host 正在校验 DSH 结果",
+      waiting_for_model_slot: "等待 DSH provider 槽位",
+    };
+    if (!labels[stateValue]) { return null; }
+    return {
+      retrying: stateValue === "model_retry_running",
+      statusText: stateValue === "model_retry_running" ? "模型重试中" : null,
+      detail: "DSH 子阶段 " + stage + roleText + attemptText + " · " + labels[stateValue] + elapsedText,
+      heartbeat: "DSH " + stage + roleText + " · " + labels[stateValue] + updatedText,
+    };
+  }
+
   function renderExecutionMonitor(run) {
     var statusNode = $("#execution-monitor-status");
     var labelNode = $("#execution-progress-label");
@@ -1409,8 +1437,9 @@
     var autoBlocked = liveAllowed && state.autoAdvanceBlockedRunId === run.id && state.autoAdvanceError;
     var hardTokenPause = runHasHardTokenPause(run);
     var schedulerQueue = executionSchedulerQueueInfo(run);
+    var dshActivity = liveAllowed && explicitProgress.dsh_activity && typeof explicitProgress.dsh_activity === "object" ? executionDshActivityPresentation(explicitProgress.dsh_activity) : null;
     var retainedEvidence = executionHasRetainedEvidence(run);
-    var statusText = failed ? "执行失败" : hardTokenPause ? "逐样本智能体 Token 预算已暂停" : pausedDrained ? "已暂停，请求已排空" : paused ? "已暂停，可人工干预" : cancelled ? "已取消" : retryWait ? "等待网关重试" : schedulerQueue ? "后台排队中" : autoBlocked ? "自动推进已暂停" : displayActive ? "模型执行中" : completionText || (finished ? "运行已结束" : retainedEvidence ? executionEvidenceQualifier(run) : autoActive ? "自动准备下一轮" : autoManaged ? "后台自动推进" : waiting ? "等待推进" : "等待下一轮");
+    var statusText = failed ? "执行失败" : hardTokenPause ? "逐样本智能体 Token 预算已暂停" : pausedDrained ? "已暂停，请求已排空" : paused ? "已暂停，可人工干预" : cancelled ? "已取消" : retryWait ? "等待网关重试" : schedulerQueue ? "后台排队中" : autoBlocked ? "自动推进已暂停" : displayActive ? (dshActivity && dshActivity.statusText || "模型执行中") : completionText || (finished ? "运行已结束" : retainedEvidence ? executionEvidenceQualifier(run) : autoActive ? "自动准备下一轮" : autoManaged ? "后台自动推进" : waiting ? "等待推进" : "等待下一轮");
     var statusClass = failed ? "pill-red" : hardTokenPause || paused || cancelled || retainedEvidence ? "pill-amber" : schedulerQueue ? "pill-blue" : autoBlocked ? "pill-red" : displayActive ? "pill-blue" : exhausted ? "pill-amber" : finished ? "pill-green" : waiting ? "pill-amber" : autoActive || autoManaged ? "pill-blue" : "pill-neutral";
     statusNode.className = "pill " + statusClass;
     statusNode.textContent = statusText;
@@ -1433,7 +1462,7 @@
     var elapsedText = executionElapsedText(effectiveElapsedMs, displayActive);
     var batchText = stageProgress && Number.isFinite(Number(stageProgress.batch_index)) && Number.isFinite(Number(stageProgress.batch_count)) ? " · 微批 " + formatNumber(stageProgress.batch_index) + " / " + formatNumber(stageProgress.batch_count) : "";
     var terminalEvidenceText = (failed || cancelled) && retainedEvidence ? " · " + executionEvidenceQualifier(run) : "";
-    detailNode.textContent = hardTokenPause ? "逐样本智能体 Token 硬预算已耗尽；逐样本 checkpoint 已保留。" : paused ? "暂停阶段：" + (stageText || "等待阶段状态") + (candidate ? " · " + shortId(candidate.id || candidate.candidate_id) : "") + batchText + (pausedDrained ? " · 请求已排空" : " · 已停止提交新请求") : retryWait ? (retryWait.reason || "网关请求已完成本地重试，正在等待队列恢复") + (retryWait.retry_at ? " · 下次重试 " + formatTime(retryWait.retry_at) : "") : schedulerQueue ? schedulerQueue.detail : displayActive ? "当前阶段：" + (stageText || "等待事件回执") + (candidate ? " · " + shortId(candidate.id || candidate.candidate_id) : "") + batchText + elapsedText : statusText + terminalEvidenceText + (exhausted ? observedDetail + "，但未通过全部门禁" : candidate ? " · 最近候选 " + shortId(candidate.id || candidate.candidate_id) : "") + (autoActive ? elapsedText : "");
+    detailNode.textContent = hardTokenPause ? "逐样本智能体 Token 硬预算已耗尽；逐样本 checkpoint 已保留。" : paused ? "暂停阶段：" + (stageText || "等待阶段状态") + (candidate ? " · " + shortId(candidate.id || candidate.candidate_id) : "") + batchText + (pausedDrained ? " · 请求已排空" : " · 已停止提交新请求") : retryWait ? (retryWait.reason || "网关请求已完成本地重试，正在等待队列恢复") + (retryWait.retry_at ? " · 下次重试 " + formatTime(retryWait.retry_at) : "") : schedulerQueue ? schedulerQueue.detail : displayActive ? "当前阶段：" + (stageText || "等待事件回执") + (candidate ? " · " + shortId(candidate.id || candidate.candidate_id) : "") + batchText + (dshActivity ? " · " + dshActivity.detail : "") + elapsedText : statusText + terminalEvidenceText + (exhausted ? observedDetail + "，但未通过全部门禁" : candidate ? " · 最近候选 " + shortId(candidate.id || candidate.candidate_id) : "") + (autoActive ? elapsedText : "");
     track.className = "execution-progress-track" + (failed ? " is-failed" : paused ? " is-paused" : displayActive ? " is-running" : "");
     track.setAttribute("aria-valuenow", String(roundedPercent));
     fill.style.width = Math.max(0, Math.min(100, progress.percent)).toFixed(1) + "%";
@@ -1466,11 +1495,11 @@
     }
     if (heartbeatNode) {
       if (stageProgress && stageProgress.updated_at && stageProgress.live) {
-        heartbeatNode.textContent = "评测心跳：" + formatTime(stageProgress.updated_at) + (stageProgress.progress_kind === "waiting" ? " · 网关执行中" + inFlightText + queuedText : causalWaveText ? " · 已提交" + causalWaveText + inFlightText + queuedText : inFlightText + queuedText);
+        heartbeatNode.textContent = "评测心跳：" + formatTime(stageProgress.updated_at) + (stageProgress.progress_kind === "waiting" ? " · 网关执行中" + inFlightText + queuedText : causalWaveText ? " · 已提交" + causalWaveText + inFlightText + queuedText : inFlightText + queuedText) + (dshActivity ? " · " + dshActivity.heartbeat : "");
       } else if (stageProgress && stageProgress.updated_at) {
         heartbeatNode.textContent = (paused ? "最近评测记录：" : "评测证据：") + formatTime(stageProgress.updated_at) + (pausedDrained ? " · 暂停后请求已排空" + inFlightText + queuedText : stageProgress.evidence_qualifier ? " · " + stageProgress.evidence_qualifier : "");
       } else if (liveAllowed) {
-        heartbeatNode.textContent = "评测心跳：等待首个波次完成";
+        heartbeatNode.textContent = dshActivity ? "DSH 活动：" + dshActivity.heartbeat : "评测心跳：等待首个波次完成";
       } else {
         heartbeatNode.textContent = "评测证据：" + (executionEvidenceQualifier(run) || "无逐批时间记录");
       }

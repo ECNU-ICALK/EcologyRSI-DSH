@@ -93,6 +93,17 @@ test("post-score sample reflection is a registered structured DSH stage", () => 
   assert.match(STAGES["sample.reflect"].instruction, /next-generation action/i);
 });
 
+test("pre-score sample critic has a bounded schema-recovery protocol", () => {
+  const critic = STAGES["sample.critic"];
+
+  assert.match(critic.instruction, /exact wave_digest/i);
+  assert.match(critic.instruction, /every supplied sample_id/i);
+  assert.match(critic.instruction, /never call structured_output with empty arguments/i);
+  assert.match(critic.instruction, /rejected.*terminate.*fresh.*child attempt/i);
+  assert.doesNotMatch(critic.instruction, /retry that same tool/i);
+  assert.match(critic.instruction, /emit no prose/i);
+});
+
 test("Skill-first evidence permits optional retrieval before the terminal tool", () => {
   const evidence = skillInvocationEvidence([
     {
@@ -567,6 +578,104 @@ test("native stage runner retries one transient child model failure with a fresh
   assert.deepEqual(disposed, ["child-1", "child-2"]);
 });
 
+test("sample critic retries a normally-ended missing result in a fresh child", async () => {
+  const roleHost = {
+    sessionId: "critic-retry-parent",
+    agent: { id: "critic-role-host" },
+    binding: { model: "pjlab/deepseek-v4-flash-0731" },
+  };
+  const waveDigest = "f".repeat(64);
+  const structured = {
+    schema_version: "ecology-sample-review@1",
+    wave_digest: waveDigest,
+    decisions: [],
+  };
+  const criticEvents = skillFirstEvents("origin-vector-review");
+  let starts = 0;
+  let reservations = 0;
+  let persisted = 0;
+  let penalties = 0;
+  const runner = new NativeStageRunner({
+    sessions: {
+      get: (id) => (id.startsWith("critic-child-")
+        ? { id, events: criticEvents }
+        : undefined),
+    },
+    subagents: {
+      start: async () => {
+        starts += 1;
+        const id = `critic-child-${starts}`;
+        return {
+          id,
+          result: Promise.resolve(
+            starts === 1
+              ? { stopReason: "completed" }
+              : { stopReason: "completed", structured },
+          ),
+          dispose: async () => {},
+        };
+      },
+    },
+  }, {
+    roleAgents: { get: () => roleHost },
+    runRegistry: { get: () => ({ status: "running" }) },
+    sidecar: {
+      request: async (path, options) => {
+        if (path.endsWith("/child-reservations")) {
+          reservations += 1;
+          return {
+            accepted: true,
+            launch: {
+              reservation_id: `critic-retry-reservation-${reservations}`,
+              launch_attempt: reservations,
+            },
+            ledger_expected_revision: 20 + reservations,
+          };
+        }
+        persisted += 1;
+        return { accepted: true, result_digest: options.body.result_digest };
+      },
+    },
+    structuredStageMaxAttempts: 2,
+    providerStageGate: {
+      run: async (_provider, operation) => operation(),
+      penalize: () => { penalties += 1; },
+    },
+  });
+  const context = {
+    schema_version: "ecologyrsi-dsh.sample-review-wave/1",
+    wave_digest: waveDigest,
+    samples: [],
+  };
+
+  const result = await runner.run({
+    run_id: "run-critic-missing-result-retry",
+    stage: "sample.critic",
+    run_state_revision: 7,
+    stage_attempt: 1,
+    ledger_expected_revision: 19,
+    idempotency_key: "critic-missing-result-1",
+    request: {
+      role: "sample-critic",
+      output_schema_id: "ecology-sample-review@1",
+      context,
+      context_canonical_json: canonicalJson(context),
+      context_digest: jsonDigest(context),
+      identity_digests: {
+        genome_digest: "a".repeat(64),
+        compiled_behavior_digest: "b".repeat(64),
+        phenotype_instance_digest: "c".repeat(64),
+      },
+    },
+  });
+
+  assert.deepEqual(result.structured, structured);
+  assert.equal(starts, 2);
+  assert.equal(reservations, 2);
+  assert.equal(persisted, 1);
+  assert.equal(penalties, 1);
+});
+
 test("sample planner waves execute through the retained DSH Workflow Engine", async () => {
   const listeners = new Map();
   const sessions = new Map([[
@@ -742,4 +851,76 @@ test("sample planner waves execute through the retained DSH Workflow Engine", as
   assert.equal(result.session_id, "workflow-child-session");
   assert.deepEqual(result.structured, structured);
   assert.equal(workflowDisposed, true);
+});
+
+test("sample critic uses its shorter independent operational timeout", async () => {
+  let aborted = false;
+  const roleHost = {
+    sessionId: "critic-parent-session",
+    agent: { id: "critic-role-host" },
+    binding: { model: "pjlab/deepseek-v4-flash-0731" },
+  };
+  const ctx = {
+    subagents: {
+      start: async (_provider, request) => new Promise((_resolve, reject) => {
+        request.signal.addEventListener("abort", () => {
+          aborted = true;
+          reject(new Error("critic child aborted"));
+        }, { once: true });
+      }),
+    },
+  };
+  const runner = new NativeStageRunner(ctx, {
+    roleAgents: { get: () => roleHost },
+    runRegistry: { get: () => ({ status: "running" }) },
+    sidecar: {
+      request: async () => ({
+        accepted: true,
+        launch: {
+          reservation_id: "critic-timeout-reservation",
+          launch_attempt: 1,
+        },
+        ledger_expected_revision: 12,
+      }),
+    },
+    structuredStageTimeoutMs: 1_000,
+    sampleCriticStageTimeoutMs: 20,
+    structuredStageMaxAttempts: 1,
+    providerStageGate: {
+      run: async (_provider, operation) => operation(),
+      penalize: () => {},
+    },
+  });
+  const context = {
+    schema_version: "ecologyrsi-dsh.sample-review-wave/1",
+    wave_digest: "f".repeat(64),
+    samples: [],
+  };
+  const startedAt = Date.now();
+
+  await assert.rejects(
+    runner.run({
+      run_id: "run-critic-timeout",
+      stage: "sample.critic",
+      run_state_revision: 7,
+      stage_attempt: 1,
+      ledger_expected_revision: 11,
+      idempotency_key: "critic-timeout-1",
+      request: {
+        role: "sample-critic",
+        output_schema_id: "ecology-sample-review@1",
+        context,
+        context_canonical_json: canonicalJson(context),
+        context_digest: jsonDigest(context),
+        identity_digests: {
+          genome_digest: "a".repeat(64),
+          compiled_behavior_digest: "b".repeat(64),
+          phenotype_instance_digest: "c".repeat(64),
+        },
+      },
+    }),
+    /operational timeout/,
+  );
+  assert.equal(aborted, true);
+  assert.ok(Date.now() - startedAt < 500, "sample critic must not inherit the 1s general timeout");
 });

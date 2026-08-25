@@ -82,18 +82,17 @@ class AutoProgressHTTPTests(unittest.TestCase):
         self.assertIsNone(
             auto_progress_module._retry_later_error(research_contract)
         )
-        self.assertTrue(
+        self.assertFalse(
             auto_progress_module._progress_failure_retryable(
                 research_contract,
                 stage="research",
             )
         )
-        self.assertIs(
+        self.assertIsNone(
             auto_progress_module._retry_later_error(
                 research_contract,
                 stage="research",
-            ),
-            research_contract,
+            )
         )
         self.assertTrue(
             auto_progress_module._progress_failure_retryable(
@@ -197,6 +196,76 @@ class AutoProgressHTTPTests(unittest.TestCase):
         self.assertIsNone(
             auto_progress_module._retry_later_error(contract_failure)
         )
+
+    def test_exhausted_research_contract_pauses_without_outer_retry(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "research-contract-circuit-breaker",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        executed = threading.Event()
+        calls: list[str] = []
+
+        def invalid_research(_endpoint: object, target_run_id: str) -> object:
+            calls.append(target_run_id)
+            with self.server.mutation_lock:
+                self.server.director.record_evolution_stage(
+                    target_run_id,
+                    generation=0,
+                    stage="research",
+                    status="failed",
+                    attempt=1,
+                    public_error="远程研究计划响应未通过宿主契约校验。",
+                )
+            executed.set()
+            raise ResearchResponseContractError(
+                "candidate direction d1 uses a selection or promotion "
+                "success criterion in a diagnostic-only run"
+            )
+
+        with (
+            patch.object(
+                auto_progress_module,
+                "execute_generation",
+                side_effect=invalid_research,
+            ),
+            patch.object(
+                self.server.auto_progress,
+                "_gateway_retry_delay",
+                return_value=60.0,
+            ),
+        ):
+            with self.server.mutation_lock:
+                self.server.director.start_run(run_id)
+                self.server.auto_progress.schedule(run_id)
+            self.assertTrue(executed.wait(timeout=2))
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if self.server.director.state(run_id).run.status.value == "paused":
+                    break
+                time.sleep(0.01)
+
+        state = self.server.director.state(run_id)
+        self.assertEqual(state.run.status.value, "paused")
+        self.assertEqual(calls, [run_id])
+        self.assertFalse(
+            any(event.kind == "GatewayRetryScheduled" for event in state.events)
+        )
+        paused = next(event for event in reversed(state.events) if event.kind == "RunPaused")
+        self.assertEqual(paused.payload["code"], "research_contract_retry_exhausted")
+        self.assertIn("candidate direction d1", paused.payload["reason"])
 
     def test_gateway_retry_delay_saturates_before_large_exponent(self) -> None:
         work_item = ("run:large-retry-attempt", 1)

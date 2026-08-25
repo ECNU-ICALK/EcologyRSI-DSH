@@ -1226,6 +1226,43 @@ assert.equal(monitorNodes["#active-candidate-status"].className, "pill pill-ambe
 assert.equal(monitorNodes["#implementation-status"].textContent, "已暂停");
 assert.equal(monitorNodes["#implementation-status"].className, "pill pill-amber");
 assert.ok(monitorNodes["#execution-stage-strip"].innerHTML.includes("execution-stage-chip is-paused"));
+
+const activeDshRetryRun = {
+  ...pausedDrainedRun,
+  id: "run:active-dsh-retry",
+  status: "running",
+  execution_diagnostics: {},
+  execution_progress: {
+    ...pausedDrainedRun.execution_progress,
+    phase: "evaluation",
+    stage_progress: {
+      ...pausedDrainedRun.execution_progress.stage_progress,
+      progress_kind: "waiting",
+      in_flight_batches: 1,
+      queued_batches: 1,
+    },
+    dsh_activity: {
+      schema_version: "ecologyrsi-dsh.dsh-activity/1",
+      state: "model_retry_running",
+      evolution_stage: "evaluation",
+      dsh_stage: "sample.critic",
+      role: "sample-critic",
+      launch_attempt: 2,
+      started_at: new Date(Date.now() - 24000).toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+  },
+};
+modelSandbox.state.events = [];
+modelSandbox.renderExecutionMonitor(activeDshRetryRun);
+assert.equal(monitorNodes["#execution-monitor-status"].textContent, "模型重试中");
+for (const text of ["DSH 子阶段 sample.critic", "角色 sample-critic", "第 2 次", "已运行"] ) {
+  assert.ok(monitorNodes["#execution-progress-detail"].textContent.includes(text), `missing DSH activity detail: ${text}`);
+}
+assert.ok(monitorNodes["#execution-heartbeat"].textContent.includes("sample.critic"));
+assert.ok(monitorNodes["#execution-heartbeat"].textContent.includes("角色 sample-critic"));
+assert.ok(monitorNodes["#execution-heartbeat"].textContent.includes("DSH 更新"));
+
 const completedHeartbeatSnapshot = modelSandbox.executionSampleProgressSnapshot({
   status: "completed",
   execution_diagnostics: {

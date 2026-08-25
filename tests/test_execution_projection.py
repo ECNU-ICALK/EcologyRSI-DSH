@@ -20,10 +20,12 @@ from ecologyrsi_dsh.data.toy import ToyCropSoilWater
 from ecologyrsi_dsh.presentation.reporting import run_completion_outcome, run_summary
 from ecologyrsi_dsh.api.generation_execution import _model_token_budget_state
 from ecologyrsi_dsh.api.projection import (
+    _dsh_activity_projection,
     _dsh_runtime_projection,
     _evaluation_progress_rates,
     _model_usage_summary,
     _public_evaluation_metrics,
+    _run_failure_projection,
 )
 from ecologyrsi_dsh.api.projection import _projection_json
 
@@ -61,6 +63,152 @@ def _skill_evidence(stage: str, skill_name: str) -> dict:
 
 
 class ExecutionProjectionTests(unittest.TestCase):
+    def test_completed_run_hides_recovered_failed_stage(self) -> None:
+        failed_stage = SimpleNamespace(
+            seq=10,
+            kind="EvolutionStageRecorded",
+            payload={
+                "generation": 0,
+                "stage": "reflection",
+                "status": "failed",
+                "attempt": 3,
+                "public_error": "temporary structured response failure",
+            },
+            created_at="2026-08-25T14:36:12+00:00",
+        )
+        completed = SimpleNamespace(
+            seq=20,
+            kind="RunCompleted",
+            payload={},
+            created_at="2026-08-25T14:39:02+00:00",
+        )
+        state = SimpleNamespace(
+            run=SimpleNamespace(status=SimpleNamespace(value="completed")),
+            events=(failed_stage, completed),
+        )
+
+        failure_reason, projected_stage = _run_failure_projection(state)
+
+        self.assertIsNone(failure_reason)
+        self.assertIsNone(projected_stage)
+
+    def test_dsh_activity_projects_running_retry_and_host_validation(self) -> None:
+        stage_started = SimpleNamespace(
+            seq=10,
+            kind="EvolutionStageRecorded",
+            payload={"stage": "evaluation", "status": "started"},
+            created_at="2026-08-25T13:44:02+00:00",
+        )
+        launch = SimpleNamespace(
+            seq=20,
+            kind="DshChildLaunchReserved",
+            payload={
+                "launch": {
+                    "stage": "sample.critic",
+                    "role": "sample-critic",
+                    "launch_attempt": 2,
+                    "reservation_id": "reservation-critic-2",
+                }
+            },
+            created_at="2026-08-25T13:54:17+00:00",
+        )
+        running_state = SimpleNamespace(events=(stage_started, launch))
+
+        running = _dsh_activity_projection(
+            running_state,
+            current_stage="evaluation",
+            run_status="running",
+        )
+
+        self.assertEqual(running["state"], "model_retry_running")
+        self.assertEqual(running["dsh_stage"], "sample.critic")
+        self.assertEqual(running["role"], "sample-critic")
+        self.assertEqual(running["launch_attempt"], 2)
+        self.assertEqual(running["started_at"], launch.created_at)
+        self.assertNotIn("reservation_id", running)
+
+        accepted = SimpleNamespace(
+            seq=21,
+            kind="DshStructuredResultAccepted",
+            payload={
+                "identity": {
+                    "stage": "sample.critic",
+                    "child_reservation_id": "reservation-critic-2",
+                }
+            },
+            created_at="2026-08-25T13:54:41+00:00",
+        )
+        validating = _dsh_activity_projection(
+            SimpleNamespace(events=(stage_started, launch, accepted)),
+            current_stage="evaluation",
+            run_status="running",
+        )
+
+        self.assertEqual(validating["state"], "host_validating")
+        self.assertEqual(validating["updated_at"], accepted.created_at)
+
+    def test_dsh_activity_projects_provider_slot_wait_without_fabricated_progress(
+        self,
+    ) -> None:
+        stage_started = SimpleNamespace(
+            seq=10,
+            kind="EvolutionStageRecorded",
+            payload={"stage": "research", "status": "started"},
+            created_at="2026-08-25T13:38:27+00:00",
+        )
+
+        activity = _dsh_activity_projection(
+            SimpleNamespace(events=(stage_started,)),
+            current_stage="research",
+            run_status="running",
+        )
+
+        self.assertEqual(activity["state"], "waiting_for_model_slot")
+        self.assertEqual(activity["evolution_stage"], "research")
+        self.assertIsNone(activity["dsh_stage"])
+        self.assertNotIn("progress_percent", activity)
+
+    def test_dsh_activity_maps_search_plan_to_search_stage(self) -> None:
+        stage_started = SimpleNamespace(
+            seq=10,
+            kind="EvolutionStageRecorded",
+            payload={"stage": "search", "status": "started"},
+            created_at="2026-08-25T13:38:27+00:00",
+        )
+        launch = SimpleNamespace(
+            seq=11,
+            kind="DshChildLaunchReserved",
+            payload={
+                "launch": {
+                    "stage": "generation.search-plan",
+                    "role": "coordinator",
+                    "launch_attempt": 1,
+                    "reservation_id": "reservation-search-1",
+                }
+            },
+            created_at="2026-08-25T13:38:31+00:00",
+        )
+
+        activity = _dsh_activity_projection(
+            SimpleNamespace(events=(stage_started, launch)),
+            current_stage="search",
+            run_status="running",
+        )
+
+        self.assertEqual(activity["state"], "model_running")
+        self.assertEqual(activity["evolution_stage"], "search")
+        self.assertEqual(activity["dsh_stage"], "generation.search-plan")
+        self.assertEqual(activity["role"], "coordinator")
+
+    def test_dsh_activity_is_hidden_after_run_is_terminal(self) -> None:
+        activity = _dsh_activity_projection(
+            SimpleNamespace(events=()),
+            current_stage=None,
+            run_status="completed",
+        )
+
+        self.assertIsNone(activity)
+
     def test_structured_result_with_dsh_session_metrics_replays(self) -> None:
         with EventLedger() as ledger:
             director = EvolutionDirector(ledger, FakeDSHAdapter())

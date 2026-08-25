@@ -93,6 +93,15 @@ def _run_failure_code(state: Any) -> str | None:
 def _run_failure_projection(state: Any) -> tuple[str | None, dict[str, Any] | None]:
     """Expose the durable public failure reason without requiring event joins."""
 
+    # Stage failures are retry observations, not terminal run failures.  Once a
+    # later attempt completes the run, keeping the earlier stage receipt in the
+    # top-level failure fields makes a healthy run look internally inconsistent.
+    run_status = getattr(
+        getattr(getattr(state, "run", None), "status", None), "value", None
+    )
+    if run_status == "completed":
+        return None, None
+
     failed_event = next(
         (event for event in reversed(state.events) if event.kind == "RunFailed"),
         None,
@@ -1450,6 +1459,118 @@ def _candidate_execution_projection(
     }
 
 
+def _dsh_evolution_stage(stage: str | None) -> str | None:
+    value = str(stage or "").strip().lower()
+    if value == "generation.search-plan":
+        return "search"
+    if value in {"generation.research", "generation.research-synthesis"}:
+        return "research"
+    if value == "candidate.propose":
+        return "proposal"
+    if value.startswith("sample."):
+        return "evaluation"
+    if value == "generation.judge":
+        return "judge"
+    if value == "generation.reflect":
+        return "reflection"
+    return None
+
+
+def _dsh_activity_projection(
+    state: Any,
+    *,
+    current_stage: str | None,
+    run_status: str,
+) -> dict[str, Any] | None:
+    """Project bounded DSH child activity without inventing model progress."""
+
+    if run_status != "running" or current_stage not in {
+        "search",
+        "research",
+        "proposal",
+        "evaluation",
+        "judge",
+        "reflection",
+    }:
+        return None
+    stage_started = next(
+        (
+            event
+            for event in reversed(state.events)
+            if event.kind == "EvolutionStageRecorded"
+            and event.payload.get("stage") == current_stage
+            and str(event.payload.get("status") or "").lower()
+            in {"started", "running"}
+        ),
+        None,
+    )
+    if stage_started is None:
+        return None
+    stage_seq = int(getattr(stage_started, "seq", 0) or 0)
+    launches: list[tuple[Any, Mapping[str, Any]]] = []
+    for event in state.events:
+        if event.kind != "DshChildLaunchReserved" or int(event.seq) < stage_seq:
+            continue
+        launch = event.payload.get("launch")
+        if not isinstance(launch, Mapping):
+            continue
+        if _dsh_evolution_stage(launch.get("stage")) == current_stage:
+            launches.append((event, launch))
+    if not launches:
+        return {
+            "schema_version": "ecologyrsi-dsh.dsh-activity/1",
+            "state": "waiting_for_model_slot",
+            "evolution_stage": current_stage,
+            "dsh_stage": None,
+            "role": None,
+            "launch_attempt": None,
+            "started_at": stage_started.created_at,
+            "updated_at": state.events[-1].created_at,
+            "event_seq": stage_seq,
+            "evidence": "append_only_stage_event",
+        }
+
+    launch_event, launch = launches[-1]
+    reservation_id = launch.get("reservation_id")
+    accepted_event = next(
+        (
+            event
+            for event in reversed(state.events)
+            if event.kind == "DshStructuredResultAccepted"
+            and int(event.seq) > int(launch_event.seq)
+            and isinstance(event.payload.get("identity"), Mapping)
+            and event.payload["identity"].get("child_reservation_id")
+            == reservation_id
+        ),
+        None,
+    )
+    attempt = int(launch.get("launch_attempt") or 1)
+    if accepted_event is None:
+        activity_state = "model_retry_running" if attempt > 1 else "model_running"
+        updated_at = state.events[-1].created_at
+        event_seq = int(launch_event.seq)
+    elif int(accepted_event.seq) == int(state.events[-1].seq):
+        activity_state = "host_validating"
+        updated_at = accepted_event.created_at
+        event_seq = int(accepted_event.seq)
+    else:
+        activity_state = "waiting_for_model_slot"
+        updated_at = state.events[-1].created_at
+        event_seq = int(accepted_event.seq)
+    return {
+        "schema_version": "ecologyrsi-dsh.dsh-activity/1",
+        "state": activity_state,
+        "evolution_stage": current_stage,
+        "dsh_stage": launch.get("stage"),
+        "role": launch.get("role"),
+        "launch_attempt": attempt,
+        "started_at": launch_event.created_at,
+        "updated_at": updated_at,
+        "event_seq": event_seq,
+        "evidence": "append_only_dsh_child_events",
+    }
+
+
 def _run_execution_progress(state: Any) -> dict[str, Any]:
     """Summarize durable execution evidence for a compact progress bar."""
 
@@ -1590,6 +1711,12 @@ def _run_execution_progress(state: Any) -> dict[str, Any]:
     else:
         phase = current_stage
 
+    dsh_activity = _dsh_activity_projection(
+        state,
+        current_stage=current_stage,
+        run_status=status,
+    )
+
     return {
         "schema_version": "ecologyrsi-dsh.execution-progress/1",
         "status": status,
@@ -1607,6 +1734,7 @@ def _run_execution_progress(state: Any) -> dict[str, Any]:
         "stage_progress": stage_progress,
         "superseded_sample_revision": superseded_sample_revision,
         "retry_wait": retry_wait,
+        "dsh_activity": dsh_activity,
         "current_generation_candidate_count": len(current_candidates),
         "candidates_per_generation": candidates_per_generation,
         "auto_progress": state.task_manifest.metadata.get("auto_progress") is True,

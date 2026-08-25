@@ -1051,6 +1051,32 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
 
         for index, claim in enumerate(
             (
+                "The run compares target-horizon behavior and agent "
+                "reliability; no eligibility, gate passage, or promotion is "
+                "claimed from this diagnostic smoke test.",
+                "No claim of eligibility, gate passage, or promotion is made "
+                "from this diagnostic run.",
+                "Diagnostic only — no promotion, gate passage, or selection "
+                "eligibility is claimed.",
+                "This is a diagnostic comparison only and does not constitute "
+                "eligibility, gate passage, or promotion.",
+                "This run is diagnostic-only; no candidate advancement, gate "
+                "passage, or run-level eligibility is implied.",
+            )
+        ):
+            real_rejected_negation = _direction(index, [])
+            real_rejected_negation["success_criterion"] = claim
+            with self.subTest(real_rejected_negation=claim):
+                _validate_candidate_direction_realizability(
+                    [real_rejected_negation],
+                    run=state.run,
+                    task=state.task_manifest,
+                    parent=parent,
+                    avoid_behaviors=[],
+                )
+
+        for index, claim in enumerate(
+            (
                 "No RMSE or sample count change is expected.",
                 "Reduce invalid Planner outputs while keeping RMSE and sample "
                 "coverage unchanged.",
@@ -1085,6 +1111,10 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                 "No regression is expected, and pass the scientific gate.",
                 "No regression is expected，and pass the scientific gate.",
                 "No regression is expected but pass the scientific gate.",
+                "No claim of eligibility is made, but promotion should proceed.",
+                "No eligibility is claimed, promotion should proceed.",
+                "No eligibility is claimed and promotion should proceed.",
+                "No eligibility is claimed, gate passage is achieved.",
             )
         ):
             direction = _direction(index, [])

@@ -17,6 +17,7 @@ from ..core.models import (
     canonical_json,
     digest,
 )
+from ..core.redaction import public_error_summary
 from .workflow_ir import DEFAULT_COMPILER_SEMANTIC_DIGEST
 from ..knowledge.algorithms import AlgorithmCompileError, resolve_predictor_adoption
 from ..knowledge.research_iteration import ResearchIteration
@@ -49,6 +50,18 @@ class ResearchResponseContractError(ValueError):
     """A model-authored research result failed the bounded host contract."""
 
     error_code = "research_response_contract_invalid"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        validation_detail: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.validation_detail = public_error_summary(
+            validation_detail if validation_detail is not None else message,
+            limit=500,
+        )
 
 
 def _expert_collaboration_context(
@@ -540,7 +553,8 @@ def _ensure_generation_research_iteration(
                     "远程研究计划响应未通过宿主契约校验。"
                 )
                 raise ResearchResponseContractError(
-                    "research response failed host contract validation"
+                    "research response failed host contract validation",
+                    validation_detail=str(exc),
                 ) from exc
             except Exception:
                 record_research_failure(
@@ -572,7 +586,8 @@ def _ensure_generation_research_iteration(
                     "远程研究计划响应未通过宿主契约校验。"
                 )
                 raise ResearchResponseContractError(
-                    "research response failed host contract validation"
+                    "research response failed host contract validation",
+                    validation_detail=str(exc),
                 ) from exc
         else:
             plan = current_plan
@@ -586,7 +601,8 @@ def _ensure_generation_research_iteration(
     except (TypeError, ValueError) as exc:
         record_research_failure("远程研究计划响应未通过宿主契约校验。")
         raise ResearchResponseContractError(
-            "research response failed host contract validation"
+            "research response failed host contract validation",
+            validation_detail=str(exc),
         ) from exc
     except Exception:
         record_research_failure("研究计划的宿主解析过程失败。")
@@ -608,7 +624,8 @@ def _ensure_generation_research_iteration(
     except (TypeError, ValueError) as exc:
         record_research_failure("远程研究计划响应未通过宿主契约校验。")
         raise ResearchResponseContractError(
-            "research response failed host contract validation"
+            "research response failed host contract validation",
+            validation_detail=str(exc),
         ) from exc
 
     try:

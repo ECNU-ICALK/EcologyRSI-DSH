@@ -110,6 +110,12 @@ const STAGES = Object.freeze({
     schema: "ecology-sample-review@1",
     file: "sample-review",
     skillName: "origin-vector-review",
+    instruction: [
+      "Review exactly the supplied immutable prediction decisions and use the exact wave_digest from context.",
+      "Return one decision for every supplied sample_id and no additional decisions.",
+      "Never call structured_output with empty arguments.",
+      "If a skill or structured_output call is rejected, terminate the child turn immediately: emit no prose and do not retry; the Host will start a fresh bounded child attempt.",
+    ].join(" "),
   }),
   "sample.reflect": Object.freeze({
     role: "sample-critic",
@@ -208,8 +214,9 @@ function positiveStageAttempts(value) {
   return value;
 }
 
-function retryableStructuredStageError(error) {
-  return error?.code === "structured_child_model_error";
+function retryableStructuredStageError(error, stage) {
+  return error?.code === "structured_child_model_error"
+    || (stage === "sample.critic" && error?.code === "structured_result_missing");
 }
 
 const SAMPLE_PLANNER_SKILLS = new Set([
@@ -370,6 +377,7 @@ export class NativeStageRunner {
     sidecar,
     structuredStageTimeoutMs = 600_000,
     researchStageTimeoutMs = 1_800_000,
+    sampleCriticStageTimeoutMs = 180_000,
     structuredStageMinIntervalMs = 60_000,
     structuredStageFailureCooldownMs = 60_000,
     structuredStageMaxAttempts = 2,
@@ -381,6 +389,7 @@ export class NativeStageRunner {
     this.sidecar = sidecar;
     this.structuredStageTimeoutMs = structuredStageTimeoutMs;
     this.researchStageTimeoutMs = researchStageTimeoutMs;
+    this.sampleCriticStageTimeoutMs = sampleCriticStageTimeoutMs;
     this.structuredStageMaxAttempts = positiveStageAttempts(structuredStageMaxAttempts);
     this.providerStageGate = providerStageGate || new ProviderStageGate({
       minimumIntervalMs: structuredStageMinIntervalMs,
@@ -455,10 +464,11 @@ export class NativeStageRunner {
           }), { runId: binding.run_id });
       } catch (error) {
         lastError = error;
-        if (retryableStructuredStageError(error)) {
+        const retryable = retryableStructuredStageError(error, binding.stage);
+        if (retryable) {
           this.providerStageGate.penalize(provider);
         }
-        if (!retryableStructuredStageError(error) || attempt >= this.structuredStageMaxAttempts) {
+        if (!retryable || attempt >= this.structuredStageMaxAttempts) {
           throw error;
         }
       }
@@ -532,7 +542,9 @@ export class NativeStageRunner {
       ];
       const stageTimeoutMs = contract.role === "researcher"
         ? this.researchStageTimeoutMs
-        : this.structuredStageTimeoutMs;
+        : binding.stage === "sample.critic"
+          ? this.sampleCriticStageTimeoutMs
+          : this.structuredStageTimeoutMs;
       const prompt = canonical({
         instruction: [
           ...responseProtocol,

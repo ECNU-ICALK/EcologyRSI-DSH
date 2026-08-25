@@ -50,6 +50,11 @@ export function resolvePluginConfig(config = {}, { defaultStaticRoot, env = proc
       1_800_000,
       "researchStageTimeoutMs",
     ),
+    sampleCriticStageTimeoutMs: positiveInteger(
+      config.sampleCriticStageTimeoutMs,
+      180_000,
+      "sampleCriticStageTimeoutMs",
+    ),
     structuredStageMinIntervalMs: positiveInteger(
       config.structuredStageMinIntervalMs,
       60_000,
