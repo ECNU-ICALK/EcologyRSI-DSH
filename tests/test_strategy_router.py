@@ -4,11 +4,15 @@ import json
 import unittest
 
 from ecologyrsi_dsh.core.director import EvolutionDirector
+from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.evolution.strategies import FakeDSHAdapter, StrategyRouterDSHAdapter
 from ecologyrsi_dsh.evolution.batches import start_generation_batch
 from ecologyrsi_dsh.evolution.context import safe_aggregate_feedback
+from ecologyrsi_dsh.integrations.dsh_native_runtime import (
+    DshNativeAgentRuntimeClient,
+)
 from ecologyrsi_dsh.integrations.model_gateway import GatewayResponseError
 from ecologyrsi_dsh.knowledge.algorithms import compile_algorithm_spec
 from ecologyrsi_dsh.core.models import Run, TaskManifest
@@ -275,6 +279,22 @@ def _greenhouse_parent() -> dict:
 
 
 class StrategyRouterTests(unittest.TestCase):
+    def test_raw_native_strategy_provider_requires_host_admission(self) -> None:
+        native = DshNativeAgentRuntimeClient(
+            "http://127.0.0.1:9",
+            token="unused-test-token",
+        )
+        adapter = StrategyRouterDSHAdapter(
+            gateway=object(),  # type: ignore[arg-type]
+            native_runtime_provider=lambda: native,
+        )
+
+        with self.assertRaisesRegex(
+            DshNativeRuntimeUnavailableError,
+            "Host-local admission service",
+        ):
+            adapter._native_runtime()
+
     def test_later_generation_slot_receives_prior_sibling_avoid_context(self) -> None:
         adapter = _BatchContextCapturingAdapter()
         task_data = _task().to_dict()

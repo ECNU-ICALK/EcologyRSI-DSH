@@ -36,7 +36,6 @@ from ..core.models import (
     digest,
     utc_now,
 )
-from ..core.redaction import safe_error_code
 from ..core.sample_results import MAX_SAMPLE_RESULTS_UNCOMPRESSED_BYTES
 from ..data.registry import DatasetRegistry
 from ..evaluators.registry import (
@@ -88,12 +87,18 @@ _DEFAULT_SAMPLES_PER_UPDATE = 1_600
 _MAX_SAMPLES_PER_UPDATE = 100_000
 _DEFAULT_SAMPLE_AGENT_BATCH_SIZE = 64
 _MAX_SAMPLE_AGENT_BATCH_SIZE = 128
+_DSH_SIDECAR_PUBLIC_ERROR_CODES = frozenset(
+    {"structured_role_operational_timeout"}
+)
 
 
 def _dsh_sidecar_error(exc: BaseException) -> dict[str, str]:
     payload = {"error": _public_http_error(exc)}
-    error_code = safe_error_code(getattr(exc, "error_code", None))
-    if error_code is not None:
+    error_code = getattr(exc, "error_code", None)
+    if (
+        isinstance(error_code, str)
+        and error_code in _DSH_SIDECAR_PUBLIC_ERROR_CODES
+    ):
         payload["error_code"] = error_code
     return payload
 

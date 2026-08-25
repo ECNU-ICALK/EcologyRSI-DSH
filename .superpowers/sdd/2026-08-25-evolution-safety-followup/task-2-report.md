@@ -571,3 +571,190 @@ git diff --check
 - No production service, live run, browser suite, or external state was
   touched. The complete plugin suite and 106 directly related Python tests were
   run; unrelated repository-wide tests were not run.
+
+## Fix Round 3/5
+
+### Review findings addressed
+
+1. `accept_structured` now validates and normalizes the complete
+   envelope-derived accepted payload, derives its durable event identity, and
+   checks for an exact prior event before consulting process-local admission
+   state. This restores response-loss replay after a Python service restart.
+   A different structured result or identity under the same event identity
+   raises the existing idempotency conflict; malformed or inconsistent schema,
+   digest, skill evidence, and session metrics fail during normalization. If
+   no durable prior exists, the request continues through prediction-tool
+   binding, admission ID, frozen deadline, authorization, and commit guard
+   exactly as before.
+2. The structured sidecar HTTP boundary no longer treats an arbitrary
+   regex-safe exception attribute as public. Its explicit machine-code
+   allowlist contains only `structured_role_operational_timeout`; every other
+   internal code is omitted from the response.
+3. Constructing `DshStructuredRoleRuntime` around a real
+   `DshNativeAgentRuntimeClient` without the Host-local admission service now
+   fails immediately with `dsh_native_runtime_contract_error`. Both the
+   StrategyRouter and sample adapter raw-provider branches therefore reject at
+   their provider boundary instead of creating a runtime that later fails on
+   missing `admission_id`. Duck-typed `run_stage` test runtimes remain valid,
+   while the production server providers continue to pass `self.dsh_tools`.
+
+### Durable replay safety evidence
+
+- The fence-free path can return only an already committed
+  `DshStructuredResultAccepted` event whose kind and complete durable payload
+  match the normalized retry. The returned `event_id`, `event_seq`, and result
+  digest come from that immutable event, and no append is attempted.
+- Admission metadata is intentionally not scientific ledger state. A retry
+  after process restart therefore does not try to reconstruct or trust the old
+  in-memory admission ID; it only acknowledges the exact durable side effect.
+- For `sample.plan`, `required_tool_receipt` is Host-produced durable metadata
+  that is not present in the wire envelope. The fast path requires the prior
+  event to contain that receipt and requires every envelope-derived payload
+  field to match after removing only that one recorded field. A new Planner
+  result still requires the live prediction binding and armed fence.
+- A legacy `DshChildLaunchReserved` event without
+  `request_contract_digest` remains readable by projection but is deliberately
+  fail-closed for exact reservation retry. The service will not invent the
+  missing admission/revision/attempt/timeout contract or treat an unverifiable
+  old request as the new strict wire request.
+
+### RED evidence
+
+The restart replay tests were added first:
+
+```bash
+PYTHONPATH=src python3.12 -m unittest -v \
+  tests.test_dsh_tool_contracts.DshToolServiceTests.test_exact_structured_receipt_replays_after_service_restart \
+  tests.test_dsh_tool_contracts.DshToolServiceTests.test_restarted_service_rejects_conflicting_structured_replay \
+  tests.test_dsh_tool_contracts.DshToolServiceTests.test_restarted_service_rejects_conflicting_identity_replay
+```
+
+```text
+Ran 3 tests in 0.007s
+FAILED (errors=3)
+```
+
+All three reached `structured admission is unavailable` before the durable
+receipt lookup. This proved both the lost-response regression and the missing
+durable conflict classification.
+
+The HTTP allowlist pair was RED with the approved timeout control already
+passing:
+
+```text
+Ran 2 tests in 1.065s
+FAILED (failures=1)
+```
+
+The failing response exposed
+`{"error_code": "private_internal_code"}` solely because the string matched
+the generic compact-code regex.
+
+The two real-client provider tests were independently RED:
+
+```text
+Ran 2 tests in 0.001s
+FAILED (failures=2)
+```
+
+StrategyRouter returned an admission-free wrapper without raising; the sample
+branch reached `run_stage` and reported the deeper `missing admission_id`
+contract failure rather than the required Host admission boundary.
+
+### GREEN evidence
+
+The same three restart replay tests passed after the durable fast path:
+
+```text
+Ran 3 tests in 0.006s
+OK
+```
+
+The allowlisted timeout and rejected internal code passed together:
+
+```text
+Ran 2 tests in 1.068s
+OK
+```
+
+Both real raw-provider branches passed with the same immediate error:
+
+```text
+Ran 2 tests in 0.000s
+OK
+```
+
+The directly affected Python modules passed as a focused group:
+
+```bash
+PYTHONPATH=src python3.12 -m unittest \
+  tests.test_dsh_tool_contracts tests.test_dsh_structured_roles \
+  tests.test_dsh_sample_execution tests.test_strategy_router -v
+```
+
+```text
+Ran 98 tests in 2.586s
+OK
+```
+
+Complete plugin Node regression:
+
+```bash
+node --test integrations/dsh_ecology_plugin/test/*.mjs
+```
+
+```text
+tests 103
+pass 103
+fail 0
+duration_ms 651.783917
+```
+
+Related Python regression, extended with StrategyRouter coverage:
+
+```bash
+PYTHONPATH=src python3.12 -m unittest \
+  tests.test_dsh_tool_contracts tests.test_dsh_cancel_race \
+  tests.test_dsh_native_runtime tests.test_dsh_sample_execution \
+  tests.test_core tests.test_dsh_structured_roles \
+  tests.test_dsh_reconciliation tests.test_genome_replay \
+  tests.test_strategy_router -v
+```
+
+```text
+Ran 143 tests in 12.870s
+OK
+```
+
+Syntax, byte-compilation, and whitespace verification completed without
+diagnostics:
+
+```bash
+node --check integrations/dsh_ecology_plugin/lib/runtime/structured-deadline.js
+node --check integrations/dsh_ecology_plugin/lib/runtime/routes.js
+node --check integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js
+node --check integrations/dsh_ecology_plugin/lib/runtime/structured-roles.js
+node --check integrations/dsh_ecology_plugin/lib/sidecar/client.js
+PYTHONPATH=src python3.12 -m py_compile \
+  src/ecologyrsi_dsh/api/dsh_tools.py \
+  src/ecologyrsi_dsh/api/handler.py \
+  src/ecologyrsi_dsh/integrations/dsh_structured_roles.py \
+  tests/test_dsh_tool_contracts.py \
+  tests/test_dsh_sample_execution.py tests/test_strategy_router.py
+git diff --check
+```
+
+### Self-review and concerns
+
+- No known functional concern remains within the three Round 3 review items.
+- Exact durable replay is acknowledgment-only and cannot create a new event.
+  Every request without a matching durable event still needs the current
+  process-local admission, frozen monotonic deadline, and guarded commit.
+- The machine-code allowlist is local to the two structured sidecar routes;
+  it does not broaden any other HTTP error surface.
+- Raw real-client compatibility now has an explicit secure migration:
+  providers must return an admission-bound `DshStructuredRoleRuntime`. There
+  is no Node protocol downgrade or implicit HTTP-client admission object.
+- No production service, live run, browser suite, or external state was
+  touched. The complete plugin suite and 143 related Python tests were run;
+  unrelated repository-wide tests were not run.

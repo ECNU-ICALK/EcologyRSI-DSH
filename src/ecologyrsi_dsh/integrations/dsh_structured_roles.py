@@ -5,12 +5,23 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from ..core.errors import DshNativeRuntimeUnavailableError
 from ..core.models import canonical_json, digest
 from .dsh_native_runtime import DshNativeAgentRuntimeClient
 
 
 class DshStructuredRoleRuntime:
-    def __init__(self, client: DshNativeAgentRuntimeClient, *, admission: Any = None) -> None:
+    def __init__(
+        self,
+        client: DshNativeAgentRuntimeClient,
+        *,
+        admission: Any = None,
+    ) -> None:
+        if isinstance(client, DshNativeAgentRuntimeClient) and admission is None:
+            raise DshNativeRuntimeUnavailableError(
+                "The real DSH native runtime requires a Host-local admission service.",
+                error_code="dsh_native_runtime_contract_error",
+            )
         if not isinstance(client, DshNativeAgentRuntimeClient) and not hasattr(
             client, "run_stage"
         ):

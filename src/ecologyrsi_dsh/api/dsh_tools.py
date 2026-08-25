@@ -1282,6 +1282,63 @@ class DshToolService:
             envelope["skill_invocation_evidence"],
             stage=str(identity.get("stage") or ""),
         )
+        payload = {
+            "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
+            "identity": dict(identity),
+            "output_schema_id": output_schema_id,
+            "result_digest": actual_digest,
+            "structured": deepcopy(dict(structured)),
+            "skill_invocation_evidence": skill_evidence,
+        }
+        if "session_metrics" in envelope:
+            payload["session_metrics"] = _dsh_session_metrics(
+                envelope["session_metrics"],
+                session_id=str(identity["session_id"]),
+            )
+        event_id = self._structured_event_id(
+            str(identity["run_id"]),
+            str(identity["stage"]),
+            str(identity["idempotency_key"]),
+        )
+
+        def prior_receipt(
+            *, allow_recorded_tool_receipt: bool = False
+        ) -> dict[str, Any] | None:
+            prior = self._event_by_id(str(identity["run_id"]), event_id)
+            if prior is None:
+                return None
+            matches_payload = (
+                prior.kind == "DshStructuredResultAccepted"
+                and prior.payload == payload
+            )
+            if (
+                not matches_payload
+                and allow_recorded_tool_receipt
+                and prior.kind == "DshStructuredResultAccepted"
+            ):
+                recorded_payload = dict(prior.payload)
+                recorded_tool_receipt = recorded_payload.pop(
+                    "required_tool_receipt", None
+                )
+                matches_payload = (
+                    isinstance(recorded_tool_receipt, Mapping)
+                    and recorded_payload == payload
+                )
+            if not matches_payload:
+                raise ValueError("structured-result idempotency key was reused")
+            return {
+                "accepted": True,
+                "result_digest": actual_digest,
+                "event_id": prior.event_id,
+                "event_seq": prior.seq,
+            }
+
+        receipt = prior_receipt(
+            allow_recorded_tool_receipt=identity.get("stage") == "sample.plan"
+        )
+        if receipt is not None:
+            return receipt
+
         required_tool_receipt: dict[str, Any] | None = None
         if identity.get("stage") == "sample.plan":
             key = (
@@ -1321,26 +1378,8 @@ class DshToolService:
             required_tool_receipt = binding.require_session_call(
                 str(identity["session_id"])
             )
-        payload = {
-            "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
-            "identity": dict(identity),
-            "output_schema_id": output_schema_id,
-            "result_digest": actual_digest,
-            "structured": deepcopy(dict(structured)),
-            "skill_invocation_evidence": skill_evidence,
-        }
         if required_tool_receipt is not None:
             payload["required_tool_receipt"] = required_tool_receipt
-        if "session_metrics" in envelope:
-            payload["session_metrics"] = _dsh_session_metrics(
-                envelope["session_metrics"],
-                session_id=str(identity["session_id"]),
-            )
-        event_id = self._structured_event_id(
-            str(identity["run_id"]),
-            str(identity["stage"]),
-            str(identity["idempotency_key"]),
-        )
         fence_key = (
             str(identity["run_id"]),
             int(identity["run_state_revision"]),
@@ -1365,19 +1404,6 @@ class DshToolService:
                 raise DshToolOperationalTimeoutError(
                     "structured admission binding mismatch"
                 )
-
-        def prior_receipt() -> dict[str, Any] | None:
-            prior = self._event_by_id(str(identity["run_id"]), event_id)
-            if prior is None:
-                return None
-            if prior.kind != "DshStructuredResultAccepted" or prior.payload != payload:
-                raise ValueError("structured-result idempotency key was reused")
-            return {
-                "accepted": True,
-                "result_digest": actual_digest,
-                "event_id": prior.event_id,
-                "event_seq": prior.seq,
-            }
 
         with fence.lock:
             require_matching_fence()

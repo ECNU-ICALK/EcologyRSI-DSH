@@ -25,6 +25,9 @@ from ecologyrsi_dsh.evaluators.sample_execution import (
     classify_sample_failure,
 )
 from ecologyrsi_dsh.evaluators.registry import EvaluatorRegistry
+from ecologyrsi_dsh.integrations.dsh_native_runtime import (
+    DshNativeAgentRuntimeClient,
+)
 from ecologyrsi_dsh.integrations.dsh_structured_roles import DshStructuredRoleRuntime
 
 
@@ -321,6 +324,41 @@ def _request(sample_id: str) -> SamplePredictionRequest:
 
 
 class DshSampleExecutionTests(unittest.TestCase):
+    def test_raw_native_sample_provider_requires_host_admission(self) -> None:
+        native = DshNativeAgentRuntimeClient(
+            "http://127.0.0.1:9",
+            token="unused-test-token",
+        )
+        adapter = DshSampleCollaborationAdapter(
+            run_id="run:raw-native-provider",
+            runtime_provider=lambda: native,
+            revision_provider=lambda _run_id: {
+                "run_state_revision": 7,
+                "ledger_expected_revision": 11,
+            },
+            identity_digests={
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            strategy_model_id="dsh/strategy",
+            review_model_id="dsh/review",
+            forecast_bundle_tool=_constant_forecast_bundle(21.5),
+            prediction_tool_binder=_fake_agent_prediction_binder,
+        )
+
+        with self.assertRaisesRegex(
+            DshNativeRuntimeUnavailableError,
+            "Host-local admission service",
+        ):
+            adapter._decision_client.sample_decide(
+                "dsh/strategy",
+                role="planner",
+                samples=(),
+                context={},
+                available_tools=(),
+            )
+
     def test_dsh_runtime_5xx_is_a_retryable_remote_failure(self) -> None:
         error = DshNativeRuntimeUnavailableError(
             "runtime temporarily unavailable",

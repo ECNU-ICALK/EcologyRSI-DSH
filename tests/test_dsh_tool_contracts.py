@@ -1169,6 +1169,62 @@ class DshToolServiceTests(unittest.TestCase):
             1,
         )
 
+    def test_exact_structured_receipt_replays_after_service_restart(self) -> None:
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
+        first = self.service.accept_structured(envelope)
+        restarted = DshToolService(self.ledger)
+
+        second = restarted.accept_structured(envelope)
+
+        self.assertEqual(second, first)
+        self.assertEqual(
+            sum(
+                event.kind == "DshStructuredResultAccepted"
+                for event in self.ledger.events("run:tool-test")
+            ),
+            1,
+        )
+
+    def test_restarted_service_rejects_conflicting_structured_replay(self) -> None:
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
+        self.service.accept_structured(envelope)
+        restarted = DshToolService(self.ledger)
+        conflicting = json.loads(json.dumps(envelope))
+        conflicting["structured"]["summary"] = "conflicting restarted payload"
+        conflicting["result_digest"] = digest(conflicting["structured"])
+
+        with self.assertRaisesRegex(ValueError, "idempotency key was reused"):
+            restarted.accept_structured(conflicting)
+
+        self.assertEqual(
+            sum(
+                event.kind == "DshStructuredResultAccepted"
+                for event in self.ledger.events("run:tool-test")
+            ),
+            1,
+        )
+
+    def test_restarted_service_rejects_conflicting_identity_replay(self) -> None:
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
+        self.service.accept_structured(envelope)
+        restarted = DshToolService(self.ledger)
+        conflicting = json.loads(json.dumps(envelope))
+        conflicting["identity"]["session_id"] = "session:conflicting-retry"
+
+        with self.assertRaisesRegex(ValueError, "idempotency key was reused"):
+            restarted.accept_structured(conflicting)
+
+        self.assertEqual(
+            sum(
+                event.kind == "DshStructuredResultAccepted"
+                for event in self.ledger.events("run:tool-test")
+            ),
+            1,
+        )
+
     def test_expired_conflicting_structured_replay_still_rejects_idempotency(self) -> None:
         monotonic_ms = [100]
         self.service._monotonic_ms = lambda: monotonic_ms[0]
@@ -1662,6 +1718,28 @@ class DshToolHTTPAuthTests(unittest.TestCase):
             payload["error_code"],
             "structured_role_operational_timeout",
         )
+
+    def test_structured_sidecar_omits_unapproved_machine_code(self) -> None:
+        class PrivateSidecarError(RuntimeError):
+            error_code = "private_internal_code"
+
+        original_accept = self.server.dsh_tools.accept_structured
+
+        def reject_structured(_envelope: dict) -> dict:
+            raise PrivateSidecarError("bounded internal failure")
+
+        self.server.dsh_tools.accept_structured = reject_structured
+        try:
+            status, payload = self._post(
+                "/api/ecology-agent-sidecar/v1/structured-results",
+                {},
+            )
+        finally:
+            self.server.dsh_tools.accept_structured = original_accept
+
+        self.assertEqual(status, 409)
+        self.assertIn("error", payload)
+        self.assertNotIn("error_code", payload)
 
 
 if __name__ == "__main__":
