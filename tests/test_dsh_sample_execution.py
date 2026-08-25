@@ -210,6 +210,7 @@ class _PersistingRetryRuntime:
                 "structured": structured,
                 "result_digest": digest(structured),
                 "skill_invocation_evidence": _skill_evidence(stage),
+                "deadline_unix_ms": 4_102_444_800_000,
             }
         )
         return {"structured": structured, "result_digest": digest(structured)}

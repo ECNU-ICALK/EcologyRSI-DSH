@@ -10,6 +10,8 @@ same code works in tests and in a single-process local deployment.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -432,11 +434,16 @@ class EventLedger:
         event_id: str | None = None,
         created_at: str | None = None,
         expected_run_seq: int | None = None,
+        commit_guard: Callable[[bool], Any] | None = None,
     ) -> Event:
         """Append one event, returning an existing event for duplicate IDs.
 
         The optional event ID makes retries idempotent.  Payloads are validated
         before touching SQLite, keeping malformed events out of the ledger.
+        When supplied, ``commit_guard`` returns a context manager that wraps
+        the commit and receives whether this transaction inserted a new row.
+        It can therefore fence a new durable side effect without preventing an
+        exact idempotent replay of an already-committed event.
         """
 
         if not isinstance(run_id, str) or not run_id.strip():
@@ -458,6 +465,8 @@ class EventLedger:
             or expected_run_seq < 0
         ):
             raise ValueError("expected_run_seq must be a non-negative integer")
+        if commit_guard is not None and not callable(commit_guard):
+            raise TypeError("commit_guard must be callable")
 
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -476,7 +485,7 @@ class EventLedger:
                         raise ConcurrentRunMutationError(
                             f"run {run_id.strip()} changed while appending {kind.strip()}"
                         )
-                self._connection.execute(
+                cursor = self._connection.execute(
                 """
                 INSERT OR IGNORE INTO evolution_events
                     (event_id, run_id, kind, payload_json, created_at)
@@ -484,6 +493,7 @@ class EventLedger:
                 """,
                 (event_id, run_id.strip(), kind.strip(), payload_json, created_at),
                 )
+                inserted = cursor.rowcount == 1
                 row = self._connection.execute(
                 """
                 SELECT seq, event_id, run_id, kind, payload_json, created_at
@@ -491,7 +501,9 @@ class EventLedger:
                 """,
                 (event_id,),
                 ).fetchone()
-                self._connection.commit()
+                guard = commit_guard(inserted) if commit_guard else nullcontext()
+                with guard:
+                    self._connection.commit()
             except Exception:
                 self._connection.rollback()
                 raise

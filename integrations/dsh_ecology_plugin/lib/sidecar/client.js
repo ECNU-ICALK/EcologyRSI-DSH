@@ -128,4 +128,4 @@ export class SidecarClient {
   }
 }
 
-export { SIDECAR_BASE };
+export { MAX_REQUEST_TIMEOUT_MS, SIDECAR_BASE };

@@ -40,26 +40,28 @@ export async function runStructuredRole(
   if (!pendingStarts?.start || typeof persist !== "function") {
     throw new Error("structured role lifecycle services are required");
   }
-  const pending = pendingStarts.start("one-shot", {
-    provider: "spawn",
-    parent: roleHost.agent,
-    label: reservedBinding.label,
-    prompt: [{ type: "text", text: request.prompt }],
-    outputSchema: structuredClone(request.outputSchema),
-  }, {
-    roleHostAgent: roleHost.agent,
-    runId: reservedBinding?.launch?.run_id || reservedBinding?.binding?.run_id,
-  });
+  if (
+    timeoutMs !== undefined
+    && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)
+  ) {
+    throw new Error("structured role timeout must be a positive integer");
+  }
+  let pending = null;
   let run;
   let timeout = null;
-  let deadlineAt = null;
+  const deadlineAt = timeoutMs === undefined
+    ? null
+    : performance.now() + timeoutMs;
+  const deadlineUnixMs = timeoutMs === undefined
+    ? null
+    : Date.now() + timeoutMs;
   let deadlinePromise = null;
   let timedOut = false;
   const timeoutError = operationalTimeoutError();
   const expireDeadline = () => {
     if (!timedOut) {
       timedOut = true;
-      pending.controller.abort();
+      pending?.controller.abort();
     }
     return timeoutError;
   };
@@ -72,26 +74,44 @@ export async function runStructuredRole(
   const withinDeadline = async (operation) => {
     if (deadlinePromise === null) return await operation();
     requireBeforeDeadline();
-    return await Promise.race([
-      Promise.resolve().then(operation),
-      deadlinePromise,
-    ]);
-  };
-  if (timeoutMs !== undefined) {
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
-      pending.controller.abort();
-      detachCleanup(() => pendingStarts.finish?.(pending));
-      throw new Error("structured role timeout must be a positive integer");
+    try {
+      const value = await Promise.race([
+        Promise.resolve().then(operation),
+        deadlinePromise,
+      ]);
+      requireBeforeDeadline();
+      return value;
+    } catch (error) {
+      if (deadlineExpired() || error === timeoutError) throw expireDeadline();
+      throw error;
     }
-    deadlineAt = performance.now() + timeoutMs;
+  };
+  const remainingTimeoutMs = () => {
+    requireBeforeDeadline();
+    return Math.max(1, Math.ceil(deadlineAt - performance.now()));
+  };
+  if (deadlineAt !== null) {
     deadlinePromise = new Promise((_resolve, reject) => {
       timeout = setTimeout(() => reject(expireDeadline()), timeoutMs);
     });
-    // A synchronous phase failure may leave the deadline unraced until finally.
     deadlinePromise.catch(() => {});
   }
   try {
+    requireBeforeDeadline();
+    const outputSchema = structuredClone(request.outputSchema);
+    requireBeforeDeadline();
     try {
+      pending = pendingStarts.start("one-shot", {
+        provider: "spawn",
+        parent: roleHost.agent,
+        label: reservedBinding.label,
+        prompt: [{ type: "text", text: request.prompt }],
+        outputSchema,
+      }, {
+        roleHostAgent: roleHost.agent,
+        runId: reservedBinding?.launch?.run_id || reservedBinding?.binding?.run_id,
+      });
+      requireBeforeDeadline();
       run = await withinDeadline(() => pending.promise);
     } catch (error) {
       if (deadlineExpired() || error === timeoutError) throw expireDeadline();
@@ -105,20 +125,28 @@ export async function runStructuredRole(
       throw phaseError("structured_child_result_failed", error);
     }
     requireBeforeDeadline();
-    if (result?.stopReason && result.stopReason !== "completed") {
+    const stopReason = result?.stopReason;
+    requireBeforeDeadline();
+    if (stopReason && stopReason !== "completed") {
       throw phaseError(
-        result.stopReason === "aborted"
+        stopReason === "aborted"
           ? "structured_child_aborted"
           : "structured_child_model_error",
       );
     }
     const structured = result?.structured;
+    requireBeforeDeadline();
     if (!structured || typeof structured !== "object" || Array.isArray(structured)) {
       throw phaseError("structured_result_missing");
     }
-    if (admission?.isOpen && !await withinDeadline(
-      () => admission.isOpen(reservedBinding),
-    )) {
+    let admissionOpen = true;
+    if (admission?.isOpen) {
+      admissionOpen = await withinDeadline(
+        () => admission.isOpen(reservedBinding),
+      );
+    }
+    requireBeforeDeadline();
+    if (!admissionOpen) {
       const error = phaseError("structured_result_admission_closed");
       // Preserve the legacy message for callers that surface this safe state.
       error.message = "structured result admission is closed";
@@ -127,45 +155,85 @@ export async function runStructuredRole(
     // rc.6 SubagentRun publishes the real child Session identity as `id`.
     // `childId` belongs to the continuable-start and Workflow event seams.
     const sessionId = String(run?.id || "");
+    requireBeforeDeadline();
     if (!sessionId) throw phaseError("structured_child_session_missing");
+    const persistedStructured = structuredClone(structured);
+    requireBeforeDeadline();
+    const persistenceDeadline = deadlineAt === null ? null : Object.freeze({
+      deadlineUnixMs,
+      signal: pending.controller.signal,
+      throwIfExpired: requireBeforeDeadline,
+      remainingTimeoutMs,
+    });
     let accepted;
     try {
       accepted = await withinDeadline(() => persist({
         binding: reservedBinding,
-        structured: structuredClone(structured),
+        structured: persistedStructured,
         session_id: sessionId,
-      }));
+      }, persistenceDeadline));
     } catch (error) {
       if (deadlineExpired() || error === timeoutError) throw expireDeadline();
       throw phaseError("structured_result_persist_failed", error);
     }
     requireBeforeDeadline();
-    if (!accepted || accepted.accepted !== true) {
+    const receiptAccepted = accepted?.accepted;
+    requireBeforeDeadline();
+    if (!accepted || receiptAccepted !== true) {
       throw phaseError("structured_result_not_accepted");
     }
-    return Object.freeze({
-      structured: structuredClone(structured),
+    const returnedStructured = structuredClone(structured);
+    requireBeforeDeadline();
+    const response = Object.freeze({
+      structured: returnedStructured,
       receipt: accepted,
       session_id: sessionId,
     });
+    requireBeforeDeadline();
+    return response;
   } finally {
-    if (timeout !== null) clearTimeout(timeout);
-    if (run === undefined) {
-      pending.promise.then(
-        (lateRun) => {
-          try {
-            Promise.resolve(structuredResult(lateRun)).catch(() => {});
-          } catch {
-            // A late result accessor is observational cleanup only.
+    try {
+      if (pending !== null) {
+        if (deadlineExpired()) expireDeadline();
+        if (timedOut) {
+          if (run === undefined) {
+            pending.promise.then(
+              (lateRun) => {
+                try {
+                  Promise.resolve(structuredResult(lateRun)).catch(() => {});
+                } catch {
+                  // A late result accessor is observational cleanup only.
+                }
+                detachCleanup(() => lateRun?.dispose?.());
+              },
+              () => {},
+            );
+          } else {
+            detachCleanup(() => run.dispose?.());
           }
-          detachCleanup(() => lateRun?.dispose?.());
-        },
-        () => {},
-      );
-    } else {
-      detachCleanup(() => run.dispose?.());
+          detachCleanup(() => pendingStarts.finish?.(pending));
+        } else {
+          try {
+            if (run !== undefined) {
+              await withinDeadline(() => run.dispose?.());
+            }
+          } finally {
+            if (deadlineExpired()) {
+              expireDeadline();
+              detachCleanup(() => pendingStarts.finish?.(pending));
+            } else {
+              await withinDeadline(() => pendingStarts.finish?.(pending));
+            }
+          }
+        }
+      }
+    } catch (error) {
+      if (deadlineExpired() || error === timeoutError) throw expireDeadline();
+      throw error;
+    } finally {
+      if (timeout !== null) clearTimeout(timeout);
     }
-    detachCleanup(() => pendingStarts.finish?.(pending));
+    if (deadlineExpired()) throw expireDeadline();
   }
 }
 

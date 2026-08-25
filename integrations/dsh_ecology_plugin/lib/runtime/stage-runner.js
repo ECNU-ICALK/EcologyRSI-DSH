@@ -5,7 +5,7 @@ import {
   DYNAMIC_RETRIEVAL_TOOL_PROFILE,
   roleToolNames,
 } from "../tools/roles.js";
-import { SidecarClient } from "../sidecar/client.js";
+import { MAX_REQUEST_TIMEOUT_MS, SidecarClient } from "../sidecar/client.js";
 import { dshSessionMetrics } from "./agents.js";
 import { ChildBindingRegistry } from "./child-bindings.js";
 import { ProviderStageGate } from "./provider-stage-gate.js";
@@ -564,6 +564,7 @@ export class NativeStageRunner {
         sessionId,
         capturedSessionMetrics = null,
         capturedSessionEvents = null,
+        persistenceDeadline = null,
       ) => {
         if (!reservation.claimed_child_id) {
           this.childBindings.claimPublished(
@@ -590,23 +591,35 @@ export class NativeStageRunner {
         persistedSkillEvidence = evidence;
         const resultDigest = jsonDigest(structured);
         const { allowed_tools: _allowedTools, ...identity } = frozenIdentity;
-        return this.sidecar.request("/api/ecology-agent-sidecar/v1/structured-results", {
-          body: {
-            identity: {
-              ...identity,
-              session_id: sessionId,
-              child_reservation_id: reservation.launch.reservation_id,
-              activation_lease_id: (
-                this.childBindings.activeByChild.get(sessionId)
-                || `lease-${reservation.launch.reservation_id}`
-              ),
-            },
-            output_schema_id: contract.schema,
-            structured,
-            result_digest: resultDigest,
-            session_metrics: capturedSessionMetrics || dshSessionMetrics(this.ctx, sessionId),
-            skill_invocation_evidence: evidence,
+        if (!Number.isSafeInteger(persistenceDeadline?.deadlineUnixMs)) {
+          throw new Error("structured persistence requires a runtime deadline");
+        }
+        const body = {
+          identity: {
+            ...identity,
+            session_id: sessionId,
+            child_reservation_id: reservation.launch.reservation_id,
+            activation_lease_id: (
+              this.childBindings.activeByChild.get(sessionId)
+              || `lease-${reservation.launch.reservation_id}`
+            ),
           },
+          output_schema_id: contract.schema,
+          structured,
+          result_digest: resultDigest,
+          session_metrics: capturedSessionMetrics || dshSessionMetrics(this.ctx, sessionId),
+          skill_invocation_evidence: evidence,
+          deadline_unix_ms: persistenceDeadline.deadlineUnixMs,
+        };
+        persistenceDeadline.throwIfExpired();
+        const requestTimeoutMs = Math.min(
+          persistenceDeadline.remainingTimeoutMs(),
+          MAX_REQUEST_TIMEOUT_MS,
+        );
+        return this.sidecar.request("/api/ecology-agent-sidecar/v1/structured-results", {
+          body,
+          signal: persistenceDeadline.signal,
+          timeoutMs: requestTimeoutMs,
         });
       };
       const result = binding.stage === "sample.plan"
@@ -626,9 +639,12 @@ export class NativeStageRunner {
           {
             pendingStarts: this.pendingStarts,
             admission,
-            persist: async ({ structured, session_id }) => persist(
+            persist: async ({ structured, session_id }, persistenceDeadline) => persist(
               structured,
               session_id,
+              null,
+              null,
+              persistenceDeadline,
             ),
             timeoutMs: stageTimeoutMs,
           },
@@ -654,6 +670,24 @@ export class NativeStageRunner {
     admission,
     persist,
   }) {
+    const deadlineAt = performance.now() + this.structuredStageTimeoutMs;
+    const deadlineUnixMs = Date.now() + this.structuredStageTimeoutMs;
+    const persistenceController = new AbortController();
+    const throwIfExpired = () => {
+      if (performance.now() >= deadlineAt) {
+        persistenceController.abort();
+        throw new Error("structured workflow operational timeout");
+      }
+    };
+    const persistenceDeadline = Object.freeze({
+      deadlineUnixMs,
+      signal: persistenceController.signal,
+      throwIfExpired,
+      remainingTimeoutMs: () => {
+        throwIfExpired();
+        return Math.max(1, Math.ceil(deadlineAt - performance.now()));
+      },
+    });
     const workflowName = `ecology-wave-${jsonDigest({
       run_id: binding.run_id,
       reservation_id: reservation.launch.reservation_id,
@@ -714,6 +748,7 @@ export class NativeStageRunner {
       this.activeWorkflows.add(active);
       timeout = setTimeout(() => {
         timedOut = true;
+        persistenceController.abort();
         workflow.cancel?.("structured workflow operational timeout");
       }, this.structuredStageTimeoutMs);
       const settled = await workflow.result;
@@ -743,6 +778,7 @@ export class NativeStageRunner {
         childSessionId,
         capturedSessionMetrics,
         capturedSessionEvents,
+        persistenceDeadline,
       );
       if (!accepted || accepted.accepted !== true) {
         throw new Error("structured result was not durably accepted");

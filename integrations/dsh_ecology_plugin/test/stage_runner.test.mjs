@@ -76,6 +76,11 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
+function blockFor(milliseconds) {
+  const state = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(state, 0, 0, milliseconds);
+}
+
 test("post-score sample reflection is a registered structured DSH stage", () => {
   assert.deepEqual(
     {
@@ -299,6 +304,7 @@ test("native stage runner reserves before first child tool and durably persists 
   let disposed = false;
   let claimedIdentity;
   let runner;
+  let childStartUnixMs;
   const gatedProviders = [];
   const candidateEvents = skillFirstEvents("bounded-plugin-experiment");
   const ctx = {
@@ -331,6 +337,8 @@ test("native stage runner reserves before first child tool and durably persists 
     },
     subagents: {
       start: async (provider, request) => {
+        childStartUnixMs = Date.now();
+        blockFor(20);
         assert.equal(provider, "spawn");
         assert.deepEqual(request.prompt[0], { type: "text", text: request.prompt[0].text });
         const prompt = JSON.parse(request.prompt[0].text);
@@ -373,7 +381,12 @@ test("native stage runner reserves before first child tool and durably persists 
     runRegistry: { get: () => ({ status: "running" }) },
     sidecar: {
       request: async (path, options) => {
-        persisted.push({ path, body: options.body });
+        persisted.push({
+          path,
+          body: options.body,
+          signal: options.signal,
+          timeoutMs: options.timeoutMs,
+        });
         if (path.endsWith("/child-reservations")) {
           return {
             accepted: true,
@@ -399,6 +412,7 @@ test("native stage runner reserves before first child tool and durably persists 
       },
       penalize: () => {},
     },
+    structuredStageTimeoutMs: 700_000,
   });
   const context = { parent_genome: { genome_digest: "a".repeat(64) } };
   const result = await runner.run({
@@ -427,6 +441,14 @@ test("native stage runner reserves before first child tool and durably persists 
   assert.equal(persisted[0].path, "/api/ecology-agent-sidecar/v1/child-reservations");
   assert.equal(persisted[1].path, "/api/ecology-agent-sidecar/v1/structured-results");
   assert.equal(persisted[1].body.identity.session_id, "child-session");
+  assert.ok(Number.isSafeInteger(persisted[1].body.deadline_unix_ms));
+  assert.ok(persisted[1].body.deadline_unix_ms >= childStartUnixMs + 699_000);
+  assert.ok(
+    persisted[1].body.deadline_unix_ms <= childStartUnixMs + 700_001,
+    "durable deadline must be fixed before synchronous child-start work",
+  );
+  assert.ok(persisted[1].signal instanceof AbortSignal);
+  assert.ok(persisted[1].timeoutMs > 0 && persisted[1].timeoutMs <= 600_000);
   assert.equal(
     persisted[1].body.skill_invocation_evidence.skill_name,
     "bounded-plugin-experiment",

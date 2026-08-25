@@ -4,6 +4,15 @@ import test from "node:test";
 import { runStructuredRole } from "../lib/runtime/structured-roles.js";
 import { PendingChildStarts } from "../lib/runtime/workflows.js";
 
+function blockFor(milliseconds) {
+  const state = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(state, 0, 0, milliseconds);
+}
+
+function operationalTimeout(error) {
+  return error?.code === "structured_role_operational_timeout";
+}
+
 test("one-shot structured role persists only structured output and disposes its run", async () => {
   let disposed = false;
   let request;
@@ -95,20 +104,315 @@ test("structured role aborts a wedged DSH child at the operational timeout", asy
   assert.equal(pendingStarts.size, 0);
 });
 
+test("structured role deadline includes synchronous child-start work", async () => {
+  let persistCalls = 0;
+  const pendingStarts = new PendingChildStarts({
+    subagents: {
+      start: () => {
+        blockFor(30);
+        return {
+          id: "slow-synchronous-start",
+          result: Promise.resolve({ structured: { value: 1 } }),
+          dispose: async () => {},
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    runStructuredRole(
+      { agent: { id: "researcher-host" } },
+      { label: "slow-synchronous-start-label" },
+      { prompt: "research", outputSchema: { type: "object" } },
+      {
+        pendingStarts,
+        admission: { isOpen: async () => true },
+        persist: async () => { persistCalls += 1; return { accepted: true }; },
+        timeoutMs: 5,
+      },
+    ),
+    operationalTimeout,
+  );
+  assert.equal(persistCalls, 0);
+  assert.equal(pendingStarts.size, 0);
+});
+
+test("structured role deadline bounds a child start that ignores abort forever", async () => {
+  const pendingStarts = new PendingChildStarts({
+    subagents: { start: () => new Promise(() => {}) },
+  });
+  let watchdog = null;
+
+  const outcome = await Promise.race([
+    runStructuredRole(
+      { agent: { id: "researcher-host" } },
+      { label: "never-start-label" },
+      { prompt: "research", outputSchema: { type: "object" } },
+      {
+        pendingStarts,
+        admission: { isOpen: async () => true },
+        persist: async () => ({ accepted: true }),
+        timeoutMs: 20,
+      },
+    ).then(
+      () => ({ kind: "resolved" }),
+      (error) => ({ kind: "rejected", error }),
+    ),
+    new Promise((resolve) => {
+      watchdog = setTimeout(() => resolve({ kind: "watchdog" }), 250);
+    }),
+  ]);
+  clearTimeout(watchdog);
+
+  assert.equal(outcome.kind, "rejected");
+  assert.equal(outcome.error.code, "structured_role_operational_timeout");
+  assert.equal(pendingStarts.size, 0);
+});
+
+test("structured role classifies sync and async admission boundary crossings as timeout", async () => {
+  for (const admissionMode of ["sync", "async"]) {
+    for (const admissionOutcome of ["closed", "rejected"]) {
+      let persistCalls = 0;
+      const pendingStarts = new PendingChildStarts({
+        subagents: {
+          start: async () => ({
+            id: `admission-${admissionMode}-${admissionOutcome}-child`,
+            result: Promise.resolve({ structured: { value: 1 } }),
+            dispose: async () => {},
+          }),
+        },
+      });
+      const crossBoundary = () => {
+        blockFor(30);
+        if (admissionOutcome === "rejected") {
+          throw new Error("private admission failure");
+        }
+        return false;
+      };
+      const isOpen = admissionMode === "sync"
+        ? crossBoundary
+        : async () => {
+          await Promise.resolve();
+          return crossBoundary();
+        };
+      await assert.rejects(
+        runStructuredRole(
+          { agent: { id: "judge-host" } },
+          { label: `admission-${admissionMode}-${admissionOutcome}-label` },
+          { prompt: "judge", outputSchema: { type: "object" } },
+          {
+            pendingStarts,
+            admission: { isOpen },
+            persist: async () => { persistCalls += 1; return { accepted: true }; },
+            timeoutMs: 5,
+          },
+        ),
+        (error) => operationalTimeout(error)
+          && !String(error).includes("admission")
+          && !String(error).includes("private"),
+      );
+      assert.equal(persistCalls, 0);
+      assert.equal(pendingStarts.size, 0);
+    }
+  }
+});
+
+test("structured role rechecks its deadline after the persistence clone", async () => {
+  const nativeStructuredClone = globalThis.structuredClone;
+  let persistCalls = 0;
+  globalThis.structuredClone = (value, options) => {
+    if (value?.deadline_test === "pre-persist-clone") blockFor(30);
+    return nativeStructuredClone(value, options);
+  };
+  try {
+    const pendingStarts = new PendingChildStarts({
+      subagents: {
+        start: async () => ({
+          id: "pre-persist-clone-child",
+          result: Promise.resolve({
+            structured: { deadline_test: "pre-persist-clone" },
+          }),
+          dispose: async () => {},
+        }),
+      },
+    });
+    await assert.rejects(
+      runStructuredRole(
+        { agent: { id: "researcher-host" } },
+        { label: "pre-persist-clone-label" },
+        { prompt: "research", outputSchema: { type: "object" } },
+        {
+          pendingStarts,
+          admission: { isOpen: async () => true },
+          persist: async () => { persistCalls += 1; return { accepted: true }; },
+          timeoutMs: 5,
+        },
+      ),
+      operationalTimeout,
+    );
+    assert.equal(persistCalls, 0);
+  } finally {
+    globalThis.structuredClone = nativeStructuredClone;
+  }
+});
+
+test("structured role rechecks its deadline after the final return clone", async () => {
+  const nativeStructuredClone = globalThis.structuredClone;
+  let targetClones = 0;
+  globalThis.structuredClone = (value, options) => {
+    if (value?.deadline_test === "return-clone") {
+      targetClones += 1;
+      if (targetClones === 2) blockFor(40);
+    }
+    return nativeStructuredClone(value, options);
+  };
+  try {
+    const pendingStarts = new PendingChildStarts({
+      subagents: {
+        start: async () => ({
+          id: "return-clone-child",
+          result: Promise.resolve({ structured: { deadline_test: "return-clone" } }),
+          dispose: async () => {},
+        }),
+      },
+    });
+    await assert.rejects(
+      runStructuredRole(
+        { agent: { id: "judge-host" } },
+        { label: "return-clone-label" },
+        { prompt: "judge", outputSchema: { type: "object" } },
+        {
+          pendingStarts,
+          admission: { isOpen: async () => true },
+          persist: async () => ({ accepted: true }),
+          timeoutMs: 10,
+        },
+      ),
+      operationalTimeout,
+    );
+    assert.equal(targetClones, 2);
+  } finally {
+    globalThis.structuredClone = nativeStructuredClone;
+  }
+});
+
+test("structured role rechecks its deadline after reading the persistence receipt", async () => {
+  const pendingStarts = new PendingChildStarts({
+    subagents: {
+      start: async () => ({
+        id: "slow-receipt-child",
+        result: Promise.resolve({ structured: { value: 1 } }),
+        dispose: async () => {},
+      }),
+    },
+  });
+
+  await assert.rejects(
+    runStructuredRole(
+      { agent: { id: "judge-host" } },
+      { label: "slow-receipt-label" },
+      { prompt: "judge", outputSchema: { type: "object" } },
+      {
+        pendingStarts,
+        admission: { isOpen: async () => true },
+        persist: async () => ({
+          get accepted() {
+            blockFor(30);
+            return true;
+          },
+        }),
+        timeoutMs: 5,
+      },
+    ),
+    operationalTimeout,
+  );
+});
+
+test("structured role keeps normal bookkeeping pending until disposal completes", async () => {
+  for (const timeoutMs of [undefined, 500]) {
+    let releaseDispose;
+    let markDisposeStarted;
+    const disposeStarted = new Promise((resolve) => { markDisposeStarted = resolve; });
+    const disposeGate = new Promise((resolve) => { releaseDispose = resolve; });
+    const pendingStarts = new PendingChildStarts({
+      subagents: {
+        start: async () => ({
+          id: `normal-cleanup-${timeoutMs ?? "unbounded"}`,
+          result: Promise.resolve({ structured: { value: 1 } }),
+          dispose: async () => {
+            markDisposeStarted();
+            await disposeGate;
+          },
+        }),
+      },
+    });
+    let settled = false;
+    const running = runStructuredRole(
+      { agent: { id: "judge-host" } },
+      { label: `normal-cleanup-${timeoutMs ?? "unbounded"}-label` },
+      { prompt: "judge", outputSchema: { type: "object" } },
+      {
+        pendingStarts,
+        admission: { isOpen: async () => true },
+        persist: async () => ({ accepted: true }),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      },
+    ).finally(() => { settled = true; });
+
+    await disposeStarted;
+    await Promise.resolve();
+    assert.equal(settled, false);
+    assert.equal(pendingStarts.size, 1);
+    releaseDispose();
+    await running;
+    assert.equal(pendingStarts.size, 0);
+  }
+});
+
+test("structured role finishes bookkeeping when disposal crosses the deadline", async () => {
+  const pendingStarts = new PendingChildStarts({
+    subagents: {
+      start: async () => ({
+        id: "cleanup-timeout-child",
+        result: Promise.resolve({ structured: { value: 1 } }),
+        dispose: async () => new Promise(() => {}),
+      }),
+    },
+  });
+
+  await assert.rejects(
+    runStructuredRole(
+      { agent: { id: "judge-host" } },
+      { label: "cleanup-timeout-label" },
+      { prompt: "judge", outputSchema: { type: "object" } },
+      {
+        pendingStarts,
+        admission: { isOpen: async () => true },
+        persist: async () => ({ accepted: true }),
+        timeoutMs: 20,
+      },
+    ),
+    operationalTimeout,
+  );
+  assert.equal(pendingStarts.size, 0);
+});
+
 test("structured role rejects a result that succeeds after its operational deadline", async () => {
   let admissionCalls = 0;
   let persistCalls = 0;
   const pendingStarts = new PendingChildStarts({
     subagents: {
-      start: async () => new Promise((resolveStart) => {
-        setTimeout(() => resolveStart({
+      start: () => {
+        blockFor(15);
+        return {
           id: "late-success-child",
-          result: new Promise((resolveResult) => {
-            setTimeout(() => resolveResult({ structured: { value: "too late" } }), 50);
-          }),
+          result: () => {
+            blockFor(15);
+            return { structured: { value: "too late" } };
+          },
           dispose: async () => {},
-        }), 50);
-      }),
+        };
+      },
     },
   });
 
@@ -121,7 +425,7 @@ test("structured role rejects a result that succeeds after its operational deadl
         pendingStarts,
         admission: { isOpen: async () => { admissionCalls += 1; return true; } },
         persist: async () => { persistCalls += 1; return { accepted: true }; },
-        timeoutMs: 80,
+        timeoutMs: 20,
       },
     ),
     (error) => error.code === "structured_role_operational_timeout",
@@ -137,9 +441,10 @@ test("structured role classifies a result rejection after the deadline as an ope
     subagents: {
       start: async () => ({
         id: "late-rejection-child",
-        result: new Promise((_resolve, reject) => {
-          setTimeout(() => reject(new Error("private late child failure")), 50);
-        }),
+        result: () => {
+          blockFor(30);
+          throw new Error("private late child failure");
+        },
         dispose: async () => {},
       }),
     },

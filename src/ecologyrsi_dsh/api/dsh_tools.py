@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
-from threading import Lock
+from threading import Lock, RLock
 from typing import Any, Iterator
 
 from ..core.ledger import ConcurrentRunMutationError
@@ -165,12 +166,13 @@ class DshToolAdmissionClosedError(RuntimeError):
     error_code = "dsh_tool_admission_closed"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class AdmissionFence:
     run_id: str
     run_state_revision: int
     stage_attempt: int
     state: str
+    lock: Any = field(default_factory=RLock, repr=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -452,10 +454,13 @@ class DshToolService:
         ledger: Any,
         *,
         retrieval_fallback: Callable[..., Mapping[str, Any]] | None = None,
+        wall_clock_ms: Callable[[], int] | None = None,
+        monotonic_ms: Callable[[], float] | None = None,
     ) -> None:
         self.ledger = ledger
         self._fences: dict[tuple[str, int, int], AdmissionFence] = {}
         self._run_admission: dict[str, str] = {}
+        self._admission_registry_lock = RLock()
         self._prediction_bindings: dict[
             tuple[str, int, str], DshPredictionToolBinding
         ] = {}
@@ -463,6 +468,12 @@ class DshToolService:
         self._launch_lock = Lock()
         self._retrieval_lock = Lock()
         self._retrieval_fallback = retrieval_fallback or search_openalex_metadata
+        self._wall_clock_ms = wall_clock_ms or (
+            lambda: time.time_ns() // 1_000_000
+        )
+        self._monotonic_ms = monotonic_ms or (
+            lambda: time.monotonic_ns() / 1_000_000
+        )
 
     @staticmethod
     def _prediction_event_id(run_id: str, idempotency_key: str) -> str:
@@ -558,36 +569,57 @@ class DshToolService:
         self, run_id: str, run_state_revision: int, stage_attempt: int
     ) -> AdmissionFence:
         key = (run_id, run_state_revision, stage_attempt)
-        if self._run_admission.get(run_id, "open") != "open":
-            raise DshToolAdmissionClosedError("run admission is closed")
-        prior = self._fences.get(key)
-        if prior is not None and prior.state != "open":
-            raise DshToolAdmissionClosedError("admission fence is permanently closed")
-        fence = AdmissionFence(run_id, run_state_revision, stage_attempt, "open")
-        self._fences[key] = fence
+        with self._admission_registry_lock:
+            if self._run_admission.get(run_id, "open") != "open":
+                raise DshToolAdmissionClosedError("run admission is closed")
+            fence = self._fences.get(key)
+            if fence is None:
+                fence = AdmissionFence(
+                    run_id, run_state_revision, stage_attempt, "open"
+                )
+                self._fences[key] = fence
+        with fence.lock:
+            if fence.state != "open":
+                raise DshToolAdmissionClosedError(
+                    "admission fence is permanently closed"
+                )
         return fence
 
     def close_admission(
         self, run_id: str, run_state_revision: int, stage_attempt: int
     ) -> AdmissionFence:
         key = (run_id, run_state_revision, stage_attempt)
-        fence = AdmissionFence(run_id, run_state_revision, stage_attempt, "closed")
-        self._fences[key] = fence
+        with self._admission_registry_lock:
+            fence = self._fences.get(key)
+            if fence is None:
+                fence = AdmissionFence(
+                    run_id, run_state_revision, stage_attempt, "closed"
+                )
+                self._fences[key] = fence
+        with fence.lock:
+            fence.state = "closed"
         return fence
 
     def close_run_admissions(self, run_id: str) -> tuple[AdmissionFence, ...]:
-        self._run_admission[run_id] = "closed"
+        with self._admission_registry_lock:
+            self._run_admission[run_id] = "closed"
+            fences = tuple(
+                fence
+                for key, fence in self._fences.items()
+                if key[0] == run_id
+            )
         closed: list[AdmissionFence] = []
-        for key, prior in tuple(self._fences.items()):
-            if key[0] != run_id or prior.state != "open":
-                continue
-            fence = AdmissionFence(key[0], key[1], key[2], "closed")
-            self._fences[key] = fence
-            closed.append(fence)
+        for fence in fences:
+            with fence.lock:
+                if fence.state != "open":
+                    continue
+                fence.state = "closed"
+                closed.append(fence)
         return tuple(closed)
 
     def open_run_admissions(self, run_id: str) -> None:
-        self._run_admission[run_id] = "open"
+        with self._admission_registry_lock:
+            self._run_admission[run_id] = "open"
 
     def allocate_child_reservation(self, request: Mapping[str, Any]) -> dict[str, Any]:
         expected_fields = {
@@ -619,7 +651,9 @@ class DshToolService:
         ):
             raise ValueError("child reservation item_digest must be a SHA-256 digest")
         run_id = str(request["run_id"])
-        if self._run_admission.get(run_id, "open") != "open":
+        with self._admission_registry_lock:
+            run_admission = self._run_admission.get(run_id, "open")
+        if run_admission != "open":
             raise DshToolAdmissionClosedError("run admission is closed")
         if not self.ledger.events(run_id):
             raise DshToolAuthorizationError("unknown child reservation run")
@@ -1019,6 +1053,7 @@ class DshToolService:
         tool_name: str | None = None,
         expected_role: str | None = None,
         allow_ledger_advance: bool = False,
+        require_open_fence: bool = True,
     ) -> str:
         role = str(identity.get("role") or "")
         if tool_name is not None and tool_name not in ROLE_TOOLS.get(role, frozenset()):
@@ -1064,14 +1099,21 @@ class DshToolService:
             or (not allow_ledger_advance and expected_ledger_revision != current_ledger_revision)
         ):
             raise DshToolAuthorizationError("ledger expected revision is stale")
-        fence_key = (
-            run_id,
-            int(identity["run_state_revision"]),
-            int(identity["stage_attempt"]),
-        )
-        fence = self._fences.get(fence_key)
-        if fence is None or fence.state != "open":
-            raise DshToolAdmissionClosedError("stage admission is closed")
+        if require_open_fence:
+            fence_key = (
+                run_id,
+                int(identity["run_state_revision"]),
+                int(identity["stage_attempt"]),
+            )
+            with self._admission_registry_lock:
+                fence = self._fences.get(fence_key)
+            if fence is None:
+                raise DshToolAdmissionClosedError("stage admission is closed")
+            with fence.lock:
+                if fence.state != "open":
+                    raise DshToolAdmissionClosedError(
+                        "stage admission is closed"
+                    )
         return role
 
     def accept_structured(self, envelope: Mapping[str, Any]) -> dict[str, Any]:
@@ -1081,7 +1123,10 @@ class DshToolService:
             "structured",
             "result_digest",
             "skill_invocation_evidence",
+            "deadline_unix_ms",
         }
+        if "deadline_unix_ms" not in envelope:
+            raise ValueError("DSH structured envelope requires deadline_unix_ms")
         if not required_fields.issubset(envelope) or set(envelope) - (
             required_fields | {"session_metrics"}
         ):
@@ -1090,6 +1135,14 @@ class DshToolService:
         structured = envelope["structured"]
         output_schema_id = envelope["output_schema_id"]
         supplied_digest = envelope["result_digest"]
+        deadline_unix_ms = envelope["deadline_unix_ms"]
+        if (
+            isinstance(deadline_unix_ms, bool)
+            or not isinstance(deadline_unix_ms, int)
+            or deadline_unix_ms < 1
+            or deadline_unix_ms > 9_007_199_254_740_991
+        ):
+            raise ValueError("deadline_unix_ms must be a positive safe integer")
         if not isinstance(identity, Mapping) or set(identity) != _IDENTITY_FIELDS:
             raise DshToolAuthorizationError("invalid Host-bound DSH structured identity")
         if not isinstance(structured, Mapping):
@@ -1165,8 +1218,11 @@ class DshToolService:
             str(identity["stage"]),
             str(identity["idempotency_key"]),
         )
-        prior = self._event_by_id(str(identity["run_id"]), event_id)
-        if prior is not None:
+
+        def prior_receipt() -> dict[str, Any] | None:
+            prior = self._event_by_id(str(identity["run_id"]), event_id)
+            if prior is None:
+                return None
             if prior.kind != "DshStructuredResultAccepted" or prior.payload != payload:
                 raise ValueError("structured-result idempotency key was reused")
             return {
@@ -1175,16 +1231,70 @@ class DshToolService:
                 "event_id": prior.event_id,
                 "event_seq": prior.seq,
             }
+
+        receipt = prior_receipt()
+        if receipt is not None:
+            return receipt
+        remaining_wall_ms = deadline_unix_ms - self._wall_clock_ms()
+        if remaining_wall_ms <= 0:
+            # The first lookup may have raced another request that committed
+            # this exact idempotent event while wall-clock authorization was
+            # in progress.  Re-read before rejecting a replay as expired.
+            receipt = prior_receipt()
+            if receipt is not None:
+                return receipt
+            raise DshToolAdmissionClosedError(
+                "structured result deadline expired"
+            )
+        deadline_monotonic_ms = self._monotonic_ms() + remaining_wall_ms
         self._authorize_identity(
             identity,
             expected_role=expected[0],
             allow_ledger_advance=True,
+            require_open_fence=False,
         )
+        if self._monotonic_ms() >= deadline_monotonic_ms:
+            receipt = prior_receipt()
+            if receipt is not None:
+                return receipt
+            raise DshToolAdmissionClosedError(
+                "structured result deadline expired"
+            )
+        fence_key = (
+            str(identity["run_id"]),
+            int(identity["run_state_revision"]),
+            int(identity["stage_attempt"]),
+        )
+        with self._admission_registry_lock:
+            fence = self._fences.get(fence_key)
+        if fence is None:
+            receipt = prior_receipt()
+            if receipt is not None:
+                return receipt
+            raise DshToolAdmissionClosedError("stage admission is closed")
+
+        @contextmanager
+        def commit_guard(inserted: bool) -> Iterator[None]:
+            if not inserted:
+                yield
+                return
+            with fence.lock:
+                if fence.state != "open":
+                    raise DshToolAdmissionClosedError(
+                        "stage admission is closed"
+                    )
+                if self._monotonic_ms() >= deadline_monotonic_ms:
+                    raise DshToolAdmissionClosedError(
+                        "structured result deadline expired"
+                    )
+                yield
+
         event = self.ledger.append(
             str(identity["run_id"]),
             "DshStructuredResultAccepted",
             payload,
             event_id=event_id,
+            commit_guard=commit_guard,
         )
         return {
             "accepted": True,

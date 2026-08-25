@@ -22,6 +22,9 @@ from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 from ecologyrsi_dsh.integrations.dsh_structured_roles import DshStructuredRoleRuntime
 
 
+FUTURE_DEADLINE_UNIX_MS = 4_102_444_800_000
+
+
 def _identity(ledger: EventLedger, **overrides: object) -> dict:
     value = {
         "run_id": "run:tool-test",
@@ -66,6 +69,27 @@ def _skill_evidence(stage: str) -> dict:
         "next_tool_call_seq": 3,
         "order_verified": True,
         "source": "dsh_session_event_log",
+    }
+
+
+def _research_envelope(ledger: EventLedger, *, deadline_unix_ms: int) -> dict:
+    structured = {
+        "schema_version": "ecology-research-result@1",
+        "summary": "bounded evidence",
+        "evidence": [],
+    }
+    return {
+        "identity": _identity(
+            ledger,
+            role="researcher",
+            stage="generation.research",
+            idempotency_key="deadline-result",
+        ),
+        "output_schema_id": "ecology-research-result@1",
+        "structured": structured,
+        "result_digest": digest(structured),
+        "skill_invocation_evidence": _skill_evidence("generation.research"),
+        "deadline_unix_ms": deadline_unix_ms,
     }
 
 
@@ -526,6 +550,7 @@ class DshToolServiceTests(unittest.TestCase):
             "skill_invocation_evidence": _skill_evidence(
                 "generation.research"
             ),
+            "deadline_unix_ms": FUTURE_DEADLINE_UNIX_MS,
             "session_metrics": {
                 "schema_version": "ecologyrsi-dsh.dsh-session-metrics/1",
                 "session_id": identity["session_id"],
@@ -597,6 +622,7 @@ class DshToolServiceTests(unittest.TestCase):
             "structured": structured,
             "result_digest": digest(structured),
             "skill_invocation_evidence": _skill_evidence("generation.judge"),
+            "deadline_unix_ms": FUTURE_DEADLINE_UNIX_MS,
         }
 
         accepted = self.service.accept_structured(envelope)
@@ -663,6 +689,7 @@ class DshToolServiceTests(unittest.TestCase):
                     "structured": structured,
                     "result_digest": digest(structured),
                     "skill_invocation_evidence": _skill_evidence("sample.plan"),
+                    "deadline_unix_ms": FUTURE_DEADLINE_UNIX_MS,
                 }
             )
 
@@ -731,6 +758,7 @@ class DshToolServiceTests(unittest.TestCase):
                 "skill_invocation_evidence": _skill_evidence(
                     "generation.research"
                 ),
+                "deadline_unix_ms": FUTURE_DEADLINE_UNIX_MS,
             }
         )
         replay_args = {
@@ -816,6 +844,7 @@ class DshToolServiceTests(unittest.TestCase):
                 "structured": structured,
                 "result_digest": digest(structured),
                 "skill_invocation_evidence": _skill_evidence("sample.reflect"),
+                "deadline_unix_ms": FUTURE_DEADLINE_UNIX_MS,
             }
         )
 
@@ -825,6 +854,278 @@ class DshToolServiceTests(unittest.TestCase):
         self.assertEqual(event.payload["identity"]["stage"], "sample.reflect")
         self.assertEqual(
             event.payload["output_schema_id"], "ecology-sample-reflection@1"
+        )
+
+    def test_structured_result_requires_a_runtime_deadline(self) -> None:
+        envelope = _research_envelope(
+            self.ledger,
+            deadline_unix_ms=FUTURE_DEADLINE_UNIX_MS,
+        )
+        envelope.pop("deadline_unix_ms")
+
+        with self.assertRaisesRegex(ValueError, "deadline"):
+            self.service.accept_structured(envelope)
+
+    def test_expired_structured_result_is_rejected_before_arrival_work(self) -> None:
+        self.service._wall_clock_ms = lambda: 1_000
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        before = self.ledger.count("run:tool-test")
+
+        with self.assertRaises(Exception) as caught:
+            self.service.accept_structured(envelope)
+
+        self.assertIsInstance(caught.exception, DshToolAdmissionClosedError)
+        self.assertRegex(str(caught.exception), "deadline")
+        self.assertEqual(self.ledger.count("run:tool-test"), before)
+
+    def test_structured_result_deadline_is_rechecked_inside_ledger_precommit(self) -> None:
+        monotonic_ms = [100]
+        monotonic_calls = 0
+        precommit_entered = threading.Event()
+        release_precommit = threading.Event()
+
+        def monotonic_clock_ms() -> int:
+            nonlocal monotonic_calls
+            monotonic_calls += 1
+            if monotonic_calls == 3:
+                precommit_entered.set()
+                if not release_precommit.wait(2):
+                    raise RuntimeError("test did not release precommit deadline check")
+            return monotonic_ms[0]
+
+        self.service._wall_clock_ms = lambda: 0
+        self.service._monotonic_ms = monotonic_clock_ms
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        before = self.ledger.count("run:tool-test")
+        outcome: list[object] = []
+
+        def accept() -> None:
+            try:
+                outcome.append(self.service.accept_structured(envelope))
+            except Exception as error:  # noqa: BLE001 - asserted below
+                outcome.append(error)
+
+        worker = threading.Thread(target=accept)
+        worker.start()
+        try:
+            self.assertTrue(
+                precommit_entered.wait(1),
+                "structured result never reached its ledger precommit guard",
+            )
+            monotonic_ms[0] = 1_100
+        finally:
+            release_precommit.set()
+        worker.join(2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], DshToolAdmissionClosedError)
+        self.assertEqual(self.ledger.count("run:tool-test"), before)
+        self.assertFalse(any(
+            event.kind == "DshStructuredResultAccepted"
+            for event in self.ledger.events("run:tool-test")
+        ))
+
+    def test_exact_structured_receipt_replays_after_its_deadline(self) -> None:
+        wall_ms = [0]
+        monotonic_ms = [100]
+        self.service._wall_clock_ms = lambda: wall_ms[0]
+        self.service._monotonic_ms = lambda: monotonic_ms[0]
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+
+        first = self.service.accept_structured(envelope)
+        wall_ms[0] = 2_000
+        monotonic_ms[0] = 2_100
+        second = self.service.accept_structured(envelope)
+
+        self.assertEqual(second, first)
+        self.assertEqual(
+            sum(
+                event.kind == "DshStructuredResultAccepted"
+                for event in self.ledger.events("run:tool-test")
+            ),
+            1,
+        )
+
+    def test_concurrent_exact_receipt_replays_after_early_lookup_expires(self) -> None:
+        replay_at_wall_clock = threading.Event()
+        release_replay = threading.Event()
+
+        def wall_clock_ms() -> int:
+            if threading.current_thread().name == "late-exact-replay":
+                replay_at_wall_clock.set()
+                if not release_replay.wait(2):
+                    raise RuntimeError("test did not release late exact replay")
+                return 1_100
+            return 0
+
+        self.service._wall_clock_ms = wall_clock_ms
+        self.service._monotonic_ms = lambda: 100
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        replay_outcome: list[object] = []
+
+        def replay() -> None:
+            try:
+                replay_outcome.append(self.service.accept_structured(envelope))
+            except Exception as error:  # noqa: BLE001 - asserted below
+                replay_outcome.append(error)
+
+        replay_worker = threading.Thread(
+            target=replay,
+            name="late-exact-replay",
+        )
+        replay_worker.start()
+        self.assertTrue(
+            replay_at_wall_clock.wait(1),
+            "replay did not finish its early receipt lookup",
+        )
+        first = self.service.accept_structured(envelope)
+        release_replay.set()
+        replay_worker.join(2)
+
+        self.assertFalse(replay_worker.is_alive())
+        self.assertEqual(replay_outcome, [first])
+        self.assertEqual(
+            sum(
+                event.kind == "DshStructuredResultAccepted"
+                for event in self.ledger.events("run:tool-test")
+            ),
+            1,
+        )
+
+    def test_insert_ignore_exact_replay_skips_expired_commit_guard(self) -> None:
+        before_append = threading.Event()
+        release_append = threading.Event()
+        replay_clock_calls = 0
+        replay_expired = False
+
+        def replay_monotonic_ms() -> int:
+            nonlocal replay_clock_calls
+            replay_clock_calls += 1
+            if replay_clock_calls == 2:
+                before_append.set()
+                if not release_append.wait(2):
+                    raise RuntimeError("test did not release exact replay append")
+                # This is the pre-append check. The deadline expires immediately
+                # after it, before EventLedger resolves INSERT OR IGNORE.
+                return 100
+            return 1_100 if replay_expired else 100
+
+        self.service._wall_clock_ms = lambda: 0
+        self.service._monotonic_ms = replay_monotonic_ms
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        replay_outcome: list[object] = []
+
+        def replay() -> None:
+            try:
+                replay_outcome.append(self.service.accept_structured(envelope))
+            except Exception as error:  # noqa: BLE001 - asserted below
+                replay_outcome.append(error)
+
+        replay_worker = threading.Thread(target=replay)
+        replay_worker.start()
+        self.assertTrue(before_append.wait(1))
+
+        committer = DshToolService(
+            self.ledger,
+            wall_clock_ms=lambda: 0,
+            monotonic_ms=lambda: 100,
+        )
+        committer.open_admission("run:tool-test", 3, 2)
+        first = committer.accept_structured(envelope)
+        replay_expired = True
+        release_append.set()
+        replay_worker.join(2)
+
+        self.assertFalse(replay_worker.is_alive())
+        self.assertEqual(replay_outcome, [first])
+        self.assertEqual(
+            replay_clock_calls,
+            2,
+            "an INSERT OR IGNORE replay must not enter the new-row deadline guard",
+        )
+        self.assertEqual(
+            sum(
+                event.kind == "DshStructuredResultAccepted"
+                for event in self.ledger.events("run:tool-test")
+            ),
+            1,
+        )
+
+    def test_close_fence_cannot_overtake_structured_result_commit(self) -> None:
+        monotonic_calls = 0
+        precommit_entered = threading.Event()
+        release_precommit = threading.Event()
+        close_blocked = threading.Event()
+        close_finished = threading.Event()
+        fence = self.service._fences[("run:tool-test", 3, 2)]
+        inner_lock = fence.lock
+
+        class ObservedFenceLock:
+            def __enter__(self) -> ObservedFenceLock:
+                if threading.current_thread().name == "close-admission":
+                    if not inner_lock.acquire(blocking=False):
+                        close_blocked.set()
+                        inner_lock.acquire()
+                else:
+                    inner_lock.acquire()
+                return self
+
+            def __exit__(self, *_error: object) -> None:
+                inner_lock.release()
+
+        fence.lock = ObservedFenceLock()
+
+        def monotonic_clock_ms() -> int:
+            nonlocal monotonic_calls
+            monotonic_calls += 1
+            if monotonic_calls == 3:
+                precommit_entered.set()
+                if not release_precommit.wait(2):
+                    raise RuntimeError("test did not release guarded commit")
+            return 100
+
+        self.service._wall_clock_ms = lambda: 0
+        self.service._monotonic_ms = monotonic_clock_ms
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        outcome: list[object] = []
+
+        def accept() -> None:
+            try:
+                outcome.append(self.service.accept_structured(envelope))
+            except Exception as error:  # noqa: BLE001 - asserted below
+                outcome.append(error)
+
+        accept_worker = threading.Thread(target=accept)
+        accept_worker.start()
+        self.assertTrue(precommit_entered.wait(1))
+
+        def close() -> None:
+            self.service.close_admission("run:tool-test", 3, 2)
+            close_finished.set()
+
+        close_worker = threading.Thread(target=close, name="close-admission")
+        close_worker.start()
+        try:
+            self.assertTrue(
+                close_blocked.wait(1),
+                "close did not contend on the guarded commit's fence",
+            )
+            self.assertFalse(close_finished.is_set())
+        finally:
+            release_precommit.set()
+        accept_worker.join(2)
+        close_worker.join(2)
+
+        self.assertFalse(accept_worker.is_alive())
+        self.assertFalse(close_worker.is_alive())
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], dict)
+        self.assertTrue(outcome[0]["accepted"])
+        self.assertTrue(close_finished.is_set())
+        self.assertEqual(
+            self.service._fences[("run:tool-test", 3, 2)].state,
+            "closed",
         )
 
     def test_cross_language_schemas_are_closed_and_role_sets_match(self) -> None:

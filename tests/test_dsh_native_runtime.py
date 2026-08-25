@@ -789,6 +789,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                         "structured": structured,
                         "result_digest": digest(structured),
                         "skill_invocation_evidence": _research_skill_evidence(),
+                        "deadline_unix_ms": 4_102_444_800_000,
                     }
                 )
             release_runtime_cancel.set()
