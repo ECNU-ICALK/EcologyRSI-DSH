@@ -18,6 +18,10 @@ branch as stable:
    that was awaiting schema or reservation data can still launch a child.
 4. `execute_formal_stage` accepts an arbitrary aggregate mapping whose only
    scientific assertion is `{"outcome": "passed"}`.
+5. A native `pause`/`cancel` request can hold the server-wide mutation lock
+   while DSH quiescence or the generation barrier waits. One pending pause
+   then makes unrelated archive/create requests hit the proxy's 30-second
+   timeout and appear as a service outage.
 
 The review also found that the legacy promotion helper advertises a paired
 moving-block bootstrap while sampling independent single-day blocks in hash
@@ -38,6 +42,8 @@ it is reused for a promotion decision.
   and its frozen UQ bindings are integrated.
 - Make the legacy promotion bootstrap operate on ordered, contiguous calendar
   blocks and report the method it actually executes.
+- Keep unrelated mutations responsive while a run is draining after pause or
+  cancel.
 - Rebuild the isolated runtime and verify new cucumber and tomato diagnostic
   runs through terminal acceptance.
 
@@ -94,6 +100,15 @@ calendar gap, and truncate to the paired cohort size. Evidence with too few
 paired days or legal starts fails closed. Returned metadata records block
 length and legal-start count in addition to the versioned method.
 
+### 6. Bounded global mutation-lock scope
+
+The HTTP dispatcher treats native pause/cancel as potentially long-running
+control operations, just as it already treats generation advancement. The
+outer server-wide lock is not held across DSH quiescence or a per-run
+generation barrier. The action path still acquires that lock around the short
+durable pause/cancel event boundary, preserving coherent append-only state
+without blocking unrelated runs.
+
 ## Acceptance
 
 - All new regression tests demonstrate RED before implementation and GREEN
@@ -106,8 +121,9 @@ length and legal-start count in addition to the versioned method.
   rejected without setting validated/final-test candidate state.
 - Moving-block draws contain only contiguous calendar blocks and never bridge
   a time gap.
+- While pause/cancel is blocked in drain, another thread can acquire the global
+  mutation lock and unrelated archive/create commands remain responsive.
 - Full Python, Node, browser, source verification, and diff checks pass.
 - Fresh cucumber and tomato one-origin/nine-cell diagnostics terminate with
   `diagnostic_smoke_completed_no_promotion`, use DSH-owned prediction tools,
   expose interpretable stage activity, and pass the native acceptance script.
-

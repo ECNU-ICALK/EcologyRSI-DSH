@@ -23,6 +23,21 @@
 - Do not expose holdout rows, secrets, reservation identifiers, or raw model
   responses in public projections or test reports.
 
+## Task 0: Keep unrelated mutations responsive during pause/cancel drain
+
+Files:
+
+- `src/ecologyrsi_dsh/api/handler.py`
+- `tests/test_http.py`
+
+Add a deterministic failing concurrency test proving that `pause` and
+`cancel` do not hold the server-wide mutation lock while DSH quiescence or the
+per-run generation barrier is waiting. Keep only the short durable state
+boundary under the global lock so archive/create operations for unrelated runs
+remain responsive. Confirm the regression against the production symptom:
+an old pending pause receipt must never make the proxy time out unrelated
+mutations.
+
 ## Task 1: Reject affirmative clauses after shared negation
 
 Files:
@@ -104,12 +119,13 @@ Run the full Python suite, all plugin Node tests, browser smoke tests,
 `make verify`, and `git diff --check`. Request an independent whole-branch
 review; resolve every Critical or Important finding before runtime packaging.
 
-## Task 7: Rebuild and restart the isolated runtime
+## Task 7: Rebuild and restart the production-port runtime
 
-Package and install the updated DSH plugin into the isolated DSH profile.
-Restart only ports 19777/19848 and preserve unrelated 8777/8848 services.
-Confirm sidecar health, DSH capabilities, plugin revision, and an empty active
-run set before creating new work.
+Package and install the updated DSH plugin into the existing DSH profile.
+Per operator direction, stop all other EcologyRSI project services and run
+only ports 8777/8848. Preserve the existing event ledger, confirm sidecar
+health, DSH capabilities, plugin revision, and responsive archive/create
+commands before creating new work.
 
 ## Task 8: Run and analyze fresh controlled evolutions
 
@@ -126,4 +142,3 @@ successful runs. Audit run duration, retries, model/tool calls, candidate
 metrics, cohort bindings, pending receipts, formal exposure count, and public
 projection. Request a final independent code/scientific review and report all
 remaining formal-readiness gaps explicitly.
-
