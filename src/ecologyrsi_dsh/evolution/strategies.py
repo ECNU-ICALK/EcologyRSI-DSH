@@ -3740,6 +3740,11 @@ _CLAIM_COMPLETED_ASSERTION_BEFORE_RE = re.compile(
     r"\b(?:is|are|was|were)\s+(?:claimed|asserted|implied|made)\s*$",
     re.IGNORECASE,
 )
+_CLAIM_COORDINATED_AFFIRMATIVE_ASSERTION_RE = re.compile(
+    r"^(?:and|or)\s+.+\b(?:is|are|was|were)\s+"
+    r"(?:claimed|asserted|implied|made)\b",
+    re.IGNORECASE,
+)
 
 
 def _claim_scopes(text: str) -> tuple[str, ...]:
@@ -3763,10 +3768,15 @@ def _claim_scopes(text: str) -> tuple[str, ...]:
             if not suffix:
                 continue
             prefix = clause[: boundary.start()]
+            initial_coordinated_affirmative_suffix = (
+                bool(_CLAIM_COORDINATED_AFFIRMATIVE_ASSERTION_RE.search(suffix))
+                and not _CLAIM_SCOPE_RESTART_RE.search(prefix)
+            )
             if (
                 _CLAIM_NEGATED_ASSERTION_BEFORE_RE.search(prefix)
                 and not _CLAIM_COMPLETED_ASSERTION_BEFORE_RE.search(prefix)
                 and _CLAIM_NEGATED_ENUMERATION_ITEM_RE.fullmatch(suffix)
+                and not initial_coordinated_affirmative_suffix
             ):
                 continue
             scopes.append(suffix)
