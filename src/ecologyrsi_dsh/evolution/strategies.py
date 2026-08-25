@@ -3745,6 +3745,15 @@ _CLAIM_COORDINATED_AFFIRMATIVE_ASSERTION_RE = re.compile(
     r"(?:claimed|asserted|implied|made)\b",
     re.IGNORECASE,
 )
+_CLAIM_COORDINATED_GERUND_RE = re.compile(
+    r"^(?:and|or)\s+\w+ing\b",
+    re.IGNORECASE,
+)
+_CLAIM_SHARED_NEGATION_COMPLETION_RE = re.compile(
+    r"^(?:and|or)\s+.+\b(?:is|are|was|were)\s+"
+    r"(?:expected|unchanged|constant|fixed|preserved)\b",
+    re.IGNORECASE,
+)
 
 
 def _claim_scopes(text: str) -> tuple[str, ...]:
@@ -3773,7 +3782,7 @@ def _claim_scopes(text: str) -> tuple[str, ...]:
                 if boundary.group().casefold() in {"and", "or"}
                 else suffix
             )
-            initial_coordinated_affirmative_suffix = (
+            initial_coordinated_affirmative_assertion_suffix = (
                 bool(
                     _CLAIM_COORDINATED_AFFIRMATIVE_ASSERTION_RE.search(
                         coordinated_suffix
@@ -3782,16 +3791,20 @@ def _claim_scopes(text: str) -> tuple[str, ...]:
                 and not _CLAIM_SCOPE_RESTART_RE.search(prefix)
             )
             if (
-                boundary.group().casefold() == "or"
-                and _CLAIM_NEGATION_BEFORE_RE.search(prefix)
-                and not initial_coordinated_affirmative_suffix
+                _CLAIM_NEGATION_BEFORE_RE.search(prefix)
+                and (
+                    _CLAIM_COORDINATED_GERUND_RE.search(coordinated_suffix)
+                    or _CLAIM_SHARED_NEGATION_COMPLETION_RE.search(
+                        coordinated_suffix
+                    )
+                )
             ):
                 continue
             if (
                 _CLAIM_NEGATED_ASSERTION_BEFORE_RE.search(prefix)
                 and not _CLAIM_COMPLETED_ASSERTION_BEFORE_RE.search(prefix)
                 and _CLAIM_NEGATED_ENUMERATION_ITEM_RE.fullmatch(suffix)
-                and not initial_coordinated_affirmative_suffix
+                and not initial_coordinated_affirmative_assertion_suffix
             ):
                 continue
             scopes.append(suffix)
