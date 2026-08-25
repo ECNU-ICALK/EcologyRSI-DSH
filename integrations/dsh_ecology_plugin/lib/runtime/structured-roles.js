@@ -12,6 +12,20 @@ function phaseError(code, cause) {
   return error;
 }
 
+function operationalTimeoutError() {
+  const error = new Error("structured role operational timeout");
+  error.code = "structured_role_operational_timeout";
+  return error;
+}
+
+function detachCleanup(operation) {
+  try {
+    Promise.resolve(operation?.()).catch(() => {});
+  } catch {
+    // Cleanup must not replace the structured-role outcome or wait forever.
+  }
+}
+
 export async function runStructuredRole(
   roleHost,
   reservedBinding,
@@ -37,34 +51,60 @@ export async function runStructuredRole(
     runId: reservedBinding?.launch?.run_id || reservedBinding?.binding?.run_id,
   });
   let run;
-  let timedOut = false;
   let timeout = null;
+  let deadlineAt = null;
+  let deadlinePromise = null;
+  let timedOut = false;
+  const timeoutError = operationalTimeoutError();
+  const expireDeadline = () => {
+    if (!timedOut) {
+      timedOut = true;
+      pending.controller.abort();
+    }
+    return timeoutError;
+  };
+  const deadlineExpired = () => (
+    deadlineAt !== null && (timedOut || performance.now() >= deadlineAt)
+  );
+  const requireBeforeDeadline = () => {
+    if (deadlineExpired()) throw expireDeadline();
+  };
+  const withinDeadline = async (operation) => {
+    if (deadlinePromise === null) return await operation();
+    requireBeforeDeadline();
+    return await Promise.race([
+      Promise.resolve().then(operation),
+      deadlinePromise,
+    ]);
+  };
   if (timeoutMs !== undefined) {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
       pending.controller.abort();
-      pendingStarts.finish?.(pending);
+      detachCleanup(() => pendingStarts.finish?.(pending));
       throw new Error("structured role timeout must be a positive integer");
     }
-    timeout = setTimeout(() => {
-      timedOut = true;
-      pending.controller.abort();
-    }, timeoutMs);
+    deadlineAt = performance.now() + timeoutMs;
+    deadlinePromise = new Promise((_resolve, reject) => {
+      timeout = setTimeout(() => reject(expireDeadline()), timeoutMs);
+    });
+    // A synchronous phase failure may leave the deadline unraced until finally.
+    deadlinePromise.catch(() => {});
   }
   try {
     try {
-      run = await pending.promise;
+      run = await withinDeadline(() => pending.promise);
     } catch (error) {
-      if (timedOut) {
-        throw new Error("structured role operational timeout", { cause: error });
-      }
+      if (deadlineExpired() || error === timeoutError) throw expireDeadline();
       throw phaseError("structured_child_start_failed", error);
     }
     let result;
     try {
-      result = await structuredResult(run);
+      result = await withinDeadline(() => structuredResult(run));
     } catch (error) {
+      if (deadlineExpired() || error === timeoutError) throw expireDeadline();
       throw phaseError("structured_child_result_failed", error);
     }
+    requireBeforeDeadline();
     if (result?.stopReason && result.stopReason !== "completed") {
       throw phaseError(
         result.stopReason === "aborted"
@@ -76,7 +116,9 @@ export async function runStructuredRole(
     if (!structured || typeof structured !== "object" || Array.isArray(structured)) {
       throw phaseError("structured_result_missing");
     }
-    if (admission?.isOpen && !await admission.isOpen(reservedBinding)) {
+    if (admission?.isOpen && !await withinDeadline(
+      () => admission.isOpen(reservedBinding),
+    )) {
       const error = phaseError("structured_result_admission_closed");
       // Preserve the legacy message for callers that surface this safe state.
       error.message = "structured result admission is closed";
@@ -88,14 +130,16 @@ export async function runStructuredRole(
     if (!sessionId) throw phaseError("structured_child_session_missing");
     let accepted;
     try {
-      accepted = await persist({
+      accepted = await withinDeadline(() => persist({
         binding: reservedBinding,
         structured: structuredClone(structured),
         session_id: sessionId,
-      });
+      }));
     } catch (error) {
+      if (deadlineExpired() || error === timeoutError) throw expireDeadline();
       throw phaseError("structured_result_persist_failed", error);
     }
+    requireBeforeDeadline();
     if (!accepted || accepted.accepted !== true) {
       throw phaseError("structured_result_not_accepted");
     }
@@ -106,8 +150,22 @@ export async function runStructuredRole(
     });
   } finally {
     if (timeout !== null) clearTimeout(timeout);
-    await run?.dispose?.();
-    pendingStarts.finish?.(pending);
+    if (run === undefined) {
+      pending.promise.then(
+        (lateRun) => {
+          try {
+            Promise.resolve(structuredResult(lateRun)).catch(() => {});
+          } catch {
+            // A late result accessor is observational cleanup only.
+          }
+          detachCleanup(() => lateRun?.dispose?.());
+        },
+        () => {},
+      );
+    } else {
+      detachCleanup(() => run.dispose?.());
+    }
+    detachCleanup(() => pendingStarts.finish?.(pending));
   }
 }
 

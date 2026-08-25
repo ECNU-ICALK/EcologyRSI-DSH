@@ -95,6 +95,123 @@ test("structured role aborts a wedged DSH child at the operational timeout", asy
   assert.equal(pendingStarts.size, 0);
 });
 
+test("structured role rejects a result that succeeds after its operational deadline", async () => {
+  let admissionCalls = 0;
+  let persistCalls = 0;
+  const pendingStarts = new PendingChildStarts({
+    subagents: {
+      start: async () => new Promise((resolveStart) => {
+        setTimeout(() => resolveStart({
+          id: "late-success-child",
+          result: new Promise((resolveResult) => {
+            setTimeout(() => resolveResult({ structured: { value: "too late" } }), 50);
+          }),
+          dispose: async () => {},
+        }), 50);
+      }),
+    },
+  });
+
+  await assert.rejects(
+    runStructuredRole(
+      { agent: { id: "researcher-host" } },
+      { label: "late-success-label" },
+      { prompt: "research", outputSchema: { type: "object" } },
+      {
+        pendingStarts,
+        admission: { isOpen: async () => { admissionCalls += 1; return true; } },
+        persist: async () => { persistCalls += 1; return { accepted: true }; },
+        timeoutMs: 80,
+      },
+    ),
+    (error) => error.code === "structured_role_operational_timeout",
+  );
+  assert.equal(admissionCalls, 0);
+  assert.equal(persistCalls, 0);
+  assert.equal(pendingStarts.size, 0);
+});
+
+test("structured role classifies a result rejection after the deadline as an operational timeout", async () => {
+  let persistCalls = 0;
+  const pendingStarts = new PendingChildStarts({
+    subagents: {
+      start: async () => ({
+        id: "late-rejection-child",
+        result: new Promise((_resolve, reject) => {
+          setTimeout(() => reject(new Error("private late child failure")), 50);
+        }),
+        dispose: async () => {},
+      }),
+    },
+  });
+
+  await assert.rejects(
+    runStructuredRole(
+      { agent: { id: "researcher-host" } },
+      { label: "late-rejection-label" },
+      { prompt: "research", outputSchema: { type: "object" } },
+      {
+        pendingStarts,
+        admission: { isOpen: async () => true },
+        persist: async () => { persistCalls += 1; return { accepted: true }; },
+        timeoutMs: 10,
+      },
+    ),
+    (error) => error.code === "structured_role_operational_timeout"
+      && error.code !== "structured_child_result_failed"
+      && !String(error).includes("private late child failure"),
+  );
+  assert.equal(persistCalls, 0);
+  assert.equal(pendingStarts.size, 0);
+});
+
+test("structured role deadline does not wait for abort-ignoring result or disposal", async () => {
+  let aborted = false;
+  let persistCalls = 0;
+  const pendingStarts = new PendingChildStarts({
+    subagents: {
+      start: async (_provider, request) => {
+        request.signal.addEventListener("abort", () => { aborted = true; }, { once: true });
+        return {
+          id: "abort-ignoring-child",
+          result: new Promise(() => {}),
+          dispose: async () => new Promise(() => {}),
+        };
+      },
+    },
+  });
+  const startedAt = Date.now();
+  let watchdog = null;
+
+  const outcome = await Promise.race([
+    runStructuredRole(
+      { agent: { id: "judge-host" } },
+      { label: "abort-ignoring-label" },
+      { prompt: "judge", outputSchema: { type: "object" } },
+      {
+        pendingStarts,
+        admission: { isOpen: async () => true },
+        persist: async () => { persistCalls += 1; return { accepted: true }; },
+        timeoutMs: 20,
+      },
+    ).then(
+      () => ({ kind: "resolved" }),
+      (error) => ({ kind: "rejected", error }),
+    ),
+    new Promise((resolve) => {
+      watchdog = setTimeout(() => resolve({ kind: "watchdog" }), 250);
+    }),
+  ]);
+  clearTimeout(watchdog);
+
+  assert.equal(outcome.kind, "rejected");
+  assert.equal(outcome.error.code, "structured_role_operational_timeout");
+  assert.equal(aborted, true);
+  assert.equal(persistCalls, 0);
+  assert.equal(pendingStarts.size, 0);
+  assert.ok(Date.now() - startedAt < 250, "structured role exceeded its deadline watchdog");
+});
+
 test("structured role exposes bounded phase codes without reflecting provider errors", async () => {
   const pendingStarts = new PendingChildStarts({
     subagents: {
