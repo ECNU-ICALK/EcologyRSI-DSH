@@ -32,6 +32,27 @@ function outcome(promise) {
   );
 }
 
+async function startReadyRun(controller, startBinding = binding()) {
+  const stageRunner = controller.stageRunner;
+  const presetCatalog = controller.presetCatalog;
+  const roleAgents = controller.roleAgents;
+  controller.stageRunner = null;
+  controller.presetCatalog = [
+    { preset_id: "ecology-researcher-v7", tool_profile: "test" },
+  ];
+  controller.roleAgents = {
+    createRoleAgent: async () => ({ dispose: async () => {} }),
+    quiesceRun: async () => {},
+  };
+  try {
+    await controller.startRun(startBinding);
+  } finally {
+    controller.stageRunner = stageRunner;
+    controller.presetCatalog = presetCatalog;
+    controller.roleAgents = roleAgents;
+  }
+}
+
 test("runtime creation freezes the Python-owned initial run status", () => {
   const registry = new RuntimeRunRegistry();
   registry.start(binding({ binding: { initial_run_status: "running" } }));
@@ -85,6 +106,71 @@ test("ordinary created runs cannot enter the restored-paused resume path", async
   assert.equal(opens, 0);
 });
 
+test("a second controller cannot resume registry-only paused hosts", async () => {
+  const registry = new RuntimeRunRegistry();
+  const ownerCalls = [];
+  const owner = new RuntimeController({}, {
+    registry,
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => ownerCalls.push("close"),
+      openLaunchFence: () => ownerCalls.push("open"),
+    },
+  });
+  owner.roleAgents = {
+    createRoleAgent: async () => ({ dispose: async () => {} }),
+    quiesceRun: async () => {},
+  };
+  const restored = binding({
+    idempotency_key: "runtime-restore:run-1",
+    binding: {
+      initial_run_status: "paused",
+      restore_provenance: {
+        source: "python_durable_ledger",
+        status: "paused",
+      },
+    },
+  });
+  await owner.startRun(restored);
+  assert.equal(owner.liveReady, true);
+  assert.deepEqual(ownerCalls, ["close"]);
+
+  const externalCalls = [];
+  const external = new RuntimeController({}, {
+    registry,
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => externalCalls.push("close"),
+      openLaunchFence: () => externalCalls.push("open"),
+    },
+  });
+  external.roleAgents = { quiesceRun: async () => {} };
+
+  const resumed = await outcome(external.resume(binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: "external-resume-without-hosts-1",
+  })));
+
+  assert.equal(resumed.status, "rejected");
+  assert.equal(resumed.reason.code, "runtime_role_hosts_incomplete");
+  assert.equal(registry.get("run-1").status, "paused");
+  assert.equal(external.liveReady, false);
+  assert.equal(externalCalls.includes("open"), false);
+  assert.ok(externalCalls.includes("close"));
+
+  external.runLifecycles.get("run-1").hosts = "creating";
+  const creatingWithoutStart = await outcome(external.resume(binding({
+    run_state_revision: 9,
+    ledger_expected_revision: 13,
+    idempotency_key: "external-resume-creating-without-start-1",
+  })));
+  assert.equal(creatingWithoutStart.status, "rejected");
+  assert.equal(creatingWithoutStart.reason.code, "runtime_role_hosts_incomplete");
+  assert.equal(registry.get("run-1").status, "paused");
+  assert.equal(externalCalls.includes("open"), false);
+});
+
 test("cancel closes runtime admission before child and role-host quiescence", async () => {
   const calls = [];
   const controller = new RuntimeController({}, {
@@ -115,7 +201,7 @@ test("pause quiesces but retains role-hosts for exact resume", async () => {
   const controller = new RuntimeController({}, {
     stageRunner: { quiesceRun: async () => calls.push("children") },
   });
-  controller.registry.start(binding());
+  await startReadyRun(controller);
   controller.roleAgents = {
     quiesceRun: async (_runId, options) => calls.push(["hosts", options.dispose]),
   };
@@ -141,7 +227,7 @@ test("resume waits for the pause drain before reopening launch admission", async
       openLaunchFence: (runId) => calls.push(["open", runId]),
     },
   });
-  controller.registry.start(binding());
+  await startReadyRun(controller);
   controller.roleAgents = { quiesceRun: async () => {} };
 
   const pausing = controller.pause(binding({
@@ -415,7 +501,7 @@ test("resume followed synchronously by pause serializes both controls and stays 
       quiesceRun: async () => { drains += 1; },
     },
   });
-  controller.registry.start(binding());
+  await startReadyRun(controller);
   controller.roleAgents = { quiesceRun: async () => {} };
   await controller.pause(binding({
     run_state_revision: 8,
@@ -454,7 +540,7 @@ test("concurrent identical resumes join one queued transition", async () => {
       quiesceRun: async () => {},
     },
   });
-  controller.registry.start(binding());
+  await startReadyRun(controller);
   controller.roleAgents = { quiesceRun: async () => {} };
   await controller.pause(binding({
     run_state_revision: 8,
@@ -1034,6 +1120,90 @@ test("terminal cancel dominates an exact same-key retry after failed start clean
   assert.equal(retried.status, "rejected");
   assert.match(retried.reason.message, /cannot start from cancelled/);
   assert.equal(controller.registry.get("run-1").status, "cancelled");
+  assert.equal(createCalls, 1);
+  assert.equal(opens, 0);
+});
+
+test("failed start cleanup preserves another controller's same-key cancel tombstone", async () => {
+  const registry = new RuntimeRunRegistry();
+  const createEntered = deferred();
+  const releaseCreate = deferred();
+  const cancelDrainEntered = deferred();
+  const releaseCancelDrain = deferred();
+  let createCalls = 0;
+  let opens = 0;
+  const starter = new RuntimeController({}, {
+    registry,
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => { opens += 1; },
+    },
+  });
+  starter.roleAgents = {
+    createRoleAgent: async () => {
+      createCalls += 1;
+      if (createCalls === 1) {
+        createEntered.resolve();
+        await releaseCreate.promise;
+        throw new Error("deterministic external-cancel start failure");
+      }
+      return { dispose: async () => {} };
+    },
+    quiesceRun: async () => {},
+  };
+  const canceller = new RuntimeController({}, {
+    registry,
+    stageRunner: {
+      closeLaunchFence: () => {},
+      quiesceRun: async () => {
+        cancelDrainEntered.resolve();
+        await releaseCancelDrain.promise;
+      },
+    },
+  });
+  canceller.roleAgents = { quiesceRun: async () => {} };
+  const exactKey = "shared-external-start-cancel-key";
+  const startBinding = binding({
+    idempotency_key: exactKey,
+    binding: {
+      initial_run_status: "running",
+      strategy_model_id: "provider/model",
+      review_model_id: "provider/model",
+    },
+  });
+
+  const starting = outcome(starter.startRun(startBinding));
+  await createEntered.promise;
+  const cancelling = outcome(canceller.cancel(binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: exactKey,
+  })));
+  await cancelDrainEntered.promise;
+  assert.equal(registry.get("run-1").status, "cancelling");
+
+  releaseCreate.resolve();
+  const failedStart = await starting;
+  const retryWhileCancelling = await outcome(starter.startRun({
+    ...startBinding,
+    binding: { ...startBinding.binding },
+  }));
+  releaseCancelDrain.resolve();
+  const cancelled = await cancelling;
+  const retryAfterCancel = await outcome(starter.startRun({
+    ...startBinding,
+    binding: { ...startBinding.binding },
+  }));
+
+  assert.equal(failedStart.status, "rejected");
+  assert.match(failedStart.reason.message, /external-cancel start failure/);
+  assert.equal(retryWhileCancelling.status, "rejected");
+  assert.equal(retryWhileCancelling.reason.code, "runtime_start_transition_invalid");
+  assert.equal(cancelled.status, "fulfilled");
+  assert.equal(registry.get("run-1").status, "cancelled");
+  assert.equal(retryAfterCancel.status, "rejected");
+  assert.equal(retryAfterCancel.reason.code, "runtime_start_transition_invalid");
   assert.equal(createCalls, 1);
   assert.equal(opens, 0);
 });

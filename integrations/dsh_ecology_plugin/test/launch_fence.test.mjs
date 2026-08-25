@@ -38,6 +38,27 @@ function outcome(promise) {
   );
 }
 
+async function startReadyControllerRun(controller, startBinding) {
+  const stageRunner = controller.stageRunner;
+  const presetCatalog = controller.presetCatalog;
+  const roleAgents = controller.roleAgents;
+  controller.stageRunner = null;
+  controller.presetCatalog = [
+    { preset_id: "ecology-researcher-v7", tool_profile: "test" },
+  ];
+  controller.roleAgents = {
+    createRoleAgent: async () => ({ dispose: async () => {} }),
+    quiesceRun: async () => {},
+  };
+  try {
+    await controller.startRun(startBinding);
+  } finally {
+    controller.stageRunner = stageRunner;
+    controller.presetCatalog = presetCatalog;
+    controller.roleAgents = roleAgents;
+  }
+}
+
 function liveCapabilityContext({ beforeCreate = async () => {} } = {}) {
   const toolsByPreset = new Map(REALISTIC_PRESET_CATALOG.map((item) => [
     `standing:${item.preset_id}`,
@@ -273,7 +294,7 @@ function launchRaceHarness({ workflow = false } = {}) {
 test("pause closes the fence before a schema-blocked direct child can launch", { timeout: 2_000 }, async () => {
   const harness = launchRaceHarness();
   const first = stageBinding();
-  harness.registry.start(first);
+  await startReadyControllerRun(harness.controller, first);
   const stageOutcome = harness.controller.runStage(first).then(
     (value) => ({ value }),
     (error) => ({ error }),
@@ -311,7 +332,7 @@ test("pause closes the fence before a schema-blocked direct child can launch", {
 test("cancel closes the fence before a schema-blocked Workflow can launch", { timeout: 2_000 }, async () => {
   const harness = launchRaceHarness({ workflow: true });
   const first = stageBinding({ workflow: true });
-  harness.registry.start(first);
+  await startReadyControllerRun(harness.controller, first);
   const stageOutcome = harness.controller.runStage(first).then(
     (value) => ({ value }),
     (error) => ({ error }),

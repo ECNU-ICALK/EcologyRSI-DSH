@@ -687,3 +687,155 @@ passed `python -m py_compile`; `git diff --check` exited 0 without diagnostics.
   reviewed handshake race.
 - The pre-existing role-host `waitForIdle()` boundary remains unbounded, as
   documented in Rounds 1 and 2; this round does not alter that Host API contract.
+
+## Fix Round 4/5
+
+### Review findings resolved
+
+- Resume now requires controller-local role-host authority, not merely a shared
+  registry row. A locally finalized host set must be exactly `ready`; an
+  `unknown`, `failed`, or orphaned `creating` lifecycle rejects with
+  `runtime_role_hosts_incomplete`, retains the durable `paused` record, and
+  explicitly keeps launch admission closed. The only incomplete state allowed
+  to enter the queued resume path is `creating` with that controller's live
+  start token; after its finalization the same exact `ready` requirement is
+  enforced before the registry can become `running` or the fence can open.
+- Failed-start deletion is now a compare-and-delete against the exact frozen
+  registry record returned to that start. A same-key `cancelling` or
+  `cancelled` record written by another controller is a different authoritative
+  generation and can never be deleted by the failing controller's unchanged
+  local epoch. Retries remain rejected both while cancellation is draining and
+  after its terminal tombstone is installed.
+- The two deterministic regressions use two controllers and one injected
+  `RuntimeRunRegistry`. The resume repro first establishes a real finalized
+  restored-paused lifecycle on the owning controller, then proves a second
+  controller with unknown/orphaned-creating hosts cannot borrow that readiness.
+  The cleanup repro blocks the first role creation, installs an external
+  same-key cancellation, releases the primary failure, and proves no retry can
+  create a second host or open admission.
+- Existing control-order tests now establish their ready lifecycle through the
+  real `startRun()` path instead of treating a test-injected registry record as
+  evidence that role hosts exist. Their pause/resume, exact single-flight,
+  close-before-drain, and FIFO assertions are otherwise unchanged.
+
+### Round 4 RED evidence
+
+Both shared-registry repros failed deterministically before the controller
+change:
+
+```bash
+node --test \
+  --test-name-pattern='second controller cannot resume|another controller.s same-key cancel' \
+  integrations/dsh_ecology_plugin/test/cancel_race.test.mjs
+```
+
+```text
+tests 2
+pass 0
+fail 2
+
+a second controller cannot resume registry-only paused hosts
+  actual: fulfilled
+  expected: rejected
+
+failed start cleanup preserves another controller's same-key cancel tombstone
+  actual retry outcome: fulfilled
+  expected: rejected
+```
+
+The first failure proved that a registry-only paused row could become running
+and open the second controller's fence without local hosts. The second proved
+that matching a local epoch plus idempotency key allowed failed-start cleanup
+to erase an externally written cancelling record and admit a new start.
+
+### Round 4 GREEN evidence
+
+The two exact shared-registry regressions passed:
+
+```bash
+node --test \
+  --test-name-pattern='second controller cannot resume|another controller.s same-key cancel' \
+  integrations/dsh_ecology_plugin/test/cancel_race.test.mjs
+```
+
+```text
+tests 2
+pass 2
+fail 0
+```
+
+Focused controller, registry, launch-fence, restored-handshake, live-readiness,
+and control-order coverage passed:
+
+```bash
+node --test \
+  integrations/dsh_ecology_plugin/test/cancel_race.test.mjs \
+  integrations/dsh_ecology_plugin/test/launch_fence.test.mjs
+```
+
+```text
+tests 35
+pass 35
+fail 0
+```
+
+The complete plugin Node suite, including proxy security, passed:
+
+```bash
+node --test integrations/dsh_ecology_plugin/test/*.mjs
+```
+
+```text
+tests 144
+pass 144
+fail 0
+```
+
+The relevant Python restoration, real Python/Node handshake, reconciliation,
+and cancel-race suite passed:
+
+```bash
+uv run --with pytest --frozen python -m pytest -o addopts='' -q \
+  tests/test_dsh_native_runtime.py \
+  tests/test_dsh_reconciliation.py \
+  tests/test_dsh_cancel_race.py
+```
+
+```text
+24 passed
+```
+
+The changed JavaScript files passed `node --check`, and `git diff --check`
+exited 0 without diagnostics.
+
+### Round 4 self-review
+
+- A registry status is durable control intent; it is not proof that the current
+  controller owns live role hosts. The resume gate therefore reads only its
+  own lifecycle and fails closed before changing a registry-only paused row.
+- A genuinely live start remains resumable while creation is pending: resume
+  joins its finalization and opens only after `hosts === "ready"`. Existing
+  success, failure, stale cleanup, and restored-paused handshake tests cover
+  each branch, including the real six-preset Python/Node path.
+- Frozen registry object identity acts as the cleanup generation token. Every
+  transition produces a new object, so external cancelling/cancelled state,
+  even with the same raw idempotency key, supersedes the failed start and is
+  preserved without relying on another controller's private epoch.
+- Terminal start rejection remains before local single-flight and registry
+  idempotency handling. The new race proves both cancelling and cancelled
+  retries reject, while unchanged ordinary failed starts still delete their
+  own untouched record.
+- No provider FIFO/cooldown, lifecycle epoch ordering, live-readiness
+  reduction, stable child/Workflow drain, deadline finalization, durable
+  reconciliation, or ordinary-created behavior was changed. The full Node and
+  relevant Python suites exercise those adjacent paths.
+- No Python service, database, production port, current run, package install,
+  or external state was touched.
+
+### Round 4 concerns
+
+- No known correctness gap remains in the reviewed registry-authority resume
+  or cross-controller failed-start cleanup paths.
+- The pre-existing role-host `waitForIdle()` boundary remains unbounded, as
+  documented in Rounds 1 through 3; this round does not alter that Host API
+  contract.

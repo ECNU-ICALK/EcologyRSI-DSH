@@ -171,7 +171,7 @@ export class RuntimeController {
         const current = this.registry.get(binding.run_id);
         if (
           lifecycle.epoch === startToken.startEpoch
-          && current?.idempotency_key === startToken.accepted.idempotency_key
+          && current === startToken.accepted
         ) {
           this.registry.delete(binding.run_id);
         }
@@ -316,7 +316,13 @@ export class RuntimeController {
     if (!resumable) {
       return Promise.reject(this.#transitionError("resume", current.status));
     }
-    if (lifecycle.hosts === "failed") {
+    const liveCreatingStart = (
+      lifecycle.hosts === "creating"
+      && lifecycle.start !== null
+      && !lifecycle.start.finalized
+    );
+    if (lifecycle.hosts !== "ready" && !liveCreatingStart) {
+      this.stageRunner?.closeLaunchFence?.(binding.run_id);
       return Promise.reject(this.#hostsIncompleteError());
     }
     this.#advanceLifecycle(lifecycle, "resume");
@@ -325,7 +331,10 @@ export class RuntimeController {
     this.#mutation(binding, "resuming");
     return this.#queueControl(lifecycle, token, async () => {
       await this.#waitForStartFinalization(lifecycle);
-      if (lifecycle.hosts === "failed") throw this.#hostsIncompleteError();
+      if (lifecycle.hosts !== "ready") {
+        this.stageRunner?.closeLaunchFence?.(binding.run_id);
+        throw this.#hostsIncompleteError();
+      }
       const latest = this.#current(binding.run_id);
       if (
         lifecycle.terminalEpoch !== token.terminalEpoch
