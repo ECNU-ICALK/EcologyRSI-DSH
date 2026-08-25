@@ -19,6 +19,13 @@
   admitted or persisted.
 - Pause/cancel closes the launch fence before drain; no child/workflow may
   start after that fence is closed.
+- Sample-stage structured output is bound to Host-owned wave and sample
+  identities before child launch. A rejected output must not become a durable
+  accepted receipt, and only explicitly retryable missing/model output may use
+  the existing bounded fresh reservation retry.
+- Gateway retry is durable and bounded. Exhausting a breaker epoch safely
+  pauses the run with its checkpoint intact; it never retries forever and
+  never auto-resumes.
 - Promotion resampling uses ordered, non-circular contiguous three-day blocks
   and never bridges a calendar gap.
 - Production provider pacing remains 60 seconds. Test-only runtimes may use a
@@ -87,7 +94,52 @@ Introduce a synchronous per-run launch fence, re-check admission after the last
 preparatory await, and register pending work without another await. Drain to a
 stable empty state. Cover both child and workflow launch paths.
 
-## Task 4: Fail closed at the formal scientific boundary
+## Task 4: Bind sample structured output before durable acceptance
+
+Files:
+
+- `integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js`
+- `integrations/dsh_ecology_plugin/test/stage_runner.test.mjs`
+- `tests/test_dsh_sample_execution.py` for final fail-closed controls
+
+Add failing regressions for the two production contract failures: a wrong
+`wave_digest`, and a reflection that copies a prediction-cell ID instead of
+the outer origin sample ID. After schema cloning but before any launch,
+specialize all sample-stage schemas with the exact Host wave digest; bind
+plan/critic decision IDs to the Host sample-ID enum and bind reflection to the
+outer sample-ID const. Validate Host context locally and clarify the prompts.
+Normalize missing direct/Workflow structured output and allow it to consume
+only the existing two-attempt sample-stage retry budget. Prove the rejected
+first attempt writes zero accepted structured receipts, the second attempt uses
+a fresh reservation under the same absolute deadline, and infrastructure,
+control, authorization, timeout, or persistence errors are never retried. Do
+not rewrite model output or migrate an already accepted poison receipt.
+
+## Task 5: Bound gateway retries with a persistent circuit pause
+
+Files:
+
+- `src/ecologyrsi_dsh/api/auto_progress.py`
+- `src/ecologyrsi_dsh/core/director.py`
+- `src/ecologyrsi_dsh/core/state.py`
+- `src/ecologyrsi_dsh/api/projection.py`
+- `src/ecologyrsi_dsh/api/events.py`
+- focused auto-progress, state, projection, restart, and concurrency tests
+- narrowly required ecology-console rendering and command tests
+
+Add failing tests proving a permanently unavailable model gateway cannot
+remain schedulable forever. Replace best-effort, memory-first defer with one
+durable CAS decision that either schedules the next retry or writes a
+`RunPaused` circuit payload. Count logical orchestration failures in a scoped
+breaker epoch, deduplicate a stable failure ID, reset only on durable progress,
+generation advance, or explicit resume, and preserve the current checkpoint.
+Use a finite default of six consecutive model-gateway failures or 30 minutes,
+whichever occurs first. Resume begins a new epoch and retries the same
+checkpoint; it never skips the failed stage. Projection/UI must show the stable
+`gateway_retry_circuit_open` code, bounded count, stage, and
+`check_gateway_then_resume` action without exposing raw provider errors.
+
+## Task 6: Fail closed at the formal scientific boundary
 
 Files:
 
@@ -103,7 +155,7 @@ evidence for reservation and keep passing formal execution unavailable until a
 host-derived canonical assessment path is implemented. Preserve sealing and
 single-exposure semantics on all failures.
 
-## Task 5: Add an explicit quick-diagnostic launch mode
+## Task 7: Add an explicit quick-diagnostic launch mode
 
 Files:
 
@@ -126,10 +178,10 @@ diagnostic and at least 11.8 hours per generation / 59 hours for the default
 full preset at 177 origins, four candidates, and 60-second pacing). Treat the
 mode as a UI preset only: the server derives `sample_budget_class` from trusted
 numeric budgets. Label quick results as diagnostic-only with no champion,
-formal-best, selection, validation, or promotion claim. Depend on Task 4's
+formal-best, selection, validation, or promotion claim. Depend on Task 6's
 server-side formal fail-closed boundary before shipping this mode.
 
-## Task 6: Correct the legacy moving-block bootstrap
+## Task 8: Correct the legacy moving-block bootstrap
 
 Files:
 
@@ -142,13 +194,13 @@ calendar blocks and that no draw bridges a gap. Retain and validate unique
 sample ordered blocks rather than hash-sorted IDs. Return actual block length
 and legal-start count. Run focused promotion and fitness tests.
 
-## Task 7: Full source verification and review
+## Task 9: Full source verification and review
 
 Run the full Python suite, all plugin Node tests, browser smoke tests,
 `make verify`, and `git diff --check`. Request an independent whole-branch
 review; resolve every Critical or Important finding before runtime packaging.
 
-## Task 8: Rebuild and restart the production-port runtime
+## Task 10: Rebuild and restart the production-port runtime
 
 Package and install the updated DSH plugin into the existing DSH profile.
 Per operator direction, stop all other EcologyRSI project services and run
@@ -156,7 +208,7 @@ only ports 8777/8848. Preserve the existing event ledger, confirm sidecar
 health, DSH capabilities, plugin revision, and responsive archive/create
 commands before creating new work.
 
-## Task 9: Run and analyze fresh controlled evolutions
+## Task 11: Run and analyze fresh controlled evolutions
 
 Run one cucumber and one tomato diagnostic with one generation, one candidate,
 and nine cells. Monitor durable stage, child, retry, and progress events until
@@ -164,7 +216,7 @@ terminal state. If a run pauses or fails, diagnose from the first causal error,
 add a failing regression test, fix, rebuild, and rerun. Both runs must pass
 `scripts/dsh_native_e2e_acceptance.py` and end without promotion.
 
-## Task 10: Final verification and handoff
+## Task 12: Final verification and handoff
 
 Re-run the complete verification set on the exact code/package used by the
 successful runs. Audit run duration, retries, model/tool calls, candidate

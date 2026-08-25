@@ -22,6 +22,14 @@ branch as stable:
    while DSH quiescence or the generation barrier waits. One pending pause
    then makes unrelated archive/create requests hit the proxy's 30-second
    timeout and appear as a service outage.
+6. The DSH-compatible schema subset discards static string-pattern and length
+   constraints. A sample reflection can therefore persist a wrong wave digest
+   or a prediction-cell ID before Python detects the Host-identity mismatch and
+   fails the whole candidate.
+7. Retryable gateway failure is deferred before the ordinary worker retry
+   limit and re-enters with that local counter reset. The durable attempt count
+   controls only backoff, so a run can remain scheduled forever at the
+   five-minute delay cap.
 
 The review also found that the legacy promotion helper advertises a paired
 moving-block bootstrap while sampling independent single-day blocks in hash
@@ -44,6 +52,10 @@ budget needs an explicit diagnostic-only UI preset and honest evidence labels.
   creation, child result settlement, validation, and persistence admission.
 - Close a run's child-launch fence synchronously before pause/cancel drains
   outstanding work.
+- Bind every sample-stage structured result to Host-owned wave and sample
+  identities before launch and before any accepted receipt can be persisted.
+- Convert unbounded gateway defer into a durable, finite, checkpoint-preserving
+  circuit pause with an explicit operator recovery action.
 - Keep diagnostic runs structurally unable to reserve or pass a formal stage.
 - Do not allow a formal pass until a host-derived canonical formal assessment
   and its frozen UQ bindings are integrated.
@@ -67,6 +79,10 @@ budget needs an explicit diagnostic-only UI preset and honest evidence labels.
 - It does not add synthetic progress percentages or billing-token claims.
 - It does not trust a caller-supplied mode or budget-class label; the server
   continues deriving scientific eligibility from numeric budget evidence.
+- It does not rewrite model output, broaden the DSH schema dialect, or migrate
+  a historically accepted invalid structured receipt.
+- It does not automatically resume a circuit-paused run or classify a
+  transient gateway outage as candidate scientific failure.
 
 ## Design
 
@@ -93,7 +109,41 @@ and registers itself as pending without an intervening await. Draining then
 waits for a stable pending set. Releasing an earlier schema/reservation await
 after pause cannot start a child or workflow.
 
-### 4. Formal stage fail-closed boundary
+### 4. Host-bound sample structured contracts
+
+The Host specializes the already cloned schema after validating the structured
+stage context and before launching any child or Workflow. All sample stages
+receive an exact `wave_digest` const. Plan and critic decisions receive the
+exact outer sample-ID enum; reflection receives the single outer
+`context.sample.sample_id` const and must never substitute a prediction-cell
+ID. Prompts state the same copy-exactly rule.
+
+A schema-rejected or missing sample result is not persisted. It may consume the
+existing bounded fresh-reservation retry under the same absolute stage
+deadline. Control, timeout, authorization, infrastructure, and persistence
+errors are not output retries. Python retains its final fail-closed contract
+checks, and an already durable invalid receipt is never ignored or repaired in
+place.
+
+### 5. Persistent bounded gateway circuit
+
+Gateway defer is a durable state decision, not an in-memory timer followed by a
+best-effort heartbeat. Under an optimistic SQLite sequence check, the director
+either appends the next scoped `GatewayRetryScheduled` event or atomically
+transitions the run to `RunPaused` with code
+`gateway_retry_circuit_open`. A stable failure identity prevents duplicate
+workers from counting the same logical failure twice.
+
+The model-gateway breaker opens after six consecutive orchestration-level
+failures or 30 minutes in one epoch, whichever occurs first. Durable progress,
+generation advance, or explicit resume starts a new epoch; stage-start events
+do not. Circuit pause preserves generation, candidate, and sample checkpoints,
+does not create candidate/run failure, and cannot wake itself. Explicit resume
+retries the same checkpoint and the UI explains
+`check_gateway_then_resume`. Provider response bodies and raw exception text
+remain private.
+
+### 6. Formal stage fail-closed boundary
 
 Formal reservation requires a selection-eligible budget and a legitimate
 locked selection incumbent. Diagnostic smoke runs are rejected before any
@@ -103,7 +153,7 @@ UQ artifact, and canonical `FormalFitnessAssessment` are wired together, a
 formal pass remains explicitly unavailable. Event replay also refuses a
 `passed` completion that lacks the canonical assessment bindings.
 
-### 5. Explicit quick diagnostic and full-run cost boundary
+### 7. Explicit quick diagnostic and full-run cost boundary
 
 The web console presents two explicit presets. Quick diagnostic launches one
 generation, one candidate, one origin/nine prediction cells, concurrency one,
@@ -117,10 +167,10 @@ The console derives a lower-bound duration estimate from the selected origin
 count, candidate count, generation count, and the fixed 60-second provider
 pacing. It explains that model latency and retries add to that bound. The mode
 is UI convenience only: launch requests send numeric budgets, while the server
-derives `sample_budget_class` and enforces formal eligibility. Task 4's formal
+derives `sample_budget_class` and enforces formal eligibility. Task 6's formal
 fail-closed boundary is a prerequisite.
 
-### 6. Ordered moving-block bootstrap
+### 8. Ordered moving-block bootstrap
 
 Validated promotion evidence retains a unique integer
 `origin_block_index`. Candidate and incumbent indices must match exactly.
@@ -129,7 +179,7 @@ calendar gap, and truncate to the paired cohort size. Evidence with too few
 paired days or legal starts fails closed. Returned metadata records block
 length and legal-start count in addition to the versioned method.
 
-### 7. Bounded global mutation-lock scope
+### 9. Bounded global mutation-lock scope
 
 The HTTP dispatcher treats native pause/cancel as potentially long-running
 control operations, just as it already treats generation advancement. The
@@ -146,6 +196,13 @@ without blocking unrelated runs.
   abort-ignoring child both return the operational-timeout classification.
 - A schema-blocked stage released after pause starts zero children and the
   control operation returns without waiting for a stage timeout.
+- Wrong sample wave/outer IDs are rejected by the specialized child schema,
+  write zero accepted receipts on the first attempt, and can recover only via
+  the bounded fresh-reservation sample retry.
+- A permanently unavailable gateway reaches a durable circuit pause within six
+  logical failures or 30 minutes; restart preserves the decision, explicit
+  resume restarts the epoch at the same checkpoint, and duplicate workers do
+  not double-count one failure.
 - Diagnostic formal reservation and `lambda: {"outcome": "passed"}` are
   rejected without setting validated/final-test candidate state.
 - The default web launch request is exactly 1 × 1 × 9 with both concurrencies
