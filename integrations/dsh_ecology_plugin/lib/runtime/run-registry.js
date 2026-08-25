@@ -7,7 +7,23 @@ export class RuntimeRunRegistry {
       throw new Error("run already has a different active command");
     }
     const requestedStatus = binding?.binding?.initial_run_status || "created";
-    if (!["created", "running"].includes(requestedStatus)) {
+    const provenance = binding?.binding?.restore_provenance;
+    const exactRestore = (
+      provenance !== null
+      && typeof provenance === "object"
+      && !Array.isArray(provenance)
+      && Object.keys(provenance).length === 2
+      && provenance.source === "python_durable_ledger"
+      && provenance.status === requestedStatus
+      && binding.idempotency_key === `runtime-restore:${binding.run_id}`
+    );
+    if (
+      (provenance !== undefined && !exactRestore)
+      || (
+        !["created", "running"].includes(requestedStatus)
+        && !(requestedStatus === "paused" && exactRestore)
+      )
+    ) {
       throw new Error("invalid initial runtime run status");
     }
     const frozen = Object.freeze({ ...binding, status: requestedStatus });

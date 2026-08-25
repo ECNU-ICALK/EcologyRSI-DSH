@@ -2919,6 +2919,9 @@ class EvolutionRequestHandler(
                     latest_run_revision = (
                         int(state.events[-1].seq) if state.events else 0
                     )
+                    restored_status = state.run.status.value
+                    if restored_status not in {"created", "running", "paused"}:
+                        restored_status = "created"
                     runtime.create_run(
                         {
                             "run_id": target_run_id,
@@ -2928,11 +2931,11 @@ class EvolutionRequestHandler(
                             "idempotency_key": f"runtime-restore:{target_run_id}",
                             "binding": {
                                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
-                                "initial_run_status": (
-                                    "running"
-                                    if state.run.status.value == "running"
-                                    else "created"
-                                ),
+                                "initial_run_status": restored_status,
+                                "restore_provenance": {
+                                    "source": "python_durable_ledger",
+                                    "status": restored_status,
+                                },
                                 "task_manifest_digest": task.digest,
                                 "preset_catalog_digest": metadata.get(
                                     "dsh_preset_catalog_digest"

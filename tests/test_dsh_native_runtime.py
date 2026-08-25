@@ -509,6 +509,13 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             state.task_manifest.digest,
         )
         self.assertEqual(restored["binding"]["initial_run_status"], "created")
+        self.assertEqual(
+            restored["binding"]["restore_provenance"],
+            {
+                "source": "python_durable_ledger",
+                "status": "created",
+            },
+        )
 
     def test_resume_restores_a_paused_native_run_after_dsh_restart(self) -> None:
         runtime = _FakeNativeRuntime()
@@ -546,6 +553,17 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertEqual(payload["projection"]["status"], "running")
         self.assertEqual(runtime.run_ids, {run_id})
         self.assertEqual(runtime.created[-1]["idempotency_key"], f"runtime-restore:{run_id}")
+        self.assertEqual(
+            runtime.created[-1]["binding"]["initial_run_status"],
+            "paused",
+        )
+        self.assertEqual(
+            runtime.created[-1]["binding"]["restore_provenance"],
+            {
+                "source": "python_durable_ledger",
+                "status": "paused",
+            },
+        )
         self.assertEqual(runtime.resumed[-1]["run_id"], run_id)
 
     def test_started_native_run_opens_runtime_admission_at_creation(self) -> None:

@@ -181,28 +181,43 @@ export class PendingChildStarts {
     if (!record) return Promise.resolve();
     record.controller.abort();
     if (record.kind !== "workflow" || !record.result?.cancel) return Promise.resolve();
-    if (record.cancelPromise === null) {
-      try {
-        record.cancelPromise = Promise.resolve(record.result.cancel(reason));
-      } catch (error) {
-        record.cancelPromise = Promise.reject(error);
-      }
-      record.cancelPromise.catch(() => {});
-    }
-    return record.cancelPromise;
+    return this.#memoizedCleanup(
+      record,
+      "cancelPromise",
+      () => record.result.cancel(reason),
+    );
   }
 
   dispose(record) {
     if (!record?.result?.dispose) return Promise.resolve();
-    if (record.disposePromise === null) {
-      try {
-        record.disposePromise = Promise.resolve(record.result.dispose());
-      } catch (error) {
-        record.disposePromise = Promise.reject(error);
+    return this.#memoizedCleanup(
+      record,
+      "disposePromise",
+      () => record.result.dispose(),
+    );
+  }
+
+  #memoizedCleanup(record, field, operation) {
+    if (record[field] !== null) return record[field];
+    let resolveCleanup;
+    let rejectCleanup;
+    const inFlight = new Promise((resolve, reject) => {
+      resolveCleanup = resolve;
+      rejectCleanup = reject;
+    });
+    inFlight.catch(() => {});
+    record[field] = inFlight;
+    try {
+      const external = operation();
+      if (external === inFlight) {
+        resolveCleanup();
+      } else {
+        Promise.resolve(external).then(resolveCleanup, rejectCleanup);
       }
-      record.disposePromise.catch(() => {});
+    } catch (error) {
+      rejectCleanup(error);
     }
-    return record.disposePromise;
+    return inFlight;
   }
 
   quiesce(record, reason = "run quiescing") {

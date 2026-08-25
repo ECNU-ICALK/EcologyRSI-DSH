@@ -53,17 +53,52 @@ export class RoleAgentManager {
   }
 
   async quiesceRun(runId, { dispose = false } = {}) {
-    const selected = [...this.handles.entries()].filter(
-      ([_key, handle]) => handle.binding.run_id === runId,
-    );
-    for (const [_key, handle] of selected) {
-      await handle.agent?.waitForIdle?.();
-      await handle.agent?.session?.flush?.();
+    const failures = [];
+    const processed = new Set();
+    const prefix = `${runId}\u0000`;
+    while (true) {
+      const pending = [...this.pending.entries()]
+        .filter(([key]) => key.startsWith(prefix))
+        .map(([_key, promise]) => promise);
+      if (pending.length) await Promise.allSettled(pending);
+
+      const selected = [...this.handles.entries()].filter(
+        ([_key, handle]) => (
+          handle.binding.run_id === runId
+          && !processed.has(handle)
+        ),
+      );
+      for (const [_key, handle] of selected) processed.add(handle);
+      const quiesced = await Promise.allSettled(selected.map(async ([_key, handle]) => {
+        const idle = await Promise.allSettled([
+          Promise.resolve().then(() => handle.agent?.waitForIdle?.()),
+        ]);
+        const flushed = await Promise.allSettled([
+          Promise.resolve().then(() => handle.agent?.session?.flush?.()),
+        ]);
+        const failed = [...idle, ...flushed].find((item) => item.status === "rejected");
+        if (failed) throw failed.reason;
+      }));
+      for (const item of quiesced) {
+        if (item.status === "rejected") failures.push(item.reason);
+      }
+      if (dispose) {
+        const disposed = await Promise.allSettled(
+          selected.map(([_key, handle]) => Promise.resolve().then(() => handle.dispose())),
+        );
+        for (const [key] of selected) this.handles.delete(key);
+        for (const item of disposed) {
+          if (item.status === "rejected") failures.push(item.reason);
+        }
+      }
+
+      const hasPending = [...this.pending.keys()].some((key) => key.startsWith(prefix));
+      const hasUnprocessed = [...this.handles.values()].some(
+        (handle) => handle.binding.run_id === runId && !processed.has(handle),
+      );
+      if (!hasPending && !hasUnprocessed) break;
     }
-    if (dispose) {
-      await Promise.all(selected.map(([_key, handle]) => handle.dispose()));
-      for (const [key] of selected) this.handles.delete(key);
-    }
+    if (failures.length) throw failures[0];
   }
 
   async resumeRoleAgent(binding) {
@@ -120,7 +155,7 @@ export class RoleAgentManager {
       this.handles.set(key, handle);
       return handle;
     } catch (error) {
-      await rawHandle?.dispose?.();
+      try { await rawHandle?.dispose?.(); } catch {}
       throw error;
     }
   }
@@ -169,7 +204,7 @@ export class RoleAgentManager {
       this.handles.set(key, handle);
       return handle;
     } catch (error) {
-      await rawHandle?.dispose?.();
+      try { await rawHandle?.dispose?.(); } catch {}
       throw error;
     }
   }

@@ -42,6 +42,47 @@ test("runtime creation freezes the Python-owned initial run status", () => {
     ),
     /invalid initial runtime run status/,
   );
+  const restored = new RuntimeRunRegistry();
+  restored.start(binding({
+    idempotency_key: "runtime-restore:run-1",
+    binding: {
+      initial_run_status: "paused",
+      restore_provenance: {
+        source: "python_durable_ledger",
+        status: "paused",
+      },
+    },
+  }));
+  assert.equal(restored.get("run-1").status, "paused");
+  assert.throws(
+    () => new RuntimeRunRegistry().start(binding({
+      binding: {
+        initial_run_status: "paused",
+        restore_provenance: {
+          source: "python_durable_ledger",
+          status: "running",
+        },
+      },
+    })),
+    /invalid initial runtime run status/,
+  );
+});
+
+test("ordinary created runs cannot enter the restored-paused resume path", async () => {
+  let opens = 0;
+  const controller = new RuntimeController({}, {
+    stageRunner: { openLaunchFence: () => { opens += 1; } },
+  });
+  controller.registry.start(binding({
+    binding: { initial_run_status: "created" },
+  }));
+
+  await assert.rejects(
+    controller.resume(binding({ idempotency_key: "ordinary-created-resume-1" })),
+    /cannot resume from created/,
+  );
+  assert.equal(controller.registry.get("run-1").status, "created");
+  assert.equal(opens, 0);
 });
 
 test("cancel closes runtime admission before child and role-host quiescence", async () => {
@@ -335,6 +376,112 @@ test("a cancel retry reruns a failed cancelling drain and reaches terminal state
   assert.equal(controller.registry.get("run-1").status, "cancelled");
 });
 
+test("an exact pause retry reruns a rejected drain and reaches paused", async () => {
+  let drains = 0;
+  const controller = new RuntimeController({}, {
+    stageRunner: {
+      closeLaunchFence: () => {},
+      quiesceRun: async () => {
+        drains += 1;
+        if (drains === 1) throw new Error("private first pause drain failure");
+      },
+    },
+  });
+  controller.registry.start(binding());
+  controller.roleAgents = { quiesceRun: async () => {} };
+  const pauseBinding = binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: "retryable-pause-1",
+  });
+
+  await assert.rejects(controller.pause(pauseBinding), /private first pause drain failure/);
+  assert.equal(controller.registry.get("run-1").status, "pausing");
+
+  const retried = await controller.pause(pauseBinding);
+
+  assert.equal(retried.accepted, true);
+  assert.equal(drains, 2);
+  assert.equal(controller.registry.get("run-1").status, "paused");
+});
+
+test("resume followed synchronously by pause serializes both controls and stays fenced", async () => {
+  let drains = 0;
+  let opens = 0;
+  const controller = new RuntimeController({}, {
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => { opens += 1; },
+      quiesceRun: async () => { drains += 1; },
+    },
+  });
+  controller.registry.start(binding());
+  controller.roleAgents = { quiesceRun: async () => {} };
+  await controller.pause(binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: "initial-pause-1",
+  }));
+  const resumeBinding = binding({
+    run_state_revision: 9,
+    ledger_expected_revision: 13,
+    idempotency_key: "resume-before-repause-1",
+  });
+  const repauseBinding = binding({
+    run_state_revision: 10,
+    ledger_expected_revision: 14,
+    idempotency_key: "pause-after-resume-1",
+  });
+
+  const resuming = controller.resume(resumeBinding);
+  assert.equal(controller.registry.get("run-1").status, "resuming");
+  const repausing = controller.pause(repauseBinding);
+  const results = await Promise.all([outcome(resuming), outcome(repausing)]);
+
+  assert.deepEqual(results.map((item) => item.status), ["fulfilled", "fulfilled"]);
+  assert.equal(drains, 2);
+  assert.equal(opens, 0);
+  assert.equal(controller.registry.get("run-1").status, "paused");
+  assert.equal(controller.registry.get("run-1").idempotency_key, "pause-after-resume-1");
+});
+
+test("concurrent identical resumes join one queued transition", async () => {
+  let opens = 0;
+  const controller = new RuntimeController({}, {
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => { opens += 1; },
+      quiesceRun: async () => {},
+    },
+  });
+  controller.registry.start(binding());
+  controller.roleAgents = { quiesceRun: async () => {} };
+  await controller.pause(binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: "pause-before-identical-resumes-1",
+  }));
+  const resumeBinding = binding({
+    run_state_revision: 9,
+    ledger_expected_revision: 13,
+    idempotency_key: "identical-resume-1",
+  });
+
+  const first = controller.resume(resumeBinding);
+  assert.equal(controller.registry.get("run-1").status, "resuming");
+  const second = controller.resume({ ...resumeBinding });
+  assert.strictEqual(second, first);
+  const results = await Promise.all([outcome(first), outcome(second)]);
+
+  assert.deepEqual(results.map((item) => item.status), ["fulfilled", "fulfilled"]);
+  assert.deepEqual(results.map((item) => item.value.idempotency_key), [
+    "identical-resume-1",
+    "identical-resume-1",
+  ]);
+  assert.equal(opens, 1);
+  assert.equal(controller.registry.get("run-1").status, "running");
+});
+
 test("terminal cancel supersedes an already queued resume without an open window", async () => {
   const pauseDrainEntered = deferred();
   const releasePauseDrain = deferred();
@@ -388,6 +535,297 @@ test("terminal cancel supersedes an already queued resume without an open window
   assert.equal(drains, 2);
 });
 
+test("start failure preserves its primary error while cleanup closes and deletes the run", async () => {
+  const calls = [];
+  const ctx = {
+    agents: {
+      create: async (options) => {
+        const role = options.meta.ecologyRole;
+        calls.push(["create", role]);
+        if (role === "researcher") throw new Error("primary researcher creation failure");
+        return {
+          agent: {
+            session: {
+              append: async () => {},
+              flush: async () => {},
+            },
+            waitForIdle: async () => {},
+          },
+          dispose: async () => {
+            calls.push(["dispose", role]);
+            throw new Error("private cleanup failure");
+          },
+        };
+      },
+    },
+    agentPresets: {
+      standingKeyFor: async (presetId) => `standing:${presetId}`,
+      mount: async (_agentCtx, presetId) => ({ id: presetId }),
+      serviceFor: async () => ({ ready: true }),
+    },
+  };
+  const controller = new RuntimeController(ctx, {
+    presetCatalog: [
+      { preset_id: "ecology-researcher-v7", tool_profile: "test" },
+      { preset_id: "ecology-candidate-proposer-v4", tool_profile: "test" },
+    ],
+    stageRunner: {
+      closeLaunchFence: () => calls.push(["close"]),
+      openLaunchFence: () => calls.push(["open"]),
+    },
+  });
+
+  const result = await outcome(controller.startRun(binding({
+    binding: {
+      initial_run_status: "running",
+      strategy_model_id: "provider/model",
+      review_model_id: "provider/model",
+    },
+    idempotency_key: "atomic-start-failure-1",
+  })));
+
+  assert.equal(result.status, "rejected");
+  assert.match(result.reason.message, /primary researcher creation failure/);
+  assert.equal(controller.registry.get("run-1"), null);
+  assert.equal(calls.filter(([name]) => name === "dispose").length, 1);
+  assert.equal(calls.filter(([name]) => name === "open").length, 0);
+  assert.ok(calls.filter(([name]) => name === "close").length >= 1);
+});
+
+test("failed restored-paused start is deleted when no control supersedes it", async () => {
+  let opens = 0;
+  const controller = new RuntimeController({}, {
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => { opens += 1; },
+    },
+  });
+  controller.roleAgents = {
+    createRoleAgent: async () => {
+      throw new Error("restored role-host creation failure");
+    },
+    quiesceRun: async () => {},
+  };
+
+  const result = await outcome(controller.startRun(binding({
+    idempotency_key: "runtime-restore:run-1",
+    binding: {
+      initial_run_status: "paused",
+      restore_provenance: {
+        source: "python_durable_ledger",
+        status: "paused",
+      },
+    },
+  })));
+
+  assert.equal(result.status, "rejected");
+  assert.match(result.reason.message, /restored role-host creation failure/);
+  assert.equal(controller.registry.get("run-1"), null);
+  assert.equal(opens, 0);
+});
+
+test("pause joins a failing start cleanup and failed hosts can never resume", async () => {
+  const createEntered = deferred();
+  const releaseCreate = deferred();
+  let opens = 0;
+  const ctx = {
+    agents: {
+      create: async () => {
+        createEntered.resolve();
+        return await releaseCreate.promise;
+      },
+    },
+    agentPresets: {
+      standingKeyFor: async (presetId) => `standing:${presetId}`,
+      mount: async (_agentCtx, presetId) => ({ id: presetId }),
+      serviceFor: async () => ({ ready: true }),
+    },
+  };
+  const controller = new RuntimeController(ctx, {
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => { opens += 1; },
+      quiesceRun: async () => {},
+    },
+  });
+  const starting = outcome(controller.startRun(binding({
+    binding: {
+      initial_run_status: "running",
+      strategy_model_id: "provider/model",
+      review_model_id: "provider/model",
+    },
+    idempotency_key: "pause-start-failure-1",
+  })));
+  await createEntered.promise;
+
+  let pauseSettled = false;
+  const pausing = outcome(controller.pause(binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: "pause-during-start-failure-1",
+  }))).finally(() => { pauseSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  const pauseSettledBeforeCreate = pauseSettled;
+  releaseCreate.reject(new Error("primary late creation failure"));
+
+  const [startResult, pauseResult] = await Promise.all([starting, pausing]);
+  const resumeResult = await outcome(controller.resume(binding({
+    run_state_revision: 9,
+    ledger_expected_revision: 13,
+    idempotency_key: "resume-after-start-failure-1",
+  })));
+
+  assert.equal(pauseSettledBeforeCreate, false);
+  assert.equal(startResult.status, "rejected");
+  assert.match(startResult.reason.message, /primary late creation failure/);
+  assert.equal(pauseResult.status, "fulfilled");
+  assert.equal(controller.registry.get("run-1").status, "paused");
+  assert.equal(resumeResult.status, "rejected");
+  assert.equal(resumeResult.reason.code, "runtime_role_hosts_incomplete");
+  assert.equal(opens, 0);
+});
+
+test("queued resume rejected by a failing start leaves the completed pause durable", async () => {
+  const createEntered = deferred();
+  const releaseCreate = deferred();
+  let opens = 0;
+  const controller = new RuntimeController({}, {
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => { opens += 1; },
+      quiesceRun: async () => {},
+    },
+  });
+  controller.roleAgents = {
+    createRoleAgent: async () => {
+      createEntered.resolve();
+      return await releaseCreate.promise;
+    },
+    quiesceRun: async () => {},
+  };
+
+  const starting = outcome(controller.startRun(binding({
+    binding: {
+      initial_run_status: "running",
+      strategy_model_id: "provider/model",
+      review_model_id: "provider/model",
+    },
+    idempotency_key: "queued-resume-failing-start-1",
+  })));
+  await createEntered.promise;
+  const pausing = outcome(controller.pause(binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: "pause-before-failing-start-resume-1",
+  })));
+  const resuming = outcome(controller.resume(binding({
+    run_state_revision: 9,
+    ledger_expected_revision: 13,
+    idempotency_key: "resume-queued-before-start-failure-1",
+  })));
+
+  releaseCreate.reject(new Error("late role-host creation failure"));
+  const [startResult, pauseResult, resumeResult] = await Promise.all([
+    starting,
+    pausing,
+    resuming,
+  ]);
+
+  assert.equal(startResult.status, "rejected");
+  assert.equal(pauseResult.status, "fulfilled");
+  assert.equal(resumeResult.status, "rejected");
+  assert.equal(resumeResult.reason.code, "runtime_role_hosts_incomplete");
+  assert.equal(controller.registry.get("run-1").status, "paused");
+  assert.equal(opens, 0);
+});
+
+test("identical starts are one flight and resume waits for every stale cleanup", async () => {
+  const createEntered = deferred();
+  const releaseCreate = deferred();
+  const cleanupEntered = deferred();
+  const releaseCleanup = deferred();
+  let createCalls = 0;
+  let cleanupCalls = 0;
+  let opens = 0;
+  const controller = new RuntimeController({}, {
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => { opens += 1; },
+      quiesceRun: async () => {},
+    },
+  });
+  controller.roleAgents = {
+    createRoleAgent: async () => {
+      createCalls += 1;
+      createEntered.resolve();
+      await releaseCreate.promise;
+      return { dispose: async () => {} };
+    },
+    quiesceRun: async () => {
+      cleanupCalls += 1;
+      cleanupEntered.resolve();
+      await releaseCleanup.promise;
+    },
+  };
+  const startBinding = binding({
+    binding: {
+      initial_run_status: "running",
+      strategy_model_id: "provider/model",
+      review_model_id: "provider/model",
+    },
+    idempotency_key: "concurrent-start-1",
+  });
+
+  const firstStart = controller.startRun(startBinding);
+  const secondStart = controller.startRun({
+    ...startBinding,
+    binding: { ...startBinding.binding },
+  });
+  assert.strictEqual(secondStart, firstStart);
+  await createEntered.promise;
+  const pausing = controller.pause(binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: "pause-two-starts-1",
+  }));
+  const resuming = controller.resume(binding({
+    run_state_revision: 9,
+    ledger_expected_revision: 13,
+    idempotency_key: "resume-two-starts-1",
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const cleanupCallsBeforeCreateRelease = cleanupCalls;
+
+  releaseCreate.resolve();
+  await cleanupEntered.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(opens, 0);
+  releaseCleanup.resolve();
+
+  const results = await Promise.all([
+    outcome(firstStart),
+    outcome(secondStart),
+    outcome(pausing),
+    outcome(resuming),
+  ]);
+
+  assert.deepEqual(results.map((item) => item.status), [
+    "fulfilled",
+    "fulfilled",
+    "fulfilled",
+    "fulfilled",
+  ]);
+  assert.equal(createCalls, 1);
+  assert.equal(cleanupCallsBeforeCreateRelease, 0);
+  assert.equal(cleanupCalls, 2);
+  assert.equal(opens, 1);
+  assert.equal(controller.registry.get("run-1").status, "running");
+});
+
 for (const control of ["pause", "cancel"]) {
   test(`stale startRun completion after ${control} cannot reopen and is quiesced`, async () => {
     const createEntered = deferred();
@@ -429,17 +867,21 @@ for (const control of ["pause", "cancel"]) {
       ledger_expected_revision: 12,
       idempotency_key: `${control}-during-start-1`,
     }));
-    await controlling;
+    let controlSettled = false;
+    void controlling.finally(() => { controlSettled = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(controlSettled, false);
     releaseCreate.resolve();
-    await starting;
+    await Promise.all([starting, controlling]);
 
     assert.equal(
       controller.registry.get("run-1").status,
       control === "cancel" ? "cancelled" : "paused",
     );
-    assert.deepEqual(calls, [
-      ["close"],
-      ["hosts", control === "cancel", false],
+    assert.equal(calls.filter(([name]) => name === "close").length, 2);
+    assert.equal(calls.some(([name]) => name === "open"), false);
+    assert.deepEqual(calls.filter(([name]) => name === "hosts"), [
+      ["hosts", control === "cancel", true],
       ["hosts", control === "cancel", true],
     ]);
     assert.equal(controller.liveReady, false);
@@ -481,21 +923,22 @@ test("stale failing startRun preserves terminal cancellation and disposes late h
     idempotency_key: "failing-start-with-cancel-race-1",
   })));
   await createEntered.promise;
-  await controller.cancel(binding({
+  const cancelling = controller.cancel(binding({
     run_state_revision: 8,
     ledger_expected_revision: 12,
     idempotency_key: "cancel-during-failing-start-1",
   }));
   releaseCreate.reject(new Error("private role creation failure"));
 
-  const startOutcome = await starting;
+  const [startOutcome] = await Promise.all([starting, cancelling]);
 
   assert.equal(startOutcome.status, "rejected");
   assert.match(startOutcome.reason.message, /private role creation failure/);
   assert.equal(controller.registry.get("run-1").status, "cancelled");
-  assert.deepEqual(calls, [
-    ["close"],
-    ["hosts", true, false],
+  assert.ok(calls.filter(([name]) => name === "close").length >= 2);
+  assert.equal(calls.some(([name]) => name === "open"), false);
+  assert.deepEqual(calls.filter(([name]) => name === "hosts"), [
+    ["hosts", true, true],
     ["hosts", true, true],
   ]);
 });
@@ -533,7 +976,7 @@ test("resume waits for stale startRun cleanup before reopening admission", async
     idempotency_key: "start-before-pause-resume-1",
   }));
   await createEntered.promise;
-  await controller.pause(binding({
+  const pausing = controller.pause(binding({
     run_state_revision: 8,
     ledger_expected_revision: 12,
     idempotency_key: "pause-during-start-before-resume-1",
@@ -550,15 +993,15 @@ test("resume waits for stale startRun cleanup before reopening admission", async
   assert.equal(calls.some(([name]) => name === "open"), false);
 
   releaseCreate.resolve();
-  await Promise.all([starting, resuming]);
+  await Promise.all([starting, pausing, resuming]);
 
   assert.equal(controller.registry.get("run-1").status, "running");
-  assert.deepEqual(calls, [
-    ["close"],
-    ["hosts", false, false],
+  assert.equal(calls.filter(([name]) => name === "close").length, 2);
+  assert.deepEqual(calls.filter(([name]) => name === "hosts"), [
     ["hosts", false, true],
-    ["open"],
+    ["hosts", false, true],
   ]);
+  assert.equal(calls.filter(([name]) => name === "open").length, 1);
 });
 
 test("late concurrent stage completion cannot reopen a paused run", async () => {

@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 import { RuntimeRunRegistry } from "./run-registry.js";
 import { runtimeCapabilities } from "./capabilities.js";
 import { RoleAgentManager } from "./agents.js";
@@ -20,8 +22,10 @@ const DEFAULT_PRESETS = Object.freeze([
 
 const START_OPEN_STATUSES = Object.freeze(["created", "running"]);
 const CONTROL_TRANSITIONS = Object.freeze({
-  pause: Object.freeze(["created", "running"]),
-  cancel: Object.freeze(["created", "running", "pausing", "paused", "cancelling"]),
+  pause: Object.freeze(["created", "running", "pausing", "resuming"]),
+  cancel: Object.freeze([
+    "created", "running", "pausing", "paused", "resuming", "cancelling",
+  ]),
   resume: Object.freeze(["pausing", "paused"]),
 });
 
@@ -64,21 +68,45 @@ export class RuntimeController {
     };
   }
 
-  async startRun(binding) {
-    const accepted = this.registry.start(binding);
+  startRun(binding) {
     const lifecycle = this.#lifecycle(binding.run_id);
-    const startEpoch = lifecycle.epoch;
-    let releaseStart;
-    const startSettlement = new Promise((resolve) => { releaseStart = resolve; });
-    const startToken = { promise: startSettlement };
-    lifecycle.start = startToken;
-    let startReleased = false;
-    const settleStart = () => {
-      if (startReleased) return;
-      startReleased = true;
-      releaseStart();
-      if (lifecycle.start === startToken) lifecycle.start = null;
+    if (lifecycle.start !== null) {
+      if (isDeepStrictEqual(lifecycle.start.binding, binding)) {
+        return lifecycle.start.promise;
+      }
+      const error = new Error("run already has a different start command");
+      error.code = "runtime_start_conflict";
+      return Promise.reject(error);
+    }
+    let accepted;
+    try {
+      accepted = this.registry.start(binding);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    let releaseFinalization;
+    const finalization = new Promise((resolve) => { releaseFinalization = resolve; });
+    const startToken = {
+      binding: structuredClone(binding),
+      accepted,
+      startEpoch: lifecycle.epoch,
+      promise: null,
+      finalization,
+      releaseFinalization,
+      finalized: false,
+      status: "pending",
     };
+    lifecycle.start = startToken;
+    lifecycle.hosts = "creating";
+    this.stageRunner?.closeLaunchFence?.(binding.run_id);
+    startToken.promise = Promise.resolve().then(
+      () => this.#performStart(binding, lifecycle, startToken),
+    );
+    startToken.promise.catch(() => {});
+    return startToken.promise;
+  }
+
+  async #performStart(binding, lifecycle, startToken) {
     const frozen = binding.binding || {};
     const strategyModel = frozen.strategy_model_id;
     const reviewModel = frozen.review_model_id;
@@ -103,40 +131,47 @@ export class RuntimeController {
       }));
       const failed = creations.find((item) => item.status === "rejected");
       if (failed) throw failed.reason;
-    } catch (error) {
-      try {
-        await this.roleAgents.quiesceRun(binding.run_id, { dispose: true });
-        if (
-          lifecycle.epoch === startEpoch
-          && START_OPEN_STATUSES.includes(this.registry.get(binding.run_id)?.status)
-        ) {
-          this.registry.delete(binding.run_id);
-        }
-      } catch {
-        // Best-effort private cleanup must not replace the role creation error.
-      } finally {
-        settleStart();
-      }
-      throw error;
-    }
-    const current = this.registry.get(binding.run_id);
-    if (
-      lifecycle.epoch !== startEpoch
-      || !START_OPEN_STATUSES.includes(current?.status)
-    ) {
-      try {
+      lifecycle.hosts = "ready";
+      const current = this.registry.get(binding.run_id);
+      if (
+        lifecycle.epoch !== startToken.startEpoch
+        || !START_OPEN_STATUSES.includes(current?.status)
+      ) {
         await this.roleAgents.quiesceRun(binding.run_id, {
           dispose: current?.status === "cancelling" || current?.status === "cancelled",
         });
-      } finally {
-        settleStart();
+        startToken.status = "fulfilled";
+        return this.#response(startToken.accepted);
       }
-      return this.#response(accepted);
+      this.stageRunner?.openLaunchFence?.(binding.run_id);
+      this.liveReady = true;
+      startToken.status = "fulfilled";
+      return this.#response(startToken.accepted);
+    } catch (primaryError) {
+      lifecycle.hosts = "failed";
+      this.stageRunner?.closeLaunchFence?.(binding.run_id);
+      try {
+        await this.roleAgents.quiesceRun(binding.run_id, { dispose: true });
+      } catch {
+        // Best-effort private cleanup must not replace the start failure.
+      } finally {
+        const current = this.registry.get(binding.run_id);
+        if (
+          lifecycle.epoch === startToken.startEpoch
+          && current?.idempotency_key === startToken.accepted.idempotency_key
+        ) {
+          this.registry.delete(binding.run_id);
+        }
+      }
+      startToken.status = "rejected";
+      if (lifecycle.start === startToken) lifecycle.start = null;
+      throw primaryError;
+    } finally {
+      if (!startToken.finalized) {
+        startToken.finalized = true;
+        startToken.releaseFinalization();
+      }
     }
-    this.stageRunner?.openLaunchFence?.(binding.run_id);
-    this.liveReady = true;
-    settleStart();
-    return this.#response(accepted);
   }
 
   async runStage(binding) {
@@ -167,80 +202,153 @@ export class RuntimeController {
   pause(binding) {
     const current = this.#current(binding.run_id);
     const lifecycle = this.#lifecycle(binding.run_id);
+    const existing = this.#matchingControl(lifecycle, "pause", binding);
+    if (existing) return existing.promise;
     if (current.status === "paused") return Promise.resolve(this.#response(current));
-    if (current.status === "pausing" && lifecycle.intent === "pause") {
-      return this.controlDrains.get(binding.run_id) || Promise.resolve(this.#response(current));
+    const exactRetry = (
+      current.status === "pausing"
+      && lifecycle.failed.pause !== null
+      && isDeepStrictEqual(lifecycle.failed.pause, binding)
+    );
+    if (current.status === "pausing" && !exactRetry) {
+      return Promise.reject(this.#transitionError("pause", current.status));
     }
     if (!CONTROL_TRANSITIONS.pause.includes(current.status)) {
       return Promise.reject(this.#transitionError("pause", current.status));
     }
-    const epoch = this.#advanceLifecycle(lifecycle, "pause");
-    this.#mutation(binding, "pausing");
-    this.stageRunner?.closeLaunchFence?.(binding.run_id);
-    return this.#enqueueControl(binding.run_id, async () => {
+    this.#advanceLifecycle(lifecycle, "pause");
+    const token = this.#controlToken(lifecycle, "pause", binding);
+    if (current.status !== "resuming") this.#mutation(binding, "pausing");
+    const operation = this.#queueControl(lifecycle, token, async () => {
+      const latestBeforeDrain = this.#current(binding.run_id);
+      if (
+        lifecycle.terminalEpoch !== token.terminalEpoch
+        || latestBeforeDrain.status === "cancelling"
+        || latestBeforeDrain.status === "cancelled"
+      ) {
+        return this.#response(latestBeforeDrain);
+      }
+      if (latestBeforeDrain.status !== "pausing") {
+        this.#mutation(binding, "pausing");
+      }
       await this.stageRunner?.quiesceRun?.(binding.run_id);
+      await this.#waitForStartFinalization(lifecycle);
       await this.roleAgents.quiesceRun(binding.run_id, { dispose: false });
       const latest = this.#current(binding.run_id);
-      if (lifecycle.epoch === epoch && latest.status === "pausing") {
-        return this.#mutation(binding, "paused");
+      if (
+        lifecycle.terminalEpoch !== token.terminalEpoch
+        || latest.status === "cancelling"
+        || latest.status === "cancelled"
+      ) {
+        return this.#response(latest);
       }
-      return this.#response(latest);
+      const later = this.#laterControl(lifecycle, token);
+      if (later) return this.#response(latest);
+      return this.#mutation(binding, "paused");
+    }, {
+      continueAfterRejection: true,
+      rememberFailure: true,
     });
+    this.stageRunner?.closeLaunchFence?.(binding.run_id);
+    return operation;
   }
 
   cancel(binding) {
     const current = this.#current(binding.run_id);
     const lifecycle = this.#lifecycle(binding.run_id);
+    const existing = this.#matchingControl(lifecycle, "cancel", binding);
+    if (existing) return existing.promise;
     if (current.status === "cancelled") return Promise.resolve(this.#response(current));
-    if (current.status === "cancelling" && lifecycle.intent === "cancel") {
-      const active = this.controlDrains.get(binding.run_id);
-      if (active) return active;
+    const exactRetry = (
+      current.status === "cancelling"
+      && lifecycle.failed.cancel !== null
+      && isDeepStrictEqual(lifecycle.failed.cancel, binding)
+    );
+    if (current.status === "cancelling" && !exactRetry) {
+      return Promise.reject(this.#transitionError("cancel", current.status));
     }
     if (!CONTROL_TRANSITIONS.cancel.includes(current.status)) {
       return Promise.reject(this.#transitionError("cancel", current.status));
     }
-    const epoch = this.#advanceLifecycle(lifecycle, "cancel");
+    this.#advanceLifecycle(lifecycle, "cancel");
+    lifecycle.terminalEpoch += 1;
+    const token = this.#controlToken(lifecycle, "cancel", binding);
     this.#mutation(binding, "cancelling");
-    this.stageRunner?.closeLaunchFence?.(binding.run_id);
-    return this.#enqueueControl(binding.run_id, async () => {
+    const operation = this.#queueControl(lifecycle, token, async () => {
       await this.stageRunner?.quiesceRun?.(binding.run_id);
+      await this.#waitForStartFinalization(lifecycle);
       await this.roleAgents.quiesceRun(binding.run_id, { dispose: true });
       const latest = this.#current(binding.run_id);
-      if (lifecycle.epoch === epoch && latest.status === "cancelling") {
+      if (lifecycle.terminalEpoch === token.terminalEpoch && latest.status === "cancelling") {
         return this.#mutation(binding, "cancelled");
       }
       return this.#response(latest);
-    }, { continueAfterRejection: true });
+    }, {
+      continueAfterRejection: true,
+      rememberFailure: true,
+    });
+    this.stageRunner?.closeLaunchFence?.(binding.run_id);
+    return operation;
   }
-  async resume(binding) {
+  resume(binding) {
     const current = this.#current(binding.run_id);
     const lifecycle = this.#lifecycle(binding.run_id);
+    const existing = this.#matchingControl(lifecycle, "resume", binding);
+    if (existing) return existing.promise;
     const resumable = current.status === "paused"
       || (
         current.status === "pausing"
-        && lifecycle.intent === "pause"
-        && this.controlDrains.has(binding.run_id)
+        && this.#hasControl(lifecycle, "pause")
       );
     if (!resumable) {
-      throw this.#transitionError("resume", current.status);
+      return Promise.reject(this.#transitionError("resume", current.status));
     }
-    const epoch = this.#advanceLifecycle(lifecycle, "resume");
-    return await this.#enqueueControl(binding.run_id, async () => {
-      if (lifecycle.start?.promise) await lifecycle.start.promise;
+    if (lifecycle.hosts === "failed") {
+      return Promise.reject(this.#hostsIncompleteError());
+    }
+    this.#advanceLifecycle(lifecycle, "resume");
+    const source = current;
+    const token = this.#controlToken(lifecycle, "resume", binding);
+    this.#mutation(binding, "resuming");
+    return this.#queueControl(lifecycle, token, async () => {
+      await this.#waitForStartFinalization(lifecycle);
+      if (lifecycle.hosts === "failed") throw this.#hostsIncompleteError();
       const latest = this.#current(binding.run_id);
       if (
-        lifecycle.epoch !== epoch
+        lifecycle.terminalEpoch !== token.terminalEpoch
         || latest.status === "cancelled"
         || latest.status === "cancelling"
       ) {
         throw this.#transitionError("resume", latest.status);
       }
-      if (!CONTROL_TRANSITIONS.resume.includes(latest.status)) {
+      if (![...CONTROL_TRANSITIONS.resume, "resuming"].includes(latest.status)) {
         throw this.#transitionError("resume", latest.status);
       }
       const resumed = this.#mutation(binding, "running");
-      this.stageRunner?.openLaunchFence?.(binding.run_id);
+      if (!this.#laterControl(lifecycle, token, new Set(["pause", "cancel"]))) {
+        this.stageRunner?.openLaunchFence?.(binding.run_id);
+      }
       return resumed;
+    }, {
+      onRejected: () => {
+        const latest = this.registry.get(binding.run_id);
+        if (
+          lifecycle.terminalEpoch === token.terminalEpoch
+          && (
+            latest?.status === "resuming"
+            || (source.status === "pausing" && latest?.status === "pausing")
+          )
+          && !this.#laterControl(lifecycle, token, new Set(["pause", "cancel"]))
+        ) {
+          const rollbackStatus = (
+            source.status === "pausing"
+            && lifecycle.failed.pause === null
+          )
+            ? "paused"
+            : source.status;
+          this.registry.transition(binding.run_id, source, rollbackStatus);
+        }
+      },
     });
   }
 
@@ -281,7 +389,16 @@ export class RuntimeController {
 
   #lifecycle(runId) {
     if (!this.runLifecycles.has(runId)) {
-      this.runLifecycles.set(runId, { epoch: 0, intent: null, start: null });
+      this.runLifecycles.set(runId, {
+        epoch: 0,
+        terminalEpoch: 0,
+        intent: null,
+        start: null,
+        hosts: "unknown",
+        controls: new Set(),
+        nextControlSequence: 0,
+        failed: { pause: null, cancel: null },
+      });
     }
     return this.runLifecycles.get(runId);
   }
@@ -292,6 +409,67 @@ export class RuntimeController {
     return lifecycle.epoch;
   }
 
+  #controlToken(lifecycle, action, binding) {
+    lifecycle.nextControlSequence += 1;
+    return {
+      action,
+      binding: structuredClone(binding),
+      sequence: lifecycle.nextControlSequence,
+      terminalEpoch: lifecycle.terminalEpoch,
+      promise: null,
+    };
+  }
+
+  #matchingControl(lifecycle, action, binding) {
+    return [...lifecycle.controls].find(
+      (token) => token.action === action && isDeepStrictEqual(token.binding, binding),
+    ) || null;
+  }
+
+  #hasControl(lifecycle, action) {
+    return [...lifecycle.controls].some((token) => token.action === action);
+  }
+
+  #laterControl(lifecycle, token, actions = null) {
+    return [...lifecycle.controls].find((candidate) => (
+      candidate.sequence > token.sequence
+      && (actions === null || actions.has(candidate.action))
+    )) || null;
+  }
+
+  async #waitForStartFinalization(lifecycle) {
+    if (lifecycle.start?.finalization) await lifecycle.start.finalization;
+  }
+
+  #queueControl(
+    lifecycle,
+    token,
+    execute,
+    {
+      continueAfterRejection = false,
+      rememberFailure = false,
+      onRejected = null,
+    } = {},
+  ) {
+    lifecycle.controls.add(token);
+    const promise = this.#enqueueControl(token.binding.run_id, execute, {
+      continueAfterRejection,
+    });
+    token.promise = promise;
+    promise.then(
+      () => {
+        if (rememberFailure) lifecycle.failed[token.action] = null;
+        lifecycle.controls.delete(token);
+      },
+      () => {
+        if (rememberFailure) lifecycle.failed[token.action] = token.binding;
+        try { onRejected?.(); } catch {}
+        lifecycle.controls.delete(token);
+      },
+    );
+    return promise;
+  }
+
   #transitionError(action, status) {
     const terminal = status === "cancelled" || status === "cancelling";
     const error = new Error(
@@ -300,6 +478,12 @@ export class RuntimeController {
         : `runtime run cannot ${action} from ${status}`,
     );
     error.code = "runtime_control_transition_invalid";
+    return error;
+  }
+
+  #hostsIncompleteError() {
+    const error = new Error("runtime role hosts are incomplete");
+    error.code = "runtime_role_hosts_incomplete";
     return error;
   }
 

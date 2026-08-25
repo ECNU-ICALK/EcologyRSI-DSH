@@ -116,6 +116,32 @@ test("Workflow launch is registered before engine start can reenter drain", asyn
   assert.equal(starts.size, 0);
 });
 
+test("Workflow cancel and dispose memoize before synchronous reentry", async () => {
+  const starts = new PendingChildStarts({ subagents: {} });
+  let pending;
+  let cancelCalls = 0;
+  let disposeCalls = 0;
+  pending = starts.startWorkflow(() => ({
+    result: Promise.resolve({ stopReason: "aborted" }),
+    cancel: () => {
+      cancelCalls += 1;
+      if (cancelCalls === 1) void starts.cancel(pending, "synchronous reentry");
+    },
+    dispose: () => {
+      disposeCalls += 1;
+      if (disposeCalls === 1) void starts.dispose(pending);
+    },
+  }), { runId: "run-workflow-cleanup-reentry" });
+
+  await starts.cancel(pending, "outer cancellation");
+  await starts.dispose(pending);
+  starts.finish(pending);
+
+  assert.equal(cancelCalls, 1);
+  assert.equal(disposeCalls, 1);
+  assert.equal(starts.size, 0);
+});
+
 test("closed launch admission blocks one-shot, continuable and Workflow starters synchronously", () => {
   let externalStarts = 0;
   const launchFence = {

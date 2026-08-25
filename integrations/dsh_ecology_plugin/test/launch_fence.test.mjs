@@ -16,6 +16,13 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+function outcome(promise) {
+  return Promise.resolve(promise).then(
+    (value) => ({ status: "fulfilled", value }),
+    (reason) => ({ status: "rejected", reason }),
+  );
+}
+
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object") {
@@ -274,4 +281,48 @@ test("cancel closes the fence before a schema-blocked Workflow can launch", { ti
   assert.equal(harness.runner.activeWorkflows.size, 0);
   assert.equal(harness.providerStageGate.records.size, 0);
   assert.equal(harness.registry.get(first.run_id).status, "cancelled");
+});
+
+test("real controller reconciles a durable paused restore with admission closed until resume", { timeout: 2_000 }, async () => {
+  const harness = launchRaceHarness();
+  const controller = new RuntimeController({}, {
+    registry: harness.registry,
+    stageRunner: harness.runner,
+    presetCatalog: [],
+  });
+  const restored = stageBinding({ suffix: "durable-restored-paused" });
+  restored.idempotency_key = `runtime-restore:${restored.run_id}`;
+  restored.binding = {
+    initial_run_status: "paused",
+    restore_provenance: {
+      source: "python_durable_ledger",
+      status: "paused",
+    },
+  };
+
+  await controller.startRun(restored);
+  assert.equal(harness.registry.get(restored.run_id).status, "paused");
+
+  const fencedStage = stageBinding({ suffix: "before-restored-resume" });
+  const rejected = await outcome(controller.runStage(fencedStage));
+
+  assert.equal(rejected.status, "rejected");
+  assert.equal(rejected.reason.code, "provider_stage_admission_closed");
+  assert.deepEqual(harness.counts(), { childStarts: 0, workflowStarts: 0 });
+
+  await controller.resume(controlBinding(restored, {
+    status: "resume",
+    revision: 8,
+  }));
+  const resumedStage = controller.runStage(stageBinding({
+    suffix: "after-restored-resume",
+    revision: 8,
+  }));
+  await harness.schemaEntered.promise;
+  harness.releaseSchema.resolve({ type: "object", additionalProperties: true });
+  const resumed = await resumedStage;
+
+  assert.equal(resumed.accepted, true);
+  assert.equal(harness.registry.get(restored.run_id).status, "running");
+  assert.deepEqual(harness.counts(), { childStarts: 1, workflowStarts: 0 });
 });

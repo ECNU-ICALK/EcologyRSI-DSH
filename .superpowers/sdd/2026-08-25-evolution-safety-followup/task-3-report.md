@@ -337,3 +337,200 @@ All changed production and test JavaScript files also passed `node --check`.
 - Role-host quiescence still relies on the underlying retained Agent's
   `waitForIdle()` contract. This round bounds structured child and Workflow
   launch lifecycles; it does not add a new timeout around the role-host manager.
+
+## Fix Round 2/5
+
+### Review findings resolved
+
+- Python durable restoration now transmits the ledger status and an explicit
+  `{source, status}` restore provenance. The Node registry accepts `paused`
+  only for the exact `runtime-restore:<run_id>` command whose provenance says
+  `python_durable_ledger/paused`; ordinary `created` runs still cannot resume.
+  A real `RuntimeController` plus `NativeStageRunner` reconciliation test proves
+  that a restored paused run completes controller reconstruction with admission
+  closed, rejects pre-resume stage work, and opens only after resume.
+- Nonterminal controls now have explicit queued tokens and a visible
+  `resuming` state. Exact concurrent resumes share the same Promise, a
+  synchronous resume-then-pause executes the later pause, and an exact failed
+  pause is permitted to re-drain. Rejection rollback distinguishes a failed
+  preceding pause from a completed pause, preventing `pausing`/`resuming`
+  wedges while preserving terminal epoch supremacy.
+- `startRun()` is one exact-identity flight with a finalization token and an
+  explicit role-host state (`creating`, `ready`, or `failed`). All role-host
+  creations settle before the primary creation failure is chosen. Pause,
+  cancel, and resume join start finalization and stale cleanup; no successful
+  or failed late start may reopen admission before cleanup finishes.
+- Start failure closes admission, marks hosts failed, best-effort disposes all
+  retained hosts, and deletes an unchanged registry entry in `finally`,
+  including a restored-paused entry whose reconstruction itself failed.
+  A pause racing the failure retains the safe paused record, while resume is
+  rejected with `runtime_role_hosts_incomplete`. Private cleanup failures do
+  not replace the primary creation/setup error.
+- `RoleAgentManager.quiesceRun()` repeatedly joins pending creations, rescans
+  newly published handles, attempts idle/flush and disposal with all-settled
+  semantics, and removes disposed registry handles even when one cleanup
+  rejects. Role creation and persisted-role resume preserve their primary
+  setup error when best-effort private disposal also fails.
+- Workflow cancel/dispose memoization installs its in-flight sentinel before
+  invoking the external cleanup function. Synchronous re-entry therefore
+  observes and joins the same operation instead of invoking cleanup twice.
+
+### Round 2 RED evidence
+
+The initial deterministic controller, role-host, Workflow, and real-fence
+repros were run together before production changes:
+
+```bash
+node --test \
+  integrations/dsh_ecology_plugin/test/agent_lifecycle.test.mjs \
+  integrations/dsh_ecology_plugin/test/cancel_race.test.mjs \
+  integrations/dsh_ecology_plugin/test/launch_fence.test.mjs \
+  integrations/dsh_ecology_plugin/test/workflow_lifecycle.test.mjs
+```
+
+```text
+tests 37
+pass 26
+fail 11
+```
+
+The failures matched the reviewed defects: paused restore was rejected by the
+real registry, ordinary control state had no queued `resuming` representation,
+pause retry and identical resume single-flight were absent, start failure left
+an open/active run or exposed private cleanup, pause could finish before a
+pending start, concurrent starts duplicated work, and synchronous Workflow
+cleanup re-entry invoked the external operation twice.
+
+The two Python restoration assertions also failed before the handler change:
+
+```bash
+uv run --with pytest --frozen python -m pytest -q \
+  tests/test_dsh_native_runtime.py \
+  -k 'frozen_native_run_is_recreated_after_dsh_process_restart or resume_restores_a_paused_native_run_after_dsh_restart'
+```
+
+```text
+2 failed
+```
+
+Two final adversarial TDD cycles caught additional atomicity edges after the
+first GREEN pass. The first covered queued rollback:
+
+```bash
+node --test --test-name-pattern='queued resume rejected' \
+  integrations/dsh_ecology_plugin/test/cancel_race.test.mjs
+```
+
+```text
+tests 1
+pass 0
+fail 1
+actual final status: pausing
+expected final status: paused
+```
+
+The resume rejection rollback now recognizes that the preceding pause drain
+completed before host creation failed; the same repro passes and retains the
+closed, durable `paused` state.
+
+The second proved that an unsuperseded restored-paused start failure must delete
+the incomplete reconstruction instead of leaving a durable-looking paused
+record:
+
+```bash
+node --test --test-name-pattern='failed restored-paused' \
+  integrations/dsh_ecology_plugin/test/cancel_race.test.mjs
+```
+
+```text
+tests 1
+pass 0
+fail 1
+actual registry entry: paused
+expected registry entry: null
+```
+
+The failure cleanup now deletes any unchanged start identity regardless of its
+initial open/paused state, while lifecycle-epoch changes still preserve a
+superseding pause or terminal cancel.
+
+### Round 2 GREEN evidence
+
+Focused control, role-host, real launch-fence, and Workflow lifecycle coverage:
+
+```bash
+node --test \
+  integrations/dsh_ecology_plugin/test/agent_lifecycle.test.mjs \
+  integrations/dsh_ecology_plugin/test/cancel_race.test.mjs \
+  integrations/dsh_ecology_plugin/test/launch_fence.test.mjs \
+  integrations/dsh_ecology_plugin/test/workflow_lifecycle.test.mjs
+```
+
+```text
+tests 40
+pass 40
+fail 0
+duration_ms 58.8695
+```
+
+Complete plugin Node suite, including the proxy security script:
+
+```bash
+node --test integrations/dsh_ecology_plugin/test/*.mjs
+```
+
+```text
+tests 137
+pass 137
+fail 0
+duration_ms 652.591458
+```
+
+Targeted Python restoration, reconciliation, and cancel-race coverage:
+
+```bash
+uv run --with pytest --frozen python -m pytest -o addopts='' -q \
+  tests/test_dsh_native_runtime.py \
+  tests/test_dsh_reconciliation.py \
+  tests/test_dsh_cancel_race.py
+```
+
+```text
+22 passed in 10.09s
+```
+
+All changed JavaScript files passed `node --check`; the changed Python handler
+and test passed `python -m py_compile`; `git diff --check` exited 0 without
+diagnostics.
+
+### Round 2 self-review
+
+- Restored paused startup closes the same provider/child admission fence as a
+  live pause and never calls open during role-host reconstruction. The exact
+  provenance/idempotency fence does not broaden resume from normal `created`.
+- Control calls mutate intent and close admission synchronously. Queue tokens
+  are ordered, exact duplicates join one Promise, rejected drains remain
+  retryable only under the same pause/cancel binding, and terminal cancellation
+  still wins through its separate epoch.
+- Start success can open only after every role-host creation is fulfilled and
+  only if its captured lifecycle epoch/status is unchanged. Both stale-success
+  and failure paths join all pending publication and cleanup before controls
+  may reopen; failed host sets are never resumable.
+- Role-host cleanup uses no fail-fast aggregate. Idle, flush, and disposal are
+  attempted for every published handle, while primary start/setup errors remain
+  the public failure. Workflow cleanup retains the earlier hard-deadline and
+  detached-late-cleanup behavior.
+- Provider ordering/cooldown, stable child/Workflow drain, terminal cancel,
+  lifecycle epochs, deadline finalization, reconciliation, and public error
+  classification were exercised by the unchanged full suite.
+- No Python service, database, production port, current run, or external state
+  was touched.
+
+### Round 2 concerns
+
+- No known correctness race remains in the reviewed restore, nonterminal
+  control, start failure, concurrent start, or cleanup memoization paths.
+- As in Round 1, role-host quiescence joins the underlying Agent
+  `waitForIdle()` contract without adding a new timeout; this round makes its
+  multi-host cleanup complete and failure-atomic but does not change that Host
+  API boundary.
