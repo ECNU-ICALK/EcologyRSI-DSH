@@ -4,6 +4,7 @@ const PHASE_CODES = Object.freeze({
   control: "provider_stage_admission_closed",
   aborted: "structured_child_aborted",
   model: "structured_child_model_error",
+  model_terminal: "structured_child_model_error",
   capture: "structured_result_missing",
   admission: "structured_result_admission_failed",
   admission_closed: "structured_result_admission_closed",

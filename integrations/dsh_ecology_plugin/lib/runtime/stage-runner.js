@@ -391,21 +391,83 @@ function toolResultIdentity(event) {
   return { callId: block.toolCallId, isError: block.isError === true };
 }
 
-function rejectedStructuredCapture(rawEvents) {
-  if (!Array.isArray(rawEvents)) return false;
-  const events = rawEvents
-    .map((event, index) => ({ event, seq: eventSequence(event, index) }))
-    .sort((left, right) => left.seq - right.seq);
-  const calls = events.filter((item) => (
-    item.event?.type === "tool/call"
-    && eventData(item.event).name === "structured_output"
-    && typeof eventData(item.event).callId === "string"
-  ));
-  return calls.some((call) => events.some((item) => {
-    if (item.event?.type !== "tool/result" || item.seq <= call.seq) return false;
-    const result = toolResultIdentity(item.event);
-    return result?.callId === eventData(call.event).callId && result.isError === true;
+function accountsForConsumedClaim(reason) {
+  return reason?.kind !== "completed";
+}
+
+// Mirror the rc.6 foldConsumedWork(...).end selection used by readResult.
+function consumedTerminalEnd(events) {
+  const stepped = new Set();
+  const claimed = new Set();
+  let open;
+  let end;
+  for (const event of events) {
+    const data = eventData(event);
+    if (event?.type === "turn/start") {
+      open = data.turn;
+    } else if (event?.type === "step/start") {
+      stepped.add(data.turn);
+    } else if (event?.type === "agent/inbox/spliced") {
+      if (data.removedCount !== undefined && data.outcome !== "canceled" && open !== undefined) {
+        claimed.add(open);
+      }
+    } else if (event?.type === "turn/end") {
+      open = undefined;
+      if (
+        stepped.delete(data.turn)
+        || (claimed.delete(data.turn) && accountsForConsumedClaim(data.reason))
+      ) {
+        end = event;
+      }
+    }
+  }
+  return end;
+}
+
+function structuredCaptureDisposition(rawEvents) {
+  if (!Array.isArray(rawEvents)) return "non-missing";
+  const terminal = consumedTerminalEnd(rawEvents);
+  const terminalData = eventData(terminal);
+  if (terminalData.reason?.kind !== "completed") return "non-missing";
+  const turn = terminalData.turn;
+  const events = rawEvents.map((event, index) => ({
+    event,
+    seq: eventSequence(event, index),
   }));
+  const calls = events.filter(({ event }) => {
+    const data = eventData(event);
+    return event?.type === "tool/call"
+      && Number.isSafeInteger(event.seq)
+      && event.seq >= 0
+      && data.turn === turn
+      && data.name === "structured_output"
+      && typeof data.callId === "string"
+      && data.callId.length > 0;
+  });
+  if (calls.length === 0) return "missing";
+  const call = calls.at(-1);
+  const callData = eventData(call.event);
+  const terminalSeq = eventSequence(terminal, Number.POSITIVE_INFINITY);
+  const result = events.find((item) => {
+    if (
+      item.event?.type !== "tool/result"
+      || item.seq <= call.seq
+      || item.seq >= terminalSeq
+    ) return false;
+    const data = eventData(item.event);
+    const identity = toolResultIdentity(item.event);
+    return data.turn === callData.turn
+      && data.step === callData.step
+      && identity?.callId === callData.callId
+      && identity.isError === true
+      && Array.isArray(item.event.sourceEventSeqs)
+      && item.event.sourceEventSeqs.length === 1
+      && item.event.sourceEventSeqs[0] === call.seq;
+  });
+  const error = eventData(result?.event).error;
+  return error?.name === "ToolArgsError" && error?.code === "INVALID_ARGS"
+    ? "missing"
+    : "non-missing";
 }
 
 function successfulResultAfter(events, call) {
@@ -849,7 +911,7 @@ export class NativeStageRunner {
               persistenceDeadline,
             ),
             deadline: lifecycle.deadline,
-            captureRejected: ({ run }) => rejectedStructuredCapture(
+            classifyMissingCapture: ({ run }) => structuredCaptureDisposition(
               this.ctx?.sessions?.get?.(String(run?.id || ""))?.events,
             ),
           },
@@ -955,6 +1017,7 @@ export class NativeStageRunner {
       reservation_id: reservation.launch.reservation_id,
     }).slice(0, 24)}`;
     let childSessionId = null;
+    let childOutcome = null;
     let capturedSessionMetrics = null;
     let capturedSessionEvents = null;
     const removeListener = this.ctx.on?.(
@@ -983,6 +1046,7 @@ export class NativeStageRunner {
         if (info?.meta?.name !== workflowName || agent?.label !== reservation.label) return;
         const endedChildId = String(agent.childId || "") || null;
         if (!endedChildId || (childSessionId && endedChildId !== childSessionId)) return;
+        childOutcome = typeof agent?.outcome === "string" ? agent.outcome : null;
         capturedSessionMetrics = dshSessionMetrics(this.ctx, endedChildId);
         const endedSession = this.ctx?.sessions?.get?.(endedChildId);
         if (Array.isArray(endedSession?.events)) {
@@ -1034,20 +1098,21 @@ export class NativeStageRunner {
         && !Array.isArray(structured);
       if (settled?.stopReason !== "completed") {
         if (settled?.stopReason === "aborted") throw structuredPhaseError("aborted");
-        if (
-          settled?.stopReason === "error"
-          && !validStructured
-          && rejectedStructuredCapture(
-            capturedSessionEvents
-              || this.ctx?.sessions?.get?.(childSessionId)?.events,
-          )
-        ) {
-          throw structuredPhaseError("capture");
-        }
         throw structuredPhaseError("model");
       }
       if (!validStructured) {
-        throw structuredPhaseError("capture");
+        const failedNullItem = childOutcome === "failed"
+          && Array.isArray(settled?.value)
+          && settled.value.length === 1
+          && settled.value[0] === null;
+        const disposition = failedNullItem
+          ? structuredCaptureDisposition(
+            capturedSessionEvents
+              || this.ctx?.sessions?.get?.(childSessionId)?.events,
+          )
+          : "non-missing";
+        if (disposition === "missing") throw structuredPhaseError("capture");
+        throw structuredPhaseError("model_terminal");
       }
       throwIfExpired();
       if (!childSessionId) throw structuredPhaseError("child_session");

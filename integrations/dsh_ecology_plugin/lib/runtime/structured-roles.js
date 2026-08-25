@@ -38,7 +38,7 @@ export async function runStructuredRole(
     persist,
     timeoutMs,
     deadline,
-    captureRejected,
+    classifyMissingCapture,
   } = {},
 ) {
   if (!roleHost?.agent) throw new Error("structured role requires a retained role-host Agent");
@@ -150,21 +150,28 @@ export async function runStructuredRole(
     const validStructured = structured
       && typeof structured === "object"
       && !Array.isArray(structured);
-    let rejectedCapture = false;
-    if (!validStructured && stopReason === "error" && typeof captureRejected === "function") {
+    const hasCaptureClassifier = typeof classifyMissingCapture === "function";
+    let captureDisposition = null;
+    if (!validStructured && stopReason === "error" && hasCaptureClassifier) {
       try {
-        rejectedCapture = captureRejected({ run, result }) === true;
+        captureDisposition = classifyMissingCapture({ run, result });
       } catch {
-        rejectedCapture = false;
+        captureDisposition = "non-missing";
       }
     }
     requireBeforeDeadline();
     if (stopReason && stopReason !== "completed") {
       if (stopReason === "aborted") throw structuredPhaseError("aborted");
-      if (rejectedCapture) throw structuredPhaseError("capture");
+      if (captureDisposition === "missing") throw structuredPhaseError("capture");
+      if (stopReason === "error" && captureDisposition !== null) {
+        throw structuredPhaseError("model_terminal");
+      }
       throw structuredPhaseError("model");
     }
     if (!validStructured) {
+      if (hasCaptureClassifier && captureDisposition !== "missing") {
+        throw structuredPhaseError("model_terminal");
+      }
       throw structuredPhaseError("capture");
     }
     let admissionOpen = true;

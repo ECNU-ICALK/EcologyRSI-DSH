@@ -303,3 +303,130 @@ uses one reservation/start. Both post-commit persistence cases call persist
 exactly once and make zero fresh attempts. Legitimate local missing and model
 phases still consume exactly two fresh attempts; rejected captures make zero
 structured-result persistence calls.
+
+## Fix Round 2/5 — rc.6 consumed-turn capture classification
+
+### Runtime contract
+
+- Direct sample capture classification now requires the real rc.6 public shape:
+  no valid structured object, public `stopReason: "error"`, and a child event
+  log whose `foldConsumedWork`-equivalent terminal reason is exactly
+  `completed`. A completed consumed turn with no `structured_output` call is an
+  ordinary missing capture.
+- A rejected `structured_output` call is missing only when the latest call in
+  that consumed turn has a later result with the same turn, step, and call ID,
+  exact `sourceEventSeqs: [call.seq]`, nested `isError: true`, and exact
+  `data.error` identity `ToolArgsError` / `INVALID_ARGS`.
+- Provider/model terminal errors, authorization or guard failures, aborted or
+  unknown tools, missing/mismatched source linkage, and reused call IDs are
+  public `structured_child_model_error` outcomes backed by a private
+  `model_terminal` provenance. They are not accepted by either retry allowlist.
+  The existing trusted `model` provenance and its global retry remain intact.
+- Workflow classification now requires the natural rc.6 combination of an
+  exact `workflow/agent-end` child identity with `outcome: "failed"`, a
+  completed Workflow result containing `[null]`, and the same child-session
+  consumed-turn classification. Top-level Workflow shape alone cannot create a
+  missing retry.
+- The Round 1 module-owned `WeakMap`, public error-code compatibility, and fresh
+  wrapping at every lifecycle and persistence boundary are unchanged.
+
+### RED evidence
+
+The deterministic natural-shape RED command was:
+
+```bash
+node --check integrations/dsh_ecology_plugin/test/stage_runner.test.mjs && \
+node --test \
+  --test-name-pattern='consumed completed|exact INVALID_ARGS|provider terminal|authorization, abort|reused callId|Workflow completed null' \
+  integrations/dsh_ecology_plugin/test/stage_runner.test.mjs
+```
+
+```text
+tests 8
+pass 4
+fail 4
+duration_ms 65.969125
+```
+
+The failures were the intended four unsafe branches: direct provider terminal
+error, direct authorization/ABORTED/UNKNOWN_TOOL, direct reused call ID with a
+mismatched source, and Workflow authorization rejection all produced
+`structured_result_missing` instead of one-attempt
+`structured_child_model_error`. The completed/no-call and exact INVALID_ARGS
+fixtures already exercised the positive missing branch.
+
+A second single-case RED ensured the Workflow classifier accepts only the
+natural `[null]` batch, not an arbitrary invalid value:
+
+```bash
+node --test --test-name-pattern='non-null-batch shape' \
+  integrations/dsh_ecology_plugin/test/stage_runner.test.mjs
+```
+
+```text
+tests 1
+pass 0
+fail 1
+actual: structured_result_missing
+expected: structured_child_model_error
+duration_ms 53.745959
+```
+
+### GREEN evidence
+
+The same focused command after implementation passed:
+
+```text
+tests 8
+pass 8
+fail 0
+duration_ms 66.081166
+```
+
+The final focused runtime suite passed after all prior missing-result fixtures
+were migrated to the natural rc.6 terminal/outcome shape:
+
+```bash
+node --test \
+  integrations/dsh_ecology_plugin/test/stage_runner.test.mjs \
+  integrations/dsh_ecology_plugin/test/structured_roles.test.mjs \
+  integrations/dsh_ecology_plugin/test/workflow_lifecycle.test.mjs \
+  integrations/dsh_ecology_plugin/test/launch_fence.test.mjs
+```
+
+```text
+tests 76
+pass 76
+fail 0
+duration_ms 541.586209
+```
+
+Complete plugin Node suite:
+
+```bash
+node --test integrations/dsh_ecology_plugin/test/*.mjs
+```
+
+```text
+tests 172
+pass 172
+fail 0
+duration_ms 656.309708
+```
+
+Related Python sample and durable-tool contracts:
+
+```bash
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m unittest tests.test_dsh_sample_execution tests.test_dsh_tool_contracts -v
+```
+
+```text
+Ran 62 tests in 2.179s
+OK
+```
+
+Every negative capture-classification case makes one reservation/start and zero
+structured-result persistence calls. Both positive missing cases consume the
+exact two-attempt budget and still persist zero results when exhausted; existing
+missing-then-valid paths persist exactly once.

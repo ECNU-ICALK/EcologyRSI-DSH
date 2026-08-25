@@ -66,22 +66,126 @@ function skillFirstEvents(skillName, { prediction = false } = {}) {
   return events;
 }
 
-function schemaRejectedEvents(skillName, { prediction = false } = {}) {
-  const events = skillFirstEvents(skillName, { prediction });
-  events.push({
-    seq: prediction ? 6 : 4,
-    type: "tool/result",
-    data: {
-      message: {
-        content: [{
-          type: "tool-result",
-          toolCallId: "structured-call",
-          isError: true,
-          content: [{ type: "text", text: "private schema validation detail" }],
-        }],
+function rc6ConsumedEvents(skillName, {
+  prediction = false,
+  structuredResult = null,
+  terminalKind = "completed",
+} = {}) {
+  let seq = 1;
+  const turn = 1;
+  const step = 0;
+  const events = [
+    { seq: seq++, type: "turn/start", data: { turn } },
+    { seq: seq++, type: "step/start", data: { turn, step } },
+  ];
+  const appendCall = (callId, name, argumentsValue) => {
+    const callSeq = seq++;
+    events.push({
+      seq: callSeq,
+      type: "tool/call",
+      data: { turn, step, callId, name, arguments: JSON.stringify(argumentsValue) },
+    });
+    return callSeq;
+  };
+  const appendResult = (callId, callSeq, { isError = false, error } = {}) => {
+    events.push({
+      seq: seq++,
+      type: "tool/result",
+      data: {
+        turn,
+        step,
+        message: {
+          content: [{
+            type: "tool-result",
+            toolCallId: callId,
+            isError,
+            content: [],
+          }],
+          role: "tool",
+        },
+        ...(error === undefined ? {} : { error }),
+      },
+      sourceEventSeqs: [callSeq],
+    });
+  };
+  const skillSeq = appendCall("skill-call", "skill", { name: skillName });
+  appendResult("skill-call", skillSeq);
+  if (prediction) {
+    const predictionSeq = appendCall(
+      "prediction-call",
+      "ecology_execute_prediction_tool",
+      { tool_id: "ridge@1", wave_digest: "f".repeat(64) },
+    );
+    appendResult("prediction-call", predictionSeq);
+  }
+  if (structuredResult !== null) {
+    const structuredSeq = appendCall("structured-call", "structured_output", {});
+    appendResult("structured-call", structuredSeq, structuredResult);
+  }
+  events.push(
+    { seq: seq++, type: "step/end", data: { turn, step } },
+    {
+      seq: seq++,
+      type: "turn/end",
+      data: {
+        turn,
+        reason: terminalKind === "error"
+          ? { kind: "error", error: { message: "provider failed", code: "UPSTREAM" } }
+          : { kind: terminalKind },
       },
     },
+  );
+  return events;
+}
+
+function rc6ReusedStructuredCallEvents(skillName) {
+  const events = rc6ConsumedEvents(skillName, {
+    structuredResult: {
+      isError: true,
+      error: { name: "ToolArgsError", code: "INVALID_ARGS" },
+    },
   });
+  const terminal = events.pop();
+  const firstStepEnd = events.pop();
+  const firstCall = events.find((event) => (
+    event.type === "tool/call" && event.data.name === "structured_output"
+  ));
+  let seq = firstStepEnd.seq;
+  events.push(
+    firstStepEnd,
+    { seq: ++seq, type: "step/start", data: { turn: 1, step: 1 } },
+    {
+      seq: ++seq,
+      type: "tool/call",
+      data: {
+        turn: 1,
+        step: 1,
+        callId: firstCall.data.callId,
+        name: "structured_output",
+        arguments: "{}",
+      },
+    },
+    {
+      seq: ++seq,
+      type: "tool/result",
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          role: "tool",
+          content: [{
+            type: "tool-result",
+            toolCallId: firstCall.data.callId,
+            isError: true,
+            content: [],
+          }],
+        },
+      },
+      sourceEventSeqs: [firstCall.seq],
+    },
+    { seq: ++seq, type: "step/end", data: { turn: 1, step: 1 } },
+    { ...terminal, seq: ++seq },
+  );
   return events;
 }
 
@@ -223,10 +327,14 @@ function publishWorkflowChild(
   listeners,
   request,
   childId = "workflow-deadline-child",
+  outcome = "completed",
 ) {
   const agent = { label: request.args.items[0].label, childId };
   listeners.get("workflow/agent-start")?.({ meta: request.meta }, agent);
-  listeners.get("workflow/agent-end")?.({ meta: request.meta }, agent);
+  listeners.get("workflow/agent-end")?.(
+    { meta: request.meta },
+    { ...agent, outcome },
+  );
 }
 
 function directSampleBinding(stage, context) {
@@ -897,7 +1005,7 @@ test("native stage runner retries one transient child model failure with a fresh
   assert.deepEqual(disposed, ["child-1", "child-2"]);
 });
 
-test("sample critic retries a normally-ended missing result in a fresh child", async () => {
+test("sample critic retries a consumed completed turn with no capture in a fresh child", async () => {
   const roleHost = {
     sessionId: "critic-retry-parent",
     agent: { id: "critic-role-host" },
@@ -909,7 +1017,6 @@ test("sample critic retries a normally-ended missing result in a fresh child", a
     wave_digest: waveDigest,
     decisions: [],
   };
-  const criticEvents = skillFirstEvents("origin-vector-review");
   let starts = 0;
   let reservations = 0;
   let persisted = 0;
@@ -918,7 +1025,12 @@ test("sample critic retries a normally-ended missing result in a fresh child", a
   const runner = new NativeStageRunner({
     sessions: {
       get: (id) => (id.startsWith("critic-child-")
-        ? { id, events: criticEvents }
+        ? {
+          id,
+          events: id.endsWith("-1")
+            ? rc6ConsumedEvents("origin-vector-review")
+            : skillFirstEvents("origin-vector-review"),
+        }
         : undefined),
     },
     subagents: {
@@ -930,7 +1042,7 @@ test("sample critic retries a normally-ended missing result in a fresh child", a
           id,
           result: Promise.resolve(
             starts === 1
-              ? { stopReason: "completed" }
+              ? { stopReason: "error" }
               : { stopReason: "completed", structured },
           ),
           dispose: async () => {},
@@ -1041,9 +1153,12 @@ test("sample reflection binds the outer Host identity and retries one missing re
   const harness = directSampleHarness({
     stage: "sample.reflect",
     results: [
-      { stopReason: "completed" },
+      { stopReason: "error" },
       { stopReason: "completed", structured },
     ],
+    sessionEvents: (attempt) => attempt === 1
+      ? rc6ConsumedEvents("origin-vector-review")
+      : skillFirstEvents("origin-vector-review"),
   });
 
   const result = await harness.runner.run(directSampleBinding("sample.reflect", context));
@@ -1088,9 +1203,10 @@ test("sample reflection stops after two missing structured outputs without persi
   const harness = directSampleHarness({
     stage: "sample.reflect",
     results: [
-      { stopReason: "completed" },
-      { stopReason: "completed" },
+      { stopReason: "error" },
+      { stopReason: "error" },
     ],
+    sessionEvents: () => rc6ConsumedEvents("origin-vector-review"),
   });
 
   await assert.rejects(
@@ -1102,7 +1218,7 @@ test("sample reflection stops after two missing structured outputs without persi
   assert.equal(harness.persisted.length, 0);
 });
 
-test("direct sample schema rejection is a bounded missing-capture retry", async () => {
+test("direct sample exact INVALID_ARGS rejection is a bounded missing-capture retry", async () => {
   const context = {
     schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
     wave_digest: "a".repeat(64),
@@ -1115,7 +1231,12 @@ test("direct sample schema rejection is a bounded missing-capture retry", async 
       { stopReason: "error" },
       { stopReason: "error" },
     ],
-    sessionEvents: () => schemaRejectedEvents("origin-vector-review"),
+    sessionEvents: () => rc6ConsumedEvents("origin-vector-review", {
+      structuredResult: {
+        isError: true,
+        error: { name: "ToolArgsError", code: "INVALID_ARGS" },
+      },
+    }),
   });
 
   await assert.rejects(
@@ -1127,7 +1248,7 @@ test("direct sample schema rejection is a bounded missing-capture retry", async 
   assert.equal(harness.persisted.length, 0);
 });
 
-test("Workflow sample schema rejection is a bounded missing-capture retry", async () => {
+test("Workflow completed null with failed child exact INVALID_ARGS is a bounded missing-capture retry", async () => {
   let workflowStarts = 0;
   let persistCalls = 0;
   const reservations = [];
@@ -1144,17 +1265,17 @@ test("Workflow sample schema rejection is a bounded missing-capture retry", asyn
       const childId = `workflow-schema-rejected-child-${workflowStarts}`;
       sessions.set(childId, {
         id: childId,
-        events: schemaRejectedEvents(
-          "origin-vector-forecasting-balanced",
-          { prediction: true },
-        ),
+        events: rc6ConsumedEvents("origin-vector-forecasting-balanced", {
+          prediction: true,
+          structuredResult: {
+            isError: true,
+            error: { name: "ToolArgsError", code: "INVALID_ARGS" },
+          },
+        }),
       });
-      listeners.get("workflow/agent-start")?.(
-        { meta: request.meta },
-        { label: request.args.items[0].label, childId },
-      );
+      publishWorkflowChild(listeners, request, childId, "failed");
       return {
-        result: Promise.resolve({ stopReason: "error" }),
+        result: Promise.resolve({ stopReason: "completed", value: [null] }),
         cancel: () => {},
         dispose: async () => {},
       };
@@ -1170,7 +1291,7 @@ test("Workflow sample schema rejection is a bounded missing-capture retry", asyn
   assert.equal(persistCalls, 0);
 });
 
-test("ordinary direct and Workflow error turns remain bounded model failures", async () => {
+test("direct and Workflow provider terminal errors are non-retryable model failures", async () => {
   const context = {
     schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
     wave_digest: "9".repeat(64),
@@ -1179,17 +1300,21 @@ test("ordinary direct and Workflow error turns remain bounded model failures", a
   };
   const direct = directSampleHarness({
     stage: "sample.reflect",
-    results: [
-      { stopReason: "error", output: [{ type: "text", text: "private transport failure" }] },
-      { stopReason: "error", output: [{ type: "text", text: "private transport failure" }] },
-    ],
+    results: [{ stopReason: "error", output: [{ type: "text", text: "private transport failure" }] }],
+    sessionEvents: () => rc6ConsumedEvents("origin-vector-review", {
+      structuredResult: {
+        isError: true,
+        error: { name: "ToolArgsError", code: "INVALID_ARGS" },
+      },
+      terminalKind: "error",
+    }),
   });
   await assert.rejects(
     direct.runner.run(directSampleBinding("sample.reflect", context)),
     (error) => error?.code === "structured_child_model_error",
   );
-  assert.equal(direct.reservations.length, 2);
-  assert.equal(direct.starts.length, 2);
+  assert.equal(direct.reservations.length, 1);
+  assert.equal(direct.starts.length, 1);
   assert.equal(direct.persisted.length, 0);
 
   let workflowStarts = 0;
@@ -1198,13 +1323,19 @@ test("ordinary direct and Workflow error turns remain bounded model failures", a
     timeoutMs: 1_000,
     maxAttempts: 2,
     onReservation: (_options, attempt) => workflowReservations.push(attempt),
-    startWorkflow: () => {
+    startWorkflow: ({ request, listeners, sessions }) => {
       workflowStarts += 1;
-      return {
-        result: Promise.resolve({
-          stopReason: "error",
-          error: "private transport failure",
+      const childId = `workflow-provider-error-${workflowStarts}`;
+      sessions.set(childId, {
+        id: childId,
+        events: rc6ConsumedEvents("origin-vector-forecasting-balanced", {
+          prediction: true,
+          terminalKind: "error",
         }),
+      });
+      publishWorkflowChild(listeners, request, childId, "failed");
+      return {
+        result: Promise.resolve({ stopReason: "completed", value: [null] }),
         cancel: () => {},
         dispose: async () => {},
       };
@@ -1214,8 +1345,248 @@ test("ordinary direct and Workflow error turns remain bounded model failures", a
     workflow.runner.run(samplePlanBinding()),
     (error) => error?.code === "structured_child_model_error",
   );
-  assert.deepEqual(workflowReservations, [1, 2]);
-  assert.equal(workflowStarts, 2);
+  assert.deepEqual(workflowReservations, [1]);
+  assert.equal(workflowStarts, 1);
+});
+
+test("an unconsumed completed no-op turn cannot hide the prior consumed provider error", async () => {
+  const context = {
+    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    wave_digest: "5".repeat(64),
+    sample: { sample_id: "origin-consumed-terminal" },
+    outcome: { cells: [] },
+  };
+  const harness = directSampleHarness({
+    stage: "sample.reflect",
+    results: [{ stopReason: "error" }],
+    sessionEvents: () => {
+      const events = rc6ConsumedEvents("origin-vector-review", { terminalKind: "error" });
+      const seq = events.at(-1).seq;
+      events.push(
+        { seq: seq + 1, type: "turn/start", data: { turn: 2 } },
+        {
+          seq: seq + 2,
+          type: "turn/end",
+          data: { turn: 2, reason: { kind: "completed" } },
+        },
+      );
+      return events;
+    },
+  });
+
+  await assert.rejects(
+    harness.runner.run(directSampleBinding("sample.reflect", context)),
+    (error) => error?.code === "structured_child_model_error",
+  );
+  assert.equal(harness.reservations.length, 1);
+  assert.equal(harness.starts.length, 1);
+  assert.equal(harness.persisted.length, 0);
+});
+
+test("completed child events cannot turn a public model_error into missing capture", async () => {
+  const context = {
+    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    wave_digest: "4".repeat(64),
+    sample: { sample_id: "origin-public-model-error" },
+    outcome: { cells: [] },
+  };
+  const harness = directSampleHarness({
+    stage: "sample.reflect",
+    results: [
+      { stopReason: "model_error" },
+      { stopReason: "model_error" },
+    ],
+    sessionEvents: () => rc6ConsumedEvents("origin-vector-review"),
+  });
+
+  await assert.rejects(
+    harness.runner.run(directSampleBinding("sample.reflect", context)),
+    (error) => error?.code === "structured_child_model_error",
+  );
+  assert.equal(harness.reservations.length, 2);
+  assert.equal(harness.starts.length, 2);
+  assert.equal(harness.persisted.length, 0);
+});
+
+test("direct structured-output authorization, abort, and unknown-tool failures never retry as missing", async () => {
+  const context = {
+    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    wave_digest: "7".repeat(64),
+    sample: { sample_id: "origin-control-rejection" },
+    outcome: { cells: [] },
+  };
+  const rejectedErrors = [
+    undefined,
+    { name: "AbortError", code: "ABORTED" },
+    { name: "ToolNotFoundError", code: "UNKNOWN_TOOL" },
+  ];
+
+  for (const error of rejectedErrors) {
+    const harness = directSampleHarness({
+      stage: "sample.reflect",
+      results: [{ stopReason: "error" }],
+      sessionEvents: () => rc6ConsumedEvents("origin-vector-review", {
+        structuredResult: { isError: true, error },
+      }),
+    });
+    await assert.rejects(
+      harness.runner.run(directSampleBinding("sample.reflect", context)),
+      (caught) => caught?.code === "structured_child_model_error",
+      error?.code || "authorization",
+    );
+    assert.equal(harness.reservations.length, 1, error?.code || "authorization");
+    assert.equal(harness.starts.length, 1, error?.code || "authorization");
+    assert.equal(harness.persisted.length, 0, error?.code || "authorization");
+  }
+});
+
+test("direct reused callId and mismatched source cannot authorize a missing retry", async () => {
+  const context = {
+    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    wave_digest: "6".repeat(64),
+    sample: { sample_id: "origin-reused-call" },
+    outcome: { cells: [] },
+  };
+  const harness = directSampleHarness({
+    stage: "sample.reflect",
+    results: [{ stopReason: "error" }],
+    sessionEvents: () => rc6ReusedStructuredCallEvents("origin-vector-review"),
+  });
+
+  await assert.rejects(
+    harness.runner.run(directSampleBinding("sample.reflect", context)),
+    (error) => error?.code === "structured_child_model_error",
+  );
+  assert.equal(harness.reservations.length, 1);
+  assert.equal(harness.starts.length, 1);
+  assert.equal(harness.persisted.length, 0);
+});
+
+test("Workflow completed null with failed child no-call completion retries as missing", async () => {
+  let starts = 0;
+  const reservations = [];
+  const harness = workflowDeadlineHarness({
+    timeoutMs: 1_000,
+    maxAttempts: 2,
+    onReservation: (_options, attempt) => reservations.push(attempt),
+    startWorkflow: ({ request, listeners, sessions }) => {
+      starts += 1;
+      const childId = `workflow-no-capture-${starts}`;
+      sessions.set(childId, {
+        id: childId,
+        events: rc6ConsumedEvents("origin-vector-forecasting-balanced", { prediction: true }),
+      });
+      publishWorkflowChild(listeners, request, childId, "failed");
+      return {
+        result: Promise.resolve({ stopReason: "completed", value: [null] }),
+        cancel: () => {},
+        dispose: async () => {},
+      };
+    },
+  });
+
+  await assert.rejects(
+    harness.runner.run(samplePlanBinding()),
+    (error) => error?.code === "structured_result_missing",
+  );
+  assert.deepEqual(reservations, [1, 2]);
+  assert.equal(starts, 2);
+});
+
+test("Workflow completed null with authorization-rejected child is non-missing and non-retryable", async () => {
+  let starts = 0;
+  const reservations = [];
+  const harness = workflowDeadlineHarness({
+    timeoutMs: 1_000,
+    maxAttempts: 2,
+    onReservation: (_options, attempt) => reservations.push(attempt),
+    startWorkflow: ({ request, listeners, sessions }) => {
+      starts += 1;
+      const childId = `workflow-authorization-${starts}`;
+      sessions.set(childId, {
+        id: childId,
+        events: rc6ConsumedEvents("origin-vector-forecasting-balanced", {
+          prediction: true,
+          structuredResult: { isError: true },
+        }),
+      });
+      publishWorkflowChild(listeners, request, childId, "failed");
+      return {
+        result: Promise.resolve({ stopReason: "completed", value: [null] }),
+        cancel: () => {},
+        dispose: async () => {},
+      };
+    },
+  });
+
+  await assert.rejects(
+    harness.runner.run(samplePlanBinding()),
+    (error) => error?.code === "structured_child_model_error",
+  );
+  assert.deepEqual(reservations, [1]);
+  assert.equal(starts, 1);
+});
+
+test("Workflow completed null cannot infer missing from a non-failed child outcome", async () => {
+  let starts = 0;
+  const reservations = [];
+  const harness = workflowDeadlineHarness({
+    timeoutMs: 1_000,
+    maxAttempts: 2,
+    onReservation: (_options, attempt) => reservations.push(attempt),
+    startWorkflow: ({ request, listeners, sessions }) => {
+      starts += 1;
+      const childId = `workflow-nonfailed-null-${starts}`;
+      sessions.set(childId, {
+        id: childId,
+        events: rc6ConsumedEvents("origin-vector-forecasting-balanced", { prediction: true }),
+      });
+      publishWorkflowChild(listeners, request, childId, "completed");
+      return {
+        result: Promise.resolve({ stopReason: "completed", value: [null] }),
+        cancel: () => {},
+        dispose: async () => {},
+      };
+    },
+  });
+
+  await assert.rejects(
+    harness.runner.run(samplePlanBinding()),
+    (error) => error?.code === "structured_child_model_error",
+  );
+  assert.deepEqual(reservations, [1]);
+  assert.equal(starts, 1);
+});
+
+test("Workflow failed child capture evidence cannot authorize a non-null-batch shape", async () => {
+  let starts = 0;
+  const reservations = [];
+  const harness = workflowDeadlineHarness({
+    timeoutMs: 1_000,
+    maxAttempts: 2,
+    onReservation: (_options, attempt) => reservations.push(attempt),
+    startWorkflow: ({ request, listeners, sessions }) => {
+      starts += 1;
+      const childId = `workflow-wrong-batch-${starts}`;
+      sessions.set(childId, {
+        id: childId,
+        events: rc6ConsumedEvents("origin-vector-forecasting-balanced", { prediction: true }),
+      });
+      publishWorkflowChild(listeners, request, childId, "failed");
+      return {
+        result: Promise.resolve({ stopReason: "completed", value: [] }),
+        cancel: () => {},
+        dispose: async () => {},
+      };
+    },
+  });
+
+  await assert.rejects(
+    harness.runner.run(samplePlanBinding()),
+    (error) => error?.code === "structured_child_model_error",
+  );
+  assert.deepEqual(reservations, [1]);
+  assert.equal(starts, 1);
 });
 
 test("direct phase causes cannot spoof either retry allowlist code", async () => {
@@ -1567,12 +1938,19 @@ test("sample planner retries a missing Workflow result with a fresh reservation 
       childIds.push(childId);
       sessions.set(childId, {
         id: childId,
-        events: skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
+        events: workflowStarts === 1
+          ? rc6ConsumedEvents("origin-vector-forecasting-balanced", { prediction: true })
+          : skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
       });
-      publishWorkflowChild(listeners, request, childId);
+      publishWorkflowChild(
+        listeners,
+        request,
+        childId,
+        workflowStarts === 1 ? "failed" : "completed",
+      );
       return {
         result: Promise.resolve(workflowStarts === 1
-          ? { value: [], stopReason: "completed" }
+          ? { value: [null], stopReason: "completed" }
           : { value: [structured], stopReason: "completed" }),
         cancel: () => {},
         dispose: async () => {},
