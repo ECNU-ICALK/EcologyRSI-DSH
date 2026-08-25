@@ -29,6 +29,13 @@ order. The active DSH-native diagnostic path uses a different, correct
 contiguous-block selector, but the mislabeled helper must be corrected before
 it is reused for a promotion decision.
 
+Operational evidence from the restarted production service also showed that
+the web console's current default full run is unsuitable for an interactive
+health check: 177 origins × four candidates under 60-second provider pacing is
+at least 11.8 hours per generation and about 59 hours for five generations,
+before model latency and retries. The already supported one-origin/nine-cell
+budget needs an explicit diagnostic-only UI preset and honest evidence labels.
+
 ## Goals
 
 - Reject affirmative eligibility, gate, selection, or promotion assertions
@@ -44,6 +51,9 @@ it is reused for a promotion decision.
   blocks and report the method it actually executes.
 - Keep unrelated mutations responsive while a run is draining after pause or
   cancel.
+- Make quick diagnostic launch the explicit web-console default, keep full
+  selection-grade evolution opt-in, and show honest pacing-cost and scientific
+  scope labels for both.
 - Rebuild the isolated runtime and verify new cucumber and tomato diagnostic
   runs through terminal acceptance.
 
@@ -55,6 +65,8 @@ it is reused for a promotion decision.
   predictor family.
 - It does not compare scores across datasets or frozen cohorts.
 - It does not add synthetic progress percentages or billing-token claims.
+- It does not trust a caller-supplied mode or budget-class label; the server
+  continues deriving scientific eligibility from numeric budget evidence.
 
 ## Design
 
@@ -91,7 +103,24 @@ UQ artifact, and canonical `FormalFitnessAssessment` are wired together, a
 formal pass remains explicitly unavailable. Event replay also refuses a
 `passed` completion that lacks the canonical assessment bindings.
 
-### 5. Ordered moving-block bootstrap
+### 5. Explicit quick diagnostic and full-run cost boundary
+
+The web console presents two explicit presets. Quick diagnostic launches one
+generation, one candidate, one origin/nine prediction cells, concurrency one,
+and max-candidates one. It is labeled diagnostic-only and cannot claim a
+champion, formal best, selection, validation, final test, or promotion. Full
+selection-grade evolution remains available only as an explicit choice and
+retains the existing five generations, four candidates per generation, 1600
+cells per update, and max-candidates twenty.
+
+The console derives a lower-bound duration estimate from the selected origin
+count, candidate count, generation count, and the fixed 60-second provider
+pacing. It explains that model latency and retries add to that bound. The mode
+is UI convenience only: launch requests send numeric budgets, while the server
+derives `sample_budget_class` and enforces formal eligibility. Task 4's formal
+fail-closed boundary is a prerequisite.
+
+### 6. Ordered moving-block bootstrap
 
 Validated promotion evidence retains a unique integer
 `origin_block_index`. Candidate and incumbent indices must match exactly.
@@ -100,7 +129,7 @@ calendar gap, and truncate to the paired cohort size. Evidence with too few
 paired days or legal starts fails closed. Returned metadata records block
 length and legal-start count in addition to the versioned method.
 
-### 6. Bounded global mutation-lock scope
+### 7. Bounded global mutation-lock scope
 
 The HTTP dispatcher treats native pause/cancel as potentially long-running
 control operations, just as it already treats generation advancement. The
@@ -119,6 +148,12 @@ without blocking unrelated runs.
   control operation returns without waiting for a stage timeout.
 - Diagnostic formal reservation and `lambda: {"outcome": "passed"}` are
   rejected without setting validated/final-test candidate state.
+- The default web launch request is exactly 1 × 1 × 9 with both concurrencies
+  and max-candidates set to one; the full preset requires an explicit choice,
+  retains 5 × 4 × 1600 / 20, and both show their pacing lower bound.
+- Quick diagnostic projections and UI copy make no selection, champion,
+  formal-best, validation, final-test, or promotion claim. No caller-trusted
+  eligibility flag is sent; the server derives eligibility from numeric budgets.
 - Moving-block draws contain only contiguous calendar blocks and never bridge
   a time gap.
 - While pause/cancel is blocked in drain, another thread can acquire the global
