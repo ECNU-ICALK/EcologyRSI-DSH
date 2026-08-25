@@ -1,5 +1,19 @@
+import { isDeepStrictEqual } from "node:util";
+
+function deepFreeze(value, seen = new Set()) {
+  if (value === null || typeof value !== "object" || seen.has(value)) return value;
+  seen.add(value);
+  for (const key of Reflect.ownKeys(value)) deepFreeze(value[key], seen);
+  return Object.freeze(value);
+}
+
+function immutableClone(value) {
+  return deepFreeze(structuredClone(value));
+}
+
 export class RuntimeRunRegistry {
   #runs = new Map();
+  #metadata = new WeakMap();
 
   start(binding) {
     const prior = this.#runs.get(binding.run_id);
@@ -8,11 +22,19 @@ export class RuntimeRunRegistry {
       error.code = "runtime_start_transition_invalid";
       throw error;
     }
-    if (prior && prior.idempotency_key !== binding.idempotency_key) {
-      throw new Error("run already has a different active command");
+    if (prior) {
+      const metadata = this.#metadata.get(prior);
+      if (!metadata || !isDeepStrictEqual(metadata.startBinding, binding)) {
+        const error = new Error("run already has a different start command");
+        error.code = "runtime_start_conflict";
+        throw error;
+      }
+      return prior;
     }
-    const requestedStatus = binding?.binding?.initial_run_status || "created";
-    const provenance = binding?.binding?.restore_provenance;
+
+    const startBinding = immutableClone(binding);
+    const requestedStatus = startBinding?.binding?.initial_run_status || "created";
+    const provenance = startBinding?.binding?.restore_provenance;
     const exactRestore = (
       provenance !== null
       && typeof provenance === "object"
@@ -20,7 +42,7 @@ export class RuntimeRunRegistry {
       && Object.keys(provenance).length === 2
       && provenance.source === "python_durable_ledger"
       && provenance.status === requestedStatus
-      && binding.idempotency_key === `runtime-restore:${binding.run_id}`
+      && startBinding.idempotency_key === `runtime-restore:${startBinding.run_id}`
     );
     if (
       (provenance !== undefined && !exactRestore)
@@ -31,18 +53,21 @@ export class RuntimeRunRegistry {
     ) {
       throw new Error("invalid initial runtime run status");
     }
-    const frozen = Object.freeze({ ...binding, status: requestedStatus });
-    this.#runs.set(binding.run_id, frozen);
-    return frozen;
+    const metadata = Object.freeze({
+      generation: Object.freeze({}),
+      startBinding,
+    });
+    return this.#publish(startBinding.run_id, {
+      ...startBinding,
+      status: requestedStatus,
+    }, metadata);
   }
 
   transition(runId, binding, status) {
     const prior = this.#runs.get(runId);
     if (!prior) throw new Error("unknown runtime run");
     if (prior.run_id !== binding.run_id) throw new Error("runtime run identity mismatch");
-    const frozen = Object.freeze({ ...prior, ...binding, status });
-    this.#runs.set(runId, frozen);
-    return frozen;
+    return this.#publish(runId, { ...prior, ...binding, status }, this.#metadata.get(prior));
   }
 
   refresh(binding) {
@@ -55,8 +80,22 @@ export class RuntimeRunRegistry {
       || binding.ledger_expected_revision < prior.ledger_expected_revision
     );
     if (staleStageReceipt) return prior;
-    const frozen = Object.freeze({ ...prior, ...binding, status: prior.status });
-    this.#runs.set(binding.run_id, frozen);
+    return this.#publish(
+      binding.run_id,
+      { ...prior, ...binding, status: prior.status },
+      this.#metadata.get(prior),
+    );
+  }
+
+  generationOf(record) {
+    return this.#metadata.get(record)?.generation || null;
+  }
+
+  #publish(runId, value, metadata) {
+    if (!metadata) throw new Error("runtime run generation metadata is missing");
+    const frozen = immutableClone(value);
+    this.#metadata.set(frozen, metadata);
+    this.#runs.set(runId, frozen);
     return frozen;
   }
 

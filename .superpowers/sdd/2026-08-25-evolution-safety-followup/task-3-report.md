@@ -839,3 +839,181 @@ exited 0 without diagnostics.
 - The pre-existing role-host `waitForIdle()` boundary remains unbounded, as
   documented in Rounds 1 through 3; this round does not alter that Host API
   contract.
+
+## Fix Round 5/5
+
+### Review finding resolved
+
+- Every registry-created run generation now has an opaque, registry-owned
+  identity held in private `WeakMap` metadata. It cannot be selected through a
+  request field or reconstructed by a caller. `transition()` and `refresh()`
+  publish new immutable records with the same identity, while a start after an
+  actual deletion receives a fresh identity.
+- The same private metadata retains an immutable clone of the complete original
+  start payload. An active same-key request with any changed top-level or nested
+  field now rejects with `runtime_start_conflict` and leaves the current record
+  untouched. An exact replay returns the current record in the same generation;
+  a foreign controller returns only an idempotent receipt and neither creates
+  duplicate role hosts nor claims live readiness. If controls or stages changed
+  the current row's receipt, the replay response still echoes the original start
+  idempotency key required by the Python client without rolling registry state
+  back.
+- Controller host lifecycle state now carries `hostGeneration`, and every live
+  start token carries its accepted registry generation. Global live readiness,
+  stage admission before and after the external stage, resume admission before
+  and after start finalization, and both start/resume fence-open paths require
+  `hosts === "ready"` and exact equality with the current registry generation.
+- Successful role creation checks generation ownership before setting `ready`.
+  A superseded completion disposes/quiesces its private hosts and never opens
+  admission. The same controller also rejects claiming a replacement generation
+  until its older start token has finalized, preventing run-id cleanup from
+  crossing two local host generations.
+- Failed-start deletion remains the Round 4 exact-record compare-and-delete.
+  Generation identity does not weaken that CAS: a transition or refresh in the
+  same generation creates a different exact record, so cancelling/cancelled
+  tombstones and other authoritative mutations remain undeletable by stale
+  cleanup.
+
+### Round 5 RED evidence
+
+The initial registry and natural two-controller generation suite failed every
+new case before implementation:
+
+```bash
+node --test \
+  --test-name-pattern='registry exact start replay|registry rejects a changed|genuine replacement|exact shared-registry|changed same-key|stale ready hosts' \
+  integrations/dsh_ecology_plugin/test/cancel_race.test.mjs
+```
+
+```text
+tests 7
+pass 0
+fail 7
+
+generationOf: TypeError (three registry/generation cases)
+changed same-key registry start: Missing expected exception
+changed same-key controller start: actual fulfilled; expected rejected
+stale-ready replacement resumes: actual fulfilled; expected rejected (two cases)
+```
+
+The start-open and stage-admission mutations also both reproduced:
+
+```bash
+node --test \
+  --test-name-pattern='superseded by a new generation|stale ready host generation rejects stage admission' \
+  integrations/dsh_ecology_plugin/test/cancel_race.test.mjs
+```
+
+```text
+tests 2
+pass 0
+fail 2
+
+superseded start: no generation API and would otherwise open
+stale stage admission: actual fulfilled; expected rejected
+```
+
+Two self-review TDD cycles then caught exact-replay and local-token edge cases.
+The replay after a pause transition returned `pause-after-replayed-start-1`
+instead of the requested `runtime-restore:run-1`; the unfinished old local
+start accepted a replacement replay as fulfilled instead of rejecting it.
+Each one-test command failed 0/1 for that exact reason before its minimal fix.
+
+### Round 5 GREEN evidence
+
+All new registry, two-controller success/failure, exact-replay, stale-resume,
+superseded-start, and stale-stage cases passed together:
+
+```bash
+node --test \
+  --test-name-pattern='registry exact start replay|registry rejects a changed|genuine replacement|exact shared-registry|changed same-key|stale ready hosts|superseded by a new generation|stale ready host generation rejects stage admission' \
+  integrations/dsh_ecology_plugin/test/cancel_race.test.mjs
+```
+
+```text
+tests 9
+pass 9
+fail 0
+```
+
+The complete controller race file passed 39/39, and focused controller plus
+launch-fence coverage passed:
+
+```bash
+node --test \
+  integrations/dsh_ecology_plugin/test/cancel_race.test.mjs \
+  integrations/dsh_ecology_plugin/test/launch_fence.test.mjs
+```
+
+```text
+tests 44
+pass 44
+fail 0
+```
+
+The complete plugin Node suite, including proxy security, passed:
+
+```bash
+node --test integrations/dsh_ecology_plugin/test/*.mjs
+```
+
+```text
+tests 153
+pass 153
+fail 0
+duration_ms 663.536625
+```
+
+The relevant Python restoration, real Python/Node handshake, reconciliation,
+and cancel-race suite passed:
+
+```bash
+uv run --with pytest --frozen python -m pytest -o addopts='' -q \
+  tests/test_dsh_native_runtime.py \
+  tests/test_dsh_reconciliation.py \
+  tests/test_dsh_cancel_race.py
+```
+
+```text
+24 passed in 11.27s
+```
+
+Both changed production JavaScript files and the changed race test passed
+`node --check`; `git diff --check` exited 0 without diagnostics.
+
+### Round 5 self-review
+
+- Mutation coverage is direct: changing generation preservation, accepting a
+  changed nested model binding, reusing an old generation, treating stale hosts
+  as ready, opening before the generation check, admitting a stale stage,
+  deleting a transitioned tombstone, duplicating exact-replay hosts, or returning
+  the wrong replay key fails at least one deterministic regression.
+- The natural shared-registry races establish an actually ready restored-paused
+  owner, delete only to model a genuine replacement, block the replacement's
+  role creation, and attempt the old owner's resume while the new generation is
+  `creating`. Both replacement success and failure keep every inappropriate
+  fence closed; success leaves the new paused generation ready only on its owner,
+  while ordinary untouched failure still deletes only its own exact record.
+- A changed same-key attempt never reaches role creation and leaves the original
+  paused row and old ready hosts authoritative. An exact replay is intentionally
+  weaker than host ownership: it acknowledges the already accepted command but
+  leaves a foreign controller `liveReady === false`.
+- Generation identity is process-local control metadata, deliberately absent
+  from JSON responses and caller bindings. The durable business identity remains
+  the Python-owned frozen payload; a Node process restart constructs a fresh
+  registry and a fresh generation while the existing real restore handshake
+  recreates and verifies all six role hosts.
+- No provider FIFO/cooldown, control ordering, stable child/Workflow drain,
+  structured-role deadline, durable reconciliation, or terminal transition
+  behavior was broadened. All 153 Node tests and the 24 relevant Python tests
+  exercise those adjacent invariants.
+- No Python service, database, production port, current run, package install,
+  or external state was touched.
+
+### Round 5 concerns
+
+- No known correctness gap remains in the reviewed generation-bound host
+  readiness, replay conflict, stale resume, stage admission, or fence-open paths.
+- The pre-existing role-host `waitForIdle()` boundary remains unbounded, as
+  documented in Rounds 1 through 4; this round does not alter that Host API
+  contract.

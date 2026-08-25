@@ -89,6 +89,88 @@ test("runtime creation freezes the Python-owned initial run status", () => {
   );
 });
 
+test("registry exact start replay returns the current record and preserves its generation", () => {
+  const registry = new RuntimeRunRegistry();
+  const startBinding = binding({
+    idempotency_key: "generation-replay-1",
+    binding: {
+      initial_run_status: "running",
+      strategy_model_id: "provider/model-a",
+      review_model_id: "provider/model-b",
+    },
+  });
+  const started = registry.start(startBinding);
+  const generation = registry.generationOf(started);
+  const transitioned = registry.transition("run-1", binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: "pause-generation-replay-1",
+  }), "running");
+  const refreshed = registry.refresh(binding({
+    run_state_revision: 9,
+    ledger_expected_revision: 13,
+    idempotency_key: "stage-generation-replay-1",
+  }));
+  const replayed = registry.start(structuredClone(startBinding));
+
+  assert.ok(generation);
+  assert.strictEqual(registry.generationOf(transitioned), generation);
+  assert.strictEqual(registry.generationOf(refreshed), generation);
+  assert.strictEqual(replayed, refreshed);
+  assert.strictEqual(registry.generationOf(replayed), generation);
+  assert.equal(replayed.run_state_revision, 9);
+  assert.equal(replayed.idempotency_key, "stage-generation-replay-1");
+});
+
+test("registry rejects a changed full start payload under the same idempotency key", () => {
+  const registry = new RuntimeRunRegistry();
+  const startBinding = binding({
+    idempotency_key: "runtime-restore:run-1",
+    binding: {
+      initial_run_status: "paused",
+      restore_provenance: {
+        source: "python_durable_ledger",
+        status: "paused",
+      },
+      strategy_model_id: "provider/model-a",
+      review_model_id: "provider/model-b",
+    },
+  });
+  const started = registry.start(startBinding);
+
+  assert.throws(
+    () => registry.start({
+      ...structuredClone(startBinding),
+      binding: {
+        ...structuredClone(startBinding.binding),
+        strategy_model_id: "provider/changed-model",
+      },
+    }),
+    (error) => error?.code === "runtime_start_conflict",
+  );
+  assert.strictEqual(registry.get("run-1"), started);
+  assert.equal(registry.get("run-1").status, "paused");
+});
+
+test("a genuine replacement receives a new registry-owned generation", () => {
+  const registry = new RuntimeRunRegistry();
+  const startBinding = binding({
+    idempotency_key: "generation-replacement-1",
+    caller_generation: { forged: true },
+    binding: { initial_run_status: "running" },
+  });
+  const first = registry.start(startBinding);
+  const firstGeneration = registry.generationOf(first);
+  registry.delete("run-1");
+  const replacementBinding = structuredClone(startBinding);
+  replacementBinding.caller_generation = firstGeneration;
+  const replacement = registry.start(replacementBinding);
+
+  assert.ok(firstGeneration);
+  assert.ok(registry.generationOf(replacement));
+  assert.notStrictEqual(registry.generationOf(replacement), firstGeneration);
+});
+
 test("ordinary created runs cannot enter the restored-paused resume path", async () => {
   let opens = 0;
   const controller = new RuntimeController({}, {
@@ -169,6 +251,403 @@ test("a second controller cannot resume registry-only paused hosts", async () =>
   assert.equal(creatingWithoutStart.reason.code, "runtime_role_hosts_incomplete");
   assert.equal(registry.get("run-1").status, "paused");
   assert.equal(externalCalls.includes("open"), false);
+});
+
+test("an exact shared-registry start replay does not duplicate or claim role hosts", async () => {
+  const registry = new RuntimeRunRegistry();
+  const restored = binding({
+    idempotency_key: "runtime-restore:run-1",
+    binding: {
+      initial_run_status: "paused",
+      restore_provenance: {
+        source: "python_durable_ledger",
+        status: "paused",
+      },
+      strategy_model_id: "provider/model-a",
+      review_model_id: "provider/model-b",
+    },
+  });
+  const owner = new RuntimeController({}, {
+    registry,
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => assert.fail("restored paused owner must not open"),
+    },
+  });
+  owner.roleAgents = {
+    createRoleAgent: async () => ({ dispose: async () => {} }),
+    quiesceRun: async () => {},
+  };
+  await owner.startRun(restored);
+  const authoritative = registry.transition("run-1", binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: "pause-after-replayed-start-1",
+  }), "paused");
+  const generation = registry.generationOf(authoritative);
+  let replayCreates = 0;
+  let replayOpens = 0;
+  const replay = new RuntimeController({}, {
+    registry,
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => { replayOpens += 1; },
+    },
+  });
+  replay.roleAgents = {
+    createRoleAgent: async () => {
+      replayCreates += 1;
+      return { dispose: async () => {} };
+    },
+    quiesceRun: async () => {},
+  };
+
+  const result = await replay.startRun(structuredClone(restored));
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.idempotency_key, restored.idempotency_key);
+  assert.strictEqual(registry.get("run-1"), authoritative);
+  assert.equal(registry.get("run-1").idempotency_key, "pause-after-replayed-start-1");
+  assert.strictEqual(registry.generationOf(registry.get("run-1")), generation);
+  assert.equal(replayCreates, 0);
+  assert.equal(replayOpens, 0);
+  assert.equal(replay.liveReady, false);
+  assert.equal(owner.liveReady, true);
+});
+
+test("a changed same-key start on another controller conflicts without replacing paused hosts", async () => {
+  const registry = new RuntimeRunRegistry();
+  const restored = binding({
+    idempotency_key: "runtime-restore:run-1",
+    binding: {
+      initial_run_status: "paused",
+      restore_provenance: {
+        source: "python_durable_ledger",
+        status: "paused",
+      },
+      strategy_model_id: "provider/model-a",
+      review_model_id: "provider/model-b",
+    },
+  });
+  const owner = new RuntimeController({}, {
+    registry,
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: { closeLaunchFence: () => {}, openLaunchFence: () => {} },
+  });
+  owner.roleAgents = {
+    createRoleAgent: async () => ({ dispose: async () => {} }),
+    quiesceRun: async () => {},
+  };
+  await owner.startRun(restored);
+  const authoritative = registry.get("run-1");
+  let replacementCreates = 0;
+  let replacementOpens = 0;
+  const replacement = new RuntimeController({}, {
+    registry,
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => { replacementOpens += 1; },
+    },
+  });
+  replacement.roleAgents = {
+    createRoleAgent: async () => {
+      replacementCreates += 1;
+      return { dispose: async () => {} };
+    },
+    quiesceRun: async () => {},
+  };
+  const changed = structuredClone(restored);
+  changed.binding.strategy_model_id = "provider/changed-model";
+
+  const result = await outcome(replacement.startRun(changed));
+
+  assert.equal(result.status, "rejected");
+  assert.equal(result.reason.code, "runtime_start_conflict");
+  assert.strictEqual(registry.get("run-1"), authoritative);
+  assert.equal(registry.get("run-1").status, "paused");
+  assert.equal(replacementCreates, 0);
+  assert.equal(replacementOpens, 0);
+  assert.equal(owner.liveReady, true);
+  assert.equal(replacement.liveReady, false);
+});
+
+test("stale ready hosts cannot resume while a new paused generation is creating", async () => {
+  const registry = new RuntimeRunRegistry();
+  const ownerCalls = [];
+  const restored = binding({
+    idempotency_key: "runtime-restore:run-1",
+    binding: {
+      initial_run_status: "paused",
+      restore_provenance: {
+        source: "python_durable_ledger",
+        status: "paused",
+      },
+      strategy_model_id: "provider/model-a",
+      review_model_id: "provider/model-b",
+    },
+  });
+  const owner = new RuntimeController({}, {
+    registry,
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => ownerCalls.push("close"),
+      openLaunchFence: () => ownerCalls.push("open"),
+    },
+  });
+  owner.roleAgents = {
+    createRoleAgent: async () => ({ dispose: async () => {} }),
+    quiesceRun: async () => {},
+  };
+  await owner.startRun(restored);
+  const oldGeneration = registry.generationOf(registry.get("run-1"));
+  ownerCalls.length = 0;
+  registry.delete("run-1");
+
+  const createEntered = deferred();
+  const releaseCreate = deferred();
+  const replacementCalls = [];
+  const replacement = new RuntimeController({}, {
+    registry,
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => replacementCalls.push("close"),
+      openLaunchFence: () => replacementCalls.push("open"),
+    },
+  });
+  replacement.roleAgents = {
+    createRoleAgent: async () => {
+      createEntered.resolve();
+      await releaseCreate.promise;
+      return { dispose: async () => {} };
+    },
+    quiesceRun: async () => {},
+  };
+  const replacementBinding = structuredClone(restored);
+  replacementBinding.binding.strategy_model_id = "provider/replacement-model";
+  const startingReplacement = outcome(replacement.startRun(replacementBinding));
+  await createEntered.promise;
+  assert.notStrictEqual(
+    registry.generationOf(registry.get("run-1")),
+    oldGeneration,
+  );
+
+  const resumed = await outcome(owner.resume(binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: "stale-owner-resume-1",
+  })));
+
+  assert.equal(resumed.status, "rejected");
+  assert.equal(resumed.reason.code, "runtime_role_hosts_incomplete");
+  assert.equal(registry.get("run-1").status, "paused");
+  assert.equal(owner.liveReady, false);
+  assert.equal(ownerCalls.includes("open"), false);
+  assert.ok(ownerCalls.includes("close"));
+  assert.equal(replacementCalls.includes("open"), false);
+
+  releaseCreate.resolve();
+  const replacementResult = await startingReplacement;
+  assert.equal(replacementResult.status, "fulfilled");
+  assert.equal(registry.get("run-1").status, "paused");
+  assert.equal(replacement.liveReady, true);
+  assert.equal(owner.liveReady, false);
+  assert.equal(ownerCalls.includes("open"), false);
+  assert.equal(replacementCalls.includes("open"), false);
+});
+
+test("stale ready hosts cannot resume across a replacement start failure", async () => {
+  const registry = new RuntimeRunRegistry();
+  let ownerOpens = 0;
+  const restored = binding({
+    idempotency_key: "runtime-restore:run-1",
+    binding: {
+      initial_run_status: "paused",
+      restore_provenance: {
+        source: "python_durable_ledger",
+        status: "paused",
+      },
+      strategy_model_id: "provider/model-a",
+      review_model_id: "provider/model-b",
+    },
+  });
+  const owner = new RuntimeController({}, {
+    registry,
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => { ownerOpens += 1; },
+    },
+  });
+  owner.roleAgents = {
+    createRoleAgent: async () => ({ dispose: async () => {} }),
+    quiesceRun: async () => {},
+  };
+  await owner.startRun(restored);
+  ownerOpens = 0;
+  registry.delete("run-1");
+
+  const createEntered = deferred();
+  const releaseCreate = deferred();
+  let replacementOpens = 0;
+  const replacement = new RuntimeController({}, {
+    registry,
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => { replacementOpens += 1; },
+    },
+  });
+  replacement.roleAgents = {
+    createRoleAgent: async () => {
+      createEntered.resolve();
+      await releaseCreate.promise;
+      throw new Error("replacement host creation failed");
+    },
+    quiesceRun: async () => {},
+  };
+  const replacementBinding = structuredClone(restored);
+  replacementBinding.binding.review_model_id = "provider/replacement-review";
+  const startingReplacement = outcome(replacement.startRun(replacementBinding));
+  await createEntered.promise;
+
+  const resumed = await outcome(owner.resume(binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: "stale-owner-failed-replacement-resume-1",
+  })));
+  assert.equal(resumed.status, "rejected");
+  assert.equal(resumed.reason.code, "runtime_role_hosts_incomplete");
+  assert.equal(registry.get("run-1").status, "paused");
+
+  releaseCreate.resolve();
+  const replacementResult = await startingReplacement;
+  assert.equal(replacementResult.status, "rejected");
+  assert.match(replacementResult.reason.message, /replacement host creation failed/);
+  assert.equal(registry.get("run-1"), null);
+  assert.equal(ownerOpens, 0);
+  assert.equal(replacementOpens, 0);
+  assert.equal(owner.liveReady, false);
+  assert.equal(replacement.liveReady, false);
+});
+
+test("a start superseded by a new generation cleans its hosts and never opens admission", async () => {
+  const registry = new RuntimeRunRegistry();
+  const createEntered = deferred();
+  const releaseCreate = deferred();
+  const calls = [];
+  const controller = new RuntimeController({}, {
+    registry,
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => calls.push(["close"]),
+      openLaunchFence: () => calls.push(["open"]),
+    },
+  });
+  controller.roleAgents = {
+    createRoleAgent: async () => {
+      createEntered.resolve();
+      await releaseCreate.promise;
+      return { dispose: async () => {} };
+    },
+    quiesceRun: async (_runId, { dispose }) => calls.push(["hosts", dispose]),
+  };
+  const oldBinding = binding({
+    idempotency_key: "superseded-start-old-1",
+    binding: {
+      initial_run_status: "running",
+      strategy_model_id: "provider/old-model",
+      review_model_id: "provider/old-review",
+    },
+  });
+  const starting = outcome(controller.startRun(oldBinding));
+  await createEntered.promise;
+  const oldGeneration = registry.generationOf(registry.get("run-1"));
+  registry.delete("run-1");
+  const replacementBinding = binding({
+    idempotency_key: "superseded-start-new-1",
+    binding: {
+      initial_run_status: "running",
+      strategy_model_id: "provider/new-model",
+      review_model_id: "provider/new-review",
+    },
+  });
+  const replacement = registry.start(replacementBinding);
+  assert.notStrictEqual(registry.generationOf(replacement), oldGeneration);
+  const localReplayBeforeCleanup = await outcome(
+    controller.startRun(structuredClone(replacementBinding)),
+  );
+
+  releaseCreate.resolve();
+  const result = await starting;
+
+  assert.equal(result.status, "fulfilled");
+  assert.equal(localReplayBeforeCleanup.status, "rejected");
+  assert.equal(localReplayBeforeCleanup.reason.code, "runtime_start_conflict");
+  assert.strictEqual(registry.get("run-1"), replacement);
+  assert.deepEqual(calls.filter(([name]) => name === "hosts"), [["hosts", true]]);
+  assert.equal(calls.some(([name]) => name === "open"), false);
+  assert.equal(controller.liveReady, false);
+});
+
+test("stale ready host generation rejects stage admission before the runner", async () => {
+  const registry = new RuntimeRunRegistry();
+  const calls = [];
+  let stageRuns = 0;
+  const controller = new RuntimeController({}, {
+    registry,
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => calls.push("close"),
+      openLaunchFence: () => calls.push("open"),
+      run: async () => {
+        stageRuns += 1;
+        return {
+          structured: { accepted: true },
+          result_digest: "a".repeat(64),
+          session_id: "must-not-run",
+          skill_invocation_evidence: {
+            first_tool_call_verified: true,
+            order_verified: true,
+          },
+        };
+      },
+    },
+  });
+  controller.roleAgents = {
+    createRoleAgent: async () => ({ dispose: async () => {} }),
+    quiesceRun: async () => {},
+  };
+  await controller.startRun(binding({
+    idempotency_key: "admission-old-start-1",
+    binding: {
+      initial_run_status: "running",
+      strategy_model_id: "provider/old-model",
+      review_model_id: "provider/old-review",
+    },
+  }));
+  calls.length = 0;
+  registry.delete("run-1");
+  registry.start(binding({
+    idempotency_key: "admission-new-start-1",
+    binding: {
+      initial_run_status: "running",
+      strategy_model_id: "provider/new-model",
+      review_model_id: "provider/new-review",
+    },
+  }));
+
+  const result = await outcome(controller.runStage(binding({
+    idempotency_key: "stale-admission-stage-1",
+  })));
+
+  assert.equal(result.status, "rejected");
+  assert.equal(result.reason.code, "runtime_role_hosts_incomplete");
+  assert.equal(stageRuns, 0);
+  assert.deepEqual(calls, ["close"]);
+  assert.equal(controller.liveReady, false);
 });
 
 test("cancel closes runtime admission before child and role-host quiescence", async () => {
@@ -1037,8 +1516,9 @@ for (const terminalStatus of ["cancelling", "cancelled"]) {
       idempotency_key: exactKey,
       binding: { initial_run_status: "running" },
     });
-    registry.start(startBinding);
-    registry.transition(
+    const started = registry.start(startBinding);
+    const generation = registry.generationOf(started);
+    const tombstone = registry.transition(
       "run-1",
       binding({ idempotency_key: exactKey }),
       terminalStatus,
@@ -1049,6 +1529,7 @@ for (const terminalStatus of ["cancelling", "cancelled"]) {
       new RegExp(`cannot start from ${terminalStatus}`),
     );
     assert.equal(registry.get("run-1").status, terminalStatus);
+    assert.strictEqual(registry.generationOf(tombstone), generation);
   });
 }
 
@@ -1283,7 +1764,7 @@ test("late concurrent stage completion cannot reopen a paused run", async () => 
       quiesceRun: async () => {},
     },
   });
-  controller.registry.start(binding());
+  await startReadyRun(controller);
   controller.roleAgents = { quiesceRun: async () => {} };
 
   const inFlight = controller.runStage(binding({idempotency_key: "stage-1"}));

@@ -74,7 +74,10 @@ export class RuntimeController {
       (run) => !TERMINAL_START_STATUSES.includes(run.status),
     );
     return liveRuns.length > 0 && liveRuns.every(
-      (run) => this.runLifecycles.get(run.run_id)?.hosts === "ready",
+      (run) => this.#hostsReadyFor(
+        this.runLifecycles.get(run.run_id),
+        run,
+      ),
     );
   }
 
@@ -84,13 +87,18 @@ export class RuntimeController {
       return Promise.reject(this.#startTransitionError(current.status));
     }
     const lifecycle = this.#lifecycle(binding.run_id);
-    if (lifecycle.start !== null) {
+    const currentGeneration = this.registry.generationOf(current);
+    if (
+      lifecycle.start !== null
+      && lifecycle.start.generation === currentGeneration
+    ) {
       if (isDeepStrictEqual(lifecycle.start.binding, binding)) {
         return lifecycle.start.promise;
       }
-      const error = new Error("run already has a different start command");
-      error.code = "runtime_start_conflict";
-      return Promise.reject(error);
+      return Promise.reject(this.#startConflictError());
+    }
+    if (lifecycle.start !== null && !lifecycle.start.finalized) {
+      return Promise.reject(this.#startConflictError());
     }
     let accepted;
     try {
@@ -98,11 +106,22 @@ export class RuntimeController {
     } catch (error) {
       return Promise.reject(error);
     }
+    if (current !== null && accepted === current) {
+      return Promise.resolve({
+        ...this.#response(accepted),
+        idempotency_key: binding.idempotency_key,
+      });
+    }
+    const generation = this.registry.generationOf(accepted);
+    if (!generation) {
+      return Promise.reject(new Error("runtime run generation metadata is missing"));
+    }
     let releaseFinalization;
     const finalization = new Promise((resolve) => { releaseFinalization = resolve; });
     const startToken = {
       binding: structuredClone(binding),
       accepted,
+      generation,
       startEpoch: lifecycle.epoch,
       promise: null,
       finalization,
@@ -112,9 +131,10 @@ export class RuntimeController {
     };
     lifecycle.start = startToken;
     lifecycle.hosts = "creating";
+    lifecycle.hostGeneration = generation;
     this.stageRunner?.closeLaunchFence?.(binding.run_id);
     startToken.promise = Promise.resolve().then(
-      () => this.#performStart(binding, lifecycle, startToken),
+      () => this.#performStart(startToken.binding, lifecycle, startToken),
     );
     startToken.promise.catch(() => {});
     return startToken.promise;
@@ -145,8 +165,19 @@ export class RuntimeController {
       }));
       const failed = creations.find((item) => item.status === "rejected");
       if (failed) throw failed.reason;
-      lifecycle.hosts = "ready";
       const current = this.registry.get(binding.run_id);
+      if (
+        !this.#ownsStartGeneration(lifecycle, startToken)
+        || this.registry.generationOf(current) !== startToken.generation
+      ) {
+        await this.roleAgents.quiesceRun(binding.run_id, { dispose: true });
+        if (this.#ownsStartGeneration(lifecycle, startToken)) {
+          lifecycle.hosts = "superseded";
+        }
+        startToken.status = "fulfilled";
+        return this.#response(startToken.accepted);
+      }
+      lifecycle.hosts = "ready";
       if (
         lifecycle.epoch !== startToken.startEpoch
         || !START_OPEN_STATUSES.includes(current?.status)
@@ -157,11 +188,16 @@ export class RuntimeController {
         startToken.status = "fulfilled";
         return this.#response(startToken.accepted);
       }
-      this.stageRunner?.openLaunchFence?.(binding.run_id);
+      if (!this.#openLaunchFenceFor(binding.run_id, lifecycle, startToken.generation)) {
+        await this.roleAgents.quiesceRun(binding.run_id, { dispose: true });
+        lifecycle.hosts = "superseded";
+      }
       startToken.status = "fulfilled";
       return this.#response(startToken.accepted);
     } catch (primaryError) {
-      lifecycle.hosts = "failed";
+      if (this.#ownsStartGeneration(lifecycle, startToken)) {
+        lifecycle.hosts = "failed";
+      }
       this.stageRunner?.closeLaunchFence?.(binding.run_id);
       try {
         await this.roleAgents.quiesceRun(binding.run_id, { dispose: true });
@@ -189,12 +225,24 @@ export class RuntimeController {
 
   async runStage(binding) {
     if (!this.stageRunner?.run) throw new Error("structured DSH stage runner is unavailable");
+    const lifecycle = this.#lifecycle(binding.run_id);
+    const admitted = this.#current(binding.run_id);
+    const admittedGeneration = this.registry.generationOf(admitted);
+    if (!this.#hostsReadyFor(lifecycle, admitted, admittedGeneration)) {
+      this.stageRunner?.closeLaunchFence?.(binding.run_id);
+      throw this.#hostsIncompleteError();
+    }
     const stageResult = await this.stageRunner.run(binding);
     if (
       stageResult?.skill_invocation_evidence?.first_tool_call_verified !== true
       || stageResult?.skill_invocation_evidence?.order_verified !== true
     ) {
       throw new Error("DSH stage has no verified Skill-first execution evidence");
+    }
+    const latest = this.#current(binding.run_id);
+    if (!this.#hostsReadyFor(lifecycle, latest, admittedGeneration)) {
+      this.stageRunner?.closeLaunchFence?.(binding.run_id);
+      throw this.#hostsIncompleteError();
     }
     // Stage completion updates its frozen revision receipt but never owns run
     // control. Pause/cancel may have won while this child was in flight.
@@ -316,26 +364,30 @@ export class RuntimeController {
     if (!resumable) {
       return Promise.reject(this.#transitionError("resume", current.status));
     }
+    const currentGeneration = this.registry.generationOf(current);
     const liveCreatingStart = (
       lifecycle.hosts === "creating"
       && lifecycle.start !== null
       && !lifecycle.start.finalized
+      && lifecycle.hostGeneration === currentGeneration
+      && lifecycle.start.generation === currentGeneration
     );
-    if (lifecycle.hosts !== "ready" && !liveCreatingStart) {
+    if (!this.#hostsReadyFor(lifecycle, current, currentGeneration) && !liveCreatingStart) {
       this.stageRunner?.closeLaunchFence?.(binding.run_id);
       return Promise.reject(this.#hostsIncompleteError());
     }
     this.#advanceLifecycle(lifecycle, "resume");
     const source = current;
     const token = this.#controlToken(lifecycle, "resume", binding);
+    token.hostGeneration = currentGeneration;
     this.#mutation(binding, "resuming");
     return this.#queueControl(lifecycle, token, async () => {
       await this.#waitForStartFinalization(lifecycle);
-      if (lifecycle.hosts !== "ready") {
+      const latest = this.registry.get(binding.run_id);
+      if (!this.#hostsReadyFor(lifecycle, latest, token.hostGeneration)) {
         this.stageRunner?.closeLaunchFence?.(binding.run_id);
         throw this.#hostsIncompleteError();
       }
-      const latest = this.#current(binding.run_id);
       if (
         lifecycle.terminalEpoch !== token.terminalEpoch
         || latest.status === "cancelled"
@@ -346,16 +398,19 @@ export class RuntimeController {
       if (![...CONTROL_TRANSITIONS.resume, "resuming"].includes(latest.status)) {
         throw this.#transitionError("resume", latest.status);
       }
-      const resumed = this.#mutation(binding, "running");
+      const resumed = this.registry.transition(binding.run_id, binding, "running");
       if (!this.#laterControl(lifecycle, token, new Set(["pause", "cancel"]))) {
-        this.stageRunner?.openLaunchFence?.(binding.run_id);
+        if (!this.#openLaunchFenceFor(binding.run_id, lifecycle, token.hostGeneration)) {
+          throw this.#hostsIncompleteError();
+        }
       }
-      return resumed;
+      return this.#response(resumed);
     }, {
       onRejected: () => {
         const latest = this.registry.get(binding.run_id);
         if (
           lifecycle.terminalEpoch === token.terminalEpoch
+          && this.registry.generationOf(latest) === token.hostGeneration
           && (
             latest?.status === "resuming"
             || (source.status === "pausing" && latest?.status === "pausing")
@@ -417,12 +472,41 @@ export class RuntimeController {
         intent: null,
         start: null,
         hosts: "unknown",
+        hostGeneration: null,
         controls: new Set(),
         nextControlSequence: 0,
         failed: { pause: null, cancel: null },
       });
     }
     return this.runLifecycles.get(runId);
+  }
+
+  #hostsReadyFor(lifecycle, record, expectedGeneration = undefined) {
+    if (!lifecycle || !record || lifecycle.hosts !== "ready") return false;
+    const generation = this.registry.generationOf(record);
+    return Boolean(
+      generation
+      && lifecycle.hostGeneration === generation
+      && (expectedGeneration === undefined || generation === expectedGeneration)
+    );
+  }
+
+  #ownsStartGeneration(lifecycle, startToken) {
+    return lifecycle.start === startToken
+      && lifecycle.hostGeneration === startToken.generation;
+  }
+
+  #openLaunchFenceFor(runId, lifecycle, expectedGeneration) {
+    const current = this.registry.get(runId);
+    if (
+      !START_OPEN_STATUSES.includes(current?.status)
+      || !this.#hostsReadyFor(lifecycle, current, expectedGeneration)
+    ) {
+      this.stageRunner?.closeLaunchFence?.(runId);
+      return false;
+    }
+    this.stageRunner?.openLaunchFence?.(runId);
+    return true;
   }
 
   #advanceLifecycle(lifecycle, intent) {
@@ -506,6 +590,12 @@ export class RuntimeController {
   #startTransitionError(status) {
     const error = new Error(`runtime run cannot start from ${status}`);
     error.code = "runtime_start_transition_invalid";
+    return error;
+  }
+
+  #startConflictError() {
+    const error = new Error("run already has a different start command");
+    error.code = "runtime_start_conflict";
     return error;
   }
 
