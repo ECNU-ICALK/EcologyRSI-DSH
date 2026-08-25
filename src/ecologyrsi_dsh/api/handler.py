@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from ..application.config import bind_toy_dataset
 from ..core.director import EvolutionDirector
@@ -395,6 +396,10 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
             # A mutation spans several append-only events.  Serial execution keeps
             # that unit coherent without introducing a queue or transaction layer.
             self.mutation_lock = threading.RLock()
+            self._control_locks_guard = threading.Lock()
+            self._control_locks: WeakValueDictionary[str, threading.RLock] = (
+                WeakValueDictionary()
+            )
             self.sample_result_cache_lock = threading.RLock()
             self.sample_result_cache: OrderedDict[
                 tuple[str, str], tuple[int, tuple[dict[str, Any], ...]]
@@ -510,6 +515,19 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
                 lease = _GenerationLease(self, key)
                 self._generation_locks[key] = lease
             return lease
+
+    def control_lock(self, run_id: str) -> threading.RLock:
+        """Return the process-local control lock for one durable run."""
+
+        key = str(run_id).strip()
+        if not key:
+            raise ValueError("run_id must be non-empty")
+        with self._control_locks_guard:
+            lock = self._control_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._control_locks[key] = lock
+            return lock
 
     def acquire_generation_lease(
         self,
@@ -795,12 +813,31 @@ class EvolutionRequestHandler(
                 and path[0] == "runs"
                 and path[2] in ("advance", "step")
             )
+            control_request = (
+                len(path) == 3
+                and path[0] == "runs"
+                and path[2] in ("action", "control")
+            )
+            draining_control = control_request and str(
+                body.get("action", body.get("command", ""))
+            ).strip().lower() in {"pause", "cancel"}
             if long_running_advance:
                 # Generation execution owns a per-run lease and already uses
                 # thread-safe ledger writes.  Keeping the global mutation lock
                 # across remote model waits would block pause/cancel and every
                 # unrelated run for the full generation.
                 self._dispatch_post(path, body)
+            elif control_request:
+                # Serializing controls per run keeps a resume or second control
+                # from overtaking a pause/cancel drain.  Pause and cancel keep
+                # their small durable-write locks in _action, but must never
+                # hold the server-wide lock while DSH and generation work drain.
+                with self.server.control_lock(path[1]):
+                    if draining_control:
+                        self._dispatch_post(path, body)
+                    else:
+                        with self.server.mutation_lock:
+                            self._dispatch_post(path, body)
             else:
                 with self.server.mutation_lock:
                     self._dispatch_post(path, body)
@@ -3081,11 +3118,12 @@ class EvolutionRequestHandler(
                 # Preserve an operator-supplied pause cause in the append-only
                 # event stream so the projection can distinguish manual pauses
                 # from budget and gateway back-pressure pauses.
-                director.pause_run(
-                    run_id,
-                    reason=pause_reason,
-                    code=pause_code,
-                )
+                with self.server.mutation_lock:
+                    director.pause_run(
+                        run_id,
+                        reason=pause_reason,
+                        code=pause_code,
+                    )
         elif action == "resume":
             director.resume_run(run_id)
             if native_protocol:

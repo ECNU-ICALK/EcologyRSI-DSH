@@ -18,6 +18,7 @@ from ecologyrsi_dsh.application.config import bind_toy_dataset
 from ecologyrsi_dsh.core.models import Evaluation, TaskManifest
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 from ecologyrsi_dsh.data.toy import ToyCropSoilWater
+from ecologyrsi_dsh.integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 
 
 class HTTPServerErrorHandlingTests(unittest.TestCase):
@@ -549,6 +550,184 @@ class HTTPContractTests(unittest.TestCase):
 
         self.assertEqual(status, 200, payload)
         self.assertEqual(lock_available, [True])
+
+    def test_native_control_drain_keeps_unrelated_mutations_responsive(self) -> None:
+        class BlockingNativeRuntime:
+            def __init__(self) -> None:
+                self.entered = threading.Event()
+
+            def capabilities(self) -> dict:
+                return {"ready": True}
+
+            def require_capabilities(self, _payload: dict, _required: object, **_kwargs: object) -> None:
+                return
+
+            def create_run(self, request: dict) -> dict:
+                return {"accepted": True, **request}
+
+            def status(self, request: str) -> dict:
+                return {"run_id": request, "status": "running"}
+
+            def pause(self, request: dict) -> dict:
+                self.entered.set()
+                return {"accepted": True, **request}
+
+            def cancel(self, request: dict) -> dict:
+                self.entered.set()
+                return {"accepted": True, **request}
+
+            def resume(self, request: dict) -> dict:
+                return {"accepted": True, **request}
+
+        for action in ("pause", "cancel"):
+            with self.subTest(action=action):
+                run_id = f"run:native-{action}-drain-lock"
+                runtime = BlockingNativeRuntime()
+                self.server.dsh_native_runtime = runtime
+                status, created = self.request(
+                    "/api/runs",
+                    "POST",
+                    {
+                        "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                        "run_id": run_id,
+                        "domain_pack_id": "crop_soil_water",
+                        "dataset_id": "generated-toy-series@1",
+                        "strategy_model_id": "dsh/strategy",
+                        "review_model_id": "dsh/review",
+                        "start": True,
+                        "auto_advance": 0,
+                        "idempotency_key": f"native-{action}-drain-create",
+                    },
+                )
+                self.assertEqual(status, 201, created)
+                archivable_run_id = f"run:unrelated-archive-during-{action}"
+                status, archived_run = self.request(
+                    "/api/runs",
+                    "POST",
+                    {
+                        "run_id": archivable_run_id,
+                        "domain_pack_id": "crop_soil_water",
+                        "dataset_id": "generated-toy-series@1",
+                        "budget": 1,
+                        "auto_advance": 0,
+                        "idempotency_key": f"unrelated-archive-during-{action}-create",
+                    },
+                )
+                self.assertEqual(status, 201, archived_run)
+                status, cancelled = self.request(
+                    f"/api/runs/{quote(archivable_run_id, safe='')}/control",
+                    "POST",
+                    {
+                        "action": "cancel",
+                        "idempotency_key": f"unrelated-archive-during-{action}-cancel",
+                    },
+                )
+                self.assertEqual(status, 200, cancelled)
+                active_generation = self.server.acquire_generation_lease(run_id)
+                self.assertIsNotNone(active_generation)
+
+                control_response: list[tuple[int, object]] = []
+                control_thread = threading.Thread(
+                    target=lambda: control_response.append(
+                        self.request(
+                            f"/api/runs/{quote(run_id, safe='')}/control",
+                            "POST",
+                            {
+                                "action": action,
+                                "idempotency_key": f"native-{action}-drain-control",
+                            },
+                        )
+                    )
+                )
+                control_thread.start()
+                create_response: list[tuple[int, object]] = []
+                create_thread: threading.Thread | None = None
+                archive_response: list[tuple[int, object]] = []
+                archive_thread: threading.Thread | None = None
+                resume_response: list[tuple[int, object]] = []
+                resume_thread: threading.Thread | None = None
+                try:
+                    self.assertTrue(runtime.entered.wait(1))
+                    receipt = self.server.ledger.command_receipt(
+                        f"{run_id}:native-{action}-drain-control"
+                    )
+                    self.assertIsNotNone(receipt)
+                    self.assertEqual(receipt.status, "pending")
+                    self.assertTrue(control_thread.is_alive())
+
+                    create_thread = threading.Thread(
+                        target=lambda: create_response.append(
+                            self.request(
+                                "/api/runs",
+                                "POST",
+                                {
+                                    "run_id": f"run:unrelated-create-during-{action}",
+                                    "domain_pack_id": "crop_soil_water",
+                                    "dataset_id": "generated-toy-series@1",
+                                    "budget": 1,
+                                    "auto_advance": 0,
+                                    "idempotency_key": f"unrelated-create-during-{action}",
+                                },
+                            )
+                        )
+                    )
+                    create_thread.start()
+                    create_thread.join(0.5)
+                    self.assertFalse(
+                        create_thread.is_alive(),
+                        "an unrelated create waited for native control drain",
+                    )
+                    self.assertEqual(create_response[0][0], 201, create_response)
+
+                    archive_thread = threading.Thread(
+                        target=lambda: archive_response.append(
+                            self.request(
+                                f"/api/runs/{quote(archivable_run_id, safe='')}/archive",
+                                "POST",
+                                {},
+                            )
+                        )
+                    )
+                    archive_thread.start()
+                    archive_thread.join(0.5)
+                    self.assertFalse(
+                        archive_thread.is_alive(),
+                        "an unrelated archive waited for native control drain",
+                    )
+                    self.assertEqual(archive_response[0][0], 200, archive_response)
+
+                    if action == "pause":
+                        resume_thread = threading.Thread(
+                            target=lambda: resume_response.append(
+                                self.request(
+                                    f"/api/runs/{quote(run_id, safe='')}/control",
+                                    "POST",
+                                    {
+                                        "action": "resume",
+                                        "idempotency_key": "native-pause-drain-resume",
+                                    },
+                                )
+                            )
+                        )
+                        resume_thread.start()
+                        resume_thread.join(0.1)
+                        self.assertTrue(
+                            resume_thread.is_alive(),
+                            "resume overtook an in-flight native pause drain",
+                        )
+                        self.assertEqual(
+                            self.server.director.state(run_id).run.status.value,
+                            "paused",
+                        )
+                finally:
+                    active_generation.release()
+                control_thread.join(2)
+                self.assertFalse(control_thread.is_alive())
+                self.assertEqual(control_response[0][0], 200, control_response)
+                if resume_thread is not None:
+                    resume_thread.join(2)
+                    self.assertFalse(resume_thread.is_alive())
+                    self.assertEqual(resume_response[0][0], 200, resume_response)
 
     def test_pause_control_persists_operator_reason_and_code(self) -> None:
         run_id, _created = self._create_running_run_for_boundary(
