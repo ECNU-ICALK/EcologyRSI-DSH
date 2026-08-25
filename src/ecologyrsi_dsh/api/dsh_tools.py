@@ -14,7 +14,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from ..core.ledger import ConcurrentRunMutationError
-from ..core.models import digest
+from ..core.models import canonical_json, digest
 from ..knowledge.retrieval import (
     assess_dynamic_search_quality,
     merge_dynamic_search_results,
@@ -112,6 +112,12 @@ _IDENTITY_FIELDS = frozenset(
     }
 )
 _MODEL_BLOCKED_FIELDS = _IDENTITY_FIELDS
+
+
+def _strict_json_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values without Python's bool/int/float coercions."""
+
+    return canonical_json(left) == canonical_json(right)
 
 
 def _skill_invocation_evidence(
@@ -1174,14 +1180,12 @@ class DshToolService:
             )
             return self._retrieval_response(event.payload)
 
-    def _authorize_identity(
-        self,
+    @staticmethod
+    def _validate_identity_static(
         identity: Mapping[str, Any],
         *,
         tool_name: str | None = None,
         expected_role: str | None = None,
-        allow_ledger_advance: bool = False,
-        require_open_fence: bool = True,
     ) -> str:
         role = str(identity.get("role") or "")
         if tool_name is not None and tool_name not in ROLE_TOOLS.get(role, frozenset()):
@@ -1217,6 +1221,215 @@ class DshToolService:
             value = identity.get(name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise DshToolAuthorizationError(f"invalid Host revision field: {name}")
+        return role
+
+    def _validate_recorded_planner_binding(self, event: Any) -> None:
+        invalid_message = "recorded sample.plan prediction-tool binding is invalid"
+        payload = event.payload
+        identity = payload.get("identity")
+        structured = payload.get("structured")
+        receipt = payload.get("required_tool_receipt")
+        receipt_fields = {
+            "event_id",
+            "event_seq",
+            "request_digest",
+            "output_digest",
+            "execution_owner",
+        }
+        if (
+            not isinstance(identity, Mapping)
+            or not isinstance(structured, Mapping)
+            or not isinstance(receipt, Mapping)
+            or set(receipt) != receipt_fields
+            or not isinstance(receipt.get("event_id"), str)
+            or not receipt["event_id"]
+            or isinstance(receipt.get("event_seq"), bool)
+            or not isinstance(receipt.get("event_seq"), int)
+            or receipt["event_seq"] < 0
+            or receipt.get("execution_owner") != "dsh_agent_tool_call"
+            or any(
+                not isinstance(receipt.get(name), str)
+                or len(receipt[name]) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in receipt[name]
+                )
+                for name in ("request_digest", "output_digest")
+            )
+        ):
+            raise ValueError(invalid_message)
+
+        run_id = str(identity["run_id"])
+        idempotency_key = str(identity["idempotency_key"])
+        expected_event_id = self._prediction_event_id(run_id, idempotency_key)
+        if receipt["event_id"] != expected_event_id:
+            raise ValueError(invalid_message)
+        tool_event = self._event_by_id(run_id, receipt["event_id"])
+        if (
+            tool_event is None
+            or tool_event.kind != "DshPredictionToolExecuted"
+            or tool_event.seq != receipt["event_seq"]
+            or tool_event.seq >= event.seq
+        ):
+            raise ValueError(invalid_message)
+
+        tool_payload = tool_event.payload
+        tool_fields = {
+            "schema_version",
+            "stage",
+            "stage_attempt",
+            "idempotency_key",
+            "tool_id",
+            "wave_digest",
+            "sample_ids",
+            "prediction_count",
+            "request_digest",
+            "output_digest",
+            "execution_owner",
+        }
+        if not isinstance(tool_payload, Mapping) or set(tool_payload) != tool_fields:
+            raise ValueError(invalid_message)
+        sample_ids = tool_payload.get("sample_ids")
+        if (
+            tool_payload.get("schema_version")
+            != "ecologyrsi-dsh.dsh-prediction-tool-executed/1"
+            or tool_payload.get("stage") != "sample.plan"
+            or tool_payload.get("execution_owner") != "dsh_agent_tool_call"
+            or isinstance(tool_payload.get("stage_attempt"), bool)
+            or not isinstance(tool_payload.get("stage_attempt"), int)
+            or tool_payload["stage_attempt"] < 0
+            or not isinstance(tool_payload.get("idempotency_key"), str)
+            or not tool_payload["idempotency_key"]
+            or not isinstance(tool_payload.get("tool_id"), str)
+            or not tool_payload["tool_id"]
+            or not isinstance(sample_ids, list)
+            or not sample_ids
+            or not all(isinstance(item, str) and item for item in sample_ids)
+            or len(sample_ids) != len(set(sample_ids))
+            or isinstance(tool_payload.get("prediction_count"), bool)
+            or not isinstance(tool_payload.get("prediction_count"), int)
+            or tool_payload["prediction_count"] != len(sample_ids)
+            or any(
+                not isinstance(tool_payload.get(name), str)
+                or len(tool_payload[name]) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in tool_payload[name]
+                )
+                for name in ("wave_digest", "request_digest", "output_digest")
+            )
+            or tool_payload["stage_attempt"] != identity["stage_attempt"]
+            or tool_payload["idempotency_key"] != identity["idempotency_key"]
+            or tool_payload["wave_digest"] != structured.get("wave_digest")
+            or receipt["request_digest"] != tool_payload["request_digest"]
+            or receipt["output_digest"] != tool_payload["output_digest"]
+        ):
+            raise ValueError(invalid_message)
+        expected_request_digest = digest(
+            {
+                "tool_name": _PREDICTION_TOOL_NAME,
+                "run_id": run_id,
+                "stage": "sample.plan",
+                "stage_attempt": tool_payload["stage_attempt"],
+                "idempotency_key": tool_payload["idempotency_key"],
+                "arguments": {
+                    "tool_id": tool_payload["tool_id"],
+                    "wave_digest": tool_payload["wave_digest"],
+                },
+            }
+        )
+        if tool_payload["request_digest"] != expected_request_digest:
+            raise ValueError(invalid_message)
+
+        decisions = structured.get("decisions")
+        if not isinstance(decisions, list) or not all(
+            isinstance(item, Mapping)
+            and isinstance(item.get("sample_id"), str)
+            and item.get("sample_id")
+            and item.get("next_tool") == tool_payload["tool_id"]
+            for item in decisions
+        ):
+            raise ValueError(invalid_message)
+        decision_ids = [str(item["sample_id"]) for item in decisions]
+        if len(decision_ids) != len(sample_ids) or set(decision_ids) != set(
+            sample_ids
+        ):
+            raise ValueError(invalid_message)
+
+    def _validate_recorded_structured_result(
+        self,
+        event: Any,
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        payload = event.payload
+        required_fields = {
+            "schema_version",
+            "identity",
+            "output_schema_id",
+            "result_digest",
+            "structured",
+            "skill_invocation_evidence",
+        }
+        if (
+            not isinstance(payload, Mapping)
+            or not required_fields.issubset(payload)
+            or set(payload)
+            - (required_fields | {"session_metrics", "required_tool_receipt"})
+        ):
+            raise ValueError("recorded structured result has an invalid shape")
+        if (
+            payload.get("schema_version")
+            != "ecologyrsi-dsh.structured-result-accepted/1"
+        ):
+            raise ValueError("recorded structured result has an unsupported version")
+        identity = payload.get("identity")
+        if not isinstance(identity, Mapping) or set(identity) != _IDENTITY_FIELDS:
+            raise ValueError("recorded structured result identity is invalid")
+        self._validate_identity_static(identity)
+        stage = identity.get("stage")
+        expected_contract = _STRUCTURED_STAGE_CONTRACTS.get(stage)
+        if expected_contract is None or (
+            identity.get("role"), payload.get("output_schema_id")
+        ) != expected_contract:
+            raise ValueError("recorded structured result stage contract mismatch")
+        if identity.get("run_id") != event.run_id:
+            raise ValueError("recorded structured result run identity mismatch")
+        _skill_invocation_evidence(
+            payload.get("skill_invocation_evidence"),
+            stage=str(stage),
+        )
+        if "session_metrics" in payload:
+            _dsh_session_metrics(
+                payload["session_metrics"],
+                session_id=str(identity["session_id"]),
+            )
+        structured = payload.get("structured")
+        if (
+            not isinstance(structured, Mapping)
+            or payload.get("result_digest") != digest(structured)
+        ):
+            raise ValueError("recorded structured result digest mismatch")
+        if stage == "sample.plan":
+            self._validate_recorded_planner_binding(event)
+        elif "required_tool_receipt" in payload:
+            raise ValueError(
+                "recorded non-Planner structured result has a tool receipt"
+            )
+        return identity, structured
+
+    def _authorize_identity(
+        self,
+        identity: Mapping[str, Any],
+        *,
+        tool_name: str | None = None,
+        expected_role: str | None = None,
+        allow_ledger_advance: bool = False,
+        require_open_fence: bool = True,
+    ) -> str:
+        role = self._validate_identity_static(
+            identity,
+            tool_name=tool_name,
+            expected_role=expected_role,
+        )
         run_id = str(identity["run_id"])
         if not self.ledger.events(run_id):
             raise DshToolAuthorizationError("unknown DSH tool run")
@@ -1295,6 +1508,7 @@ class DshToolService:
                 envelope["session_metrics"],
                 session_id=str(identity["session_id"]),
             )
+        self._validate_identity_static(identity, expected_role=expected[0])
         event_id = self._structured_event_id(
             str(identity["run_id"]),
             str(identity["stage"]),
@@ -1307,22 +1521,16 @@ class DshToolService:
             prior = self._event_by_id(str(identity["run_id"]), event_id)
             if prior is None:
                 return None
-            matches_payload = (
-                prior.kind == "DshStructuredResultAccepted"
-                and prior.payload == payload
-            )
-            if (
-                not matches_payload
-                and allow_recorded_tool_receipt
-                and prior.kind == "DshStructuredResultAccepted"
-            ):
+            if prior.kind != "DshStructuredResultAccepted":
+                raise ValueError("structured-result idempotency key was reused")
+            self._validate_recorded_structured_result(prior)
+            matches_payload = _strict_json_equal(prior.payload, payload)
+            if not matches_payload and allow_recorded_tool_receipt:
                 recorded_payload = dict(prior.payload)
-                recorded_tool_receipt = recorded_payload.pop(
-                    "required_tool_receipt", None
-                )
-                matches_payload = (
-                    isinstance(recorded_tool_receipt, Mapping)
-                    and recorded_payload == payload
+                recorded_payload.pop("required_tool_receipt", None)
+                matches_payload = _strict_json_equal(
+                    recorded_payload,
+                    payload,
                 )
             if not matches_payload:
                 raise ValueError("structured-result idempotency key was reused")
@@ -1493,33 +1701,12 @@ class DshToolService:
         if prior.kind != "DshStructuredResultAccepted":
             raise ValueError("structured-result event identity was reused")
         payload = prior.payload
-        required_fields = {
-            "schema_version",
-            "identity",
-            "output_schema_id",
-            "result_digest",
-            "structured",
-            "skill_invocation_evidence",
-        }
-        if not isinstance(payload, Mapping) or not required_fields.issubset(payload):
-            raise ValueError("recorded structured result has an invalid shape")
-        if set(payload) - (
-            required_fields | {"session_metrics", "required_tool_receipt"}
-        ):
-            raise ValueError("recorded structured result has an invalid shape")
-        if (
-            payload.get("schema_version")
-            != "ecologyrsi-dsh.structured-result-accepted/1"
-        ):
-            raise ValueError("recorded structured result has an unsupported version")
         expected_contract = _STRUCTURED_STAGE_CONTRACTS.get(stage)
         if expected_contract != (role, output_schema_id):
             raise DshToolAuthorizationError(
                 "structured replay role/schema does not match its stage"
             )
-        identity = payload.get("identity")
-        if not isinstance(identity, Mapping) or set(identity) != _IDENTITY_FIELDS:
-            raise ValueError("recorded structured result identity is invalid")
+        identity, structured = self._validate_recorded_structured_result(prior)
         expected_identity = {
             "run_id": run_id,
             "stage": stage,
@@ -1528,7 +1715,7 @@ class DshToolService:
             "idempotency_key": idempotency_key,
         }
         if any(
-            identity.get(name) != value
+            not _strict_json_equal(identity.get(name), value)
             for name, value in expected_identity.items()
         ):
             raise DshToolAuthorizationError("structured replay identity mismatch")
@@ -1541,14 +1728,6 @@ class DshToolService:
             )
         if payload.get("output_schema_id") != output_schema_id:
             raise DshToolAuthorizationError("structured replay schema mismatch")
-        _skill_invocation_evidence(
-            payload.get("skill_invocation_evidence"),
-            stage=stage,
-        )
-        structured = payload.get("structured")
-        result_digest = payload.get("result_digest")
-        if not isinstance(structured, Mapping) or result_digest != digest(structured):
-            raise ValueError("recorded structured result digest mismatch")
         if stage == "sample.plan":
             key = (run_id, stage_attempt, idempotency_key)
             with self._prediction_lock:
@@ -1561,7 +1740,10 @@ class DshToolService:
                 raise DshToolAuthorizationError(
                     "sample.plan replay does not match its prediction wave"
                 )
-            if payload.get("required_tool_receipt") != binding.audit_receipt():
+            if not _strict_json_equal(
+                payload.get("required_tool_receipt"),
+                binding.audit_receipt(),
+            ):
                 raise ValueError(
                     "sample.plan replay prediction-tool receipt mismatch"
                 )

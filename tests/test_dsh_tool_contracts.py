@@ -164,6 +164,119 @@ def _arm_structured_envelope(
     return fence
 
 
+def _append_recorded_planner_result(
+    ledger: EventLedger,
+    *,
+    case: str,
+) -> tuple[dict, object]:
+    """Append one durable Planner result, optionally corrupting its binding."""
+
+    idempotency_key = f"restart-planner-{case}"
+    prediction_event_id = (
+        f"run:tool-test:dsh-prediction-tool:"
+        f"{digest({
+            'idempotency_key': idempotency_key,
+            'tool_name': 'ecology_execute_prediction_tool',
+        })}"
+    )
+    prediction_payload = {
+        "schema_version": "ecologyrsi-dsh.dsh-prediction-tool-executed/1",
+        "stage": "sample.plan",
+        "stage_attempt": 2,
+        "idempotency_key": idempotency_key,
+        "tool_id": "ridge@1",
+        "wave_digest": "d" * 64,
+        "sample_ids": ["s1"],
+        "prediction_count": 1,
+        "request_digest": "",
+        "output_digest": "f" * 64,
+        "execution_owner": "dsh_agent_tool_call",
+    }
+    if case == "binding":
+        prediction_payload["stage_attempt"] = 3
+    elif case == "wave":
+        prediction_payload["wave_digest"] = "c" * 64
+    elif case == "request-digest":
+        prediction_payload["request_digest"] = "0" * 64
+    if case != "request-digest":
+        prediction_payload["request_digest"] = digest(
+            {
+                "tool_name": "ecology_execute_prediction_tool",
+                "run_id": "run:tool-test",
+                "stage": "sample.plan",
+                "stage_attempt": prediction_payload["stage_attempt"],
+                "idempotency_key": prediction_payload["idempotency_key"],
+                "arguments": {
+                    "tool_id": prediction_payload["tool_id"],
+                    "wave_digest": prediction_payload["wave_digest"],
+                },
+            }
+        )
+    prediction_event = ledger.append(
+        "run:tool-test",
+        "DshPredictionToolExecuted",
+        prediction_payload,
+        event_id=prediction_event_id,
+    )
+
+    identity = _identity(ledger, idempotency_key=idempotency_key)
+    structured = {
+        "schema_version": "ecology-sample-decisions@1",
+        "wave_digest": "d" * 64,
+        "decisions": [
+            {
+                "sample_id": "s1",
+                "next_tool": "ridge@1",
+                "reason_code": "frozen_registered_route",
+                "confidence": 0.9,
+            }
+        ],
+    }
+    if case == "decision":
+        structured["decisions"][0]["next_tool"] = "forged@9"
+    receipt = {
+        "event_id": prediction_event.event_id,
+        "event_seq": prediction_event.seq,
+        "request_digest": prediction_payload["request_digest"],
+        "output_digest": prediction_payload["output_digest"],
+        "execution_owner": "dsh_agent_tool_call",
+    }
+    if case == "receipt":
+        receipt["output_digest"] = "0" * 64
+    accepted_payload = {
+        "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
+        "identity": identity,
+        "output_schema_id": "ecology-sample-decisions@1",
+        "result_digest": digest(structured),
+        "structured": structured,
+        "skill_invocation_evidence": _skill_evidence("sample.plan"),
+    }
+    if case != "missing-receipt":
+        accepted_payload["required_tool_receipt"] = receipt
+    accepted_event_id = (
+        f"run:tool-test:dsh-structured:"
+        f"{digest({
+            'stage': 'sample.plan',
+            'idempotency_key': idempotency_key,
+        })}"
+    )
+    accepted_event = ledger.append(
+        "run:tool-test",
+        "DshStructuredResultAccepted",
+        accepted_payload,
+        event_id=accepted_event_id,
+    )
+    envelope = {
+        "identity": identity,
+        "output_schema_id": "ecology-sample-decisions@1",
+        "structured": structured,
+        "result_digest": digest(structured),
+        "skill_invocation_evidence": _skill_evidence("sample.plan"),
+        "admission_id": "lost-response-admission",
+    }
+    return envelope, accepted_event
+
+
 class DshToolServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.ledger = EventLedger(":memory:")
@@ -1185,6 +1298,163 @@ class DshToolServiceTests(unittest.TestCase):
             ),
             1,
         )
+
+    def test_restarted_service_validates_identity_before_durable_lookup(self) -> None:
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
+        self.service.accept_structured(envelope)
+        malformed_fields = {
+            "run_state_revision float": ("run_state_revision", 3.0),
+            "stage_attempt float": ("stage_attempt", 2.0),
+            "ledger_expected_revision float": (
+                "ledger_expected_revision",
+                float(envelope["identity"]["ledger_expected_revision"]),
+            ),
+            "bool revision": ("ledger_expected_revision", True),
+            "negative revision": ("run_state_revision", -1),
+            "empty session": ("session_id", ""),
+            "blank reservation": ("child_reservation_id", "  "),
+            "non-text lease": ("activation_lease_id", 7),
+            "invalid digest": ("genome_digest", "not-a-sha256"),
+        }
+
+        for label, (field, value) in malformed_fields.items():
+            with self.subTest(label=label):
+                retry = json.loads(json.dumps(envelope))
+                retry["identity"][field] = value
+                restarted = DshToolService(self.ledger)
+
+                def durable_lookup_must_not_run(*_args: object) -> object:
+                    self.fail("malformed identity reached durable lookup")
+
+                restarted._event_by_id = durable_lookup_must_not_run
+                with self.assertRaises(DshToolAuthorizationError):
+                    restarted.accept_structured(retry)
+
+    def test_restarted_service_rejects_same_malformed_identity_from_history(
+        self,
+    ) -> None:
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        envelope.pop("deadline_unix_ms")
+        envelope["admission_id"] = "lost-response-admission"
+        envelope["identity"]["stage_attempt"] = 2.0
+        payload = {
+            "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
+            "identity": dict(envelope["identity"]),
+            "output_schema_id": envelope["output_schema_id"],
+            "result_digest": envelope["result_digest"],
+            "structured": dict(envelope["structured"]),
+            "skill_invocation_evidence": dict(
+                envelope["skill_invocation_evidence"]
+            ),
+        }
+        event_id = (
+            "run:tool-test:dsh-structured:"
+            f"{digest({
+                'stage': 'generation.research',
+                'idempotency_key': 'deadline-result',
+            })}"
+        )
+        self.ledger.append(
+            "run:tool-test",
+            "DshStructuredResultAccepted",
+            payload,
+            event_id=event_id,
+        )
+
+        with self.assertRaises(DshToolAuthorizationError):
+            DshToolService(self.ledger).accept_structured(envelope)
+
+    def test_restarted_service_preserves_non_identity_error_classification(
+        self,
+    ) -> None:
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
+        self.service.accept_structured(envelope)
+        restarted = DshToolService(self.ledger)
+
+        structured_conflict = json.loads(json.dumps(envelope))
+        structured_conflict["structured"]["summary"] = "different result"
+        structured_conflict["result_digest"] = digest(
+            structured_conflict["structured"]
+        )
+        with self.assertRaisesRegex(ValueError, "idempotency key was reused"):
+            restarted.accept_structured(structured_conflict)
+
+        digest_conflict = json.loads(json.dumps(envelope))
+        digest_conflict["result_digest"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "result digest mismatch"):
+            restarted.accept_structured(digest_conflict)
+
+        skill_conflict = json.loads(json.dumps(envelope))
+        skill_conflict["skill_invocation_evidence"]["skill_name"] = (
+            "origin-vector-review"
+        )
+        with self.assertRaisesRegex(ValueError, "stage contract"):
+            restarted.accept_structured(skill_conflict)
+
+        schema_conflict = json.loads(json.dumps(envelope))
+        schema_conflict["output_schema_id"] = "ecology-generation-review@1"
+        with self.assertRaisesRegex(
+            DshToolAuthorizationError,
+            "schema is not allowed",
+        ):
+            restarted.accept_structured(schema_conflict)
+
+        metrics_conflict = json.loads(json.dumps(envelope))
+        metrics_conflict["session_metrics"] = {
+            "schema_version": "ecologyrsi-dsh.dsh-session-metrics/1",
+            "session_id": "session:forged",
+            "context_pressure": {
+                "available": False,
+                "source": "dsh_token_meter",
+            },
+            "provider_usage": {
+                "available": False,
+                "source": "dsh_session_projection_token_usage",
+            },
+        }
+        with self.assertRaisesRegex(
+            DshToolAuthorizationError,
+            "session metrics identity mismatch",
+        ):
+            restarted.accept_structured(metrics_conflict)
+
+    def test_restarted_planner_exact_receipt_requires_no_live_fence_or_binding(
+        self,
+    ) -> None:
+        envelope, accepted_event = _append_recorded_planner_result(
+            self.ledger,
+            case="healthy",
+        )
+        before = self.ledger.count("run:tool-test")
+
+        receipt = DshToolService(self.ledger).accept_structured(envelope)
+
+        self.assertEqual(receipt["event_id"], accepted_event.event_id)
+        self.assertEqual(receipt["event_seq"], accepted_event.seq)
+        self.assertEqual(self.ledger.count("run:tool-test"), before)
+
+    def test_restarted_planner_revalidates_durable_prediction_binding(self) -> None:
+        for case in (
+            "missing-receipt",
+            "receipt",
+            "request-digest",
+            "binding",
+            "decision",
+            "wave",
+        ):
+            with self.subTest(case=case):
+                envelope, _accepted_event = _append_recorded_planner_result(
+                    self.ledger,
+                    case=case,
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "recorded sample.plan prediction-tool binding is invalid",
+                ):
+                    DshToolService(self.ledger).accept_structured(envelope)
 
     def test_restarted_service_rejects_conflicting_structured_replay(self) -> None:
         envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)

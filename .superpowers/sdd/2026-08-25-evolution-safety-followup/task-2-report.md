@@ -758,3 +758,157 @@ git diff --check
 - No production service, live run, browser suite, or external state was
   touched. The complete plugin suite and 143 related Python tests were run;
   unrelated repository-wide tests were not run.
+
+## Fix Round 4/5
+
+### Review finding addressed
+
+The restart receipt fast path now validates the complete Host identity before
+deriving an event ID or consulting the durable ledger. The validation is the
+same side-effect-free static validation used by normal live authorization: all
+text bindings must be non-empty strings, all three genome identity digests must
+be lowercase SHA-256 values, and all three revisions must be non-negative
+integers with booleans rejected explicitly. Consequently `2.0` can no longer
+stand in for `2`, `True` can no longer stand in for `1`, and an equally
+malformed historical event and retry cannot confirm each other.
+
+Durable payload comparison now uses canonical JSON rather than Python mapping
+equality. This preserves object-key normalization while distinguishing JSON
+numbers and booleans that Python otherwise treats as equal. The prior accepted
+event is also fully revalidated before acknowledgment: version, exact shape,
+Host identity, stage/role/schema contract, Skill evidence, optional session
+metrics, and result digest all have to remain valid. The explicit
+`replay_structured_result` path reuses this same validator.
+
+For `sample.plan`, the receipt-free wire payload can match only after the
+recorded Host-produced `required_tool_receipt` is validated against a strictly
+earlier `DshPredictionToolExecuted` event. The validator checks the deterministic
+event ID and sequence, closed payload shape and types, execution owner, receipt
+digests, recomputed request digest, stage attempt, idempotency key, prediction
+wave, and the exact frozen sample/tool decision set. A missing or forged
+receipt, a self-consistent forged request digest, or drift in the durable
+attempt, decisions, or wave now fails closed before acknowledgment.
+
+A genuinely exact healthy receipt still needs no process-local admission fence
+or prediction binding after restart. It returns the original event ID and
+sequence without appending a new event.
+
+### RED evidence
+
+The public service regressions were added before production changes:
+
+```bash
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m unittest -v \
+  tests.test_dsh_tool_contracts.DshToolServiceTests.test_restarted_service_validates_identity_before_durable_lookup \
+  tests.test_dsh_tool_contracts.DshToolServiceTests.test_restarted_service_rejects_same_malformed_identity_from_history \
+  tests.test_dsh_tool_contracts.DshToolServiceTests.test_restarted_service_preserves_non_identity_error_classification \
+  tests.test_dsh_tool_contracts.DshToolServiceTests.test_restarted_planner_exact_receipt_requires_no_live_fence_or_binding \
+  tests.test_dsh_tool_contracts.DshToolServiceTests.test_restarted_planner_revalidates_durable_prediction_binding
+```
+
+```text
+Ran 5 tests in 0.012s
+FAILED (failures=15)
+```
+
+All nine malformed identity cases reached the durable-lookup tripwire before
+authorization. A historical and retried `stage_attempt: 2.0` was acknowledged
+without error. Missing/forged Planner receipts plus attempt, decision, and wave
+drift were also acknowledged. The legal restart receipt and the structured,
+result-digest, Skill, schema, and session-metrics classification controls
+already passed.
+
+An additional self-consistent forged Planner request digest was independently
+RED before request-digest recomputation:
+
+```text
+test_restarted_planner_revalidates_durable_prediction_binding
+  (case='request-digest') ... FAIL
+AssertionError: ValueError not raised
+```
+
+### GREEN evidence
+
+The core fix and legal controls passed together:
+
+```text
+Ran 7 tests in 0.010s
+OK
+```
+
+The complete directly affected Python group passed:
+
+```bash
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m unittest tests.test_dsh_tool_contracts tests.test_dsh_structured_roles \
+  tests.test_dsh_sample_execution tests.test_strategy_router -v
+```
+
+```text
+Ran 103 tests in 2.589s
+OK
+```
+
+The expanded related Python regression passed:
+
+```bash
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m unittest tests.test_dsh_tool_contracts tests.test_dsh_cancel_race \
+  tests.test_dsh_native_runtime tests.test_dsh_sample_execution \
+  tests.test_core tests.test_dsh_structured_roles \
+  tests.test_dsh_reconciliation tests.test_genome_replay \
+  tests.test_strategy_router -v
+```
+
+```text
+Ran 148 tests in 12.850s
+OK
+```
+
+The unchanged plugin boundary also passed its complete regression suite:
+
+```bash
+node --test integrations/dsh_ecology_plugin/test/*.mjs
+```
+
+```text
+tests 103
+pass 103
+fail 0
+duration_ms 629.420041
+```
+
+Fresh syntax, byte-compilation, and whitespace checks completed with exit code
+zero and no diagnostics:
+
+```bash
+node --check integrations/dsh_ecology_plugin/lib/runtime/structured-deadline.js
+node --check integrations/dsh_ecology_plugin/lib/runtime/routes.js
+node --check integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js
+node --check integrations/dsh_ecology_plugin/lib/runtime/structured-roles.js
+node --check integrations/dsh_ecology_plugin/lib/sidecar/client.js
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m py_compile src/ecologyrsi_dsh/api/dsh_tools.py \
+  src/ecologyrsi_dsh/api/handler.py \
+  src/ecologyrsi_dsh/integrations/dsh_structured_roles.py \
+  tests/test_dsh_tool_contracts.py tests/test_dsh_sample_execution.py \
+  tests/test_strategy_router.py
+git diff --check
+```
+
+### Self-review and concerns
+
+- No known functional concern remains for the restart durable fast path.
+- Validation of an exact durable acknowledgment is ledger-only and has no
+  live-state side effects. A receipt that is absent or invalid cannot fall
+  through to the live acceptance path as if it were new; it fails closed.
+- The normal new-event path still requires the live prediction binding,
+  admission ID, frozen monotonic deadline, authorization, and guarded commit.
+- The accepted Planner event does not duplicate prediction outputs, so its
+  output digest is validated through the earlier immutable prediction event
+  and receipt. The recomputable request digest and every persisted binding are
+  independently checked.
+- No JavaScript production code, production service, live run, browser suite,
+  or external state was changed. The complete plugin suite and 148 related
+  Python tests were run; unrelated repository-wide tests were not run.
