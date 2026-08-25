@@ -43,3 +43,21 @@ test("research stage timeout must be positive", () => {
     /researchStageTimeoutMs must be positive/,
   );
 });
+
+test("all structured stage timeouts respect the protocol ceiling", () => {
+  for (const name of [
+    "structuredStageTimeoutMs",
+    "researchStageTimeoutMs",
+    "sampleCriticStageTimeoutMs",
+  ]) {
+    for (const value of [1_800_001, 2_147_483_648]) {
+      assert.throws(
+        () => resolvePluginConfig({ [name]: value }, {
+          defaultStaticRoot: "/tmp/ecologyrsi-static",
+          env: {},
+        }),
+        new RegExp(`${name} must be at most 1800000`),
+      );
+    }
+  }
+});

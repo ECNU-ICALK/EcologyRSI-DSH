@@ -96,10 +96,17 @@ export function registerRuntimeRoutes(ctx, controller, config) {
       }
       const extra = create
         ? new Set(["binding"])
-        : mutation?.[2] === "stages" ? new Set(["stage", "request"]) : new Set();
+        : mutation?.[2] === "stages"
+          ? new Set(["stage", "request", "admission_id"])
+          : new Set();
       if (!validIdentityBody(body, extra)
         || (mutation && decodeURIComponent(mutation[1]) !== body.run_id)
-        || (mutation?.[2] === "stages" && (typeof body.stage !== "string" || !body.stage))) {
+        || (mutation?.[2] === "stages" && (
+          typeof body.stage !== "string"
+          || !body.stage
+          || typeof body.admission_id !== "string"
+          || !body.admission_id
+        ))) {
         safeJsonError(res, 400, "invalid_start_contract");
         return;
       }

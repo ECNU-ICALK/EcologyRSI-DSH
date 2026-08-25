@@ -54,7 +54,29 @@ class DshCancelRaceTests(unittest.TestCase):
         }
 
     def test_closed_run_fence_rejects_late_structured_result_and_new_stage(self) -> None:
-        self.service.open_admission("run-1", 3, 1)
+        fence = self.service.open_admission(
+            "run-1",
+            3,
+            1,
+            role="researcher",
+            stage="generation.research",
+            idempotency_key="research-1",
+        )
+        self.service.allocate_child_reservation(
+            {
+                "request_id": "cancel-race-reservation",
+                "run_id": "run-1",
+                "parent_session_id": "research-host",
+                "role": "researcher",
+                "stage": "generation.research",
+                "run_state_revision": 3,
+                "stage_attempt": 1,
+                "admission_id": fence.admission_id,
+                "timeout_ms": 1_000,
+                "item_digest": "d" * 64,
+                "idempotency_key": "research-1",
+            }
+        )
         self.service.close_run_admissions("run-1")
         structured = {
             "schema_version": "ecology-research-result@1",
@@ -69,7 +91,7 @@ class DshCancelRaceTests(unittest.TestCase):
                     "structured": structured,
                     "result_digest": digest(structured),
                     "skill_invocation_evidence": _research_skill_evidence(),
-                    "deadline_unix_ms": 4_102_444_800_000,
+                    "admission_id": fence.admission_id,
                 }
             )
         with self.assertRaises(DshToolAdmissionClosedError):

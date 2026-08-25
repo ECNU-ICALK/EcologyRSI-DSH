@@ -1,4 +1,5 @@
 import { validateLoopbackOrigin } from "./security.js";
+import { validateStructuredTimeoutMs } from "./runtime/structured-deadline.js";
 
 export const DEFAULT_BACKEND_ORIGIN = "http://127.0.0.1:8777";
 
@@ -40,19 +41,16 @@ export function resolvePluginConfig(config = {}, { defaultStaticRoot, env = proc
       config.maxResponseBytes, 16 * 1024 * 1024, "maxResponseBytes",
     ),
     totalTimeoutMs: positiveInteger(config.totalTimeoutMs, 30_000, "totalTimeoutMs"),
-    structuredStageTimeoutMs: positiveInteger(
-      config.structuredStageTimeoutMs,
-      600_000,
+    structuredStageTimeoutMs: validateStructuredTimeoutMs(
+      positiveInteger(config.structuredStageTimeoutMs, 600_000, "structuredStageTimeoutMs"),
       "structuredStageTimeoutMs",
     ),
-    researchStageTimeoutMs: positiveInteger(
-      config.researchStageTimeoutMs,
-      1_800_000,
+    researchStageTimeoutMs: validateStructuredTimeoutMs(
+      positiveInteger(config.researchStageTimeoutMs, 1_800_000, "researchStageTimeoutMs"),
       "researchStageTimeoutMs",
     ),
-    sampleCriticStageTimeoutMs: positiveInteger(
-      config.sampleCriticStageTimeoutMs,
-      180_000,
+    sampleCriticStageTimeoutMs: validateStructuredTimeoutMs(
+      positiveInteger(config.sampleCriticStageTimeoutMs, 180_000, "sampleCriticStageTimeoutMs"),
       "sampleCriticStageTimeoutMs",
     ),
     structuredStageMinIntervalMs: positiveInteger(

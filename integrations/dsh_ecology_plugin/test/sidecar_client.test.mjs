@@ -114,6 +114,31 @@ test("sidecar rejection retains only the sidecar's already-redacted public detai
   } finally { await close(server); }
 });
 
+test("sidecar preserves the structured operational timeout machine code", async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(409, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      error: "structured role deadline expired",
+      error_code: "structured_role_operational_timeout",
+    }));
+  });
+  const port = await listen(server);
+  try {
+    const client = new SidecarClient({
+      origin: `http://127.0.0.1:${port}`,
+      token: "top-secret-token",
+    });
+    await assert.rejects(
+      client.request("/api/ecology-agent-sidecar/v1/structured-results", {
+        body: { result: true },
+      }),
+      (error) => error instanceof SidecarError
+        && error.code === "structured_role_operational_timeout"
+        && error.publicDetail === "structured role deadline expired",
+    );
+  } finally { await close(server); }
+});
+
 test("sidecar origin and paths are literal loopback allowlists", () => {
   assert.throws(() => new SidecarClient({ origin: "http://example.com", token: "x" }), /loopback/);
   const client = new SidecarClient({ origin: "http://127.0.0.1:8777", token: "x" });

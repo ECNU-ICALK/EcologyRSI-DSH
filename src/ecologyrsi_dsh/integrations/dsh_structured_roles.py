@@ -49,7 +49,15 @@ class DshStructuredRoleRuntime:
             },
         }
         if self.admission is not None:
-            self.admission.open_admission(run_id, run_state_revision, stage_attempt)
+            fence = self.admission.open_admission(
+                run_id,
+                run_state_revision,
+                stage_attempt,
+                role=role,
+                stage=stage,
+                idempotency_key=idempotency_key,
+            )
+            request["admission_id"] = fence.admission_id
         try:
             replay = getattr(self.admission, "replay_structured_result", None)
             if callable(replay):

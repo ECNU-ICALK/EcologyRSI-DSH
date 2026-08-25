@@ -1750,15 +1750,20 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 raise ValueError("DshPredictionToolExecuted payload is invalid")
             dsh_prediction_tool_events[event.event_id] = (event.seq, dict(payload))
         elif event.kind == "DshChildLaunchReserved":
-            if set(payload) != {
+            legacy_fields = {
                 "schema_version",
                 "request_id",
                 "parent_session_id",
                 "business_key_digest",
                 "launch",
-            }:
+            }
+            if set(payload) not in (
+                legacy_fields,
+                legacy_fields | {"request_contract_digest"},
+            ):
                 raise ValueError("DshChildLaunchReserved payload is invalid")
             launch = payload["launch"]
+            request_contract_digest = payload.get("request_contract_digest")
             if (
                 payload["schema_version"]
                 != "ecologyrsi-dsh.child-launch-reserved/1"
@@ -1767,6 +1772,17 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 or isinstance(launch.get("launch_attempt"), bool)
                 or not isinstance(launch.get("launch_attempt"), int)
                 or launch["launch_attempt"] < 1
+                or (
+                    request_contract_digest is not None
+                    and (
+                        not isinstance(request_contract_digest, str)
+                        or len(request_contract_digest) != 64
+                        or any(
+                            character not in "0123456789abcdef"
+                            for character in request_contract_digest
+                        )
+                    )
+                )
             ):
                 raise ValueError("DshChildLaunchReserved contract is invalid")
         elif event.kind == "GatewayRetryScheduled":

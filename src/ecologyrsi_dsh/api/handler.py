@@ -36,6 +36,7 @@ from ..core.models import (
     digest,
     utc_now,
 )
+from ..core.redaction import safe_error_code
 from ..core.sample_results import MAX_SAMPLE_RESULTS_UNCOMPRESSED_BYTES
 from ..data.registry import DatasetRegistry
 from ..evaluators.registry import (
@@ -87,6 +88,16 @@ _DEFAULT_SAMPLES_PER_UPDATE = 1_600
 _MAX_SAMPLES_PER_UPDATE = 100_000
 _DEFAULT_SAMPLE_AGENT_BATCH_SIZE = 64
 _MAX_SAMPLE_AGENT_BATCH_SIZE = 128
+
+
+def _dsh_sidecar_error(exc: BaseException) -> dict[str, str]:
+    payload = {"error": _public_http_error(exc)}
+    error_code = safe_error_code(getattr(exc, "error_code", None))
+    if error_code is not None:
+        payload["error_code"] = error_code
+    return payload
+
+
 _DEFAULT_SAMPLE_OPERATION_MAX_TOKENS = {
     # Production evidence showed that reasoning-capable planners frequently
     # exhausted 3072 tokens before emitting the bounded decision object.  A
@@ -747,9 +758,9 @@ class EvolutionRequestHandler(
                 result = self.server.dsh_tools.allocate_child_reservation(self._body())
                 self._send(HTTPStatus.OK, result)
             except PermissionError as exc:
-                self._send(HTTPStatus.FORBIDDEN, {"error": _public_http_error(exc)})
+                self._send(HTTPStatus.FORBIDDEN, _dsh_sidecar_error(exc))
             except (RuntimeError, TypeError, ValueError) as exc:
-                self._send(HTTPStatus.CONFLICT, {"error": _public_http_error(exc)})
+                self._send(HTTPStatus.CONFLICT, _dsh_sidecar_error(exc))
             return
         if raw_path == "/api/ecology-agent-sidecar/v1/structured-results":
             if not self._authorize_dsh_tool():
@@ -758,9 +769,9 @@ class EvolutionRequestHandler(
                 result = self.server.dsh_tools.accept_structured(self._body())
                 self._send(HTTPStatus.OK, result)
             except PermissionError as exc:
-                self._send(HTTPStatus.FORBIDDEN, {"error": _public_http_error(exc)})
+                self._send(HTTPStatus.FORBIDDEN, _dsh_sidecar_error(exc))
             except (RuntimeError, TypeError, ValueError) as exc:
-                self._send(HTTPStatus.CONFLICT, {"error": _public_http_error(exc)})
+                self._send(HTTPStatus.CONFLICT, _dsh_sidecar_error(exc))
             return
         if raw_path == "/api/ecology-agent-sidecar/v1/retrievals/replay":
             if not self._authorize_dsh_tool():

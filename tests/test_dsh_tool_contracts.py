@@ -93,6 +93,77 @@ def _research_envelope(ledger: EventLedger, *, deadline_unix_ms: int) -> dict:
     }
 
 
+def _reservation_request(
+    admission_id: str,
+    *,
+    request_id: str = "deadline-reservation-1",
+    timeout_ms: int = 1_000,
+) -> dict:
+    return {
+        "request_id": request_id,
+        "run_id": "run:tool-test",
+        "parent_session_id": "session:research-host",
+        "role": "researcher",
+        "stage": "generation.research",
+        "run_state_revision": 3,
+        "stage_attempt": 2,
+        "admission_id": admission_id,
+        "timeout_ms": timeout_ms,
+        "item_digest": "d" * 64,
+        "idempotency_key": "deadline-result",
+    }
+
+
+def _admitted_research_envelope(
+    ledger: EventLedger,
+    *,
+    admission_id: str,
+) -> dict:
+    envelope = _research_envelope(ledger, deadline_unix_ms=1)
+    envelope.pop("deadline_unix_ms")
+    envelope["admission_id"] = admission_id
+    return envelope
+
+
+def _arm_structured_envelope(
+    service: DshToolService,
+    envelope: dict,
+    *,
+    timeout_ms: int = 1_000,
+) -> object:
+    identity = envelope["identity"]
+    fence = service.open_admission(
+        identity["run_id"],
+        identity["run_state_revision"],
+        identity["stage_attempt"],
+        role=identity["role"],
+        stage=identity["stage"],
+        idempotency_key=identity["idempotency_key"],
+    )
+    service.allocate_child_reservation(
+        {
+            "request_id": f"arm-{digest({
+                'run_id': identity['run_id'],
+                'stage': identity['stage'],
+                'idempotency_key': identity['idempotency_key'],
+            })}",
+            "run_id": identity["run_id"],
+            "parent_session_id": identity["session_id"],
+            "role": identity["role"],
+            "stage": identity["stage"],
+            "run_state_revision": identity["run_state_revision"],
+            "stage_attempt": identity["stage_attempt"],
+            "admission_id": fence.admission_id,
+            "timeout_ms": timeout_ms,
+            "item_digest": digest({"stage": identity["stage"]}),
+            "idempotency_key": identity["idempotency_key"],
+        }
+    )
+    envelope.pop("deadline_unix_ms", None)
+    envelope["admission_id"] = fence.admission_id
+    return fence
+
+
 class DshToolServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.ledger = EventLedger(":memory:")
@@ -577,6 +648,7 @@ class DshToolServiceTests(unittest.TestCase):
                 },
             },
         }
+        _arm_structured_envelope(self.service, envelope)
         first = self.service.accept_structured(envelope)
         second = self.service.accept_structured(envelope)
         self.assertEqual(first, second)
@@ -624,6 +696,7 @@ class DshToolServiceTests(unittest.TestCase):
             "skill_invocation_evidence": _skill_evidence("generation.judge"),
             "deadline_unix_ms": FUTURE_DEADLINE_UNIX_MS,
         }
+        _arm_structured_envelope(self.service, envelope)
 
         accepted = self.service.accept_structured(envelope)
 
@@ -682,16 +755,16 @@ class DshToolServiceTests(unittest.TestCase):
                     },
                 },
             )
-            self.service.accept_structured(
-                {
-                    "identity": identity,
-                    "output_schema_id": "ecology-sample-decisions@1",
-                    "structured": structured,
-                    "result_digest": digest(structured),
-                    "skill_invocation_evidence": _skill_evidence("sample.plan"),
-                    "deadline_unix_ms": FUTURE_DEADLINE_UNIX_MS,
-                }
-            )
+            envelope = {
+                "identity": identity,
+                "output_schema_id": "ecology-sample-decisions@1",
+                "structured": structured,
+                "result_digest": digest(structured),
+                "skill_invocation_evidence": _skill_evidence("sample.plan"),
+                "deadline_unix_ms": FUTURE_DEADLINE_UNIX_MS,
+            }
+            _arm_structured_envelope(self.service, envelope)
+            self.service.accept_structured(envelope)
 
         class NeverCalledRuntime:
             calls = 0
@@ -749,18 +822,18 @@ class DshToolServiceTests(unittest.TestCase):
             "summary": "bounded evidence",
             "evidence": [],
         }
-        self.service.accept_structured(
-            {
-                "identity": identity,
-                "output_schema_id": "ecology-research-result@1",
-                "structured": structured,
-                "result_digest": digest(structured),
-                "skill_invocation_evidence": _skill_evidence(
-                    "generation.research"
-                ),
-                "deadline_unix_ms": FUTURE_DEADLINE_UNIX_MS,
-            }
-        )
+        envelope = {
+            "identity": identity,
+            "output_schema_id": "ecology-research-result@1",
+            "structured": structured,
+            "result_digest": digest(structured),
+            "skill_invocation_evidence": _skill_evidence(
+                "generation.research"
+            ),
+            "deadline_unix_ms": FUTURE_DEADLINE_UNIX_MS,
+        }
+        _arm_structured_envelope(self.service, envelope)
+        self.service.accept_structured(envelope)
         replay_args = {
             "run_id": "run:tool-test",
             "stage": "generation.research",
@@ -837,16 +910,16 @@ class DshToolServiceTests(unittest.TestCase):
             "summary": "The completed sample suggests a smaller correction.",
         }
 
-        accepted = self.service.accept_structured(
-            {
-                "identity": identity,
-                "output_schema_id": "ecology-sample-reflection@1",
-                "structured": structured,
-                "result_digest": digest(structured),
-                "skill_invocation_evidence": _skill_evidence("sample.reflect"),
-                "deadline_unix_ms": FUTURE_DEADLINE_UNIX_MS,
-            }
-        )
+        envelope = {
+            "identity": identity,
+            "output_schema_id": "ecology-sample-reflection@1",
+            "structured": structured,
+            "result_digest": digest(structured),
+            "skill_invocation_evidence": _skill_evidence("sample.reflect"),
+            "deadline_unix_ms": FUTURE_DEADLINE_UNIX_MS,
+        }
+        _arm_structured_envelope(self.service, envelope)
+        accepted = self.service.accept_structured(envelope)
 
         self.assertTrue(accepted["accepted"])
         event = self.ledger.events("run:tool-test")[-1]
@@ -856,25 +929,171 @@ class DshToolServiceTests(unittest.TestCase):
             event.payload["output_schema_id"], "ecology-sample-reflection@1"
         )
 
-    def test_structured_result_requires_a_runtime_deadline(self) -> None:
+    def test_structured_result_requires_an_armed_admission(self) -> None:
         envelope = _research_envelope(
             self.ledger,
             deadline_unix_ms=FUTURE_DEADLINE_UNIX_MS,
         )
         envelope.pop("deadline_unix_ms")
 
-        with self.assertRaisesRegex(ValueError, "deadline"):
+        with self.assertRaisesRegex(ValueError, "admission_id"):
             self.service.accept_structured(envelope)
 
+    def test_child_reservation_arms_one_frozen_monotonic_deadline(self) -> None:
+        monotonic_ms = [100]
+        service = DshToolService(
+            self.ledger,
+            monotonic_ms=lambda: monotonic_ms[0],
+        )
+        fence = service.open_admission(
+            "run:tool-test",
+            3,
+            2,
+            role="researcher",
+            stage="generation.research",
+            idempotency_key="deadline-result",
+        )
+
+        first = service.allocate_child_reservation(
+            _reservation_request(fence.admission_id)
+        )
+        frozen_deadline = fence.deadline_monotonic_ms
+        monotonic_ms[0] = 500
+        second = service.allocate_child_reservation(
+            _reservation_request(
+                fence.admission_id,
+                request_id="deadline-reservation-2",
+            )
+        )
+
+        self.assertEqual(first["admission_id"], fence.admission_id)
+        self.assertEqual(first["timeout_ms"], 1_000)
+        self.assertEqual(second["admission_id"], fence.admission_id)
+        self.assertEqual(frozen_deadline, 1_100)
+        self.assertEqual(fence.deadline_monotonic_ms, frozen_deadline)
+
+        changed = _reservation_request(
+            fence.admission_id,
+            request_id="deadline-reservation-3",
+            timeout_ms=1_001,
+        )
+        with self.assertRaises(Exception) as caught:
+            service.allocate_child_reservation(changed)
+        self.assertEqual(
+            getattr(caught.exception, "error_code", None),
+            "structured_role_operational_timeout",
+        )
+        self.assertEqual(fence.deadline_monotonic_ms, frozen_deadline)
+
+    def test_armed_deadline_uses_only_monotonic_time_after_wall_rollback(self) -> None:
+        monotonic_ms = [100]
+        service = DshToolService(
+            self.ledger,
+            monotonic_ms=lambda: monotonic_ms[0],
+        )
+        service._wall_clock_ms = lambda: self.fail(
+            "wall time must not participate in armed deadline authorization"
+        )
+        fence = service.open_admission(
+            "run:tool-test",
+            3,
+            2,
+            role="researcher",
+            stage="generation.research",
+            idempotency_key="deadline-result",
+        )
+        service.allocate_child_reservation(
+            _reservation_request(fence.admission_id)
+        )
+        monotonic_ms[0] = 1_100
+
+        with self.assertRaises(Exception) as caught:
+            service.accept_structured(
+                _admitted_research_envelope(
+                    self.ledger,
+                    admission_id=fence.admission_id,
+                )
+            )
+
+        self.assertEqual(
+            getattr(caught.exception, "error_code", None),
+            "structured_role_operational_timeout",
+        )
+        self.assertFalse(any(
+            event.kind == "DshStructuredResultAccepted"
+            for event in self.ledger.events("run:tool-test")
+        ))
+
+    def test_child_reservation_rejects_timeout_above_protocol_ceiling(self) -> None:
+        service = DshToolService(self.ledger, monotonic_ms=lambda: 100)
+        fence = service.open_admission(
+            "run:tool-test",
+            3,
+            2,
+            role="researcher",
+            stage="generation.research",
+            idempotency_key="deadline-result",
+        )
+
+        with self.assertRaises(Exception) as caught:
+            service.allocate_child_reservation(
+                _reservation_request(
+                    fence.admission_id,
+                    timeout_ms=1_800_001,
+                )
+            )
+
+        self.assertEqual(
+            getattr(caught.exception, "error_code", None),
+            "structured_role_operational_timeout",
+        )
+        self.assertFalse(any(
+            event.kind == "DshChildLaunchReserved"
+            for event in self.ledger.events("run:tool-test")
+        ))
+
+    def test_structured_result_must_match_the_armed_admission(self) -> None:
+        service = DshToolService(self.ledger, monotonic_ms=lambda: 100)
+        fence = service.open_admission(
+            "run:tool-test",
+            3,
+            2,
+            role="researcher",
+            stage="generation.research",
+            idempotency_key="deadline-result",
+        )
+        service.allocate_child_reservation(
+            _reservation_request(fence.admission_id)
+        )
+
+        with self.assertRaises(Exception) as caught:
+            service.accept_structured(
+                _admitted_research_envelope(
+                    self.ledger,
+                    admission_id="admission-forged",
+                )
+            )
+
+        self.assertEqual(
+            getattr(caught.exception, "error_code", None),
+            "structured_role_operational_timeout",
+        )
+
     def test_expired_structured_result_is_rejected_before_arrival_work(self) -> None:
-        self.service._wall_clock_ms = lambda: 1_000
+        monotonic_ms = [100]
+        self.service._monotonic_ms = lambda: monotonic_ms[0]
         envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
         before = self.ledger.count("run:tool-test")
+        monotonic_ms[0] = 1_100
 
         with self.assertRaises(Exception) as caught:
             self.service.accept_structured(envelope)
 
-        self.assertIsInstance(caught.exception, DshToolAdmissionClosedError)
+        self.assertEqual(
+            getattr(caught.exception, "error_code", None),
+            "structured_role_operational_timeout",
+        )
         self.assertRegex(str(caught.exception), "deadline")
         self.assertEqual(self.ledger.count("run:tool-test"), before)
 
@@ -893,9 +1112,11 @@ class DshToolServiceTests(unittest.TestCase):
                     raise RuntimeError("test did not release precommit deadline check")
             return monotonic_ms[0]
 
-        self.service._wall_clock_ms = lambda: 0
-        self.service._monotonic_ms = monotonic_clock_ms
+        self.service._monotonic_ms = lambda: monotonic_ms[0]
         envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
+        self.service._monotonic_ms = monotonic_clock_ms
+        monotonic_calls = 0
         before = self.ledger.count("run:tool-test")
         outcome: list[object] = []
 
@@ -919,7 +1140,10 @@ class DshToolServiceTests(unittest.TestCase):
 
         self.assertFalse(worker.is_alive())
         self.assertEqual(len(outcome), 1)
-        self.assertIsInstance(outcome[0], DshToolAdmissionClosedError)
+        self.assertEqual(
+            getattr(outcome[0], "error_code", None),
+            "structured_role_operational_timeout",
+        )
         self.assertEqual(self.ledger.count("run:tool-test"), before)
         self.assertFalse(any(
             event.kind == "DshStructuredResultAccepted"
@@ -927,15 +1151,13 @@ class DshToolServiceTests(unittest.TestCase):
         ))
 
     def test_exact_structured_receipt_replays_after_its_deadline(self) -> None:
-        wall_ms = [0]
         monotonic_ms = [100]
-        self.service._wall_clock_ms = lambda: wall_ms[0]
         self.service._monotonic_ms = lambda: monotonic_ms[0]
         envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
 
         first = self.service.accept_structured(envelope)
-        wall_ms[0] = 2_000
-        monotonic_ms[0] = 2_100
+        monotonic_ms[0] = 1_100
         second = self.service.accept_structured(envelope)
 
         self.assertEqual(second, first)
@@ -947,21 +1169,53 @@ class DshToolServiceTests(unittest.TestCase):
             1,
         )
 
-    def test_concurrent_exact_receipt_replays_after_early_lookup_expires(self) -> None:
-        replay_at_wall_clock = threading.Event()
-        release_replay = threading.Event()
+    def test_expired_conflicting_structured_replay_still_rejects_idempotency(self) -> None:
+        monotonic_ms = [100]
+        self.service._monotonic_ms = lambda: monotonic_ms[0]
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
+        self.service.accept_structured(envelope)
+        monotonic_ms[0] = 1_100
+        conflicting = json.loads(json.dumps(envelope))
+        conflicting["structured"]["summary"] = "conflicting late payload"
+        conflicting["result_digest"] = digest(conflicting["structured"])
 
-        def wall_clock_ms() -> int:
-            if threading.current_thread().name == "late-exact-replay":
-                replay_at_wall_clock.set()
+        with self.assertRaisesRegex(ValueError, "idempotency key was reused"):
+            self.service.accept_structured(conflicting)
+
+        self.assertEqual(
+            sum(
+                event.kind == "DshStructuredResultAccepted"
+                for event in self.ledger.events("run:tool-test")
+            ),
+            1,
+        )
+
+    def test_concurrent_exact_receipt_replays_after_early_lookup_expires(self) -> None:
+        replay_after_empty_lookup = threading.Event()
+        release_replay = threading.Event()
+        monotonic_ms = [100]
+        self.service._monotonic_ms = lambda: monotonic_ms[0]
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
+        original_event_by_id = self.service._event_by_id
+        blocked_once = False
+
+        def observed_event_by_id(run_id: str, event_id: str) -> object:
+            nonlocal blocked_once
+            result = original_event_by_id(run_id, event_id)
+            if (
+                threading.current_thread().name == "late-exact-replay"
+                and ":dsh-structured:" in event_id
+                and not blocked_once
+            ):
+                blocked_once = True
+                replay_after_empty_lookup.set()
                 if not release_replay.wait(2):
                     raise RuntimeError("test did not release late exact replay")
-                return 1_100
-            return 0
+            return result
 
-        self.service._wall_clock_ms = wall_clock_ms
-        self.service._monotonic_ms = lambda: 100
-        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        self.service._event_by_id = observed_event_by_id
         replay_outcome: list[object] = []
 
         def replay() -> None:
@@ -976,10 +1230,11 @@ class DshToolServiceTests(unittest.TestCase):
         )
         replay_worker.start()
         self.assertTrue(
-            replay_at_wall_clock.wait(1),
+            replay_after_empty_lookup.wait(1),
             "replay did not finish its early receipt lookup",
         )
         first = self.service.accept_structured(envelope)
+        monotonic_ms[0] = 1_100
         release_replay.set()
         replay_worker.join(2)
 
@@ -996,24 +1251,46 @@ class DshToolServiceTests(unittest.TestCase):
     def test_insert_ignore_exact_replay_skips_expired_commit_guard(self) -> None:
         before_append = threading.Event()
         release_append = threading.Event()
-        replay_clock_calls = 0
-        replay_expired = False
+        monotonic_ms = [100]
+        monotonic_calls = 0
 
         def replay_monotonic_ms() -> int:
-            nonlocal replay_clock_calls
-            replay_clock_calls += 1
-            if replay_clock_calls == 2:
+            nonlocal monotonic_calls
+            monotonic_calls += 1
+            return monotonic_ms[0]
+
+        self.service._monotonic_ms = replay_monotonic_ms
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
+        original_event_by_id = self.service._event_by_id
+        original_append = self.ledger.append
+        hid_early_receipt = False
+
+        def observed_event_by_id(run_id: str, event_id: str) -> object:
+            nonlocal hid_early_receipt
+            result = original_event_by_id(run_id, event_id)
+            if (
+                threading.current_thread().name == "insert-ignore-replay"
+                and ":dsh-structured:" in event_id
+                and not hid_early_receipt
+            ):
+                hid_early_receipt = True
+                return None
+            return result
+
+        def observed_append(*args: object, **kwargs: object) -> object:
+            if (
+                threading.current_thread().name == "insert-ignore-replay"
+                and len(args) > 1
+                and args[1] == "DshStructuredResultAccepted"
+            ):
                 before_append.set()
                 if not release_append.wait(2):
                     raise RuntimeError("test did not release exact replay append")
-                # This is the pre-append check. The deadline expires immediately
-                # after it, before EventLedger resolves INSERT OR IGNORE.
-                return 100
-            return 1_100 if replay_expired else 100
+            return original_append(*args, **kwargs)
 
-        self.service._wall_clock_ms = lambda: 0
-        self.service._monotonic_ms = replay_monotonic_ms
-        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        self.service._event_by_id = observed_event_by_id
+        self.ledger.append = observed_append
         replay_outcome: list[object] = []
 
         def replay() -> None:
@@ -1022,26 +1299,21 @@ class DshToolServiceTests(unittest.TestCase):
             except Exception as error:  # noqa: BLE001 - asserted below
                 replay_outcome.append(error)
 
-        replay_worker = threading.Thread(target=replay)
+        replay_worker = threading.Thread(target=replay, name="insert-ignore-replay")
         replay_worker.start()
         self.assertTrue(before_append.wait(1))
 
-        committer = DshToolService(
-            self.ledger,
-            wall_clock_ms=lambda: 0,
-            monotonic_ms=lambda: 100,
-        )
-        committer.open_admission("run:tool-test", 3, 2)
-        first = committer.accept_structured(envelope)
-        replay_expired = True
+        first = self.service.accept_structured(envelope)
+        monotonic_ms[0] = 1_100
+        calls_before_insert_ignore = monotonic_calls
         release_append.set()
         replay_worker.join(2)
 
         self.assertFalse(replay_worker.is_alive())
         self.assertEqual(replay_outcome, [first])
         self.assertEqual(
-            replay_clock_calls,
-            2,
+            monotonic_calls,
+            calls_before_insert_ignore,
             "an INSERT OR IGNORE replay must not enter the new-row deadline guard",
         )
         self.assertEqual(
@@ -1085,9 +1357,11 @@ class DshToolServiceTests(unittest.TestCase):
                     raise RuntimeError("test did not release guarded commit")
             return 100
 
-        self.service._wall_clock_ms = lambda: 0
-        self.service._monotonic_ms = monotonic_clock_ms
+        self.service._monotonic_ms = lambda: 100
         envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
+        self.service._monotonic_ms = monotonic_clock_ms
+        monotonic_calls = 0
         outcome: list[object] = []
 
         def accept() -> None:
@@ -1127,6 +1401,78 @@ class DshToolServiceTests(unittest.TestCase):
             self.service._fences[("run:tool-test", 3, 2)].state,
             "closed",
         )
+
+    def test_close_run_cannot_overtake_structured_result_commit(self) -> None:
+        monotonic_calls = 0
+        precommit_entered = threading.Event()
+        release_precommit = threading.Event()
+        close_blocked = threading.Event()
+        close_finished = threading.Event()
+        fence = self.service._fences[("run:tool-test", 3, 2)]
+        inner_lock = fence.lock
+
+        class ObservedFenceLock:
+            def __enter__(self) -> ObservedFenceLock:
+                if threading.current_thread().name == "close-run-admissions":
+                    if not inner_lock.acquire(blocking=False):
+                        close_blocked.set()
+                        inner_lock.acquire()
+                else:
+                    inner_lock.acquire()
+                return self
+
+            def __exit__(self, *_error: object) -> None:
+                inner_lock.release()
+
+        fence.lock = ObservedFenceLock()
+
+        def monotonic_clock_ms() -> int:
+            nonlocal monotonic_calls
+            monotonic_calls += 1
+            if monotonic_calls == 3:
+                precommit_entered.set()
+                if not release_precommit.wait(2):
+                    raise RuntimeError("test did not release guarded commit")
+            return 100
+
+        self.service._monotonic_ms = lambda: 100
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
+        self.service._monotonic_ms = monotonic_clock_ms
+        monotonic_calls = 0
+        outcome: list[object] = []
+
+        accept_worker = threading.Thread(
+            target=lambda: outcome.append(
+                self.service.accept_structured(envelope)
+            )
+        )
+        accept_worker.start()
+        self.assertTrue(precommit_entered.wait(1))
+
+        def close_run() -> None:
+            self.service.close_run_admissions("run:tool-test")
+            close_finished.set()
+
+        close_worker = threading.Thread(
+            target=close_run,
+            name="close-run-admissions",
+        )
+        close_worker.start()
+        try:
+            self.assertTrue(close_blocked.wait(1))
+            self.assertFalse(close_finished.is_set())
+        finally:
+            release_precommit.set()
+        accept_worker.join(2)
+        close_worker.join(2)
+
+        self.assertFalse(accept_worker.is_alive())
+        self.assertFalse(close_worker.is_alive())
+        self.assertEqual(len(outcome), 1)
+        self.assertTrue(outcome[0]["accepted"])
+        self.assertTrue(close_finished.is_set())
+        self.assertEqual(fence.state, "closed")
 
     def test_cross_language_schemas_are_closed_and_role_sets_match(self) -> None:
         root = Path(__file__).resolve().parents[1] / "integrations" / "dsh_ecology_plugin"
@@ -1284,6 +1630,38 @@ class DshToolHTTPAuthTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(replay["found"])
         self.assertEqual(replay["result"], completed)
+
+    def test_expired_structured_result_exposes_a_stable_machine_code(self) -> None:
+        monotonic_ms = [100]
+        self.server.dsh_tools._monotonic_ms = lambda: monotonic_ms[0]
+        fence = self.server.dsh_tools.open_admission(
+            "run:tool-test",
+            3,
+            2,
+            role="researcher",
+            stage="generation.research",
+            idempotency_key="deadline-result",
+        )
+        status, receipt = self._post(
+            "/api/ecology-agent-sidecar/v1/child-reservations",
+            _reservation_request(fence.admission_id),
+        )
+        self.assertEqual(status, 200, receipt)
+        monotonic_ms[0] = 1_100
+
+        status, payload = self._post(
+            "/api/ecology-agent-sidecar/v1/structured-results",
+            _admitted_research_envelope(
+                self.server.ledger,
+                admission_id=fence.admission_id,
+            ),
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(
+            payload["error_code"],
+            "structured_role_operational_timeout",
+        )
 
 
 if __name__ == "__main__":

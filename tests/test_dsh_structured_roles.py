@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from types import SimpleNamespace
 
@@ -91,6 +92,38 @@ class _SequencedNativeRuntime(_NativeRuntime):
 
 
 class DshStructuredRoleTests(unittest.TestCase):
+    def test_runtime_request_carries_the_server_issued_admission_id(self) -> None:
+        structured = {
+            "schema_version": "ecology-research-result@1",
+            "summary": "bounded evidence",
+            "evidence": [],
+        }
+        native = _NativeRuntime(structured)
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        ledger.append("run:admission-id", "RunCreated", {"test": True})
+        service = DshToolService(ledger)
+        runtime = DshStructuredRoleRuntime(native, admission=service)
+
+        self.assertEqual(
+            runtime.run(
+                run_id="run:admission-id",
+                stage="generation.research",
+                role="researcher",
+                context={"question": "bounded"},
+                output_schema_id="ecology-research-result@1",
+                run_state_revision=3,
+                stage_attempt=1,
+                ledger_expected_revision=ledger.latest_seq(),
+                idempotency_key="research-admission-1",
+                identity_digests={},
+            ),
+            structured,
+        )
+        admission_id = native.requests[0]["admission_id"]
+        self.assertIsInstance(admission_id, str)
+        self.assertTrue(re.fullmatch(r"admission-[0-9a-f-]{36}", admission_id))
+
     def test_native_proposer_retries_a_no_effect_mutation(self) -> None:
         runtime = _SequencedNativeRuntime(
             [

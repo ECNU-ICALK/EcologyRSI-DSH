@@ -81,6 +81,117 @@ function blockFor(milliseconds) {
   Atomics.wait(state, 0, 0, milliseconds);
 }
 
+function samplePlanContext() {
+  return {
+    schema_version: "ecologyrsi-dsh.sample-routing-wave/1",
+    wave_digest: "f".repeat(64),
+    samples: [],
+    context: {
+      candidate_agent_profile: {
+        schema_version: "ecologyrsi-dsh.candidate-agent-profile/1",
+        role: "sample-planner",
+        skill_name: "origin-vector-forecasting-balanced",
+      },
+    },
+  };
+}
+
+function samplePlanBinding({ admissionId = "admission-workflow-deadline-1" } = {}) {
+  const context = samplePlanContext();
+  return {
+    run_id: "run-workflow-deadline",
+    stage: "sample.plan",
+    admission_id: admissionId,
+    run_state_revision: 7,
+    stage_attempt: 2,
+    ledger_expected_revision: 11,
+    idempotency_key: "sample-plan-deadline-1",
+    request: {
+      role: "sample-planner",
+      output_schema_id: "ecology-sample-decisions@1",
+      context,
+      context_canonical_json: canonicalJson(context),
+      context_digest: jsonDigest(context),
+      identity_digests: {
+        genome_digest: "a".repeat(64),
+        compiled_behavior_digest: "b".repeat(64),
+        phenotype_instance_digest: "c".repeat(64),
+      },
+    },
+  };
+}
+
+function workflowDeadlineHarness({
+  startWorkflow,
+  timeoutMs = 20,
+  runRegistry = { get: () => ({ status: "running" }) },
+  persist = async (options) => ({ accepted: true, result_digest: options.body.result_digest }),
+  onReservation = () => {},
+} = {}) {
+  const listeners = new Map();
+  let reservationCount = 0;
+  const sessions = new Map([[
+    "workflow-deadline-child",
+    {
+      id: "workflow-deadline-child",
+      events: skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
+    },
+  ]]);
+  const roleHost = {
+    sessionId: "workflow-deadline-parent",
+    agent: { id: "workflow-deadline-role-host" },
+    binding: { model: "pjlab/deepseek-v4-pro-0813" },
+    services: {
+      workflowEngine: {
+        start: (request) => startWorkflow({ request, listeners, sessions }),
+      },
+    },
+  };
+  const runner = new NativeStageRunner({
+    on: (name, listener) => {
+      listeners.set(name, listener);
+      return () => listeners.delete(name);
+    },
+    sessions: { get: (sessionId) => sessions.get(sessionId) },
+    subagents: { start: async () => { throw new Error("Workflow path required"); } },
+  }, {
+    roleAgents: { get: () => roleHost },
+    runRegistry,
+    sidecar: {
+      request: async (path, options) => {
+        if (path.endsWith("/child-reservations")) {
+          reservationCount += 1;
+          onReservation(options);
+          return {
+            accepted: true,
+            admission_id: options.body.admission_id,
+            timeout_ms: options.body.timeout_ms,
+            launch: {
+              reservation_id: `workflow-deadline-reservation-${reservationCount}`,
+              launch_attempt: reservationCount,
+            },
+            ledger_expected_revision: 12,
+          };
+        }
+        return persist(options);
+      },
+    },
+    structuredStageTimeoutMs: timeoutMs,
+    structuredStageMaxAttempts: 1,
+    providerStageGate: {
+      run: async (_provider, operation) => operation(),
+      penalize: () => {},
+    },
+  });
+  return { runner, listeners };
+}
+
+function publishWorkflowChild(listeners, request) {
+  const agent = { label: request.args.items[0].label, childId: "workflow-deadline-child" };
+  listeners.get("workflow/agent-start")?.({ meta: request.meta }, agent);
+  listeners.get("workflow/agent-end")?.({ meta: request.meta }, agent);
+}
+
 test("post-score sample reflection is a registered structured DSH stage", () => {
   assert.deepEqual(
     {
@@ -287,6 +398,19 @@ test("DSH projection normalizes enum and union type syntax", () => {
   });
 });
 
+test("native stage runner rejects over-ceiling structured timers at construction", () => {
+  for (const option of [
+    { structuredStageTimeoutMs: 1_800_001 },
+    { researchStageTimeoutMs: 2_147_483_648 },
+    { sampleCriticStageTimeoutMs: 1_800_001 },
+  ]) {
+    assert.throws(
+      () => new NativeStageRunner({}, option),
+      /must be at most 1800000/,
+    );
+  }
+});
+
 test("native stage runner reserves before first child tool and durably persists structured output", async () => {
   const roleHost = {
     sessionId: "parent-session",
@@ -390,6 +514,8 @@ test("native stage runner reserves before first child tool and durably persists 
         if (path.endsWith("/child-reservations")) {
           return {
             accepted: true,
+            admission_id: options.body.admission_id,
+            timeout_ms: options.body.timeout_ms,
             launch: {
               reservation_id: "reservation-1",
               run_id: "run-1",
@@ -418,6 +544,7 @@ test("native stage runner reserves before first child tool and durably persists 
   const result = await runner.run({
     run_id: "run-1",
     stage: "candidate.propose",
+    admission_id: "admission-main-1",
     run_state_revision: 7,
     stage_attempt: 2,
     ledger_expected_revision: 11,
@@ -440,13 +567,24 @@ test("native stage runner reserves before first child tool and durably persists 
   assert.deepEqual(claimedIdentity.allowed_tools, ["skill", "web_search"]);
   assert.equal(persisted[0].path, "/api/ecology-agent-sidecar/v1/child-reservations");
   assert.equal(persisted[1].path, "/api/ecology-agent-sidecar/v1/structured-results");
-  assert.equal(persisted[1].body.identity.session_id, "child-session");
-  assert.ok(Number.isSafeInteger(persisted[1].body.deadline_unix_ms));
-  assert.ok(persisted[1].body.deadline_unix_ms >= childStartUnixMs + 699_000);
-  assert.ok(
-    persisted[1].body.deadline_unix_ms <= childStartUnixMs + 700_001,
-    "durable deadline must be fixed before synchronous child-start work",
+  assert.deepEqual(
+    {
+      admission_id: persisted[0].body.admission_id,
+      run_state_revision: persisted[0].body.run_state_revision,
+      stage_attempt: persisted[0].body.stage_attempt,
+      timeout_ms: persisted[0].body.timeout_ms,
+    },
+    {
+      admission_id: "admission-main-1",
+      run_state_revision: 7,
+      stage_attempt: 2,
+      timeout_ms: 700_000,
+    },
   );
+  assert.equal(persisted[1].body.identity.session_id, "child-session");
+  assert.equal(persisted[1].body.admission_id, "admission-main-1");
+  assert.equal("deadline_unix_ms" in persisted[1].body, false);
+  assert.ok(childStartUnixMs > 0);
   assert.ok(persisted[1].signal instanceof AbortSignal);
   assert.ok(persisted[1].timeoutMs > 0 && persisted[1].timeoutMs <= 600_000);
   assert.equal(
@@ -552,6 +690,8 @@ test("native stage runner retries one transient child model failure with a fresh
           reservations += 1;
           return {
             accepted: true,
+            admission_id: options.body.admission_id,
+            timeout_ms: options.body.timeout_ms,
             launch: {
               reservation_id: `reservation-${reservations}`,
               launch_attempt: reservations,
@@ -574,6 +714,7 @@ test("native stage runner retries one transient child model failure with a fresh
   const result = await runner.run({
     run_id: "run-retry",
     stage: "generation.judge",
+    admission_id: "admission-retry-1",
     run_state_revision: 7,
     stage_attempt: 1,
     ledger_expected_revision: 9,
@@ -647,6 +788,8 @@ test("sample critic retries a normally-ended missing result in a fresh child", a
           reservations += 1;
           return {
             accepted: true,
+            admission_id: options.body.admission_id,
+            timeout_ms: options.body.timeout_ms,
             launch: {
               reservation_id: `critic-retry-reservation-${reservations}`,
               launch_attempt: reservations,
@@ -673,6 +816,7 @@ test("sample critic retries a normally-ended missing result in a fresh child", a
   const result = await runner.run({
     run_id: "run-critic-missing-result-retry",
     stage: "sample.critic",
+    admission_id: "admission-critic-retry-1",
     run_state_revision: 7,
     stage_attempt: 1,
     ledger_expected_revision: 19,
@@ -798,6 +942,8 @@ test("sample planner waves execute through the retained DSH Workflow Engine", as
         if (path.endsWith("/child-reservations")) {
           return {
             accepted: true,
+            admission_id: options.body.admission_id,
+            timeout_ms: options.body.timeout_ms,
             launch: {
               reservation_id: "workflow-reservation-1",
               launch_attempt: 1,
@@ -824,6 +970,7 @@ test("sample planner waves execute through the retained DSH Workflow Engine", as
   const result = await runner.run({
     run_id: "run-workflow",
     stage: "sample.plan",
+    admission_id: "admission-workflow-1",
     run_state_revision: 7,
     stage_attempt: 2,
     ledger_expected_revision: 11,
@@ -875,6 +1022,264 @@ test("sample planner waves execute through the retained DSH Workflow Engine", as
   assert.equal(workflowDisposed, true);
 });
 
+test("sample planner deadline bounds cancel-ignoring Workflow result and disposal", async () => {
+  let cancelled = false;
+  let disposeCalled = false;
+  const never = new Promise(() => {});
+  const { runner } = workflowDeadlineHarness({
+    startWorkflow: () => ({
+      result: never,
+      cancel: () => { cancelled = true; },
+      dispose: () => {
+        disposeCalled = true;
+        return never;
+      },
+    }),
+  });
+  const runPromise = runner.run(samplePlanBinding());
+  const outcome = await Promise.race([
+    runPromise.then(
+      () => ({ kind: "success" }),
+      (error) => ({ kind: "error", error }),
+    ),
+    new Promise((resolve) => setTimeout(() => resolve({ kind: "guard" }), 160)),
+  ]);
+
+  assert.equal(outcome.kind, "error", "Workflow result must not outlive its hard deadline");
+  assert.equal(outcome.error?.code, "structured_role_operational_timeout");
+  assert.equal(cancelled, true);
+  assert.equal(disposeCalled, true);
+  assert.equal(runner.activeWorkflows.size, 0);
+});
+
+test("sample planner normal cleanup stays active through disposal and drains rejection", async () => {
+  let releaseDispose;
+  const disposeRelease = new Promise((resolve) => { releaseDispose = resolve; });
+  let disposeStarted;
+  const startedDisposal = new Promise((resolve) => { disposeStarted = resolve; });
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  const { runner } = workflowDeadlineHarness({
+    timeoutMs: 1_000,
+    startWorkflow: ({ request, listeners }) => {
+      publishWorkflowChild(listeners, request);
+      return {
+        result: Promise.resolve({ value: [structured], stopReason: "completed" }),
+        cancel: () => {},
+        dispose: async () => {
+          disposeStarted();
+          await disposeRelease;
+          throw new Error("private workflow disposal failure");
+        },
+      };
+    },
+  });
+  const runPromise = runner.run(samplePlanBinding());
+  await startedDisposal;
+  const activeDuringDisposal = runner.activeWorkflows.size;
+  releaseDispose();
+  const outcome = await runPromise.then(
+    (value) => ({ value }),
+    (error) => ({ error }),
+  );
+
+  assert.equal(activeDuringDisposal, 1);
+  assert.equal(outcome.error, undefined);
+  assert.deepEqual(outcome.value.structured, structured);
+  assert.equal(runner.activeWorkflows.size, 0);
+});
+
+test("sample planner classifies an admission boundary crossing as operational timeout", async () => {
+  let persistCalls = 0;
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  const { runner } = workflowDeadlineHarness({
+    runRegistry: {
+      get: () => {
+        blockFor(30);
+        return { status: "paused" };
+      },
+    },
+    persist: async () => {
+      persistCalls += 1;
+      return { accepted: true };
+    },
+    startWorkflow: ({ request, listeners }) => {
+      publishWorkflowChild(listeners, request);
+      return {
+        result: Promise.resolve({ value: [structured], stopReason: "completed" }),
+        cancel: () => {},
+        dispose: async () => {},
+      };
+    },
+  });
+
+  await assert.rejects(
+    runner.run(samplePlanBinding()),
+    (error) => error?.code === "structured_role_operational_timeout",
+  );
+  assert.equal(persistCalls, 0);
+});
+
+test("sample planner does not persist when its persistence clone crosses the deadline", async () => {
+  let persistCalls = 0;
+  let blockClone = true;
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  const originalStructuredClone = globalThis.structuredClone;
+  const { runner } = workflowDeadlineHarness({
+    persist: async () => {
+      persistCalls += 1;
+      return { accepted: true };
+    },
+    startWorkflow: ({ request, listeners }) => {
+      publishWorkflowChild(listeners, request);
+      return {
+        result: Promise.resolve({ value: [structured], stopReason: "completed" }),
+        cancel: () => {},
+        dispose: async () => {},
+      };
+    },
+  });
+  globalThis.structuredClone = (value, options) => {
+    if (value === structured && blockClone) {
+      blockClone = false;
+      blockFor(30);
+    }
+    return originalStructuredClone(value, options);
+  };
+  try {
+    await assert.rejects(
+      runner.run(samplePlanBinding()),
+      (error) => error?.code === "structured_role_operational_timeout",
+    );
+  } finally {
+    globalThis.structuredClone = originalStructuredClone;
+  }
+  assert.equal(persistCalls, 0);
+});
+
+test("sample planner rechecks its hard deadline after the final return clone", async () => {
+  let structuredCloneCalls = 0;
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  const originalStructuredClone = globalThis.structuredClone;
+  const { runner } = workflowDeadlineHarness({
+    startWorkflow: ({ request, listeners }) => {
+      publishWorkflowChild(listeners, request);
+      return {
+        result: Promise.resolve({ value: [structured], stopReason: "completed" }),
+        cancel: () => {},
+        dispose: async () => {},
+      };
+    },
+  });
+  globalThis.structuredClone = (value, options) => {
+    if (value === structured) {
+      structuredCloneCalls += 1;
+      if (structuredCloneCalls === 2) blockFor(30);
+    }
+    return originalStructuredClone(value, options);
+  };
+  try {
+    await assert.rejects(
+      runner.run(samplePlanBinding()),
+      (error) => error?.code === "structured_role_operational_timeout",
+    );
+  } finally {
+    globalThis.structuredClone = originalStructuredClone;
+  }
+  assert.equal(structuredCloneCalls, 2);
+});
+
+test("sample planner deadline bounds persistence that ignores abort", async () => {
+  const never = new Promise(() => {});
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  const { runner } = workflowDeadlineHarness({
+    persist: async () => never,
+    startWorkflow: ({ request, listeners }) => {
+      publishWorkflowChild(listeners, request);
+      return {
+        result: Promise.resolve({ value: [structured], stopReason: "completed" }),
+        cancel: () => {},
+        dispose: async () => {},
+      };
+    },
+  });
+  const outcome = await Promise.race([
+    runner.run(samplePlanBinding()).then(
+      () => ({ kind: "success" }),
+      (error) => ({ kind: "error", error }),
+    ),
+    new Promise((resolve) => setTimeout(() => resolve({ kind: "guard" }), 160)),
+  ]);
+
+  assert.equal(outcome.kind, "error");
+  assert.equal(outcome.error?.code, "structured_role_operational_timeout");
+  assert.equal(runner.activeWorkflows.size, 0);
+});
+
+test("sample planner retries reuse one absolute local and frozen server deadline", async () => {
+  let workflowStarts = 0;
+  const reservationTimeouts = [];
+  const armedTimeouts = [];
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  const { runner } = workflowDeadlineHarness({
+    timeoutMs: 100,
+    onReservation: (options) => {
+      reservationTimeouts.push(options.timeoutMs);
+      armedTimeouts.push(options.body.timeout_ms);
+    },
+    startWorkflow: ({ request, listeners }) => {
+      workflowStarts += 1;
+      if (workflowStarts === 1) {
+        return {
+          result: Promise.resolve({ stopReason: "model_error", error: "private" }),
+          cancel: () => {},
+          dispose: async () => { blockFor(30); },
+        };
+      }
+      publishWorkflowChild(listeners, request);
+      return {
+        result: Promise.resolve({ value: [structured], stopReason: "completed" }),
+        cancel: () => {},
+        dispose: async () => {},
+      };
+    },
+  });
+  runner.structuredStageMaxAttempts = 2;
+
+  const result = await runner.run(samplePlanBinding());
+
+  assert.deepEqual(result.structured, structured);
+  assert.deepEqual(armedTimeouts, [100, 100]);
+  assert.equal(reservationTimeouts.length, 2);
+  assert.ok(
+    reservationTimeouts[1] <= reservationTimeouts[0] - 20,
+    "retry transport must use the first attempt's remaining absolute budget",
+  );
+});
+
 test("sample critic uses its shorter independent operational timeout", async () => {
   let aborted = false;
   const roleHost = {
@@ -896,8 +1301,10 @@ test("sample critic uses its shorter independent operational timeout", async () 
     roleAgents: { get: () => roleHost },
     runRegistry: { get: () => ({ status: "running" }) },
     sidecar: {
-      request: async () => ({
+      request: async (_path, options) => ({
         accepted: true,
+        admission_id: options.body.admission_id,
+        timeout_ms: options.body.timeout_ms,
         launch: {
           reservation_id: "critic-timeout-reservation",
           launch_attempt: 1,
@@ -924,6 +1331,7 @@ test("sample critic uses its shorter independent operational timeout", async () 
     runner.run({
       run_id: "run-critic-timeout",
       stage: "sample.critic",
+      admission_id: "admission-critic-timeout-1",
       run_state_revision: 7,
       stage_attempt: 1,
       ledger_expected_revision: 11,

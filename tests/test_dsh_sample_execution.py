@@ -160,6 +160,21 @@ class _PersistingRetryRuntime:
             )
 
         session_id = f"session:{stage}:{len(self.requests)}"
+        reservation = self.service.allocate_child_reservation(
+            {
+                "request_id": f"persisting-retry-{len(self.requests)}",
+                "run_id": request["run_id"],
+                "parent_session_id": "session:role-host",
+                "role": request["request"]["role"],
+                "stage": stage,
+                "run_state_revision": request["run_state_revision"],
+                "stage_attempt": request["stage_attempt"],
+                "admission_id": request["admission_id"],
+                "timeout_ms": 1_000,
+                "item_digest": request["request"]["context_digest"],
+                "idempotency_key": request["idempotency_key"],
+            }
+        )
         identity = {
             "run_id": request["run_id"],
             "role": request["request"]["role"],
@@ -169,7 +184,7 @@ class _PersistingRetryRuntime:
             "ledger_expected_revision": self.ledger.latest_seq(),
             "session_id": session_id,
             "idempotency_key": request["idempotency_key"],
-            "child_reservation_id": f"reservation:{len(self.requests)}",
+            "child_reservation_id": reservation["launch"]["reservation_id"],
             "activation_lease_id": f"lease:{len(self.requests)}",
             **request["request"]["identity_digests"],
         }
@@ -210,7 +225,7 @@ class _PersistingRetryRuntime:
                 "structured": structured,
                 "result_digest": digest(structured),
                 "skill_invocation_evidence": _skill_evidence(stage),
-                "deadline_unix_ms": 4_102_444_800_000,
+                "admission_id": request["admission_id"],
             }
         )
         return {"structured": structured, "result_digest": digest(structured)}

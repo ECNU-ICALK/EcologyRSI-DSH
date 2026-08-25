@@ -106,7 +106,10 @@ export class SidecarClient {
         throw new SidecarError("invalid_response");
       }
       if (!response.ok) {
-        throw new SidecarError("sidecar_rejected", "sidecar_rejected", {
+        const code = result?.error_code === "structured_role_operational_timeout"
+          ? result.error_code
+          : "sidecar_rejected";
+        throw new SidecarError(code, code, {
           // The Python boundary has already passed this value through its
           // credential-redacting public-error policy.  Retaining the bounded
           // value here makes native-runtime failures diagnosable without

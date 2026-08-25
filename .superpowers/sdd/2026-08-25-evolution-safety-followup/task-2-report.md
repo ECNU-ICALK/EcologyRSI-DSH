@@ -347,3 +347,227 @@ git diff --check
 - The complete plugin Node suite and 98 directly related Python tests were run.
   The unrelated full repository/browser suites were not run.
 - No production service, live run, or external state was touched.
+
+## Fix Round 2/5
+
+### Review findings addressed
+
+This round replaces the wall-clock authorization bridge with a process-local,
+one-shot server arm and applies the same absolute lifecycle deadline to the
+`sample.plan` Workflow path.
+
+1. `DshStructuredRoleRuntime` now opens a stage fence with its exact
+   run/revision/attempt/role/stage/idempotency binding and passes the generated
+   `admission_id` to Node. Before any child reservation, Node sends that exact
+   admission plus the selected role timeout. Python freezes
+   `monotonic_now + timeout_ms` once under the stable fence lock; subsequent
+   arms must use the same admission and timeout and can never extend it.
+2. Wall time and `deadline_unix_ms` have been removed from structured-result
+   authorization. The protocol accepts only integer timeouts from 1 through
+   1,800,000 ms. Node config, runtime construction, and Python reservation
+   validation all enforce the same ceiling before a platform timer is created.
+3. Normal one-shot and Workflow cleanup awaits disposal and bookkeeping. A
+   rejected disposer or finisher is drained and cannot replace a successful
+   result or the primary structured phase error. Expired cleanup remains
+   detached and rejection-observed so a non-cooperating object cannot defeat
+   the hard deadline.
+4. Python sidecar errors now include a sanitized `error_code`. The Node
+   transport allowlists `structured_role_operational_timeout`, so server expiry
+   and admission-arm mismatch cannot degrade to `sidecar_rejected` or disclose
+   a private error string.
+5. `sample.plan` now races Workflow result, admission, persistence, and normal
+   cleanup against the same absolute deadline created after the first arm
+   receipt. It checks synchronous clone/receipt/return boundaries, aborts and
+   cancels on expiry, detaches expired disposal, retains active Workflow
+   bookkeeping until normal disposal completes, and reuses the same deadline
+   across retries. Schema loading, provider-gate retry waits, and the final
+   stage response digest are bounded by that deadline as well.
+
+### Durable admission and lock evidence
+
+- `open_admission` creates one random `admission_id`; the stable fence is keyed
+  by run/revision/attempt and binds role, stage, and idempotency key. A process
+  restart has no such fence, so an old wire admission fails closed. A fresh Host
+  invocation can open a new fence and still replay an already durable exact
+  structured result through the existing replay path.
+- `/child-reservations` has an exact request shape containing
+  `run_state_revision`, `stage_attempt`, `admission_id`, and `timeout_ms`.
+  Its durable event stores a request-contract digest for exact request-ID
+  replay while retaining the admission-independent business digest, so launch
+  attempts remain monotonic after a Host restart. Projection accepts legacy
+  events without the new digest but validates it when present.
+- Arming holds only `fence.lock` and never calls the ledger. Reservation and
+  structured-result commits acquire `ledger._lock` first, then their stable
+  fence through `commit_guard(inserted=True)`, and hold it through SQLite
+  `COMMIT`. `close_admission` and `close_run_admissions` use the same fence lock,
+  so neither close path can overtake an accepted commit.
+- An `inserted=False` exact duplicate skips the new-row guard and replays even
+  after expiry. Sequential, early-lookup-racing, and `INSERT OR IGNORE` exact
+  replays are covered; a conflicting payload after expiry still raises the
+  idempotency conflict and never creates another event.
+- Accepted structured-event payloads contain no admission or deadline
+  metadata. The admission is an authorization envelope, not scientific state.
+
+### RED evidence
+
+Timeout ceiling coverage was added before the implementation:
+
+```bash
+node --test integrations/dsh_ecology_plugin/test/config.test.mjs \
+  integrations/dsh_ecology_plugin/test/structured_roles.test.mjs \
+  integrations/dsh_ecology_plugin/test/stage_runner.test.mjs
+```
+
+```text
+tests 36
+pass 33
+fail 3
+```
+
+The three failures included a Node `TimeoutOverflowWarning` and proved that
+config, direct structured roles, and runtime construction accepted values above
+the protocol/platform bound.
+
+Two cleanup tests were RED because a private `finish` rejection replaced both
+the successful result and the primary `structured_result_missing` error. After
+the cleanup fix, the selected cleanup/bookkeeping group passed 4/4.
+
+Early-arm protocol tests were RED independently at each boundary:
+
+- the Node reservation omitted revision, attempt, admission, and timeout;
+- the Python runtime request had no server-issued admission ID;
+- four Python tests could not arm a frozen monotonic deadline, reject an
+  over-ceiling timeout, or reject a mismatched admission.
+
+The HTTP/Sidecar error-code tests were run before their transport changes:
+
+```text
+Node:   tests 1, pass 0, fail 1 (received sidecar_rejected)
+Python: Ran 1 test, FAILED (response had no error_code)
+```
+
+The six focused Workflow deadline tests were all RED before the Workflow
+refactor:
+
+```text
+tests 6
+pass 0
+fail 6
+duration_ms 478.239458
+```
+
+Both a cancel-ignoring Workflow result and abort-ignoring persistence reached
+the 160 ms outer guard instead of the 20 ms stage deadline. Admission crossing
+the boundary was misclassified, a clone crossing returned an unstable error,
+the final clone still returned success, and normal disposal removed active
+bookkeeping early and leaked its private rejection.
+
+The first related Python migration run intentionally exposed every old wire
+fixture:
+
+```text
+Ran 80 tests
+pass 62
+fail 7
+error 11
+```
+
+All failures were then migrated to the strict admission/arm protocol. One
+remaining cancellation projection failure identified the new reservation
+contract digest as an unrecognized event field; the projection was updated
+with strict new-field validation plus legacy-event compatibility.
+
+### GREEN evidence
+
+Focused Workflow deadline run after the implementation:
+
+```text
+tests 6
+pass 6
+fail 0
+duration_ms 342.700458
+```
+
+The additional cross-retry test confirms that both reservations send the same
+frozen server timeout while the second transport request receives only the
+remaining local absolute budget.
+
+Complete plugin Node run:
+
+```bash
+node --test integrations/dsh_ecology_plugin/test/*.mjs
+```
+
+```text
+tests 103
+pass 103
+fail 0
+duration_ms 659.201875
+```
+
+Related Python regression run:
+
+```bash
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m unittest tests.test_dsh_tool_contracts tests.test_dsh_cancel_race \
+  tests.test_dsh_native_runtime tests.test_dsh_sample_execution \
+  tests.test_core tests.test_dsh_structured_roles \
+  tests.test_dsh_reconciliation tests.test_genome_replay -v
+```
+
+```text
+Ran 106 tests in 12.201s
+OK
+```
+
+Fresh syntax and whitespace verification completed without diagnostics:
+
+```bash
+node --check integrations/dsh_ecology_plugin/lib/runtime/structured-deadline.js
+node --check integrations/dsh_ecology_plugin/lib/runtime/routes.js
+node --check integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js
+node --check integrations/dsh_ecology_plugin/lib/runtime/structured-roles.js
+node --check integrations/dsh_ecology_plugin/lib/sidecar/client.js
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m py_compile src/ecologyrsi_dsh/api/dsh_tools.py \
+  src/ecologyrsi_dsh/api/handler.py src/ecologyrsi_dsh/core/state.py \
+  src/ecologyrsi_dsh/integrations/dsh_native_runtime.py \
+  src/ecologyrsi_dsh/integrations/dsh_structured_roles.py \
+  tests/test_dsh_tool_contracts.py tests/test_dsh_cancel_race.py \
+  tests/test_dsh_native_runtime.py tests/test_dsh_reconciliation.py \
+  tests/test_dsh_sample_execution.py tests/test_dsh_structured_roles.py
+git diff --check
+```
+
+### Added deterministic coverage
+
+- one-shot server arm, exact repeat without extension, and admission mismatch;
+- wall-clock rollback is never consulted after the server arm;
+- protocol ceiling at config, Node runtime, and Python reservation boundaries;
+- fixed admission/revision/attempt/timeout propagation before child launch;
+- expiry and close checks at reservation and structured durable commit guards;
+- close-stage and close-run serialization through commit;
+- exact replay after expiry, concurrent early-lookup and insert-ignore races,
+  plus expired conflicting-payload rejection;
+- HTTP machine error code and Node Sidecar stable-code propagation;
+- cancel-ignoring Workflow result, abort-ignoring persistence, admission and
+  clone boundary crossings, final return cloning, normal rejected disposal,
+  timeout disposal, active bookkeeping, and cross-retry remaining budget;
+- normal one-shot disposer/finisher rejection preserving success and the
+  primary phase error.
+
+### Self-review and concerns
+
+- No known functional concern remains in the reviewed structured lifecycle and
+  durable admission scope.
+- The Python admission arm is intentionally in-memory and process-local. A
+  sidecar restart invalidates old in-flight wire admissions rather than trying
+  to reconstruct a possibly expired monotonic deadline from wall time.
+- Abort signals and Workflow cancellation remain resource-reclamation hints.
+  Correctness comes from the frozen server deadline and commit guard; a late
+  non-cooperating request cannot make a new durable acceptance.
+- Exact already-durable receipts remain replayable after expiry. A new durable
+  event never bypasses the current fence, deadline, or close state.
+- No production service, live run, browser suite, or external state was
+  touched. The complete plugin suite and 106 directly related Python tests were
+  run; unrelated repository-wide tests were not run.

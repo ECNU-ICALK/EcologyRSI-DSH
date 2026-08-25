@@ -1,3 +1,11 @@
+import {
+  createStructuredDeadline,
+  remainingStructuredDeadlineMs,
+  structuredDeadlineExpired,
+  validateStructuredDeadline,
+  validateStructuredTimeoutMs,
+} from "./structured-deadline.js";
+
 function structuredResult(run) {
   if (typeof run?.result === "function") return run.result();
   if (run?.result && typeof run.result.then === "function") return run.result;
@@ -30,7 +38,7 @@ export async function runStructuredRole(
   roleHost,
   reservedBinding,
   request,
-  { pendingStarts, admission, persist, timeoutMs } = {},
+  { pendingStarts, admission, persist, timeoutMs, deadline } = {},
 ) {
   if (!roleHost?.agent) throw new Error("structured role requires a retained role-host Agent");
   if (!reservedBinding?.label) throw new Error("structured role requires a pre-registered child label");
@@ -42,19 +50,22 @@ export async function runStructuredRole(
   }
   if (
     timeoutMs !== undefined
-    && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)
   ) {
-    throw new Error("structured role timeout must be a positive integer");
+    validateStructuredTimeoutMs(timeoutMs);
+  }
+  if (deadline !== undefined) {
+    validateStructuredDeadline(deadline);
+    if (timeoutMs !== undefined && deadline.timeoutMs !== timeoutMs) {
+      throw new Error("structured role deadline timeout mismatch");
+    }
   }
   let pending = null;
   let run;
   let timeout = null;
-  const deadlineAt = timeoutMs === undefined
-    ? null
-    : performance.now() + timeoutMs;
-  const deadlineUnixMs = timeoutMs === undefined
-    ? null
-    : Date.now() + timeoutMs;
+  const hardDeadline = deadline === undefined
+    ? (timeoutMs === undefined ? null : createStructuredDeadline(timeoutMs))
+    : deadline;
+  const deadlineAt = hardDeadline?.deadlineAt ?? null;
   let deadlinePromise = null;
   let timedOut = false;
   const timeoutError = operationalTimeoutError();
@@ -66,7 +77,7 @@ export async function runStructuredRole(
     return timeoutError;
   };
   const deadlineExpired = () => (
-    deadlineAt !== null && (timedOut || performance.now() >= deadlineAt)
+    hardDeadline !== null && (timedOut || structuredDeadlineExpired(hardDeadline))
   );
   const requireBeforeDeadline = () => {
     if (deadlineExpired()) throw expireDeadline();
@@ -88,11 +99,14 @@ export async function runStructuredRole(
   };
   const remainingTimeoutMs = () => {
     requireBeforeDeadline();
-    return Math.max(1, Math.ceil(deadlineAt - performance.now()));
+    return Math.max(1, remainingStructuredDeadlineMs(hardDeadline));
   };
   if (deadlineAt !== null) {
     deadlinePromise = new Promise((_resolve, reject) => {
-      timeout = setTimeout(() => reject(expireDeadline()), timeoutMs);
+      timeout = setTimeout(
+        () => reject(expireDeadline()),
+        remainingStructuredDeadlineMs(hardDeadline),
+      );
     });
     deadlinePromise.catch(() => {});
   }
@@ -160,7 +174,6 @@ export async function runStructuredRole(
     const persistedStructured = structuredClone(structured);
     requireBeforeDeadline();
     const persistenceDeadline = deadlineAt === null ? null : Object.freeze({
-      deadlineUnixMs,
       signal: pending.controller.signal,
       throwIfExpired: requireBeforeDeadline,
       remainingTimeoutMs,
@@ -229,7 +242,8 @@ export async function runStructuredRole(
       }
     } catch (error) {
       if (deadlineExpired() || error === timeoutError) throw expireDeadline();
-      throw error;
+      // Normal cleanup is awaited for quiescence, but its private failure must
+      // not replace either a successful result or the primary phase outcome.
     } finally {
       if (timeout !== null) clearTimeout(timeout);
     }

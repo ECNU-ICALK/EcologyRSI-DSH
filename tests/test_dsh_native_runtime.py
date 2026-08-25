@@ -158,6 +158,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
     def test_run_stage_uses_the_long_stage_timeout(self) -> None:
         request = {
             "run_id": "run-1",
+            "admission_id": "admission-runtime-client-1",
             "run_state_revision": 7,
             "stage_attempt": 2,
             "ledger_expected_revision": 11,
@@ -725,7 +726,29 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertEqual(status, 201, payload)
         state = self.server.director.state(run_id)
         run_state_revision = state.events[-1].seq
-        self.server.dsh_tools.open_admission(run_id, run_state_revision, 1)
+        fence = self.server.dsh_tools.open_admission(
+            run_id,
+            run_state_revision,
+            1,
+            role="researcher",
+            stage="generation.research",
+            idempotency_key="late-result",
+        )
+        self.server.dsh_tools.allocate_child_reservation(
+            {
+                "request_id": "native-cancel-late-reservation",
+                "run_id": run_id,
+                "parent_session_id": "session:research-host",
+                "role": "researcher",
+                "stage": "generation.research",
+                "run_state_revision": run_state_revision,
+                "stage_attempt": 1,
+                "admission_id": fence.admission_id,
+                "timeout_ms": 1_000,
+                "item_digest": "d" * 64,
+                "idempotency_key": "late-result",
+            }
+        )
         active_generation = self.server.acquire_generation_lease(run_id)
         self.assertIsNotNone(active_generation)
 
@@ -789,7 +812,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                         "structured": structured,
                         "result_digest": digest(structured),
                         "skill_invocation_evidence": _research_skill_evidence(),
-                        "deadline_unix_ms": 4_102_444_800_000,
+                        "admission_id": fence.admission_id,
                     }
                 )
             release_runtime_cancel.set()

@@ -184,6 +184,7 @@ class DshNativeAgentRuntimeClient:
 
     def run_stage(self, request: Mapping[str, Any], *, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         run_id = _nonempty_text(request.get("run_id"), "run_id")
+        _nonempty_text(request.get("admission_id"), "admission_id")
         self._validate_identity(request)
         payload = self._request(
             "POST",

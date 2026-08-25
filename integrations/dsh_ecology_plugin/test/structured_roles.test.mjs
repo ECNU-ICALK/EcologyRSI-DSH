@@ -104,6 +104,35 @@ test("structured role aborts a wedged DSH child at the operational timeout", asy
   assert.equal(pendingStarts.size, 0);
 });
 
+test("structured role rejects an over-ceiling timer before child work", async () => {
+  let starts = 0;
+  const pendingStarts = new PendingChildStarts({
+    subagents: {
+      start: async () => {
+        starts += 1;
+        throw new Error("must not start");
+      },
+    },
+  });
+
+  await assert.rejects(
+    runStructuredRole(
+      { agent: { id: "researcher-host" } },
+      { label: "over-ceiling-label" },
+      { prompt: "research", outputSchema: { type: "object" } },
+      {
+        pendingStarts,
+        admission: { isOpen: async () => true },
+        persist: async () => ({ accepted: true }),
+        timeoutMs: 2_147_483_648,
+      },
+    ),
+    /structured role timeout must be at most 1800000/,
+  );
+  assert.equal(starts, 0);
+  assert.equal(pendingStarts.size, 0);
+});
+
 test("structured role deadline includes synchronous child-start work", async () => {
   let persistCalls = 0;
   const pendingStarts = new PendingChildStarts({
@@ -367,6 +396,84 @@ test("structured role keeps normal bookkeeping pending until disposal completes"
     await running;
     assert.equal(pendingStarts.size, 0);
   }
+});
+
+test("normal cleanup rejections do not replace a successful structured result", async () => {
+  const cleanup = [];
+  const pendingStarts = new PendingChildStarts({
+    subagents: {
+      start: async () => ({
+        id: "cleanup-reject-success-child",
+        result: Promise.resolve({ structured: { value: 1 } }),
+        dispose: async () => {
+          cleanup.push("dispose");
+          await Promise.resolve();
+          throw new Error("private dispose failure");
+        },
+      }),
+    },
+  });
+  const finish = pendingStarts.finish.bind(pendingStarts);
+  pendingStarts.finish = async (pending) => {
+    cleanup.push("finish");
+    finish(pending);
+    await Promise.resolve();
+    throw new Error("private finish failure");
+  };
+
+  const result = await runStructuredRole(
+    { agent: { id: "judge-host" } },
+    { label: "cleanup-reject-success-label" },
+    { prompt: "judge", outputSchema: { type: "object" } },
+    {
+      pendingStarts,
+      admission: { isOpen: async () => true },
+      persist: async () => ({ accepted: true }),
+    },
+  );
+
+  assert.deepEqual(result.structured, { value: 1 });
+  assert.deepEqual(cleanup, ["dispose", "finish"]);
+  assert.equal(pendingStarts.size, 0);
+});
+
+test("normal cleanup rejections do not replace or disclose the primary phase error", async () => {
+  const cleanup = [];
+  const pendingStarts = new PendingChildStarts({
+    subagents: {
+      start: async () => ({
+        id: "cleanup-reject-error-child",
+        result: Promise.resolve({ stopReason: "completed" }),
+        dispose: async () => {
+          cleanup.push("dispose");
+          throw new Error("private dispose failure");
+        },
+      }),
+    },
+  });
+  const finish = pendingStarts.finish.bind(pendingStarts);
+  pendingStarts.finish = async (pending) => {
+    cleanup.push("finish");
+    finish(pending);
+    throw new Error("private finish failure");
+  };
+
+  await assert.rejects(
+    runStructuredRole(
+      { agent: { id: "judge-host" } },
+      { label: "cleanup-reject-error-label" },
+      { prompt: "judge", outputSchema: { type: "object" } },
+      {
+        pendingStarts,
+        admission: { isOpen: async () => true },
+        persist: async () => ({ accepted: true }),
+      },
+    ),
+    (error) => error?.code === "structured_result_missing"
+      && !String(error).includes("private"),
+  );
+  assert.deepEqual(cleanup, ["dispose", "finish"]);
+  assert.equal(pendingStarts.size, 0);
 });
 
 test("structured role finishes bookkeeping when disposal crosses the deadline", async () => {

@@ -9,6 +9,12 @@ import { MAX_REQUEST_TIMEOUT_MS, SidecarClient } from "../sidecar/client.js";
 import { dshSessionMetrics } from "./agents.js";
 import { ChildBindingRegistry } from "./child-bindings.js";
 import { ProviderStageGate } from "./provider-stage-gate.js";
+import {
+  createStructuredDeadline,
+  remainingStructuredDeadlineMs,
+  structuredDeadlineExpired,
+  validateStructuredTimeoutMs,
+} from "./structured-deadline.js";
 import { runStructuredRole } from "./structured-roles.js";
 import { PendingChildStarts, startHomogeneousWorkflow } from "./workflows.js";
 
@@ -219,6 +225,44 @@ function retryableStructuredStageError(error, stage) {
     || (stage === "sample.critic" && error?.code === "structured_result_missing");
 }
 
+function structuredOperationalTimeout() {
+  const error = new Error("structured role operational timeout");
+  error.code = "structured_role_operational_timeout";
+  return error;
+}
+
+function requireStructuredDeadline(deadline) {
+  if (structuredDeadlineExpired(deadline)) throw structuredOperationalTimeout();
+}
+
+async function withinStructuredDeadline(deadline, operation) {
+  requireStructuredDeadline(deadline);
+  const timeoutError = structuredOperationalTimeout();
+  let timer;
+  const timeoutPromise = new Promise((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(timeoutError),
+      remainingStructuredDeadlineMs(deadline),
+    );
+  });
+  timeoutPromise.catch(() => {});
+  try {
+    const value = await Promise.race([
+      Promise.resolve().then(operation),
+      timeoutPromise,
+    ]);
+    requireStructuredDeadline(deadline);
+    return value;
+  } catch (error) {
+    if (error === timeoutError || structuredDeadlineExpired(deadline)) {
+      throw structuredOperationalTimeout();
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const SAMPLE_PLANNER_SKILLS = new Set([
   "origin-vector-forecasting-balanced",
   "origin-vector-forecasting-anomaly-aware",
@@ -387,9 +431,18 @@ export class NativeStageRunner {
     this.roleAgents = roleAgents;
     this.runRegistry = runRegistry;
     this.sidecar = sidecar;
-    this.structuredStageTimeoutMs = structuredStageTimeoutMs;
-    this.researchStageTimeoutMs = researchStageTimeoutMs;
-    this.sampleCriticStageTimeoutMs = sampleCriticStageTimeoutMs;
+    this.structuredStageTimeoutMs = validateStructuredTimeoutMs(
+      structuredStageTimeoutMs,
+      "structuredStageTimeoutMs",
+    );
+    this.researchStageTimeoutMs = validateStructuredTimeoutMs(
+      researchStageTimeoutMs,
+      "researchStageTimeoutMs",
+    );
+    this.sampleCriticStageTimeoutMs = validateStructuredTimeoutMs(
+      sampleCriticStageTimeoutMs,
+      "sampleCriticStageTimeoutMs",
+    );
     this.structuredStageMaxAttempts = positiveStageAttempts(structuredStageMaxAttempts);
     this.providerStageGate = providerStageGate || new ProviderStageGate({
       minimumIntervalMs: structuredStageMinIntervalMs,
@@ -451,17 +504,30 @@ export class NativeStageRunner {
     const identityDigests = request.identity_digests || {};
     const roleHost = this.roleAgents.get(binding.run_id, contract.role);
     if (!roleHost) throw new Error("DSH role-host is unavailable");
+    if (typeof binding.admission_id !== "string" || !binding.admission_id) {
+      throw new Error("DSH structured stage admission_id is required");
+    }
+    const stageTimeoutMs = contract.role === "researcher"
+      ? this.researchStageTimeoutMs
+      : binding.stage === "sample.critic"
+        ? this.sampleCriticStageTimeoutMs
+        : this.structuredStageTimeoutMs;
+    const lifecycle = { timeoutMs: stageTimeoutMs, deadline: null };
     const provider = String(roleHost.binding?.model || "default").split("/", 1)[0] || "default";
     let lastError;
     for (let attempt = 1; attempt <= this.structuredStageMaxAttempts; attempt += 1) {
       try {
-        return await this.providerStageGate.run(provider, () => this.#runReservedStage({
-            binding,
-            contract,
-            request,
-            identityDigests,
-            roleHost,
-          }), { runId: binding.run_id });
+        const runAttempt = () => this.providerStageGate.run(provider, () => this.#runReservedStage({
+          binding,
+          contract,
+          request,
+          identityDigests,
+          roleHost,
+          lifecycle,
+        }), { runId: binding.run_id });
+        return lifecycle.deadline === null
+          ? await runAttempt()
+          : await withinStructuredDeadline(lifecycle.deadline, runAttempt);
       } catch (error) {
         lastError = error;
         const retryable = retryableStructuredStageError(error, binding.stage);
@@ -476,10 +542,24 @@ export class NativeStageRunner {
     throw lastError;
   }
 
-  async #runReservedStage({ binding, contract, request, identityDigests, roleHost }) {
+  async #runReservedStage({
+    binding,
+    contract,
+    request,
+    identityDigests,
+    roleHost,
+    lifecycle,
+  }) {
     const dynamicRetrieval = (
       roleHost.binding?.tool_profile === DYNAMIC_RETRIEVAL_TOOL_PROFILE
     );
+    if (lifecycle.deadline !== null) requireStructuredDeadline(lifecycle.deadline);
+    const reservationTimeoutMs = lifecycle.deadline === null
+      ? Math.min(lifecycle.timeoutMs, MAX_REQUEST_TIMEOUT_MS)
+      : Math.min(
+        Math.max(1, remainingStructuredDeadlineMs(lifecycle.deadline)),
+        MAX_REQUEST_TIMEOUT_MS,
+      );
     const allocation = await this.sidecar.request(
       "/api/ecology-agent-sidecar/v1/child-reservations",
       {
@@ -489,13 +569,28 @@ export class NativeStageRunner {
           parent_session_id: roleHost.sessionId,
           role: contract.role,
           stage: binding.stage,
+          run_state_revision: binding.run_state_revision,
+          stage_attempt: binding.stage_attempt,
+          admission_id: binding.admission_id,
+          timeout_ms: lifecycle.timeoutMs,
           item_digest: request.context_digest,
           idempotency_key: binding.idempotency_key,
         },
+        timeoutMs: reservationTimeoutMs,
       },
     );
-    if (!allocation?.accepted || !allocation.launch) {
+    if (
+      !allocation?.accepted
+      || !allocation.launch
+      || allocation.admission_id !== binding.admission_id
+      || allocation.timeout_ms !== lifecycle.timeoutMs
+    ) {
       throw new Error("durable child reservation was not accepted");
+    }
+    if (lifecycle.deadline === null) {
+      lifecycle.deadline = createStructuredDeadline(lifecycle.timeoutMs);
+    } else {
+      requireStructuredDeadline(lifecycle.deadline);
     }
     const launch = {
       ...allocation.launch,
@@ -525,7 +620,12 @@ export class NativeStageRunner {
     const skillName = expectedSkillName(contract, request);
     let persistedSkillEvidence = null;
     try {
-      const outputSchema = await this.schema(contract.file);
+      requireStructuredDeadline(lifecycle.deadline);
+      const outputSchema = await withinStructuredDeadline(
+        lifecycle.deadline,
+        () => this.schema(contract.file),
+      );
+      requireStructuredDeadline(lifecycle.deadline);
       const responseProtocol = [
         "Do not narrate analysis.",
         `Your first response must call skill exactly once with name ${skillName}.`,
@@ -540,11 +640,6 @@ export class NativeStageRunner {
           "Do not emit prose before or after it.",
         ]),
       ];
-      const stageTimeoutMs = contract.role === "researcher"
-        ? this.researchStageTimeoutMs
-        : binding.stage === "sample.critic"
-          ? this.sampleCriticStageTimeoutMs
-          : this.structuredStageTimeoutMs;
       const prompt = canonical({
         instruction: [
           ...responseProtocol,
@@ -553,6 +648,7 @@ export class NativeStageRunner {
         stage: binding.stage,
         context: request.context,
       });
+      requireStructuredDeadline(lifecycle.deadline);
       const admission = {
         isOpen: async () => {
           const current = this.runRegistry.get(binding.run_id);
@@ -566,6 +662,13 @@ export class NativeStageRunner {
         capturedSessionEvents = null,
         persistenceDeadline = null,
       ) => {
+        if (
+          typeof persistenceDeadline?.throwIfExpired !== "function"
+          || typeof persistenceDeadline?.remainingTimeoutMs !== "function"
+        ) {
+          throw new Error("structured persistence requires a runtime deadline");
+        }
+        persistenceDeadline.throwIfExpired();
         if (!reservation.claimed_child_id) {
           this.childBindings.claimPublished(
             roleHost.sessionId,
@@ -573,6 +676,7 @@ export class NativeStageRunner {
             sessionId,
           );
         }
+        persistenceDeadline.throwIfExpired();
         if (!this.childBindings.activeByChild.has(sessionId)) {
           this.childBindings.openActivation(sessionId, {
             revision: binding.run_state_revision,
@@ -580,6 +684,7 @@ export class NativeStageRunner {
             idempotency_key: binding.idempotency_key,
           });
         }
+        persistenceDeadline.throwIfExpired();
         const liveSession = this.ctx?.sessions?.get?.(sessionId);
         const sessionEvents = capturedSessionEvents || liveSession?.events;
         const evidence = skillInvocationEvidence(sessionEvents, {
@@ -588,12 +693,11 @@ export class NativeStageRunner {
           requiresPredictionTool: contract.requiresPredictionTool === true,
           allowDynamicRetrieval: dynamicRetrieval,
         });
+        persistenceDeadline.throwIfExpired();
         persistedSkillEvidence = evidence;
         const resultDigest = jsonDigest(structured);
+        persistenceDeadline.throwIfExpired();
         const { allowed_tools: _allowedTools, ...identity } = frozenIdentity;
-        if (!Number.isSafeInteger(persistenceDeadline?.deadlineUnixMs)) {
-          throw new Error("structured persistence requires a runtime deadline");
-        }
         const body = {
           identity: {
             ...identity,
@@ -609,18 +713,21 @@ export class NativeStageRunner {
           result_digest: resultDigest,
           session_metrics: capturedSessionMetrics || dshSessionMetrics(this.ctx, sessionId),
           skill_invocation_evidence: evidence,
-          deadline_unix_ms: persistenceDeadline.deadlineUnixMs,
+          admission_id: binding.admission_id,
         };
         persistenceDeadline.throwIfExpired();
         const requestTimeoutMs = Math.min(
           persistenceDeadline.remainingTimeoutMs(),
           MAX_REQUEST_TIMEOUT_MS,
         );
-        return this.sidecar.request("/api/ecology-agent-sidecar/v1/structured-results", {
+        persistenceDeadline.throwIfExpired();
+        const receipt = await this.sidecar.request("/api/ecology-agent-sidecar/v1/structured-results", {
           body,
           signal: persistenceDeadline.signal,
           timeoutMs: requestTimeoutMs,
         });
+        persistenceDeadline.throwIfExpired();
+        return receipt;
       };
       const result = binding.stage === "sample.plan"
         ? await this.#runWorkflowStage({
@@ -631,6 +738,7 @@ export class NativeStageRunner {
           outputSchema,
           admission,
           persist,
+          deadline: lifecycle.deadline,
         })
         : await runStructuredRole(
           roleHost,
@@ -646,13 +754,20 @@ export class NativeStageRunner {
               null,
               persistenceDeadline,
             ),
-            timeoutMs: stageTimeoutMs,
+            deadline: lifecycle.deadline,
           },
         );
+      requireStructuredDeadline(lifecycle.deadline);
+      const returnedStructured = result.structured;
+      requireStructuredDeadline(lifecycle.deadline);
+      const returnedDigest = jsonDigest(returnedStructured);
+      requireStructuredDeadline(lifecycle.deadline);
+      const returnedSessionId = result.session_id;
+      requireStructuredDeadline(lifecycle.deadline);
       return {
-        structured: result.structured,
-        result_digest: jsonDigest(result.structured),
-        session_id: result.session_id,
+        structured: returnedStructured,
+        result_digest: returnedDigest,
+        session_id: returnedSessionId,
         skill_invocation_evidence: persistedSkillEvidence,
       };
     } finally {
@@ -669,25 +784,67 @@ export class NativeStageRunner {
     outputSchema,
     admission,
     persist,
+    deadline,
   }) {
-    const deadlineAt = performance.now() + this.structuredStageTimeoutMs;
-    const deadlineUnixMs = Date.now() + this.structuredStageTimeoutMs;
+    requireStructuredDeadline(deadline);
     const persistenceController = new AbortController();
-    const throwIfExpired = () => {
-      if (performance.now() >= deadlineAt) {
-        persistenceController.abort();
-        throw new Error("structured workflow operational timeout");
+    const timeoutError = structuredOperationalTimeout();
+    let workflow;
+    let active = null;
+    let timeout = null;
+    let timedOut = false;
+    let deadlinePromise;
+    const detach = (operation) => {
+      try {
+        Promise.resolve(operation?.()).catch(() => {});
+      } catch {
+        // Expired cleanup is observational and must never replace the timeout.
       }
     };
+    const expireDeadline = () => {
+      if (!timedOut) {
+        timedOut = true;
+        persistenceController.abort();
+        try { workflow?.cancel?.("structured role operational timeout"); } catch {}
+      }
+      return timeoutError;
+    };
+    const deadlineExpired = () => (
+      timedOut || structuredDeadlineExpired(deadline)
+    );
+    const throwIfExpired = () => {
+      if (deadlineExpired()) throw expireDeadline();
+    };
+    const withinDeadline = async (operation) => {
+      throwIfExpired();
+      try {
+        const value = await Promise.race([
+          Promise.resolve().then(operation),
+          deadlinePromise,
+        ]);
+        throwIfExpired();
+        return value;
+      } catch (error) {
+        if (deadlineExpired() || error === timeoutError) throw expireDeadline();
+        throw error;
+      }
+    };
+    deadlinePromise = new Promise((_resolve, reject) => {
+      timeout = setTimeout(
+        () => reject(expireDeadline()),
+        remainingStructuredDeadlineMs(deadline),
+      );
+    });
+    deadlinePromise.catch(() => {});
     const persistenceDeadline = Object.freeze({
-      deadlineUnixMs,
       signal: persistenceController.signal,
       throwIfExpired,
       remainingTimeoutMs: () => {
         throwIfExpired();
-        return Math.max(1, Math.ceil(deadlineAt - performance.now()));
+        return Math.max(1, remainingStructuredDeadlineMs(deadline));
       },
     });
+    throwIfExpired();
     const workflowName = `ecology-wave-${jsonDigest({
       run_id: binding.run_id,
       reservation_id: reservation.launch.reservation_id,
@@ -728,10 +885,8 @@ export class NativeStageRunner {
         }
       },
     );
-    let workflow;
-    let timeout = null;
-    let timedOut = false;
     try {
+      throwIfExpired();
       workflow = startHomogeneousWorkflow(
         roleHost,
         {
@@ -740,19 +895,15 @@ export class NativeStageRunner {
           max_total_agents: 1,
           max_concurrent: 1,
           max_items: 1,
-          sync_timeout_ms: this.structuredStageTimeoutMs,
+          sync_timeout_ms: deadline.timeoutMs,
         },
         [{ label: reservation.label, prompt, schema: outputSchema }],
       );
-      const active = { runId: binding.run_id, workflow };
+      throwIfExpired();
+      active = { runId: binding.run_id, workflow };
       this.activeWorkflows.add(active);
-      timeout = setTimeout(() => {
-        timedOut = true;
-        persistenceController.abort();
-        workflow.cancel?.("structured workflow operational timeout");
-      }, this.structuredStageTimeoutMs);
-      const settled = await workflow.result;
-      if (timedOut) throw new Error("structured workflow operational timeout");
+      const settled = await withinDeadline(() => workflow.result);
+      throwIfExpired();
       if (settled?.stopReason !== "completed") {
         const error = new Error(
           `structured workflow failed: ${settled?.error || settled?.stopReason || "unknown"}`,
@@ -769,35 +920,60 @@ export class NativeStageRunner {
       if (!structured || typeof structured !== "object" || Array.isArray(structured)) {
         throw new Error("structured workflow child returned no schema-bound result");
       }
+      throwIfExpired();
       if (!childSessionId) throw new Error("structured workflow did not publish a real child session");
-      if (!await admission.isOpen(reservation)) {
+      const admissionOpen = await withinDeadline(() => admission.isOpen(reservation));
+      throwIfExpired();
+      if (!admissionOpen) {
         throw new Error("structured result admission is closed");
       }
-      const accepted = await persist(
-        structuredClone(structured),
-        childSessionId,
-        capturedSessionMetrics,
-        capturedSessionEvents,
-        persistenceDeadline,
+      const persistedStructured = structuredClone(structured);
+      throwIfExpired();
+      const accepted = await withinDeadline(
+        () => persist(
+          persistedStructured,
+          childSessionId,
+          capturedSessionMetrics,
+          capturedSessionEvents,
+          persistenceDeadline,
+        ),
       );
-      if (!accepted || accepted.accepted !== true) {
+      throwIfExpired();
+      const receiptAccepted = accepted?.accepted;
+      throwIfExpired();
+      if (!accepted || receiptAccepted !== true) {
         throw new Error("structured result was not durably accepted");
       }
-      return Object.freeze({
-        structured: structuredClone(structured),
+      const returnedStructured = structuredClone(structured);
+      throwIfExpired();
+      const response = Object.freeze({
+        structured: returnedStructured,
         receipt: accepted,
         session_id: childSessionId,
       });
+      throwIfExpired();
+      return response;
     } finally {
-      if (timeout !== null) clearTimeout(timeout);
       if (typeof removeListener === "function") removeListener();
       if (typeof removeEndListener === "function") removeEndListener();
       if (workflow) {
-        for (const active of this.activeWorkflows) {
-          if (active.workflow === workflow) this.activeWorkflows.delete(active);
+        if (deadlineExpired()) expireDeadline();
+        if (timedOut) {
+          if (active !== null) this.activeWorkflows.delete(active);
+          detach(() => workflow.dispose?.());
+        } else {
+          try {
+            await withinDeadline(() => workflow.dispose?.());
+          } catch (error) {
+            if (deadlineExpired() || error === timeoutError) expireDeadline();
+            // A normal private disposer failure is drained, never surfaced.
+          } finally {
+            if (active !== null) this.activeWorkflows.delete(active);
+          }
         }
-        await workflow.dispose?.();
       }
+      if (timeout !== null) clearTimeout(timeout);
+      if (deadlineExpired()) throw expireDeadline();
     }
   }
 
