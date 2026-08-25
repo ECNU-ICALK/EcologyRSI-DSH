@@ -3754,6 +3754,12 @@ _CLAIM_SHARED_NEGATION_COMPLETION_RE = re.compile(
     r"(?:expected|unchanged|constant|fixed|preserved)\b",
     re.IGNORECASE,
 )
+_CLAIM_COMPLETE_FINITE_PREDICATE_BEFORE_RE = re.compile(
+    r"\b(?:is|are|was|were|has|have|had|does|do|did|will|would|"
+    r"should|must|can|could|may|might)\s+(?:(?:not|never)\s+)?\w+\b"
+    r"[^.;。；!?！？]*$",
+    re.IGNORECASE,
+)
 
 
 def _claim_scopes(text: str) -> tuple[str, ...]:
@@ -3792,6 +3798,9 @@ def _claim_scopes(text: str) -> tuple[str, ...]:
             )
             if (
                 _CLAIM_NEGATION_BEFORE_RE.search(prefix)
+                and not _CLAIM_COMPLETE_FINITE_PREDICATE_BEFORE_RE.search(
+                    prefix
+                )
                 and (
                     _CLAIM_COORDINATED_GERUND_RE.search(coordinated_suffix)
                     or _CLAIM_SHARED_NEGATION_COMPLETION_RE.search(

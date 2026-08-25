@@ -1047,6 +1047,18 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
             avoid_behaviors=[],
         )
 
+        shared_neutral_completion = _direction(0, [])
+        shared_neutral_completion["success_criterion"] = (
+            "No eligibility or promotion is expected."
+        )
+        _validate_candidate_direction_realizability(
+            [shared_neutral_completion],
+            run=state.run,
+            task=state.task_manifest,
+            parent=parent,
+            avoid_behaviors=[],
+        )
+
         coordinated_negation = _direction(0, [])
         coordinated_negation["success_criterion"] = (
             "Compare diagnostic scores across the full matrix; do not claim "
@@ -1132,6 +1144,10 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                 "No eligibility and promotion is claimed.",
                 "No eligibility or gate passage is asserted.",
                 "No eligibility is claimed or promotion should proceed.",
+                "No eligibility is expected or promotion is expected.",
+                "No eligibility is claimed or promotion is expected.",
+                "No eligibility is claimed and passing the scientific gate "
+                "should proceed.",
             )
         ):
             direction = _direction(index, [])
