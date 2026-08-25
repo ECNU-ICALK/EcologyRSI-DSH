@@ -88,6 +88,64 @@ class CoreTests(unittest.TestCase):
         )
         ledger.close()
 
+    def test_ledger_idempotency_preserves_json_scalar_types(self) -> None:
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        conflicting_values = (
+            ("bool-versus-int", True, 1),
+            ("int-versus-float", 2, 2.0),
+            ("float-versus-bool", 0.0, False),
+        )
+
+        for label, recorded, retry in conflicting_values:
+            with self.subTest(label=label):
+                event_id = f"event:json-type:{label}"
+                ledger.append(
+                    "run:json-types",
+                    "Example",
+                    {"nested": {"value": recorded}},
+                    event_id=event_id,
+                )
+
+                with self.assertRaisesRegex(ValueError, "different event"):
+                    ledger.append(
+                        "run:json-types",
+                        "Example",
+                        {"nested": {"value": retry}},
+                        event_id=event_id,
+                    )
+
+        first = ledger.append(
+            "run:json-types",
+            "Example",
+            {"outer": {"alpha": 1, "beta": 2}, "stable": True},
+            event_id="event:json-type:key-order",
+        )
+        reordered = ledger.append(
+            "run:json-types",
+            "Example",
+            {"stable": True, "outer": {"beta": 2, "alpha": 1}},
+            event_id="event:json-type:key-order",
+        )
+
+        self.assertEqual(reordered, first)
+
+        ledger.append_many(
+            "run:json-types",
+            (("Example", {"nested": {"value": 3}}, "event:batch-json-type"),),
+        )
+        with self.assertRaisesRegex(ValueError, "different event"):
+            ledger.append_many(
+                "run:json-types",
+                (
+                    (
+                        "Example",
+                        {"nested": {"value": 3.0}},
+                        "event:batch-json-type",
+                    ),
+                ),
+            )
+
     def test_full_loop_replays_from_sqlite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "events.sqlite3"

@@ -912,3 +912,200 @@ git diff --check
 - No JavaScript production code, production service, live run, browser suite,
   or external state was changed. The complete plugin suite and 148 related
   Python tests were run; unrelated repository-wide tests were not run.
+
+## Fix Round 5/5
+
+### Review findings addressed
+
+1. The final `INSERT OR IGNORE` result is no longer trusted merely because the
+   ledger returned an event. `accept_structured` now revalidates that returned
+   event with `_validate_recorded_structured_result` and compares its complete
+   payload with canonical JSON before acknowledging it. If the ledger reports
+   a collision, the service re-reads through the same durable validator: an
+   invalid competing winner fails with its validation classification, while a
+   valid but different winner retains the public structured idempotency
+   conflict instead of leaking the ledger's generic collision message.
+2. `EventLedger.append` and `append_many` now compare canonical JSON at their
+   idempotency boundary. Object-key order and JSON container normalization
+   remain replay-compatible, while Python's coercive `True == 1`, `2 == 2.0`,
+   and `0.0 == False` mapping equality can no longer confirm distinct payloads.
+3. Explicit `sample.plan` replay keeps the complete durable Planner validator
+   as its mandatory authorization evidence but no longer requires an
+   ephemeral `_prediction_bindings` entry. If a live binding is present, its
+   wave and receipt are still checked as defense in depth. A restarted
+   `DshStructuredRoleRuntime` can therefore return the already accepted
+   structured result without invoking another agent or appending an event.
+
+### Explicit replay identity ruling
+
+An explicit durable replay compares only stable business identity supplied by
+the new invocation: `run_id`, stage, role, stage attempt, idempotency key, the
+three genome/compiled-behavior/phenotype digests, and output schema. The
+recorded identity is still fully shape- and type-validated, but historical
+session ID, child reservation ID, activation lease ID, run-state revision, and
+ledger-expected revision describe the original execution or mutable ledger
+position and are deliberately not compared with a restarted invocation. Making
+those historical fields new-call identity would prevent a healthy durable
+receipt from replaying after process restart or subsequent ledger progress.
+
+### Deterministic race and restart coverage
+
+- A legal structured request is allowed to complete every prior lookup and is
+  then blocked immediately before its final append. The test commits a same-ID
+  prior whose `stage_attempt` is `2.0`, releases the requester, and proves both
+  that current call and a later restarted fast-path call reject the invalid
+  event. Neither call acknowledges it.
+- The same append barrier commits a well-formed but different structured
+  payload and proves the error remains `structured-result idempotency key was
+  reused`. The existing exact concurrent winner control still returns the
+  original receipt, skips the expired new-row guard, and creates one accepted
+  event only.
+- Ledger controls cover bool/int/float collisions in nested payloads,
+  `append_many`, and a legal nested object-key reordering replay.
+- A healthy durable Planner chain is replayed directly by a new service with no
+  binding. The higher-level restarted `DshStructuredRoleRuntime` test uses new
+  run/ledger revisions, observes zero client calls, returns the durable
+  structured result, and leaves the event count unchanged. Corrupt receipt,
+  request digest, attempt, decision, and wave controls continue to fail through
+  the shared durable validator.
+
+### RED evidence
+
+The ledger scalar-type regression was run before its production change:
+
+```bash
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m unittest -v \
+  tests.test_core.CoreTests.test_ledger_idempotency_preserves_json_scalar_types
+```
+
+```text
+Ran 1 test in 0.002s
+FAILED (failures=4)
+```
+
+All three bool/int/float pairs and the `append_many` pair were accepted without
+the required collision error. The legal key-order control completed.
+
+The two deterministic append-winner regressions were independently RED:
+
+```bash
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m unittest -v \
+  tests.test_dsh_tool_contracts.DshToolServiceTests.test_insert_ignore_race_never_acknowledges_type_invalid_winner \
+  tests.test_dsh_tool_contracts.DshToolServiceTests.test_insert_ignore_race_preserves_structured_conflict_classification
+```
+
+```text
+Ran 2 tests in 0.004s
+FAILED (failures=2)
+```
+
+The type-invalid winner produced an `accepted: True` receipt, while the valid
+conflicting winner exposed `event_id already belongs to a different event`
+instead of the stable structured idempotency classification.
+
+Both restart Planner replay paths were RED before removing the live-state
+precondition:
+
+```bash
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m unittest -v \
+  tests.test_dsh_tool_contracts.DshToolServiceTests.test_restarted_planner_explicit_replay_requires_no_live_binding \
+  tests.test_dsh_tool_contracts.DshToolServiceTests.test_restarted_planner_runtime_replays_without_agent_call
+```
+
+```text
+Ran 2 tests in 0.006s
+FAILED (errors=2)
+```
+
+Both raised `sample.plan replay has no active prediction tool binding` despite
+the healthy durable prediction event and accepted-result chain.
+
+### GREEN evidence
+
+The focused new regressions plus the legal key-order, exact concurrent replay,
+and corrupt durable Planner controls passed together:
+
+```text
+Ran 8 tests in 0.009s
+OK
+```
+
+The directly affected Python group passed:
+
+```bash
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m unittest -v tests.test_dsh_tool_contracts \
+  tests.test_dsh_structured_roles tests.test_dsh_sample_execution \
+  tests.test_strategy_router tests.test_core
+```
+
+```text
+Ran 117 tests in 2.590s
+OK
+```
+
+The expanded related Python regression passed:
+
+```bash
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m unittest -v tests.test_dsh_tool_contracts tests.test_dsh_cancel_race \
+  tests.test_dsh_native_runtime tests.test_dsh_sample_execution \
+  tests.test_core tests.test_dsh_structured_roles \
+  tests.test_dsh_reconciliation tests.test_genome_replay \
+  tests.test_strategy_router
+```
+
+```text
+Ran 153 tests in 12.844s
+OK
+```
+
+The unchanged JavaScript boundary passed its complete plugin suite:
+
+```bash
+node --test integrations/dsh_ecology_plugin/test/*.mjs
+```
+
+```text
+tests 103
+pass 103
+fail 0
+duration_ms 643.423417
+```
+
+Fresh Node syntax, Python byte-compilation, and whitespace verification
+completed with exit code zero and no diagnostics:
+
+```bash
+node --check integrations/dsh_ecology_plugin/lib/runtime/structured-deadline.js
+node --check integrations/dsh_ecology_plugin/lib/runtime/routes.js
+node --check integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js
+node --check integrations/dsh_ecology_plugin/lib/runtime/structured-roles.js
+node --check integrations/dsh_ecology_plugin/lib/sidecar/client.js
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m py_compile src/ecologyrsi_dsh/api/dsh_tools.py \
+  src/ecologyrsi_dsh/core/ledger.py src/ecologyrsi_dsh/api/handler.py \
+  src/ecologyrsi_dsh/integrations/dsh_structured_roles.py \
+  tests/test_dsh_tool_contracts.py tests/test_core.py \
+  tests/test_dsh_sample_execution.py tests/test_strategy_router.py
+git diff --check
+```
+
+### Self-review and concerns
+
+- No known functional concern remains for the two final review findings.
+- A malformed race winner stays durably visible for audit but can never become
+  a successful structured acknowledgment. The append-only ledger is not
+  rewritten or silently repaired.
+- Exact duplicate behavior is unchanged except that JSON scalar types are now
+  part of event identity; object-key order and tuple/list JSON normalization
+  remain compatible.
+- Durable Planner validation remains ledger-only and side-effect-free. Live
+  binding checks are optional additional evidence, never the prerequisite for
+  acknowledging a healthy durable chain after restart.
+- No JavaScript production code, production service, live run, browser suite,
+  or external state was changed. The complete plugin suite and 153 related
+  Python tests were run; unrelated repository-wide tests were not run.

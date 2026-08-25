@@ -1667,13 +1667,25 @@ class DshToolService:
                     )
                 yield
 
-        event = self.ledger.append(
-            str(identity["run_id"]),
-            "DshStructuredResultAccepted",
-            payload,
-            event_id=event_id,
-            commit_guard=commit_guard,
-        )
+        try:
+            event = self.ledger.append(
+                str(identity["run_id"]),
+                "DshStructuredResultAccepted",
+                payload,
+                event_id=event_id,
+                commit_guard=commit_guard,
+            )
+        except ValueError:
+            # A competing writer may have won after every prior lookup. Re-read
+            # through the durable validator so malformed winners fail closed
+            # and valid conflicts retain the structured idempotency error.
+            receipt = prior_receipt()
+            if receipt is not None:
+                return receipt
+            raise
+        self._validate_recorded_structured_result(event)
+        if not _strict_json_equal(event.payload, payload):
+            raise ValueError("structured-result idempotency key was reused")
         return {
             "accepted": True,
             "result_digest": actual_digest,
@@ -1732,21 +1744,18 @@ class DshToolService:
             key = (run_id, stage_attempt, idempotency_key)
             with self._prediction_lock:
                 binding = self._prediction_bindings.get(key)
-            if binding is None:
-                raise DshToolAdmissionClosedError(
-                    "sample.plan replay has no active prediction tool binding"
-                )
-            if structured.get("wave_digest") != binding.wave_digest:
-                raise DshToolAuthorizationError(
-                    "sample.plan replay does not match its prediction wave"
-                )
-            if not _strict_json_equal(
-                payload.get("required_tool_receipt"),
-                binding.audit_receipt(),
-            ):
-                raise ValueError(
-                    "sample.plan replay prediction-tool receipt mismatch"
-                )
+            if binding is not None:
+                if structured.get("wave_digest") != binding.wave_digest:
+                    raise DshToolAuthorizationError(
+                        "sample.plan replay does not match its prediction wave"
+                    )
+                if not _strict_json_equal(
+                    payload.get("required_tool_receipt"),
+                    binding.audit_receipt(),
+                ):
+                    raise ValueError(
+                        "sample.plan replay prediction-tool receipt mismatch"
+                    )
         return deepcopy(dict(structured))
 
 

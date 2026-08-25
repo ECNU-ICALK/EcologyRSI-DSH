@@ -277,6 +277,84 @@ def _append_recorded_planner_result(
     return envelope, accepted_event
 
 
+def _accepted_payload(envelope: dict) -> dict:
+    return {
+        "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
+        "identity": json.loads(json.dumps(envelope["identity"])),
+        "output_schema_id": envelope["output_schema_id"],
+        "result_digest": envelope["result_digest"],
+        "structured": json.loads(json.dumps(envelope["structured"])),
+        "skill_invocation_evidence": json.loads(
+            json.dumps(envelope["skill_invocation_evidence"])
+        ),
+    }
+
+
+def _race_structured_append_winner(
+    service: DshToolService,
+    ledger: EventLedger,
+    envelope: dict,
+    winning_payload: dict,
+    *,
+    thread_name: str,
+) -> object:
+    """Block the legal request at append, commit a winner, then resume it."""
+
+    before_append = threading.Event()
+    release_append = threading.Event()
+    original_append = ledger.append
+    outcome: list[object] = []
+
+    def observed_append(*args: object, **kwargs: object) -> object:
+        if (
+            threading.current_thread().name == thread_name
+            and len(args) > 1
+            and args[1] == "DshStructuredResultAccepted"
+        ):
+            before_append.set()
+            if not release_append.wait(2):
+                raise RuntimeError("test did not release structured append")
+        return original_append(*args, **kwargs)
+
+    def accept() -> None:
+        try:
+            outcome.append(service.accept_structured(envelope))
+        except Exception as error:  # noqa: BLE001 - asserted by the caller
+            outcome.append(error)
+
+    worker = threading.Thread(target=accept, name=thread_name)
+    try:
+        with patch.object(ledger, "append", side_effect=observed_append):
+            worker.start()
+            if not before_append.wait(1):
+                raise AssertionError("legal request did not reach its final append")
+            identity = envelope["identity"]
+            event_id = (
+                f"{identity['run_id']}:dsh-structured:"
+                f"{digest({
+                    'stage': identity['stage'],
+                    'idempotency_key': identity['idempotency_key'],
+                })}"
+            )
+            original_append(
+                identity["run_id"],
+                "DshStructuredResultAccepted",
+                winning_payload,
+                event_id=event_id,
+            )
+            release_append.set()
+            worker.join(2)
+    finally:
+        release_append.set()
+        worker.join(2)
+
+    if worker.is_alive():
+        raise AssertionError("structured append worker did not finish")
+    if len(outcome) != 1:
+        raise AssertionError(f"unexpected structured append outcome: {outcome!r}")
+    return outcome[0]
+
+
 class DshToolServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.ledger = EventLedger(":memory:")
@@ -1435,6 +1513,87 @@ class DshToolServiceTests(unittest.TestCase):
         self.assertEqual(receipt["event_seq"], accepted_event.seq)
         self.assertEqual(self.ledger.count("run:tool-test"), before)
 
+    def test_restarted_planner_explicit_replay_requires_no_live_binding(
+        self,
+    ) -> None:
+        envelope, _accepted_event = _append_recorded_planner_result(
+            self.ledger,
+            case="healthy",
+        )
+        identity = envelope["identity"]
+        before = self.ledger.count("run:tool-test")
+
+        replayed = DshToolService(self.ledger).replay_structured_result(
+            run_id=identity["run_id"],
+            stage=identity["stage"],
+            role=identity["role"],
+            stage_attempt=identity["stage_attempt"],
+            idempotency_key=identity["idempotency_key"],
+            output_schema_id=envelope["output_schema_id"],
+            identity_digests={
+                "genome_digest": identity["genome_digest"],
+                "compiled_behavior_digest": identity[
+                    "compiled_behavior_digest"
+                ],
+                "phenotype_instance_digest": identity[
+                    "phenotype_instance_digest"
+                ],
+            },
+        )
+
+        self.assertEqual(replayed, envelope["structured"])
+        self.assertEqual(self.ledger.count("run:tool-test"), before)
+
+    def test_restarted_planner_runtime_replays_without_agent_call(self) -> None:
+        envelope, _accepted_event = _append_recorded_planner_result(
+            self.ledger,
+            case="healthy",
+        )
+        identity = envelope["identity"]
+
+        class CountingRuntime:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def run_stage(self, _request: dict) -> dict:
+                self.calls += 1
+                unexpected = {"unexpected": True}
+                return {
+                    "structured": unexpected,
+                    "result_digest": digest(unexpected),
+                }
+
+        client = CountingRuntime()
+        restarted = DshToolService(self.ledger)
+        runtime = DshStructuredRoleRuntime(client, admission=restarted)
+        before = self.ledger.count("run:tool-test")
+        current_revision = self.ledger.latest_seq()
+
+        replayed = runtime.run(
+            run_id=identity["run_id"],
+            stage=identity["stage"],
+            role=identity["role"],
+            context={"restart": "new Host invocation"},
+            output_schema_id=envelope["output_schema_id"],
+            run_state_revision=current_revision + 10,
+            stage_attempt=identity["stage_attempt"],
+            ledger_expected_revision=current_revision,
+            idempotency_key=identity["idempotency_key"],
+            identity_digests={
+                "genome_digest": identity["genome_digest"],
+                "compiled_behavior_digest": identity[
+                    "compiled_behavior_digest"
+                ],
+                "phenotype_instance_digest": identity[
+                    "phenotype_instance_digest"
+                ],
+            },
+        )
+
+        self.assertEqual(replayed, envelope["structured"])
+        self.assertEqual(client.calls, 0)
+        self.assertEqual(self.ledger.count("run:tool-test"), before)
+
     def test_restarted_planner_revalidates_durable_prediction_binding(self) -> None:
         for case in (
             "missing-receipt",
@@ -1642,6 +1801,66 @@ class DshToolServiceTests(unittest.TestCase):
             calls_before_insert_ignore,
             "an INSERT OR IGNORE replay must not enter the new-row deadline guard",
         )
+        self.assertEqual(
+            sum(
+                event.kind == "DshStructuredResultAccepted"
+                for event in self.ledger.events("run:tool-test")
+            ),
+            1,
+        )
+
+    def test_insert_ignore_race_never_acknowledges_type_invalid_winner(self) -> None:
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
+        invalid_payload = _accepted_payload(envelope)
+        invalid_payload["identity"]["stage_attempt"] = 2.0
+
+        outcome = _race_structured_append_winner(
+            self.service,
+            self.ledger,
+            envelope,
+            invalid_payload,
+            thread_name="type-invalid-structured-winner",
+        )
+
+        self.assertIsInstance(outcome, DshToolAuthorizationError)
+        self.assertIn("invalid Host revision field: stage_attempt", str(outcome))
+        with self.assertRaisesRegex(
+            DshToolAuthorizationError,
+            "invalid Host revision field: stage_attempt",
+        ):
+            DshToolService(self.ledger).accept_structured(envelope)
+        self.assertEqual(
+            sum(
+                event.kind == "DshStructuredResultAccepted"
+                for event in self.ledger.events("run:tool-test")
+            ),
+            1,
+        )
+
+    def test_insert_ignore_race_preserves_structured_conflict_classification(
+        self,
+    ) -> None:
+        envelope = _research_envelope(self.ledger, deadline_unix_ms=1_000)
+        _arm_structured_envelope(self.service, envelope)
+        conflicting_payload = _accepted_payload(envelope)
+        conflicting_payload["structured"]["summary"] = "concurrent conflict"
+        conflicting_payload["result_digest"] = digest(
+            conflicting_payload["structured"]
+        )
+
+        outcome = _race_structured_append_winner(
+            self.service,
+            self.ledger,
+            envelope,
+            conflicting_payload,
+            thread_name="conflicting-structured-winner",
+        )
+
+        self.assertIsInstance(outcome, ValueError)
+        self.assertRegex(str(outcome), "idempotency key was reused")
+        with self.assertRaisesRegex(ValueError, "idempotency key was reused"):
+            DshToolService(self.ledger).accept_structured(envelope)
         self.assertEqual(
             sum(
                 event.kind == "DshStructuredResultAccepted"

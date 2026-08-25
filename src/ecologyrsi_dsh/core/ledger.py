@@ -452,7 +452,6 @@ class EventLedger:
             raise ValueError("kind must be a non-empty string")
         payload_dict = dict(payload)
         payload_json = canonical_json(payload_dict)
-        normalized_payload = json.loads(payload_json)
         event_id = event_id or str(uuid4())
         created_at = created_at or utc_now()
         if not isinstance(event_id, str) or not event_id.strip():
@@ -513,7 +512,7 @@ class EventLedger:
         if (
             event.run_id != run_id.strip()
             or event.kind != kind.strip()
-            or event.payload != normalized_payload
+            or canonical_json(event.payload) != payload_json
         ):
             raise ValueError(f"event_id already belongs to a different event: {event_id}")
         return event
@@ -600,7 +599,7 @@ class EventLedger:
                     if (
                         event.run_id != run_id
                         or event.kind != kind
-                        or event.payload != payload_dict
+                        or canonical_json(event.payload) != payload_json
                     ):
                         raise ValueError(
                             "event_id already belongs to a different event: "
