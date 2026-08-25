@@ -4,17 +4,18 @@ import { RoleAgentManager } from "./agents.js";
 import { NativeStageRunner } from "./stage-runner.js";
 
 const DEFAULT_PRESETS = Object.freeze([
-  "ecology-coordinator-v3",
-  "ecology-researcher-v6",
-  "ecology-candidate-proposer-v3",
-  "ecology-sample-planner-v3",
-  "ecology-sample-critic-v3",
-  "ecology-generation-judge-v6",
+  "ecology-coordinator-v4",
+  "ecology-researcher-v7",
+  "ecology-candidate-proposer-v4",
+  "ecology-sample-planner-v4",
+  "ecology-sample-critic-v4",
+  "ecology-generation-judge-v7",
 ].map((preset_id) => ({
   preset_id,
-  required_tools: preset_id === "ecology-sample-planner-v3"
-    ? ["ecology_execute_prediction_tool", "skill"]
-    : ["skill"],
+  tool_profile: "dynamic-retrieval-v1",
+  required_tools: preset_id === "ecology-sample-planner-v4"
+    ? ["ecology_execute_prediction_tool", "skill", "web_search"]
+    : ["skill", "web_search"],
 })));
 
 export class RuntimeController {
@@ -60,22 +61,23 @@ export class RuntimeController {
     const strategyModel = frozen.strategy_model_id;
     const reviewModel = frozen.review_model_id;
     try {
-      await Promise.all(this.presetCatalog.map(({ preset_id }) => {
-      const role = preset_id.replace(/^ecology-/, "").replace(/-v\d+$/, "");
-      const reviewRole = role === "sample-critic" || role === "generation-judge";
-      return this.roleAgents.createRoleAgent({
-        run_id: binding.run_id,
-        role,
-        preset_id,
-        model: reviewRole ? reviewModel : strategyModel,
-        cwd: process.cwd(),
-        require_workflow: role === "coordinator" || role === "sample-planner",
-        preset_content_digest: frozen.preset_content_digest,
-        standing_tool_surface_digest: frozen.standing_tool_surface_digest,
-        route_config_digest: reviewRole
-          ? frozen.resolved_review_route_config_digest
-          : frozen.resolved_policy_route_config_digest,
-      });
+      await Promise.all(this.presetCatalog.map(({ preset_id, tool_profile }) => {
+        const role = preset_id.replace(/^ecology-/, "").replace(/-v\d+$/, "");
+        const reviewRole = role === "sample-critic" || role === "generation-judge";
+        return this.roleAgents.createRoleAgent({
+          run_id: binding.run_id,
+          role,
+          preset_id,
+          model: reviewRole ? reviewModel : strategyModel,
+          cwd: process.cwd(),
+          tool_profile,
+          require_workflow: role === "coordinator" || role === "sample-planner",
+          preset_content_digest: frozen.preset_content_digest,
+          standing_tool_surface_digest: frozen.standing_tool_surface_digest,
+          route_config_digest: reviewRole
+            ? frozen.resolved_review_route_config_digest
+            : frozen.resolved_policy_route_config_digest,
+        });
       }));
     } catch (error) {
       this.registry.delete(binding.run_id);

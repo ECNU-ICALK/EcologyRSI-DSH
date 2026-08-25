@@ -3699,6 +3699,19 @@ _CLAIM_SCOPE_RESTART_RE = re.compile(
     r"[,，:：]|\band\b|并且|而且",
     re.IGNORECASE,
 )
+_CLAIM_NEGATED_ASSERTION_BEFORE_RE = re.compile(
+    r"(?:\b(?:do|does|did|will|would|should|must|can|could)\s+not\s+"
+    r"(?:claim|assert|imply)\b|\bwithout\s+(?:claiming|asserting|implying)\b|"
+    r"(?:不|未|不会|不能|不得)\s*(?:声称|宣称|断言|暗示))"
+    r"[^.;。；!?！？]*$",
+    re.IGNORECASE,
+)
+_CLAIM_NEGATED_ENUMERATION_ITEM_RE = re.compile(
+    r"^(?:(?:and|or)\s+)?(?:eligib\w*|promot\w*|gate\b|threshold\b|"
+    r"(?:scientific|selection|statistical|evidence)[-\s]+(?:gate|threshold)\b|"
+    r"(?:门禁|门槛|阈值|晋级|入选|证据充足|样本量达标))",
+    re.IGNORECASE,
+)
 
 
 def _claim_scopes(text: str) -> tuple[str, ...]:
@@ -3717,11 +3730,17 @@ def _claim_scopes(text: str) -> tuple[str, ...]:
         if not clause:
             continue
         scopes.append(clause)
-        scopes.extend(
-            suffix
-            for boundary in _CLAIM_SCOPE_RESTART_RE.finditer(clause)
-            if (suffix := clause[boundary.end() :].strip())
-        )
+        for boundary in _CLAIM_SCOPE_RESTART_RE.finditer(clause):
+            suffix = clause[boundary.end() :].strip()
+            if not suffix:
+                continue
+            prefix = clause[: boundary.start()]
+            if (
+                _CLAIM_NEGATED_ASSERTION_BEFORE_RE.search(prefix)
+                and _CLAIM_NEGATED_ENUMERATION_ITEM_RE.match(suffix)
+            ):
+                continue
+            scopes.append(suffix)
     return tuple(scopes)
 
 
@@ -3736,10 +3755,13 @@ def _contains_unnegated_claim(text: str, pattern: re.Pattern[str]) -> bool:
 
     for scope in _claim_scopes(text):
         for match in pattern.finditer(scope):
-            before = scope[max(0, match.start() - 64) : match.start()]
+            full_before = scope[: match.start()]
+            before = full_before[max(0, len(full_before) - 64) :]
             after = scope[match.end() : min(len(scope), match.end() + 40)]
             if boundary := _CLAIM_SCOPE_RESTART_RE.search(after):
                 after = after[: boundary.start()]
+            if _CLAIM_NEGATED_ASSERTION_BEFORE_RE.search(full_before):
+                continue
             if _CLAIM_NEGATION_BEFORE_RE.search(before):
                 continue
             if _CLAIM_NEGATION_BEFORE_RE.search(match.group()):

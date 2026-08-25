@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
@@ -12,18 +13,39 @@ from typing import Any, Iterator
 
 from ..core.ledger import ConcurrentRunMutationError
 from ..core.models import digest
+from ..knowledge.retrieval import (
+    assess_dynamic_search_quality,
+    merge_dynamic_search_results,
+    normalize_dynamic_search_result,
+    search_openalex_metadata,
+)
 
 
 ROLE_TOOLS: dict[str, frozenset[str]] = {
-    "coordinator": frozenset(),
-    "researcher": frozenset(),
-    "candidate-proposer": frozenset(),
-    "sample-planner": frozenset({"ecology_execute_prediction_tool"}),
-    "sample-critic": frozenset(),
-    "generation-judge": frozenset(),
+    "coordinator": frozenset({"web_search"}),
+    "researcher": frozenset({"web_search"}),
+    "candidate-proposer": frozenset({"web_search"}),
+    "sample-planner": frozenset(
+        {"web_search", "ecology_execute_prediction_tool"}
+    ),
+    "sample-critic": frozenset({"web_search"}),
+    "generation-judge": frozenset({"web_search"}),
 }
 
 _PREDICTION_TOOL_NAME = "ecology_execute_prediction_tool"
+_RETRIEVAL_TOOL_NAME = "web_search"
+_RETRIEVAL_MAX_CALLS_PER_STAGE = 3
+_RETRIEVAL_MAX_QUERIES = 4
+_RETRIEVAL_QUERY_MAX_CHARS = 180
+_RETRIEVAL_IDEMPOTENCY_MAX_CHARS = 120
+_RETRIEVAL_TECHNICAL_FAILURES = frozenset(
+    {
+        "primary_provider_unavailable",
+        "primary_provider_error",
+        "primary_timeout",
+        "primary_malformed",
+    }
+)
 _STRUCTURED_STAGE_CONTRACTS: dict[str, tuple[str, str]] = {
     "generation.research": ("researcher", "ecology-research-result@1"),
     "generation.search-plan": (
@@ -425,7 +447,12 @@ def _dsh_session_metrics(value: Any, *, session_id: str) -> dict[str, Any]:
 
 
 class DshToolService:
-    def __init__(self, ledger: Any) -> None:
+    def __init__(
+        self,
+        ledger: Any,
+        *,
+        retrieval_fallback: Callable[..., Mapping[str, Any]] | None = None,
+    ) -> None:
         self.ledger = ledger
         self._fences: dict[tuple[str, int, int], AdmissionFence] = {}
         self._run_admission: dict[str, str] = {}
@@ -434,6 +461,8 @@ class DshToolService:
         ] = {}
         self._prediction_lock = Lock()
         self._launch_lock = Lock()
+        self._retrieval_lock = Lock()
+        self._retrieval_fallback = retrieval_fallback or search_openalex_metadata
 
     @staticmethod
     def _prediction_event_id(run_id: str, idempotency_key: str) -> str:
@@ -447,6 +476,20 @@ class DshToolService:
         return (
             f"{run_id}:dsh-structured:"
             f"{digest({'stage': stage, 'idempotency_key': idempotency_key})}"
+        )
+
+    @staticmethod
+    def _retrieval_event_id(
+        run_id: str,
+        role: str,
+        stage: str,
+        stage_attempt: int,
+        stage_idempotency_key: str,
+        idempotency_key: str,
+    ) -> str:
+        return (
+            f"{run_id}:dsh-retrieval:"
+            f"{digest({'role': role, 'stage': stage, 'stage_attempt': stage_attempt, 'stage_idempotency_key': stage_idempotency_key, 'retrieval_key': idempotency_key})}"
         )
 
     def _event_by_id(self, run_id: str, event_id: str) -> Any | None:
@@ -728,6 +771,246 @@ class DshToolService:
             "event_id": event.event_id,
             **result,
         }
+
+    @staticmethod
+    def _retrieval_arguments(value: Any) -> tuple[tuple[str, ...], str]:
+        if not isinstance(value, Mapping) or set(value) != {
+            "queries",
+            "retrieval_key",
+        }:
+            raise ValueError("dynamic retrieval arguments have an invalid shape")
+        raw_queries = value.get("queries")
+        if not isinstance(raw_queries, list) or not (
+            1 <= len(raw_queries) <= _RETRIEVAL_MAX_QUERIES
+        ):
+            raise ValueError("dynamic retrieval requires one to four queries")
+        queries: list[str] = []
+        seen: set[str] = set()
+        for raw_query in raw_queries:
+            if not isinstance(raw_query, str):
+                raise ValueError("dynamic retrieval queries must be text")
+            query = " ".join(raw_query.split())
+            if not query or len(query) > _RETRIEVAL_QUERY_MAX_CHARS:
+                raise ValueError("dynamic retrieval query is empty or too long")
+            normalized = query.casefold()
+            if normalized not in seen:
+                seen.add(normalized)
+                queries.append(query)
+        raw_key = value.get("retrieval_key")
+        if (
+            not isinstance(raw_key, str)
+            or not 1 <= len(raw_key) <= _RETRIEVAL_IDEMPOTENCY_MAX_CHARS
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", raw_key) is None
+        ):
+            raise ValueError("dynamic retrieval idempotency key is invalid")
+        return tuple(queries), raw_key
+
+    @staticmethod
+    def _retrieval_response(payload: Mapping[str, Any]) -> dict[str, Any]:
+        result = payload.get("result")
+        if not isinstance(result, Mapping):
+            raise ValueError("recorded dynamic retrieval result is invalid")
+        if payload.get("result_digest") != digest(result):
+            raise ValueError("recorded dynamic retrieval result digest mismatch")
+        return {
+            **deepcopy(dict(result)),
+            "provider_route": payload.get("provider_route"),
+            "fallback_reason": payload.get("fallback_reason"),
+            "result_digest": payload.get("result_digest"),
+        }
+
+    def _recorded_retrieval(
+        self,
+        *,
+        identity: Mapping[str, Any],
+        queries: tuple[str, ...],
+        retrieval_idempotency_key: str,
+    ) -> Any | None:
+        run_id = str(identity["run_id"])
+        event_id = self._retrieval_event_id(
+            run_id,
+            str(identity["role"]),
+            str(identity["stage"]),
+            int(identity["stage_attempt"]),
+            str(identity["idempotency_key"]),
+            retrieval_idempotency_key,
+        )
+        prior = self._event_by_id(run_id, event_id)
+        if prior is None:
+            return None
+        if prior.kind != "DshRetrievalExecuted":
+            raise ValueError("dynamic retrieval event identity was reused")
+        payload = prior.payload
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("query_digest") != digest(list(queries))
+            or payload.get("queries") != list(queries)
+        ):
+            raise ValueError("dynamic retrieval idempotency key was reused")
+        recorded_identity = payload.get("identity")
+        if not isinstance(recorded_identity, Mapping) or any(
+            recorded_identity.get(name) != identity.get(name)
+            for name in (
+                "run_id",
+                "role",
+                "stage",
+                "run_state_revision",
+                "stage_attempt",
+                "idempotency_key",
+                "genome_digest",
+                "compiled_behavior_digest",
+                "phenotype_instance_digest",
+            )
+        ):
+            raise DshToolAuthorizationError("dynamic retrieval replay identity mismatch")
+        return prior
+
+    def replay_retrieval(self, envelope: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Replay one completed dynamic retrieval before any network access."""
+
+        if not isinstance(envelope, Mapping) or set(envelope) != {
+            "identity",
+            "arguments",
+        }:
+            raise ValueError("dynamic retrieval replay envelope has an invalid shape")
+        identity = envelope.get("identity")
+        if not isinstance(identity, Mapping) or set(identity) != _IDENTITY_FIELDS:
+            raise DshToolAuthorizationError("invalid Host-bound retrieval identity")
+        queries, retrieval_key = self._retrieval_arguments(envelope.get("arguments"))
+        self._authorize_identity(
+            identity,
+            tool_name=_RETRIEVAL_TOOL_NAME,
+            allow_ledger_advance=True,
+        )
+        prior = self._recorded_retrieval(
+            identity=identity,
+            queries=queries,
+            retrieval_idempotency_key=retrieval_key,
+        )
+        return None if prior is None else self._retrieval_response(prior.payload)
+
+    def complete_retrieval(self, envelope: Mapping[str, Any]) -> dict[str, Any]:
+        """Assess DSH primary evidence, fall back when needed, and persist once."""
+
+        if not isinstance(envelope, Mapping) or set(envelope) not in (
+            {"identity", "arguments", "primary_result"},
+            {"identity", "arguments", "primary_error_code"},
+            {
+                "identity",
+                "arguments",
+                "primary_result",
+                "primary_error_code",
+            },
+        ):
+            raise ValueError("dynamic retrieval completion envelope has an invalid shape")
+        identity = envelope.get("identity")
+        arguments = envelope.get("arguments")
+        if not isinstance(identity, Mapping) or set(identity) != _IDENTITY_FIELDS:
+            raise DshToolAuthorizationError("invalid Host-bound retrieval identity")
+        queries, retrieval_key = self._retrieval_arguments(arguments)
+        self._authorize_identity(
+            identity,
+            tool_name=_RETRIEVAL_TOOL_NAME,
+            allow_ledger_advance=True,
+        )
+        with self._retrieval_lock:
+            prior = self._recorded_retrieval(
+                identity=identity,
+                queries=queries,
+                retrieval_idempotency_key=retrieval_key,
+            )
+            if prior is not None:
+                return self._retrieval_response(prior.payload)
+            stage_events = [
+                event
+                for event in self.ledger.events(str(identity["run_id"]))
+                if event.kind == "DshRetrievalExecuted"
+                and isinstance(event.payload.get("identity"), Mapping)
+                and event.payload["identity"].get("stage") == identity["stage"]
+                and event.payload["identity"].get("stage_attempt")
+                == identity["stage_attempt"]
+                and event.payload["identity"].get("idempotency_key")
+                == identity["idempotency_key"]
+            ]
+            if len(stage_events) >= _RETRIEVAL_MAX_CALLS_PER_STAGE:
+                raise DshToolAuthorizationError(
+                    "dynamic retrieval stage call budget is exhausted"
+                )
+
+            primary: dict[str, Any] | None = None
+            primary_error_code = envelope.get("primary_error_code")
+            if (
+                primary_error_code is not None
+                and primary_error_code not in _RETRIEVAL_TECHNICAL_FAILURES
+            ):
+                raise ValueError("dynamic retrieval primary error code is invalid")
+            if "primary_result" in envelope:
+                try:
+                    primary = normalize_dynamic_search_result(
+                        envelope.get("primary_result")
+                    )
+                except (TypeError, ValueError):
+                    primary_error_code = "primary_malformed"
+            elif primary_error_code not in _RETRIEVAL_TECHNICAL_FAILURES:
+                raise ValueError("dynamic retrieval primary error code is invalid")
+
+            if primary is None:
+                primary_quality = assess_dynamic_search_quality(
+                    queries,
+                    {"sources": [], "truncated": False},
+                )
+                fallback_reason = str(primary_error_code)
+                primary_quality["fallback_reason"] = fallback_reason
+            else:
+                primary_quality = assess_dynamic_search_quality(queries, primary)
+                fallback_reason = (
+                    str(primary_error_code)
+                    if primary_error_code is not None
+                    else primary_quality["fallback_reason"]
+                )
+                primary_quality["fallback_reason"] = fallback_reason
+                primary_quality["sufficient"] = fallback_reason is None
+
+            fallback: dict[str, Any] | None = None
+            if fallback_reason is not None:
+                try:
+                    fallback = normalize_dynamic_search_result(
+                        self._retrieval_fallback(queries, limit=8)
+                    )
+                except Exception:  # noqa: BLE001 - isolated optional provider
+                    fallback = {"sources": [], "truncated": False}
+                provider_route = "dsh_primary_then_openalex_fallback"
+            else:
+                provider_route = "dsh_primary"
+            result = merge_dynamic_search_results(primary, fallback)
+            result_digest = digest(result)
+            payload = {
+                "schema_version": "ecologyrsi-dsh.retrieval-executed/1",
+                "execution_owner": "dsh_agent_web_search",
+                "identity": deepcopy(dict(identity)),
+                "retrieval_idempotency_key": retrieval_key,
+                "query_digest": digest(list(queries)),
+                "queries": list(queries),
+                "provider_route": provider_route,
+                "fallback_reason": fallback_reason,
+                "primary_quality": deepcopy(dict(primary_quality)),
+                "result": deepcopy(result),
+                "result_digest": result_digest,
+            }
+            event = self.ledger.append(
+                str(identity["run_id"]),
+                "DshRetrievalExecuted",
+                payload,
+                event_id=self._retrieval_event_id(
+                    str(identity["run_id"]),
+                    str(identity["role"]),
+                    str(identity["stage"]),
+                    int(identity["stage_attempt"]),
+                    str(identity["idempotency_key"]),
+                    retrieval_key,
+                ),
+            )
+            return self._retrieval_response(event.payload)
 
     def _authorize_identity(
         self,

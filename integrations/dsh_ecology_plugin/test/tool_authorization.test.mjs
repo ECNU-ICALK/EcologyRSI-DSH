@@ -13,7 +13,9 @@ test("Host identity and labels cannot be forged recursively in model arguments",
 test("wrong Host-bound role is denied before sidecar execution", async () => {
   let handler;
   let called = false;
-  registerRoleTools({ tools: { register: (definition) => { handler ||= definition.execute; } } }, {
+  registerRoleTools({ tools: { register: (definition) => {
+    if (definition.name === "ecology_execute_prediction_tool") handler = definition.execute;
+  } } }, {
     role: "sample-planner",
     bridge: {
       bindingFor: async () => ({ role: "researcher" }),

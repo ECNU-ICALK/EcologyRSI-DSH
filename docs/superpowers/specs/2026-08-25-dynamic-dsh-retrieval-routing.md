@@ -27,7 +27,7 @@ The tool uses DSH's configured `ctx.web` service as the primary route. If that r
 
 ```text
 EcologyRSI stage Agent
-  |  web_search({queries, idempotency_key})
+  |  web_search({queries, retrieval_key})
   v
 EcologyRSI DSH wrapper
   |-- replay lookup --------------------------> Python sidecar / event ledger
@@ -55,7 +55,7 @@ The model-facing input is:
 ```json
 {
   "queries": ["one to four focused questions"],
-  "idempotency_key": "stable stage-local key"
+  "retrieval_key": "stable stage-local key"
 }
 ```
 
@@ -64,7 +64,7 @@ Constraints:
 - 1-4 non-empty queries per call.
 - 180 Unicode code points maximum per query.
 - At most three distinct retrieval calls for one stage attempt.
-- The idempotency key is stage-local, bounded, and supplied by the Agent from a purpose-oriented slug such as `check-vpd-literature`.
+- The retrieval key is stage-local, bounded, and supplied by the Agent from a purpose-oriented slug such as `check-vpd-literature`. Its distinct name prevents the model from setting the Host-owned `idempotency_key` identity field.
 - The final result contains at most eight sources and bounded text fields.
 
 The model-facing result includes a short `content` summary, normalized `sources`, and safe routing metadata (`provider_route`, `fallback_reason`, `result_digest`). Credentials, raw provider errors, stack traces, sidecar addresses, and internal tokens are never returned.
@@ -136,13 +136,13 @@ Before making any primary network request, the wrapper asks the sidecar for a re
 - run ID;
 - stage name and role;
 - stage attempt;
-- idempotency key;
+- retrieval key;
 - digest of normalized queries.
 
 On a miss, completion appends exactly one `DshRetrievalExecuted` event containing:
 
 - schema version and execution owner;
-- stage identity, idempotency key, and query digest;
+- stage identity, retrieval key, and query digest;
 - bounded normalized queries;
 - provider route and optional fallback reason;
 - primary quality metrics;

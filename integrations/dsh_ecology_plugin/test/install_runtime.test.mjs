@@ -66,7 +66,11 @@ test("preset installation is exact, idempotent, and refuses drift", async () => 
   for (const target of obsolete) {
     await assert.rejects(readFile(path.join(target, "preset.yml")), { code: "ENOENT" });
   }
-  const target = path.join(dshHome, ".agent-presets", "ecology-researcher-v6", "preset.yml");
+  const legacyTarget = path.join(
+    dshHome, ".agent-presets", "ecology-researcher-v6", "preset.yml",
+  );
+  const target = path.join(dshHome, ".agent-presets", "ecology-researcher-v7", "preset.yml");
+  assert.match(await readFile(legacyTarget, "utf8"), /Ecology Researcher v6/);
   assert.match(await readFile(target, "utf8"), /Ecology Researcher/);
   await writeFile(target, "drift\n");
   await assert.rejects(installPresetTree({ sourceRoot: source, dshHome }), /drift/);
@@ -84,13 +88,13 @@ test("preset installation rejects a composition that DSH cannot parse", async (t
   await cp(source, sourceRoot, { recursive: true });
   await mkdir(dshHome);
   await writeFile(
-    path.join(sourceRoot, "ecology-researcher-v6", "agent.cordis.yml"),
+    path.join(sourceRoot, "ecology-researcher-v7", "agent.cordis.yml"),
     "- id: persona\n  name: '@deepseek-ai/dsh-persona'\n  config:\n    text: invalid plain scalar: parsed as a mapping\n",
   );
 
   await assert.rejects(
     installPresetTree({ sourceRoot, dshHome, dshBin }),
-    /ecology-researcher-v6[\s\S]*not valid YAML|not valid YAML[\s\S]*ecology-researcher-v6/i,
+    /ecology-researcher-v7[\s\S]*not valid YAML|not valid YAML[\s\S]*ecology-researcher-v7/i,
   );
 });
 
@@ -105,7 +109,7 @@ test("preset installation supports a DSH test double without packaged parser mod
   await installPresetTree({ sourceRoot: source, dshHome, dshBin });
 
   assert.match(
-    await readFile(path.join(dshHome, ".agent-presets", "ecology-researcher-v6", "preset.yml"), "utf8"),
+    await readFile(path.join(dshHome, ".agent-presets", "ecology-researcher-v7", "preset.yml"), "utf8"),
     /Ecology Researcher/,
   );
 });
@@ -123,7 +127,7 @@ test("managed Host patch has the exact DSH service injection and no embedded cre
   const text = managedPatchText({ staticRoot: "/safe/static" });
   for (const name of [
     "webServer", "agents", "sessions", "tokenMeter", "subagents", "tools",
-    "sessionPersistence", "sessionProjections", "agentPresets", "llm",
+    "sessionPersistence", "sessionProjections", "agentPresets", "llm", "web",
   ]) assert.match(text, new RegExp(`\\b${name}\\b`));
   assert.doesNotMatch(text, /credentials|serviceToken|runtimeToken|secret/i);
 });

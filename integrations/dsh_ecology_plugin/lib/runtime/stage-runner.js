@@ -1,7 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
-import { ROLE_TOOL_NAMES } from "../tools/roles.js";
+import {
+  DYNAMIC_RETRIEVAL_TOOL_PROFILE,
+  roleToolNames,
+} from "../tools/roles.js";
 import { SidecarClient } from "../sidecar/client.js";
 import { dshSessionMetrics } from "./agents.js";
 import { ChildBindingRegistry } from "./child-bindings.js";
@@ -276,7 +279,12 @@ function successfulResultAfter(events, call) {
 
 export function skillInvocationEvidence(
   rawEvents,
-  { stage, skillName, requiresPredictionTool = false } = {},
+  {
+    stage,
+    skillName,
+    requiresPredictionTool = false,
+    allowDynamicRetrieval = false,
+  } = {},
 ) {
   if (!Array.isArray(rawEvents)) throw new Error("DSH child Session event log is unavailable");
   const events = rawEvents
@@ -301,6 +309,28 @@ export function skillInvocationEvidence(
   const nextCalls = calls.filter((item) => eventData(item.event).name === nextToolName);
   if (nextCalls.length !== 1 || nextCalls[0].seq <= skillResult.seq) {
     throw new Error(`the required ${nextToolName} call did not follow the Skill result`);
+  }
+  const retrievalCalls = calls.filter(
+    (item) => eventData(item.event).name === "web_search",
+  );
+  if (!allowDynamicRetrieval && retrievalCalls.length > 0) {
+    throw new Error("dynamic retrieval is outside the frozen legacy tool profile");
+  }
+  if (retrievalCalls.length > 3) {
+    throw new Error("the zero to three dynamic retrieval call budget was exceeded");
+  }
+  for (const retrievalCall of retrievalCalls) {
+    const retrievalResult = successfulResultAfter(events, retrievalCall);
+    if (
+      retrievalCall.seq <= skillResult.seq
+      || retrievalCall.seq >= nextCalls[0].seq
+      || !retrievalResult
+      || retrievalResult.seq >= nextCalls[0].seq
+    ) {
+      throw new Error(
+        "dynamic retrieval must succeed after Skill and before the required terminal tool",
+      );
+    }
   }
   if (requiresPredictionTool) {
     const predictionResult = successfulResultAfter(events, nextCalls[0]);
@@ -437,6 +467,9 @@ export class NativeStageRunner {
   }
 
   async #runReservedStage({ binding, contract, request, identityDigests, roleHost }) {
+    const dynamicRetrieval = (
+      roleHost.binding?.tool_profile === DYNAMIC_RETRIEVAL_TOOL_PROFILE
+    );
     const allocation = await this.sidecar.request(
       "/api/ecology-agent-sidecar/v1/child-reservations",
       {
@@ -473,26 +506,30 @@ export class NativeStageRunner {
       genome_digest: exactDigest(identityDigests.genome_digest, "genome_digest"),
       compiled_behavior_digest: exactDigest(identityDigests.compiled_behavior_digest, "compiled_behavior_digest"),
       phenotype_instance_digest: exactDigest(identityDigests.phenotype_instance_digest, "phenotype_instance_digest"),
-      allowed_tools: ROLE_TOOL_NAMES[contract.role],
+      allowed_tools: roleToolNames(
+        contract.role,
+        dynamicRetrieval ? DYNAMIC_RETRIEVAL_TOOL_PROFILE : null,
+      ),
     };
     const reservation = this.childBindings.reserve(roleHost.sessionId, launch, frozenIdentity);
     const skillName = expectedSkillName(contract, request);
     let persistedSkillEvidence = null;
     try {
       const outputSchema = await this.schema(contract.file);
-      const responseProtocol = contract.requiresPredictionTool
-        ? [
-          "Do not narrate analysis.",
-          `Your first response must call skill exactly once with name ${skillName}.`,
-          "After the Skill result, call ecology_execute_prediction_tool exactly once; do not call structured_output before its result arrives.",
+      const responseProtocol = [
+        "Do not narrate analysis.",
+        `Your first response must call skill exactly once with name ${skillName}.`,
+        ...(dynamicRetrieval ? [
+          "After the Skill result, make zero to three web_search calls only when current reasoning needs external evidence; submit queries and retrieval_key only, and never choose a provider.",
+        ] : []),
+        ...(contract.requiresPredictionTool ? [
+          `${dynamicRetrieval ? "Then" : "After the Skill result,"} call ecology_execute_prediction_tool exactly once; do not call structured_output before its result arrives.`,
           "After the prediction-tool result, call structured_output exactly once and emit no prose.",
-        ]
-        : [
-          "Do not narrate analysis.",
-          `Your first response must call skill exactly once with name ${skillName}.`,
-          "After the Skill result, call structured_output exactly once with one concise object matching the supplied output schema.",
+        ] : [
+          `${dynamicRetrieval ? "Then" : "After the Skill result,"} call structured_output exactly once with one concise object matching the supplied output schema.`,
           "Do not emit prose before or after it.",
-        ];
+        ]),
+      ];
       const stageTimeoutMs = contract.role === "researcher"
         ? this.researchStageTimeoutMs
         : this.structuredStageTimeoutMs;
@@ -536,6 +573,7 @@ export class NativeStageRunner {
           stage: binding.stage,
           skillName,
           requiresPredictionTool: contract.requiresPredictionTool === true,
+          allowDynamicRetrieval: dynamicRetrieval,
         });
         persistedSkillEvidence = evidence;
         const resultDigest = jsonDigest(structured);

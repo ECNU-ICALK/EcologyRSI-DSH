@@ -57,6 +57,29 @@ _DSH_STAGE_SKILLS: dict[str, frozenset[str]] = {
     "sample.reflect": frozenset({"origin-vector-review"}),
 }
 
+_DSH_RETRIEVAL_ROLES = frozenset(
+    {
+        "coordinator",
+        "researcher",
+        "candidate-proposer",
+        "sample-planner",
+        "sample-critic",
+        "generation-judge",
+    }
+)
+_DSH_RETRIEVAL_FALLBACK_REASONS = frozenset(
+    {
+        "primary_provider_unavailable",
+        "primary_provider_error",
+        "primary_timeout",
+        "primary_malformed",
+        "primary_empty",
+        "insufficient_distinct_sources",
+        "insufficient_evidence_sources",
+        "insufficient_query_overlap",
+    }
+)
+
 
 def _validate_dsh_skill_evidence(value: Any, *, stage: str) -> None:
     fields = {
@@ -175,6 +198,157 @@ def _validate_dsh_session_metrics(value: Any, *, session_id: str) -> None:
         "source": "dsh_session_projection_token_usage",
     }:
         raise ValueError("unavailable DSH provider usage is invalid")
+
+
+def _validate_dsh_retrieval_event(value: Any, *, run_id: str) -> None:
+    fields = {
+        "schema_version",
+        "execution_owner",
+        "identity",
+        "retrieval_idempotency_key",
+        "query_digest",
+        "queries",
+        "provider_route",
+        "fallback_reason",
+        "primary_quality",
+        "result",
+        "result_digest",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ValueError("DshRetrievalExecuted payload is invalid")
+    identity = value.get("identity")
+    identity_fields = {
+        "run_id",
+        "role",
+        "stage",
+        "run_state_revision",
+        "stage_attempt",
+        "ledger_expected_revision",
+        "session_id",
+        "idempotency_key",
+        "child_reservation_id",
+        "activation_lease_id",
+        "genome_digest",
+        "compiled_behavior_digest",
+        "phenotype_instance_digest",
+    }
+    if (
+        value.get("schema_version") != "ecologyrsi-dsh.retrieval-executed/1"
+        or value.get("execution_owner") != "dsh_agent_web_search"
+        or not isinstance(identity, Mapping)
+        or set(identity) != identity_fields
+        or identity.get("run_id") != run_id
+        or identity.get("role") not in _DSH_RETRIEVAL_ROLES
+        or not isinstance(identity.get("stage"), str)
+        or not identity["stage"]
+    ):
+        raise ValueError("DshRetrievalExecuted identity is invalid")
+    for name in ("run_state_revision", "stage_attempt", "ledger_expected_revision"):
+        item = identity.get(name)
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            raise ValueError("DshRetrievalExecuted identity revision is invalid")
+    for name in (
+        "session_id",
+        "idempotency_key",
+        "child_reservation_id",
+        "activation_lease_id",
+        "genome_digest",
+        "compiled_behavior_digest",
+        "phenotype_instance_digest",
+    ):
+        if not isinstance(identity.get(name), str) or not identity[name]:
+            raise ValueError("DshRetrievalExecuted identity field is invalid")
+    for name in (
+        "genome_digest",
+        "compiled_behavior_digest",
+        "phenotype_instance_digest",
+    ):
+        if len(identity[name]) != 64 or any(
+            character not in "0123456789abcdef" for character in identity[name]
+        ):
+            raise ValueError("DshRetrievalExecuted identity digest is invalid")
+    retrieval_key = value.get("retrieval_idempotency_key")
+    queries = value.get("queries")
+    if (
+        not isinstance(retrieval_key, str)
+        or not retrieval_key
+        or len(retrieval_key) > 120
+        or not isinstance(queries, list)
+        or not 1 <= len(queries) <= 4
+        or not all(
+            isinstance(item, str) and item and len(item) <= 180 for item in queries
+        )
+        or value.get("query_digest") != digest(queries)
+    ):
+        raise ValueError("DshRetrievalExecuted query contract is invalid")
+    quality = value.get("primary_quality")
+    quality_fields = {
+        "distinct_source_count",
+        "evidence_source_count",
+        "query_token_count",
+        "overlap_token_count",
+        "sufficient",
+        "fallback_reason",
+    }
+    fallback_reason = value.get("fallback_reason")
+    route = value.get("provider_route")
+    if (
+        not isinstance(quality, Mapping)
+        or set(quality) != quality_fields
+        or any(
+            isinstance(quality.get(name), bool)
+            or not isinstance(quality.get(name), int)
+            or quality[name] < 0
+            for name in (
+                "distinct_source_count",
+                "evidence_source_count",
+                "query_token_count",
+                "overlap_token_count",
+            )
+        )
+        or not isinstance(quality.get("sufficient"), bool)
+        or quality.get("fallback_reason") != fallback_reason
+        or fallback_reason not in (_DSH_RETRIEVAL_FALLBACK_REASONS | {None})
+        or route not in {
+            "dsh_primary",
+            "dsh_primary_then_openalex_fallback",
+        }
+        or (route == "dsh_primary") != (fallback_reason is None)
+        or quality["sufficient"] != (fallback_reason is None)
+    ):
+        raise ValueError("DshRetrievalExecuted quality contract is invalid")
+    result = value.get("result")
+    if (
+        not isinstance(result, Mapping)
+        or set(result) - {"content", "sources", "truncated"}
+        or not isinstance(result.get("sources"), list)
+        or len(result["sources"]) > 8
+        or not isinstance(result.get("truncated"), bool)
+        or (
+            "content" in result
+            and (
+                not isinstance(result["content"], str)
+                or not result["content"]
+                or len(result["content"]) > 4_000
+            )
+        )
+    ):
+        raise ValueError("DshRetrievalExecuted result is invalid")
+    for source in result["sources"]:
+        if (
+            not isinstance(source, Mapping)
+            or set(source) - {"url", "title", "snippet", "publishedAt"}
+            or not isinstance(source.get("url"), str)
+            or not source["url"].startswith("https://")
+            or any(
+                name in source
+                and (not isinstance(source[name], str) or not source[name])
+                for name in ("title", "snippet", "publishedAt")
+            )
+        ):
+            raise ValueError("DshRetrievalExecuted source is invalid")
+    if value.get("result_digest") != digest(result):
+        raise ValueError("DshRetrievalExecuted retrieval result digest mismatch")
 
 
 def is_dsh_native_protocol(task: TaskManifest) -> bool:
@@ -1538,6 +1712,8 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 raise ValueError(
                     "non-Planner structured result cannot claim a prediction-tool receipt"
                 )
+        elif event.kind == "DshRetrievalExecuted":
+            _validate_dsh_retrieval_event(payload, run_id=run.run_id)
         elif event.kind == "DshPredictionToolExecuted":
             expected_fields = {
                 "schema_version",

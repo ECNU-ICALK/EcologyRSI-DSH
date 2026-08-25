@@ -8,21 +8,33 @@ import {
   ROLE_TOOL_NAMES,
   registerRoleToolGuard,
   registerRoleTools,
+  rolePluginToolNames,
+  roleToolNames,
 } from "../lib/tools/roles.js";
 
 test("role tool sets are exact and one-shot roles have no submit channel", () => {
   assert.deepEqual(
     ROLE_TOOL_NAMES["sample-planner"],
-    ["skill", "ecology_execute_prediction_tool"],
+    ["skill", "web_search", "ecology_execute_prediction_tool"],
   );
   assert.deepEqual(
     ROLE_PLUGIN_TOOL_NAMES["sample-planner"],
-    ["ecology_execute_prediction_tool"],
+    ["web_search", "ecology_execute_prediction_tool"],
   );
   for (const role of ["coordinator", "researcher", "candidate-proposer", "sample-critic", "generation-judge"]) {
-    assert.deepEqual(ROLE_TOOL_NAMES[role], ["skill"]);
-    assert.deepEqual(ROLE_PLUGIN_TOOL_NAMES[role], []);
+    assert.deepEqual(ROLE_TOOL_NAMES[role], ["skill", "web_search"]);
+    assert.deepEqual(ROLE_PLUGIN_TOOL_NAMES[role], ["web_search"]);
   }
+  assert.deepEqual(roleToolNames("researcher"), ["skill"]);
+  assert.deepEqual(rolePluginToolNames("researcher"), []);
+  assert.deepEqual(
+    roleToolNames("researcher", "dynamic-retrieval-v1"),
+    ["skill", "web_search"],
+  );
+  assert.throws(
+    () => roleToolNames("researcher", "model-selected-provider"),
+    /unsupported.*profile/i,
+  );
   for (const definition of Object.values(TOOL_DEFINITIONS)) {
     const input = JSON.stringify(definition.parameters);
     for (const field of BLOCKED_MODEL_IDENTITY_FIELDS) assert.doesNotMatch(input, new RegExp(`"${field}"`));
@@ -70,8 +82,9 @@ test("role guard allows only the frozen role tool and structured result channel"
     tools: {
       guard: (candidate) => { guard = candidate; return () => {}; },
     },
-  }, "sample-planner");
+  }, "sample-planner", { toolProfile: "dynamic-retrieval-v1" });
   assert.equal(guard({ name: "ecology_execute_prediction_tool" }), undefined);
+  assert.equal(guard({ name: "web_search" }), undefined);
   assert.equal(guard({ name: "skill" }), undefined);
   assert.equal(guard({ name: "structured_output" }), undefined);
   assert.match(guard({ name: "bash" }), /outside the frozen sample-planner role surface/);

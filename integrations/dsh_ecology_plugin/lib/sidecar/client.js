@@ -1,6 +1,7 @@
 import { validateLoopbackOrigin } from "../security.js";
 
 const SIDECAR_BASE = "/api/ecology-agent-sidecar/v1";
+const MAX_REQUEST_TIMEOUT_MS = 600_000;
 
 export class SidecarError extends Error {
   constructor(code, message = code, { publicDetail = null } = {}) {
@@ -33,13 +34,21 @@ export class SidecarClient {
     this.maxResponseBytes = maxResponseBytes;
   }
 
-  async request(path, { method = "POST", body, signal } = {}) {
+  async request(path, { method = "POST", body, signal, timeoutMs } = {}) {
     if (typeof path !== "string" || !path.startsWith(`${SIDECAR_BASE}/`)
       || path.includes("?") || path.includes("#") || path.includes("..") || path.includes("://")) {
       throw new SidecarError("invalid_path", "sidecar path is not allowed");
     }
     if (!new Set(["GET", "POST"]).has(method)) {
       throw new SidecarError("invalid_method", "sidecar method is not allowed");
+    }
+    const requestTimeoutMs = timeoutMs === undefined ? this.totalTimeoutMs : timeoutMs;
+    if (
+      !Number.isSafeInteger(requestTimeoutMs)
+      || requestTimeoutMs < 1
+      || requestTimeoutMs > MAX_REQUEST_TIMEOUT_MS
+    ) {
+      throw new SidecarError("invalid_timeout", "sidecar timeout is not allowed");
     }
     let encoded;
     if (body !== undefined) {
@@ -53,7 +62,7 @@ export class SidecarClient {
     const timeout = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, this.totalTimeoutMs);
+    }, requestTimeoutMs);
     const onAbort = () => controller.abort();
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) controller.abort();

@@ -108,6 +108,7 @@ def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
                 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib/tools/agent-plugin.js",
                 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/schemas/genome-mutation.schema.json",
                 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3/preset.yml",
+                "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4/preset.yml",
                 f"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-{version}.tgz",
                 "share/ecologyrsi-dsh/scripts/install_dsh_ecology_runtime.mjs",
                 ".dist-info/licenses/LICENSE",
@@ -211,6 +212,7 @@ def verify_sdist(sdist: Path, source_root: Path, version: str) -> None:
             "/integrations/dsh_ecology_plugin/lib/tools/agent-plugin.js",
             "/integrations/dsh_ecology_plugin/schemas/genome-mutation.schema.json",
             "/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3/preset.yml",
+            "/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4/preset.yml",
             f"/integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-{version}.tgz",
             "/integrations/dsh_ecology_plugin/test/proxy_security.mjs",
             "/scripts/install_dsh_ecology_runtime.mjs",
@@ -275,8 +277,10 @@ def verify_delivery_archive(
                 "/integrations/dsh_ecology_plugin/package.json",
                 "/integrations/dsh_ecology_plugin/lib/index.js",
                 "/integrations/dsh_ecology_plugin/lib/client.js",
+                "/integrations/dsh_ecology_plugin/lib/tools/retrieval.js",
                 "/integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js",
                 "/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3/preset.yml",
+                "/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4/preset.yml",
                 "/scripts/install_dsh_ecology_runtime.mjs",
                 "/integrations/dsh_ecology_plugin/test/proxy_security.mjs",
                 "/src/ecologyrsi_dsh/application/cli.py",
@@ -335,13 +339,16 @@ def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
             "package/package.json",
             "package/lib/index.js",
             "package/lib/tools/agent-plugin.js",
+            "package/lib/tools/retrieval.js",
             "package/lib/runtime/stage-runner.js",
             "package/lib/runtime/reconciliation.js",
             "package/schemas/genome-mutation.schema.json",
             "package/presets/ecology-coordinator-v3/preset.yml",
+            "package/presets/ecology-coordinator-v4/preset.yml",
             "package/presets/ecology-generation-judge-v6/agent.cordis.yml",
-            "package/presets/ecology-generation-judge-v6/skills/batch-scientific-reflection/SKILL.md",
-            "package/presets/ecology-generation-judge-v6/skills/candidate-scientific-review/SKILL.md",
+            "package/presets/ecology-generation-judge-v7/agent.cordis.yml",
+            "package/presets/ecology-generation-judge-v7/skills/batch-scientific-reflection/SKILL.md",
+            "package/presets/ecology-generation-judge-v7/skills/candidate-scientific-review/SKILL.md",
         }
         missing = sorted(required - names)
         if missing:
@@ -456,7 +463,7 @@ def installed_smoke(wheel: Path, version: str) -> None:
             if not (
                 dsh_home
                 / ".agent-presets"
-                / "ecology-coordinator-v3"
+                / "ecology-coordinator-v4"
                 / "preset.yml"
             ).is_file():
                 raise RuntimeError("installed wheel did not install DSH presets")

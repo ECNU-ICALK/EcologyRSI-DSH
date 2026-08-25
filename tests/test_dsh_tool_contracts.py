@@ -175,7 +175,7 @@ class DshToolServiceTests(unittest.TestCase):
                 "identity": identity,
                 "arguments": {
                     "queries": ["greenhouse temperature forecasting"],
-                    "idempotency_key": "check-temperature-literature",
+                    "retrieval_key": "check-temperature-literature",
                 },
                 "primary_result": {
                     "content": "Two greenhouse temperature forecasting sources.",
@@ -242,7 +242,7 @@ class DshToolServiceTests(unittest.TestCase):
             "identity": identity,
             "arguments": {
                 "queries": ["greenhouse temperature forecasting"],
-                "idempotency_key": "verify-proposal-evidence",
+                "retrieval_key": "verify-proposal-evidence",
             },
         }
         completed = service.complete_retrieval(
@@ -322,7 +322,7 @@ class DshToolServiceTests(unittest.TestCase):
                     },
                     "arguments": {
                         "queries": [f"greenhouse forecast check {index}"],
-                        "idempotency_key": f"judge-search-{index}",
+                        "retrieval_key": f"judge-search-{index}",
                     },
                     "primary_error_code": "primary_provider_error",
                 }
@@ -338,12 +338,173 @@ class DshToolServiceTests(unittest.TestCase):
                     },
                     "arguments": {
                         "queries": ["greenhouse forecast fourth query"],
-                        "idempotency_key": "judge-search-3",
+                        "retrieval_key": "judge-search-3",
                     },
                     "primary_error_code": "primary_timeout",
                 }
             )
-        self.assertEqual(fallback_calls, 3)
+        next_stage_result = service.complete_retrieval(
+            {
+                "identity": {
+                    **identity,
+                    "idempotency_key": "judge-result-next-generation",
+                    "ledger_expected_revision": self.ledger.latest_seq(),
+                },
+                "arguments": {
+                    "queries": ["greenhouse forecast new generation"],
+                    "retrieval_key": "judge-search-0",
+                },
+                "primary_error_code": "primary_timeout",
+            }
+        )
+        self.assertEqual(next_stage_result["fallback_reason"], "primary_timeout")
+        self.assertEqual(fallback_calls, 4)
+
+    def test_dynamic_retrieval_keeps_partial_primary_when_one_query_fails(self) -> None:
+        service = DshToolService(
+            self.ledger,
+            retrieval_fallback=lambda _queries, limit=8: {
+                "sources": [
+                    {
+                        "url": "https://openalex.org/W-partial",
+                        "title": "Greenhouse forecasting fallback",
+                    }
+                ],
+                "truncated": False,
+            },
+        )
+        service.open_admission("run:tool-test", 3, 2)
+        result = service.complete_retrieval(
+            {
+                "identity": _identity(
+                    self.ledger,
+                    role="researcher",
+                    stage="generation.research",
+                    idempotency_key="partial-result",
+                ),
+                "arguments": {
+                    "queries": [
+                        "greenhouse temperature forecasting",
+                        "greenhouse humidity forecasting",
+                    ],
+                    "retrieval_key": "partial-primary",
+                },
+                "primary_result": {
+                    "sources": [
+                        {
+                            "url": "https://example.org/temperature",
+                            "title": "Greenhouse temperature forecasting",
+                        }
+                    ],
+                    "truncated": False,
+                },
+                "primary_error_code": "primary_timeout",
+            }
+        )
+        self.assertEqual(result["fallback_reason"], "primary_timeout")
+        self.assertEqual(
+            [item["url"] for item in result["sources"]],
+            [
+                "https://example.org/temperature",
+                "https://openalex.org/W-partial",
+            ],
+        )
+
+    def test_dynamic_retrieval_duplicate_completion_is_single_event(self) -> None:
+        fallback_calls = 0
+
+        def fallback(_queries: tuple[str, ...], *, limit: int = 8) -> dict:
+            nonlocal fallback_calls
+            fallback_calls += 1
+            return {
+                "sources": [
+                    {"url": "https://openalex.org/W1", "title": "Greenhouse forecast"},
+                    {"url": "https://openalex.org/W2", "title": "Temperature forecast"},
+                ],
+                "truncated": False,
+            }
+
+        service = DshToolService(self.ledger, retrieval_fallback=fallback)
+        service.open_admission("run:tool-test", 3, 2)
+        base_identity = _identity(
+            self.ledger,
+            role="researcher",
+            stage="generation.research",
+            idempotency_key="concurrent-result",
+        )
+        results: list[dict] = []
+        failures: list[BaseException] = []
+
+        def complete(session_id: str) -> None:
+            try:
+                results.append(
+                    service.complete_retrieval(
+                        {
+                            "identity": {
+                                **base_identity,
+                                "session_id": session_id,
+                            },
+                            "arguments": {
+                                "queries": ["greenhouse temperature forecasting"],
+                                "retrieval_key": "concurrent-search",
+                            },
+                            "primary_error_code": "primary_provider_error",
+                        }
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failures.append(exc)
+
+        workers = [
+            threading.Thread(target=complete, args=(f"session:concurrent-{index}",))
+            for index in range(2)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=2)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(fallback_calls, 1)
+        self.assertEqual(
+            [event.kind for event in self.ledger.events("run:tool-test")].count(
+                "DshRetrievalExecuted"
+            ),
+            1,
+        )
+
+    def test_dynamic_retrieval_rejects_unknown_role_and_closed_fence(self) -> None:
+        arguments = {
+            "queries": ["greenhouse temperature forecasting"],
+            "retrieval_key": "authorization-check",
+        }
+        with self.assertRaises(DshToolAuthorizationError):
+            self.service.complete_retrieval(
+                {
+                    "identity": _identity(
+                        self.ledger,
+                        role="unregistered-role",
+                        stage="generation.research",
+                    ),
+                    "arguments": arguments,
+                    "primary_error_code": "primary_provider_error",
+                }
+            )
+        self.service.close_admission("run:tool-test", 3, 2)
+        with self.assertRaises(DshToolAdmissionClosedError):
+            self.service.complete_retrieval(
+                {
+                    "identity": _identity(
+                        self.ledger,
+                        role="researcher",
+                        stage="generation.research",
+                    ),
+                    "arguments": arguments,
+                    "primary_error_code": "primary_provider_error",
+                }
+            )
 
     def test_structured_result_is_durably_idempotent_and_stage_bound(self) -> None:
         identity = _identity(
@@ -731,6 +892,22 @@ class DshToolHTTPAuthTests(unittest.TestCase):
         except HTTPError as exc:
             return exc.code, json.loads(exc.read())
 
+    def _post(self, path: str, body: dict, token: str = "tool-secret") -> tuple[int, dict]:
+        request = Request(
+            f"http://127.0.0.1:{self.server.server_address[1]}{path}",
+            data=json.dumps(body).encode(),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urlopen(request, timeout=3) as response:
+                return response.status, json.loads(response.read())
+        except HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
     def test_internal_tool_token_is_separate_and_required(self) -> None:
         status, _ = self._request("wrong")
         self.assertEqual(status, 401)
@@ -748,6 +925,64 @@ class DshToolHTTPAuthTests(unittest.TestCase):
             status, payload = self._request("tool-secret")
         self.assertEqual(status, 200)
         self.assertTrue(payload["accepted"])
+
+    def test_dynamic_retrieval_completion_and_replay_have_dedicated_endpoints(
+        self,
+    ) -> None:
+        identity = _identity(
+            self.server.ledger,
+            role="researcher",
+            stage="generation.research",
+            idempotency_key="research-result-http",
+        )
+        request = {
+            "identity": identity,
+            "arguments": {
+                "queries": ["greenhouse temperature forecasting"],
+                "retrieval_key": "http-search",
+            },
+        }
+        status, replay = self._post(
+            "/api/ecology-agent-sidecar/v1/retrievals/replay",
+            request,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(replay, {"found": False, "result": None})
+
+        status, completed = self._post(
+            "/api/ecology-agent-sidecar/v1/retrievals/complete",
+            {
+                **request,
+                "primary_result": {
+                    "sources": [
+                        {
+                            "url": "https://example.org/temperature",
+                            "title": "Greenhouse temperature forecasting",
+                        },
+                        {
+                            "url": "https://example.net/forecasting",
+                            "title": "Protected crop forecasting model",
+                        },
+                    ],
+                    "truncated": False,
+                },
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(completed["provider_route"], "dsh_primary")
+
+        request["identity"] = {
+            **identity,
+            "session_id": "session:http-replay",
+            "ledger_expected_revision": self.server.ledger.latest_seq(),
+        }
+        status, replay = self._post(
+            "/api/ecology-agent-sidecar/v1/retrievals/replay",
+            request,
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(replay["found"])
+        self.assertEqual(replay["result"], completed)
 
 
 if __name__ == "__main__":

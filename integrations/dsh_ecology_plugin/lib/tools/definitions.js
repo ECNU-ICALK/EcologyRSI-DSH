@@ -5,6 +5,19 @@ function objectInput(properties, required = Object.keys(properties)) {
 const text = (maxLength = 240) => ({ type: "string", minLength: 1, maxLength });
 
 export const TOOL_DEFINITIONS = Object.freeze({
+  web_search: {
+    name: "web_search",
+    description: "Search for evidence needed at the current reasoning step. DSH chooses the primary provider and EcologyRSI automatically handles fallback; provide queries only, never a provider.",
+    parameters: objectInput({
+      queries: {
+        type: "array",
+        minItems: 1,
+        maxItems: 4,
+        items: text(180),
+      },
+      retrieval_key: text(120),
+    }),
+  },
   ecology_execute_prediction_tool: {
     name: "ecology_execute_prediction_tool",
     description: "Execute the one Host-frozen prediction tool once for every target and horizon in this forecast-origin wave.",

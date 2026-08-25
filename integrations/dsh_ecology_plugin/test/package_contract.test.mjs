@@ -20,5 +20,7 @@ test("package exposes an isolated agent-plane entry and pins DSH rc dependencies
   }
   const module = await import("../lib/tools/agent-plugin.js");
   assert.equal(typeof module.apply, "function");
-  assert.deepEqual(module.inject, ["tools", "ecologyAgentTools"]);
+  assert.deepEqual(module.inject, ["tools", "web", "ecologyAgentTools"]);
+  const rootModule = await import("../lib/index.js");
+  assert.ok(rootModule.inject.includes("web"));
 });

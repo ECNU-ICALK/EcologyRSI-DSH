@@ -93,7 +93,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
             "root_services": {"required": ["agents"], "missing": [], "declared": True},
             "presets": [
                 {
-                    "preset_id": "ecology-researcher-v6",
+                    "preset_id": "ecology-researcher-v7",
                     "declared": True,
                     "standing_key": "standing:researcher",
                     "preset_mountable": True,
@@ -121,7 +121,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
     def test_capabilities_and_mutations_are_strict_and_bearer_authenticated(self) -> None:
         self.server.responses.extend([(200, self._capabilities()), (200, self._accepted())])  # type: ignore[attr-defined]
         capability = self.client.capabilities()
-        self.client.require_capabilities(capability, ["ecology-researcher-v6"])
+        self.client.require_capabilities(capability, ["ecology-researcher-v7"])
         response = self.client.create_run(
             {
                 "run_id": "run-1",
@@ -197,7 +197,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
             )
         with self.assertRaises(DshNativeRuntimeUnavailableError):
             self.client.require_capabilities(
-                self._capabilities(ready=False), ["ecology-researcher-v6"]
+                self._capabilities(ready=False), ["ecology-researcher-v7"]
             )
 
     def test_remote_errors_and_transport_failures_never_disclose_token(self) -> None:
@@ -236,12 +236,12 @@ class _FakeNativeRuntime:
             raise DshNativeRuntimeUnavailableError()
         presets = []
         for preset_id in (
-            "ecology-coordinator-v3",
-            "ecology-researcher-v6",
-            "ecology-candidate-proposer-v3",
-            "ecology-sample-planner-v3",
-            "ecology-sample-critic-v3",
-            "ecology-generation-judge-v6",
+            "ecology-coordinator-v4",
+            "ecology-researcher-v7",
+            "ecology-candidate-proposer-v4",
+            "ecology-sample-planner-v4",
+            "ecology-sample-critic-v4",
+            "ecology-generation-judge-v7",
         ):
             presets.append(
                 {

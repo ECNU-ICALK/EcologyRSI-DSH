@@ -354,7 +354,7 @@ def _agent_program(programs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             "role_profiles": [
                 {
                     "role": "sample-planner",
-                    "preset_id": "ecology-sample-planner-v3",
+                    "preset_id": "ecology-sample-planner-v4",
                     "instruction_template_ref": _program_ref(
                         programs,
                         "instruction_templates",

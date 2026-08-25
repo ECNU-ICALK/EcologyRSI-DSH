@@ -55,6 +55,42 @@ test("sidecar timeout and caller abort have stable public codes", async () => {
   } finally { await close(server); }
 });
 
+test("sidecar request can use a longer bounded operation timeout", async () => {
+  const server = createServer((_req, res) => {
+    setTimeout(() => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    }, 50);
+  });
+  const port = await listen(server);
+  try {
+    const client = new SidecarClient({
+      origin: `http://127.0.0.1:${port}`, token: "token", totalTimeoutMs: 20,
+    });
+    assert.deepEqual(
+      await client.request("/api/ecology-agent-sidecar/v1/context", {
+        method: "GET",
+        timeoutMs: 200,
+      }),
+      { ok: true },
+    );
+    await assert.rejects(
+      client.request("/api/ecology-agent-sidecar/v1/context", {
+        method: "GET",
+        timeoutMs: 0,
+      }),
+      (error) => error instanceof SidecarError && error.code === "invalid_timeout",
+    );
+    await assert.rejects(
+      client.request("/api/ecology-agent-sidecar/v1/context", {
+        method: "GET",
+        timeoutMs: 600_001,
+      }),
+      (error) => error instanceof SidecarError && error.code === "invalid_timeout",
+    );
+  } finally { await close(server); }
+});
+
 test("sidecar rejection retains only the sidecar's already-redacted public detail", async () => {
   const server = createServer((_req, res) => {
     res.writeHead(409, { "content-type": "application/json" });

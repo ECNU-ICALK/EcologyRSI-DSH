@@ -1035,6 +1035,20 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
             avoid_behaviors=[],
         )
 
+        coordinated_negation = _direction(0, [])
+        coordinated_negation["success_criterion"] = (
+            "Compare diagnostic scores across the full matrix; do not claim "
+            "eligibility, gate passage, evidence-threshold satisfaction, or "
+            "promotion from this diagnostic run."
+        )
+        _validate_candidate_direction_realizability(
+            [coordinated_negation],
+            run=state.run,
+            task=state.task_manifest,
+            parent=parent,
+            avoid_behaviors=[],
+        )
+
         for index, claim in enumerate(
             (
                 "No RMSE or sample count change is expected.",

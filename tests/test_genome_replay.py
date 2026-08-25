@@ -4,6 +4,7 @@ import json
 import unittest
 
 from ecologyrsi_dsh.core.director import EvolutionDirector
+from ecologyrsi_dsh.api.dsh_tools import DshToolService
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import (
     Evaluation,
@@ -195,6 +196,68 @@ class GenomeReplayTests(unittest.TestCase):
             current_run_id=run_id,
         )
         self.assertEqual(reflection["avoid_behaviors"], [])
+
+    def test_dynamic_retrieval_event_replays_and_rejects_digest_tampering(self) -> None:
+        run_id = self._start_new("run:retrieval-replay")
+        service = DshToolService(
+            self.ledger,
+            retrieval_fallback=lambda _queries, limit=8: {
+                "sources": [],
+                "truncated": False,
+            },
+        )
+        service.open_admission(run_id, 3, 1)
+        identity = {
+            "run_id": run_id,
+            "role": "researcher",
+            "stage": "generation.research",
+            "run_state_revision": 3,
+            "stage_attempt": 1,
+            "ledger_expected_revision": self.ledger.latest_seq(),
+            "session_id": "session:retrieval-replay",
+            "idempotency_key": "research-result",
+            "child_reservation_id": "reservation:retrieval-replay",
+            "activation_lease_id": "lease:retrieval-replay",
+            "genome_digest": "a" * 64,
+            "compiled_behavior_digest": "b" * 64,
+            "phenotype_instance_digest": "c" * 64,
+        }
+        service.complete_retrieval(
+            {
+                "identity": identity,
+                "arguments": {
+                    "queries": ["greenhouse temperature forecasting"],
+                    "retrieval_key": "replay-evidence",
+                },
+                "primary_result": {
+                    "sources": [
+                        {
+                            "url": "https://example.org/temperature",
+                            "title": "Greenhouse temperature forecasting",
+                        },
+                        {
+                            "url": "https://example.net/model",
+                            "title": "Protected crop temperature model",
+                        },
+                    ],
+                    "truncated": False,
+                },
+            }
+        )
+        self.assertEqual(self.director.state(run_id).run.run_id, run_id)
+
+        corrupt_run = self._start_new("run:retrieval-replay-corrupt")
+        recorded = next(
+            event
+            for event in self.ledger.events(run_id)
+            if event.kind == "DshRetrievalExecuted"
+        )
+        payload = json.loads(json.dumps(recorded.payload))
+        payload["identity"]["run_id"] = corrupt_run
+        payload["result_digest"] = "0" * 64
+        self.ledger.append(corrupt_run, "DshRetrievalExecuted", payload)
+        with self.assertRaisesRegex(ValueError, "retrieval.*digest"):
+            self.director.state(corrupt_run)
 
     def test_native_approval_uses_recorded_adaptive_champion_not_legacy_policy(
         self,

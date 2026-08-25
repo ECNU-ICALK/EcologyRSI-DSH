@@ -3,12 +3,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const ids = [
-  "ecology-coordinator-v3",
-  "ecology-researcher-v6",
-  "ecology-candidate-proposer-v3",
-  "ecology-sample-planner-v3",
-  "ecology-sample-critic-v3",
-  "ecology-generation-judge-v6",
+  "ecology-coordinator-v4",
+  "ecology-researcher-v7",
+  "ecology-candidate-proposer-v4",
+  "ecology-sample-planner-v4",
+  "ecology-sample-critic-v4",
+  "ecology-generation-judge-v7",
 ];
 
 test("six legal role presets expose only the narrow agent plane", async () => {
@@ -21,13 +21,15 @@ test("six legal role presets expose only the narrow agent plane", async () => {
     assert.match(composition, /@deepseek-ai\/dsh-persona/);
     assert.match(composition, /@ecologyrsi\/dsh-evolution-plugin\/agent-plugin/);
     assert.match(composition, /@deepseek-ai\/dsh-compaction-basic/);
+    assert.match(composition, /web_search/);
+    assert.match(composition, /never\s+(?:choose|select|name)\s+(?:a\s+)?provider/i);
     assert.match(composition, /isolate:/);
     assert.doesNotMatch(composition, /dsh-tool-workflow|dsh-tool-subagent|dsh-tool-bash|dsh-tool-fs|dsh-tool-web|dsh-tool-ask-user|mcp/i);
   }
 });
 
 test("only workflow-driving roles mount the non-model-facing worker service", async () => {
-  const workerRoles = new Set(["ecology-coordinator-v3", "ecology-sample-planner-v3"]);
+  const workerRoles = new Set(["ecology-coordinator-v4", "ecology-sample-planner-v4"]);
   for (const id of ids) {
     const text = await readFile(new URL(`../presets/${id}/agent.cordis.yml`, import.meta.url), "utf8");
     assert.equal(text.includes("@deepseek-ai/dsh-workflow-worker-thread"), workerRoles.has(id));
@@ -37,13 +39,13 @@ test("only workflow-driving roles mount the non-model-facing worker service", as
 test("generation judge preset separates candidate review from batch reflection", async () => {
   const composition = await readFile(
     new URL(
-      "../presets/ecology-generation-judge-v6/agent.cordis.yml",
+      "../presets/ecology-generation-judge-v7/agent.cordis.yml",
       import.meta.url,
     ),
     "utf8",
   );
   const skillsRoot = new URL(
-    "../presets/ecology-generation-judge-v6/skills/",
+    "../presets/ecology-generation-judge-v7/skills/",
     import.meta.url,
   );
   const candidateReview = await readFile(

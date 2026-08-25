@@ -16,7 +16,7 @@ test("role-host creation is single-flight, resumable and has no token hard cap",
     },
   };
   const manager = new RoleAgentManager(ctx);
-  const binding = { run_id: "r1", role: "coordinator", preset_id: "ecology-coordinator-v3", model: "p/m", cwd: "/tmp", require_workflow: true };
+  const binding = { run_id: "r1", role: "coordinator", preset_id: "ecology-coordinator-v4", model: "p/m", cwd: "/tmp", require_workflow: true };
   const [a, b] = await Promise.all([manager.createRoleAgent(binding), manager.createRoleAgent(binding)]);
   assert.equal(a, b);
   assert.equal(calls.filter(([name]) => name === "create").length, 1);

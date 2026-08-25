@@ -75,6 +75,8 @@ This is not 1521 LLM prediction calls. Under `dsh-strict-origin-bundle@3`, it is
 
 The strategy model controls queries, synthesis, direction choice, and bounded mutations. The Host controls network destinations, response limits, evidence freezing, parameter schemas, program registries, compilation, evaluation, and promotion. OpenAlex output is metadata-only and never executed.
 
+The generation-start search plan remains the bootstrap path that freezes citation-authoritative evidence. It is not the only retrieval opportunity: the dynamic routing extension in `2026-08-25-dynamic-dsh-retrieval-routing.md` permits every EcologyRSI stage to call one provider-neutral `web_search` after Skill and before its terminal tool. DSH internal search is primary; the sidecar invokes OpenAlex only after a technical failure or deterministic evidence-insufficiency check. These dynamic results are durable advisory context and cannot create a trusted `evidence_ref` or bypass any Host gate.
+
 “Implementing a proposal” means compiling it into an allowlisted plugin Genome operation such as a bounded parameter, registered policy, registered tool choice, or registered workflow setting. Arbitrary source generation, dynamic imports, shell commands, dependency installation, evaluator changes, and DSH framework mutation are rejected. A genuinely new algorithm must first be developed and registered as a reviewed EcologyRSI plugin capability.
 
 ## Failure and recovery rules

@@ -6,7 +6,7 @@ import { runtimeCapabilities } from "../lib/runtime/capabilities.js";
 
 const ROOT_SERVICES = [
   "agents", "sessions", "tokenMeter", "subagents", "tools",
-  "sessionPersistence", "sessionProjections", "agentPresets", "llm",
+  "sessionPersistence", "sessionProjections", "agentPresets", "llm", "web",
 ];
 
 test("missing root services are reported truthfully", async () => {
@@ -22,13 +22,13 @@ test("preset mount, tool surface and route resolution do not create probe agents
   const ctx = Object.fromEntries(ROOT_SERVICES.map((name) => [name, {}]));
   ctx.agents.create = () => { created += 1; throw new Error("must not create"); };
   ctx.agentPresets.standingKeyFor = async (id) => `standing:${id}`;
-  ctx.tools.schemas = (key) => key.endsWith("researcher-v6")
+  ctx.tools.schemas = (key) => key.endsWith("researcher-v7")
     ? [{ name: "read_generation_context" }]
     : [];
   ctx.llm.resolveCallConfig = async ({ model }) => ({ model, provider: "fake" });
   const result = await runtimeCapabilities(ctx, [
     {
-      preset_id: "ecology-researcher-v6",
+      preset_id: "ecology-researcher-v7",
       required_tools: ["read_generation_context"],
       model: "fake/model",
     },
@@ -51,7 +51,7 @@ test("tool surface verification rejects undeclared extra tools", async () => {
   ];
   ctx.llm.resolveCallConfig = async () => ({ provider: "fake", model: "model" });
   const result = await runtimeCapabilities(ctx, [{
-    preset_id: "ecology-sample-planner-v3",
+    preset_id: "ecology-sample-planner-v4",
     required_tools: ["ecology_execute_prediction_tool"],
   }]);
   assert.equal(result.presets[0].tool_surface_verified, false);

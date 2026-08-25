@@ -257,12 +257,16 @@ PYTHONPATH=src python -m ecologyrsi_dsh data fetch agc_tomato_2019
 
 新建 DSH-native 运行把自主研究协议冻结为 `dsh-model-search-reflect@1`。每轮形成下面的可重放闭环：
 
-1. `generation.search-plan`：策略模型读取上一轮聚合指标、批次反思和当前父 Genome，自主提出最多 6 条检索词与关注问题；它不能直接联网，也看不到原始反馈行。
+1. `generation.search-plan`：策略模型读取上一轮聚合指标、批次反思和当前父 Genome，自主提出最多 6 条启动检索词与关注问题；该结构化输出本身不执行网络请求，也看不到原始反馈行。
 2. Host 检索工具：宿主先执行模型检索词，再补充确定性的领域/弱点查询；读取内置核验目录，并在启用联网时查询 OpenAlex 元数据。网络失败只产生告警并回退内置目录。
 3. `generation.research-synthesis`：Researcher 只能引用本轮冻结证据，整理与候选槽位数量完全一致的多套、彼此不同、可由登记能力实现的优化方向。参数方向必须显式声明 `increase` 或 `decrease`，预测器/Planner Skill 方向声明 `select`；Host 会在整组方向上预分配互不重复的合法行为 witness，并拒绝藏在自由文本中的精确参数赋值。
 4. `candidate.propose`：每个候选槽位绑定其中一个方向，Candidate Proposer 输出单轴 GenomeMutation；Host 将它编译成登记预测器、工具策略或工作流参数，同时校验目标和参数增减符号，拒绝任意代码、越界、过大步长、无效变更和重复行为。被拒绝时，下一次 DSH 调用会收到具体的宿主契约违反原因。
 5. 同轮候选在完全相同的冻结 `training_feedback` cohort 上完成向量预测、逐时点反思和独立评审，Host 统一选择本轮最佳，并且只有达到最小实用差异和配对稳定性门槛才更新 incumbent。
 6. `generation.reflect`：批次 Reflector 读取唯一一份由 Host 按科学排名生成的候选结果映射，其中显式绑定 `rank`、`candidate_id`、`direction_id`、direction digest 与得分，不能把排名或数组位置猜成方向编号；它提出的下一轮方向只是建议，下一轮 synthesis 仍须重新通过 Host 联合可实现性预检。`search-plan` 通过包含该映射的 reflection digest 继承结果。
+
+启动检索不是唯一检索时机。Researcher、Candidate Proposer、Sample Planner、Sample Critic、Generation Judge 和 Coordinator 在各自阶段加载必需 Skill 后，都可以在遇到证据缺口时调用零到三次同一个 `web_search`。模型只提交 1–4 条短查询和阶段内 `retrieval_key`，不能选择 provider：包装器先调用 DSH 内部 `ctx.web.search`；若 provider 不可用、出错，或结果少于 2 个不同 HTTPS 来源、少于 2 个有标题/摘要的证据来源、与查询没有词项重合，Python sidecar 才自动调用 OpenAlex 元数据回退。主结果与回退结果按 URL 去重、最多保留 8 个来源，并以 `DshRetrievalExecuted` 事件持久化；相同阶段检索在恢复时先重放，不重复联网。动态结果只作为推理参考，不能自行进入冻结 `evidence_ref`、改变预测向量、评分、门禁或晋级。
+
+插件不暴露 provider 专用工具，也不开放 `web_fetch`。显式取消会终止当前检索而不发起回退；检索仍必须发生在 Skill 之后、预测/结构化终端工具之前，Sample Planner 的一次登记预测工具调用保持不变。
 
 这里的“实现方案”指把模型方案编译成 EcologyRSI 插件自己的受限 Genome，并调用宿主已登记的科学工具；不会修改 DSH 基本框架，也不会执行模型生成的 Python、Shell、依赖安装或任意网络代码。新增算法必须先由开发者实现、测试并登记为插件能力，之后才能被策略模型选择。
 
@@ -385,7 +389,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --samples-per-task 1 \
   --minimum-coverage 0.8 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.26-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.27-real-api-agent-tool-acceptance.json
 ```
 
 验收无论通过或失败都会原子写入 JSON 报告；省略 `--output` 时默认写到系统临时目录下的
@@ -437,7 +441,7 @@ ecologyrsi-dsh install-dsh-runtime --profile web
 - insert:
     - id: ecologyrsi-evolution
       name: '@ecologyrsi/dsh-evolution-plugin'
-      inject: [webServer, agents, sessions, tokenMeter, subagents, tools, sessionPersistence, sessionProjections, agentPresets, llm]
+      inject: [webServer, agents, sessions, tokenMeter, subagents, tools, sessionPersistence, sessionProjections, agentPresets, llm, web]
       config:
         staticRoot: '/path/to/EcologyRSI-DSH/plugins/ecology_evolution'
         backendOrigin: 'http://127.0.0.1:8777'
@@ -562,7 +566,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --db /tmp/ecologyrsi-dsh-dsh-adapter.sqlite3 \
   --samples-per-task 1 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.26-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.27-real-api-agent-tool-acceptance.json
 ```
 
 构建 wheel、sdist 和完整交付包需要 `uv`：

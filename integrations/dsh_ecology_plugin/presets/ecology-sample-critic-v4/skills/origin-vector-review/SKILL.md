@@ -1,0 +1,12 @@
+---
+name: origin-vector-review
+description: Independently review or reflect on a complete ecology forecast-origin vector without changing its registered predictions.
+---
+
+# Origin-vector review
+
+Review the complete target-by-horizon vector as one unit. For pre-score criticism, use only supplied label-free context, prediction metadata, tool evidence, physical bounds, and allowed reason codes. For post-score reflection, compare the immutable historical outcome across cells, identify whether the dominant issue is model, feature, parameter, tool, execution, or unknown, and recommend one bounded next-generation action.
+
+If a general scientific or physical-bound question blocks review, use `web_search` after loading this Skill with focused `queries` and a purpose-oriented `retrieval_key`; never name or select a provider. Search cannot reveal hidden labels, replace supplied evidence, or alter the immutable prediction vector.
+
+Do not replace predictions, reveal or infer hidden labels, make causal claims from observational errors, or change Host gates.

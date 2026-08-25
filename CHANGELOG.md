@@ -2,6 +2,31 @@
 
 All notable changes to EcologyRSI-DSH are recorded in this file.
 
+## 0.3.27 - 2026-08-25
+
+### Changed
+
+- Make bounded `web_search` available to every DSH reasoning role after its
+  required Skill call, so a stage can retrieve evidence when a question arises
+  instead of relying only on the generation bootstrap search plan.
+- Keep provider routing Host-owned: use DSH web search first, assess evidence
+  quality deterministically, and invoke the bounded OpenAlex metadata adapter
+  only after a primary technical failure or quantitative insufficiency.
+- Persist and project replayable `DshRetrievalExecuted` receipts while keeping
+  dynamic search advisory-only and outside trusted prediction, gate, and
+  promotion evidence.
+- Publish the retrieval-capable roles under immutable `v4`/`v7` preset IDs;
+  retain the prior preset trees and legacy tool profile so an upgrade never
+  mutates an already-installed preset in place.
+
+### Fixed
+
+- Preserve partial DSH results across multi-query failures, suppress provider
+  error details, propagate explicit cancellation, and serialize duplicate
+  completion for one frozen stage identity.
+- Give the optional OpenAlex completion its own bounded sidecar deadline and
+  require the dynamic retrieval module in npm and delivery artifact checks.
+
 ## 0.3.26 - 2026-08-24
 
 ### Changed

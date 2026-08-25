@@ -63,10 +63,12 @@ integrations/dsh_ecology_plugin/lib/client.js
 integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js
 integrations/dsh_ecology_plugin/lib/runtime/reconciliation.js
 integrations/dsh_ecology_plugin/lib/tools/agent-plugin.js
+integrations/dsh_ecology_plugin/lib/tools/retrieval.js
 integrations/dsh_ecology_plugin/schemas/genome-mutation.schema.json
 integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3/preset.yml
-integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v6/agent.cordis.yml
-integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.26.tgz
+integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v7/agent.cordis.yml
+integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.27.tgz
 integrations/dsh_ecology_plugin/test/proxy_security.mjs
 "
 

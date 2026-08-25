@@ -109,12 +109,12 @@ _STRICT_SAMPLE_AGENT_PROTOCOL = "dsh-strict-origin-bundle@3"
 _STRICT_SAMPLE_REMOTE_CRITIC_POLICY = {"version": "always@1"}
 _STRICT_SAMPLE_REFLECTION_POLICY = "always_remote_post_score@1"
 _DSH_NATIVE_PRESET_IDS = (
-    "ecology-coordinator-v3",
-    "ecology-researcher-v6",
-    "ecology-candidate-proposer-v3",
-    "ecology-sample-planner-v3",
-    "ecology-sample-critic-v3",
-    "ecology-generation-judge-v6",
+    "ecology-coordinator-v4",
+    "ecology-researcher-v7",
+    "ecology-candidate-proposer-v4",
+    "ecology-sample-planner-v4",
+    "ecology-sample-critic-v4",
+    "ecology-generation-judge-v7",
 )
 _DSH_NATIVE_STABLE_PRESET_FIELDS = (
     "preset_id",
@@ -738,6 +738,31 @@ class EvolutionRequestHandler(
                 return
             try:
                 result = self.server.dsh_tools.accept_structured(self._body())
+                self._send(HTTPStatus.OK, result)
+            except PermissionError as exc:
+                self._send(HTTPStatus.FORBIDDEN, {"error": _public_http_error(exc)})
+            except (RuntimeError, TypeError, ValueError) as exc:
+                self._send(HTTPStatus.CONFLICT, {"error": _public_http_error(exc)})
+            return
+        if raw_path == "/api/ecology-agent-sidecar/v1/retrievals/replay":
+            if not self._authorize_dsh_tool():
+                return
+            try:
+                result = self.server.dsh_tools.replay_retrieval(self._body())
+                self._send(
+                    HTTPStatus.OK,
+                    {"found": result is not None, "result": result},
+                )
+            except PermissionError as exc:
+                self._send(HTTPStatus.FORBIDDEN, {"error": _public_http_error(exc)})
+            except (RuntimeError, TypeError, ValueError) as exc:
+                self._send(HTTPStatus.CONFLICT, {"error": _public_http_error(exc)})
+            return
+        if raw_path == "/api/ecology-agent-sidecar/v1/retrievals/complete":
+            if not self._authorize_dsh_tool():
+                return
+            try:
+                result = self.server.dsh_tools.complete_retrieval(self._body())
                 self._send(HTTPStatus.OK, result)
             except PermissionError as exc:
                 self._send(HTTPStatus.FORBIDDEN, {"error": _public_http_error(exc)})

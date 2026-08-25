@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { NativeStageRunner, STAGES, dshCompatibleSchema, jsonDigest } from "../lib/runtime/stage-runner.js";
+import {
+  NativeStageRunner,
+  STAGES,
+  dshCompatibleSchema,
+  jsonDigest,
+  skillInvocationEvidence,
+} from "../lib/runtime/stage-runner.js";
 
 function skillFirstEvents(skillName, { prediction = false } = {}) {
   const events = [
@@ -87,6 +93,108 @@ test("post-score sample reflection is a registered structured DSH stage", () => 
   assert.match(STAGES["sample.reflect"].instruction, /next-generation action/i);
 });
 
+test("Skill-first evidence permits optional retrieval before the terminal tool", () => {
+  const evidence = skillInvocationEvidence([
+    {
+      seq: 1,
+      type: "tool/call",
+      data: { callId: "skill", name: "skill", arguments: { name: "autonomous-ecology-research" } },
+    },
+    {
+      seq: 2,
+      type: "tool/result",
+      data: { message: { content: [{ type: "tool-result", toolCallId: "skill", isError: false }] } },
+    },
+    {
+      seq: 3,
+      type: "tool/call",
+      data: { callId: "search", name: "web_search", arguments: { queries: ["greenhouse forecast"], retrieval_key: "evidence" } },
+    },
+    {
+      seq: 4,
+      type: "tool/result",
+      data: { message: { content: [{ type: "tool-result", toolCallId: "search", isError: false }] } },
+    },
+    {
+      seq: 5,
+      type: "tool/call",
+      data: { callId: "structured", name: "structured_output", arguments: {} },
+    },
+  ], {
+    stage: "generation.research",
+    skillName: "autonomous-ecology-research",
+    allowDynamicRetrieval: true,
+  });
+
+  assert.equal(evidence.first_tool_call_verified, true);
+  assert.equal(evidence.next_tool_name, "structured_output");
+  assert.equal(evidence.next_tool_call_seq, 5);
+});
+
+test("Skill-first evidence rejects excessive or post-terminal retrieval", () => {
+  const skillAndResult = [
+    {
+      seq: 1,
+      type: "tool/call",
+      data: { callId: "skill", name: "skill", arguments: { name: "autonomous-ecology-research" } },
+    },
+    {
+      seq: 2,
+      type: "tool/result",
+      data: { message: { content: [{ type: "tool-result", toolCallId: "skill", isError: false }] } },
+    },
+  ];
+  const fourSearches = [];
+  for (let index = 0; index < 4; index += 1) {
+    fourSearches.push(
+      {
+        seq: 3 + index * 2,
+        type: "tool/call",
+        data: { callId: `search-${index}`, name: "web_search", arguments: {} },
+      },
+      {
+        seq: 4 + index * 2,
+        type: "tool/result",
+        data: { message: { content: [{ type: "tool-result", toolCallId: `search-${index}`, isError: false }] } },
+      },
+    );
+  }
+  const options = {
+    stage: "generation.research",
+    skillName: "autonomous-ecology-research",
+    allowDynamicRetrieval: true,
+  };
+  assert.throws(
+    () => skillInvocationEvidence([
+      ...skillAndResult,
+      { seq: 3, type: "tool/call", data: { callId: "search", name: "web_search", arguments: {} } },
+      { seq: 4, type: "tool/result", data: { message: { content: [{ type: "tool-result", toolCallId: "search", isError: false }] } } },
+      { seq: 5, type: "tool/call", data: { callId: "structured", name: "structured_output", arguments: {} } },
+    ], {
+      stage: "generation.research",
+      skillName: "autonomous-ecology-research",
+    }),
+    /legacy tool profile/i,
+  );
+  assert.throws(
+    () => skillInvocationEvidence([
+      ...skillAndResult,
+      ...fourSearches,
+      { seq: 11, type: "tool/call", data: { callId: "structured", name: "structured_output", arguments: {} } },
+    ], options),
+    /zero to three|retrieval call budget/i,
+  );
+  assert.throws(
+    () => skillInvocationEvidence([
+      ...skillAndResult,
+      { seq: 3, type: "tool/call", data: { callId: "structured", name: "structured_output", arguments: {} } },
+      { seq: 4, type: "tool/call", data: { callId: "late-search", name: "web_search", arguments: {} } },
+      { seq: 5, type: "tool/result", data: { message: { content: [{ type: "tool-result", toolCallId: "late-search", isError: false }] } } },
+    ], options),
+    /before the required terminal tool/i,
+  );
+});
+
 test("candidate judging and batch reflection use distinct scientific Skills", () => {
   const judge = STAGES["generation.judge"];
   const reflection = STAGES["generation.reflect"];
@@ -167,7 +275,10 @@ test("native stage runner reserves before first child tool and durably persists 
   const roleHost = {
     sessionId: "parent-session",
     agent: { id: "role-host" },
-    binding: { model: "pjlab/deepseek-v4-pro-0813" },
+    binding: {
+      model: "pjlab/deepseek-v4-pro-0813",
+      tool_profile: "dynamic-retrieval-v1",
+    },
   };
   const structured = {
     schema_version: "ecologyrsi-dsh.genome-mutation/1",
@@ -216,6 +327,7 @@ test("native stage runner reserves before first child tool and durably persists 
         assert.match(prompt.instruction, /first response/i);
         assert.match(prompt.instruction, /call skill exactly once/i);
         assert.match(prompt.instruction, /structured_output exactly once/i);
+        assert.match(prompt.instruction, /zero to three web_search calls/i);
         assert.match(prompt.instruction, /mutation delta/i);
         assert.match(prompt.instruction, /omit every unchanged/i);
         assert.match(prompt.instruction, /exactly one operation/i);
@@ -300,7 +412,7 @@ test("native stage runner reserves before first child tool and durably persists 
   });
 
   assert.equal(claimedIdentity.role, "candidate-proposer");
-  assert.deepEqual(claimedIdentity.allowed_tools, ["skill"]);
+  assert.deepEqual(claimedIdentity.allowed_tools, ["skill", "web_search"]);
   assert.equal(persisted[0].path, "/api/ecology-agent-sidecar/v1/child-reservations");
   assert.equal(persisted[1].path, "/api/ecology-agent-sidecar/v1/structured-results");
   assert.equal(persisted[1].body.identity.session_id, "child-session");
@@ -362,7 +474,10 @@ test("native stage runner retries one transient child model failure with a fresh
   const roleHost = {
     sessionId: "parent-session",
     agent: { id: "role-host" },
-    binding: { model: "freerouter/gpt-5.6-sol" },
+    binding: {
+      model: "freerouter/gpt-5.6-sol",
+      tool_profile: "dynamic-retrieval-v1",
+    },
   };
   const structured = {
     schema_version: "ecology-generation-review@1",
@@ -472,6 +587,10 @@ test("sample planner waves execute through the retained DSH Workflow Engine", as
   const roleHost = {
     sessionId: "planner-parent-session",
     agent: { id: "planner-role-host" },
+    binding: {
+      model: "pjlab/deepseek-v4-pro-0813",
+      tool_profile: "dynamic-retrieval-v1",
+    },
     services: {
       workflowEngine: {
         start: (request) => {
@@ -603,7 +722,7 @@ test("sample planner waves execute through the retained DSH Workflow Engine", as
   );
   assert.match(
     plannerPrompt.instruction,
-    /After the Skill result, call ecology_execute_prediction_tool exactly once/i,
+    /Then call ecology_execute_prediction_tool exactly once/i,
   );
   assert.match(
     plannerPrompt.instruction,

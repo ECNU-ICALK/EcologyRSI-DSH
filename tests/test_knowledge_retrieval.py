@@ -416,6 +416,111 @@ class KnowledgeRetrievalTests(unittest.TestCase):
             )
         )
 
+    def test_dynamic_search_quality_reasons_and_url_normalization_are_deterministic(
+        self,
+    ) -> None:
+        normalized = knowledge_retrieval.normalize_dynamic_search_result(
+            {
+                "content": " bounded   answer ",
+                "sources": [
+                    {
+                        "url": "https://Example.org/paper?utm_source=x&b=2&a=1#fragment",
+                        "title": "Greenhouse temperature forecasting",
+                    },
+                    {
+                        "url": "https://example.org/paper?a=1&b=2",
+                        "title": "duplicate",
+                    },
+                    {"url": "http://insecure.example/paper", "title": "insecure"},
+                ],
+                "truncated": False,
+            }
+        )
+        self.assertEqual(normalized["content"], "bounded answer")
+        self.assertEqual(
+            normalized["sources"],
+            [
+                {
+                    "url": "https://example.org/paper?a=1&b=2",
+                    "title": "Greenhouse temperature forecasting",
+                }
+            ],
+        )
+
+        cases = (
+            (
+                [{"url": "https://a.example/", "title": "greenhouse forecast"}],
+                "insufficient_distinct_sources",
+            ),
+            (
+                [{"url": "https://a.example/"}, {"url": "https://b.example/"}],
+                "insufficient_evidence_sources",
+            ),
+            (
+                [
+                    {"url": "https://a.example/", "title": "marine geology"},
+                    {"url": "https://b.example/", "title": "ocean chemistry"},
+                ],
+                "insufficient_query_overlap",
+            ),
+        )
+        for sources, expected in cases:
+            with self.subTest(reason=expected):
+                result = knowledge_retrieval.normalize_dynamic_search_result(
+                    {"sources": sources, "truncated": False}
+                )
+                quality = knowledge_retrieval.assess_dynamic_search_quality(
+                    ("greenhouse temperature forecasting",),
+                    result,
+                )
+                self.assertEqual(quality["fallback_reason"], expected)
+                self.assertFalse(quality["sufficient"])
+
+        chinese = knowledge_retrieval.normalize_dynamic_search_result(
+            {
+                "sources": [
+                    {"url": "https://a.example/", "title": "温室温度预测方法"},
+                    {"url": "https://b.example/", "snippet": "温室环境时间序列预测"},
+                ],
+                "truncated": False,
+            }
+        )
+        quality = knowledge_retrieval.assess_dynamic_search_quality(
+            ("温室温度预测",),
+            chinese,
+        )
+        self.assertTrue(quality["sufficient"])
+        self.assertIsNone(quality["fallback_reason"])
+
+    def test_dynamic_search_merge_prefers_primary_and_deduplicates_fallback(self) -> None:
+        merged = knowledge_retrieval.merge_dynamic_search_results(
+            {
+                "content": "DSH primary",
+                "sources": [
+                    {"url": "https://example.org/a", "title": "primary A"},
+                    {"url": "https://example.org/b", "title": "primary B"},
+                ],
+                "truncated": False,
+            },
+            {
+                "content": "OpenAlex fallback",
+                "sources": [
+                    {"url": "https://example.org/a", "title": "duplicate A"},
+                    {"url": "https://openalex.org/W2", "title": "fallback C"},
+                ],
+                "truncated": False,
+            },
+        )
+        self.assertEqual(
+            [item["url"] for item in merged["sources"]],
+            [
+                "https://example.org/a",
+                "https://example.org/b",
+                "https://openalex.org/W2",
+            ],
+        )
+        self.assertEqual(merged["content"], "DSH primary OpenAlex fallback")
+
     def test_openalex_short_queries_fall_back_and_deduplicate_work_ids(self) -> None:
         def metadata_card(work_id: str) -> KnowledgeCard:
             return KnowledgeCard(

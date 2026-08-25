@@ -8,6 +8,7 @@ const ROOT_SERVICES = Object.freeze([
   "sessionProjections",
   "agentPresets",
   "llm",
+  "web",
 ]);
 
 function schemaName(value) {

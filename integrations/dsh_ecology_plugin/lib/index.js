@@ -9,7 +9,7 @@ import { registerStaticRoute, STATIC_BASE } from "./web/static.js";
 export const name = "ecologyrsi-dsh-evolution";
 export const inject = [
   "webServer", "agents", "sessions", "tokenMeter", "subagents", "tools",
-  "sessionPersistence", "sessionProjections", "agentPresets", "llm",
+  "sessionPersistence", "sessionProjections", "agentPresets", "llm", "web",
 ];
 
 const DEFAULT_STATIC_ROOT = fileURLToPath(

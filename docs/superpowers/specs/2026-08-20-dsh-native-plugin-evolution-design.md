@@ -527,19 +527,22 @@ Web Profile 根作用域没有 Compaction/Workflow，但标准 preset 的隔离 
 Ecology 不应全局打开服务，而应安装版本化角色 preset：
 
 ```text
-ecology-coordinator-v3
-ecology-researcher-v6
-ecology-candidate-proposer-v3
-ecology-sample-planner-v3
-ecology-sample-critic-v3
-ecology-generation-judge-v6
+ecology-coordinator-v4
+ecology-researcher-v7
+ecology-candidate-proposer-v4
+ecology-sample-planner-v4
+ecology-sample-critic-v4
+ecology-generation-judge-v7
 ```
 
-Preset ID 遵守 rc.6 的 `[a-z0-9][a-z0-9-]*` 约束；版本使用 `-v2`，不在 preset
-ID 中使用 `@`。协议、schema 和宿主模板 ID 仍可保留 `@1`。
+Preset ID 遵守 rc.6 的 `[a-z0-9][a-z0-9-]*` 约束；版本使用 `-vN`，不在 preset
+ID 中使用 `@`。协议、schema 和宿主模板 ID 仍可保留 `@1`。上一组
+`v3`/`v6` preset 保留原始字节与 legacy 工具面，安装器只添加新 ID，
+不原地改写已安装 preset。
 
 每个 preset 只挂载本角色工具、persona、Compaction，以及确实需要时的 Workflow。
-不挂载 Bash、FS、Web、任意 MCP、Ask User 或通用执行技能。
+不挂载 Bash、FS、`dsh-tool-web`、任意 MCP、Ask User 或通用执行技能；
+新 preset 只通过 Host 封装的 `web_search` 使用 DSH Web 服务。
 
 Host Controller 通过 `ctx.agentPresets.mount(agentCtx, presetId)` 挂载 preset，并从 Agent realm 取得
 `workflowEngine`。Cordis 根插件注入：

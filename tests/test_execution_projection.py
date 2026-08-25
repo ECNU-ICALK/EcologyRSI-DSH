@@ -215,7 +215,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     payload={
                         "execution_protocol": "dsh_native_plugin_evolution@1",
                         "capabilities_digest": "a" * 64,
-                        "preset_ids": ["ecology-sample-planner-v3"],
+                        "preset_ids": ["ecology-sample-planner-v4"],
                     },
                 ),
                 SimpleNamespace(
@@ -244,6 +244,32 @@ class ExecutionProjectionTests(unittest.TestCase):
                         },
                     },
                 ),
+                SimpleNamespace(
+                    seq=3,
+                    kind="DshRetrievalExecuted",
+                    payload={
+                        "identity": {
+                            "role": "researcher",
+                            "stage": "generation.research",
+                        },
+                        "provider_route": "dsh_primary",
+                        "fallback_reason": None,
+                        "result_digest": "b" * 64,
+                    },
+                ),
+                SimpleNamespace(
+                    seq=4,
+                    kind="DshRetrievalExecuted",
+                    payload={
+                        "identity": {
+                            "role": "candidate-proposer",
+                            "stage": "candidate.propose",
+                        },
+                        "provider_route": "dsh_primary_then_openalex_fallback",
+                        "fallback_reason": "insufficient_distinct_sources",
+                        "result_digest": "c" * 64,
+                    },
+                ),
             ),
         )
 
@@ -254,6 +280,23 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(projected["provider_usage"]["session_count"], 1)
         self.assertTrue(projected["context_pressure"]["available"])
         self.assertEqual(projected["context_pressure"]["maximum_total_tokens"], 120)
+        self.assertEqual(projected["retrieval"]["call_count"], 2)
+        self.assertEqual(projected["retrieval"]["fallback_count"], 1)
+        self.assertEqual(
+            projected["retrieval"]["routes"],
+            {
+                "dsh_primary": 1,
+                "dsh_primary_then_openalex_fallback": 1,
+            },
+        )
+        self.assertEqual(
+            projected["retrieval"]["stages"],
+            ["candidate.propose", "generation.research"],
+        )
+        self.assertEqual(
+            projected["retrieval"]["result_digests"],
+            ["b" * 64, "c" * 64],
+        )
 
     def test_public_metrics_hide_private_sample_and_promotion_evidence(self) -> None:
         public = _public_evaluation_metrics(

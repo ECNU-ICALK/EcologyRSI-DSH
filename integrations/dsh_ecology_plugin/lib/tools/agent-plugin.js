@@ -1,11 +1,11 @@
-import { registerRoleToolGuard, registerRoleTools, ROLE_TOOL_NAMES } from "./roles.js";
+import { registerRoleToolGuard, registerRoleTools, roleToolNames } from "./roles.js";
 
 export const name = "ecologyrsi-dsh-agent-plane";
-export const inject = ["tools", "ecologyAgentTools"];
+export const inject = ["tools", "web", "ecologyAgentTools"];
 
 export function apply(ctx, config = {}) {
   const role = String(config.role || "");
-  if (!ROLE_TOOL_NAMES[role]) throw new Error(`unknown ecology role: ${role}`);
+  roleToolNames(role, config.toolProfile);
 
   // A preset is a standing ancestor of both its role host and spawned children.
   // A standing `restrict({ allow: [] })` therefore also masks tools registered
@@ -13,7 +13,9 @@ export function apply(ctx, config = {}) {
   // Host readiness probe verifies the exact visible schema set instead; this
   // guard remains the execution-time authorization boundary.
   const disposeTools = registerRoleTools(ctx, { ...config, role });
-  const disposeGuard = registerRoleToolGuard(ctx, role);
+  const disposeGuard = registerRoleToolGuard(ctx, role, {
+    toolProfile: config.toolProfile,
+  });
   let disposed = false;
   const dispose = () => {
     if (disposed) return;

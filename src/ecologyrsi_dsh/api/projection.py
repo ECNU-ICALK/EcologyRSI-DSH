@@ -2037,6 +2037,15 @@ def _dsh_runtime_projection(state: Any) -> dict[str, Any]:
             },
             "context_pressure": {"available": False, "source": "not_dsh_native"},
             "provider_usage": {"available": False, "source": "not_dsh_native"},
+            "retrieval": {
+                "available": False,
+                "call_count": 0,
+                "fallback_count": 0,
+                "routes": {},
+                "stages": [],
+                "roles": [],
+                "result_digests": [],
+            },
         }
     metrics_by_session: dict[str, tuple[int, Mapping[str, Any]]] = {}
     for event in state.events:
@@ -2116,6 +2125,46 @@ def _dsh_runtime_projection(state: Any) -> dict[str, Any]:
             "session_count": len(usage_rows),
             **totals,
         }
+    retrieval_events = [
+        event
+        for event in state.events
+        if event.kind == "DshRetrievalExecuted"
+        and isinstance(event.payload, Mapping)
+    ]
+    route_counts: dict[str, int] = {}
+    fallback_count = 0
+    stages: set[str] = set()
+    roles: set[str] = set()
+    result_digests: list[str] = []
+    for event in retrieval_events:
+        route = event.payload.get("provider_route")
+        if isinstance(route, str) and route:
+            route_counts[route] = route_counts.get(route, 0) + 1
+        if event.payload.get("fallback_reason") is not None:
+            fallback_count += 1
+        identity = event.payload.get("identity")
+        if isinstance(identity, Mapping):
+            if isinstance(identity.get("stage"), str) and identity["stage"]:
+                stages.add(identity["stage"])
+            if isinstance(identity.get("role"), str) and identity["role"]:
+                roles.add(identity["role"])
+        result_digest = event.payload.get("result_digest")
+        if (
+            isinstance(result_digest, str)
+            and len(result_digest) == 64
+            and all(character in "0123456789abcdef" for character in result_digest)
+        ):
+            result_digests.append(result_digest)
+    retrieval = {
+        "available": True,
+        "call_count": len(retrieval_events),
+        "fallback_count": fallback_count,
+        "routes": dict(sorted(route_counts.items())),
+        "stages": sorted(stages),
+        "roles": sorted(roles),
+        # Keep the public read model bounded even for long-running evolution.
+        "result_digests": result_digests[-64:],
+    }
     return {
         "execution_protocol": bound.payload["execution_protocol"],
         "native": True,
@@ -2140,6 +2189,7 @@ def _dsh_runtime_projection(state: Any) -> dict[str, Any]:
         # other and never relabels legacy ModelUsageRecorded receipts as DSH.
         "context_pressure": context_pressure,
         "provider_usage": provider_usage,
+        "retrieval": retrieval,
     }
 
 

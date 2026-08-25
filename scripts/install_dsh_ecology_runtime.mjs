@@ -16,6 +16,12 @@ export const PRESET_IDS = Object.freeze([
   "ecology-sample-planner-v3",
   "ecology-sample-critic-v3",
   "ecology-generation-judge-v6",
+  "ecology-coordinator-v4",
+  "ecology-researcher-v7",
+  "ecology-candidate-proposer-v4",
+  "ecology-sample-planner-v4",
+  "ecology-sample-critic-v4",
+  "ecology-generation-judge-v7",
 ]);
 const OBSOLETE_PRESET_IDS = Object.freeze([
   "ecology-coordinator-v1",
@@ -195,7 +201,7 @@ export async function installPresetTree({ sourceRoot, dshHome, dshBin = null }) 
 
 export function managedPatchText({ staticRoot }) {
   const safeRoot = String(staticRoot).replaceAll("'", "''");
-  return `${BEGIN}\n- insert:\n    - id: ecologyrsi-evolution\n      name: '@ecologyrsi/dsh-evolution-plugin'\n      inject: [webServer, agents, sessions, tokenMeter, subagents, tools, sessionPersistence, sessionProjections, agentPresets, llm]\n      config:\n        staticRoot: '${safeRoot}'\n        backendOrigin: 'http://127.0.0.1:8777'\n${END}\n`;
+  return `${BEGIN}\n- insert:\n    - id: ecologyrsi-evolution\n      name: '@ecologyrsi/dsh-evolution-plugin'\n      inject: [webServer, agents, sessions, tokenMeter, subagents, tools, sessionPersistence, sessionProjections, agentPresets, llm, web]\n      config:\n        staticRoot: '${safeRoot}'\n        backendOrigin: 'http://127.0.0.1:8777'\n${END}\n`;
 }
 
 async function atomicWrite(target, content) {

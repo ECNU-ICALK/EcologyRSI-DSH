@@ -20,6 +20,8 @@ Generation Judge preset 内部使用两个职责隔离的 Skill：`candidate-sci
 只审查单个候选的冻结科学证据，`batch-scientific-reflection` 只读取 Host 生成的
 rank→candidate→direction 聚合映射并提出建议；后者不能替代下一代 Host 预检，也不拥有选择或晋级权限。
 
+所有六个角色 preset 都暴露同一个 `web_search`。Agent 在必需 Skill 之后、阶段终端工具之前按需提交查询，不指定 provider；工具默认使用 DSH `ctx.web.search`，技术失败或定量证据不足时由 Python sidecar 自动切到 OpenAlex 元数据检索。结果和路由进入追加式事件账本并可重放。插件不挂载 `dsh-tool-web`、不开放 `web_fetch`，动态结果也不能替代冻结证据、登记预测工具或科学门禁。
+
 安装已打包的运行时：
 
 ```bash
