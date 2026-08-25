@@ -534,3 +534,156 @@ diagnostics.
   `waitForIdle()` contract without adding a new timeout; this round makes its
   multi-host cleanup complete and failure-atomic but does not change that Host
   API boundary.
+
+## Fix Round 3/5
+
+### Review findings resolved
+
+- Live readiness is now derived from the complete role-host state of every
+  nonterminal registry run instead of a sticky controller-wide bit. A durable
+  restored-paused run therefore reports live Agent service readiness after all
+  six role hosts are ready while its launch fence remains closed. Any active
+  run whose hosts are creating, failed, or unknown makes the global capability
+  fail closed, and an empty preset catalog cannot manufacture readiness through
+  a vacuous successful start. Cancelling/cancelled tombstones are excluded;
+  cancelling one of two ready runs retains readiness through the other, and
+  cancelling the final ready run clears it.
+- The real capability path is covered with the production-shaped six-preset
+  catalog, exact tool surfaces, mountable standing keys, resolvable routes, and
+  real `RoleAgentManager` creation. A loopback test fixture exposes the actual
+  Node runtime routes. Python tests consume those routes through the real
+  `DshNativeAgentRuntimeClient`, and the real Python HTTP handler is exercised
+  across create, pause, Node-process restart, durable paused reconstruction,
+  live-capability validation, resume, and status.
+- Terminal start rejection now precedes exact single-flight/idempotency handling
+  in `RuntimeController` and precedes idempotency-key comparison in
+  `RuntimeRunRegistry`. Both `cancelling` and `cancelled` reject every start,
+  including an exact retry whose raw start and control keys collide. The
+  cancellation tombstone remains authoritative after a failed start clears its
+  lifecycle start token.
+- Ordinary `created` runs remain outside the restored-paused resume path; the
+  existing regression still rejects that transition without opening admission.
+
+### Round 3 RED evidence
+
+The deterministic restored-paused and exact-key terminal retry repros failed
+before the production changes:
+
+```bash
+node --test \
+  integrations/dsh_ecology_plugin/test/launch_fence.test.mjs \
+  integrations/dsh_ecology_plugin/test/cancel_race.test.mjs
+```
+
+```text
+tests 30
+pass 27
+fail 3
+
+registry terminal tombstones reject an exact same-key start
+  Missing expected exception
+
+terminal cancel dominates an exact same-key retry after failed start cleanup
+  actual retry outcome: fulfilled
+  expected: rejected
+
+real controller reconciles a durable paused restore with admission closed until resume
+  actual controller.liveReady: false
+  expected: true
+```
+
+The real Python client rejected the real Node restored-paused capability at the
+same production gate used before `runtime.resume`:
+
+```bash
+uv run --with pytest --frozen python -m pytest -o addopts='' -q \
+  tests/test_dsh_native_runtime.py \
+  -k 'python_resume_handshake_accepts_real_node_restored_paused_hosts'
+```
+
+```text
+1 failed, 19 deselected
+DshNativeRuntimeUnavailableError: dsh_native_runtime_not_ready
+```
+
+A mutation audit changed the multi-run readiness reduction from `every` to
+`some`; the deterministic incomplete-second-host assertion failed with actual
+`true` versus expected `false`. Restoring `every` returned the test to GREEN,
+proving that one healthy run cannot mask another nonterminal incomplete run.
+An additional empty-catalog RED failed with actual live readiness `true` versus
+expected `false`; requiring a nonempty catalog closed that vacuous path.
+
+### Round 3 GREEN evidence
+
+Focused launch, controller, registry, capability, and cross-language coverage:
+
+```bash
+node --test \
+  integrations/dsh_ecology_plugin/test/cancel_race.test.mjs \
+  integrations/dsh_ecology_plugin/test/launch_fence.test.mjs
+```
+
+```text
+tests 33
+pass 33
+fail 0
+```
+
+Complete plugin Node suite, including proxy security:
+
+```bash
+node --test integrations/dsh_ecology_plugin/test/*.mjs
+```
+
+```text
+tests 142
+pass 142
+fail 0
+duration_ms 698.09725
+```
+
+Targeted Python restoration, real Python/Node handshake, reconciliation, and
+cancel-race coverage:
+
+```bash
+uv run --with pytest --frozen python -m pytest -o addopts='' -q \
+  tests/test_dsh_native_runtime.py \
+  tests/test_dsh_reconciliation.py \
+  tests/test_dsh_cancel_race.py
+```
+
+```text
+24 passed in 11.28s
+```
+
+All changed JavaScript files passed `node --check`; the changed Python test
+passed `python -m py_compile`; `git diff --check` exited 0 without diagnostics.
+
+### Round 3 self-review
+
+- Host service readiness and launch admission are deliberately independent.
+  A complete paused host set is live, but only resume opens its launch fence.
+- Global readiness requires every nonterminal run to have a complete host set.
+  This produces a conservative transient false while another run is still
+  creating, then becomes true only after that start fully settles. It never
+  derives readiness from a terminal tombstone or a different healthy run alone.
+- Controller and registry terminal checks execute before exact-key handling.
+  The failed-start/cancel repro blocks the first role creation, installs a
+  same-key cancelling tombstone, releases the exact failure, waits for start
+  token cleanup and terminal cancellation, then proves both the in-flight and
+  post-cleanup retries reject without a second creation or fence open.
+- No FIFO provider ordering, lifecycle epoch, single-flight, failure-atomic
+  cleanup, deadline finalization, stable drain, durable reconciliation, or
+  ordinary-created behavior was changed. The unchanged complete Node suite and
+  relevant Python suite exercise those paths.
+- No Python service, database, production port, current run, package install,
+  or external state was touched.
+
+### Round 3 concerns
+
+- The intentionally fail-closed global capability can be temporarily false
+  while a concurrent run is constructing its host set; Python checks it after
+  its own synchronous create/restore completes, so this does not reopen the
+  reviewed handshake race.
+- The pre-existing role-host `waitForIdle()` boundary remains unbounded, as
+  documented in Rounds 1 and 2; this round does not alter that Host API contract.

@@ -21,6 +21,7 @@ const DEFAULT_PRESETS = Object.freeze([
 })));
 
 const START_OPEN_STATUSES = Object.freeze(["created", "running"]);
+const TERMINAL_START_STATUSES = Object.freeze(["cancelling", "cancelled"]);
 const CONTROL_TRANSITIONS = Object.freeze({
   pause: Object.freeze(["created", "running", "pausing", "resuming"]),
   cancel: Object.freeze([
@@ -35,7 +36,6 @@ export class RuntimeController {
     this.registry = registry;
     this.presetCatalog = presetCatalog;
     this.roleAgents = new RoleAgentManager(ctx);
-    this.liveReady = false;
     this.stageRunner = stageRunner;
     this.controlDrains = new Map();
     this.runLifecycles = new Map();
@@ -68,7 +68,21 @@ export class RuntimeController {
     };
   }
 
+  get liveReady() {
+    if (this.presetCatalog.length === 0) return false;
+    const liveRuns = this.registry.values().filter(
+      (run) => !TERMINAL_START_STATUSES.includes(run.status),
+    );
+    return liveRuns.length > 0 && liveRuns.every(
+      (run) => this.runLifecycles.get(run.run_id)?.hosts === "ready",
+    );
+  }
+
   startRun(binding) {
+    const current = this.registry.get(binding.run_id);
+    if (current && TERMINAL_START_STATUSES.includes(current.status)) {
+      return Promise.reject(this.#startTransitionError(current.status));
+    }
     const lifecycle = this.#lifecycle(binding.run_id);
     if (lifecycle.start !== null) {
       if (isDeepStrictEqual(lifecycle.start.binding, binding)) {
@@ -144,7 +158,6 @@ export class RuntimeController {
         return this.#response(startToken.accepted);
       }
       this.stageRunner?.openLaunchFence?.(binding.run_id);
-      this.liveReady = true;
       startToken.status = "fulfilled";
       return this.#response(startToken.accepted);
     } catch (primaryError) {
@@ -478,6 +491,12 @@ export class RuntimeController {
         : `runtime run cannot ${action} from ${status}`,
     );
     error.code = "runtime_control_transition_invalid";
+    return error;
+  }
+
+  #startTransitionError(status) {
+    const error = new Error(`runtime run cannot start from ${status}`);
+    error.code = "runtime_start_transition_invalid";
     return error;
   }
 

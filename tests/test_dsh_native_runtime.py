@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import selectors
+import subprocess
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +25,66 @@ from ecologyrsi_dsh.integrations.dsh_native_runtime import (
     DshNativeAgentRuntimeClient,
 )
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
+
+
+class _RealNodeRuntime:
+    def __init__(self) -> None:
+        self.process: subprocess.Popen[str] | None = None
+
+    def __enter__(self) -> DshNativeAgentRuntimeClient:
+        runtime_server = (
+            Path(__file__).resolve().parents[1]
+            / "integrations"
+            / "dsh_ecology_plugin"
+            / "test"
+            / "fixtures"
+            / "runtime_handshake_server.mjs"
+        )
+        self.process = subprocess.Popen(
+            ["node", str(runtime_server)],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert self.process.stdout is not None
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.process.stdout, selectors.EVENT_READ)
+            if not selector.select(timeout=10):
+                self.close()
+                raise RuntimeError("real Node runtime did not publish its loopback port")
+            address_line = self.process.stdout.readline()
+        if not address_line:
+            assert self.process.stderr is not None
+            detail = self.process.stderr.read()
+            self.close()
+            raise RuntimeError(detail or "real Node runtime exited before startup")
+        address = json.loads(address_line)
+        return DshNativeAgentRuntimeClient(
+            f"http://127.0.0.1:{address['port']}",
+            token="runtime-secret",
+            timeout=2,
+        )
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self.process is None:
+            return
+        process, self.process = self.process, None
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
 
 
 def _research_skill_evidence() -> dict:
@@ -136,6 +198,52 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
         self.assertEqual(response["ledger_expected_revision"], 11)
         self.assertEqual(self.server.requests[0][2], "Bearer runtime-secret")  # type: ignore[attr-defined]
         self.assertEqual(DSH_NATIVE_EXECUTION_PROTOCOL, "dsh_native_plugin_evolution@1")
+
+    def test_python_resume_handshake_accepts_real_node_restored_paused_hosts(self) -> None:
+        preset_ids = (
+            "ecology-coordinator-v4",
+            "ecology-researcher-v7",
+            "ecology-candidate-proposer-v4",
+            "ecology-sample-planner-v4",
+            "ecology-sample-critic-v4",
+            "ecology-generation-judge-v7",
+        )
+        with _RealNodeRuntime() as client:
+            cold = client.capabilities()
+            client.require_capabilities(cold, preset_ids, require_live=False)
+            self.assertFalse(cold["live_agent_service_ready"])
+            run_id = "run:python-node-restored-paused"
+            client.create_run(
+                {
+                    "run_id": run_id,
+                    "run_state_revision": 7,
+                    "stage_attempt": 0,
+                    "ledger_expected_revision": 11,
+                    "idempotency_key": f"runtime-restore:{run_id}",
+                    "binding": {
+                        "initial_run_status": "paused",
+                        "restore_provenance": {
+                            "source": "python_durable_ledger",
+                            "status": "paused",
+                        },
+                        "strategy_model_id": "provider/model",
+                        "review_model_id": "provider/model",
+                    },
+                }
+            )
+            live = client.capabilities()
+            client.require_capabilities(live, preset_ids, require_live=True)
+            resumed = client.resume(
+                {
+                    "run_id": run_id,
+                    "run_state_revision": 8,
+                    "stage_attempt": 0,
+                    "ledger_expected_revision": 12,
+                    "idempotency_key": "resume:python-node-restored-paused",
+                }
+            )
+            self.assertEqual(resumed["run_id"], run_id)
+            self.assertEqual(client.status(run_id)["status"], "running")
 
     def test_default_timeouts_allow_dsh_managed_long_context_turns(self) -> None:
         client = DshNativeAgentRuntimeClient(
@@ -565,6 +673,42 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             },
         )
         self.assertEqual(runtime.resumed[-1]["run_id"], run_id)
+
+    def test_real_node_restart_resume_passes_the_python_handler_live_gate(self) -> None:
+        run_id = "run:real-node-resume-restart"
+        with _RealNodeRuntime() as runtime:
+            self.server.dsh_native_runtime = runtime
+            status, payload = self._post(
+                {
+                    "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                    "run_id": run_id,
+                    "domain_pack_id": "crop_soil_water",
+                    "dataset_id": "generated-toy-series@1",
+                    "strategy_model_id": "dsh/strategy",
+                    "review_model_id": "dsh/review",
+                    "start": True,
+                    "auto_advance": 0,
+                    "idempotency_key": "real-node-create-resume-restart",
+                }
+            )
+            self.assertEqual(status, 201, payload)
+            status, payload = self._post_path(
+                f"/runs/{run_id}/control",
+                {"action": "pause", "idempotency_key": "real-node-pause-restart"},
+            )
+            self.assertEqual(status, 200, payload)
+            self.assertEqual(payload["projection"]["status"], "paused")
+
+        with _RealNodeRuntime() as restarted:
+            self.server.dsh_native_runtime = restarted
+            status, payload = self._post_path(
+                f"/runs/{run_id}/control",
+                {"action": "resume", "idempotency_key": "real-node-resume-restart"},
+            )
+
+            self.assertEqual(status, 200, payload)
+            self.assertEqual(payload["projection"]["status"], "running")
+            self.assertEqual(restarted.status(run_id)["status"], "running")
 
     def test_started_native_run_opens_runtime_admission_at_creation(self) -> None:
         runtime = _FakeNativeRuntime()

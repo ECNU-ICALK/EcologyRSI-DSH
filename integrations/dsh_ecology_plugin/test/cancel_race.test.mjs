@@ -884,7 +884,7 @@ for (const control of ["pause", "cancel"]) {
       ["hosts", control === "cancel", true],
       ["hosts", control === "cancel", true],
     ]);
-    assert.equal(controller.liveReady, false);
+    assert.equal(controller.liveReady, control === "pause");
   });
 }
 
@@ -941,6 +941,101 @@ test("stale failing startRun preserves terminal cancellation and disposes late h
     ["hosts", true, true],
     ["hosts", true, true],
   ]);
+});
+
+for (const terminalStatus of ["cancelling", "cancelled"]) {
+  test(`registry ${terminalStatus} tombstones reject an exact same-key start`, () => {
+    const registry = new RuntimeRunRegistry();
+    const exactKey = "shared-start-cancel-key";
+    const startBinding = binding({
+      idempotency_key: exactKey,
+      binding: { initial_run_status: "running" },
+    });
+    registry.start(startBinding);
+    registry.transition(
+      "run-1",
+      binding({ idempotency_key: exactKey }),
+      terminalStatus,
+    );
+
+    assert.throws(
+      () => registry.start({ ...startBinding, binding: { ...startBinding.binding } }),
+      new RegExp(`cannot start from ${terminalStatus}`),
+    );
+    assert.equal(registry.get("run-1").status, terminalStatus);
+  });
+}
+
+test("terminal cancel dominates an exact same-key retry after failed start cleanup", async () => {
+  const createEntered = deferred();
+  const releaseCreate = deferred();
+  let createCalls = 0;
+  let opens = 0;
+  const controller = new RuntimeController({}, {
+    presetCatalog: [{ preset_id: "ecology-researcher-v7", tool_profile: "test" }],
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => { opens += 1; },
+      quiesceRun: async () => {},
+    },
+  });
+  controller.roleAgents = {
+    createRoleAgent: async () => {
+      createCalls += 1;
+      if (createCalls === 1) {
+        createEntered.resolve();
+        await releaseCreate.promise;
+        throw new Error("deterministic first start failure");
+      }
+      return { dispose: async () => {} };
+    },
+    quiesceRun: async () => {},
+  };
+  const exactKey = "shared-failed-start-cancel-key";
+  const startBinding = binding({
+    idempotency_key: exactKey,
+    binding: {
+      initial_run_status: "running",
+      strategy_model_id: "provider/model",
+      review_model_id: "provider/model",
+    },
+  });
+
+  const starting = outcome(controller.startRun(startBinding));
+  await createEntered.promise;
+  const cancelling = controller.cancel(binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: exactKey,
+  }));
+  const retryWhileCancelling = outcome(controller.startRun({
+    ...startBinding,
+    binding: { ...startBinding.binding },
+  }));
+  releaseCreate.resolve();
+  const [failedStart, cancelled, cancellingRetry] = await Promise.all([
+    starting,
+    cancelling,
+    retryWhileCancelling,
+  ]);
+
+  assert.equal(failedStart.status, "rejected");
+  assert.match(failedStart.reason.message, /deterministic first start failure/);
+  assert.equal(cancelled.accepted, true);
+  assert.equal(cancellingRetry.status, "rejected");
+  assert.match(cancellingRetry.reason.message, /cannot start from cancelling/);
+  assert.equal(controller.registry.get("run-1").status, "cancelled");
+
+  const retried = await outcome(controller.startRun({
+    ...startBinding,
+    binding: { ...startBinding.binding },
+  }));
+
+  assert.equal(retried.status, "rejected");
+  assert.match(retried.reason.message, /cannot start from cancelled/);
+  assert.equal(controller.registry.get("run-1").status, "cancelled");
+  assert.equal(createCalls, 1);
+  assert.equal(opens, 0);
 });
 
 test("resume waits for stale startRun cleanup before reopening admission", async () => {

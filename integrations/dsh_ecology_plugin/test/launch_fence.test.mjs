@@ -6,6 +6,21 @@ import { ProviderStageGate } from "../lib/runtime/provider-stage-gate.js";
 import { RuntimeRunRegistry } from "../lib/runtime/run-registry.js";
 import { NativeStageRunner, jsonDigest } from "../lib/runtime/stage-runner.js";
 
+const REALISTIC_PRESET_CATALOG = Object.freeze([
+  "ecology-coordinator-v4",
+  "ecology-researcher-v7",
+  "ecology-candidate-proposer-v4",
+  "ecology-sample-planner-v4",
+  "ecology-sample-critic-v4",
+  "ecology-generation-judge-v7",
+].map((preset_id) => ({
+  preset_id,
+  tool_profile: "dynamic-retrieval-v1",
+  required_tools: preset_id === "ecology-sample-planner-v4"
+    ? ["ecology_execute_prediction_tool", "skill", "web_search"]
+    : ["skill", "web_search"],
+})));
+
 function deferred() {
   let resolve;
   let reject;
@@ -21,6 +36,43 @@ function outcome(promise) {
     (value) => ({ status: "fulfilled", value }),
     (reason) => ({ status: "rejected", reason }),
   );
+}
+
+function liveCapabilityContext({ beforeCreate = async () => {} } = {}) {
+  const toolsByPreset = new Map(REALISTIC_PRESET_CATALOG.map((item) => [
+    `standing:${item.preset_id}`,
+    item.required_tools,
+  ]));
+  return {
+    agents: {
+      create: async (options) => {
+        await beforeCreate(options);
+        const agent = {
+          session: { append: async () => {}, flush: async () => {} },
+          waitForIdle: async () => {},
+        };
+        await options.setup?.(agent);
+        return { agent, dispose: async () => {} };
+      },
+    },
+    sessions: {},
+    tokenMeter: {},
+    subagents: {},
+    tools: {
+      schemas: async (standingKey) => (
+        toolsByPreset.get(standingKey)?.map((name) => ({ name })) || []
+      ),
+    },
+    sessionPersistence: {},
+    sessionProjections: {},
+    agentPresets: {
+      standingKeyFor: async (presetId) => `standing:${presetId}`,
+      mount: async (_agent, presetId) => ({ id: presetId }),
+      serviceFor: async (_agent, serviceName) => ({ serviceName }),
+    },
+    llm: { resolveCallConfig: async () => ({ provider: "test", model: "model" }) },
+    web: {},
+  };
 }
 
 function canonicalJson(value) {
@@ -285,10 +337,10 @@ test("cancel closes the fence before a schema-blocked Workflow can launch", { ti
 
 test("real controller reconciles a durable paused restore with admission closed until resume", { timeout: 2_000 }, async () => {
   const harness = launchRaceHarness();
-  const controller = new RuntimeController({}, {
+  const controller = new RuntimeController(liveCapabilityContext(), {
     registry: harness.registry,
     stageRunner: harness.runner,
-    presetCatalog: [],
+    presetCatalog: REALISTIC_PRESET_CATALOG,
   });
   const restored = stageBinding({ suffix: "durable-restored-paused" });
   restored.idempotency_key = `runtime-restore:${restored.run_id}`;
@@ -302,6 +354,15 @@ test("real controller reconciles a durable paused restore with admission closed 
 
   await controller.startRun(restored);
   assert.equal(harness.registry.get(restored.run_id).status, "paused");
+  assert.equal(controller.liveReady, true);
+  const capabilities = await controller.capabilities();
+  assert.equal(capabilities.ready, true);
+  assert.equal(capabilities.live_agent_service_ready, true);
+  assert.equal(capabilities.presets.length, REALISTIC_PRESET_CATALOG.length);
+  assert.equal(
+    capabilities.presets.every((item) => item.live_agent_service_ready),
+    true,
+  );
 
   const fencedStage = stageBinding({ suffix: "before-restored-resume" });
   const rejected = await outcome(controller.runStage(fencedStage));
@@ -325,4 +386,87 @@ test("real controller reconciles a durable paused restore with admission closed 
   assert.equal(resumed.accepted, true);
   assert.equal(harness.registry.get(restored.run_id).status, "running");
   assert.deepEqual(harness.counts(), { childStarts: 1, workflowStarts: 0 });
+});
+
+test("global live readiness survives one run cleanup and closes after the final live run", async () => {
+  const secondCreateEntered = deferred();
+  const releaseSecondCreate = deferred();
+  const controller = new RuntimeController(liveCapabilityContext({
+    beforeCreate: async (options) => {
+      if (options.meta.ecologyRunId === "run-live-b") {
+        secondCreateEntered.resolve();
+        await releaseSecondCreate.promise;
+      }
+    },
+  }), {
+    presetCatalog: REALISTIC_PRESET_CATALOG,
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => {},
+      quiesceRun: async () => {},
+    },
+  });
+  const start = (runId) => ({
+    run_id: runId,
+    run_state_revision: 1,
+    stage_attempt: 0,
+    ledger_expected_revision: 1,
+    idempotency_key: `start:${runId}`,
+    binding: {
+      initial_run_status: "running",
+      strategy_model_id: "provider/model",
+      review_model_id: "provider/model",
+    },
+  });
+  const cancel = (runId) => ({
+    run_id: runId,
+    run_state_revision: 2,
+    stage_attempt: 0,
+    ledger_expected_revision: 2,
+    idempotency_key: `cancel:${runId}`,
+  });
+
+  await controller.startRun(start("run-live-a"));
+  assert.equal(controller.liveReady, true);
+  const secondStart = controller.startRun(start("run-live-b"));
+  await secondCreateEntered.promise;
+  assert.equal(controller.liveReady, false);
+  assert.equal((await controller.capabilities()).live_agent_service_ready, false);
+  releaseSecondCreate.resolve();
+  await secondStart;
+  assert.equal(controller.liveReady, true);
+
+  await controller.cancel(cancel("run-live-a"));
+  assert.equal(controller.liveReady, true);
+  assert.equal((await controller.capabilities()).live_agent_service_ready, true);
+
+  await controller.cancel(cancel("run-live-b"));
+  assert.equal(controller.liveReady, false);
+  assert.equal((await controller.capabilities()).live_agent_service_ready, false);
+});
+
+test("an empty preset catalog cannot manufacture live Agent readiness", async () => {
+  const controller = new RuntimeController(liveCapabilityContext(), {
+    presetCatalog: [],
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => {},
+    },
+  });
+
+  await controller.startRun({
+    run_id: "run-empty-preset-catalog",
+    run_state_revision: 1,
+    stage_attempt: 0,
+    ledger_expected_revision: 1,
+    idempotency_key: "start:run-empty-preset-catalog",
+    binding: {
+      initial_run_status: "running",
+      strategy_model_id: "provider/model",
+      review_model_id: "provider/model",
+    },
+  });
+
+  assert.equal(controller.liveReady, false);
+  assert.equal((await controller.capabilities()).live_agent_service_ready, false);
 });

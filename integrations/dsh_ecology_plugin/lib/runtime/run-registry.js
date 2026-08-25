@@ -3,6 +3,11 @@ export class RuntimeRunRegistry {
 
   start(binding) {
     const prior = this.#runs.get(binding.run_id);
+    if (prior && ["cancelling", "cancelled"].includes(prior.status)) {
+      const error = new Error(`runtime run cannot start from ${prior.status}`);
+      error.code = "runtime_start_transition_invalid";
+      throw error;
+    }
     if (prior && prior.idempotency_key !== binding.idempotency_key) {
       throw new Error("run already has a different active command");
     }
