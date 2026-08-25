@@ -1117,6 +1117,8 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                 "No eligibility is claimed, gate passage is achieved.",
                 "No eligibility, and promotion is claimed.",
                 "No eligibility, and gate passage is asserted.",
+                "No eligibility and promotion is claimed.",
+                "No eligibility or gate passage is asserted.",
             )
         ):
             direction = _direction(index, [])

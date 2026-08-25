@@ -3697,7 +3697,7 @@ _CLAIM_HARD_BOUNDARY_RE = re.compile(
     re.IGNORECASE,
 )
 _CLAIM_SCOPE_RESTART_RE = re.compile(
-    r"[,，:：]|\band\b|并且|而且",
+    r"[,，:：]|\b(?:and|or)\b|并且|而且",
     re.IGNORECASE,
 )
 _CLAIM_NEGATED_ASSERTION_BEFORE_RE = re.compile(
@@ -3768,10 +3768,25 @@ def _claim_scopes(text: str) -> tuple[str, ...]:
             if not suffix:
                 continue
             prefix = clause[: boundary.start()]
+            coordinated_suffix = (
+                f"{boundary.group()} {suffix}"
+                if boundary.group().casefold() in {"and", "or"}
+                else suffix
+            )
             initial_coordinated_affirmative_suffix = (
-                bool(_CLAIM_COORDINATED_AFFIRMATIVE_ASSERTION_RE.search(suffix))
+                bool(
+                    _CLAIM_COORDINATED_AFFIRMATIVE_ASSERTION_RE.search(
+                        coordinated_suffix
+                    )
+                )
                 and not _CLAIM_SCOPE_RESTART_RE.search(prefix)
             )
+            if (
+                boundary.group().casefold() == "or"
+                and _CLAIM_NEGATION_BEFORE_RE.search(prefix)
+                and not initial_coordinated_affirmative_suffix
+            ):
+                continue
             if (
                 _CLAIM_NEGATED_ASSERTION_BEFORE_RE.search(prefix)
                 and not _CLAIM_COMPLETED_ASSERTION_BEFORE_RE.search(prefix)
