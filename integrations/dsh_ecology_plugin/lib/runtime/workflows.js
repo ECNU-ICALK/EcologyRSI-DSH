@@ -78,7 +78,20 @@ export class PendingChildStarts {
 
   get size() { return this.pending.size; }
 
-  finish(record) { this.pending.delete(record); }
+  finish(record) {
+    if (!record) return;
+    if (!record.finalized) {
+      record.finalized = true;
+      record.resolveFinalization();
+    }
+    this.pending.delete(record);
+  }
+
+  hasRun(runId) {
+    return [...this.pending].some(
+      (record) => runId === undefined || record.binding.runId === runId,
+    );
+  }
 
   closeRun(runId) { this.closedRuns.add(runId); }
 
@@ -98,6 +111,8 @@ export class PendingChildStarts {
       resolveStart = resolve;
       rejectStart = reject;
     });
+    let resolveFinalization;
+    const finalization = new Promise((resolve) => { resolveFinalization = resolve; });
     const record = {
       kind,
       binding,
@@ -106,6 +121,13 @@ export class PendingChildStarts {
       result: null,
       error: null,
       promise: null,
+      finalization,
+      resolveFinalization,
+      finalized: false,
+      quiescence: null,
+      cancelPromise: null,
+      disposePromise: null,
+      workflowResultPromise: null,
     };
     record.promise = start.then(
       (result) => { record.result = result; return result; },
@@ -145,14 +167,132 @@ export class PendingChildStarts {
     if (typeof operation !== "function") throw new Error("workflow start operation is required");
     const record = this.#record("workflow", binding, operation);
     if (record.error) {
-      this.pending.delete(record);
+      this.finish(record);
       throw record.error;
     }
     if (!record.result || typeof record.result !== "object" || typeof record.result.then === "function") {
-      this.pending.delete(record);
+      this.finish(record);
       throw new Error("workflow start must return a synchronous run handle");
     }
     return record;
+  }
+
+  cancel(record, reason = "run quiescing") {
+    if (!record) return Promise.resolve();
+    record.controller.abort();
+    if (record.kind !== "workflow" || !record.result?.cancel) return Promise.resolve();
+    if (record.cancelPromise === null) {
+      try {
+        record.cancelPromise = Promise.resolve(record.result.cancel(reason));
+      } catch (error) {
+        record.cancelPromise = Promise.reject(error);
+      }
+      record.cancelPromise.catch(() => {});
+    }
+    return record.cancelPromise;
+  }
+
+  dispose(record) {
+    if (!record?.result?.dispose) return Promise.resolve();
+    if (record.disposePromise === null) {
+      try {
+        record.disposePromise = Promise.resolve(record.result.dispose());
+      } catch (error) {
+        record.disposePromise = Promise.reject(error);
+      }
+      record.disposePromise.catch(() => {});
+    }
+    return record.disposePromise;
+  }
+
+  quiesce(record, reason = "run quiescing") {
+    if (!record) return Promise.resolve();
+    if (record.quiescence !== null) return record.quiescence;
+    record.controller.abort();
+    record.quiescence = this.#quiesceRecord(record, reason);
+    record.quiescence.catch(() => {});
+    return record.quiescence;
+  }
+
+  async #settledOrFinalized(record, operation) {
+    if (record.finalized) return { kind: "finalized" };
+    const observed = Promise.resolve(operation).then(
+      (value) => ({ kind: "settled", status: "fulfilled", value }),
+      (error) => ({ kind: "settled", status: "rejected", error }),
+    );
+    return await Promise.race([
+      observed,
+      record.finalization.then(() => ({ kind: "finalized" })),
+    ]);
+  }
+
+  #workflowResult(record) {
+    if (record.workflowResultPromise !== null) return record.workflowResultPromise;
+    try {
+      const value = typeof record.result?.result === "function"
+        ? record.result.result()
+        : record.result?.result;
+      record.workflowResultPromise = Promise.resolve(value);
+    } catch (error) {
+      record.workflowResultPromise = Promise.reject(error);
+    }
+    record.workflowResultPromise.catch(() => {});
+    return record.workflowResultPromise;
+  }
+
+  async #quiesceRecord(record, reason) {
+    try {
+      const started = await this.#settledOrFinalized(record, record.promise);
+      if (started.kind === "finalized") return;
+      if (started.status === "rejected") return;
+
+      if (record.kind === "one-shot") {
+        await this.#settledOrFinalized(record, this.dispose(record));
+        return;
+      }
+
+      if (record.kind === "continuable") {
+        if (record.result?.childId) {
+          let interruption;
+          try {
+            interruption = this.ctx.subagents.interrupt(record.result.childId, {
+              kind: "ancestor",
+              agent: record.binding.roleHostAgent,
+            });
+          } catch (error) {
+            interruption = Promise.reject(error);
+          }
+          const interrupted = await this.#settledOrFinalized(record, interruption);
+          if (interrupted.kind === "finalized") return;
+        }
+        if (record.binding.roleHostAgent) {
+          let descendants;
+          try {
+            descendants = this.ctx.subagents.drainContinuableDescendants([
+              record.binding.roleHostAgent,
+            ]);
+          } catch (error) {
+            descendants = Promise.reject(error);
+          }
+          await this.#settledOrFinalized(record, descendants);
+        }
+        return;
+      }
+
+      const cancelled = await this.#settledOrFinalized(
+        record,
+        this.cancel(record, reason),
+      );
+      if (cancelled.kind === "finalized") return;
+      const settled = await this.#settledOrFinalized(
+        record,
+        this.#workflowResult(record),
+      );
+      if (settled.kind === "finalized") return;
+      await this.#settledOrFinalized(record, this.dispose(record));
+    } finally {
+      this.finish(record);
+    }
   }
 
   async cancelAndQuiesce({ runId } = {}) {
@@ -162,29 +302,7 @@ export class PendingChildStarts {
         (record) => runId === undefined || record.binding.runId === runId,
       );
       if (records.length === 0) return;
-      for (const record of records) record.controller.abort();
-      await Promise.allSettled(records.map((record) => record.promise));
-      await Promise.allSettled(records.map(async (record) => {
-        if (record.kind === "one-shot") {
-          await record.result?.dispose?.();
-        } else if (record.kind === "continuable" && record.result?.childId) {
-          await this.ctx.subagents.interrupt(record.result.childId, {
-            kind: "ancestor",
-            agent: record.binding.roleHostAgent,
-          });
-        } else if (record.kind === "workflow") {
-          await record.result?.cancel?.("run quiescing");
-        }
-      }));
-      const parents = [...new Set(records
-        .filter((record) => record.kind === "continuable" && record.binding.roleHostAgent)
-        .map((record) => record.binding.roleHostAgent))];
-      if (parents.length) {
-        await Promise.allSettled([
-          this.ctx.subagents.drainContinuableDescendants(parents),
-        ]);
-      }
-      for (const record of records) this.pending.delete(record);
+      await Promise.allSettled(records.map((record) => this.quiesce(record)));
     }
   }
 }

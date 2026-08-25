@@ -13,6 +13,16 @@ function operationalTimeout(error) {
   return error?.code === "structured_role_operational_timeout";
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 test("one-shot structured role persists only structured output and disposes its run", async () => {
   let disposed = false;
   let request;
@@ -195,6 +205,95 @@ test("structured role deadline bounds a child start that ignores abort forever",
 
   assert.equal(outcome.kind, "rejected");
   assert.equal(outcome.error.code, "structured_role_operational_timeout");
+  assert.equal(pendingStarts.size, 0);
+});
+
+test("hard deadline finalization releases a drain already waiting on an abort-ignoring start", { timeout: 1_000 }, async () => {
+  const startEntered = deferred();
+  const pendingStarts = new PendingChildStarts({
+    subagents: {
+      start: () => {
+        startEntered.resolve();
+        return new Promise(() => {});
+      },
+    },
+  });
+  const role = runStructuredRole(
+    { agent: { id: "researcher-host" } },
+    {
+      label: "drain-never-start-label",
+      launch: { run_id: "run-drain-never-start" },
+    },
+    { prompt: "research", outputSchema: { type: "object" } },
+    {
+      pendingStarts,
+      admission: { isOpen: async () => true },
+      persist: async () => ({ accepted: true }),
+      timeoutMs: 20,
+    },
+  );
+  await startEntered.promise;
+  const draining = pendingStarts.cancelAndQuiesce({ runId: "run-drain-never-start" });
+
+  const roleOutcome = await role.then(
+    () => ({ status: "fulfilled" }),
+    (error) => ({ status: "rejected", error }),
+  );
+  const drainOutcome = await Promise.race([
+    draining.then(() => "drained"),
+    new Promise((resolve) => setTimeout(() => resolve("still-pending"), 100)),
+  ]);
+
+  assert.equal(roleOutcome.status, "rejected");
+  assert.equal(roleOutcome.error.code, "structured_role_operational_timeout");
+  assert.equal(drainOutcome, "drained");
+  assert.equal(pendingStarts.size, 0);
+});
+
+test("late start cleanup after deadline stays detached, rejection-drained, and idempotent", { timeout: 1_000 }, async () => {
+  const startEntered = deferred();
+  const releaseStart = deferred();
+  const disposed = deferred();
+  let disposals = 0;
+  const pendingStarts = new PendingChildStarts({
+    subagents: {
+      start: () => {
+        startEntered.resolve();
+        return releaseStart.promise;
+      },
+    },
+  });
+  const role = runStructuredRole(
+    { agent: { id: "researcher-host" } },
+    {
+      label: "late-cleanup-start-label",
+      launch: { run_id: "run-late-cleanup-start" },
+    },
+    { prompt: "research", outputSchema: { type: "object" } },
+    {
+      pendingStarts,
+      admission: { isOpen: async () => true },
+      persist: async () => ({ accepted: true }),
+      timeoutMs: 20,
+    },
+  );
+  await startEntered.promise;
+  const draining = pendingStarts.cancelAndQuiesce({ runId: "run-late-cleanup-start" });
+  await assert.rejects(role, operationalTimeout);
+  await draining;
+
+  releaseStart.resolve({
+    result: Promise.reject(new Error("private late result failure")),
+    dispose: async () => {
+      disposals += 1;
+      disposed.resolve();
+      throw new Error("private late disposal failure");
+    },
+  });
+  await disposed.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(disposals, 1);
   assert.equal(pendingStarts.size, 0);
 });
 

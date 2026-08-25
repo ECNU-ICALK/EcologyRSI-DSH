@@ -18,6 +18,13 @@ const DEFAULT_PRESETS = Object.freeze([
     : ["skill", "web_search"],
 })));
 
+const START_OPEN_STATUSES = Object.freeze(["created", "running"]);
+const CONTROL_TRANSITIONS = Object.freeze({
+  pause: Object.freeze(["created", "running"]),
+  cancel: Object.freeze(["created", "running", "pausing", "paused", "cancelling"]),
+  resume: Object.freeze(["pausing", "paused"]),
+});
+
 export class RuntimeController {
   constructor(ctx, { registry = new RuntimeRunRegistry(), presetCatalog = DEFAULT_PRESETS, stageRunner = null } = {}) {
     this.ctx = ctx;
@@ -27,6 +34,7 @@ export class RuntimeController {
     this.liveReady = false;
     this.stageRunner = stageRunner;
     this.controlDrains = new Map();
+    this.runLifecycles = new Map();
   }
 
   configureStageRunner(config) {
@@ -58,11 +66,24 @@ export class RuntimeController {
 
   async startRun(binding) {
     const accepted = this.registry.start(binding);
+    const lifecycle = this.#lifecycle(binding.run_id);
+    const startEpoch = lifecycle.epoch;
+    let releaseStart;
+    const startSettlement = new Promise((resolve) => { releaseStart = resolve; });
+    const startToken = { promise: startSettlement };
+    lifecycle.start = startToken;
+    let startReleased = false;
+    const settleStart = () => {
+      if (startReleased) return;
+      startReleased = true;
+      releaseStart();
+      if (lifecycle.start === startToken) lifecycle.start = null;
+    };
     const frozen = binding.binding || {};
     const strategyModel = frozen.strategy_model_id;
     const reviewModel = frozen.review_model_id;
     try {
-      await Promise.all(this.presetCatalog.map(({ preset_id, tool_profile }) => {
+      const creations = await Promise.allSettled(this.presetCatalog.map(({ preset_id, tool_profile }) => {
         const role = preset_id.replace(/^ecology-/, "").replace(/-v\d+$/, "");
         const reviewRole = role === "sample-critic" || role === "generation-judge";
         return this.roleAgents.createRoleAgent({
@@ -80,20 +101,42 @@ export class RuntimeController {
             : frozen.resolved_policy_route_config_digest,
         });
       }));
+      const failed = creations.find((item) => item.status === "rejected");
+      if (failed) throw failed.reason;
     } catch (error) {
-      this.registry.delete(binding.run_id);
+      try {
+        await this.roleAgents.quiesceRun(binding.run_id, { dispose: true });
+        if (
+          lifecycle.epoch === startEpoch
+          && START_OPEN_STATUSES.includes(this.registry.get(binding.run_id)?.status)
+        ) {
+          this.registry.delete(binding.run_id);
+        }
+      } catch {
+        // Best-effort private cleanup must not replace the role creation error.
+      } finally {
+        settleStart();
+      }
       throw error;
+    }
+    const current = this.registry.get(binding.run_id);
+    if (
+      lifecycle.epoch !== startEpoch
+      || !START_OPEN_STATUSES.includes(current?.status)
+    ) {
+      try {
+        await this.roleAgents.quiesceRun(binding.run_id, {
+          dispose: current?.status === "cancelling" || current?.status === "cancelled",
+        });
+      } finally {
+        settleStart();
+      }
+      return this.#response(accepted);
     }
     this.stageRunner?.openLaunchFence?.(binding.run_id);
     this.liveReady = true;
-    return {
-      accepted: true,
-      run_id: accepted.run_id,
-      run_state_revision: accepted.run_state_revision,
-      stage_attempt: accepted.stage_attempt,
-      ledger_expected_revision: accepted.ledger_expected_revision,
-      idempotency_key: accepted.idempotency_key,
-    };
+    settleStart();
+    return this.#response(accepted);
   }
 
   async runStage(binding) {
@@ -122,30 +165,83 @@ export class RuntimeController {
     };
   }
   pause(binding) {
-    return this.#control(binding, {
-      intermediateStatus: "pausing",
-      status: "paused",
-      dispose: false,
+    const current = this.#current(binding.run_id);
+    const lifecycle = this.#lifecycle(binding.run_id);
+    if (current.status === "paused") return Promise.resolve(this.#response(current));
+    if (current.status === "pausing" && lifecycle.intent === "pause") {
+      return this.controlDrains.get(binding.run_id) || Promise.resolve(this.#response(current));
+    }
+    if (!CONTROL_TRANSITIONS.pause.includes(current.status)) {
+      return Promise.reject(this.#transitionError("pause", current.status));
+    }
+    const epoch = this.#advanceLifecycle(lifecycle, "pause");
+    this.#mutation(binding, "pausing");
+    this.stageRunner?.closeLaunchFence?.(binding.run_id);
+    return this.#enqueueControl(binding.run_id, async () => {
+      await this.stageRunner?.quiesceRun?.(binding.run_id);
+      await this.roleAgents.quiesceRun(binding.run_id, { dispose: false });
+      const latest = this.#current(binding.run_id);
+      if (lifecycle.epoch === epoch && latest.status === "pausing") {
+        return this.#mutation(binding, "paused");
+      }
+      return this.#response(latest);
     });
   }
 
   cancel(binding) {
-    return this.#control(binding, {
-      intermediateStatus: "cancelling",
-      status: "cancelled",
-      dispose: true,
-    });
+    const current = this.#current(binding.run_id);
+    const lifecycle = this.#lifecycle(binding.run_id);
+    if (current.status === "cancelled") return Promise.resolve(this.#response(current));
+    if (current.status === "cancelling" && lifecycle.intent === "cancel") {
+      const active = this.controlDrains.get(binding.run_id);
+      if (active) return active;
+    }
+    if (!CONTROL_TRANSITIONS.cancel.includes(current.status)) {
+      return Promise.reject(this.#transitionError("cancel", current.status));
+    }
+    const epoch = this.#advanceLifecycle(lifecycle, "cancel");
+    this.#mutation(binding, "cancelling");
+    this.stageRunner?.closeLaunchFence?.(binding.run_id);
+    return this.#enqueueControl(binding.run_id, async () => {
+      await this.stageRunner?.quiesceRun?.(binding.run_id);
+      await this.roleAgents.quiesceRun(binding.run_id, { dispose: true });
+      const latest = this.#current(binding.run_id);
+      if (lifecycle.epoch === epoch && latest.status === "cancelling") {
+        return this.#mutation(binding, "cancelled");
+      }
+      return this.#response(latest);
+    }, { continueAfterRejection: true });
   }
   async resume(binding) {
-    const draining = this.controlDrains.get(binding.run_id);
-    if (draining) await draining;
-    const current = this.registry.get(binding.run_id);
-    if (current?.status === "cancelled" || current?.status === "cancelling") {
-      throw new Error("cancelled runtime run cannot resume");
+    const current = this.#current(binding.run_id);
+    const lifecycle = this.#lifecycle(binding.run_id);
+    const resumable = current.status === "paused"
+      || (
+        current.status === "pausing"
+        && lifecycle.intent === "pause"
+        && this.controlDrains.has(binding.run_id)
+      );
+    if (!resumable) {
+      throw this.#transitionError("resume", current.status);
     }
-    const accepted = this.#mutation(binding, "running");
-    this.stageRunner?.openLaunchFence?.(binding.run_id);
-    return accepted;
+    const epoch = this.#advanceLifecycle(lifecycle, "resume");
+    return await this.#enqueueControl(binding.run_id, async () => {
+      if (lifecycle.start?.promise) await lifecycle.start.promise;
+      const latest = this.#current(binding.run_id);
+      if (
+        lifecycle.epoch !== epoch
+        || latest.status === "cancelled"
+        || latest.status === "cancelling"
+      ) {
+        throw this.#transitionError("resume", latest.status);
+      }
+      if (!CONTROL_TRANSITIONS.resume.includes(latest.status)) {
+        throw this.#transitionError("resume", latest.status);
+      }
+      const resumed = this.#mutation(binding, "running");
+      this.stageRunner?.openLaunchFence?.(binding.run_id);
+      return resumed;
+    });
   }
 
   async status(runId) {
@@ -163,6 +259,10 @@ export class RuntimeController {
 
   #mutation(binding, status) {
     const accepted = this.registry.transition(binding.run_id, binding, status);
+    return this.#response(accepted);
+  }
+
+  #response(accepted) {
     return {
       accepted: true,
       run_id: accepted.run_id,
@@ -173,28 +273,51 @@ export class RuntimeController {
     };
   }
 
-  #beginControl(binding, { intermediateStatus, status, dispose }) {
-    this.#mutation(binding, intermediateStatus);
-    this.stageRunner?.closeLaunchFence?.(binding.run_id);
-    return Promise.resolve().then(async () => {
-      await this.stageRunner?.quiesceRun?.(binding.run_id);
-      await this.roleAgents.quiesceRun(binding.run_id, { dispose });
-      return this.#mutation(binding, status);
-    });
+  #current(runId) {
+    const current = this.registry.get(runId);
+    if (!current) throw new Error("unknown runtime run");
+    return current;
   }
 
-  #control(binding, options) {
-    const prior = this.controlDrains.get(binding.run_id);
+  #lifecycle(runId) {
+    if (!this.runLifecycles.has(runId)) {
+      this.runLifecycles.set(runId, { epoch: 0, intent: null, start: null });
+    }
+    return this.runLifecycles.get(runId);
+  }
+
+  #advanceLifecycle(lifecycle, intent) {
+    lifecycle.epoch += 1;
+    lifecycle.intent = intent;
+    return lifecycle.epoch;
+  }
+
+  #transitionError(action, status) {
+    const terminal = status === "cancelled" || status === "cancelling";
+    const error = new Error(
+      terminal && action === "resume"
+        ? "cancelled runtime run cannot resume"
+        : `runtime run cannot ${action} from ${status}`,
+    );
+    error.code = "runtime_control_transition_invalid";
+    return error;
+  }
+
+  #enqueueControl(runId, execute, { continueAfterRejection = false } = {}) {
+    const prior = this.controlDrains.get(runId);
     const operation = prior
-      ? prior.then(() => this.#beginControl(binding, options))
-      : this.#beginControl(binding, options);
+      ? continueAfterRejection
+        ? prior.then(execute, execute)
+        : prior.then(execute)
+      : Promise.resolve().then(execute);
     let tracked;
     tracked = operation.finally(() => {
-      if (this.controlDrains.get(binding.run_id) === tracked) {
-        this.controlDrains.delete(binding.run_id);
+      if (this.controlDrains.get(runId) === tracked) {
+        this.controlDrains.delete(runId);
       }
     });
-    this.controlDrains.set(binding.run_id, tracked);
+    tracked.catch(() => {});
+    this.controlDrains.set(runId, tracked);
     return tracked;
   }
 }

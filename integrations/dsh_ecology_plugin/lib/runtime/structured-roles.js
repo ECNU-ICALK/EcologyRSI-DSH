@@ -217,18 +217,24 @@ export async function runStructuredRole(
                 } catch {
                   // A late result accessor is observational cleanup only.
                 }
-                detachCleanup(() => lateRun?.dispose?.());
+                detachCleanup(() => typeof pendingStarts.dispose === "function"
+                  ? pendingStarts.dispose(pending)
+                  : lateRun?.dispose?.());
               },
               () => {},
             );
           } else {
-            detachCleanup(() => run.dispose?.());
+            detachCleanup(() => typeof pendingStarts.dispose === "function"
+              ? pendingStarts.dispose(pending)
+              : run.dispose?.());
           }
           detachCleanup(() => pendingStarts.finish?.(pending));
         } else {
           try {
             if (run !== undefined) {
-              await withinDeadline(() => run.dispose?.());
+              await withinDeadline(() => typeof pendingStarts.dispose === "function"
+                ? pendingStarts.dispose(pending)
+                : run.dispose?.());
             }
           } finally {
             if (deadlineExpired()) {

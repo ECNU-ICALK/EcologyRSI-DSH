@@ -81,6 +81,16 @@ function blockFor(milliseconds) {
   Atomics.wait(state, 0, 0, milliseconds);
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function samplePlanContext() {
   return {
     schema_version: "ecologyrsi-dsh.sample-routing-wave/1",
@@ -1050,6 +1060,79 @@ test("sample planner deadline bounds cancel-ignoring Workflow result and disposa
   assert.equal(cancelled, true);
   assert.equal(disposeCalled, true);
   assert.equal(runner.activeWorkflows.size, 0);
+});
+
+test("sample planner hard deadline releases a drain waiting on its cancel-ignoring Workflow", { timeout: 1_000 }, async () => {
+  const workflowStarted = deferred();
+  const never = new Promise(() => {});
+  const { runner } = workflowDeadlineHarness({
+    startWorkflow: () => {
+      workflowStarted.resolve();
+      return {
+        result: never,
+        cancel: () => {},
+        dispose: () => never,
+      };
+    },
+  });
+  const role = runner.run(samplePlanBinding());
+  await workflowStarted.promise;
+  const draining = runner.quiesceRun("run-workflow-deadline");
+
+  const roleOutcome = await role.then(
+    () => ({ status: "fulfilled" }),
+    (error) => ({ status: "rejected", error }),
+  );
+  const drainOutcome = await Promise.race([
+    draining.then(() => "drained"),
+    new Promise((resolve) => setTimeout(() => resolve("still-pending"), 100)),
+  ]);
+
+  assert.equal(roleOutcome.status, "rejected");
+  assert.equal(roleOutcome.error.code, "structured_role_operational_timeout");
+  assert.equal(drainOutcome, "drained");
+  assert.equal(runner.activeWorkflows.size, 0);
+  assert.equal(runner.pendingStarts.size, 0);
+});
+
+test("reentrant Workflow quiescence rescans the active publication gap before returning", { timeout: 1_000 }, async () => {
+  const never = new Promise(() => {});
+  const workflowStartEntered = deferred();
+  let harness;
+  let draining;
+  let cancels = 0;
+  let disposals = 0;
+  harness = workflowDeadlineHarness({
+    startWorkflow: () => {
+      draining = harness.runner.quiesceRun("run-workflow-deadline");
+      workflowStartEntered.resolve();
+      return {
+        result: never,
+        cancel: () => { cancels += 1; },
+        dispose: () => { disposals += 1; return never; },
+      };
+    },
+  });
+
+  const role = harness.runner.run(samplePlanBinding());
+  await workflowStartEntered.promise;
+  const drainSnapshot = draining.then(() => ({
+    active: harness.runner.activeWorkflows.size,
+    pending: harness.runner.pendingStarts.size,
+  }));
+  const [roleOutcome, snapshot] = await Promise.all([
+    role.then(
+      () => ({ status: "fulfilled" }),
+      (error) => ({ status: "rejected", error }),
+    ),
+    drainSnapshot,
+  ]);
+
+  assert.equal(roleOutcome.status, "rejected");
+  assert.equal(roleOutcome.error.code, "structured_role_operational_timeout");
+  assert.deepEqual(snapshot, { active: 0, pending: 0 });
+  assert.equal(cancels, 1);
+  assert.equal(disposals, 1);
 });
 
 test("sample planner normal cleanup stays active through disposal and drains rejection", async () => {

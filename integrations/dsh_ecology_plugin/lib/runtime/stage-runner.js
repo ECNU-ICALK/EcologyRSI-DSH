@@ -808,7 +808,14 @@ export class NativeStageRunner {
       if (!timedOut) {
         timedOut = true;
         persistenceController.abort();
-        try { workflow?.cancel?.("structured role operational timeout"); } catch {}
+        if (pendingWorkflow !== null) {
+          detach(() => this.pendingStarts.cancel(
+            pendingWorkflow,
+            "structured role operational timeout",
+          ));
+        } else {
+          try { workflow?.cancel?.("structured role operational timeout"); } catch {}
+        }
       }
       return timeoutError;
     };
@@ -907,7 +914,7 @@ export class NativeStageRunner {
       );
       workflow = pendingWorkflow.result;
       throwIfExpired();
-      active = { runId: binding.run_id, workflow };
+      active = { runId: binding.run_id, workflow, lifecycle: pendingWorkflow };
       this.activeWorkflows.add(active);
       const settled = await withinDeadline(() => workflow.result);
       throwIfExpired();
@@ -967,10 +974,14 @@ export class NativeStageRunner {
         if (deadlineExpired()) expireDeadline();
         if (timedOut) {
           if (active !== null) this.activeWorkflows.delete(active);
-          detach(() => workflow.dispose?.());
+          detach(() => pendingWorkflow !== null
+            ? this.pendingStarts.dispose(pendingWorkflow)
+            : workflow.dispose?.());
         } else {
           try {
-            await withinDeadline(() => workflow.dispose?.());
+            await withinDeadline(() => pendingWorkflow !== null
+              ? this.pendingStarts.dispose(pendingWorkflow)
+              : workflow.dispose?.());
           } catch (error) {
             if (deadlineExpired() || error === timeoutError) expireDeadline();
             // A normal private disposer failure is drained, never surfaced.
@@ -999,15 +1010,27 @@ export class NativeStageRunner {
     this.pendingStarts.openRun(runId);
   }
 
+  async #drainLaunchLifecycles(runId) {
+    while (true) {
+      const workflows = [...this.activeWorkflows].filter((item) => item.runId === runId);
+      const activeDrains = workflows.map((item) => item.lifecycle
+        ? this.pendingStarts.quiesce(item.lifecycle)
+        : Promise.resolve().then(() => item.workflow.cancel?.("run quiescing")));
+      await this.pendingStarts.cancelAndQuiesce({ runId });
+      await Promise.allSettled(activeDrains);
+      for (const item of workflows) this.activeWorkflows.delete(item);
+      if (
+        !this.pendingStarts.hasRun(runId)
+        && ![...this.activeWorkflows].some((item) => item.runId === runId)
+      ) break;
+    }
+  }
+
   async quiesceRun(runId) {
     this.closeLaunchFence(runId);
-    const workflows = [...this.activeWorkflows].filter((item) => item.runId === runId);
-    for (const item of workflows) item.workflow.cancel?.("run quiescing");
-    await Promise.allSettled(workflows.map((item) => item.workflow.result));
-    await Promise.allSettled(workflows.map((item) => item.workflow.dispose?.()));
-    for (const item of workflows) this.activeWorkflows.delete(item);
-    await this.pendingStarts.cancelAndQuiesce({ runId });
+    await this.#drainLaunchLifecycles(runId);
     await this.providerStageGate.drainRun?.(runId);
+    await this.#drainLaunchLifecycles(runId);
     this.childBindings.revokeRun(runId);
   }
 }
