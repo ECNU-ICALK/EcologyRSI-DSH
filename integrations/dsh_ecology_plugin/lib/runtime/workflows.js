@@ -19,6 +19,12 @@ function positiveInteger(value, name, fallback) {
   return resolved;
 }
 
+function launchAdmissionClosedError() {
+  const error = new Error("provider stage admission is closed");
+  error.code = "provider_stage_admission_closed";
+  return error;
+}
+
 export function startHomogeneousWorkflow(roleHost, compiledSpec, items) {
   const script = WORKFLOW_SCRIPTS[compiledSpec.template_id];
   if (!script) throw new Error("unknown fixed workflow template");
@@ -63,70 +69,123 @@ export function startHomogeneousWorkflow(roleHost, compiledSpec, items) {
 }
 
 export class PendingChildStarts {
-  constructor(ctx) {
+  constructor(ctx, { launchFence = null } = {}) {
     this.ctx = ctx;
+    this.launchFence = launchFence;
     this.pending = new Set();
+    this.closedRuns = new Set();
   }
 
   get size() { return this.pending.size; }
 
   finish(record) { this.pending.delete(record); }
 
-  start(kind, request, binding = {}) {
-    if (!new Set(["one-shot", "continuable"]).has(kind)) throw new Error("unsupported child start kind");
+  closeRun(runId) { this.closedRuns.add(runId); }
+
+  openRun(runId) { this.closedRuns.delete(runId); }
+
+  assertRunOpen(runId) {
+    if (this.closedRuns.has(runId)) throw launchAdmissionClosedError();
+    this.launchFence?.assertRunOpen?.(runId);
+  }
+
+  #record(kind, binding, operation) {
+    this.assertRunOpen(binding.runId);
     const controller = new AbortController();
-    const record = { kind, binding, controller, signal: controller.signal, result: null, error: null, promise: null };
+    let resolveStart;
+    let rejectStart;
+    const start = new Promise((resolve, reject) => {
+      resolveStart = resolve;
+      rejectStart = reject;
+    });
+    const record = {
+      kind,
+      binding,
+      controller,
+      signal: controller.signal,
+      result: null,
+      error: null,
+      promise: null,
+    };
+    record.promise = start.then(
+      (result) => { record.result = result; return result; },
+      (error) => { record.error = error; throw error; },
+    );
+    record.promise.catch(() => {});
     this.pending.add(record);
     try {
-      let operation;
-      if (kind === "one-shot") {
-        const { provider, ...childRequest } = request;
-        operation = this.ctx.subagents.start(provider, {
-          ...childRequest,
-          signal: controller.signal,
-        });
-      } else {
-        operation = this.ctx.subagents.startContinuable({
-          ...request,
-          signal: controller.signal,
-        });
-      }
-      record.promise = Promise.resolve(operation).then(
-        (result) => { record.result = result; return result; },
-        (error) => { record.error = error; throw error; },
-      );
+      const value = operation(controller.signal);
+      if (kind === "workflow") record.result = value;
+      resolveStart(value);
     } catch (error) {
       record.error = error;
-      record.promise = Promise.reject(error);
+      rejectStart(error);
     }
-    record.promise.catch(() => {});
+    return record;
+  }
+
+  start(kind, request, binding = {}) {
+    if (!new Set(["one-shot", "continuable"]).has(kind)) throw new Error("unsupported child start kind");
+    return this.#record(kind, binding, (signal) => {
+      if (kind === "one-shot") {
+        const { provider, ...childRequest } = request;
+        return this.ctx.subagents.start(provider, {
+          ...childRequest,
+          signal,
+        });
+      }
+      return this.ctx.subagents.startContinuable({
+        ...request,
+        signal,
+      });
+    });
+  }
+
+  startWorkflow(operation, binding = {}) {
+    if (typeof operation !== "function") throw new Error("workflow start operation is required");
+    const record = this.#record("workflow", binding, operation);
+    if (record.error) {
+      this.pending.delete(record);
+      throw record.error;
+    }
+    if (!record.result || typeof record.result !== "object" || typeof record.result.then === "function") {
+      this.pending.delete(record);
+      throw new Error("workflow start must return a synchronous run handle");
+    }
     return record;
   }
 
   async cancelAndQuiesce({ runId } = {}) {
-    const records = [...this.pending].filter(
-      (record) => runId === undefined || record.binding.runId === runId,
-    );
-    for (const record of records) record.controller.abort();
-    await Promise.allSettled(records.map((record) => record.promise));
-    for (const record of records) {
-      if (record.kind === "one-shot") {
-        await record.result?.dispose?.();
-      } else if (record.result?.childId) {
-        await this.ctx.subagents.interrupt(record.result.childId, {
-          kind: "ancestor",
-          agent: record.binding.roleHostAgent,
-        });
+    if (runId !== undefined) this.closeRun(runId);
+    while (true) {
+      const records = [...this.pending].filter(
+        (record) => runId === undefined || record.binding.runId === runId,
+      );
+      if (records.length === 0) return;
+      for (const record of records) record.controller.abort();
+      await Promise.allSettled(records.map((record) => record.promise));
+      await Promise.allSettled(records.map(async (record) => {
+        if (record.kind === "one-shot") {
+          await record.result?.dispose?.();
+        } else if (record.kind === "continuable" && record.result?.childId) {
+          await this.ctx.subagents.interrupt(record.result.childId, {
+            kind: "ancestor",
+            agent: record.binding.roleHostAgent,
+          });
+        } else if (record.kind === "workflow") {
+          await record.result?.cancel?.("run quiescing");
+        }
+      }));
+      const parents = [...new Set(records
+        .filter((record) => record.kind === "continuable" && record.binding.roleHostAgent)
+        .map((record) => record.binding.roleHostAgent))];
+      if (parents.length) {
+        await Promise.allSettled([
+          this.ctx.subagents.drainContinuableDescendants(parents),
+        ]);
       }
+      for (const record of records) this.pending.delete(record);
     }
-    const parents = [...new Set(records
-      .filter((record) => record.kind === "continuable" && record.binding.roleHostAgent)
-      .map((record) => record.binding.roleHostAgent))];
-    if (parents.length) await this.ctx.subagents.drainContinuableDescendants(parents);
-    for (const record of records) this.pending.delete(record);
-    if ([...this.pending].some(
-      (record) => runId === undefined || record.binding.runId === runId,
-    )) throw new Error("pending child starts did not quiesce");
   }
 }
 

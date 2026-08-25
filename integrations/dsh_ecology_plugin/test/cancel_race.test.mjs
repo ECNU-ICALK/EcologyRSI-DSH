@@ -15,6 +15,16 @@ function binding(overrides = {}) {
   };
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 test("runtime creation freezes the Python-owned initial run status", () => {
   const registry = new RuntimeRunRegistry();
   registry.start(binding({ binding: { initial_run_status: "running" } }));
@@ -66,6 +76,126 @@ test("pause quiesces but retains role-hosts for exact resume", async () => {
   assert.equal(controller.registry.get("run-1").status, "paused");
   await controller.resume(binding({ idempotency_key: "resume-1" }));
   assert.equal(controller.registry.get("run-1").status, "running");
+});
+
+test("resume waits for the pause drain before reopening launch admission", async () => {
+  const drainEntered = deferred();
+  const releaseDrain = deferred();
+  const calls = [];
+  const controller = new RuntimeController({}, {
+    stageRunner: {
+      closeLaunchFence: (runId) => calls.push(["close", runId]),
+      quiesceRun: async (runId) => {
+        calls.push(["drain", runId]);
+        drainEntered.resolve();
+        await releaseDrain.promise;
+      },
+      openLaunchFence: (runId) => calls.push(["open", runId]),
+    },
+  });
+  controller.registry.start(binding());
+  controller.roleAgents = { quiesceRun: async () => {} };
+
+  const pausing = controller.pause(binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: "pause-drain-1",
+  }));
+  await drainEntered.promise;
+  const resuming = controller.resume(binding({
+    run_state_revision: 9,
+    ledger_expected_revision: 13,
+    idempotency_key: "resume-after-drain-1",
+  }));
+  let resumeSettled = false;
+  void resuming.finally(() => { resumeSettled = true; });
+  await Promise.resolve();
+
+  assert.equal(resumeSettled, false);
+  assert.deepEqual(calls, [["close", "run-1"], ["drain", "run-1"]]);
+
+  releaseDrain.resolve();
+  await pausing;
+  await resuming;
+
+  assert.deepEqual(calls, [
+    ["close", "run-1"],
+    ["drain", "run-1"],
+    ["open", "run-1"],
+  ]);
+  assert.equal(controller.registry.get("run-1").status, "running");
+});
+
+test("cancelled runs cannot reopen their launch fence", async () => {
+  const calls = [];
+  const controller = new RuntimeController({}, {
+    stageRunner: {
+      closeLaunchFence: (runId) => calls.push(["close", runId]),
+      quiesceRun: async () => {},
+      openLaunchFence: (runId) => calls.push(["open", runId]),
+    },
+  });
+  controller.registry.start(binding());
+  controller.roleAgents = { quiesceRun: async () => {} };
+
+  await controller.cancel(binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: "cancel-terminal-1",
+  }));
+  await assert.rejects(
+    controller.resume(binding({
+      run_state_revision: 9,
+      ledger_expected_revision: 13,
+      idempotency_key: "resume-cancelled-1",
+    })),
+    /cancelled runtime run cannot resume/,
+  );
+
+  assert.deepEqual(calls, [["close", "run-1"]]);
+  assert.equal(controller.registry.get("run-1").status, "cancelled");
+});
+
+test("cancel queued during pause drain cannot be overwritten by the older control", async () => {
+  const drainEntered = [deferred(), deferred()];
+  const releaseDrain = [deferred(), deferred()];
+  let drainsStarted = 0;
+  const controller = new RuntimeController({}, {
+    stageRunner: {
+      closeLaunchFence: () => {},
+      quiesceRun: async () => {
+        const index = drainsStarted;
+        drainsStarted += 1;
+        drainEntered[index].resolve();
+        await releaseDrain[index].promise;
+      },
+    },
+  });
+  controller.registry.start(binding());
+  controller.roleAgents = { quiesceRun: async () => {} };
+
+  const pausing = controller.pause(binding({
+    run_state_revision: 8,
+    ledger_expected_revision: 12,
+    idempotency_key: "pause-before-cancel-1",
+  }));
+  await drainEntered[0].promise;
+  const cancelling = controller.cancel(binding({
+    run_state_revision: 9,
+    ledger_expected_revision: 13,
+    idempotency_key: "cancel-after-pause-1",
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const drainsBeforePauseRelease = drainsStarted;
+
+  releaseDrain[0].resolve();
+  await pausing;
+  await drainEntered[1].promise;
+  releaseDrain[1].resolve();
+  await cancelling;
+
+  assert.equal(drainsBeforePauseRelease, 1);
+  assert.equal(controller.registry.get("run-1").status, "cancelled");
 });
 
 test("late concurrent stage completion cannot reopen a paused run", async () => {

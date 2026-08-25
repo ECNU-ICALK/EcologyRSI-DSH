@@ -448,7 +448,9 @@ export class NativeStageRunner {
       minimumIntervalMs: structuredStageMinIntervalMs,
       failureCooldownMs: structuredStageFailureCooldownMs,
     });
-    this.pendingStarts = new PendingChildStarts(ctx);
+    this.pendingStarts = new PendingChildStarts(ctx, {
+      launchFence: this.providerStageGate,
+    });
     this.childBindings = new ChildBindingRegistry();
     this.activeWorkflows = new Set();
     this.schemaCache = new Map();
@@ -790,6 +792,7 @@ export class NativeStageRunner {
     const persistenceController = new AbortController();
     const timeoutError = structuredOperationalTimeout();
     let workflow;
+    let pendingWorkflow = null;
     let active = null;
     let timeout = null;
     let timedOut = false;
@@ -887,18 +890,22 @@ export class NativeStageRunner {
     );
     try {
       throwIfExpired();
-      workflow = startHomogeneousWorkflow(
-        roleHost,
-        {
-          template_id: "ecology-one-shot-v1",
-          workflow_name: workflowName,
-          max_total_agents: 1,
-          max_concurrent: 1,
-          max_items: 1,
-          sync_timeout_ms: deadline.timeoutMs,
-        },
-        [{ label: reservation.label, prompt, schema: outputSchema }],
+      pendingWorkflow = this.pendingStarts.startWorkflow(
+        () => startHomogeneousWorkflow(
+          roleHost,
+          {
+            template_id: "ecology-one-shot-v1",
+            workflow_name: workflowName,
+            max_total_agents: 1,
+            max_concurrent: 1,
+            max_items: 1,
+            sync_timeout_ms: deadline.timeoutMs,
+          },
+          [{ label: reservation.label, prompt, schema: outputSchema }],
+        ),
+        { runId: binding.run_id, roleHostAgent: roleHost.agent },
       );
+      workflow = pendingWorkflow.result;
       throwIfExpired();
       active = { runId: binding.run_id, workflow };
       this.activeWorkflows.add(active);
@@ -973,12 +980,27 @@ export class NativeStageRunner {
         }
       }
       if (timeout !== null) clearTimeout(timeout);
+      if (pendingWorkflow !== null) this.pendingStarts.finish(pendingWorkflow);
       if (deadlineExpired()) throw expireDeadline();
     }
   }
 
+  closeLaunchFence(runId) {
+    this.pendingStarts.closeRun(runId);
+    if (typeof this.providerStageGate.closeRun === "function") {
+      this.providerStageGate.closeRun(runId);
+    } else {
+      this.providerStageGate.cancelRun?.(runId);
+    }
+  }
+
+  openLaunchFence(runId) {
+    this.providerStageGate.openRun?.(runId);
+    this.pendingStarts.openRun(runId);
+  }
+
   async quiesceRun(runId) {
-    this.providerStageGate.cancelRun?.(runId);
+    this.closeLaunchFence(runId);
     const workflows = [...this.activeWorkflows].filter((item) => item.runId === runId);
     for (const item of workflows) item.workflow.cancel?.("run quiescing");
     await Promise.allSettled(workflows.map((item) => item.workflow.result));

@@ -61,12 +61,14 @@ export class ProviderStageGate {
     this.tails = new Map();
     this.nextAllowedAt = new Map();
     this.records = new Set();
+    this.closedRuns = new Set();
   }
 
   async run(provider, operation, { runId = null } = {}) {
     const providerKey = String(provider || "default");
     const key = `${providerKey}\u0000${String(runId || "unscoped")}`;
     if (typeof operation !== "function") throw new Error("provider stage operation is required");
+    this.assertRunOpen(runId);
     const previous = this.tails.get(key) || Promise.resolve();
     const controller = new AbortController();
     const record = { runId, controller, promise: null };
@@ -83,6 +85,7 @@ export class ProviderStageGate {
         );
       }
       if (controller.signal.aborted) throw admissionClosedError();
+      this.assertRunOpen(runId);
       try {
         return await operation();
       } finally {
@@ -127,8 +130,24 @@ export class ProviderStageGate {
     }
   }
 
+  closeRun(runId) {
+    this.closedRuns.add(runId);
+    this.cancelRun(runId);
+  }
+
+  openRun(runId) {
+    this.closedRuns.delete(runId);
+  }
+
+  assertRunOpen(runId) {
+    if (this.closedRuns.has(runId)) throw admissionClosedError();
+  }
+
   async drainRun(runId) {
-    const selected = [...this.records].filter((record) => record.runId === runId);
-    await Promise.allSettled(selected.map((record) => record.promise));
+    while (true) {
+      const selected = [...this.records].filter((record) => record.runId === runId);
+      if (selected.length === 0) return;
+      await Promise.allSettled(selected.map((record) => record.promise));
+    }
   }
 }

@@ -26,6 +26,7 @@ export class RuntimeController {
     this.roleAgents = new RoleAgentManager(ctx);
     this.liveReady = false;
     this.stageRunner = stageRunner;
+    this.controlDrains = new Map();
   }
 
   configureStageRunner(config) {
@@ -83,6 +84,7 @@ export class RuntimeController {
       this.registry.delete(binding.run_id);
       throw error;
     }
+    this.stageRunner?.openLaunchFence?.(binding.run_id);
     this.liveReady = true;
     return {
       accepted: true,
@@ -119,20 +121,32 @@ export class RuntimeController {
       first_call_verified: true,
     };
   }
-  async pause(binding) {
-    this.#mutation(binding, "pausing");
-    await this.stageRunner?.quiesceRun?.(binding.run_id);
-    await this.roleAgents.quiesceRun(binding.run_id, { dispose: false });
-    return this.#mutation(binding, "paused");
+  pause(binding) {
+    return this.#control(binding, {
+      intermediateStatus: "pausing",
+      status: "paused",
+      dispose: false,
+    });
   }
 
-  async cancel(binding) {
-    this.#mutation(binding, "cancelling");
-    await this.stageRunner?.quiesceRun?.(binding.run_id);
-    await this.roleAgents.quiesceRun(binding.run_id, { dispose: true });
-    return this.#mutation(binding, "cancelled");
+  cancel(binding) {
+    return this.#control(binding, {
+      intermediateStatus: "cancelling",
+      status: "cancelled",
+      dispose: true,
+    });
   }
-  async resume(binding) { return this.#mutation(binding, "running"); }
+  async resume(binding) {
+    const draining = this.controlDrains.get(binding.run_id);
+    if (draining) await draining;
+    const current = this.registry.get(binding.run_id);
+    if (current?.status === "cancelled" || current?.status === "cancelling") {
+      throw new Error("cancelled runtime run cannot resume");
+    }
+    const accepted = this.#mutation(binding, "running");
+    this.stageRunner?.openLaunchFence?.(binding.run_id);
+    return accepted;
+  }
 
   async status(runId) {
     const current = this.registry.get(runId);
@@ -157,5 +171,30 @@ export class RuntimeController {
       ledger_expected_revision: accepted.ledger_expected_revision,
       idempotency_key: accepted.idempotency_key,
     };
+  }
+
+  #beginControl(binding, { intermediateStatus, status, dispose }) {
+    this.#mutation(binding, intermediateStatus);
+    this.stageRunner?.closeLaunchFence?.(binding.run_id);
+    return Promise.resolve().then(async () => {
+      await this.stageRunner?.quiesceRun?.(binding.run_id);
+      await this.roleAgents.quiesceRun(binding.run_id, { dispose });
+      return this.#mutation(binding, status);
+    });
+  }
+
+  #control(binding, options) {
+    const prior = this.controlDrains.get(binding.run_id);
+    const operation = prior
+      ? prior.then(() => this.#beginControl(binding, options))
+      : this.#beginControl(binding, options);
+    let tracked;
+    tracked = operation.finally(() => {
+      if (this.controlDrains.get(binding.run_id) === tracked) {
+        this.controlDrains.delete(binding.run_id);
+      }
+    });
+    this.controlDrains.set(binding.run_id, tracked);
+    return tracked;
   }
 }

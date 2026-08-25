@@ -105,3 +105,28 @@ test("provider stage gate revokes a run waiting for its own interval", async () 
   );
   assert.equal(targetStarted, false);
 });
+
+test("a closed provider launch fence rejects future work until explicitly reopened", async () => {
+  const gate = new ProviderStageGate({ minimumIntervalMs: 0 });
+  let operations = 0;
+
+  gate.closeRun("run-target");
+  await gate.drainRun("run-target");
+  await assert.rejects(
+    gate.run(
+      "pjlab",
+      async () => { operations += 1; },
+      { runId: "run-target" },
+    ),
+    (error) => error.code === "provider_stage_admission_closed",
+  );
+  assert.equal(operations, 0);
+
+  gate.openRun("run-target");
+  await gate.run(
+    "pjlab",
+    async () => { operations += 1; },
+    { runId: "run-target" },
+  );
+  assert.equal(operations, 1);
+});
