@@ -115,7 +115,7 @@ class AlgorithmCompilationTests(unittest.TestCase):
                 "parameter_sweep@1": "bounded-parent-sweep/6",
                 "adaptive_local@1": "bounded-feedback-local-search/6",
                 "dsh_authenticated@1": "authenticated-structured-proposal/7",
-                "autonomous_model@1": "per-generation-research-runtime-adoption/8",
+                "autonomous_model@1": "per-generation-research-runtime-adoption/9",
             },
         )
         self.assertEqual(

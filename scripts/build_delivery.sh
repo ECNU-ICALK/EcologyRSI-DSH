@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+export PYTHONUTF8=1
+
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="$("$SCRIPT_DIR/select_python.sh")"
@@ -11,6 +15,7 @@ PLUGIN_DIST="$PLUGIN_ROOT/dist"
 cd "$ROOT_DIR"
 
 mkdir -p "$PLUGIN_DIST"
+find "$PLUGIN_DIST" -maxdepth 1 -type f -name '*.tgz' -delete
 npm pack "$PLUGIN_ROOT" --pack-destination "$PLUGIN_DIST"
 
 if ! command -v uv >/dev/null 2>&1; then

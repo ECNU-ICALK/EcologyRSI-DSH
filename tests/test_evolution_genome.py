@@ -1,31 +1,22 @@
 from __future__ import annotations
 
-import json
 import math
-from pathlib import Path
 import unittest
 
-from ecologyrsi_dsh.core.models import Proposal, TaskManifest
 from ecologyrsi_dsh.evolution.genome import (
     EcologyEvolutionPluginGenome,
     FrozenRunInitialization,
     GenomeMutationContextV1,
+    TRUST_REGION_MUTATION_OPERATOR_ID,
     apply_genome_mutation,
     deep_freeze_json,
     deep_thaw_json,
-    legacy_genome_from_proposal,
     materialize_seed_genome,
-    migrate_legacy_seed,
 )
-from ecologyrsi_dsh.knowledge.models import KnowledgeSnapshot
-from ecologyrsi_dsh.knowledge.algorithms import compile_algorithm_spec
+from ecologyrsi_dsh.evolution.workflow_ir import resolve_candidate_agent_profile
 from ecologyrsi_dsh.knowledge.program_registry import (
-    LEGACY_PROGRAM_CATALOG_0_2_2,
     current_program_registry,
 )
-
-
-_FIXTURES = Path(__file__).with_name("fixtures")
 
 
 def _initialization(**changes: object) -> FrozenRunInitialization:
@@ -59,7 +50,248 @@ def _seed_genome() -> EcologyEvolutionPluginGenome:
     )
 
 
+def _mutation_context(
+    parent: EcologyEvolutionPluginGenome,
+    *,
+    generation: int = 0,
+    slot_index: int = 0,
+    mutation_operator_id: str = "bounded-single-parent-mutation@1",
+) -> GenomeMutationContextV1:
+    return GenomeMutationContextV1(
+        run_id="run:genome-test",
+        generation=generation,
+        slot_index=slot_index,
+        slot_seed=42,
+        parent_candidate_id=None if generation == 0 else "candidate:parent",
+        parent_genome_digest=parent.genome_digest,
+        generation_batch_digest="e" * 64,
+        research_iteration_digest="f" * 64,
+        knowledge_snapshot_digest="0" * 64,
+        mutation_budget_digest="1" * 64,
+        mutation_operator_id=mutation_operator_id,
+    )
+
+
 class EvolutionGenomeTests(unittest.TestCase):
+    def test_all_research_mutation_axes_change_registered_behavior(self) -> None:
+        parent = _seed_genome()
+        registry = current_program_registry()
+        cases = (
+            (
+                {
+                    "op": "set_bounded_parameter",
+                    "name": "ridge_alpha",
+                    "value": 0.2,
+                },
+                lambda child: self.assertEqual(
+                    child.scientific_program["parameter_overrides"]["ridge_alpha"],
+                    0.2,
+                ),
+            ),
+            (
+                {
+                    "op": "select_registered_pipeline",
+                    "predictor_id": "greenhouse-targetwise-ridge@1",
+                },
+                lambda child: self.assertEqual(
+                    child.scientific_program["predictor_ref"]["id"],
+                    "greenhouse-targetwise-ridge@1",
+                ),
+            ),
+            (
+                {
+                    "op": "select_instruction_template",
+                    "role": "sample-planner",
+                    "instruction_template_id": "sample-planner-anomaly-aware@1",
+                },
+                lambda child: self.assertEqual(
+                    resolve_candidate_agent_profile(child, registry)["skill_name"],
+                    "origin-vector-forecasting-anomaly-aware",
+                ),
+            ),
+        )
+
+        for slot_index, (operation, assertion) in enumerate(cases):
+            with self.subTest(operation=operation["op"]):
+                child = apply_genome_mutation(
+                    parent,
+                    {
+                        "schema_version": "ecologyrsi-dsh.genome-mutation/1",
+                        "operations": [operation],
+                    },
+                    _mutation_context(
+                        parent,
+                        slot_index=slot_index,
+                        mutation_operator_id=TRUST_REGION_MUTATION_OPERATOR_ID,
+                    ),
+                    registry,
+                )
+                assertion(child)
+                self.assertNotEqual(child.behavior_digest, parent.behavior_digest)
+
+    def test_trust_region_mutation_requires_one_axis(self) -> None:
+        parent = _seed_genome()
+        with self.assertRaisesRegex(ValueError, "exactly one operation"):
+            apply_genome_mutation(
+                parent,
+                {
+                    "schema_version": "ecologyrsi-dsh.genome-mutation/1",
+                    "operations": [
+                        {
+                            "op": "set_bounded_parameter",
+                            "name": "ridge_alpha",
+                            "value": 0.2,
+                        },
+                        {
+                            "op": "set_bounded_parameter",
+                            "name": "history_steps",
+                            "value": 7,
+                        },
+                    ],
+                },
+                _mutation_context(
+                    parent,
+                    mutation_operator_id=TRUST_REGION_MUTATION_OPERATOR_ID,
+                ),
+                current_program_registry(),
+            )
+
+    def test_trust_region_rejects_large_normalized_parameter_step(self) -> None:
+        parent = _seed_genome()
+        schemas = {
+            "ridge_alpha": {
+                "type": "number",
+                "minimum": 0.0001,
+                "maximum": 1.0,
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "normalized trust-region step"):
+            apply_genome_mutation(
+                parent,
+                {
+                    "schema_version": "ecologyrsi-dsh.genome-mutation/1",
+                    "operations": [
+                        {
+                            "op": "set_bounded_parameter",
+                            "name": "ridge_alpha",
+                            "value": 0.5,
+                        }
+                    ],
+                },
+                _mutation_context(
+                    parent,
+                    mutation_operator_id=TRUST_REGION_MUTATION_OPERATOR_ID,
+                ),
+                current_program_registry(),
+                parameter_schemas=schemas,
+            )
+
+        child = apply_genome_mutation(
+            parent,
+            {
+                "schema_version": "ecologyrsi-dsh.genome-mutation/1",
+                "operations": [
+                    {
+                        "op": "set_bounded_parameter",
+                        "name": "ridge_alpha",
+                        "value": 0.2,
+                    }
+                ],
+            },
+            _mutation_context(
+                parent,
+                mutation_operator_id=TRUST_REGION_MUTATION_OPERATOR_ID,
+            ),
+            current_program_registry(),
+            parameter_schemas=schemas,
+        )
+        self.assertEqual(child.scientific_program["parameter_overrides"]["ridge_alpha"], 0.2)
+
+    def test_mutation_requires_one_to_four_operations(self) -> None:
+        parent = _seed_genome()
+        registry = current_program_registry()
+
+        for count in (0, 5, 22):
+            with self.subTest(count=count), self.assertRaisesRegex(
+                ValueError, "between 1 and 4"
+            ):
+                apply_genome_mutation(
+                    parent,
+                    {
+                        "schema_version": "ecologyrsi-dsh.genome-mutation/1",
+                        "operations": [
+                            {
+                                "op": "set_bounded_parameter",
+                                "name": "ridge_alpha",
+                                "value": 0.2,
+                            }
+                            for _ in range(count)
+                        ],
+                    },
+                    _mutation_context(parent),
+                    registry,
+                )
+
+    def test_mutation_rejects_an_operation_that_keeps_its_target_unchanged(
+        self,
+    ) -> None:
+        parent = _seed_genome()
+        registry = current_program_registry()
+        mutations = (
+            {
+                "op": "set_bounded_parameter",
+                "name": "ridge_alpha",
+                "value": 0.1,
+            },
+            {
+                "op": "select_registered_feature_policy",
+                "program_id": "registered_greenhouse_features@1",
+            },
+            {
+                "op": "select_registered_workflow_template",
+                "workflow_template_id": "candidate-sample-execution@1",
+            },
+        )
+
+        for operation in mutations:
+            with self.subTest(operation=operation["op"]), self.assertRaisesRegex(
+                ValueError, "does not change"
+            ):
+                apply_genome_mutation(
+                    parent,
+                    {
+                        "schema_version": "ecologyrsi-dsh.genome-mutation/1",
+                        "operations": [operation],
+                    },
+                    _mutation_context(parent),
+                    registry,
+                )
+
+    def test_mutation_rejects_a_sequence_that_returns_to_parent_behavior(self) -> None:
+        parent = _seed_genome()
+
+        with self.assertRaisesRegex(ValueError, "same genome"):
+            apply_genome_mutation(
+                parent,
+                {
+                    "schema_version": "ecologyrsi-dsh.genome-mutation/1",
+                    "operations": [
+                        {
+                            "op": "set_bounded_parameter",
+                            "name": "ridge_alpha",
+                            "value": 0.2,
+                        },
+                        {
+                            "op": "set_bounded_parameter",
+                            "name": "ridge_alpha",
+                            "value": 0.1,
+                        },
+                    ],
+                },
+                _mutation_context(parent),
+                current_program_registry(),
+            )
+
     def test_genome_nested_state_cannot_mutate_after_validation(self) -> None:
         genome = _seed_genome()
 
@@ -250,7 +482,16 @@ class EvolutionGenomeTests(unittest.TestCase):
         )
         child = apply_genome_mutation(
             parent,
-            {"schema_version": "ecologyrsi-dsh.genome-mutation/1", "operations": []},
+            {
+                "schema_version": "ecologyrsi-dsh.genome-mutation/1",
+                "operations": [
+                    {
+                        "op": "set_bounded_parameter",
+                        "name": "ridge_alpha",
+                        "value": 0.2,
+                    }
+                ],
+            },
             context,
             current_program_registry(),
         )
@@ -321,89 +562,6 @@ class EvolutionGenomeTests(unittest.TestCase):
                 context,
                 current_program_registry(),
             )
-
-    def test_legacy_no_snapshot_projection_preserves_none_and_full_ir(self) -> None:
-        fixture = json.loads(
-            (_FIXTURES / "legacy_program_0_2_2_no_snapshot.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        projected = legacy_genome_from_proposal(
-            Proposal.from_dict(fixture["proposal"]),
-            TaskManifest.from_dict(fixture["task"]),
-            None,
-        )
-        result = projected.to_dict()
-
-        self.assertTrue(result["projected"])
-        self.assertIsNone(result["knowledge_snapshot_digest"])
-        self.assertEqual(result["legacy_algorithm_ir"], fixture["legacy_algorithm_ir"])
-        with self.assertRaises(TypeError):
-            projected.legacy_algorithm_ir["predictor_id"] = "changed"
-
-    def test_legacy_projection_ignores_current_registry_changes(self) -> None:
-        fixture = json.loads(
-            (_FIXTURES / "legacy_program_0_2_2.json").read_text(encoding="utf-8")
-        )
-        snapshot = KnowledgeSnapshot.from_dict(fixture["knowledge_snapshot"])
-        before = legacy_genome_from_proposal(
-            Proposal.from_dict(fixture["proposal"]),
-            TaskManifest.from_dict(fixture["task"]),
-            snapshot,
-        )
-        changed_registry = current_program_registry().with_program_override(
-            "predictors",
-            "toy-rolling-water@1",
-            {"version": "future-incompatible/999"},
-        )
-        after = legacy_genome_from_proposal(
-            Proposal.from_dict(fixture["proposal"]),
-            TaskManifest.from_dict(fixture["task"]),
-            snapshot,
-            legacy_catalog=LEGACY_PROGRAM_CATALOG_0_2_2,
-            current_registry=changed_registry,
-        )
-
-        self.assertEqual(before.projection_digest, after.projection_digest)
-        self.assertEqual(before.to_dict(), after.to_dict())
-        self.assertEqual(before.legacy_algorithm_ir, fixture["legacy_algorithm_ir"])
-        historical = compile_algorithm_spec(
-            TaskManifest.from_dict(fixture["task"]),
-            Proposal.from_dict(fixture["proposal"]),
-            snapshot,
-        )
-        self.assertEqual(historical.algorithm_ir, fixture["legacy_algorithm_ir"])
-
-    def test_projected_legacy_requires_explicit_migration_seed(self) -> None:
-        fixture = json.loads(
-            (_FIXTURES / "legacy_program_0_2_2_no_snapshot.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        projected = legacy_genome_from_proposal(
-            Proposal.from_dict(fixture["proposal"]),
-            TaskManifest.from_dict(fixture["task"]),
-            None,
-        )
-        with self.assertRaisesRegex(TypeError, "projected|migration"):
-            apply_genome_mutation(
-                projected,  # type: ignore[arg-type]
-                {"schema_version": "ecologyrsi-dsh.genome-mutation/1", "operations": []},
-                object(),  # type: ignore[arg-type]
-                current_program_registry(),
-            )
-
-        migrated = migrate_legacy_seed(
-            projected,
-            _initialization(),
-            current_program_registry().migration_template("legacy-dsh-native@1"),
-        )
-        self.assertEqual(migrated.lineage["origin_kind"], "legacy_migration")
-        self.assertEqual(
-            migrated.lineage["migration_source"]["projection_digest"],
-            projected.projection_digest,
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,7 +32,7 @@ EcologyRSI-DSH 把模型放在“研究助理”的位置，把数据、评测�
 
 ![参数设计：统一设置代数、候选、样本批次、并发和总预算](docs/screenshots/02-parameter-design.jpg)
 
-参数设计页统一配置进化代数、每代候选数、每代反馈样本数、DSH Workflow 微批和并发度。DSH-native 运行不设逐样本 Token 硬上限；上下文压缩和输出长度由 DSH Session 与模型路由统一管理。
+参数设计页统一配置进化代数、每代候选数、每代预测单元预算、候选并发和单候选时点并发。新建真实自主运行默认同时评测 4 个候选；每个候选使用同一批冻结的预测时点。严格 DSH-native 协议把一个预测起点作为一次智能体样本，一次 Planner、登记向量预测工具、Critic 和评分后 Reflector 同时覆盖该时点的全部目标 × 时距结果，因此实际调用量由预测时点数、候选数及同 cohort 对照复评共同决定。DSH-native 运行不设逐样本 Token 硬上限；上下文压缩和输出长度由 DSH Session 与模型路由统一管理。
 
 ![训练数据：数据结构、分区边界与样本预览](docs/screenshots/03-training-data.jpg)
 
@@ -95,7 +95,7 @@ AGC CSV    本地策略或     训练产物 +
 
 浏览器只读取面向界面的脱敏投影。数据凭据、DSH Bearer 凭据、完整任务清单和原始事件载荷均保留在服务端。
 
-后端实现按职责分层，顶层同名模块仅保留向后兼容导入：
+后端实现按职责分层，已删除顶层同名兼容模块，业务代码直接从所属子包导入：
 
 ```text
 src/ecologyrsi_dsh/
@@ -108,7 +108,6 @@ src/ecologyrsi_dsh/
   knowledge/      知识目录、公开元数据检索、能力映射与轮末判断
   presentation/   训练资产、运行投影与导出
   api/            HTTP 端点、命令执行、事件、静态资源和服务生命周期
-  server.py       公共 HTTP 兼容入口
 ```
 
 前端不需要打包器，按功能拆分在 `plugins/ecology_evolution/assets/js/`；根目录 `app.js` 只负责事件绑定和启动。维护原则是入口保持薄层、共享合同集中、模块按职责拆分；现有账本、模型网关、评测器和部分前端渲染模块仍偏大，后续功能扩展前应优先继续拆分，而不是向这些文件追加新的职责。
@@ -252,20 +251,22 @@ PYTHONPATH=src python -m ecologyrsi_dsh data fetch agc_tomato_2019
 
 滚动残差候选修改 `blend`、`window`、`bias_scale`；统一缩放的岭回归候选修改 `history_steps`、`ridge_alpha`、`residual_scale`；目标级岭回归则分别修改空气温度、相对湿度和二氧化碳的残差缩放系数，其中某个目标的系数为 0 时该目标单独使用持续性预测。所有参数都由策略模型在宿主登记范围内提出，不由用户选择。岭回归的特征选择、缺失值填补和标准化只在 `training_fit` 拟合，并按真实小时戳构造 1/6/24 小时目标；结果变量不进入外生特征。评测在后续 `training_feedback` 比较三项目标的 MAE、RMSE、归一化 RMSE、技能得分、缺失行和物理范围违规。评分基线在预测前仅用 `training_fit` 对每个“目标 × 时距”比较持续性与 24 小时季节性基线，同样本 RMSE 更低者被冻结并绑定 digest；模型生成预测仍保留原持续性参照，不受评分基线替换影响。固定科学门禁要求每个目标/时距不劣于冻结强基线、总体技能得分大于 0 且预测不违反目标物理范围；若使用远程 judge，还必须同时得到独立评审接受，候选才算 `passed`。
 
-`passed` 不等于被正式晋升。同一轮候选必须共享完全相同的评测窗口，本轮通过门禁和独立评审的最高分候选先成为轮内最佳。没有 incumbent 时它可建立初始基线；已有 incumbent 时，新版评分只在评测 cohort、评测器、objective 版本、数据/分区和基线 digest 一致时可比，且要求 `candidate_score - incumbent_score > 0.005`。置信度证据按预测起点组成最多 128 个 24 小时区块，保存每个目标/时距的 eligible/succeeded 和归一化平方误差充分统计量；候选与 incumbent 的块身份必须完全一致。配对区块不少于 4 个时，从统计量重建正式的覆盖惩罚后 RMSE-skill，并要求 1,000 次确定性 bootstrap 的 95% 置信区间下界大于 0。旧版评估回放仅在共同合同仍匹配时保留原 `1e-12` 严格差异规则，新旧 objective 不直接互比。不同轮使用不同窗口时不比较原始分数，本轮最佳只作为下一轮搜索父方案，正式 incumbent 保持不变，直到在同一选择窗口重评或进入独立 holdout 正式验证。手工提交 `approved` 决策执行同一辅助函数，不能绕过该规则。
+`passed` 不等于被搜索保留。同一轮候选必须共享完全相同的评测窗口，本轮通过科学门禁和独立评审的候选才进入选择。没有 incumbent 时，候选还须通过有效性、实用差异和逐单元稳健性门禁才能建立初始搜索基线；已有 incumbent 时，DSH-native 会把同轮全部候选作为一个预声明比较族，在完全一致的 24 小时区块上执行 3 日 moving-block、1,000 次确定性重采样的 centered max-T 稳定性检验，同时要求 `candidate_score - incumbent_score > 0.005`、不少于 8 个配对区块、足够连续起点且所有目标/时距均不退化。Director 只接受账本中该轮统一分析已经选出的 champion，不能由手工 `approved` 绕过，也不会再叠加另一套旧式 pairwise bootstrap 二次判定。私有计算保留全部区块的充分统计量，公共投影不暴露区块明细。同一可比窗口会跨轮保留证据等级和评分更优的搜索父方案，避免后续搜索从退化候选继续；不同轮窗口不同时不比较原始分数，本轮最佳只作为下一轮搜索父方案。以上结果仍属于 `exploratory_adaptive_data`；生产结论必须另经独立 holdout 正式验证。
 
 ## 网上知识检索与可执行方案筛选
 
-运行设置可选择“每轮检索公开论文元数据”。每轮候选生成前，后端执行以下固定流程：
+新建 DSH-native 运行把自主研究协议冻结为 `dsh-model-search-reflect@1`。每轮形成下面的可重放闭环：
 
-1. 根据数据集目录推导出的研究领域、当前冻结策略和上一轮最弱目标/时距生成不含原始数据与人工私密文本的通用英文检索词。
-2. 读取内置核验目录；启用联网时再查询 OpenAlex 的论文元数据。网络失败只产生告警，进化继续使用内置目录。
-3. 将知识条目映射到宿主登记的 `strategy`、`predictor` 或 `evaluator`。只有“已登记且本运行已冻结选择”的条目标记为 `adopted` 并进入提案上下文。
-4. 已登记但本运行未选择的算法标记为 `available_not_selected`；TPE、WOFOST、AquaCrop、GreenLight 和在线论文条目在没有本地适配器时标记为 `research_only` 或 `metadata_only`，不能直接执行。
-5. 把查询词、来源 URL、来源机构、执行映射、选择理由、检索时间和 SHA-256 快照摘要写入追加式账本，同轮所有候选共享同一个知识快照。
-6. 轮末根据候选统一评测结果记录 `observed_progress`、`no_observed_improvement` 或 `no_eligible_candidate`，形成下一轮继续、修订或更换方向的建议。该判断明确为联合搜索观察，不把改善归因于某条知识。
+1. `generation.search-plan`：策略模型读取上一轮聚合指标、批次反思和当前父 Genome，自主提出最多 6 条检索词与关注问题；它不能直接联网，也看不到原始反馈行。
+2. Host 检索工具：宿主先执行模型检索词，再补充确定性的领域/弱点查询；读取内置核验目录，并在启用联网时查询 OpenAlex 元数据。网络失败只产生告警并回退内置目录。
+3. `generation.research-synthesis`：Researcher 只能引用本轮冻结证据，整理与候选槽位数量完全一致的多套、彼此不同、可由登记能力实现的优化方向。参数方向必须显式声明 `increase` 或 `decrease`，预测器/Planner Skill 方向声明 `select`；Host 会在整组方向上预分配互不重复的合法行为 witness，并拒绝藏在自由文本中的精确参数赋值。
+4. `candidate.propose`：每个候选槽位绑定其中一个方向，Candidate Proposer 输出单轴 GenomeMutation；Host 将它编译成登记预测器、工具策略或工作流参数，同时校验目标和参数增减符号，拒绝任意代码、越界、过大步长、无效变更和重复行为。被拒绝时，下一次 DSH 调用会收到具体的宿主契约违反原因。
+5. 同轮候选在完全相同的冻结 `training_feedback` cohort 上完成向量预测、逐时点反思和独立评审，Host 统一选择本轮最佳，并且只有达到最小实用差异和配对稳定性门槛才更新 incumbent。
+6. `generation.reflect`：批次 Reflector 读取唯一一份由 Host 按科学排名生成的候选结果映射，其中显式绑定 `rank`、`candidate_id`、`direction_id`、direction digest 与得分，不能把排名或数组位置猜成方向编号；它提出的下一轮方向只是建议，下一轮 synthesis 仍须重新通过 Host 联合可实现性预检。`search-plan` 通过包含该映射的 reflection digest 继承结果。
 
-在线内容不会被下载为代码，也不能修改参数范围、数据分区、评测器或科学门禁。服务端默认仅使用内置目录；插件创建的运行默认启用 OpenAlex 元数据检索。可用 `ECOLOGYRSI_KNOWLEDGE_ONLINE=0` 在部署层强制关闭，或设置为 `1` 强制开启。每轮最多依次执行 6 条、每条最多 180 字符的确定性短查询，先检索本轮具体弱点，最后用宽泛领域词兜底；结果够用就停止，空结果才继续，并按 OpenAlex work ID 去重。系统不会再把全部领域、弱点和失败词拼成一个长查询。OpenAlex 单次请求默认等待 20 秒，可用 `ECOLOGYRSI_OPENALEX_TIMEOUT` 设置正数秒值；超时、连接错误及 HTTP 408/425/429/5xx 最多额外重试 3 次并短指数退避，存在 `Retry-After` 时在单次 5 秒安全上限内按服务端建议值等待，其他 HTTP 错误立即回退到内置目录。若共享系统代理对 OpenAlex 返回 429，且部署策略允许该固定 HTTPS 来源直连，可在启动服务时仅设置 `NO_PROXY=api.openalex.org`，模型 provider 仍继续使用原代理。每次响应仍只读取最多 1 MB 的元数据，不做启动探活。
+这里的“实现方案”指把模型方案编译成 EcologyRSI 插件自己的受限 Genome，并调用宿主已登记的科学工具；不会修改 DSH 基本框架，也不会执行模型生成的 Python、Shell、依赖安装或任意网络代码。新增算法必须先由开发者实现、测试并登记为插件能力，之后才能被策略模型选择。
+
+在线内容不会被下载为代码，也不能修改参数范围、数据分区、评测器或科学门禁。服务端默认仅使用内置目录；插件创建的运行默认启用 OpenAlex 元数据检索。可用 `ECOLOGYRSI_KNOWLEDGE_ONLINE=0` 在部署层强制关闭，或设置为 `1` 强制开启。每轮最多执行 6 条、每条最多 180 字符的短查询；模型生成的查询拥有最高优先级，Host 的具体弱点词随后执行，宽泛领域词最后兜底。结果够用就停止，空结果才继续，并按 OpenAlex work ID 去重。系统不会把全部领域、弱点和失败词拼成一个长查询。OpenAlex 单次请求默认等待 20 秒，可用 `ECOLOGYRSI_OPENALEX_TIMEOUT` 设置正数秒值；超时、连接错误及 HTTP 408/425/429/5xx 最多额外重试 3 次并短指数退避，存在 `Retry-After` 时在单次 5 秒安全上限内按服务端建议值等待，其他 HTTP 错误立即回退到内置目录。若共享系统代理对 OpenAlex 返回 429，且部署策略允许该固定 HTTPS 来源直连，可在启动服务时仅设置 `NO_PROXY=api.openalex.org`，模型 provider 仍继续使用原代理。每次响应仍只读取最多 1 MB 的元数据，不做启动探活。
 
 ## 进化投影与训练资产
 
@@ -364,9 +365,11 @@ export ECOLOGYRSI_DSH_MODELS_JSON='[
 
 这里的“能力编译”是策略模型提出选择和参数方向，宿主将已采用的知识映射、候选参数和冻结数据边界编译成不可变算法 IR。IR 只含宿主登记的特征、拟合、预测和后处理算子；模型不能写入或执行任意 Python、Shell、动态导入、依赖安装或网络工具。在生产 `research_compile_evolve@1` 工作流中，若研究计划要切换预测器，必须同时提交与宿主登记的 pipeline、算子顺序和参数名称完全匹配的 `algorithm_blueprint`；蓝图引用的同代冻结证据中，至少一条必须是 `adopted` 或 `available_not_selected` 的 predictor，并明确映射到该 pipeline。只提交预测器 ID、引用其他 pipeline，或仅有 `research_only` / `metadata_only` 证据，都不能编译执行。
 
-策略模型在该蓝图之上提交 `algorithm_synthesis`，但它只能引用蓝图已经引用的同代冻结证据，只能选择该 pipeline 已登记的 `parameter_focus`，并且 pipeline 必须与蓝图一致；它不能增加算子、参数、依赖或代码。若本轮冻结了 OpenAlex `metadata_only` 证据，Blueprint 和 synthesis 都必须至少引用其中一条；否则至少引用一条 `research_only` 方向证据，同时 Blueprint 仍须包含一条与选定 predictor 相容的可执行证据。宿主把冻结的 plan、Blueprint 和 synthesis digest 一并编译到受限算法 IR，使后续成效可以关联到准确的 synthesis 版本。每个候选随后必须依次通过 compile、静态 debug 和 `training_fit` 内部时间前向 training smoke，确认登记算子、有限输出、物理边界和算子轨迹后，才进入真实样本契约：远程 planner 选择登记工具，宿主执行并进行物理约束检查，独立远程 critic 再对每个样本接受结果或指定宿主已登记的修复工具，只有失败样本才进入 repair 波次。瞬时 smoke 工具故障可重试，确定性失败进入轮末 `algorithm_failures`；同代 synthesis 与 compile/debug/评测/晋升结果的关联会进入跨代经验，但明确标记为观察关联而非因果归因。宿主仍冻结数据集、时间分区、预测器/评测器标识、参数名称和范围以及科学门禁；研究结果只能标记为 `adopted`、`available_not_selected`、`research_only` 或 `metadata_only`。
+策略模型在该蓝图之上提交 `algorithm_synthesis`，但它只能引用蓝图已经引用的同代冻结证据，只能选择该 pipeline 已登记的 `parameter_focus`，并且 pipeline 必须与蓝图一致；它不能增加算子、参数、依赖或代码。若本轮冻结了 OpenAlex `metadata_only` 证据，Blueprint 和 synthesis 都必须至少引用其中一条；否则至少引用一条 `research_only` 方向证据，同时 Blueprint 仍须包含一条与选定 predictor 相容的可执行证据。宿主把冻结的 plan、Blueprint 和 synthesis digest 一并编译到受限算法 IR，使后续成效可以关联到准确的 synthesis 版本。每个候选随后必须依次通过 compile、静态 debug 和 `training_fit` 内部时间前向 training smoke，确认登记算子、有限输出、物理边界和算子轨迹后，才进入真实样本契约。闭式岭回归等传统模型只作为宿主登记预测工具：即使只有一个合法工具，每个样本仍必须由远程 Planner 显式选择，工具执行后必须由远程 Critic 审核，宿主完成冻结指标评分后再由远程 Reflector 形成下一代经验；不存在单工具 Host 路由旁路或 Critic 静默回退。瞬时 smoke 工具故障可重试，确定性失败进入轮末 `algorithm_failures`；同代 synthesis 与 compile/debug/评测/晋升结果的关联会进入跨代经验，但明确标记为观察关联而非因果归因。宿主仍冻结数据集、时间分区、预测器/评测器标识、参数名称和范围以及科学门禁；研究结果只能标记为 `adopted`、`available_not_selected`、`research_only` 或 `metadata_only`。
 
-新建的真实自主运行使用 `gateway_microbatch` 样本协议：每个无标签样本先获得远程 planner 决策，宿主执行其选择的登记预测/修复工具并做物理约束检查，再由独立 review 模型对每个样本执行远程 critic；critic 可接受结果或指定一个已登记修复工具，失败样本才进入下一次远程 repair 波次。该策略以 `always@1` 冻结在新运行清单中；历史运行继续使用各自已冻结的稀疏或全量 critic 策略，避免重放语义漂移。网关先按经过宿主校验的 `origin_timestamp` 形成因果 wave：只有共享同一可见信息截止点的多目标、多时距样本才能进入同一次模型调用，不同预测起点不得共享上下文；缺少可验证来源信息的旧请求保守降级为单样本调用，显式包含未来历史的请求在本地失败且不会发送到模型。每个 wave 默认最多发送 64 条，协议硬上限为 128；历史运行继续使用其已冻结的批大小。当已解码的模型输出被明确标记为截断、格式错误或样本决定契约错误时，宿主最多二分 4 层；拆分到 8 条或更小且无法继续拆分时，可恢复的决策合同错误会进入有界 repair 波次，并要求模型逐字复制宿主登记的工具 ID。认证、权限、路由、配置、其他 4xx 和已由网关耗尽重试的传输错误既不拆分也不在外层重放，避免将一次永久错误或队列故障放大成逐样本请求。外层进度按因果 wave 的微批记录；`gateway_request_count`、拆分触发/次数、最大深度和恢复/失败样本数以不含样本 ID、响应正文或异常消息的聚合诊断持久化。系统不为样本创建子进程，也不要求所有样本成功。候选在总体及每个目标/时距达到冻结的最小覆盖率后继续评分；失败样本保留结构化失败、原因码、工具成效与恢复轨迹，并使用不可获益的固定 cohort 惩罚，防止通过丢弃困难样本提高分数。该 review 模型还会在候选完成科学评测后执行一次候选级独立裁决。历史运行和 toy 运行继续使用其冻结的宿主状态机语义。
+真实自主运行只使用 `dsh-strict-origin-bundle@3`。一个“智能体样本”表示一个预测起点，同一时点的全部目标 × 时距单元在一次严格链中共同完成“远程 Planner → Planner 调用登记的向量预测工具 → 远程 Critic → 宿主逐单元评分 → 远程 Reflector”；默认温室任务一次产生温度、相对湿度、CO₂ 在 1、6、24 小时的 9 个结果。任一环节缺失、预测向量不完整、存在 Host 路由旁路或 Critic 调用失败，都不能把该时点当作完整链证据。严格 checkpoint 只在整个向量完成 Reflector 后原子落盘；恢复时只复用能验证完整链的时点。Planner/Critic 只能看到预测起点及历史；只有评分后的 Reflector 能看到 9 个观测—预测结果，且无权改写预测。
+
+严格运行只有在 `sample_budget_class=selection_eligible`、样本量达到冻结统计门槛且全部已评测样本具有完整智能体链时才允许推进。第 1 代以后，搜索父代和历史正式精英都要在本代相同 cohort 上重新执行完整逐样本链；候选只与这些同 cohort 对照进行配对稳定性和最小实用差异比较。每个候选只允许一个信赖域变异操作，数值步长最大为归一化范围的 0.15；未显著改善时保留既有父代和正式精英，不用跨窗口原始分数制造“快速进化”。
 
 上述 Token 硬预算仅适用于历史网关协议。DSH-native 运行不接收 `token_limit`，上下文和输出长度按 DSH 的 Session 与模型路由方案执行。
 
@@ -382,7 +385,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --samples-per-task 1 \
   --minimum-coverage 0.8 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.15-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.26-real-api-agent-tool-acceptance.json
 ```
 
 验收无论通过或失败都会原子写入 JSON 报告；省略 `--output` 时默认写到系统临时目录下的
@@ -423,18 +426,18 @@ export ECOLOGYRSI_SERVICE_TOKEN='replace-with-runtime-token'
 `integrations/dsh_ecology_plugin/` 是实际的 Cordis 双端宿主插件。Node 端在 DSH 端口托管工作台并代理 EcologyRSI API；浏览器端向 DSH 侧栏注册“生态模型进化”，点击后在全屏覆盖层中打开工作台并完成 `plugin.ready` / `dsh.context` 握手。
 
 ```bash
-DSH_BIN="$DSH_HOME/profiles/node_modules/@deepseek-ai/dsh/lib/bin.js"
-node "$DSH_BIN" plugin --profile web add \
-  /path/to/EcologyRSI-DSH/integrations/dsh_ecology_plugin
+ecologyrsi-dsh install-dsh-runtime --profile web
 ```
 
-然后在 `$DSH_HOME/profiles/web/cordis.patch.yml` 的顶层补丁数组中插入：
+安装器会校验并安装当前版本的打包插件与六个 v2 角色 preset，并在
+`$DSH_HOME/profiles/web/cordis.patch.yml` 中维护下列完整原生运行时注入。不要手工缩减
+`inject` 列表，否则 Planner 工具调用、子 Agent、会话持久化或跨代上下文会变成不可用：
 
 ```yaml
 - insert:
     - id: ecologyrsi-evolution
       name: '@ecologyrsi/dsh-evolution-plugin'
-      inject: [webServer]
+      inject: [webServer, agents, sessions, tokenMeter, subagents, tools, sessionPersistence, sessionProjections, agentPresets, llm]
       config:
         staticRoot: '/path/to/EcologyRSI-DSH/plugins/ecology_evolution'
         backendOrigin: 'http://127.0.0.1:8777'
@@ -487,6 +490,7 @@ API 请求使用 `Authorization: Bearer ...`。当前后端只比较进程级 `E
   "review_model_id": "newapi-glm52-judge",
   "rounds": 5,
   "candidates_per_generation": 4,
+  "candidate_concurrency": 4,
   "max_candidates": 20,
   "model_workflow": "research_compile_evolve@1",
   "autonomous_mode": true,
@@ -496,13 +500,13 @@ API 请求使用 `Authorization: Bearer ...`。当前后端只比较进程级 `E
 }
 ```
 
-`auto_progress: true` 是连续模式：服务端完成一轮后会自动排入下一轮，直到完成预设代数或候选数量、暂停、取消或失败；页面只轮询真实阶段事件，不需要点击“下一轮”。服务默认使用 1 个有界 worker，按 FIFO 串行推进不同运行，避免并发进化压满上游 API；同一运行始终只能持有一个世代租约，每执行一代就回到队尾。`ECOLOGYRSI_AUTO_PROGRESS_WORKERS` 可显式配置为 1–8；设为 2 以上时不同运行可并行，一个长 `Retry-After` 不会占用全部 worker，但应根据上游容量谨慎调大。服务重启后会从 SQLite 恢复未归档的连续运行，并在每轮开始前重新校验冻结的数据、预测器、策略、评测器和远程模型绑定；若算法或模型绑定已随服务版本变化，系统以 `frozen_runtime_binding_drift` 安全错误码停止旧运行并提示新建运行，不暴露新旧 digest，也不放宽可复现性校验。旧数值字段 `auto_advance: 1` 仅保留“创建时推进一轮”的兼容语义，不代表连续执行。
+`auto_progress: true` 是连续模式：服务端完成一轮后会自动排入下一轮，直到完成预设代数或候选数量、暂停、取消或失败；页面只轮询真实阶段事件，不需要点击“下一轮”。服务默认使用 4 个有界 worker 并行推进不同运行；同一运行始终只能持有一个世代租约，每执行一代就回到队尾。`ECOLOGYRSI_AUTO_PROGRESS_WORKERS` 可显式配置为 1–8。不同运行即使使用同一模型 provider 也可并行，同一运行内部仍按 provider 串行并保留最小调用间隔；provider 失败冷却继续对全部运行生效。工作台允许重复提交相同配置来创建彼此独立的运行。服务重启后会从 SQLite 恢复未归档的连续运行，并在每轮开始前重新校验冻结的数据、预测器、策略、评测器和远程模型绑定；若算法或模型绑定已随服务版本变化，系统以 `frozen_runtime_binding_drift` 安全错误码停止旧运行并提示新建运行，不暴露新旧 digest，也不放宽可复现性校验。旧数值字段 `auto_advance: 1` 仅保留“创建时推进一轮”的兼容语义，不代表连续执行。
 
 默认界面使用 5 轮、每轮 4 个候选和 20 个候选总预算。首轮 `K=1` 时由远程策略模型提出全部候选；`K=2` 时保留 1 个宿主诊断锚点并调用 1 次远程策略；`K>=3` 时最多保留 2 个宿主种子，其余槽位调用远程策略。每个提案都记录 `proposal_source`，投影分别统计远程成功、宿主保留种子和显式宿主回退，不再把“未调用 API”显示成“调用完成”。
 
-新建真实自主运行默认以 500 条反馈样本作为一次进化更新。每轮先按 `target × horizon` 交错构造候选无关的确定性窗口，再让同轮所有候选在完全相同的样本身份上评测；后续轮次沿冻结总体轮转，旧运行缺少该参数时仍保留全量反馈语义。`samples_per_update` 控制每轮累计反馈数，`sample_agent_batch_size` 只控制同一因果预测起点（origin wave）内的单次网关微批上限，`sample_concurrency` 控制同时在飞的请求，三者互不替代。不能用 `ceil(samples_per_update / sample_agent_batch_size)` 推断真实请求数；执行器还会按因果起点、角色、上下文和修复路径分组或拆分，实际请求数以运行进度和网关诊断为准。岭回归等已登记预测器仍可完整扫描 `training_fit` 拟合参数，固定窗口只限制智能体在 `training_feedback` 上的调用、reward 和更新证据。
+新建真实自主运行默认以 1600 个预测单元作为一次进化更新预算。默认 3 个目标 × 3 个预测时距至少需要 169 个完整预测时点，即 1521 个平衡评分单元，才能同时满足每单元 8 个 24 小时区块和连续 3 日重采样起点门禁。也可显式使用 9、18 等完整 9 单元倍数执行诊断 smoke；它会完整调用 Planner、登记向量工具、Critic、评分和 Reflector，并可按配置连续执行多个诊断代，用于验证前代分析、反思和检索结果是否进入后代。诊断代始终标记为 `diagnostic_smoke`，不会生成冠军、不会改变正式最优方案，也不能被解释为正式晋级。每轮按预测起点构造候选无关的确定性窗口，并只选择包含完整 9 单元向量的时点；同轮候选使用完全相同的时点身份。`candidate_concurrency` 控制候选并发。`samples_per_update` 表示评分单元预算，实际智能体进度按完整预测时点计数。每个时点只调用一次 Planner，由 Planner 在其 DSH 子会话内调用一次登记的联合向量预测工具，随后各调用一次 Critic 和评分后 Reflector，并把 9 条评分记录原子持久化。岭回归可以完整扫描 `training_fit` 拟合参数，但只能作为 Planner 主动调用的注册工具，不能替代任何智能体阶段。
 
-每个可评分样本都经过“预测角色调用已登记算法工具 → 独立远程评论 → 约束批评 → 失败分类 → 选择修复工具 → 宿主裁决”的反馈驱动循环，只有失败后才进入下一次尝试，不是无条件把固定流程走一遍。单样本耗尽重试预算不会终止整个候选，但评分后处理会保证失败行相对冻结强基线的 reward 不大于 0，不能通过失败或丢样本提高分数；上一轮聚合失败会生成版本化的下一轮重试、退避和修复计划。同轮候选按同窗分数排名；若下一轮窗口不同，则不把两个窗口的原始分数直接比较，本轮最佳只作为下一轮搜索父方案且不替换正式 incumbent。评分合同一致时才应用 0.005 实用差异和 24 小时配对区块 bootstrap 晋级规则；生产结论还必须经过独立 holdout 正式验证。当前滚动模型只拟合每个目标的偏差，岭回归采用一次闭式求解；它们不是神经网络式多 epoch 训练，因此单轮可能很快。`execution_diagnostics` 会分别给出物理分区行数、本轮 selected/deferred 样本、eligible/used/skipped 目标样本、累计候选工作量、拟合 pass、提案来源和轮次耗时，用于确认没有跳过训练或评测。最终产物尚未封存时，诊断优先使用当前 revision 的 `EvaluationProgressRecorded`；若新的 heartbeat 写入失败，则在校验连续批次、运行归属和 checkpoint 上限后，从已持久化的 `EvaluationSampleResultBatchRecorded` 回退聚合；两者取已完成数的较大值而不相加，正式 `EvaluationRecorded` 到达后由正式指标覆盖。`partial_live` 仅表示正在执行的部分证据，`retained_partial` 表示暂停后保留的证据，`aborted_partial` 表示候选失败或运行终止前的证据，`mixed_partial` 表示同一运行内同时存在进行中和已保留／中止的候选证据；后三类不得在页面上称为“实时”。
+每个可评分预测时点都经过“Planner 选择已登记算法工具 → 宿主执行一次完整向量预测 → Critic 审查 9 个结果 → 宿主逐单元评分 → Reflector 反思完整向量”的反馈驱动循环，只有失败后才进入下一次尝试，不是无条件把固定流程走一遍。单个时点耗尽重试预算不会终止整个候选，但评分后处理会保证失败行相对冻结强基线的 reward 不大于 0，不能通过失败或丢样本提高分数；上一轮聚合失败会生成版本化的下一轮重试、退避和修复计划。同轮候选按同窗分数和稳健性排序；若下一轮窗口不同，则不把两个窗口的原始分数直接比较，本轮最佳只作为下一轮搜索父方案且不替换搜索 incumbent。DSH-native 使用同轮 centered max-T 选择门禁，其他当前评测路径使用配对区块 bootstrap；两条路径都要求 0.005 实用差异和一致的评分合同，且生产结论还必须经过独立 holdout 正式验证。跨代反思只按完整 `behavior_digest` 禁止失败行为的精确重放；相同科学参数但不同 agent 程序仍可继续探索。闭式岭回归负责一次计算同一时点的 9 个数值，但它只作为 Planner 可选择的注册工具，不能替代 Planner、Critic 或评分后 Reflector 的大模型调用。`execution_diagnostics` 会分别给出物理分区行数、本轮 selected/deferred 评分单元和预测时点、eligible/used/skipped 目标样本、累计候选工作量、拟合 pass、提案来源和轮次耗时，用于确认没有跳过训练或评测。最终产物尚未封存时，诊断优先使用当前 revision 的 `EvaluationProgressRecorded`；若新的 heartbeat 写入失败，则在校验连续批次、运行归属和 checkpoint 上限后，从已持久化的 `EvaluationSampleResultBatchRecorded` 回退聚合；两者取已完成数的较大值而不相加，正式 `EvaluationRecorded` 到达后由正式指标覆盖。`partial_live` 仅表示正在执行的部分证据，`retained_partial` 表示暂停后保留的证据，`aborted_partial` 表示候选失败或运行终止前的证据，`mixed_partial` 表示同一运行内同时存在进行中和已保留／中止的候选证据；后三类不得在页面上称为“实时”。
 
 创建合同以 `dataset_id` 为首要输入；策略模型 API、独立评审模型 API 和轮数是另外三个用户输入。对真实 AGC 数据，建议同时提交数据集目录返回的 `episode_id`，以明确冻结训练团队／序列；只有兼容客户端省略时，服务端才确定性回退到首个非 Reference 优化 episode。服务端根据数据集目录记录的 `domain_id`、适配器、许可和兼容矩阵推导 `domain_pack` / `research_domain`，再由模型研究结果冻结预测模型、策略和评测器。旧客户端仍可提交 `domain`、`domain_pack_id` 或 `research_domain`，但这些字段只是兼容与一致性校验输入：若与数据集推导结果冲突，服务端必须拒绝创建并返回明确冲突信息，不能用旧字段覆盖目录结果。示例中的 `domain_pack_id` 因此不是用户首要选择，可由新客户端省略。
 
@@ -558,7 +562,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --db /tmp/ecologyrsi-dsh-dsh-adapter.sqlite3 \
   --samples-per-task 1 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.15-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.26-real-api-agent-tool-acceptance.json
 ```
 
 构建 wheel、sdist 和完整交付包需要 `uv`：

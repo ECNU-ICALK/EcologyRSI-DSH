@@ -16,7 +16,7 @@ test("role-host creation is single-flight, resumable and has no token hard cap",
     },
   };
   const manager = new RoleAgentManager(ctx);
-  const binding = { run_id: "r1", role: "coordinator", preset_id: "ecology-coordinator-v1", model: "p/m", cwd: "/tmp", require_workflow: true };
+  const binding = { run_id: "r1", role: "coordinator", preset_id: "ecology-coordinator-v3", model: "p/m", cwd: "/tmp", require_workflow: true };
   const [a, b] = await Promise.all([manager.createRoleAgent(binding), manager.createRoleAgent(binding)]);
   assert.equal(a, b);
   assert.equal(calls.filter(([name]) => name === "create").length, 1);
@@ -38,12 +38,21 @@ test("role-host creation is single-flight, resumable and has no token hard cap",
   assert.equal(calls.some(([name]) => name === "dispose"), true);
 });
 
-test("agent tool entry clears inherited tools without allowlisting local names", () => {
-  const calls = [];
-  const ctx = { tools: { restrict: (config) => calls.push(config), register: () => () => {} } };
+test("agent tool entry keeps descendant-visible role tools and guards execution", () => {
+  let guard;
+  let restrictions = 0;
+  const ctx = {
+    tools: {
+      restrict: () => { restrictions += 1; },
+      register: () => () => {},
+      guard: (candidate) => { guard = candidate; return () => {}; },
+    },
+  };
   return import("../lib/tools/agent-plugin.js").then(({ apply }) => {
     apply(ctx, { role: "researcher" });
-    assert.deepEqual(calls, [{ allow: [] }]);
+    assert.equal(restrictions, 0);
+    assert.equal(guard({ name: "structured_output" }), undefined);
+    assert.match(guard({ name: "unexpected_tool" }), /outside the frozen researcher role surface/);
   });
 });
 

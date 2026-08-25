@@ -4,10 +4,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from ecologyrsi_dsh.director import EvolutionDirector
-from ecologyrsi_dsh.dsh import FakeDSHAdapter
-from ecologyrsi_dsh.ledger import EventLedger
-from ecologyrsi_dsh.models import (
+from ecologyrsi_dsh.core.director import EvolutionDirector
+from ecologyrsi_dsh.core.ledger import EventLedger
+from ecologyrsi_dsh.core.models import (
     Evaluation,
     HumanIntervention,
     InterventionKind,
@@ -15,7 +14,9 @@ from ecologyrsi_dsh.models import (
     Proposal,
     TaskManifest,
 )
-from ecologyrsi_dsh.server import EvolutionRequestHandler, _intervention_projection
+from ecologyrsi_dsh.evolution.strategies import FakeDSHAdapter
+from ecologyrsi_dsh.api.handler import EvolutionRequestHandler
+from ecologyrsi_dsh.api.projection import _intervention_projection
 
 
 class HumanInterventionTests(unittest.TestCase):

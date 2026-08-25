@@ -54,10 +54,12 @@ class EventEndpointsMixin:
             "RunCompleted": "进化运行实例已完成。",
             "GenerationAdvanced": "进化轮次已推进。",
             "GenerationBatchStarted": "本轮候选批次与共享上下文已冻结。",
+            "GenerationSearchPlanned": "策略模型已生成并冻结本轮资料检索计划。",
             "GenerationKnowledgeRetrieved": "本轮公开知识与算法元数据已检索并冻结。",
             "GenerationKnowledgeAssessed": "本轮知识指导的联合搜索结果已完成非因果判断。",
             "GenerationResearchIterated": "本代研究模型已结合上一轮反馈更新并冻结研究计划。",
             "GenerationAnalyzed": "本轮候选结果与弱点已统一分析。",
+            "GenerationReflected": "反思模型已基于本轮聚合结果生成下一轮多套方向。",
             "GenerationChampionSelected": "本轮单一冠军选择已完成。",
             "ProposalSubmitted": "变更提案已提交。",
             "CandidateSpawned": "候选方案已生成。",
@@ -92,6 +94,32 @@ class EventEndpointsMixin:
                     "batch_size": batch.get("batch_size"),
                     "parent_candidate_id": batch.get("parent_candidate_id"),
                     "context_digest": batch.get("context_digest"),
+                }
+            )
+        elif event.kind == "GenerationSearchPlanned":
+            search_plan = payload.get("search_plan", {})
+            public_payload.update(
+                {
+                    "generation": search_plan.get("generation"),
+                    "search_plan_digest": search_plan.get("search_plan_digest"),
+                    "source_analysis_digest": search_plan.get(
+                        "source_analysis_digest"
+                    ),
+                    "source_reflection_digest": search_plan.get(
+                        "source_reflection_digest"
+                    ),
+                    "search_queries": sanitize_public_value(
+                        search_plan.get("search_queries", []),
+                        max_depth=2,
+                        text_limit=180,
+                        sequence_limit=6,
+                    ),
+                    "focus_areas": sanitize_public_value(
+                        search_plan.get("focus_areas", []),
+                        max_depth=2,
+                        text_limit=240,
+                        sequence_limit=8,
+                    ),
                 }
             )
         elif event.kind == "GenerationKnowledgeRetrieved":
@@ -155,6 +183,7 @@ class EventEndpointsMixin:
             public_payload.update(
                 {
                     "generation": analysis.get("generation"),
+                    "analysis_digest": analysis.get("analysis_digest"),
                     "candidate_count": analysis.get("candidate_count"),
                     "eligible_count": analysis.get("eligible_count"),
                     "outcome": analysis.get("outcome"),
@@ -176,6 +205,25 @@ class EventEndpointsMixin:
                         max_depth=6,
                         text_limit=500,
                         sequence_limit=32,
+                    ),
+                }
+            )
+        elif event.kind == "GenerationReflected":
+            reflection = payload.get("reflection", {})
+            directions = reflection.get("candidate_directions", [])
+            public_payload.update(
+                {
+                    "generation": reflection.get("generation"),
+                    "reflection_digest": reflection.get("reflection_digest"),
+                    "analysis_digest": reflection.get("analysis_digest"),
+                    "summary": redact_sensitive_text(
+                        str(reflection.get("summary", "")), limit=1000
+                    ),
+                    "stop_recommendation": reflection.get(
+                        "stop_recommendation"
+                    ),
+                    "direction_count": (
+                        len(directions) if isinstance(directions, list) else 0
                     ),
                 }
             )

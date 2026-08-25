@@ -6,7 +6,6 @@ from bisect import bisect_left
 from dataclasses import dataclass
 import hashlib
 import json
-import math
 from typing import Any, Iterable, Protocol, Sequence
 
 

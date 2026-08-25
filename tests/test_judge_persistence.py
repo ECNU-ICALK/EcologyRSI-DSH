@@ -27,7 +27,7 @@ from ecologyrsi_dsh.integrations.model_gateway import (
     GatewayResponseError,
 )
 from ecologyrsi_dsh.knowledge.algorithm_smoke import AlgorithmSmokeError
-from ecologyrsi_dsh.server import EvolutionRequestHandler
+from ecologyrsi_dsh.api.handler import EvolutionRequestHandler
 
 
 class _UnavailableJudge:

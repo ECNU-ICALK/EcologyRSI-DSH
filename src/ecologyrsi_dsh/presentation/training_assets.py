@@ -170,9 +170,12 @@ def _candidate_source_events(
         matches_generation = (
             event.kind in {
                 "GenerationBatchStarted",
+                "GenerationSearchPlanned",
                 "GenerationKnowledgeRetrieved",
+                "GenerationResearchIterated",
                 "GenerationKnowledgeAssessed",
                 "GenerationAnalyzed",
+                "GenerationReflected",
                 "GenerationChampionSelected",
             }
             and (
@@ -185,6 +188,12 @@ def _candidate_source_events(
                 and payload["knowledge_snapshot"].get("generation") == generation
                 or isinstance(payload.get("knowledge_assessment"), Mapping)
                 and payload["knowledge_assessment"].get("generation") == generation
+                or isinstance(payload.get("search_plan"), Mapping)
+                and payload["search_plan"].get("generation") == generation
+                or isinstance(payload.get("research_iteration"), Mapping)
+                and payload["research_iteration"].get("generation") == generation
+                or isinstance(payload.get("reflection"), Mapping)
+                and payload["reflection"].get("generation") == generation
             )
         )
         matches_intervention = (
@@ -475,7 +484,6 @@ def training_assets(state: Any) -> list[dict[str, Any]]:
                     ),
                     "knowledge_snapshot": knowledge_summary,
                     "parent_candidate_id": proposal.parent_candidate_id,
-                    "model_plan": _training_safe_value(model_plan),
                     "parent_parameters": _parent_parameters(
                         state, proposal.parent_candidate_id
                     ),

@@ -19,6 +19,11 @@ from ..core.errors import DshNativeRuntimeUnavailableError
 
 
 DSH_NATIVE_EXECUTION_PROTOCOL = "dsh_native_plugin_evolution@1"
+_DEFAULT_REQUEST_TIMEOUT_SECONDS = 660.0
+# A research stage may consume two 30-minute DSH attempts.  The sidecar must
+# leave enough time for the DSH-owned deadline and cleanup to complete instead
+# of abandoning the HTTP request while the child Agent is still running.
+_DEFAULT_STAGE_TIMEOUT_SECONDS = 3_720.0
 _CAPABILITY_KEYS = frozenset(
     {
         "schema_version",
@@ -78,7 +83,8 @@ class DshNativeAgentRuntimeClient:
         base_url: str,
         *,
         token: str,
-        timeout: float = 660.0,
+        timeout: float = _DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        stage_timeout: float = _DEFAULT_STAGE_TIMEOUT_SECONDS,
         max_response_bytes: int = 1_048_576,
     ) -> None:
         parsed = urlparse(base_url)
@@ -95,11 +101,14 @@ class DshNativeAgentRuntimeClient:
             raise ValueError("DSH native runtime token is required")
         if timeout <= 0:
             raise ValueError("DSH native runtime timeout must be positive")
+        if stage_timeout <= 0:
+            raise ValueError("DSH native runtime stage timeout must be positive")
         if not 1 <= max_response_bytes <= 8 * 1024 * 1024:
             raise ValueError("DSH native runtime response bound is invalid")
         self.base_url = base_url.rstrip("/")
         self.__token = token.strip()
         self.timeout = float(timeout)
+        self.stage_timeout = float(stage_timeout)
         self.max_response_bytes = int(max_response_bytes)
 
     def capabilities(self, *, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
@@ -181,6 +190,7 @@ class DshNativeAgentRuntimeClient:
             f"/api/ecology-agent-runtime/v1/runs/{quote(run_id, safe='')}/stages",
             body=request,
             cancelled=cancelled,
+            timeout=self.stage_timeout,
         )
         self._exact_keys(payload, _STAGE_KEYS, "stage mutation")
         self._validate_identity(payload)
@@ -269,6 +279,7 @@ class DshNativeAgentRuntimeClient:
         *,
         body: Mapping[str, Any] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         if cancelled is not None and cancelled():
             raise DshNativeRuntimeUnavailableError(
@@ -294,7 +305,10 @@ class DshNativeAgentRuntimeClient:
             },
         )
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            with urlopen(
+                request,
+                timeout=self.timeout if timeout is None else timeout,
+            ) as response:
                 if response.headers.get_content_type() != "application/json":
                     raise DshNativeRuntimeUnavailableError(
                         "DSH 运行时返回了非 JSON 响应。",

@@ -17,16 +17,16 @@ from ..evaluators.objectives import (
 )
 
 
-PROMOTION_POLICY_VERSION = "practical_delta_paired_block_bootstrap@1"
-PROMOTION_BLOCK_EVIDENCE_VERSION = "paired_24h_objective_sufficient_statistics@1"
+PROMOTION_POLICY_VERSION = "practical_delta_paired_block_bootstrap@3"
+PROMOTION_BLOCK_EVIDENCE_VERSION = "paired_24h_objective_sufficient_statistics@3"
+PROMOTION_SCORE_DEFINITION = "coverage_penalized_weighted_symmetric_rmse_skill@3"
 PROMOTION_CONFIDENCE_METHOD = "paired_moving_block_bootstrap@1"
 PROMOTION_BLOCK_HOURS = 24
-PROMOTION_MAXIMUM_BLOCKS = 128
 LEGACY_MINIMUM_SCORE_DELTA = 1e-12
 V2_MINIMUM_SCORE_DELTA = 0.005
 PROMOTION_BOOTSTRAP_RESAMPLES = 1_000
 PROMOTION_CONFIDENCE_LEVEL = 0.95
-PROMOTION_MINIMUM_PAIRED_BLOCKS = 4
+PROMOTION_MINIMUM_PAIRED_BLOCKS = 8
 _COMMON_CONTRACT_FIELDS = (
     "objective_aggregation_version",
     "baseline_profile_digest",
@@ -85,7 +85,7 @@ def build_promotion_block_evidence(
     dataset_digest: str,
     split_manifest_digest_sha256: str,
 ) -> dict[str, Any]:
-    """Build bounded 24-hour origin blocks of objective sufficient statistics."""
+    """Build private 24-hour origin blocks of objective sufficient statistics."""
 
     resolved_horizons, weights = _validated_grid(horizons, target_weights)
     cell_keys = tuple(
@@ -178,9 +178,8 @@ def build_promotion_block_evidence(
     body = {
         "schema_version": PROMOTION_BLOCK_EVIDENCE_VERSION,
         "block_hours": PROMOTION_BLOCK_HOURS,
-        "maximum_blocks": PROMOTION_MAXIMUM_BLOCKS,
         "objective_aggregation_version": OBJECTIVE_AGGREGATION_VERSION,
-        "score_definition": "coverage_penalized_weighted_rmse_skill@2",
+        "score_definition": PROMOTION_SCORE_DEFINITION,
         "target_weights": weights,
         "horizons": list(resolved_horizons),
         "block_count": len(blocks),
@@ -239,9 +238,8 @@ def _validated_evidence(evaluation: Any) -> dict[str, Any] | None:
     if (
         raw.get("schema_version") != PROMOTION_BLOCK_EVIDENCE_VERSION
         or raw.get("block_hours") != PROMOTION_BLOCK_HOURS
-        or raw.get("maximum_blocks") != PROMOTION_MAXIMUM_BLOCKS
         or raw.get("objective_aggregation_version") != OBJECTIVE_AGGREGATION_VERSION
-        or raw.get("score_definition") != "coverage_penalized_weighted_rmse_skill@2"
+        or raw.get("score_definition") != PROMOTION_SCORE_DEFINITION
         or raw.get("evidence_digest") != digest(body)
     ):
         return None
@@ -309,7 +307,6 @@ def _validated_evidence(evaluation: Any) -> dict[str, Any] | None:
     config = {
         "schema_version": raw["schema_version"],
         "block_hours": raw["block_hours"],
-        "maximum_blocks": raw["maximum_blocks"],
         "objective_aggregation_version": raw["objective_aggregation_version"],
         "score_definition": raw["score_definition"],
         "target_weights": weights,
@@ -429,7 +426,7 @@ def _incomparable(score_delta: float, reason_code: str) -> dict[str, Any]:
     }
 
 
-def _assess_promotion_improvement_legacy(
+def assess_promotion_improvement(
     evaluation: Any, incumbent_evaluation: Any
 ) -> dict[str, Any]:
     """Assess practical and paired-block statistical improvement."""
@@ -475,9 +472,10 @@ def _assess_promotion_improvement_legacy(
 
     point_pass = score_delta > V2_MINIMUM_SCORE_DELTA
     interval: tuple[float, float] | None = None
-    confidence_pass = True
+    evidence_sufficient = len(block_ids) >= PROMOTION_MINIMUM_PAIRED_BLOCKS
+    confidence_pass = False
     confidence_status = "insufficient_blocks"
-    if len(block_ids) >= PROMOTION_MINIMUM_PAIRED_BLOCKS:
+    if evidence_sufficient:
         try:
             interval = _paired_bootstrap_interval(
                 current,
@@ -522,10 +520,12 @@ def _assess_promotion_improvement_legacy(
             return _incomparable(score_delta, "invalid_block_evidence")
         confidence_pass = interval[0] > 0.0
         confidence_status = "passed" if confidence_pass else "crosses_zero"
-    improved = point_pass and confidence_pass
+    improved = point_pass and evidence_sufficient and confidence_pass
     reason_code = (
         "below_practical_delta"
         if not point_pass
+        else "insufficient_evidence"
+        if not evidence_sufficient
         else "confidence_interval_crosses_zero"
         if not confidence_pass
         else "improved"
@@ -546,45 +546,6 @@ def _assess_promotion_improvement_legacy(
     }
 
 
-def assess_promotion_improvement(
-    evaluation: Any,
-    incumbent_evaluation: Any,
-    *,
-    execution_protocol: str | None = None,
-) -> dict[str, Any]:
-    """Compatibility projection; adaptive DSH selection is never confirmatory."""
-
-    result = _assess_promotion_improvement_legacy(
-        evaluation, incumbent_evaluation
-    )
-    if execution_protocol != "dsh_native_plugin_evolution@1":
-        return result
-    projected = {
-        **result,
-        "evidence_class": "exploratory_adaptive_data",
-        "selection_only": True,
-        "validated": False,
-        "confirmed": False,
-        "formal_stage": None,
-    }
-    if (
-        projected.get("comparable")
-        and int(projected.get("paired_block_count") or 0) < 8
-    ):
-        projected.update(
-            {
-                "improved": False,
-                "reason_code": "insufficient_evidence",
-                "confidence_status": "display_only_insufficient_evidence",
-            }
-        )
-    elif "confidence_status" in projected:
-        projected["confidence_status"] = (
-            "display_only_" + str(projected["confidence_status"])
-        )
-    return projected
-
-
 __all__ = [
     "LEGACY_MINIMUM_SCORE_DELTA",
     "PROMOTION_BLOCK_EVIDENCE_VERSION",
@@ -592,8 +553,9 @@ __all__ = [
     "PROMOTION_BOOTSTRAP_RESAMPLES",
     "PROMOTION_CONFIDENCE_LEVEL",
     "PROMOTION_CONFIDENCE_METHOD",
-    "PROMOTION_MAXIMUM_BLOCKS",
+    "PROMOTION_MINIMUM_PAIRED_BLOCKS",
     "PROMOTION_POLICY_VERSION",
+    "PROMOTION_SCORE_DEFINITION",
     "V2_MINIMUM_SCORE_DELTA",
     "assess_promotion_improvement",
     "build_promotion_block_evidence",

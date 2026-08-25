@@ -10,6 +10,23 @@ from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import digest
 
 
+def _research_skill_evidence() -> dict:
+    return {
+        "schema_version": "ecologyrsi-dsh.skill-invocation-evidence/1",
+        "stage": "generation.research",
+        "skill_name": "autonomous-ecology-research",
+        "call_count": 1,
+        "successful_call_count": 1,
+        "call_seq": 1,
+        "result_seq": 2,
+        "first_tool_call_verified": True,
+        "next_tool_name": "structured_output",
+        "next_tool_call_seq": 3,
+        "order_verified": True,
+        "source": "dsh_session_event_log",
+    }
+
+
 class DshCancelRaceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.ledger = EventLedger()
@@ -51,6 +68,7 @@ class DshCancelRaceTests(unittest.TestCase):
                     "output_schema_id": "ecology-research-result@1",
                     "structured": structured,
                     "result_digest": digest(structured),
+                    "skill_invocation_evidence": _research_skill_evidence(),
                 }
             )
         with self.assertRaises(DshToolAdmissionClosedError):

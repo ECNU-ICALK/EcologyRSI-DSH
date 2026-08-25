@@ -102,18 +102,20 @@
   function renderReadiness() {
     var checks = readiness();
     var allReady = checks.every(function (item) { return item.ready; });
+    var unmetChecks = checks.filter(function (item) { return !item.ready; });
     $("#readiness-list").innerHTML = checks.map(function (item) { return "<li><span class=\"check-mark " + (item.ready ? "" : "pending") + "\">" + (item.ready ? "✓" : "·") + "</span><span>" + escapeHTML(item.label) + "</span></li>"; }).join("");
     var pill = $("#readiness-pill");
     pill.className = "pill " + (allReady ? "pill-green" : "pill-amber");
     pill.textContent = allReady ? "可以创建运行" : state.loadState === "loading" ? "正在读取目录" : "配置尚未就绪";
-    $("#start-button").disabled = state.busy || !allReady;
+    // Keep the primary action discoverable. Submission still fails closed in
+    // the form handler, which can now explain the exact unmet condition and
+    // move the user to the relevant controls instead of exposing a dead button.
+    $("#start-button").disabled = state.busy;
     var createStatus = state.createStatus;
     $("#start-button").textContent = state.pendingAction === "create"
       ? "正在创建并提交"
       : createRunButtonLabel(createStatus, Boolean(state.activeRun));
-    $("#create-hint").textContent = createStatus
-      ? createStatus.message
-      : allReady ? "配置将在服务端冻结；创建后由后台自动执行全部轮次。" : "请完成全部启动条件。";
+    $("#create-hint").textContent = createRunHint(createStatus, allReady, unmetChecks);
     var selectedDataset = selectedCatalogItem("datasets", "#dataset-id");
     var selectedEpisode = datasetEpisodes(selectedDataset).find(function (item) { return itemId(item) === $("#episode-id").value; });
     var effectiveBudget = normalizedEvolutionBudget(
@@ -127,7 +129,7 @@
       ["策略模型（API）", itemLabel(selectedModelCatalogItem("#policy-model-id"))],
       ["独立评审模型（API）", itemLabel(selectedModelCatalogItem("#judge-model-id"))],
       ["进化预算", formatNumber(effectiveBudget.max_generations) + " 轮 · 每轮 " + formatNumber(effectiveBudget.candidates_per_generation) + " 个 · 总上限 " + formatNumber(effectiveBudget.requested_max_candidates) + " 个候选"],
-      ["样本更新", "每轮 " + formatNumber(normalizedSamplesPerUpdate($("#samples-per-update").value)) + " 个 · 微批 " + formatNumber(normalizedSampleAgentBatchSize($("#sample-agent-batch-size").value)) + " · 并发 " + formatNumber(normalizedSampleConcurrency($("#sample-concurrency").value))],
+      ["样本更新", "每轮 " + formatNumber(normalizedSamplesPerUpdate($("#samples-per-update").value)) + " 个 · 候选并发 " + formatNumber(normalizedCandidateConcurrency($("#candidate-concurrency").value)) + " · 样本并发 " + formatNumber(normalizedSampleConcurrency($("#sample-concurrency").value))],
       ["自动绑定", "预测模型、进化策略、评测器由模型提出并由宿主登记能力校验确定"],
       ["知识检索", $("#knowledge-online-enabled").checked ? "每轮在线检索并冻结知识快照" : "仅使用内置知识目录"],
       ["运行环境", state.usingDemo ? "浏览器演示" : environmentText(state.catalog.dsh.environment)]
@@ -141,9 +143,18 @@
     return hasActiveRun ? "创建新的进化运行" : "创建并启动进化运行";
   }
 
+  function createRunHint(createStatus, allReady, unmetChecks) {
+    if (!allReady) {
+      return "未满足：" + unmetChecks.map(function (item) { return item.label; }).join("；");
+    }
+    if (createStatus) { return createStatus.message; }
+    return "配置将在服务端冻结；可同时创建多个运行，后台会并行推进。";
+  }
+
   function renderParameters() {
     var samples = normalizedSamplesPerUpdate($("#samples-per-update").value);
     var microbatch = normalizedSampleAgentBatchSize($("#sample-agent-batch-size").value);
+    var candidateConcurrency = normalizedCandidateConcurrency($("#candidate-concurrency").value);
     var concurrency = normalizedSampleConcurrency($("#sample-concurrency").value);
     var budget = candidateBudgetStatus();
     var plannedCandidates = budget.required_candidates;
@@ -157,7 +168,7 @@
       ["迭代结构", formatNumber(budget.max_generations) + " 轮 × " + formatNumber(budget.candidates_per_generation) + " 个候选"],
       ["更新边界", "每轮冻结 " + formatNumber(samples) + " 个反馈样本"],
       ["请求组织", "先按因果预测起点组成 origin wave · 每批最多 " + formatNumber(microbatch) + " 个样本 · 实际请求数以运行进度为准"],
-      ["并发上限", formatNumber(concurrency) + " 个在飞请求"],
+      ["并发上限", formatNumber(candidateConcurrency) + " 个候选 × 每候选 " + formatNumber(concurrency) + " 个在飞请求"],
       ["计划评测量", formatNumber(plannedSampleEvaluations) + " 个候选-样本交互"],
       ["候选总预算", formatNumber(budget.requested_max_candidates) + " 个（至少 " + formatNumber(budget.required_candidates) + " 个）"],
       ["上下文与输出", "由 DSH Session 压缩和模型路由统一管理，不设逐样本 Token 硬上限"],

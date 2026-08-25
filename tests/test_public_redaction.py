@@ -16,6 +16,49 @@ from ecologyrsi_dsh.presentation.trajectory import _safe_value, _stage_event
 
 
 class PublicRedactionTests(unittest.TestCase):
+    def test_generation_events_publish_cross_generation_digest_chain(self) -> None:
+        search_event = SimpleNamespace(
+            seq=1,
+            event_id="event:search",
+            run_id="run:digest-chain",
+            kind="GenerationSearchPlanned",
+            payload={
+                "search_plan": {
+                    "generation": 1,
+                    "search_plan_digest": "1" * 64,
+                    "source_analysis_digest": "a" * 64,
+                    "source_reflection_digest": "b" * 64,
+                    "search_queries": [],
+                    "focus_areas": [],
+                }
+            },
+            created_at="2026-08-24T00:00:00+00:00",
+        )
+        analysis_event = SimpleNamespace(
+            seq=2,
+            event_id="event:analysis",
+            run_id="run:digest-chain",
+            kind="GenerationAnalyzed",
+            payload={
+                "analysis": {
+                    "generation": 1,
+                    "analysis_digest": "c" * 64,
+                    "candidate_count": 1,
+                    "eligible_count": 0,
+                    "outcome": "no_improvement",
+                    "champion_candidate_id": None,
+                }
+            },
+            created_at="2026-08-24T00:00:01+00:00",
+        )
+
+        search = EventEndpointsMixin._event_json(search_event)["payload"]
+        analysis = EventEndpointsMixin._event_json(analysis_event)["payload"]
+
+        self.assertEqual(search["source_analysis_digest"], "a" * 64)
+        self.assertEqual(search["source_reflection_digest"], "b" * 64)
+        self.assertEqual(analysis["analysis_digest"], "c" * 64)
+
     def test_all_public_value_sanitizers_reject_folded_secret_keys_deeply(self) -> None:
         payload = {
             "safe": {

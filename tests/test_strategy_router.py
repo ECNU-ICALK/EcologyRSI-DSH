@@ -6,12 +6,12 @@ import unittest
 from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import digest
-from ecologyrsi_dsh.dsh import FakeDSHAdapter, StrategyRouterDSHAdapter
+from ecologyrsi_dsh.evolution.strategies import FakeDSHAdapter, StrategyRouterDSHAdapter
 from ecologyrsi_dsh.evolution.batches import start_generation_batch
 from ecologyrsi_dsh.evolution.context import safe_aggregate_feedback
 from ecologyrsi_dsh.integrations.model_gateway import GatewayResponseError
 from ecologyrsi_dsh.knowledge.algorithms import compile_algorithm_spec
-from ecologyrsi_dsh.models import Run, TaskManifest
+from ecologyrsi_dsh.core.models import Run, TaskManifest
 
 
 class _PolicyGatewayStub:
@@ -60,6 +60,26 @@ class AggregateFeedbackBoundaryTests(unittest.TestCase):
             {"scientific_pass": False, "sample_execution_coverage": 0.0},
         )
 
+    def test_research_iteration_envelope_does_not_consume_plan_depth(self) -> None:
+        feedback = {
+            "plan": {
+                "dsh_research_evidence": [
+                    {
+                        "grounding": {
+                            "historical_generations": [
+                                {"run_id": "run:prior", "generation": 2}
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+
+        self.assertEqual(
+            safe_aggregate_feedback(feedback, name="research iteration"),
+            feedback,
+        )
+
 
 class _UnavailablePolicyGateway(_PolicyGatewayStub):
     def propose(self, model_id: str, context: dict, allowed_parameters: dict) -> dict:
@@ -78,6 +98,16 @@ class _UnavailableResearchGateway(_PolicyGatewayStub):
             attempts=4,
             status_code=429,
         )
+
+
+class _BatchContextCapturingAdapter(FakeDSHAdapter):
+    def __init__(self) -> None:
+        super().__init__(max_proposals=4)
+        self.batch_contexts: list[dict | None] = []
+
+    def propose(self, *args, **kwargs):
+        self.batch_contexts.append(kwargs.get("batch_context"))
+        return super().propose(*args, **kwargs)
 
 
 class _PredictorSelectingGateway:
@@ -245,6 +275,47 @@ def _greenhouse_parent() -> dict:
 
 
 class StrategyRouterTests(unittest.TestCase):
+    def test_later_generation_slot_receives_prior_sibling_avoid_context(self) -> None:
+        adapter = _BatchContextCapturingAdapter()
+        task_data = _task().to_dict()
+        task_data["budget"] = {
+            "max_candidates": 4,
+            "max_generations": 2,
+            "candidates_per_generation": 2,
+        }
+        task = TaskManifest.from_dict(task_data)
+        with EventLedger() as ledger:
+            director = EvolutionDirector(ledger, adapter)
+            run_id = director.start_evolution(
+                task, run_id="run:sibling-proposal-context"
+            ).run.run_id
+            batch = start_generation_batch(director, run_id)
+            first_proposal = director.request_proposal(
+                run_id,
+                generation_batch=batch,
+                slot_index=0,
+                consume_interventions=False,
+            )
+            director.spawn_candidate(run_id, first_proposal, slot_index=0)
+            director.request_proposal(
+                run_id,
+                generation_batch=batch,
+                slot_index=1,
+                consume_interventions=False,
+            )
+
+        second_context = adapter.batch_contexts[1]
+        self.assertIsNotNone(second_context)
+        assert second_context is not None
+        self.assertIn("sibling_candidate_behaviors", second_context)
+        siblings = second_context["sibling_candidate_behaviors"]
+        self.assertEqual(len(siblings), 1)
+        self.assertEqual(siblings[0]["slot_index"], 0)
+        self.assertEqual(siblings[0]["parameters"], dict(first_proposal.changes))
+        self.assertEqual(
+            siblings[0]["parameters_digest"], digest(dict(first_proposal.changes))
+        )
+
     def test_autonomous_single_parameter_siblings_share_seed_and_change_one_axis(
         self,
     ) -> None:
@@ -1091,8 +1162,8 @@ class StrategyRouterTests(unittest.TestCase):
                 "authenticated-structured-proposal/6",
             ),
             "autonomous_model@1": (
-                "per-generation-research-runtime-adoption/12",
-                "per-generation-research-runtime-adoption/11",
+                "model-search-reflect-candidate-directions/19",
+                "model-search-reflect-candidate-directions/18",
             ),
         }
         for strategy_id, (

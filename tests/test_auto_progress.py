@@ -19,8 +19,8 @@ from ecologyrsi_dsh.api import generation_execution as generation_execution_modu
 from ecologyrsi_dsh.evaluators.sample_execution import SampleResultCallbackError
 from ecologyrsi_dsh.evolution.batches import ResearchResponseContractError
 from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
-from ecologyrsi_dsh.model_gateway import GatewayResponseError
-from ecologyrsi_dsh.server import EvolutionHTTPServer
+from ecologyrsi_dsh.integrations.model_gateway import GatewayResponseError
+from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 
 
 class AutoProgressHTTPTests(unittest.TestCase):
@@ -987,7 +987,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
     def test_worker_count_defaults_and_stays_bounded(self) -> None:
         with patch.dict(auto_progress_module.os.environ, {}, clear=True):
             self.assertEqual(
-                auto_progress_module.AutoProgressManager._read_worker_count(), 1
+                auto_progress_module.AutoProgressManager._read_worker_count(), 4
             )
         with patch.dict(
             auto_progress_module.os.environ,
@@ -1019,20 +1019,20 @@ class AutoProgressHTTPTests(unittest.TestCase):
             clear=True,
         ):
             self.assertEqual(
-                auto_progress_module.AutoProgressManager._read_worker_count(), 1
+                auto_progress_module.AutoProgressManager._read_worker_count(), 4
             )
 
-    def test_worker_pool_allows_other_run_while_one_generation_blocks(self) -> None:
+    def test_default_worker_pool_allows_other_run_while_one_generation_blocks(self) -> None:
         self.server.auto_progress.close()
         with patch.dict(
             auto_progress_module.os.environ,
-            {"ECOLOGYRSI_AUTO_PROGRESS_WORKERS": "2"},
-            clear=False,
+            {},
+            clear=True,
         ):
             self.server.auto_progress = auto_progress_module.AutoProgressManager(
                 self.server
             )
-        self.assertEqual(self.server.auto_progress._worker_count, 2)
+        self.assertEqual(self.server.auto_progress._worker_count, 4)
 
         run_ids: list[str] = []
         for label in ("slow", "fast"):
@@ -1481,6 +1481,15 @@ class AutoProgressHTTPTests(unittest.TestCase):
             self.assertNotIn(work_item, self.server.auto_progress._retry_timers)
 
     def test_purge_withdraws_queued_incarnation_before_run_id_reuse(self) -> None:
+        self.server.auto_progress.close()
+        with patch.dict(
+            auto_progress_module.os.environ,
+            {"ECOLOGYRSI_AUTO_PROGRESS_WORKERS": "1"},
+            clear=False,
+        ):
+            self.server.auto_progress = auto_progress_module.AutoProgressManager(
+                self.server
+            )
         blocker_id = "run-queued-purge-blocker"
         target_id = "run-queued-purge-target"
         for run_id, label in ((blocker_id, "blocker"), (target_id, "target")):

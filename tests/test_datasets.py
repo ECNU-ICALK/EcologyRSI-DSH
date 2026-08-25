@@ -11,10 +11,10 @@ import tempfile
 import unittest
 import zipfile
 
-from ecologyrsi_dsh.cli import build_parser
-from ecologyrsi_dsh.datasets import DatasetRegistry, DatasetSeries
-from ecologyrsi_dsh.greenhouse import GreenhouseDatasetAdapter
-from ecologyrsi_dsh.splits import build_split_manifest
+from ecologyrsi_dsh.application.cli import build_parser
+from ecologyrsi_dsh.data.greenhouse import GreenhouseDatasetAdapter
+from ecologyrsi_dsh.data.registry import DatasetRegistry, DatasetSeries
+from ecologyrsi_dsh.data.splits import build_split_manifest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

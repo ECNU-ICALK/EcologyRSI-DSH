@@ -10,7 +10,14 @@ from dataclasses import dataclass, field
 from statistics import fmean, median
 from typing import Any
 
-from ..core.models import CandidateStatus, JsonObject, canonical_json, digest, utc_now
+from ..core.models import (
+    CandidateStatus,
+    Evaluation,
+    JsonObject,
+    canonical_json,
+    digest,
+    utc_now,
+)
 from .promotion import assess_promotion_improvement
 from ..evaluators.fitness import (
     EXPLORATORY_EVIDENCE_CLASS,
@@ -20,6 +27,13 @@ from ..evaluators.fitness import (
 )
 
 _IMPROVEMENT_TOLERANCE = 1e-12
+GENERATION_CONTROL_EVALUATION_SCHEMA = (
+    "ecologyrsi-dsh.generation-control-evaluation/1"
+)
+GENERATION_CONTROL_POLICY = "same_cohort_search_parent_and_formal_elite@1"
+STRICT_SAMPLE_AGENT_PROTOCOLS = frozenset(
+    {"dsh-strict-origin-bundle@3"}
+)
 _EXPERIENCE_MAX_GENERATIONS = 6
 _EXPERIENCE_SCAN_GENERATIONS = 24
 _EXPERIENCE_MAX_ACTIVE_ISSUES = 16
@@ -232,6 +246,151 @@ def evaluation_cohort_comparison(
     if current_digest == incumbent_digest:
         return "same_cohort"
     return "different_cohort"
+
+
+def strict_generation_controls_required(task: Any, generation: int) -> bool:
+    """Return whether formal selection needs same-cohort control replays.
+
+    Diagnostic smoke runs exercise the complete per-origin agent chain, but
+    intentionally do not spend the formal evidence budget needed to replay a
+    prior search parent or elite.  Requiring control evidence for those runs
+    would make every diagnostic run fail when it reaches generation two.
+    """
+
+    metadata = getattr(task, "metadata", None)
+    return bool(
+        generation > 0
+        and isinstance(metadata, Mapping)
+        and metadata.get("sample_agent_protocol")
+        in STRICT_SAMPLE_AGENT_PROTOCOLS
+        and metadata.get("sample_budget_class") == "selection_eligible"
+    )
+
+
+def generation_control_evaluations(
+    state: Any,
+    batch: Any,
+) -> dict[str, tuple[str, Evaluation]]:
+    """Validate and resolve strict same-cohort parent/elite evaluations.
+
+    Control evaluations are stored inside the first sibling's scientific
+    evaluation so they commit atomically with the generation evidence.  They
+    contain aggregates only; per-sample labels, predictions, and reflections
+    remain outside the proposer-visible analysis.
+    """
+
+    if not strict_generation_controls_required(
+        state.task_manifest, batch.generation
+    ):
+        return {}
+    expected: dict[str, str] = {}
+    if batch.parent_candidate_id is not None:
+        expected["search_parent"] = str(batch.parent_candidate_id)
+    incumbent_id = state.run.best_candidate_id
+    if incumbent_id is not None:
+        expected["formal_elite"] = str(incumbent_id)
+    if "search_parent" not in expected:
+        raise RuntimeError("strict generation controls require a search parent")
+
+    carriers: list[Any] = []
+    current_evaluations: list[Evaluation] = []
+    for candidate in state.candidates:
+        if candidate.generation != batch.generation:
+            continue
+        evaluation = state.evaluation_for(candidate.candidate_id)
+        if evaluation is None:
+            continue
+        current_evaluations.append(evaluation)
+        if "generation_control_evaluations" in evaluation.metrics:
+            carriers.append(evaluation)
+    if len(carriers) != 1:
+        raise RuntimeError(
+            "strict generation requires exactly one control-evidence carrier"
+        )
+    carrier = carriers[0]
+    carrier_candidate = state.candidate(carrier.candidate_id)
+    if carrier_candidate.slot_index != 0:
+        raise RuntimeError("generation controls must be attached to slot zero")
+    metrics = carrier.metrics
+    raw_controls = metrics.get("generation_control_evaluations")
+    if (
+        metrics.get("generation_control_policy") != GENERATION_CONTROL_POLICY
+        or not isinstance(raw_controls, list)
+        or not raw_controls
+        or metrics.get("generation_control_evidence_digest")
+        != digest(raw_controls)
+    ):
+        raise RuntimeError("generation control evidence envelope is invalid")
+
+    current_cohorts = {
+        evaluation_cohort_digest(evaluation)
+        for evaluation in current_evaluations
+    }
+    if None in current_cohorts or len(current_cohorts) != 1:
+        raise RuntimeError("generation candidates lack one verifiable cohort")
+    current_cohort = next(iter(current_cohorts))
+    evaluators = {item.evaluator_digest for item in current_evaluations}
+    partitions = {item.partition for item in current_evaluations}
+    if len(evaluators) != 1 or len(partitions) != 1:
+        raise RuntimeError("generation candidates do not share evaluator identity")
+
+    resolved: dict[str, tuple[str, Evaluation]] = {}
+    seen_candidates: set[str] = set()
+    for raw in raw_controls:
+        if not isinstance(raw, Mapping):
+            raise RuntimeError("generation control evidence item is invalid")
+        if (
+            raw.get("schema_version") != GENERATION_CONTROL_EVALUATION_SCHEMA
+            or raw.get("generation") != batch.generation
+            or not isinstance(raw.get("candidate_id"), str)
+            or not isinstance(raw.get("evaluation"), Mapping)
+        ):
+            raise RuntimeError("generation control evidence identity is invalid")
+        candidate_id = str(raw["candidate_id"])
+        if candidate_id in seen_candidates:
+            raise RuntimeError("generation control candidate is duplicated")
+        seen_candidates.add(candidate_id)
+        try:
+            evaluation = Evaluation.from_dict(raw["evaluation"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("generation control evaluation is invalid") from exc
+        if (
+            evaluation.run_id != state.run.run_id
+            or evaluation.candidate_id != candidate_id
+            or evaluation.evaluator_digest not in evaluators
+            or evaluation.partition not in partitions
+            or evaluation_cohort_digest(evaluation) != current_cohort
+        ):
+            raise RuntimeError(
+                "generation control evaluation is not bound to the current cohort"
+            )
+        sample_summary = evaluation.metrics.get("sample_execution")
+        if (
+            not isinstance(sample_summary, Mapping)
+            or sample_summary.get("strict_agent_contract") is not True
+            or sample_summary.get("strict_agent_chain_pass") is not True
+            or sample_summary.get("host_route_bypass_count") != 0
+        ):
+            raise RuntimeError(
+                "generation control lacks a complete strict sample-agent chain"
+            )
+        role = raw.get("comparison_role")
+        roles = (
+            ("search_parent", "formal_elite")
+            if role == "search_parent_and_formal_elite"
+            else (str(role),)
+        )
+        for resolved_role in roles:
+            if resolved_role not in expected:
+                raise RuntimeError("generation control role is unexpected")
+            if expected[resolved_role] != candidate_id:
+                raise RuntimeError("generation control candidate does not match its role")
+            if resolved_role in resolved:
+                raise RuntimeError("generation control role is duplicated")
+            resolved[resolved_role] = (candidate_id, evaluation)
+    if set(resolved) != set(expected):
+        raise RuntimeError("required generation controls are incomplete")
+    return resolved
 
 
 def _integer(value: Any, name: str, minimum: int = 0) -> int:
@@ -865,6 +1024,9 @@ def _sample_failure_summary(
             "critic_outcome_counts",
             "reason_code_counts",
             "recovered_by_failure_class",
+            "reflection_outcome_counts",
+            "reflection_error_source_counts",
+            "reflection_next_action_counts",
         ):
             counts = _bounded_count_mapping(summary.get(source_name))
             if counts:
@@ -885,6 +1047,7 @@ def _sample_failure_summary(
             or int(row.get("repair_count", 0)) > 0
             or row.get("coverage_pass") is False
             or bool(tool_performance)
+            or bool(row.get("reflection_outcome_counts"))
         ):
             rows.append(row)
     return tuple(rows[:16])
@@ -1094,6 +1257,60 @@ def _experience_parameter_sets(
     return result
 
 
+def _experience_candidate_behaviors(
+    state: Any,
+    analysis: GenerationAnalysis,
+) -> list[dict[str, Any]]:
+    """Keep the full behavioral identity for exact-replay suppression."""
+
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    candidate_for = getattr(state, "candidate", None)
+    proposal_for = getattr(state, "proposal", None)
+    if not callable(candidate_for) or not callable(proposal_for):
+        return result
+    for row in analysis.ranking:
+        candidate_id = row.get("candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            continue
+        try:
+            candidate = candidate_for(candidate_id)
+            proposal = proposal_for(candidate.proposal_id)
+        except (KeyError, ValueError):
+            continue
+        metadata = proposal.metadata
+        behavior_digest = metadata.get("behavior_digest")
+        if (
+            not isinstance(behavior_digest, str)
+            or len(behavior_digest) != 64
+            or any(character not in "0123456789abcdef" for character in behavior_digest)
+            or behavior_digest in seen
+        ):
+            continue
+        seen.add(behavior_digest)
+        behavior: dict[str, Any] = {
+            "behavior_digest": behavior_digest,
+            "parameters_digest": digest(dict(proposal.changes)),
+        }
+        predictor_id = state.task_manifest.metadata.get("prediction_model_id")
+        raw_genome = metadata.get("evolution_genome_canonical_json")
+        if isinstance(raw_genome, str):
+            try:
+                genome = json.loads(raw_genome)
+                predictor_id = genome["scientific_program"]["predictor_ref"]["id"]
+            except (KeyError, TypeError, json.JSONDecodeError):
+                pass
+        if isinstance(predictor_id, str) and predictor_id.strip():
+            behavior["prediction_model_id"] = predictor_id.strip()[:200]
+        classification = _experience_text(row.get("classification"), maximum=100)
+        if classification is not None:
+            behavior["classification"] = classification
+        result.append(behavior)
+        if len(result) >= 8:
+            break
+    return result
+
+
 def _experience_modifications(
     state: Any,
     analysis: GenerationAnalysis,
@@ -1139,6 +1356,7 @@ def _experience_modifications(
         ),
         "parameter_names_modified": parameter_names,
         "candidate_parameter_sets": parameter_sets,
+        "candidate_behaviors": _experience_candidate_behaviors(state, analysis),
         "algorithm_changed": bool(
             previous_adopted_id
             and adopted_id
@@ -1577,6 +1795,19 @@ def _experience_generation_summary(
     result: dict[str, Any] = {
         "generation": analysis.generation,
         "score_comparison": score_comparison,
+        # Keep the evidence class on current-run summaries as well as on
+        # historical projections.  Consumers must not turn a one-origin
+        # diagnostic cohort into a durable failed-behavior blacklist merely
+        # because the current and historical projections had different
+        # shapes.
+        "gate_result": {
+            "candidate_count": analysis.candidate_count,
+            "eligible_count": analysis.eligible_count,
+            "outcome": analysis.outcome,
+            "insufficient_evidence": analysis.insufficient_evidence,
+            "constraint_failure_count": len(analysis.constraint_failures),
+            "judge_disagreement_count": len(analysis.judge_disagreements),
+        },
         "modifications": modifications,
         "algorithm_failures": _experience_algorithm_failures(analysis),
         "sample_failure_counts": _experience_sample_failure_counts(analysis),
@@ -2090,6 +2321,7 @@ def _history_generation_projection(
             ("research_plan_changed_fields", 6),
             ("parameter_names_modified", 12),
             ("candidate_parameter_sets", 2),
+            ("candidate_behaviors", 4),
             ("algorithm_synthesis_parameter_focus", 8),
         ):
             rows = modifications.get(field_name)
@@ -2629,6 +2861,15 @@ def _historical_experience_payload(
                 parameter_sets.pop()
                 omitted_detail_count += 1
                 return True
+            candidate_behaviors = (
+                modifications.get("candidate_behaviors")
+                if isinstance(modifications, dict)
+                else None
+            )
+            if isinstance(candidate_behaviors, list) and len(candidate_behaviors) > 1:
+                candidate_behaviors.pop()
+                omitted_detail_count += 1
+                return True
             if source.pop("algorithm_synthesis_effect", None) is not None:
                 omitted_detail_count += 1
                 return True
@@ -2656,6 +2897,15 @@ def _historical_experience_payload(
             parameter_sets.pop()
             omitted_detail_count += 1
             continue
+        candidate_behaviors = (
+            modifications.get("candidate_behaviors")
+            if isinstance(modifications, dict)
+            else None
+        )
+        if isinstance(candidate_behaviors, list) and candidate_behaviors:
+            candidate_behaviors.pop()
+            omitted_detail_count += 1
+            continue
         if source.pop("algorithm_synthesis_effect", None) is not None:
             omitted_detail_count += 1
             continue
@@ -2666,6 +2916,57 @@ def _historical_experience_payload(
 
 def _fit_cross_generation_experience(result: dict[str, Any]) -> dict[str, Any]:
     capacity = result["capacity"]
+
+    def drop_oldest_generation() -> bool:
+        if len(result["generations"]) <= 1:
+            return False
+        result["generations"].pop(0)
+        capacity["omitted_generation_summaries"] += 1
+        result["window"]["history_truncated"] = True
+        result["window"]["included_generations"] = [
+            item["generation"] for item in result["generations"]
+        ]
+        return True
+
+    def trim_generation_detail(*, destructive_identity: bool = False) -> bool:
+        """Remove one bounded detail while retaining the newest lesson first."""
+
+        for generation in result["generations"]:
+            for field_name in (
+                "tool_performance",
+                "algorithm_failures",
+                "weak_targets",
+                "weak_horizons",
+                "common_failures",
+            ):
+                rows = generation.get(field_name)
+                if isinstance(rows, list) and rows:
+                    rows.pop()
+                    capacity["omitted_generation_details"] += 1
+                    return True
+            failure_counts = generation.get("sample_failure_counts")
+            if isinstance(failure_counts, dict) and failure_counts:
+                failure_counts.pop(sorted(failure_counts)[-1])
+                capacity["omitted_generation_details"] += 1
+                return True
+            modifications = generation.get("modifications")
+            if isinstance(modifications, dict):
+                parameter_sets = modifications.get("candidate_parameter_sets")
+                if isinstance(parameter_sets, list) and parameter_sets:
+                    parameter_sets.pop()
+                    capacity["omitted_generation_details"] += 1
+                    return True
+            if generation.pop("algorithm_synthesis_effect", None) is not None:
+                capacity["omitted_generation_details"] += 1
+                return True
+            if destructive_identity and isinstance(modifications, dict):
+                candidate_behaviors = modifications.get("candidate_behaviors")
+                if isinstance(candidate_behaviors, list) and candidate_behaviors:
+                    candidate_behaviors.pop()
+                    capacity["omitted_generation_details"] += 1
+                    return True
+        return False
+
     while len(canonical_json(result).encode("utf-8")) > (
         _CURRENT_RUN_EXPERIENCE_MAX_BYTES
     ):
@@ -2673,27 +2974,26 @@ def _fit_cross_generation_experience(result: dict[str, Any]) -> dict[str, Any]:
             result["resolved_archived"].pop()
             capacity["omitted_archived_issues"] += 1
             continue
-        if len(result["generations"]) > 2:
-            result["generations"].pop(0)
-            capacity["omitted_generation_summaries"] += 1
-            result["window"]["history_truncated"] = True
-            result["window"]["included_generations"] = [
-                item["generation"] for item in result["generations"]
-            ]
+        # Per-target/per-horizon tool diagnostics are the largest field in a
+        # real 3x3 run.  Preserve the generation and its behavior identities,
+        # but progressively compact those repeatable details.
+        if trim_generation_detail():
+            continue
+        if len(result["generations"]) > 2 and drop_oldest_generation():
             continue
         if result["active_unresolved"]:
             result["active_unresolved"].pop()
             capacity["omitted_active_issues"] += 1
             continue
-        removed_detail = False
-        for generation in result["generations"]:
-            modifications = generation.get("modifications")
-            if isinstance(modifications, dict) and modifications.get(
-                "candidate_parameter_sets"
-            ):
-                modifications["candidate_parameter_sets"] = []
-                removed_detail = True
-        if removed_detail:
+        # Two full summaries can still exceed the envelope after every
+        # repeatable detail is removed.  Keep the newest generation rather
+        # than failing the entire autonomous run before research starts.
+        if drop_oldest_generation():
+            continue
+        # Exact behavior identity is the last removable detail because it is
+        # what prevents replay of genuinely failed, sufficiently powered
+        # experiments.
+        if trim_generation_detail(destructive_identity=True):
             continue
         raise RuntimeError("cross-generation experience cannot fit its byte budget")
     return result
@@ -2751,7 +3051,7 @@ def build_cross_generation_experience(
     selected_active = active[:_EXPERIENCE_MAX_ACTIVE_ISSUES]
     selected_archived = archived[:_EXPERIENCE_MAX_ARCHIVED_ISSUES]
     result: dict[str, Any] = {
-        "schema_version": "ecologyrsi-dsh.cross-generation-experience/2",
+        "schema_version": "ecologyrsi-dsh.cross-generation-experience/3",
         "source": "event_ledger_projection",
         "through_generation": available[-1].generation if available else None,
         "window": {
@@ -2785,6 +3085,7 @@ def build_cross_generation_experience(
             "omitted_archived_issues": max(
                 0, len(archived) - len(selected_archived)
             ),
+            "omitted_generation_details": 0,
         },
         "contains_raw_samples": False,
     }
@@ -2804,16 +3105,23 @@ def build_cross_generation_experience(
 
 
 def _rank_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    has_finite_score = math.isfinite(_finite(row.get("score"), math.nan))
     if row.get("evidence_class") == EXPLORATORY_EVIDENCE_CLASS:
         floor = row.get("primary_selection_stability_floor")
         interval = row.get("interval_score")
         return (
+            has_finite_score,
             bool(row.get("validity_pass")),
             bool(row.get("primary_selection_gate")),
             _finite(floor, -math.inf),
             _finite(row.get("robustness_min_cell_delta"), -math.inf),
+            _finite(
+                row.get("robustness_lower_quartile_cell_delta"), -math.inf
+            ),
+            _finite(row.get("primary_score", row.get("score")), -math.inf),
             bool(row.get("uq_pass_or_not_required")),
             -_finite(interval, 0.0),
+            _finite(row.get("execution_policy_score"), -math.inf),
             _finite(row.get("efficiency_score"), -math.inf),
             -_finite(row.get("complexity"), math.inf),
             -int(row.get("slot_index", 0)),
@@ -2824,7 +3132,7 @@ def _rank_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
     scientific_pass = bool(row.get("scientific_pass"))
     judge_accepted = bool(row.get("judge_accepted"))
     return (
-        bool(row.get("score") is not None),
+        has_finite_score,
         scientific_pass,
         -int(row.get("constraint_violations", 0)),
         score,
@@ -2835,6 +3143,135 @@ def _rank_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
         -_finite(row.get("parameter_distance"), math.inf),
         -int(row.get("slot_index", 0)),
     )
+
+
+def _cross_generation_search_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Rank comparable search evidence without generation-local tie breakers."""
+
+    has_finite_score = math.isfinite(_finite(row.get("score"), math.nan))
+    constraint_safety = -int(row.get("constraint_violations", 0))
+    if row.get("evidence_class") == EXPLORATORY_EVIDENCE_CLASS:
+        return (
+            has_finite_score,
+            constraint_safety,
+            bool(row.get("validity_pass")),
+            bool(row.get("primary_selection_gate")),
+            _finite(row.get("primary_selection_stability_floor"), -math.inf),
+            _finite(row.get("robustness_min_cell_delta"), -math.inf),
+            _finite(
+                row.get("robustness_lower_quartile_cell_delta"), -math.inf
+            ),
+            _finite(row.get("primary_score", row.get("score")), -math.inf),
+            bool(row.get("uq_pass_or_not_required")),
+            -_finite(row.get("interval_score"), 0.0),
+            _finite(row.get("execution_policy_score"), -math.inf),
+            _finite(row.get("efficiency_score"), -math.inf),
+            -_finite(row.get("complexity"), math.inf),
+        )
+    return (
+        has_finite_score,
+        bool(row.get("scientific_pass")),
+        constraint_safety,
+        _finite(row.get("score"), -math.inf),
+        _finite(row.get("worst_skill_score"), -math.inf),
+        bool(row.get("judge_accepted")),
+    )
+
+
+def _select_search_parent(
+    state: Any,
+    batch: GenerationBatch,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    generation_controls: Mapping[str, tuple[str, Evaluation]] | None = None,
+    profile: FitnessProfile | None = None,
+) -> tuple[str | None, bool, dict[str, Any]]:
+    """Choose the best comparable current-or-prior candidate for exploration."""
+
+    search_rows = [
+        row
+        for row in rows
+        if row.get("score") is not None
+        and int(row.get("constraint_violations", 0)) == 0
+    ]
+    if not search_rows:
+        search_rows = [row for row in rows if row.get("score") is not None]
+    current_row = search_rows[0] if search_rows else None
+    current_id = (
+        str(current_row["candidate_id"])
+        if current_row is not None
+        else None
+    )
+    if batch.generation <= 0:
+        return current_id, False, {}
+
+    if generation_controls:
+        if profile is None:
+            raise RuntimeError("strict search-parent selection requires a fitness profile")
+        control_id, control_evaluation = generation_controls["search_parent"]
+        current_evaluations = tuple(
+            evaluation
+            for row in search_rows
+            if (evaluation := state.evaluation_for(str(row["candidate_id"])))
+            is not None
+        )
+        assessments = {
+            item.candidate_id: item
+            for item in assess_generation_selection(
+                current_evaluations,
+                control_evaluation,
+                profile,
+            )
+        }
+        for row in search_rows:
+            candidate_id = str(row["candidate_id"])
+            assessment = assessments.get(candidate_id)
+            if (
+                assessment is not None
+                and bool(row.get("validity_pass"))
+                and assessment.primary_selection_gate
+            ):
+                return candidate_id, False, assessments
+        return control_id, True, assessments
+
+    previous = state.analysis_for(batch.generation - 1)
+    previous_id = (
+        previous.search_parent_candidate_id if previous is not None else None
+    )
+    if previous_id is None:
+        return current_id, False, {}
+    previous_row = next(
+        (
+            row
+            for row in previous.ranking
+            if row.get("candidate_id") == previous_id
+            and row.get("score") is not None
+        ),
+        None,
+    )
+    if previous_row is None:
+        return current_id, False, {}
+    if current_row is None:
+        return previous_id, True, {}
+
+    current_evaluation = state.evaluation_for(current_id)
+    previous_evaluation = state.evaluation_for(previous_id)
+    if current_evaluation is None or previous_evaluation is None:
+        return current_id, False, {}
+    if current_evaluation.evaluator_digest != previous_evaluation.evaluator_digest:
+        return current_id, False, {}
+    comparison = evaluation_cohort_comparison(
+        state.task_manifest,
+        current_evaluation,
+        previous_evaluation,
+    )
+    if comparison not in {"legacy_full_cohort", "same_cohort"}:
+        return current_id, False, {}
+    if _cross_generation_search_key(previous_row) >= _cross_generation_search_key(
+        current_row
+    ):
+        return previous_id, previous_id != current_id, {}
+    return current_id, False, {}
 
 
 def _metric_weaknesses(
@@ -3009,6 +3446,15 @@ def _previous_incumbent(state: Any, generation: int) -> tuple[Any, Any] | None:
 def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationAnalysis:
     """Analyze one terminal batch without using raw rows or completion times."""
 
+    dsh_native = (
+        state.task_manifest.metadata.get("execution_protocol")
+        == "dsh_native_plugin_evolution@1"
+    )
+    diagnostic_smoke = bool(
+        dsh_native
+        and state.task_manifest.metadata.get("sample_budget_class")
+        == "diagnostic_smoke"
+    )
     candidates = sorted(
         (item for item in state.candidates if item.generation == batch.generation),
         key=lambda item: item.slot_index,
@@ -3026,11 +3472,16 @@ def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationA
         raise RuntimeError("generation batch still has unfinished candidates")
 
     incumbent = _previous_incumbent(state, batch.generation)
+    controls = generation_control_evaluations(state, batch)
+    formal_comparator = (
+        controls["formal_elite"][1]
+        if "formal_elite" in controls
+        else incumbent[1]
+        if incumbent is not None
+        else None
+    )
     rows = [_candidate_row(state, item, batch.parent_candidate_id) for item in candidates]
-    if (
-        state.task_manifest.metadata.get("execution_protocol")
-        == "dsh_native_plugin_evolution@1"
-    ):
+    if dsh_native:
         profile = FitnessProfile.from_task(state.task_manifest)
         selection_by_candidate: dict[str, Any] = {}
         evaluated = [
@@ -3038,11 +3489,11 @@ def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationA
             for candidate in candidates
             if (evaluation := state.evaluation_for(candidate.candidate_id)) is not None
         ]
-        if incumbent is not None and evaluated:
+        if formal_comparator is not None and evaluated:
             selection_by_candidate = {
                 item.candidate_id: item
                 for item in assess_generation_selection(
-                    tuple(evaluated), incumbent[1], profile
+                    tuple(evaluated), formal_comparator, profile
                 )
             }
         for row in rows:
@@ -3052,11 +3503,18 @@ def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationA
             runtime = evaluation.metrics.get("runtime_metrics", {})
             assessment = build_fitness_assessment(
                 evaluation,
-                incumbent[1] if incumbent is not None else None,
+                formal_comparator,
                 runtime if isinstance(runtime, Mapping) else {},
                 profile,
             )
-            row.update(assessment.to_dict())
+            assessment_fields = assessment.to_dict()
+            # Candidate identity is assigned by the Host ledger.  Evaluation
+            # metrics may omit their optional slot hint (whose legacy default
+            # is zero), so they must never overwrite the durable candidate
+            # slot used for replay and generation attribution.
+            assessment_fields.pop("candidate_id", None)
+            assessment_fields.pop("slot_index", None)
+            row.update(assessment_fields)
             row["fitness_profile_digest"] = profile.profile_digest
             selection = selection_by_candidate.get(assessment.candidate_id)
             if selection is not None:
@@ -3087,8 +3545,13 @@ def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationA
                     and assessment.robustness_pass
                 )
     rows.sort(key=_rank_key, reverse=True)
-    for index, row in enumerate(rows, start=1):
-        row["rank"] = index
+    scientific_rank = 0
+    for row in rows:
+        if math.isfinite(_finite(row.get("score"), math.nan)):
+            scientific_rank += 1
+            row["rank"] = scientific_rank
+        else:
+            row["rank"] = None
     eligible = [row for row in rows if row["eligible"]]
     selected_id = eligible[0]["candidate_id"] if eligible else None
     incumbent_id = incumbent[0].candidate_id if incumbent else None
@@ -3097,9 +3560,9 @@ def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationA
         evaluation_cohort_comparison(
             state.task_manifest,
             selected_evaluation,
-            incumbent[1],
+            formal_comparator,
         )
-        if selected_evaluation is not None and incumbent is not None
+        if selected_evaluation is not None and formal_comparator is not None
         else "no_incumbent"
     )
     current_cohort_verifiable = bool(
@@ -3112,25 +3575,21 @@ def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationA
     promotion_assessment = (
         assess_promotion_improvement(
             selected_evaluation,
-            incumbent[1],
-            execution_protocol=state.task_manifest.metadata.get(
-                "execution_protocol"
-            ),
+            formal_comparator,
         )
         if selected_evaluation is not None
-        and incumbent is not None
+        and formal_comparator is not None
+        and not dsh_native
         and cohort_comparison in {"legacy_full_cohort", "same_cohort"}
         else None
     )
-    if (
-        state.task_manifest.metadata.get("execution_protocol")
-        == "dsh_native_plugin_evolution@1"
-    ):
-        selected_row = next(
-            (row for row in rows if row["candidate_id"] == selected_id), None
-        )
+    selected_row = next(
+        (row for row in rows if row["candidate_id"] == selected_id), None
+    )
+    if dsh_native:
         improved = bool(
-            selected_evaluation is not None
+            not diagnostic_smoke
+            and selected_evaluation is not None
             and current_cohort_verifiable
             and selected_row is not None
             and selected_row.get("primary_selection_gate")
@@ -3157,19 +3616,41 @@ def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationA
         else "no_eligible_candidate"
     )
     after_id = champion_id or incumbent_id
-    search_rows = [
-        row
-        for row in rows
-        if row["score"] is not None and int(row["constraint_violations"]) == 0
-    ]
-    if not search_rows:
-        search_rows = [row for row in rows if row["score"] is not None]
-    search_parent_id = (
-        str(search_rows[0]["candidate_id"]) if search_rows else None
+    (
+        search_parent_id,
+        retained_prior_search_elite,
+        search_control_assessments,
+    ) = _select_search_parent(
+        state,
+        batch,
+        rows,
+        generation_controls=controls,
+        profile=profile if dsh_native else None,
     )
     for row in rows:
+        search_assessment = search_control_assessments.get(
+            str(row["candidate_id"])
+        )
+        if search_assessment is not None:
+            row.update(
+                {
+                    "search_parent_control_candidate_id": controls[
+                        "search_parent"
+                    ][0],
+                    "search_parent_selection_status": search_assessment.status,
+                    "search_parent_primary_delta": search_assessment.primary_delta,
+                    "search_parent_stability_floor": (
+                        search_assessment.selection_stability_floor
+                    ),
+                    "search_parent_selection_gate": (
+                        search_assessment.primary_selection_gate
+                    ),
+                }
+            )
         row["search_parent"] = row["candidate_id"] == search_parent_id
-        if row["candidate_id"] == champion_id:
+        if diagnostic_smoke and row["candidate_id"] == selected_id:
+            row["selection_reason"] = "diagnostic_smoke_search_parent_only"
+        elif row["candidate_id"] == champion_id:
             row["selection_reason"] = (
                 "cohort_changed_batch_champion"
                 if cohort_comparison == "different_cohort"
@@ -3259,21 +3740,31 @@ def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationA
         directions.append("参数效果证据不足，不推断因果影响")
     directions = list(dict.fromkeys(directions))
 
-    if selected_id is not None and cohort_comparison == "different_cohort":
+    if diagnostic_smoke and selected_id is not None:
+        reason = (
+            f"候选 {selected_id} 是本轮诊断样本上的最佳可用方案；"
+            "诊断预算低于冻结的正式选择证据门槛，因此仅作为下一轮搜索父方案，"
+            "不生成冠军、不改变正式最优方案。"
+        )
+    elif selected_id is not None and cohort_comparison == "different_cohort":
         reason = (
             f"候选 {selected_id} 是本轮固定样本窗口内排名第一的合格方案；"
             "本轮与历史最优方案使用不同评测窗口，因此未比较跨窗口原始分数，"
             "不改变正式最优方案，仅作为下一轮搜索父方案。"
         )
-    elif champion_id is not None and (
-        state.task_manifest.metadata.get("execution_protocol")
-        == "dsh_native_plugin_evolution@1"
-    ):
-        reason = (
-            f"候选 {champion_id} 在冻结的自适应选择数据上通过实用差异、"
-            "单元稳健性与同轮 max-T 稳定性门禁；该结果仅用于选择与后续搜索，"
-            "证据类别为 exploratory_adaptive_data，不构成正式确认。"
-        )
+    elif champion_id is not None and dsh_native:
+        if incumbent is None:
+            reason = (
+                f"候选 {champion_id} 在冻结的自适应选择数据上通过有效性、"
+                "实用差异与单元稳健性门禁，建立搜索基线；该结果仅用于选择与"
+                "后续搜索，不构成正式确认。"
+            )
+        else:
+            reason = (
+                f"候选 {champion_id} 在冻结的自适应选择数据上通过实用差异、"
+                "单元稳健性与同轮 max-T 稳定性门禁；该结果仅用于选择与后续搜索，"
+                "不构成正式确认。"
+            )
     elif champion_id is not None:
         reason = (
             f"候选 {champion_id} 同轮排名第一且通过实用差异与"
@@ -3287,11 +3778,18 @@ def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationA
             "为避免错误比较跨窗口分数，未作正式晋升。"
         )
     elif selected_id is not None and incumbent is not None and selected_evaluation is not None:
-        policy_reason = (
-            str(promotion_assessment.get("reason_code"))
-            if promotion_assessment is not None
-            else "score_not_improved"
-        )
+        if dsh_native and selected_row is not None:
+            policy_reason = str(
+                selected_row.get("selection_status")
+                or selected_row.get("classification")
+                or "selection_gate_failed"
+            )
+        else:
+            policy_reason = (
+                str(promotion_assessment.get("reason_code"))
+                if promotion_assessment is not None
+                else "score_not_improved"
+            )
         reason = (
             f"同轮最佳候选 {selected_id} 得分 {selected_evaluation.score:.12g}，"
             f"未通过当前最优方案 {incumbent_id} 的晋级门槛"
@@ -3301,6 +3799,11 @@ def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationA
         reason = "本轮没有同时通过科学门禁和独立评审的候选，保留当前正式最优方案。"
         if search_parent_id is not None:
             reason += f" 后续搜索从已完成评测候选 {search_parent_id} 继续。"
+    if retained_prior_search_elite and search_parent_id is not None:
+        reason += (
+            f" 同一评测队列内，本轮最佳未超过既有搜索精英 {search_parent_id}，"
+            "因此保留该父方案以避免跨轮退化。"
+        )
     focus = directions[0] if directions else "保持当前最优方案并继续有界搜索"
     return GenerationAnalysis(
         run_id=state.run.run_id,
@@ -3331,11 +3834,15 @@ def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationA
 
 __all__ = [
     "CROSS_GENERATION_EXPERIENCE_MAX_BYTES",
+    "GENERATION_CONTROL_EVALUATION_SCHEMA",
+    "GENERATION_CONTROL_POLICY",
     "GenerationAnalysis",
     "GenerationBatch",
     "build_cross_generation_experience",
     "build_generation_analysis",
     "evaluation_cohort_comparison",
     "evaluation_cohort_digest",
+    "generation_control_evaluations",
     "sample_update_windows_enabled",
+    "strict_generation_controls_required",
 ]

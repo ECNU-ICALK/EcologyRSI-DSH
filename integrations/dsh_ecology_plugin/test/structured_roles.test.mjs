@@ -120,3 +120,32 @@ test("structured role exposes bounded phase codes without reflecting provider er
       && !String(error).includes("not schema-bound"),
   );
 });
+
+test("structured role distinguishes a failed DSH turn from a missing capture", async () => {
+  const pendingStarts = new PendingChildStarts({
+    subagents: {
+      start: async () => ({
+        id: "rate-limited-child",
+        result: Promise.resolve({
+          stopReason: "error",
+          output: [{ type: "text", text: "private provider failure" }],
+        }),
+        dispose: async () => {},
+      }),
+    },
+  });
+  await assert.rejects(
+    runStructuredRole(
+      { agent: { id: "researcher-host" } },
+      { label: "safe-label" },
+      { prompt: "research", outputSchema: { type: "object" } },
+      {
+        pendingStarts,
+        admission: { isOpen: async () => true },
+        persist: async () => ({ accepted: true }),
+      },
+    ),
+    (error) => error.code === "structured_child_model_error"
+      && !String(error).includes("private provider failure"),
+  );
+});

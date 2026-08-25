@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from ecologyrsi_dsh.core.models import Evaluation, TaskManifest, digest
+from ecologyrsi_dsh.core.models import Evaluation, TaskManifest, canonical_json, digest
 from ecologyrsi_dsh.evaluators.fitness import (
     EXPLORATORY_EVIDENCE_CLASS,
     FitnessProfile,
@@ -11,6 +11,11 @@ from ecologyrsi_dsh.evaluators.fitness import (
     build_formal_fitness_assessment,
     build_moving_block_resample_indices,
     fitness_ranking_key,
+)
+from ecologyrsi_dsh.evaluators.objectives import OBJECTIVE_AGGREGATION_VERSION
+from ecologyrsi_dsh.evolution.promotion import (
+    PROMOTION_BLOCK_EVIDENCE_VERSION,
+    PROMOTION_SCORE_DEFINITION,
 )
 from ecologyrsi_dsh.evaluators.objectives import normalized_absolute_error_reward
 
@@ -54,7 +59,7 @@ def _block_evidence(scores: tuple[float, ...], indices: tuple[int, ...] | None =
         cells = [
             {
                 "target": target,
-                "horizon_hours": 1,
+                "horizon_hours": horizon,
                 "eligible": 1,
                 "succeeded": 1,
                 "candidate_squared_error_sum": (1.0 - score) ** 2,
@@ -62,6 +67,7 @@ def _block_evidence(scores: tuple[float, ...], indices: tuple[int, ...] | None =
                 "normalized_reward_sum": score,
             }
             for target in TARGETS
+            for horizon in HORIZONS
         ]
         blocks.append(
             {
@@ -71,13 +77,12 @@ def _block_evidence(scores: tuple[float, ...], indices: tuple[int, ...] | None =
             }
         )
     body = {
-        "schema_version": "paired_24h_objective_sufficient_statistics@1",
+        "schema_version": PROMOTION_BLOCK_EVIDENCE_VERSION,
         "block_hours": 24,
-        "maximum_blocks": 128,
-        "objective_aggregation_version": "weighted_task_skill_reward@2",
-        "score_definition": "coverage_penalized_weighted_rmse_skill@2",
+        "objective_aggregation_version": OBJECTIVE_AGGREGATION_VERSION,
+        "score_definition": PROMOTION_SCORE_DEFINITION,
         "target_weights": {target: 1 / 3 for target in TARGETS},
-        "horizons": [1],
+        "horizons": list(HORIZONS),
         "block_count": len(blocks),
         "blocks": blocks,
     }
@@ -97,7 +102,7 @@ def _evaluation(name: str, score: float, block_scores: tuple[float, ...]) -> Eva
             "constraint_violations": 0,
             "objective_weight_coverage": 1.0,
             "targets": _cells(score),
-            "objective_aggregation_version": "weighted_task_skill_reward@2",
+            "objective_aggregation_version": OBJECTIVE_AGGREGATION_VERSION,
             "objective_target_weights": {target: 1 / 3 for target in TARGETS},
             "objective_horizons": [1],
             "baseline_profile_digest": "b" * 64,
@@ -110,6 +115,68 @@ def _evaluation(name: str, score: float, block_scores: tuple[float, ...]) -> Eva
 
 
 class FitnessTests(unittest.TestCase):
+    def test_default_sample_budget_can_reach_every_selection_gate(self) -> None:
+        self.assertEqual(
+            FitnessProfile.from_task(_task()).minimum_balanced_samples_per_update(),
+            1_521,
+        )
+        self.assertEqual(
+            FitnessProfile.from_task(_task()).minimum_balanced_origins_per_update(),
+            169,
+        )
+        self.assertEqual(FitnessProfile.from_task(_task()).prediction_cell_count, 9)
+
+    def test_frozen_profile_digest_must_match_the_profile_in_use(self) -> None:
+        profile = FitnessProfile()
+        task_data = _task().to_dict()
+        task_data["metadata"] = {
+            **task_data["metadata"],
+            "fitness_profile": profile.to_dict(),
+            "fitness_profile_digest": "0" * 64,
+        }
+
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            FitnessProfile.from_task(TaskManifest.from_dict(task_data))
+
+        task_data["metadata"]["fitness_profile_digest"] = profile.profile_digest
+        self.assertEqual(
+            FitnessProfile.from_task(TaskManifest.from_dict(task_data)), profile
+        )
+
+    def test_missing_or_sparse_block_evidence_fails_closed(self) -> None:
+        profile = FitnessProfile.from_task(_task())
+        candidate = _evaluation("missing-blocks", 0.2, (0.1,) * 8)
+        candidate.metrics.pop("promotion_block_evidence")
+
+        missing = build_fitness_assessment(candidate, None, {}, profile)
+
+        self.assertFalse(missing.validity_pass)
+        self.assertIn("promotion_block_evidence_invalid", missing.validity_failures)
+        self.assertTrue(
+            any(
+                failure.startswith("cell_blocks_insufficient:")
+                for failure in missing.validity_failures
+            )
+        )
+
+        sparse = _evaluation("sparse-blocks", 0.2, (0.1,) * 7)
+        sparse_assessment = build_fitness_assessment(sparse, None, {}, profile)
+        self.assertFalse(sparse_assessment.validity_pass)
+        self.assertIn("paired_blocks_insufficient", sparse_assessment.validity_failures)
+
+    def test_missing_objective_cells_serialize_finite_failure_diagnostics(self) -> None:
+        profile = FitnessProfile.from_task(_task())
+        candidate = _evaluation("missing-cells", 0.2, (0.1,) * 8)
+        candidate.metrics.pop("targets")
+
+        assessment = build_fitness_assessment(candidate, None, {}, profile)
+        payload = assessment.to_dict()
+
+        self.assertFalse(assessment.validity_pass)
+        self.assertIsNone(payload["robustness_min_cell_delta"])
+        self.assertIsNone(payload["robustness_lower_quartile_cell_delta"])
+        canonical_json(payload)
+
     def test_point_estimate_and_interval_use_identical_block_ids(self) -> None:
         profile = FitnessProfile.from_task(_task()).with_overrides(
             exploratory_resamples=100
@@ -193,6 +260,24 @@ class FitnessTests(unittest.TestCase):
             robust, incumbent, {"latency_ms": 10_000}, profile
         )
         self.assertGreater(fitness_ranking_key(good), fitness_ranking_key(bad))
+
+    def test_primary_score_breaks_ties_before_operational_fitness(self) -> None:
+        profile = FitnessProfile.from_task(_task())
+        higher = _evaluation("a-higher", 0.3, (0.1,) * 8)
+        lower = _evaluation("z-lower", 0.2, (0.1,) * 8)
+        for evaluation in (higher, lower):
+            evaluation.metrics["targets"] = _cells(0.1)
+        higher_assessment = build_fitness_assessment(higher, None, {}, profile)
+        lower_assessment = build_fitness_assessment(lower, None, {}, profile)
+
+        self.assertEqual(
+            higher_assessment.robustness_min_cell_delta,
+            lower_assessment.robustness_min_cell_delta,
+        )
+        self.assertGreater(
+            fitness_ranking_key(higher_assessment),
+            fitness_ranking_key(lower_assessment),
+        )
 
     def test_execution_policy_quality_is_a_separate_lower_order_fitness_track(self) -> None:
         profile = FitnessProfile.from_task(_task())

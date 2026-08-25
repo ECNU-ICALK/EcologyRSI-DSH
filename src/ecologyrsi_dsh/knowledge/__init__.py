@@ -9,14 +9,23 @@ from .algorithms import (
     compile_algorithm_spec,
     debug_algorithm_spec,
 )
+from .autonomous_cycle import (
+    AUTONOMOUS_RESEARCH_PROTOCOL,
+    CandidateDirection,
+    GenerationReflection,
+    GenerationSearchPlan,
+)
 from .models import KnowledgeAssessment, KnowledgeCard, KnowledgeSnapshot
 from .program_registry import (
-    LEGACY_PROGRAM_CATALOG_0_2_2,
     ProgramRegistrySnapshot,
     current_program_registry,
 )
 from .research_iteration import ResearchIteration
-from .retrieval import assess_generation_knowledge, retrieve_generation_knowledge
+from .retrieval import (
+    assess_generation_knowledge,
+    generation_query_hints,
+    retrieve_generation_knowledge,
+)
 
 __all__ = [
     "AlgorithmAttempt",
@@ -24,10 +33,13 @@ __all__ = [
     "AlgorithmIR",
     "AlgorithmSmokeError",
     "AlgorithmSpec",
+    "AUTONOMOUS_RESEARCH_PROTOCOL",
+    "CandidateDirection",
+    "GenerationReflection",
+    "GenerationSearchPlan",
     "KnowledgeAssessment",
     "KnowledgeCard",
     "KnowledgeSnapshot",
-    "LEGACY_PROGRAM_CATALOG_0_2_2",
     "ProgramRegistrySnapshot",
     "ResearchIteration",
     "assess_generation_knowledge",
@@ -35,6 +47,7 @@ __all__ = [
     "compile_algorithm_spec",
     "current_program_registry",
     "debug_algorithm_spec",
+    "generation_query_hints",
     "retrieve_generation_knowledge",
     "smoke_test_algorithm_spec",
 ]

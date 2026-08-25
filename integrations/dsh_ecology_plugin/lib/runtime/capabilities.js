@@ -37,7 +37,11 @@ export async function runtimeCapabilities(ctx, presetCatalog = []) {
       try {
         const schemas = await ctx?.tools?.schemas?.(standingKey);
         const names = new Set(Array.isArray(schemas) ? schemas.map(schemaName) : []);
-        toolSurfaceVerified = requiredTools.every((name) => names.has(name));
+        const expected = new Set(requiredTools);
+        toolSurfaceVerified = (
+          names.size === expected.size
+          && [...expected].every((name) => names.has(name))
+        );
       } catch {}
     }
     const resolveCallConfig = ctx?.llm?.resolveCallConfig;

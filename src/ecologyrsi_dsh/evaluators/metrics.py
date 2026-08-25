@@ -8,12 +8,6 @@ from typing import Any, Mapping
 
 from ..core.models import digest
 from ..data.registry import DatasetSeries
-from .objectives import (
-    OBJECTIVE_COMPONENT_BOUND,
-    clip_normalized_objective,
-    normalized_absolute_error_reward,
-    skill_score,
-)
 
 MAX_ROLLING_WINDOW_HOURS = 48
 
@@ -21,9 +15,6 @@ MAX_ROLLING_WINDOW_HOURS = 48
 # units.  Keep the scale rule explicit and versioned in every evaluation so a
 # later change cannot silently make historical scores incomparable.
 NORMALIZATION_SCALE_METHOD = "training_fit_std_floor@1"
-NORMALIZED_OBJECTIVE_BOUND = OBJECTIVE_COMPONENT_BOUND
-
-
 def _greenhouse_parameters(value: Mapping[str, Any]) -> dict[str, Any]:
     required = {"blend", "window", "bias_scale"}
     if set(value) != required:
@@ -228,43 +219,6 @@ def _mae(errors: list[float]) -> float:
 
 def _rmse(errors: list[float]) -> float:
     return math.sqrt(fmean(item * item for item in errors))
-
-
-def _skill_score(candidate_nrmse: float, baseline_nrmse: float) -> float:
-    """Return a bounded relative improvement over the baseline.
-
-    The unbounded ratio is useful as a diagnostic, but it is unsafe as a
-    cross-target objective: a nearly perfect or nearly constant baseline can
-    otherwise dominate the aggregate.  Callers retain the raw nRMSE values
-    and can reconstruct the unbounded ratio when needed.
-    """
-
-    return skill_score(candidate_nrmse, baseline_nrmse)
-
-
-def _clip_normalized_objective(value: float, *, bound: float = NORMALIZED_OBJECTIVE_BOUND) -> float:
-    """Bound one normalized objective component while preserving finiteness."""
-
-    return clip_normalized_objective(value, bound=bound)
-
-
-def _normalized_absolute_error_reward(
-    baseline_errors: list[float],
-    candidate_errors: list[float],
-    scale: float,
-) -> tuple[float, float]:
-    """Return ``(raw_mean, bounded_mean)`` normalized sample rewards.
-
-    Raw reward remains available for diagnostics.  The bounded mean is used
-    by the aggregate objective so one outlier cannot overwhelm another target
-    merely because its training variance is small.
-    """
-
-    return normalized_absolute_error_reward(
-        baseline_errors,
-        candidate_errors,
-        scale,
-    )
 
 
 def _exact_time_eligible_rows(

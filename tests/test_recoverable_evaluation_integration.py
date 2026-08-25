@@ -26,7 +26,7 @@ from ecologyrsi_dsh.evaluators.registry import (
 from ecologyrsi_dsh.evolution.batches import start_generation_batch
 from ecologyrsi_dsh.evolution.strategies import FakeDSHAdapter
 from ecologyrsi_dsh.integrations.model_gateway import GatewayResponseError
-from ecologyrsi_dsh.server import EvolutionHTTPServer
+from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 
 
 class _RetryableSiblingGateway:

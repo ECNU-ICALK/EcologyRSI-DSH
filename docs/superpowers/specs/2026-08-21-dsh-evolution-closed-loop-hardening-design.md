@@ -27,14 +27,14 @@ Legacy autonomous execution is outside the normal web path. A newly created auto
 
 ## Reflection Contract
 
-The Host builds `ecologyrsi-dsh.evolution-reflection/1` from the previous generation or compatible historical runs. The bounded contract contains:
+The Host builds `ecologyrsi-dsh.evolution-reflection/2` from the previous generation or compatible historical runs. The bounded contract contains:
 
 - prior analysis and knowledge-assessment digests;
 - target/horizon priorities;
 - scientific and execution failure codes;
 - Judge flags and bounded guidance;
 - raw-candidate and repaired-path score summaries;
-- prohibited mutation digests and previously rejected parameter sets;
+- prohibited mutation digests and previously rejected full-behavior digests;
 - evidence-backed parameter directions with confidence and non-causal labels;
 - requested workflow or role-policy changes;
 - diversity requirements for the next proposal batch.

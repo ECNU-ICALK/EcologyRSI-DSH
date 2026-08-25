@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import re
 from typing import Any
 
-from ..core.models import Run
+from ..core.models import Run, digest
 from ..knowledge.models import validate_knowledge_context
 from ..knowledge.research_iteration import ResearchIteration
 
@@ -20,6 +20,7 @@ _BLOCKED_FIELDS = frozenset(
         "command",
         "entrypoint",
         "ground_truth",
+        "generation_control_evaluations",
         "label",
         "module",
         "observation",
@@ -154,6 +155,7 @@ def batch_context(value: Mapping[str, Any] | None, run: Run) -> dict[str, Any] |
         "slot_index",
         "batch_size",
         "round_parent_candidate_id",
+        "sibling_candidate_behaviors",
         "previous_generation_analysis",
         "knowledge_snapshot",
         "knowledge_snapshot_digest",
@@ -270,6 +272,77 @@ def batch_context(value: Mapping[str, Any] | None, run: Run) -> dict[str, Any] |
         if isinstance(raw_revision, bool) or not isinstance(raw_revision, int) or raw_revision < 0:
             raise ValueError(f"batch_context.{name} must be a non-negative integer")
         revisions[name] = raw_revision
+    raw_siblings = value.get("sibling_candidate_behaviors", [])
+    if isinstance(raw_siblings, (str, bytes)) or not isinstance(
+        raw_siblings, Sequence
+    ):
+        raise TypeError("batch_context.sibling_candidate_behaviors must be an array")
+    if len(raw_siblings) > 7:
+        raise ValueError("batch_context contains too many sibling candidate behaviors")
+    siblings: list[dict[str, Any]] = []
+    sibling_slots: set[int] = set()
+    allowed_sibling_fields = {
+        "slot_index",
+        "prediction_model_id",
+        "parameters",
+        "parameters_digest",
+        "genome_digest",
+        "behavior_digest",
+        "compiled_behavior_digest",
+    }
+    for raw_sibling in raw_siblings:
+        if not isinstance(raw_sibling, Mapping) or not {
+            "slot_index",
+            "parameters",
+            "parameters_digest",
+        }.issubset(raw_sibling):
+            raise ValueError("sibling candidate behavior is incomplete")
+        if set(raw_sibling) - allowed_sibling_fields:
+            raise ValueError("sibling candidate behavior contains unsupported fields")
+        sibling_slot = raw_sibling["slot_index"]
+        if (
+            isinstance(sibling_slot, bool)
+            or not isinstance(sibling_slot, int)
+            or not 0 <= sibling_slot < slot_index
+            or sibling_slot in sibling_slots
+        ):
+            raise ValueError("sibling candidate slot must be unique and precede this slot")
+        sibling_slots.add(sibling_slot)
+        parameters = _aggregate_value(
+            raw_sibling["parameters"],
+            "batch_context.sibling_candidate_behaviors.parameters",
+        )
+        if not isinstance(parameters, Mapping):
+            raise TypeError("sibling candidate parameters must be an object")
+        parameters_digest = raw_sibling["parameters_digest"]
+        if (
+            not isinstance(parameters_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", parameters_digest)
+            or parameters_digest != digest(dict(parameters))
+        ):
+            raise ValueError("sibling candidate parameters digest mismatch")
+        sibling: dict[str, Any] = {
+            "slot_index": sibling_slot,
+            "parameters": dict(parameters),
+            "parameters_digest": parameters_digest,
+        }
+        predictor_id = raw_sibling.get("prediction_model_id")
+        if predictor_id is not None:
+            sibling["prediction_model_id"] = _optional_text(
+                predictor_id, "sibling candidate prediction_model_id"
+            )
+        for name in (
+            "genome_digest",
+            "behavior_digest",
+            "compiled_behavior_digest",
+        ):
+            item = raw_sibling.get(name)
+            if item is None:
+                continue
+            if not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item):
+                raise ValueError(f"sibling candidate {name} must be a SHA-256 digest")
+            sibling[name] = item
+        siblings.append(sibling)
     return {
         "generation": generation,
         "slot_index": slot_index,
@@ -278,6 +351,7 @@ def batch_context(value: Mapping[str, Any] | None, run: Run) -> dict[str, Any] |
             value.get("round_parent_candidate_id"),
             "batch_context.round_parent_candidate_id",
         ),
+        "sibling_candidate_behaviors": siblings,
         "previous_generation_analysis": previous,
         "knowledge_snapshot": knowledge,
         "knowledge_snapshot_digest": knowledge_digest,
@@ -300,7 +374,11 @@ def safe_aggregate_feedback(
 
     if value is None:
         return None
-    result = _aggregate_value(value, name)
+    # The supplied mapping is the envelope, not one level of user-controlled
+    # nesting.  Starting below zero keeps the effective depth budget aligned
+    # with ResearchIteration's validated plan contract when that plan is
+    # wrapped in the iteration envelope.
+    result = _aggregate_value(value, name, depth=-1)
     if not isinstance(result, Mapping):  # pragma: no cover - input contract above
         raise TypeError(f"{name} must be an object or null")
     return dict(result)

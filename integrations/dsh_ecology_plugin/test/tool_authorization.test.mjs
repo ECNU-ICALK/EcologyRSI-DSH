@@ -14,12 +14,18 @@ test("wrong Host-bound role is denied before sidecar execution", async () => {
   let handler;
   let called = false;
   registerRoleTools({ tools: { register: (definition) => { handler ||= definition.execute; } } }, {
-    role: "researcher",
+    role: "sample-planner",
     bridge: {
-      bindingFor: async () => ({ role: "sample-planner" }),
+      bindingFor: async () => ({ role: "researcher" }),
       sidecar: { request: async () => { called = true; } },
     },
   });
-  await assert.rejects(handler({}, { agent: { id: "child" } }), /authorization failed/);
+  await assert.rejects(
+    handler(
+      { tool_id: "ridge@1", wave_digest: "a".repeat(64) },
+      { agent: { id: "child" } },
+    ),
+    /authorization failed/,
+  );
   assert.equal(called, false);
 });

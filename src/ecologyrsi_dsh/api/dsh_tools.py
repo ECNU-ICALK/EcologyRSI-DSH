@@ -2,44 +2,70 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import Lock
-from typing import Any
+from typing import Any, Iterator
 
 from ..core.ledger import ConcurrentRunMutationError
 from ..core.models import digest
 
 
 ROLE_TOOLS: dict[str, frozenset[str]] = {
-    "coordinator": frozenset({"ecology_get_run_context"}),
-    "researcher": frozenset(
-        {"ecology_get_run_context", "ecology_get_research_evidence"}
+    "coordinator": frozenset(),
+    "researcher": frozenset(),
+    "candidate-proposer": frozenset(),
+    "sample-planner": frozenset({"ecology_execute_prediction_tool"}),
+    "sample-critic": frozenset(),
+    "generation-judge": frozenset(),
+}
+
+_PREDICTION_TOOL_NAME = "ecology_execute_prediction_tool"
+_STRUCTURED_STAGE_CONTRACTS: dict[str, tuple[str, str]] = {
+    "generation.research": ("researcher", "ecology-research-result@1"),
+    "generation.search-plan": (
+        "researcher",
+        "ecology-research-search-plan@1",
     ),
-    "candidate-proposer": frozenset(
+    "generation.research-synthesis": (
+        "researcher",
+        "ecology-research-synthesis@1",
+    ),
+    "generation.reflect": (
+        "generation-judge",
+        "ecology-generation-reflection@1",
+    ),
+    "candidate.propose": ("candidate-proposer", "ecology-genome-mutation@1"),
+    "generation.judge": ("generation-judge", "ecology-generation-review@1"),
+    "sample.plan": ("sample-planner", "ecology-sample-decisions@1"),
+    "sample.critic": ("sample-critic", "ecology-sample-review@1"),
+    "sample.reflect": ("sample-critic", "ecology-sample-reflection@1"),
+}
+_GENOME_IDENTITY_DIGEST_FIELDS = (
+    "genome_digest",
+    "compiled_behavior_digest",
+    "phenotype_instance_digest",
+)
+
+_STRUCTURED_STAGE_SKILLS: dict[str, frozenset[str]] = {
+    "generation.research": frozenset({"autonomous-ecology-research"}),
+    "generation.search-plan": frozenset({"autonomous-ecology-research"}),
+    "generation.research-synthesis": frozenset({"autonomous-ecology-research"}),
+    "generation.reflect": frozenset({"batch-scientific-reflection"}),
+    "candidate.propose": frozenset({"bounded-plugin-experiment"}),
+    "generation.judge": frozenset({"candidate-scientific-review"}),
+    "sample.plan": frozenset(
         {
-            "ecology_get_run_context",
-            "ecology_get_research_evidence",
-            "ecology_get_generation_summary",
+            "origin-vector-forecasting-balanced",
+            "origin-vector-forecasting-anomaly-aware",
+            "origin-vector-forecasting-horizon-aware",
         }
     ),
-    "sample-planner": frozenset(
-        {
-            "ecology_get_run_context",
-            "ecology_get_sample_wave",
-            "ecology_execute_prediction_tool",
-            "ecology_submit_sample_decisions",
-        }
-    ),
-    "sample-critic": frozenset(
-        {
-            "ecology_get_sample_wave",
-            "ecology_get_prediction_summary",
-            "ecology_submit_sample_review",
-        }
-    ),
-    "generation-judge": frozenset({"ecology_get_generation_summary"}),
+    "sample.critic": frozenset({"origin-vector-review"}),
+    "sample.reflect": frozenset({"origin-vector-review"}),
 }
 
 _IDENTITY_FIELDS = frozenset(
@@ -62,6 +88,53 @@ _IDENTITY_FIELDS = frozenset(
 _MODEL_BLOCKED_FIELDS = _IDENTITY_FIELDS
 
 
+def _skill_invocation_evidence(
+    value: Any,
+    *,
+    stage: str,
+) -> dict[str, Any]:
+    fields = {
+        "schema_version",
+        "stage",
+        "skill_name",
+        "call_count",
+        "successful_call_count",
+        "call_seq",
+        "result_seq",
+        "first_tool_call_verified",
+        "next_tool_name",
+        "next_tool_call_seq",
+        "order_verified",
+        "source",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ValueError("DSH Skill invocation evidence has an invalid shape")
+    allowed_skills = _STRUCTURED_STAGE_SKILLS.get(stage)
+    expected_next_tool = (
+        _PREDICTION_TOOL_NAME if stage == "sample.plan" else "structured_output"
+    )
+    if (
+        value.get("schema_version")
+        != "ecologyrsi-dsh.skill-invocation-evidence/1"
+        or value.get("stage") != stage
+        or value.get("skill_name") not in (allowed_skills or frozenset())
+        or value.get("call_count") != 1
+        or value.get("successful_call_count") != 1
+        or value.get("first_tool_call_verified") is not True
+        or value.get("next_tool_name") != expected_next_tool
+        or value.get("order_verified") is not True
+        or value.get("source") != "dsh_session_event_log"
+    ):
+        raise ValueError("DSH Skill invocation evidence violates the stage contract")
+    for name in ("call_seq", "result_seq", "next_tool_call_seq"):
+        item = value.get(name)
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            raise ValueError(f"DSH Skill invocation evidence {name} is invalid")
+    if not value["call_seq"] < value["result_seq"] < value["next_tool_call_seq"]:
+        raise ValueError("DSH Skill invocation evidence order is invalid")
+    return deepcopy(dict(value))
+
+
 class DshToolAuthorizationError(PermissionError):
     error_code = "dsh_tool_authorization_failed"
 
@@ -76,6 +149,177 @@ class AdmissionFence:
     run_state_revision: int
     stage_attempt: int
     state: str
+
+
+@dataclass(slots=True)
+class DshPredictionToolBinding:
+    """One frozen Planner wave and its single executable vector tool."""
+
+    run_id: str
+    stage_attempt: int
+    idempotency_key: str
+    wave_digest: str
+    tool_id: str
+    sample_ids: tuple[str, ...]
+    executor: Callable[[], Mapping[str, Any]] = field(repr=False)
+    _result: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _receipt: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _session_calls: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _lock: Lock = field(default_factory=Lock, init=False, repr=False)
+
+    def _materialize_result(self) -> dict[str, Any]:
+        raw = self.executor()
+        if not isinstance(raw, Mapping) or set(raw) != set(self.sample_ids):
+            raise ValueError(
+                "registered vector tool must return every frozen sample exactly once"
+            )
+        outputs: list[dict[str, Any]] = []
+        for sample_id in self.sample_ids:
+            item = raw[sample_id]
+            if not isinstance(item, Mapping) or set(item) != {
+                "predicted",
+                "metadata",
+            }:
+                raise ValueError(
+                    "registered vector tool output must contain predicted and metadata"
+                )
+            predicted = item.get("predicted")
+            if (
+                isinstance(predicted, bool)
+                or not isinstance(predicted, (int, float))
+                or not math.isfinite(float(predicted))
+            ):
+                raise ValueError("registered vector tool prediction must be finite")
+            metadata = item.get("metadata")
+            if not isinstance(metadata, Mapping):
+                raise TypeError("registered vector tool metadata must be an object")
+            normalized = {
+                "sample_id": sample_id,
+                "predicted": float(predicted),
+                "metadata": deepcopy(dict(metadata)),
+            }
+            digest(normalized)
+            outputs.append(normalized)
+        result_body = {
+            "schema_version": "ecologyrsi-dsh.prediction-tool-result/1",
+            "tool_id": self.tool_id,
+            "wave_digest": self.wave_digest,
+            "prediction_unit": "forecast_origin_with_target_horizon_vector",
+            "prediction_count": len(outputs),
+            "outputs": outputs,
+        }
+        return {**result_body, "output_digest": digest(result_body)}
+
+    def request_digest(self) -> str:
+        return digest(
+            {
+                "tool_name": _PREDICTION_TOOL_NAME,
+                "run_id": self.run_id,
+                "stage": "sample.plan",
+                "stage_attempt": self.stage_attempt,
+                "idempotency_key": self.idempotency_key,
+                "arguments": {
+                    "tool_id": self.tool_id,
+                    "wave_digest": self.wave_digest,
+                },
+            }
+        )
+
+    def event_payload(self, result: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "schema_version": "ecologyrsi-dsh.dsh-prediction-tool-executed/1",
+            "stage": "sample.plan",
+            "stage_attempt": self.stage_attempt,
+            "idempotency_key": self.idempotency_key,
+            "tool_id": self.tool_id,
+            "wave_digest": self.wave_digest,
+            "sample_ids": list(self.sample_ids),
+            "prediction_count": len(self.sample_ids),
+            "request_digest": self.request_digest(),
+            "output_digest": result["output_digest"],
+            "execution_owner": "dsh_agent_tool_call",
+        }
+
+    def restore_recorded_result(
+        self,
+        *,
+        event_id: str,
+        event_seq: int,
+        event_payload: Mapping[str, Any],
+    ) -> None:
+        """Rebuild a deterministic tool result and bind its durable receipt."""
+
+        with self._lock:
+            if self._result is not None or self._receipt is not None:
+                raise RuntimeError("prediction tool result is already materialized")
+            result = self._materialize_result()
+            expected_payload = self.event_payload(result)
+            if dict(event_payload) != expected_payload:
+                raise ValueError("recorded prediction-tool result no longer reproduces")
+            self._result = result
+            self._receipt = {
+                "event_id": event_id,
+                "event_seq": event_seq,
+                "request_digest": expected_payload["request_digest"],
+                "output_digest": result["output_digest"],
+                "execution_owner": "dsh_agent_tool_call",
+            }
+
+    def execute(self, arguments: Mapping[str, Any], *, session_id: str) -> dict[str, Any]:
+        if set(arguments) != {"tool_id", "wave_digest"}:
+            raise ValueError(
+                "prediction tool arguments must contain tool_id and wave_digest only"
+            )
+        if arguments.get("tool_id") != self.tool_id:
+            raise DshToolAuthorizationError("prediction tool id is outside the frozen wave")
+        if arguments.get("wave_digest") != self.wave_digest:
+            raise DshToolAuthorizationError("prediction wave digest does not match")
+        with self._lock:
+            if self._session_calls.get(session_id, 0) != 0:
+                raise DshToolAuthorizationError(
+                    "the Planner must call the vector prediction tool exactly once"
+                )
+            self._session_calls[session_id] = 1
+            if self._result is None:
+                self._result = self._materialize_result()
+            return deepcopy(self._result)
+
+    def set_receipt(self, receipt: Mapping[str, Any]) -> None:
+        with self._lock:
+            self._receipt = deepcopy(dict(receipt))
+
+    def require_session_call(self, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            if self._session_calls.get(session_id) != 1 or self._result is None:
+                raise DshToolAuthorizationError(
+                    "sample.plan requires one vector prediction tool call by its DSH child"
+                )
+            if self._receipt is None:
+                raise RuntimeError("prediction tool execution was not durably recorded")
+            return deepcopy(self._receipt)
+
+    def prediction_bundle(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            if self._result is None or self._receipt is None:
+                raise RuntimeError("DSH prediction tool did not complete")
+            audit = {
+                "execution_owner": "dsh_agent_tool_call",
+                "dsh_tool_event_id": self._receipt["event_id"],
+                "dsh_tool_output_digest": self._result["output_digest"],
+            }
+            return {
+                str(item["sample_id"]): {
+                    "predicted": float(item["predicted"]),
+                    "metadata": {**deepcopy(item["metadata"]), **audit},
+                }
+                for item in self._result["outputs"]
+            }
+
+    def audit_receipt(self) -> dict[str, Any]:
+        with self._lock:
+            if self._receipt is None:
+                raise RuntimeError("DSH prediction tool receipt is unavailable")
+            return deepcopy(self._receipt)
 
 
 def _assert_finite_json_shape(value: Any, *, label_free: bool, path: str = "$") -> None:
@@ -181,19 +425,91 @@ def _dsh_session_metrics(value: Any, *, session_id: str) -> dict[str, Any]:
 
 
 class DshToolService:
-    def __init__(
-        self,
-        ledger: Any,
-        *,
-        context_provider: Callable[[str, Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]]
-        | None = None,
-    ) -> None:
+    def __init__(self, ledger: Any) -> None:
         self.ledger = ledger
-        self.context_provider = context_provider
         self._fences: dict[tuple[str, int, int], AdmissionFence] = {}
         self._run_admission: dict[str, str] = {}
-        self._receipts: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
+        self._prediction_bindings: dict[
+            tuple[str, int, str], DshPredictionToolBinding
+        ] = {}
+        self._prediction_lock = Lock()
         self._launch_lock = Lock()
+
+    @staticmethod
+    def _prediction_event_id(run_id: str, idempotency_key: str) -> str:
+        return (
+            f"{run_id}:dsh-prediction-tool:"
+            f"{digest({'idempotency_key': idempotency_key, 'tool_name': _PREDICTION_TOOL_NAME})}"
+        )
+
+    @staticmethod
+    def _structured_event_id(run_id: str, stage: str, idempotency_key: str) -> str:
+        return (
+            f"{run_id}:dsh-structured:"
+            f"{digest({'stage': stage, 'idempotency_key': idempotency_key})}"
+        )
+
+    def _event_by_id(self, run_id: str, event_id: str) -> Any | None:
+        return self.ledger.event_by_id(event_id, run_id=run_id)
+
+    @contextmanager
+    def bind_prediction_tool(
+        self,
+        *,
+        run_id: str,
+        stage_attempt: int,
+        idempotency_key: str,
+        wave_digest: str,
+        tool_id: str,
+        sample_ids: tuple[str, ...],
+        executor: Callable[[], Mapping[str, Any]],
+    ) -> Iterator[DshPredictionToolBinding]:
+        """Bind one ephemeral executable to one Host-authenticated Planner wave."""
+
+        if not run_id or not idempotency_key or not tool_id:
+            raise ValueError("prediction tool binding identity must be non-empty")
+        if stage_attempt < 1:
+            raise ValueError("prediction tool stage_attempt must be positive")
+        if len(wave_digest) != 64 or any(
+            character not in "0123456789abcdef" for character in wave_digest
+        ):
+            raise ValueError("prediction tool wave_digest must be SHA-256")
+        if not sample_ids or len(sample_ids) != len(set(sample_ids)):
+            raise ValueError("prediction tool sample_ids must be non-empty and unique")
+        if not callable(executor):
+            raise TypeError("prediction tool executor must be callable")
+        key = (run_id, stage_attempt, idempotency_key)
+        binding = DshPredictionToolBinding(
+            run_id=run_id,
+            stage_attempt=stage_attempt,
+            idempotency_key=idempotency_key,
+            wave_digest=wave_digest,
+            tool_id=tool_id,
+            sample_ids=sample_ids,
+            executor=executor,
+        )
+        with self._prediction_lock:
+            if key in self._prediction_bindings:
+                raise RuntimeError("prediction tool binding is already active")
+            self._prediction_bindings[key] = binding
+        try:
+            prior = self._event_by_id(
+                run_id,
+                self._prediction_event_id(run_id, idempotency_key),
+            )
+            if prior is not None:
+                if prior.kind != "DshPredictionToolExecuted":
+                    raise ValueError("prediction-tool event identity was reused")
+                binding.restore_recorded_result(
+                    event_id=prior.event_id,
+                    event_seq=prior.seq,
+                    event_payload=prior.payload,
+                )
+            yield binding
+        finally:
+            with self._prediction_lock:
+                if self._prediction_bindings.get(key) is binding:
+                    self._prediction_bindings.pop(key, None)
 
     def open_admission(
         self, run_id: str, run_state_revision: int, stage_attempt: int
@@ -277,10 +593,7 @@ class DshToolService:
         with self._launch_lock:
             while True:
                 events = self.ledger.events(run_id)
-                prior = next(
-                    (event for event in events if event.event_id == event_id),
-                    None,
-                )
+                prior = self._event_by_id(run_id, event_id)
                 if prior is not None:
                     if (
                         prior.kind != "DshChildLaunchReserved"
@@ -358,29 +671,63 @@ class DshToolService:
             raise DshToolAuthorizationError("invalid Host-bound DSH tool identity")
         if not isinstance(arguments, Mapping):
             raise TypeError("DSH tool arguments must be an object")
-        role = self._authorize_identity(identity, tool_name=tool_name)
-        _assert_finite_json_shape(arguments, label_free=role == "sample-planner")
-        request_digest = digest(
-            {"tool_name": tool_name, "identity": dict(identity), "arguments": arguments}
+        role = self._authorize_identity(
+            identity,
+            tool_name=tool_name,
+            allow_ledger_advance=True,
         )
-        receipt_key = (str(identity["run_id"]), str(identity["idempotency_key"]), tool_name)
-        prior = self._receipts.get(receipt_key)
-        if prior is not None:
-            if prior[0] != request_digest:
-                raise ValueError("idempotency key was reused with different tool input")
-            return deepcopy(prior[1])
-        if self.context_provider is not None:
-            payload = dict(self.context_provider(tool_name, identity, arguments))
-        else:
-            payload = {
-                "accepted": True,
-                "tool_name": tool_name,
-                "request_digest": request_digest,
-            }
-        payload.setdefault("accepted", True)
-        payload.setdefault("request_digest", request_digest)
-        self._receipts[receipt_key] = (request_digest, deepcopy(payload))
-        return payload
+        _assert_finite_json_shape(arguments, label_free=role == "sample-planner")
+        if tool_name != _PREDICTION_TOOL_NAME:
+            raise DshToolAuthorizationError("unsupported DSH role tool")
+        if identity.get("stage") != "sample.plan":
+            raise DshToolAuthorizationError(
+                "prediction tool is available only during sample.plan"
+            )
+        key = (
+            str(identity["run_id"]),
+            int(identity["stage_attempt"]),
+            str(identity["idempotency_key"]),
+        )
+        with self._prediction_lock:
+            binding = self._prediction_bindings.get(key)
+        if binding is None:
+            raise DshToolAdmissionClosedError(
+                "no active Host prediction tool is bound to this Planner wave"
+            )
+        result = binding.execute(arguments, session_id=str(identity["session_id"]))
+        request_digest = binding.request_digest()
+        event_id = self._prediction_event_id(
+            str(identity["run_id"]), str(identity["idempotency_key"])
+        )
+        event_payload = binding.event_payload(result)
+        with self._prediction_lock:
+            prior = self._event_by_id(str(identity["run_id"]), event_id)
+            if prior is not None:
+                if prior.kind != "DshPredictionToolExecuted" or prior.payload != event_payload:
+                    raise ValueError("prediction-tool idempotency key was reused")
+                event = prior
+            else:
+                event = self.ledger.append(
+                    str(identity["run_id"]),
+                    "DshPredictionToolExecuted",
+                    event_payload,
+                    event_id=event_id,
+                )
+        receipt = {
+            "event_id": event.event_id,
+            "event_seq": event.seq,
+            "request_digest": request_digest,
+            "output_digest": result["output_digest"],
+            "execution_owner": "dsh_agent_tool_call",
+        }
+        binding.set_receipt(receipt)
+        return {
+            "accepted": True,
+            "tool_name": tool_name,
+            "request_digest": request_digest,
+            "event_id": event.event_id,
+            **result,
+        }
 
     def _authorize_identity(
         self,
@@ -450,6 +797,7 @@ class DshToolService:
             "output_schema_id",
             "structured",
             "result_digest",
+            "skill_invocation_evidence",
         }
         if not required_fields.issubset(envelope) or set(envelope) - (
             required_fields | {"session_metrics"}
@@ -465,43 +813,76 @@ class DshToolService:
             raise TypeError("DSH structured result must be an object")
         if not isinstance(output_schema_id, str) or not output_schema_id.strip():
             raise ValueError("output_schema_id must be non-empty text")
-        expected_by_stage = {
-            "generation.research": ("researcher", "ecology-research-result@1"),
-            "candidate.propose": ("candidate-proposer", "ecology-genome-mutation@1"),
-            "generation.judge": ("generation-judge", "ecology-generation-review@1"),
-            "sample.plan": ("sample-planner", "ecology-sample-decisions@1"),
-            "sample.critic": ("sample-critic", "ecology-sample-review@1"),
-        }
-        expected = expected_by_stage.get(str(identity.get("stage") or ""))
+        expected = _STRUCTURED_STAGE_CONTRACTS.get(str(identity.get("stage") or ""))
         if expected is None or output_schema_id != expected[1]:
             raise DshToolAuthorizationError("structured result schema is not allowed for its stage")
         actual_digest = digest(structured)
         if supplied_digest != actual_digest:
             raise ValueError("DSH structured result digest mismatch")
+        skill_evidence = _skill_invocation_evidence(
+            envelope["skill_invocation_evidence"],
+            stage=str(identity.get("stage") or ""),
+        )
+        required_tool_receipt: dict[str, Any] | None = None
+        if identity.get("stage") == "sample.plan":
+            key = (
+                str(identity["run_id"]),
+                int(identity["stage_attempt"]),
+                str(identity["idempotency_key"]),
+            )
+            with self._prediction_lock:
+                binding = self._prediction_bindings.get(key)
+            if binding is None:
+                raise DshToolAdmissionClosedError(
+                    "sample.plan has no active prediction tool binding"
+                )
+            if structured.get("wave_digest") != binding.wave_digest:
+                raise DshToolAuthorizationError(
+                    "sample.plan result does not match its prediction wave"
+                )
+            decisions = structured.get("decisions")
+            if not isinstance(decisions, list):
+                raise DshToolAuthorizationError("sample.plan decisions are missing")
+            decision_ids = [
+                item.get("sample_id") if isinstance(item, Mapping) else None
+                for item in decisions
+            ]
+            if (
+                len(decision_ids) != len(binding.sample_ids)
+                or set(decision_ids) != set(binding.sample_ids)
+                or any(
+                    not isinstance(item, Mapping)
+                    or item.get("next_tool") != binding.tool_id
+                    for item in decisions
+                )
+            ):
+                raise DshToolAuthorizationError(
+                    "sample.plan must submit one frozen-tool decision per prediction"
+                )
+            required_tool_receipt = binding.require_session_call(
+                str(identity["session_id"])
+            )
         payload = {
             "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
             "identity": dict(identity),
             "output_schema_id": output_schema_id,
             "result_digest": actual_digest,
             "structured": deepcopy(dict(structured)),
+            "skill_invocation_evidence": skill_evidence,
         }
+        if required_tool_receipt is not None:
+            payload["required_tool_receipt"] = required_tool_receipt
         if "session_metrics" in envelope:
             payload["session_metrics"] = _dsh_session_metrics(
                 envelope["session_metrics"],
                 session_id=str(identity["session_id"]),
             )
-        event_id = (
-            f"{identity['run_id']}:dsh-structured:"
-            f"{digest({'stage': identity['stage'], 'idempotency_key': identity['idempotency_key']})}"
+        event_id = self._structured_event_id(
+            str(identity["run_id"]),
+            str(identity["stage"]),
+            str(identity["idempotency_key"]),
         )
-        prior = next(
-            (
-                event
-                for event in self.ledger.events(str(identity["run_id"]))
-                if event.event_id == event_id
-            ),
-            None,
-        )
+        prior = self._event_by_id(str(identity["run_id"]), event_id)
         if prior is not None:
             if prior.kind != "DshStructuredResultAccepted" or prior.payload != payload:
                 raise ValueError("structured-result idempotency key was reused")
@@ -529,11 +910,106 @@ class DshToolService:
             "event_seq": event.seq,
         }
 
+    def replay_structured_result(
+        self,
+        *,
+        run_id: str,
+        stage: str,
+        role: str,
+        stage_attempt: int,
+        idempotency_key: str,
+        output_schema_id: str,
+        identity_digests: Mapping[str, str],
+    ) -> dict[str, Any] | None:
+        """Return one previously accepted result without launching another child."""
+
+        event_id = self._structured_event_id(run_id, stage, idempotency_key)
+        prior = self._event_by_id(run_id, event_id)
+        if prior is None:
+            return None
+        if prior.kind != "DshStructuredResultAccepted":
+            raise ValueError("structured-result event identity was reused")
+        payload = prior.payload
+        required_fields = {
+            "schema_version",
+            "identity",
+            "output_schema_id",
+            "result_digest",
+            "structured",
+            "skill_invocation_evidence",
+        }
+        if not isinstance(payload, Mapping) or not required_fields.issubset(payload):
+            raise ValueError("recorded structured result has an invalid shape")
+        if set(payload) - (
+            required_fields | {"session_metrics", "required_tool_receipt"}
+        ):
+            raise ValueError("recorded structured result has an invalid shape")
+        if (
+            payload.get("schema_version")
+            != "ecologyrsi-dsh.structured-result-accepted/1"
+        ):
+            raise ValueError("recorded structured result has an unsupported version")
+        expected_contract = _STRUCTURED_STAGE_CONTRACTS.get(stage)
+        if expected_contract != (role, output_schema_id):
+            raise DshToolAuthorizationError(
+                "structured replay role/schema does not match its stage"
+            )
+        identity = payload.get("identity")
+        if not isinstance(identity, Mapping) or set(identity) != _IDENTITY_FIELDS:
+            raise ValueError("recorded structured result identity is invalid")
+        expected_identity = {
+            "run_id": run_id,
+            "stage": stage,
+            "role": role,
+            "stage_attempt": stage_attempt,
+            "idempotency_key": idempotency_key,
+        }
+        if any(
+            identity.get(name) != value
+            for name, value in expected_identity.items()
+        ):
+            raise DshToolAuthorizationError("structured replay identity mismatch")
+        if set(identity_digests) != set(_GENOME_IDENTITY_DIGEST_FIELDS) or any(
+            identity.get(name) != identity_digests.get(name)
+            for name in _GENOME_IDENTITY_DIGEST_FIELDS
+        ):
+            raise DshToolAuthorizationError(
+                "structured replay genome identity mismatch"
+            )
+        if payload.get("output_schema_id") != output_schema_id:
+            raise DshToolAuthorizationError("structured replay schema mismatch")
+        _skill_invocation_evidence(
+            payload.get("skill_invocation_evidence"),
+            stage=stage,
+        )
+        structured = payload.get("structured")
+        result_digest = payload.get("result_digest")
+        if not isinstance(structured, Mapping) or result_digest != digest(structured):
+            raise ValueError("recorded structured result digest mismatch")
+        if stage == "sample.plan":
+            key = (run_id, stage_attempt, idempotency_key)
+            with self._prediction_lock:
+                binding = self._prediction_bindings.get(key)
+            if binding is None:
+                raise DshToolAdmissionClosedError(
+                    "sample.plan replay has no active prediction tool binding"
+                )
+            if structured.get("wave_digest") != binding.wave_digest:
+                raise DshToolAuthorizationError(
+                    "sample.plan replay does not match its prediction wave"
+                )
+            if payload.get("required_tool_receipt") != binding.audit_receipt():
+                raise ValueError(
+                    "sample.plan replay prediction-tool receipt mismatch"
+                )
+        return deepcopy(dict(structured))
+
 
 __all__ = [
     "AdmissionFence",
     "DshToolAdmissionClosedError",
     "DshToolAuthorizationError",
+    "DshPredictionToolBinding",
     "DshToolService",
     "ROLE_TOOLS",
 ]

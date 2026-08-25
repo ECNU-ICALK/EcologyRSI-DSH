@@ -12,12 +12,12 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from ecologyrsi_dsh import server as server_module
+from ecologyrsi_dsh.api import handler as handler_module
 from ecologyrsi_dsh.api import shared as api_shared
-from ecologyrsi_dsh.config import bind_toy_dataset
-from ecologyrsi_dsh.models import Evaluation, TaskManifest
-from ecologyrsi_dsh.server import EvolutionHTTPServer
-from ecologyrsi_dsh.toy import ToyCropSoilWater
+from ecologyrsi_dsh.application.config import bind_toy_dataset
+from ecologyrsi_dsh.core.models import Evaluation, TaskManifest
+from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
+from ecologyrsi_dsh.data.toy import ToyCropSoilWater
 
 
 class HTTPServerErrorHandlingTests(unittest.TestCase):
@@ -344,7 +344,7 @@ class HTTPContractTests(unittest.TestCase):
             patch.object(api_shared.Path, "is_dir", return_value=False),
             patch.object(api_shared.sysconfig, "get_path", return_value="/python-data"),
         ):
-            root = server_module._plugin_root()
+            root = api_shared._plugin_root()
         self.assertEqual(
             root,
             Path("/python-data/share/ecologyrsi-dsh/plugins/ecology_evolution"),
@@ -541,7 +541,7 @@ class HTTPContractTests(unittest.TestCase):
 
         path = "/api/runs/" + quote(run_id, safe="") + "/advance"
         with patch.object(
-            server_module.EvolutionRequestHandler,
+            handler_module.EvolutionRequestHandler,
             "_advance_run",
             new=probe_advance,
         ):

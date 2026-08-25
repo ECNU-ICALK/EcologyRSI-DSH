@@ -14,10 +14,11 @@ from importlib.resources import files
 from itertools import islice
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from ..core.models import digest
+from .autonomous_cycle import normalize_search_queries
 from .mapping import map_catalog_entry
 from .models import KnowledgeAssessment, KnowledgeCard, KnowledgeSnapshot
 
@@ -43,6 +44,21 @@ _OPENALEX_MAX_QUERIES = 6
 _OPENALEX_QUERY_MAX_CHARS = 180
 _OPENALEX_MAX_RESPONSE_BYTES = 1_000_000
 _OPENALEX_RETRYABLE_HTTP_STATUS = frozenset({408, 425, 429})
+_DYNAMIC_SEARCH_MAX_SOURCES = 8
+_DYNAMIC_SEARCH_CONTENT_MAX_CHARS = 4_000
+_DYNAMIC_SEARCH_TITLE_MAX_CHARS = 300
+_DYNAMIC_SEARCH_SNIPPET_MAX_CHARS = 1_200
+_DYNAMIC_SEARCH_PUBLISHED_AT_MAX_CHARS = 100
+_DYNAMIC_SEARCH_TRACKING_PARAMETERS = frozenset(
+    {
+        "fbclid",
+        "gclid",
+        "mc_cid",
+        "mc_eid",
+        "ref",
+        "ref_src",
+    }
+)
 
 
 def _safe_failure_token(value: Any) -> str | None:
@@ -201,6 +217,33 @@ def _query_terms(state: Any) -> tuple[str, ...]:
     return tuple(dict.fromkeys(terms))[:6]
 
 
+def generation_query_hints(state: Any) -> tuple[str, ...]:
+    """Return bounded Host hints; the strategy model remains the query author."""
+
+    return _query_terms(state)
+
+
+def _merged_query_terms(
+    state: Any,
+    model_queries: tuple[str, ...] | list[str] | None,
+) -> tuple[str, ...]:
+    host_queries = _query_terms(state)
+    if model_queries is None:
+        return host_queries
+    authored = normalize_search_queries(model_queries)
+    merged: list[str] = []
+    seen: set[str] = set()
+    for query in (*authored, *host_queries):
+        identity = query.casefold()
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(query)
+        if len(merged) >= _OPENALEX_MAX_QUERIES:
+            break
+    return tuple(merged)
+
+
 def _entry_matches_domain(entry: Mapping[str, Any], domain: str) -> bool:
     domains = entry.get("domains", [])
     return isinstance(domains, list) and (
@@ -301,13 +344,21 @@ def _bounded_openalex_query(value: Any) -> str:
     return bounded.strip()
 
 
-def _openalex_query_plan(queries: tuple[str, ...]) -> tuple[str, ...]:
+def _openalex_query_plan(
+    queries: tuple[str, ...],
+    *,
+    priority_count: int = 0,
+) -> tuple[str, ...]:
     if not queries:
         return ()
+    if (
+        isinstance(priority_count, bool)
+        or not isinstance(priority_count, int)
+        or not 0 <= priority_count <= len(queries)
+    ):
+        raise ValueError("priority_count must be within the query list")
     planned: list[str] = []
     seen: set[str] = set()
-    base_query = _bounded_openalex_query(queries[0])
-    base_normalized = base_query.casefold()
 
     def add(raw_query: str) -> None:
         query = _bounded_openalex_query(raw_query)
@@ -317,16 +368,30 @@ def _openalex_query_plan(queries: tuple[str, ...]) -> tuple[str, ...]:
         seen.add(normalized)
         planned.append(query)
 
-    # ``_query_terms`` keeps the broad domain query first for the audit
-    # snapshot. Search generation-specific terms first and retain that broad
-    # query as the deterministic final fallback.
-    for raw_query in queries[1:]:
-        if len(planned) >= _OPENALEX_MAX_QUERIES - 1:
+    # Model-authored queries are the active-search intent and must run before
+    # Host hints; otherwise a broad catalog query can fill the result limit
+    # before the strategy model's query is ever issued.  In the host-only
+    # compatibility path, keep the broad first term as the final fallback.
+    priority_queries = queries[:priority_count]
+    host_queries = queries[priority_count:]
+    for raw_query in priority_queries:
+        if len(planned) >= _OPENALEX_MAX_QUERIES:
+            return tuple(planned)
+        add(raw_query)
+    if not host_queries:
+        return tuple(planned)
+
+    host_base = _bounded_openalex_query(host_queries[0])
+    host_base_is_new = host_base.casefold() not in seen
+    host_specific_limit = _OPENALEX_MAX_QUERIES - (1 if host_base_is_new else 0)
+    for raw_query in host_queries[1:]:
+        if len(planned) >= host_specific_limit:
             break
-        if _bounded_openalex_query(raw_query).casefold() == base_normalized:
+        if _bounded_openalex_query(raw_query).casefold() == host_base.casefold():
             continue
         add(raw_query)
-    add(base_query)
+    if len(planned) < _OPENALEX_MAX_QUERIES:
+        add(host_base)
     return tuple(planned)
 
 
@@ -423,8 +488,9 @@ def _openalex_cards_for_queries(
     *,
     limit: int = 5,
     required_title_markers: tuple[str, ...] = (),
+    priority_count: int = 0,
 ) -> list[KnowledgeCard]:
-    plan = _openalex_query_plan(queries)
+    plan = _openalex_query_plan(queries, priority_count=priority_count)
     if not plan or limit <= 0:
         return []
     cards: list[KnowledgeCard] = []
@@ -445,12 +511,248 @@ def _openalex_cards_for_queries(
     return cards
 
 
-def retrieve_generation_knowledge(state: Any) -> KnowledgeSnapshot:
-    """Collect and freeze evidence for the current generation."""
+def _bounded_search_text(value: Any, *, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    if not text:
+        return None
+    return text[:limit]
+
+
+def _canonical_search_url(value: Any) -> str | None:
+    if not isinstance(value, str) or len(value) > 2_048:
+        return None
+    try:
+        parsed = urlsplit(value.strip())
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.casefold() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    hostname = parsed.hostname.casefold()
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    netloc = hostname if port in (None, 443) else f"{hostname}:{port}"
+    query = urlencode(
+        sorted(
+            (name, item)
+            for name, item in parse_qsl(parsed.query, keep_blank_values=True)
+            if not name.casefold().startswith("utm_")
+            and name.casefold() not in _DYNAMIC_SEARCH_TRACKING_PARAMETERS
+        ),
+        doseq=True,
+    )
+    return urlunsplit(("https", netloc, parsed.path or "/", query, ""))
+
+
+def normalize_dynamic_search_result(
+    value: Any,
+    *,
+    max_sources: int = _DYNAMIC_SEARCH_MAX_SOURCES,
+) -> dict[str, Any]:
+    """Return the closed, bounded result shape used by dynamic retrieval."""
+
+    if not isinstance(value, Mapping) or set(value) - {
+        "content",
+        "sources",
+        "truncated",
+    }:
+        raise ValueError("dynamic search result has an invalid shape")
+    sources = value.get("sources")
+    if not isinstance(sources, list):
+        raise ValueError("dynamic search sources must be an array")
+    normalized_sources: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for raw in sources:
+        if not isinstance(raw, Mapping) or set(raw) - {
+            "url",
+            "title",
+            "snippet",
+            "publishedAt",
+        }:
+            continue
+        url = _canonical_search_url(raw.get("url"))
+        if url is None or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        source: dict[str, str] = {"url": url}
+        for name, limit in (
+            ("title", _DYNAMIC_SEARCH_TITLE_MAX_CHARS),
+            ("snippet", _DYNAMIC_SEARCH_SNIPPET_MAX_CHARS),
+            ("publishedAt", _DYNAMIC_SEARCH_PUBLISHED_AT_MAX_CHARS),
+        ):
+            text = _bounded_search_text(raw.get(name), limit=limit)
+            if text is not None:
+                source[name] = text
+        normalized_sources.append(source)
+        if len(normalized_sources) >= max_sources:
+            break
+    content = _bounded_search_text(
+        value.get("content"),
+        limit=_DYNAMIC_SEARCH_CONTENT_MAX_CHARS,
+    )
+    result: dict[str, Any] = {
+        "sources": normalized_sources,
+        "truncated": bool(value.get("truncated")) or len(sources) > max_sources,
+    }
+    if content is not None:
+        result["content"] = content
+    return result
+
+
+def _dynamic_search_tokens(value: str) -> set[str]:
+    normalized = value.casefold()
+    tokens = set(re.findall(r"[a-z0-9]{3,}", normalized))
+    for group in re.findall(r"[\u3400-\u9fff]+", normalized):
+        if len(group) == 1:
+            tokens.add(group)
+        else:
+            tokens.update(group[index : index + 2] for index in range(len(group) - 1))
+    return tokens
+
+
+def assess_dynamic_search_quality(
+    queries: tuple[str, ...],
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Quantify whether a normalized DSH primary result needs fallback."""
+
+    sources = result.get("sources")
+    if not isinstance(sources, list):
+        raise ValueError("normalized search result is missing sources")
+    distinct_source_count = len(
+        {
+            item.get("url")
+            for item in sources
+            if isinstance(item, Mapping) and isinstance(item.get("url"), str)
+        }
+    )
+    evidence_sources = [
+        item
+        for item in sources
+        if isinstance(item, Mapping)
+        and any(item.get(name) for name in ("title", "snippet"))
+    ]
+    query_tokens = set().union(*(_dynamic_search_tokens(item) for item in queries))
+    evidence_tokens: set[str] = set()
+    for item in evidence_sources:
+        evidence_tokens.update(
+            _dynamic_search_tokens(
+                " ".join(
+                    str(item.get(name) or "") for name in ("title", "snippet")
+                )
+            )
+        )
+    overlap_count = len(query_tokens & evidence_tokens)
+    if distinct_source_count == 0:
+        reason = "primary_empty"
+    elif distinct_source_count < 2:
+        reason = "insufficient_distinct_sources"
+    elif len(evidence_sources) < 2:
+        reason = "insufficient_evidence_sources"
+    elif overlap_count == 0:
+        reason = "insufficient_query_overlap"
+    else:
+        reason = None
+    return {
+        "distinct_source_count": distinct_source_count,
+        "evidence_source_count": len(evidence_sources),
+        "query_token_count": len(query_tokens),
+        "overlap_token_count": overlap_count,
+        "sufficient": reason is None,
+        "fallback_reason": reason,
+    }
+
+
+def merge_dynamic_search_results(
+    primary: Mapping[str, Any] | None,
+    fallback: Mapping[str, Any] | None,
+    *,
+    max_sources: int = _DYNAMIC_SEARCH_MAX_SOURCES,
+) -> dict[str, Any]:
+    """Merge normalized primary and fallback results, preferring primary order."""
+
+    values = [item for item in (primary, fallback) if item is not None]
+    sources: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    content_parts: list[str] = []
+    truncated = False
+    for value in values:
+        normalized = normalize_dynamic_search_result(value, max_sources=max_sources)
+        truncated = truncated or bool(normalized["truncated"])
+        if normalized.get("content"):
+            content_parts.append(str(normalized["content"]))
+        for source in normalized["sources"]:
+            if source["url"] in seen_urls:
+                continue
+            seen_urls.add(source["url"])
+            if len(sources) >= max_sources:
+                truncated = True
+                continue
+            sources.append(dict(source))
+    result: dict[str, Any] = {"sources": sources, "truncated": truncated}
+    content = _bounded_search_text(
+        "\n\n".join(content_parts),
+        limit=_DYNAMIC_SEARCH_CONTENT_MAX_CHARS,
+    )
+    if content is not None:
+        result["content"] = content
+    return result
+
+
+def search_openalex_metadata(
+    queries: tuple[str, ...],
+    *,
+    limit: int = _DYNAMIC_SEARCH_MAX_SOURCES,
+) -> dict[str, Any]:
+    """Adapt allowlisted OpenAlex metadata into the dynamic-search result shape."""
+
+    cards = _openalex_cards_for_queries(queries, limit=min(max(limit, 0), 8))
+    sources: list[dict[str, str]] = []
+    for card in cards:
+        source = {
+            "url": card.source_url,
+            "title": card.title,
+            "snippet": card.abstract_summary or card.summary,
+        }
+        sources.append(source)
+    return normalize_dynamic_search_result(
+        {
+            "content": (
+                f"OpenAlex metadata fallback returned {len(sources)} bounded sources."
+            ),
+            "sources": sources,
+            "truncated": len(cards) > limit,
+        },
+        max_sources=limit,
+    )
+
+
+def retrieve_generation_knowledge(
+    state: Any,
+    *,
+    query_terms: tuple[str, ...] | list[str] | None = None,
+) -> KnowledgeSnapshot:
+    """Collect and freeze evidence using model queries plus bounded Host hints."""
 
     metadata = state.task_manifest.metadata
     domain = str(metadata.get("domain") or state.task_manifest.domain_pack).casefold()
-    queries = _query_terms(state)
+    authored_queries = (
+        normalize_search_queries(query_terms)
+        if query_terms is not None
+        else ()
+    )
+    queries = _merged_query_terms(
+        state,
+        authored_queries if authored_queries else None,
+    )
     entries = [item for item in _catalog() if _entry_matches_domain(item, domain)]
     cards = [map_catalog_entry(item, metadata) for item in entries]
     warnings: list[str] = []
@@ -475,6 +777,7 @@ def retrieve_generation_knowledge(state: Any) -> KnowledgeSnapshot:
                 queries,
                 limit=5,
                 required_title_markers=markers,
+                priority_count=min(len(authored_queries), len(queries)),
             )
             status = "catalog_and_online" if online_cards else "catalog_online_empty"
         except Exception as exc:  # noqa: BLE001 - optional metadata provider isolation
@@ -571,4 +874,8 @@ def assess_generation_knowledge(
     )
 
 
-__all__ = ["assess_generation_knowledge", "retrieve_generation_knowledge"]
+__all__ = [
+    "assess_generation_knowledge",
+    "generation_query_hints",
+    "retrieve_generation_knowledge",
+]

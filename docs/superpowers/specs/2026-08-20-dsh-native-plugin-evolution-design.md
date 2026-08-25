@@ -527,15 +527,15 @@ Web Profile 根作用域没有 Compaction/Workflow，但标准 preset 的隔离 
 Ecology 不应全局打开服务，而应安装版本化角色 preset：
 
 ```text
-ecology-coordinator-v1
-ecology-researcher-v1
-ecology-candidate-proposer-v1
-ecology-sample-planner-v1
-ecology-sample-critic-v1
-ecology-generation-judge-v1
+ecology-coordinator-v3
+ecology-researcher-v6
+ecology-candidate-proposer-v3
+ecology-sample-planner-v3
+ecology-sample-critic-v3
+ecology-generation-judge-v6
 ```
 
-Preset ID 遵守 rc.6 的 `[a-z0-9][a-z0-9-]*` 约束；版本使用 `-v1`，不在 preset
+Preset ID 遵守 rc.6 的 `[a-z0-9][a-z0-9-]*` 约束；版本使用 `-v2`，不在 preset
 ID 中使用 `@`。协议、schema 和宿主模板 ID 仍可保留 `@1`。
 
 每个 preset 只挂载本角色工具、persona、Compaction，以及确实需要时的 Workflow。
@@ -551,8 +551,11 @@ tools, sessionPersistence, sessionProjections, agentPresets, llm
 
 Compaction/Workflow 不作为根插件硬注入。
 
-每个 preset 的 standing scope 先以 `restrict({allow: []})` 清空继承的全局工具，再在同一
-preset scope 注册角色工具；role-local 工具名不能放进 inherited allowlist。preset 只挂载
+每个 preset 的 standing scope 只注册本角色工具，并安装执行时角色 guard。不能在 standing
+scope 使用 `restrict({allow: []})`：对 role-host 或其 child 而言，standing scope 是祖先层，空
+allowlist 会把同层注册的角色工具也作为 inherited tool 遮蔽。Host readiness 必须对每个
+standing key 执行“可见工具集合精确相等”检查；多出或缺少任何工具都拒绝启动。执行时 guard
+仅允许该角色冻结工具及 child-local `structured_output`，构成第二道边界。preset 只挂载
 `dsh-workflow-worker-thread` 服务，不挂载模型可调用的 `dsh-tool-workflow` 或通用 subagent tool。
 运行创建时冻结 preset 文件内容、standing tool schema set 和 resolved route config digest；安装后
 任何漂移都使新运行/恢复失败。

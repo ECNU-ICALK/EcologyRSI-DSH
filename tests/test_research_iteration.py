@@ -40,7 +40,7 @@ from ecologyrsi_dsh.knowledge.algorithms import (
 )
 from ecologyrsi_dsh.knowledge.research_iteration import ResearchIteration
 from ecologyrsi_dsh.knowledge.retrieval import retrieve_generation_knowledge
-from ecologyrsi_dsh.server import _projection_json
+from ecologyrsi_dsh.api.projection import _projection_json
 
 
 class _ResearchGateway:
@@ -2786,6 +2786,87 @@ class ResearchIterationTests(unittest.TestCase):
             experience["capacity"]["omitted_generation_summaries"], 0
         )
         self.assertGreater(experience["capacity"]["omitted_active_issues"], 0)
+        self.assertLessEqual(
+            len(canonical_json(experience).encode("utf-8")),
+            CROSS_GENERATION_EXPERIENCE_MAX_BYTES,
+        )
+
+    def test_cross_generation_experience_compacts_realistic_nine_cell_tool_rows(
+        self,
+    ) -> None:
+        targets = ("air_temperature", "relative_humidity", "co2_concentration")
+        horizons = (1, 6, 24)
+
+        def ranking(generation: int) -> tuple[dict, ...]:
+            return tuple(
+                {
+                    "candidate_id": f"candidate:{generation}:{candidate_index}",
+                    "score": -0.1 * (generation + candidate_index + 1),
+                    "classification": "scientific_gate_failed",
+                    "parameters": {
+                        "history_steps": 6 + generation,
+                        "ridge_alpha": 0.1,
+                    },
+                    "tool_performance": [
+                        {
+                            "tool_id": f"greenhouse-ridge-{candidate_index}",
+                            "version": "1",
+                            "target": target,
+                            "horizon_hours": horizon,
+                            "selected": 1,
+                            "completed": 1,
+                            "failed": 0,
+                            "rejected": 0,
+                            "critic_accept": 1,
+                            "critic_repair": 0,
+                            "critic_failed": 0,
+                            "final_accept": 1,
+                            "recovered": 0,
+                            "n": 1,
+                            "mae": 12.3456789,
+                            "rmse": 12.3456789,
+                            "baseline_mae": 10.1234567,
+                            "baseline_rmse": 10.1234567,
+                        }
+                        for target in targets
+                        for horizon in horizons
+                    ],
+                }
+                for candidate_index in range(2)
+            )
+
+        analyses = tuple(
+            GenerationAnalysis(
+                run_id="run:realistic-tool-capacity",
+                generation=generation,
+                candidate_count=2,
+                eligible_count=0,
+                outcome="no_eligible_candidate",
+                ranking=ranking(generation),
+                common_failures=("scientific_gate_failed",),
+                insufficient_evidence=True,
+            )
+            for generation in range(2)
+        )
+        state = SimpleNamespace(
+            generation_analyses=analyses,
+            research_iterations=(),
+            proposals=(),
+            algorithm_attempts=(),
+        )
+
+        experience = build_cross_generation_experience(state, 2)
+
+        self.assertEqual(experience["window"]["included_generations"], [0, 1])
+        self.assertTrue(
+            all(
+                item["gate_result"]["insufficient_evidence"]
+                for item in experience["generations"]
+            )
+        )
+        self.assertGreater(
+            experience["capacity"]["omitted_generation_details"], 0
+        )
         self.assertLessEqual(
             len(canonical_json(experience).encode("utf-8")),
             CROSS_GENERATION_EXPERIENCE_MAX_BYTES,

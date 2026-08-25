@@ -5,9 +5,9 @@ import math
 import unittest
 from unittest.mock import patch
 
-from ecologyrsi_dsh.datasets import DatasetSeries
-from ecologyrsi_dsh.greenhouse import FeatureSpec
-from ecologyrsi_dsh.greenhouse_prediction import (
+from ecologyrsi_dsh.data.greenhouse import FeatureSpec
+from ecologyrsi_dsh.data.registry import DatasetSeries
+from ecologyrsi_dsh.evaluators.greenhouse_prediction import (
     EXOGENOUS_RIDGE_MODEL_ID,
     HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
     TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
@@ -17,7 +17,7 @@ from ecologyrsi_dsh.greenhouse_prediction import (
     fit_predict_exogenous_ridge,
     predict_fitted_exogenous_ridge,
 )
-from ecologyrsi_dsh.splits import IndexRange
+from ecologyrsi_dsh.data.splits import IndexRange
 
 
 def _feature(name: str, role: str) -> FeatureSpec:

@@ -51,6 +51,19 @@ class DshStructuredRoleRuntime:
         if self.admission is not None:
             self.admission.open_admission(run_id, run_state_revision, stage_attempt)
         try:
+            replay = getattr(self.admission, "replay_structured_result", None)
+            if callable(replay):
+                prior = replay(
+                    run_id=run_id,
+                    stage=stage,
+                    role=role,
+                    stage_attempt=stage_attempt,
+                    idempotency_key=idempotency_key,
+                    output_schema_id=output_schema_id,
+                    identity_digests=dict(identity_digests or {}),
+                )
+                if prior is not None:
+                    return dict(prior)
             response = self.client.run_stage(request)
             structured = dict(response["structured"])
             if response["result_digest"] != digest(structured):

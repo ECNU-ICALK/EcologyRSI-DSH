@@ -32,7 +32,7 @@ from ecologyrsi_dsh.evaluators.sample_execution import (
     SampleExecutionPolicy,
 )
 from ecologyrsi_dsh.presentation.reporting import run_export
-from ecologyrsi_dsh.server import EvolutionHTTPServer
+from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 
 
 RUN_ID = "run:sample-contract"
@@ -568,6 +568,99 @@ class SampleResultDirectorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "progress total"):
             self.director.record_evaluation(evaluation, sample_results=payload)
+
+    def test_origin_bundle_progress_counts_origins_while_checkpoint_counts_cells(
+        self,
+    ) -> None:
+        run_id = "run:origin-bundle-checkpoint"
+        candidate_id = "candidate:origin-bundle-checkpoint"
+        task_data = _task(run_id).to_dict()
+        task_data["metadata"] = {
+            "sample_agent_protocol": "dsh-strict-origin-bundle@3",
+            "prediction_cells_per_origin": 9,
+        }
+        self.director.start_evolution(
+            TaskManifest.from_dict(task_data),
+            run_id=run_id,
+        )
+        proposal = Proposal(
+            proposal_id=f"proposal:{run_id}",
+            run_id=run_id,
+            generation=0,
+            title="origin bundle contract",
+            changes={"alpha": 0.2},
+        )
+        self.director.submit_proposal(proposal)
+        self.director.spawn_candidate(
+            run_id,
+            proposal,
+            candidate_id=candidate_id,
+        )
+        prepared = self.director.prepare_evaluation_sample_checkpoint(
+            run_id,
+            generation=0,
+            proposal_id=proposal.proposal_id,
+            candidate_id=candidate_id,
+            checkpoint=_checkpoint(sample_count=9),
+        )
+        rows = build_sample_results(
+            candidate_id,
+            [
+                {**_source_row(index), "sample_id": f"origin-cell:{index}"}
+                for index in range(1, 10)
+            ],
+        )
+        self.director.record_evaluation_sample_result_batch(
+            run_id,
+            sample_result_batch_event_payload(
+                run_id,
+                candidate_id,
+                rows,
+                revision=prepared["revision"],
+                batch_index=1,
+            ),
+        )
+        self.director.record_evaluation_progress(
+            run_id,
+            generation=0,
+            proposal_id=proposal.proposal_id,
+            candidate_id=candidate_id,
+            progress={
+                "role": "planner",
+                "model_id": "strategy-model",
+                "batch_index": 1,
+                "batch_count": 1,
+                "batch_size": 1,
+                "completed_samples": 1,
+                "total_samples": 1,
+                "succeeded_samples": 1,
+                "failed_samples": 0,
+                "gateway_request_count": 1,
+                "progress_id": 1,
+                "progress_kind": "completed_batch",
+                "in_flight_batches": 0,
+                "queued_batches": 0,
+            },
+            revision=prepared["revision"],
+        )
+        evaluation = Evaluation(
+            evaluation_id="evaluation:origin-bundle-checkpoint",
+            run_id=run_id,
+            candidate_id=candidate_id,
+            score=0.2,
+            passed=False,
+            partition="training_feedback",
+        )
+        payload = sample_results_event_payload(
+            evaluation,
+            rows,
+            revision=prepared["revision"],
+        )
+
+        self.assertEqual(
+            self.director.record_evaluation(evaluation, sample_results=payload),
+            evaluation,
+        )
 
     def test_checkpoint_completion_ignores_unrevisioned_progress_total(self) -> None:
         prepared = self.director.prepare_evaluation_sample_checkpoint(

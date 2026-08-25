@@ -101,6 +101,26 @@ class DirectorInvariantTests(unittest.TestCase):
             )
         )
 
+    def test_paused_run_rejects_a_late_scientific_evaluation(self) -> None:
+        run_id = "run:invariants"
+        candidate = self.director.propose_and_spawn(run_id)
+        self.director.pause_run(run_id, reason="pause before evaluator publication")
+
+        with self.assertRaisesRegex(RuntimeError, "running"):
+            self.director.record_evaluation(
+                Evaluation(
+                    evaluation_id="evaluation:late-after-pause",
+                    run_id=run_id,
+                    candidate_id=candidate.candidate_id,
+                    score=0.4,
+                    passed=False,
+                )
+            )
+
+        self.assertIsNone(
+            self.director.state(run_id).evaluation_for(candidate.candidate_id)
+        )
+
     def test_model_usage_is_candidate_scoped_validated_and_idempotent(self) -> None:
         run_id = "run:invariants"
         candidate = self.director.propose_and_spawn(run_id)

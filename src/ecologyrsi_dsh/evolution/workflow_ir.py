@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 import math
+import re
 from typing import Any
 
 from ..core.models import TaskManifest
@@ -18,22 +19,25 @@ from ..knowledge.algorithm_ir import (
     build_registered_algorithm_ir,
     registered_operator_tool_ids,
 )
-from ..knowledge.algorithms import AlgorithmSpec, EVOLUTION_ALLOWED_PARTITIONS
+from ..knowledge.algorithms import (
+    AlgorithmSpec,
+    EVOLUTION_ALLOWED_PARTITIONS,
+    registered_predictor_evaluator_ids,
+)
 from ..knowledge.models import KnowledgeSnapshot
 from ..knowledge.program_registry import ProgramRegistrySnapshot
 from .genome import (
     EcologyEvolutionPluginGenome,
     FrozenJsonObject,
-    ProjectedLegacyGenome,
     _domain_digest,
     deep_freeze_json,
     deep_thaw_json,
 )
 
 
-COMPILER_VERSION = "ecology-plugin-behavior-compiler@1"
+COMPILER_VERSION = "ecology-plugin-behavior-compiler@2"
 DEFAULT_COMPILER_SEMANTIC_DIGEST = _domain_digest(
-    "ecologyrsi-dsh/plugin-compiler-semantics/1",
+    "ecologyrsi-dsh/plugin-compiler-semantics/2",
     {
         "compiler_version": COMPILER_VERSION,
         "algorithm_behavior_projection": "algorithm_behavior_projection@1",
@@ -60,6 +64,8 @@ RUNTIME_SEMANTIC_DIGEST = _domain_digest(
     },
 )
 
+_SKILL_NAME_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
 
 _EVALUATOR_VERSIONS = {
     "toy_time_forward@1": "toy-time-forward/3",
@@ -71,26 +77,6 @@ _EVALUATOR_VERSIONS = {
         "greenhouse-multihorizon-time-forward/5"
     ),
 }
-_PREDICTOR_EVALUATORS = {
-    "toy-rolling-water@1": {"toy_time_forward@1"},
-    "greenhouse-rolling-residual@1": {
-        "greenhouse_time_forward@1",
-        "greenhouse_multihorizon_time_forward@1",
-    },
-    "greenhouse-exogenous-ridge@1": {
-        "greenhouse_time_forward@1",
-        "greenhouse_multihorizon_time_forward@1",
-        "greenhouse_multihorizon_time_forward@2",
-    },
-    "greenhouse-targetwise-ridge@1": {
-        "greenhouse_multihorizon_time_forward@1"
-    },
-    "greenhouse-horizon-targetwise-ridge@1": {
-        "greenhouse_multihorizon_time_forward@2"
-    },
-}
-
-
 def _sha(value: Any, name: str) -> str:
     if (
         not isinstance(value, str)
@@ -237,6 +223,11 @@ def compile_dsh_workflow_spec(
             raw_profile["instruction_template_ref"],
             "instruction template",
         )
+        if instruction.get("role") != role:
+            raise ValueError("instruction template is not registered for the role")
+        skill_name = _text(instruction.get("skill_name"), "skill_name")
+        if _SKILL_NAME_RE.fullmatch(skill_name) is None:
+            raise ValueError("instruction template skill_name must be kebab-case")
         instruction_parameters = _effective_parameters(
             registry,
             "instruction_templates",
@@ -264,6 +255,7 @@ def compile_dsh_workflow_spec(
                     "instruction_templates", instruction_id
                 )["catalog_digest"],
                 "instruction_version": instruction["version"],
+                "skill_name": skill_name,
                 "instruction_parameters": instruction_parameters,
                 "response_schema_id": _text(
                     raw_profile["response_schema_id"], "response_schema_id"
@@ -354,6 +346,12 @@ def _compile_reproduction_program(
     role_specs = []
     for instruction_id in sorted(roles):
         instruction = registry.program("instruction_templates", instruction_id)
+        expected_role = instruction_id.rsplit("@", 1)[0]
+        if instruction.get("role") != expected_role:
+            raise ValueError("reproduction instruction role mismatch")
+        skill_name = _text(instruction.get("skill_name"), "skill_name")
+        if _SKILL_NAME_RE.fullmatch(skill_name) is None:
+            raise ValueError("reproduction instruction skill_name must be kebab-case")
         role_specs.append(
             {
                 "instruction_template_id": instruction_id,
@@ -361,6 +359,7 @@ def _compile_reproduction_program(
                     "instruction_templates", instruction_id
                 )["catalog_digest"],
                 "instruction_version": instruction["version"],
+                "skill_name": skill_name,
             }
         )
     return {
@@ -503,7 +502,7 @@ def compile_plugin_behavior(
         scientific["parameter_overrides"],
     )
     evaluator_id = _text(task.metadata.get("evaluator_id"), "evaluator_id")
-    if evaluator_id not in _PREDICTOR_EVALUATORS.get(predictor_id, set()):
+    if evaluator_id not in registered_predictor_evaluator_ids(predictor_id):
         raise ValueError("predictor and evaluator bindings are incompatible")
     if evaluator_id not in _EVALUATOR_VERSIONS:
         raise ValueError("evaluator is not registered")
@@ -609,6 +608,47 @@ def compile_plugin_behavior(
         provisional.behavior_identity_dict(),
     )
     return replace(provisional, compiled_behavior_digest=compiled_digest)
+
+
+def resolve_candidate_agent_profile(
+    genome: EcologyEvolutionPluginGenome,
+    registry: ProgramRegistrySnapshot,
+    *,
+    role: str = "sample-planner",
+) -> dict[str, Any]:
+    """Resolve the candidate-owned instruction/Skill profile from its Genome."""
+
+    if not isinstance(genome, EcologyEvolutionPluginGenome):
+        raise TypeError("candidate agent profile requires a materialized genome")
+    execution = genome.agent_program["candidate_execution_program"]
+    workflow = compile_dsh_workflow_spec(
+        execution["workflow_template_ref"],
+        execution["workflow_overrides"],
+        execution["role_profiles"],
+        registry,
+    ).to_dict()
+    profile = next(
+        (
+            item
+            for item in workflow["role_profiles"]
+            if item.get("role") == role
+        ),
+        None,
+    )
+    if profile is None:
+        raise ValueError(f"candidate workflow has no {role} profile")
+    return {
+        "schema_version": "ecologyrsi-dsh.candidate-agent-profile/1",
+        "role": role,
+        "preset_id": profile["preset_id"],
+        "instruction_template_id": profile["instruction_template_id"],
+        "instruction_template_digest": profile["instruction_template_digest"],
+        "instruction_version": profile["instruction_version"],
+        "skill_name": profile["skill_name"],
+        "instruction_parameters": dict(profile["instruction_parameters"]),
+        "enabled_tool_ids": list(profile["enabled_tool_ids"]),
+        "workflow_digest": workflow["workflow_digest"],
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -758,14 +798,6 @@ def bind_phenotype_instance(
     )
 
 
-def compile_legacy_algorithm_ir(projected: ProjectedLegacyGenome) -> dict[str, Any]:
-    """Compatibility wrapper: return the frozen legacy compiler result exactly."""
-
-    if not isinstance(projected, ProjectedLegacyGenome):
-        raise TypeError("legacy compilation requires a projected legacy genome")
-    return deep_thaw_json(projected.legacy_algorithm_ir)
-
-
 __all__ = [
     "BoundEcologyPluginSpec",
     "CompilationInstanceContext",
@@ -774,6 +806,6 @@ __all__ = [
     "DEFAULT_COMPILER_SEMANTIC_DIGEST",
     "bind_phenotype_instance",
     "compile_dsh_workflow_spec",
-    "compile_legacy_algorithm_ir",
     "compile_plugin_behavior",
+    "resolve_candidate_agent_profile",
 ]

@@ -1,10 +1,10 @@
 """Durable, bounded background progression for autonomous evolution runs.
 
 The HTTP request that creates a run should not have to stay open for the whole
-search budget.  ``AutoProgressManager`` owns a small bounded worker pool and
-advances one complete generation at a time.  Every generation still goes
-through the same
-``execute_generation`` path used by the explicit ``/advance`` endpoint, so the
+search budget.  ``AutoProgressManager`` owns a bounded multi-run worker pool
+and advances one complete generation per run at a time.  Every generation
+still goes through the same ``execute_generation`` path used by the explicit
+``/advance`` endpoint, so the
 event ledger remains the source of truth and a process restart can resume a
 partially written generation.
 
@@ -38,7 +38,7 @@ from .generation_execution import complete_if_budget_exhausted, execute_generati
 
 _AUTO_PROGRESS_METADATA_KEY = "auto_progress"
 _DEFAULT_RETRY_LIMIT = 3
-_DEFAULT_WORKER_COUNT = 1
+_DEFAULT_WORKER_COUNT = 4
 _MAX_WORKER_COUNT = 8
 _FAILURE_PERSISTENCE_RETRY_SECONDS = 1.0
 _GATEWAY_RETRY_BASE_SECONDS = 15.0

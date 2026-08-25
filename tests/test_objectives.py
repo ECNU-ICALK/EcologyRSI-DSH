@@ -24,7 +24,8 @@ class ObjectiveKernelTests(unittest.TestCase):
     def test_skill_is_unit_rescaling_invariant_and_bounded(self) -> None:
         self.assertEqual(skill_score(0.5, 1.0), 0.5)
         self.assertEqual(skill_score(5.0, 10.0), 0.5)
-        self.assertEqual(skill_score(3.0, 1.0), -1.0)
+        self.assertAlmostEqual(skill_score(3.0, 1.0), -2.0 / 3.0)
+        self.assertAlmostEqual(skill_score(2.0, 1.0), -0.5)
         self.assertEqual(skill_score(0.0, 0.0), 0.0)
         self.assertEqual(skill_score(0.1, 0.0), -1.0)
 

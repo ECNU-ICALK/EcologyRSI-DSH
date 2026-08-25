@@ -1,6 +1,6 @@
 {
   "name": "@ecologyrsi/dsh-evolution-plugin",
-  "version": "0.3.15",
+  "version": "0.3.26",
   "description": "DeepSeek Harness host bridge for the EcologyRSI evolution workbench",
   "private": true,
   "type": "module",
@@ -64,6 +64,7 @@
   "files": [
     "lib/**/*.js",
     "presets/**/*.yml",
+    "presets/**/*.md",
     "schemas/*.json"
   ],
   "license": "UNLICENSED"

@@ -56,11 +56,11 @@
       $(selector).addEventListener("input", function () { syncCandidateBudget(); renderReadiness(); renderParameters(); });
     });
     $("#max-candidates").addEventListener("input", function () { syncCandidateBudget({ markManual: true }); renderReadiness(); renderParameters(); });
-    ["#samples-per-update", "#sample-agent-batch-size", "#sample-concurrency", "#fixed-seed", "#knowledge-online-enabled"].forEach(function (selector) {
+    ["#samples-per-update", "#candidate-concurrency", "#sample-agent-batch-size", "#sample-concurrency", "#fixed-seed", "#knowledge-online-enabled"].forEach(function (selector) {
       $(selector).addEventListener("input", function () { renderReadiness(); renderParameters(); });
       $(selector).addEventListener("change", function () { renderReadiness(); renderParameters(); });
     });
-    ["#max-generations", "#candidates-per-generation", "#samples-per-update", "#sample-agent-batch-size", "#sample-concurrency", "#max-candidates"].forEach(function (selector) {
+    ["#max-generations", "#candidates-per-generation", "#samples-per-update", "#candidate-concurrency", "#sample-agent-batch-size", "#sample-concurrency", "#max-candidates"].forEach(function (selector) {
       $(selector).addEventListener("invalid", function () { state.workspace = "parameters"; renderWorkspace(); });
     });
     $("#dataset-partition").addEventListener("change", function (event) { state.datasetPartition = event.target.value === "training_feedback" ? "training_feedback" : "training_fit"; loadSelectedDataset(0); });
@@ -143,7 +143,22 @@
       });
     });
     $("#start-form").addEventListener("submit", function (event) {
-      event.preventDefault(); var form = new FormData(event.currentTarget);
+      event.preventDefault();
+      var unmetChecks = readiness().filter(function (item) { return !item.ready; });
+      if (unmetChecks.length) {
+        var parameterLabels = ["每轮样本", "候选并发", "候选总预算"];
+        if (unmetChecks.some(function (item) {
+          return parameterLabels.some(function (label) { return item.label.indexOf(label) === 0; });
+        })) {
+          state.workspace = "parameters";
+          renderWorkspace();
+        }
+        state.createStatus = null;
+        renderReadiness();
+        showToast("暂时不能创建：" + unmetChecks.map(function (item) { return item.label; }).join("；"));
+        return;
+      }
+      var form = new FormData(event.currentTarget);
       // The compact form exposes only two model roles; internal components
       // are selected by the autonomous runtime and are intentionally omitted.
       createRun({
@@ -156,6 +171,7 @@
         rounds: Number(form.get("rounds") || form.get("max_generations")),
         candidates_per_generation: Number(form.get("candidates_per_generation")),
         samples_per_update: Number(form.get("samples_per_update")),
+        candidate_concurrency: Number(form.get("candidate_concurrency")),
         sample_agent_batch_size: Number(form.get("sample_agent_batch_size")),
         sample_concurrency: Number(form.get("sample_concurrency")),
         max_candidates: Number(form.get("max_candidates")),

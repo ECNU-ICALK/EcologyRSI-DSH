@@ -37,7 +37,11 @@ from ..core.models import (
 )
 from ..core.sample_results import MAX_SAMPLE_RESULTS_UNCOMPRESSED_BYTES
 from ..data.registry import DatasetRegistry
-from ..evaluators.registry import TOY_DATASET_ID, EvaluatorRegistry
+from ..evaluators.registry import (
+    GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
+    TOY_DATASET_ID,
+    EvaluatorRegistry,
+)
 from ..evolution.strategies import StrategyRouterDSHAdapter
 from ..integrations.model_bindings import (
     HOST_PARAMETER_GENERATOR_ID,
@@ -50,6 +54,8 @@ from ..integrations.dsh_native_runtime import (
     DshNativeAgentRuntimeClient,
 )
 from ..integrations.dsh_structured_roles import DshStructuredRoleRuntime
+from ..knowledge.autonomous_cycle import AUTONOMOUS_RESEARCH_PROTOCOL
+from ..knowledge.program_registry import current_program_registry
 from ..version import __version__
 from .auto_progress import AutoProgressManager
 from .dsh_tools import DshToolService
@@ -74,7 +80,9 @@ _SAMPLE_TOKEN_BUDGET_POLICY = "hard_gateway_call_reservation@1"
 _SAMPLE_TOKEN_BUDGET_SCOPE = "sample_agent_gateway_calls_only@1"
 _DEFAULT_REAL_SAMPLE_CONCURRENCY = 2
 _MAX_REAL_SAMPLE_CONCURRENCY = 8
-_DEFAULT_SAMPLES_PER_UPDATE = 500
+_DEFAULT_REAL_CANDIDATE_CONCURRENCY = 4
+_MAX_REAL_CANDIDATE_CONCURRENCY = 8
+_DEFAULT_SAMPLES_PER_UPDATE = 1_600
 _MAX_SAMPLES_PER_UPDATE = 100_000
 _DEFAULT_SAMPLE_AGENT_BATCH_SIZE = 64
 _MAX_SAMPLE_AGENT_BATCH_SIZE = 128
@@ -94,15 +102,19 @@ _DEFAULT_SAMPLE_PLANNER_PROMPT_PROFILE = {
     "version": "origin_shared_context@1",
 }
 _DEFAULT_SAMPLE_REMOTE_CRITIC_POLICY = {
-    "version": "always@1",
+    "version": "uncertain_or_failure@1",
+    "min_planner_confidence": 0.9,
 }
+_STRICT_SAMPLE_AGENT_PROTOCOL = "dsh-strict-origin-bundle@3"
+_STRICT_SAMPLE_REMOTE_CRITIC_POLICY = {"version": "always@1"}
+_STRICT_SAMPLE_REFLECTION_POLICY = "always_remote_post_score@1"
 _DSH_NATIVE_PRESET_IDS = (
-    "ecology-coordinator-v1",
-    "ecology-researcher-v1",
-    "ecology-candidate-proposer-v1",
-    "ecology-sample-planner-v1",
-    "ecology-sample-critic-v1",
-    "ecology-generation-judge-v1",
+    "ecology-coordinator-v3",
+    "ecology-researcher-v6",
+    "ecology-candidate-proposer-v3",
+    "ecology-sample-planner-v3",
+    "ecology-sample-critic-v3",
+    "ecology-generation-judge-v6",
 )
 _DSH_NATIVE_STABLE_PRESET_FIELDS = (
     "preset_id",
@@ -111,6 +123,13 @@ _DSH_NATIVE_STABLE_PRESET_FIELDS = (
     "tool_surface_verified",
     "route_resolvable",
 )
+_DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR = {
+    "greenhouse-rolling-residual@1": "greenhouse-rolling-default@1",
+    "greenhouse-exogenous-ridge@1": "greenhouse-exogenous-default@1",
+    "greenhouse-targetwise-ridge@1": "greenhouse-targetwise-default@1",
+    "greenhouse-horizon-targetwise-ridge@1": "greenhouse-default@1",
+    "toy-rolling-water@1": "toy-default@1",
+}
 
 
 def _dsh_native_stable_preset_catalog(
@@ -153,6 +172,7 @@ PLUGIN_MANIFEST = {
             "auto_progress",
             "allow_host_fallback",
             "samples_per_update",
+            "candidate_concurrency",
             "sample_concurrency",
             "sample_agent_batch_size",
         ],
@@ -369,6 +389,7 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
                 dsh_identity_provider=lambda run_id, candidate_id: (
                     self.director.state(run_id).candidate_identity_binding(candidate_id)
                 ),
+                dsh_prediction_tool_binder=self.dsh_tools.bind_prediction_tool,
             )
             self.director = EvolutionDirector(self.ledger, self.strategy_router)
             # A mutation spans several append-only events.  Serial execution keeps
@@ -619,7 +640,7 @@ class EvolutionRequestHandler(
     server: EvolutionHTTPServer
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+    def log_message(self, _format: str, *_args: Any) -> None:
         # Keep the demo quiet unless a caller overrides the handler logger.
         return
 
@@ -1054,6 +1075,7 @@ class EvolutionRequestHandler(
                 "idempotency_key": str(idempotency_key or f"create:{run_id}"),
                 "binding": {
                     "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                    "initial_run_status": "running" if start else "created",
                     "task_manifest_digest": task.digest,
                     "preset_catalog_digest": task.metadata.get("dsh_preset_catalog_digest"),
                     "data_protocol_digest": task.metadata.get("data_protocol_digest"),
@@ -1295,6 +1317,7 @@ class EvolutionRequestHandler(
                     "variants_per_round",
                     "max_candidates",
                     "samples_per_update",
+                    "candidate_concurrency",
                     "sample_concurrency",
                     "sample_agent_batch_size",
                     "execution_protocol",
@@ -1350,6 +1373,21 @@ class EvolutionRequestHandler(
                             f"{_MAX_REAL_SAMPLE_CONCURRENCY}"
                         )
                     metadata["sample_concurrency"] = sample_concurrency
+                # Older/plugin-generated requests may include the optional
+                # field as JSON null.  Treat null exactly like omission; real
+                # autonomous runs receive the frozen default during binding.
+                if body.get("candidate_concurrency") is not None:
+                    candidate_concurrency = _request_integer(
+                        body["candidate_concurrency"],
+                        "candidate_concurrency",
+                        minimum=1,
+                    )
+                    if candidate_concurrency > _MAX_REAL_CANDIDATE_CONCURRENCY:
+                        raise ValueError(
+                            "candidate_concurrency must be between 1 and "
+                            f"{_MAX_REAL_CANDIDATE_CONCURRENCY}"
+                        )
+                    metadata["candidate_concurrency"] = candidate_concurrency
                 if "samples_per_update" in body:
                     samples_per_update = _request_integer(
                         body["samples_per_update"], "samples_per_update", minimum=1
@@ -1645,6 +1683,7 @@ class EvolutionRequestHandler(
                 else None
             ),
             "sample_concurrency": body.get("sample_concurrency"),
+            "candidate_concurrency": body.get("candidate_concurrency"),
             "samples_per_update": body.get("samples_per_update"),
             "sample_agent_batch_size": body.get("sample_agent_batch_size"),
             "execution_protocol": body.get("execution_protocol"),
@@ -1872,6 +1911,15 @@ class EvolutionRequestHandler(
             metadata.get("prediction_model_id")
             or self.server.evaluators.default_predictor(dataset_id)
         )
+        if (
+            native_protocol
+            and dataset_id != TOY_DATASET_ID
+            and evaluator_id != GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID
+        ):
+            raise ValueError(
+                "DSH-native greenhouse runs require the 3-target × 3-horizon "
+                f"evaluator {GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID}"
+            )
         strategy_model_id = str(
             metadata.get("strategy_model_id")
             or metadata.get("policy_model_id")
@@ -1908,6 +1956,20 @@ class EvolutionRequestHandler(
             evaluator_id
         )
         objective_profile = self.server.evaluators.objective_profile(evaluator_id)
+        fitness_profile = self.server.evaluators.fitness_profile(evaluator_id)
+        fitness_profile_data = fitness_profile.to_dict()
+        supplied_fitness_profile = metadata.get("fitness_profile")
+        if (
+            supplied_fitness_profile is not None
+            and supplied_fitness_profile != fitness_profile_data
+        ):
+            raise ValueError("任务清单中的 fitness_profile 与服务端评测器不一致")
+        supplied_fitness_digest = metadata.get("fitness_profile_digest")
+        if (
+            supplied_fitness_digest is not None
+            and supplied_fitness_digest != fitness_profile.profile_digest
+        ):
+            raise ValueError("任务清单中的 fitness_profile_digest 与服务端评测器不一致")
         prediction_model_digest = (
             self.server.evaluators.predictor_configuration_digest(prediction_model_id)
         )
@@ -1984,10 +2046,6 @@ class EvolutionRequestHandler(
             policy_binding_source = "dsh_native_frozen_route"
             judge_binding_source = "dsh_native_frozen_route"
             metadata.setdefault(
-                "seed_genome_template_id",
-                "toy-default@1" if toy_domain else "greenhouse-default@1",
-            )
-            metadata.setdefault(
                 "dataset_snapshot_set_digest",
                 digest(
                     {
@@ -2009,16 +2067,7 @@ class EvolutionRequestHandler(
             )
             metadata.setdefault(
                 "stage_policy_digest",
-                digest({"policy": "dsh-native-four-stage-evolution@1"}),
-            )
-            metadata.setdefault(
-                "fitness_profile_digest",
-                digest(
-                    {
-                        "policy": "lexicographic-validity-skill-uq-efficiency@1",
-                        "objective_profile": objective_profile,
-                    }
-                ),
+                digest({"policy": "dsh-native-search-reflect-evolution@2"}),
             )
             metadata.setdefault(
                 "security_kernel_digest",
@@ -2179,10 +2228,67 @@ class EvolutionRequestHandler(
                 )
         if autonomous_mode and defer_remote_plan:
             metadata["autonomous_plan_execution"] = "deferred_to_first_generation"
+        if native_protocol:
+            seed_template_id = metadata.get("seed_genome_template_id")
+            if seed_template_id is None:
+                seed_template_id = _DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR.get(
+                    prediction_model_id
+                )
+            if not isinstance(seed_template_id, str) or not seed_template_id.strip():
+                raise ValueError(
+                    "DSH-native prediction model has no registered seed genome template"
+                )
+            seed_template_id = seed_template_id.strip()
+            seed_template = current_program_registry().seed_template(
+                seed_template_id
+            )
+            seed_predictor_id = str(
+                seed_template.to_dict()["scientific_program"]["predictor_ref"]["id"]
+            )
+            if seed_predictor_id != prediction_model_id:
+                raise ValueError(
+                    "DSH-native seed genome predictor does not match the frozen "
+                    "prediction_model_id"
+                )
+            metadata["seed_genome_template_id"] = seed_template_id
         sample_concurrency = metadata.get("sample_concurrency")
+        candidate_concurrency = metadata.get("candidate_concurrency")
         samples_per_update = metadata.get("samples_per_update")
         sample_agent_batch_size = metadata.get("sample_agent_batch_size")
-        if autonomous_mode and not toy_domain:
+        minimum_selection_samples_per_update = (
+            self.server.evaluators.minimum_selection_samples_per_update(
+                evaluator_id
+            )
+        )
+        selection_fitness_profile = self.server.evaluators.fitness_profile(
+            evaluator_id
+        )
+        minimum_selection_origin_samples_per_update = (
+            selection_fitness_profile.minimum_balanced_origins_per_update()
+        )
+        prediction_cells_per_origin = selection_fitness_profile.prediction_cell_count
+        sample_budget_class = None
+        # DSH-native sample execution needs the same frozen scheduling values
+        # for every dataset.  The synthetic fixture is small, but it still
+        # runs planner/critic child sessions; clearing these fields leaves the
+        # adapter with an explicit ``None`` concurrency and makes evaluation
+        # fail before the first sample checkpoint.
+        if autonomous_mode and (not toy_domain or native_protocol):
+            if candidate_concurrency is None:
+                candidate_concurrency = _DEFAULT_REAL_CANDIDATE_CONCURRENCY
+            if (
+                isinstance(candidate_concurrency, bool)
+                or not isinstance(candidate_concurrency, int)
+                or not (
+                    1
+                    <= candidate_concurrency
+                    <= _MAX_REAL_CANDIDATE_CONCURRENCY
+                )
+            ):
+                raise ValueError(
+                    "candidate_concurrency must be an integer between 1 and "
+                    f"{_MAX_REAL_CANDIDATE_CONCURRENCY}"
+                )
             if sample_concurrency is None:
                 sample_concurrency = _DEFAULT_REAL_SAMPLE_CONCURRENCY
             if (
@@ -2195,7 +2301,18 @@ class EvolutionRequestHandler(
                     f"{_MAX_REAL_SAMPLE_CONCURRENCY}"
                 )
             if samples_per_update is None:
-                samples_per_update = _DEFAULT_SAMPLES_PER_UPDATE
+                samples_per_update = max(
+                    _DEFAULT_SAMPLES_PER_UPDATE,
+                    minimum_selection_samples_per_update
+                    if native_protocol
+                    else 0,
+                )
+            # A strict native run may deliberately use one complete balanced
+            # origin as a diagnostic smoke.  It still executes every required
+            # Agent stage and may continue through multiple diagnostic
+            # generations, but remains ineligible for formal promotion. Full
+            # autonomous evolution keeps the larger selection threshold as its
+            # default above.
             minimum_samples_per_update = (
                 self.server.evaluators.minimum_samples_per_update(evaluator_id)
             )
@@ -2224,11 +2341,17 @@ class EvolutionRequestHandler(
                     "sample_agent_batch_size must be an integer between 1 and "
                     f"{_MAX_SAMPLE_AGENT_BATCH_SIZE}"
                 )
+            sample_budget_class = (
+                "selection_eligible"
+                if samples_per_update >= minimum_selection_samples_per_update
+                else "diagnostic_smoke"
+            )
         else:
+            candidate_concurrency = None
             sample_concurrency = None
             samples_per_update = None
             # Preserve the pre-existing host/toy manifest value. It is not
-            # used unless sample_agent_mode selects the gateway adapter.
+            # used by the host-only sample state machine.
             sample_agent_batch_size = 128
         runtime_component_catalog["selected_prediction_model_id"] = (
             prediction_model_id
@@ -2242,6 +2365,8 @@ class EvolutionRequestHandler(
                 # Freeze the objective definition with the run so the score
                 # cannot be misread as a free-form natural-language goal.
                 "objective_profile": objective_profile,
+                "fitness_profile": fitness_profile_data,
+                "fitness_profile_digest": fitness_profile.profile_digest,
                 "prediction_model_id": prediction_model_id,
                 "prediction_model_digest": prediction_model_digest,
                 "policy_model_id": policy_model_id,
@@ -2249,9 +2374,12 @@ class EvolutionRequestHandler(
                 "strategy_model_id": strategy_model_id,
                 "review_model_id": judge_model_id,
                 "autonomous_mode": autonomous_mode,
-                # Existing runs without this marker keep their historical host
-                # execution semantics. New real autonomous runs freeze the
-                # gateway-backed microbatch protocol into the task digest.
+                "autonomous_research_protocol": (
+                    AUTONOMOUS_RESEARCH_PROTOCOL if native_protocol else None
+                ),
+                # DSH-native runs freeze the agent-owned origin-vector protocol
+                # into the task digest. Other execution modes retain their own
+                # explicit sample adapters.
                 "sample_agent_mode": (
                     "dsh_native_workflow"
                     if native_protocol
@@ -2259,17 +2387,41 @@ class EvolutionRequestHandler(
                     if autonomous_mode and not toy_domain
                     else "host_feedback_state_machine"
                 ),
+                # Every DSH-native origin requires a real model-backed planner,
+                # critic, and post-score reflector.
+                "sample_agent_protocol": (
+                    _STRICT_SAMPLE_AGENT_PROTOCOL if native_protocol else None
+                ),
+                "sample_prompt_batch_size": 1 if native_protocol else None,
+                "sample_reflection_policy": (
+                    _STRICT_SAMPLE_REFLECTION_POLICY if native_protocol else None
+                ),
+                "allow_host_route_bypass": False if native_protocol else None,
+                "allow_host_prediction_fallback": (
+                    False if native_protocol else None
+                ),
                 "sample_agent_batch_size": sample_agent_batch_size,
                 # Causal origin waves are independent schedules. New real
-                # runs use eight bounded workers by default; an explicit
-                # lower value remains part of the immutable manifest. Runs
-                # created before this field continue to restore their legacy
-                # registry default of four workers.
+                # runs use two bounded sample workers per candidate by
+                # default; an explicit value remains part of the immutable
+                # manifest. Candidate-level parallelism is frozen separately.
                 "sample_concurrency": sample_concurrency,
+                # Sibling candidates share one frozen cohort but execute in
+                # independent DSH child sessions. Historical manifests omit
+                # this field and therefore remain serial on replay.
+                "candidate_concurrency": candidate_concurrency,
                 # The model fit still consumes all training_fit rows. This
                 # bounded, rotating window applies only to per-sample agent
                 # execution over training_feedback.
                 "samples_per_update": samples_per_update,
+                "minimum_selection_samples_per_update": (
+                    minimum_selection_samples_per_update
+                ),
+                "minimum_selection_origin_samples_per_update": (
+                    minimum_selection_origin_samples_per_update
+                ),
+                "prediction_cells_per_origin": prediction_cells_per_origin,
+                "sample_budget_class": sample_budget_class,
                 # These limits are part of the task manifest rather than a
                 # process-wide gateway default, so later configuration changes
                 # cannot silently change an already-created real run.
@@ -2282,15 +2434,19 @@ class EvolutionRequestHandler(
                 # addition to the host constraint critic. Persisting the policy
                 # prevents restart-time drift; older runs retain their freeze.
                 "sample_remote_critic_policy": (
-                    dict(_DEFAULT_SAMPLE_REMOTE_CRITIC_POLICY)
-                    if autonomous_mode and not toy_domain
+                    dict(
+                        _STRICT_SAMPLE_REMOTE_CRITIC_POLICY
+                        if native_protocol
+                        else _DEFAULT_SAMPLE_REMOTE_CRITIC_POLICY
+                    )
+                    if autonomous_mode and (not toy_domain or native_protocol)
                     else None
                 ),
                 # Repeated origin-level features are losslessly factored into a
                 # content-addressed context only for newly created real runs.
                 "sample_planner_prompt_profile": (
                     dict(_DEFAULT_SAMPLE_PLANNER_PROMPT_PROFILE)
-                    if autonomous_mode and not toy_domain
+                    if autonomous_mode and (not toy_domain or native_protocol)
                     else None
                 ),
                 "sample_truncation_retry_policy": (
@@ -2614,6 +2770,32 @@ class EvolutionRequestHandler(
                 raise FrozenRuntimeBindingDriftError(f"{label}实现")
 
         if metadata.get("execution_protocol") == DSH_NATIVE_EXECUTION_PROTOCOL:
+            evaluator_id = str(metadata.get("evaluator_id") or "").strip()
+            expected_profile = server.evaluators.fitness_profile(evaluator_id)
+            frozen_profile = metadata.get("fitness_profile")
+            if not isinstance(frozen_profile, dict):
+                raise ValueError(
+                    "DSH-native 运行缺少冻结的完整 fitness_profile，已拒绝继续"
+                )
+            if frozen_profile != expected_profile.to_dict():
+                raise FrozenRuntimeBindingDriftError("fitness profile")
+            if metadata.get("fitness_profile_digest") != expected_profile.profile_digest:
+                raise FrozenRuntimeBindingDriftError("fitness profile digest")
+            if metadata.get("minimum_selection_samples_per_update") != (
+                expected_profile.minimum_balanced_samples_per_update()
+            ):
+                raise FrozenRuntimeBindingDriftError("selection sample threshold")
+            if metadata.get("sample_agent_protocol") == (
+                "dsh-strict-origin-bundle@3"
+            ) and (
+                metadata.get("minimum_selection_origin_samples_per_update")
+                != expected_profile.minimum_balanced_origins_per_update()
+                or metadata.get("prediction_cells_per_origin")
+                != expected_profile.prediction_cell_count
+            ):
+                raise FrozenRuntimeBindingDriftError(
+                    "origin-bundle selection threshold"
+                )
             runtime = server.dsh_native_runtime
             if runtime is None:
                 raise DshNativeRuntimeUnavailableError()
@@ -2668,6 +2850,11 @@ class EvolutionRequestHandler(
                             "idempotency_key": f"runtime-restore:{target_run_id}",
                             "binding": {
                                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                                "initial_run_status": (
+                                    "running"
+                                    if state.run.status.value == "running"
+                                    else "created"
+                                ),
                                 "task_manifest_digest": task.digest,
                                 "preset_catalog_digest": metadata.get(
                                     "dsh_preset_catalog_digest"
@@ -2771,6 +2958,10 @@ class EvolutionRequestHandler(
         if self._serve_existing_command(cache_key, run_id, f"control:{action}", body):
             return
         state = director.state(run_id)
+        native_protocol = (
+            state.task_manifest.metadata.get("execution_protocol")
+            == DSH_NATIVE_EXECUTION_PROTOCOL
+        )
         active = getattr(self, "_active_command", None)
         target_status = {
             "start": "running",
@@ -2779,27 +2970,31 @@ class EvolutionRequestHandler(
             "cancel": "cancelled",
             "complete": "completed",
         }.get(action)
+        resumes_durable_native_quiescence = (
+            active is not None
+            and action in {"pause", "cancel"}
+            and native_protocol
+            and state.run.status.value == target_status
+        )
         if (
             active is not None
             and target_status is not None
             and state.run.status.value == target_status
+            and not resumes_durable_native_quiescence
         ):
             payload = _state_payload(state)
             self._complete_command(cache_key, payload)
             self._send(HTTPStatus.OK, payload)
             return
-        if action in ("advance", "step"):
-            self._validate_advance_request(run_id, body)
-        else:
-            self._validate_control_request(run_id, action)
+        if not resumes_durable_native_quiescence:
+            if action in ("advance", "step"):
+                self._validate_advance_request(run_id, body)
+            else:
+                self._validate_control_request(run_id, action)
         cached = self._claim_command(cache_key, run_id, f"control:{action}", body)
         if cached is not None:
             self._send(HTTPStatus.OK, cached)
             return
-        native_protocol = (
-            state.task_manifest.metadata.get("execution_protocol")
-            == DSH_NATIVE_EXECUTION_PROTOCOL
-        )
         native_request = {
             "run_id": run_id,
             "run_state_revision": state.events[-1].seq,
@@ -2809,37 +3004,74 @@ class EvolutionRequestHandler(
                 body.get("idempotency_key") or f"{action}:{run_id}:{state.events[-1].seq}"
             ),
         }
+        pause_reason: str | None = None
+        pause_code: str | None = None
+        if action == "pause":
+            # Validate the operator metadata before closing any admission fence.
+            # Native runs persist the paused boundary below before waiting for
+            # DSH quiescence so active sample executors stop treating aborted
+            # child calls as ordinary sample failures.
+            raw_pause_reason = body.get("reason")
+            raw_pause_code = body.get("code")
+            if raw_pause_reason is not None and not isinstance(
+                raw_pause_reason, str
+            ):
+                raise TypeError("pause reason must be a string")
+            if raw_pause_code is not None and not isinstance(raw_pause_code, str):
+                raise TypeError("pause code must be a string")
+            pause_reason = raw_pause_reason
+            pause_code = raw_pause_code
         if native_protocol and action in {"pause", "cancel"}:
             self.server.dsh_tools.close_run_admissions(run_id)
             if action == "pause":
+                # Serialize the durable boundary with short Host result writes.
+                # A result that wins this lock lands before RunPaused; a result
+                # that loses observes PAUSED and is rejected until resume.
+                if not resumes_durable_native_quiescence:
+                    with self.server.mutation_lock:
+                        director.pause_run(
+                            run_id,
+                            reason=pause_reason,
+                            code=pause_code,
+                        )
                 self.server.dsh_native_runtime.pause(native_request)
             else:
+                # Cancellation is a Host-owned durable safety boundary. Close
+                # admission and persist it before waiting for DSH child
+                # sessions, so a blocked or unavailable runtime cannot leave
+                # the scientific run accepting late work as RUNNING.
+                if not resumes_durable_native_quiescence:
+                    with self.server.mutation_lock:
+                        director.cancel_run(
+                            run_id,
+                            str(body.get("reason", "cancelled by user")),
+                        )
                 self.server.dsh_native_runtime.cancel(native_request)
         elif native_protocol and action == "resume":
             self.server.dsh_native_runtime.resume(native_request)
         if action == "start":
             director.start_run(run_id)
         elif action == "pause":
-            # Preserve an operator-supplied pause cause in the append-only
-            # event stream so the projection can distinguish manual pauses
-            # from budget and gateway back-pressure pauses.
-            pause_reason = body.get("reason")
-            pause_code = body.get("code")
-            if pause_reason is not None and not isinstance(pause_reason, str):
-                raise TypeError("pause reason must be a string")
-            if pause_code is not None and not isinstance(pause_code, str):
-                raise TypeError("pause code must be a string")
-            director.pause_run(
-                run_id,
-                reason=pause_reason,
-                code=pause_code,
-            )
+            if not native_protocol:
+                # Preserve an operator-supplied pause cause in the append-only
+                # event stream so the projection can distinguish manual pauses
+                # from budget and gateway back-pressure pauses.
+                director.pause_run(
+                    run_id,
+                    reason=pause_reason,
+                    code=pause_code,
+                )
         elif action == "resume":
             director.resume_run(run_id)
             if native_protocol:
                 self.server.dsh_tools.open_run_admissions(run_id)
         elif action == "cancel":
-            director.cancel_run(run_id, str(body.get("reason", "cancelled by user")))
+            if not native_protocol:
+                with self.server.mutation_lock:
+                    director.cancel_run(
+                        run_id,
+                        str(body.get("reason", "cancelled by user")),
+                    )
         elif action == "complete":
             director.complete_run(run_id)
         elif action in ("advance", "step"):
@@ -2849,6 +3081,14 @@ class EvolutionRequestHandler(
             self._schedule_auto_progress(state)
             self._send(HTTPStatus.OK, payload)
             return
+        if native_protocol and action in {"pause", "cancel"}:
+            # DSH quiescence covers child Sessions and Workflows. The Host may
+            # still be unwinding a completed local training/evaluation call, so
+            # join the per-run generation lease before acknowledging control.
+            generation_barrier = self.server.acquire_generation_lease(run_id)
+            if generation_barrier is None:
+                raise RuntimeError("run generation quiescence barrier is unavailable")
+            generation_barrier.release()
         resulting_state = director.state(run_id)
         payload = _state_payload(resulting_state)
         self._complete_command(cache_key, payload)

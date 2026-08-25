@@ -465,6 +465,36 @@ class KnowledgeRetrievalTests(unittest.TestCase):
         self.assertEqual(calls, ["weak target query", "horizon query", "broad domain query"])
         self.assertEqual([card.knowledge_id for card in cards], ["openalex:W1", "openalex:W2"])
 
+    def test_model_authored_queries_run_before_host_fallbacks(self) -> None:
+        calls: list[str] = []
+
+        def search(query: str, *, limit: int, required_title_markers=()):
+            calls.append(query)
+            return []
+
+        with mock.patch.object(
+            knowledge_retrieval,
+            "_openalex_cards",
+            side_effect=search,
+        ):
+            knowledge_retrieval._openalex_cards_for_queries(
+                (
+                    "model-authored weak CO2 query",
+                    "broad domain query",
+                    "host weak-target query",
+                ),
+                priority_count=1,
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                "model-authored weak CO2 query",
+                "host weak-target query",
+                "broad domain query",
+            ],
+        )
+
     def test_proposal_context_exposes_digest_bound_frozen_evidence(self) -> None:
         context = _evidence_snapshot().proposal_context()
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.models import digest
+from ..evolution.context import safe_aggregate_feedback
 from ..integrations.model_bindings import (
     HOST_PARAMETER_GENERATOR_ID,
     RULE_JUDGE_ID,
@@ -436,30 +437,57 @@ def _research_iteration_summary(iteration: Any | None) -> dict[str, Any] | None:
     degradation = algorithm.get("algorithm_synthesis_degradation")
     blueprint = algorithm.get("algorithm_blueprint")
     raw_research = plan.get("research")
+    native_summary = plan.get("dsh_research_summary")
+    if not isinstance(native_summary, str) or not native_summary.strip():
+        native_summary = None
+    else:
+        native_summary = native_summary.strip()[:2000]
+    raw_native_evidence = plan.get("dsh_research_evidence")
     key_findings: list[dict[str, str]] = []
+    evidence_refs: list[str] = []
+    research_sources = []
     if isinstance(raw_research, (list, tuple)):
-        for raw_item in raw_research[:8]:
-            if not isinstance(raw_item, Mapping):
-                continue
-            finding = raw_item.get("finding")
-            if not isinstance(finding, str) or not finding.strip():
-                continue
-            item = {"finding": finding.strip()[:1000]}
-            for field_name in ("title", "source", "relevance"):
-                value = raw_item.get(field_name)
-                if isinstance(value, str) and value.strip():
-                    item[field_name] = value.strip()[:500]
-            key_findings.append(item)
+        research_sources.extend(raw_research)
+    if isinstance(raw_native_evidence, (list, tuple)):
+        research_sources.extend(raw_native_evidence)
+    for raw_item in research_sources[:8]:
+        if not isinstance(raw_item, Mapping):
+            continue
+        finding = raw_item.get("finding")
+        if not isinstance(finding, str) or not finding.strip():
+            continue
+        item = {"finding": finding.strip()[:1000]}
+        for field_name in (
+            "title",
+            "source",
+            "relevance",
+            "knowledge_id",
+            "evidence_digest",
+        ):
+            value = raw_item.get(field_name)
+            if isinstance(value, str) and value.strip():
+                item[field_name] = value.strip()[:500]
+        for reference_name in ("evidence_ref", "knowledge_id", "evidence_digest"):
+            reference = raw_item.get(reference_name)
+            if (
+                isinstance(reference, str)
+                and reference.strip()
+                and reference.strip() not in evidence_refs
+            ):
+                evidence_refs.append(reference.strip()[:500])
+        key_findings.append(item)
 
     analysis_source = (
         synthesis if isinstance(synthesis, Mapping) else degradation
         if isinstance(degradation, Mapping) else None
     )
+    native_completed = native_summary is not None
     analysis_summary = {
         "schema_version": "ecologyrsi-dsh.literature-analysis-summary/1",
         "status": (
             "completed"
             if isinstance(synthesis, Mapping)
+            or native_completed
             else "degraded"
             if isinstance(degradation, Mapping)
             else "pending"
@@ -468,29 +496,42 @@ def _research_iteration_summary(iteration: Any | None) -> dict[str, Any] | None:
             str(analysis_source.get("rationale"))[:2000]
             if isinstance(analysis_source, Mapping)
             and isinstance(analysis_source.get("rationale"), str)
+            else native_summary
+            if native_completed
             else None
         ),
         "evidence_refs": (
             list(analysis_source.get("evidence_refs", []))[:16]
             if isinstance(analysis_source, Mapping)
             and isinstance(analysis_source.get("evidence_refs"), list)
-            else []
+            else evidence_refs[:16]
         ),
         "key_findings": key_findings,
-        "source": "model_research_plan",
+        "source": (
+            "model_research_plan"
+            if isinstance(analysis_source, Mapping)
+            else "dsh_native_research"
+            if native_completed
+            else "model_research_plan"
+        ),
     }
     final_plan = {
         "schema_version": "ecologyrsi-dsh.final-implementation-plan/1",
         "status": (
             "ready_for_host_compilation"
             if isinstance(blueprint, Mapping) and isinstance(synthesis, Mapping)
+            or native_completed
             else "research_only"
             if isinstance(degradation, Mapping)
             else "pending"
         ),
         "predictor_id": adoption.get("adopted_id"),
         "pipeline_id": (
-            blueprint.get("pipeline_id") if isinstance(blueprint, Mapping) else None
+            blueprint.get("pipeline_id")
+            if isinstance(blueprint, Mapping)
+            else adoption.get("adopted_id")
+            if native_completed
+            else None
         ),
         "operator_ids": (
             list(blueprint.get("operator_ids", []))[:32]
@@ -519,6 +560,47 @@ def _research_iteration_summary(iteration: Any | None) -> dict[str, Any] | None:
             "independent_model_review",
         ],
     }
+    reflection_summary = None
+    raw_reflection = plan.get("dsh_evolution_reflection")
+    if isinstance(raw_reflection, Mapping):
+        safe_reflection = safe_aggregate_feedback(
+            raw_reflection,
+            name="DSH evolution reflection reporting projection",
+        )
+        if safe_reflection is not None:
+            raw_avoid = safe_reflection.get("avoid_behaviors")
+            avoid_rows = raw_avoid if isinstance(raw_avoid, list) else []
+            raw_active = safe_reflection.get("active_unresolved")
+            active_rows = raw_active if isinstance(raw_active, list) else []
+            reflection_summary = {
+                "schema_version": safe_reflection.get(
+                    "schema_version",
+                    "ecologyrsi-dsh.evolution-reflection/2",
+                ),
+                "avoid_behavior_count": len(avoid_rows),
+                "avoid_behaviors": [
+                    {
+                        "behavior_digest": item.get("behavior_digest"),
+                        "prediction_model_id": item.get("prediction_model_id"),
+                        "parameters_digest": item.get("parameters_digest"),
+                        "reason": item.get("reason"),
+                        "source_run_id": item.get("source_run_id"),
+                        "source_generation": item.get("source_generation"),
+                    }
+                    for item in avoid_rows[:8]
+                    if isinstance(item, Mapping)
+                ],
+                "active_unresolved": [
+                    dict(item)
+                    for item in active_rows[:8]
+                    if isinstance(item, Mapping)
+                ],
+                "policy": (
+                    dict(safe_reflection["policy"])
+                    if isinstance(safe_reflection.get("policy"), Mapping)
+                    else {}
+                ),
+            }
     result = {
         "schema_version": "ecologyrsi-dsh.research-iteration-summary/2",
         "status": iteration.status,
@@ -541,8 +623,34 @@ def _research_iteration_summary(iteration: Any | None) -> dict[str, Any] | None:
         },
         "analysis_summary": analysis_summary,
         "final_plan": final_plan,
+        "candidate_directions": [
+            {
+                field_name: item.get(field_name)
+                for field_name in (
+                    "direction_id",
+                    "direction_digest",
+                    "title",
+                    "hypothesis",
+                    "target_weakness",
+                    "capability_focus",
+                    "mutation_axis",
+                    "mutation_target",
+                    "evidence_refs",
+                    "expected_tradeoff",
+                    "success_criterion",
+                )
+            }
+            for item in (
+                plan.get("candidate_directions", [])
+                if isinstance(plan.get("candidate_directions"), list)
+                else []
+            )[:8]
+            if isinstance(item, Mapping)
+        ],
         **algorithm,
     }
+    if reflection_summary is not None:
+        result["evolution_reflection"] = reflection_summary
     if historical_provenance is not None:
         result["historical_provenance"] = historical_provenance
     return result
@@ -560,12 +668,16 @@ def rounds(state: Any) -> list[dict[str, Any]]:
     generations |= {item.generation for item in state.generation_batches}
     generations |= {item.generation for item in state.knowledge_snapshots}
     generations |= {item.generation for item in state.research_iterations}
+    generations |= {item.generation for item in state.generation_search_plans}
+    generations |= {item.generation for item in state.generation_reflections}
     result: list[dict[str, Any]] = []
     for generation in sorted(generations):
         batch = state.batch_for(generation)
         analysis = state.analysis_for(generation)
         knowledge = state.knowledge_for(generation)
+        search_plan = state.search_plan_for(generation)
         research_iteration = state.research_iteration_for(generation)
+        generation_reflection = state.reflection_for(generation)
         knowledge_assessment = state.knowledge_assessment_for(generation)
         candidates = sorted(
             (item for item in state.candidates if item.generation == generation),
@@ -619,6 +731,12 @@ def rounds(state: Any) -> list[dict[str, Any]]:
                     "classification": rank.get("classification"),
                     "selection_reason": rank.get("selection_reason"),
                     "proposal_source": proposal.metadata.get("proposal_source"),
+                    "candidate_direction_id": proposal.metadata.get(
+                        "candidate_direction_id"
+                    ),
+                    "candidate_direction_digest": proposal.metadata.get(
+                        "candidate_direction_digest"
+                    ),
                     "execution": {
                         "model_id": artifact.model_id if artifact is not None else None,
                         "training_rows": artifact.training_rows if artifact is not None else None,
@@ -673,7 +791,9 @@ def rounds(state: Any) -> list[dict[str, Any]]:
                 }
             )
         representative = (
-            analysis.champion_candidate_id or analysis.selected_candidate_id
+            analysis.champion_candidate_id
+            or analysis.selected_candidate_id
+            or analysis.search_parent_candidate_id
             if analysis is not None
             else candidates[0].candidate_id
             if candidates
@@ -716,8 +836,16 @@ def rounds(state: Any) -> list[dict[str, Any]]:
                 "parent_candidate_id": batch.parent_candidate_id if batch is not None else None,
                 "context_digest": batch.context_digest if batch is not None else None,
                 "knowledge": knowledge.to_dict() if knowledge is not None else None,
+                "search_plan": (
+                    search_plan.to_dict() if search_plan is not None else None
+                ),
                 "research_iteration": _research_iteration_summary(
                     research_iteration
+                ),
+                "generation_reflection": (
+                    generation_reflection.to_dict()
+                    if generation_reflection is not None
+                    else None
                 ),
                 "knowledge_assessment": (
                     knowledge_assessment.to_dict()
@@ -769,6 +897,12 @@ def state_snapshot(state: Any) -> dict[str, Any]:
         "knowledge_snapshots": [item.to_dict() for item in state.knowledge_snapshots],
         "knowledge_assessments": [
             item.to_dict() for item in state.knowledge_assessments
+        ],
+        "generation_search_plans": [
+            item.to_dict() for item in state.generation_search_plans
+        ],
+        "generation_reflections": [
+            item.to_dict() for item in state.generation_reflections
         ],
         "event_count": len(state.events),
     }

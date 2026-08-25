@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def serve(*, host: str = "127.0.0.1", port: int = 8765, db: str = "ecologyrsi-dsh.sqlite3") -> None:
-    from ..server import EvolutionHTTPServer
+    from .handler import EvolutionHTTPServer
 
     server = EvolutionHTTPServer((host, port), Path(db).expanduser())
     try:

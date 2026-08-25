@@ -14,7 +14,7 @@ from typing import Any
 from .config import bind_toy_dataset, load_json_object, load_local_config, load_task_manifest
 from ..data.registry import DatasetRegistry
 from ..evolution.strategies import FakeDSHAdapter
-from ..core.director import EvolutionDirector, RunState
+from ..core.director import EvolutionDirector
 from ..core.ledger import EventLedger, SCHEMA_VERSION
 from ..core.models import TaskManifest, digest
 from ..presentation.reporting import (
@@ -26,13 +26,6 @@ from ..presentation.reporting import (
 )
 from ..data.toy import ToyCropSoilWater
 from ..version import __version__
-
-
-def _state_json(state: RunState) -> dict[str, Any]:
-    """Backward-compatible alias used by the HTTP projection adapter."""
-
-    return state_snapshot(state)
-
 
 def _open(path: str | Path) -> EventLedger:
     value = str(path)
@@ -78,7 +71,7 @@ def demo(args: argparse.Namespace) -> int:
             director.evaluate_and_decide(evaluation)
         director.complete_run(state.run.run_id)
         final_state = director.state(state.run.run_id)
-        output = _state_json(final_state)
+        output = state_snapshot(final_state)
         output["summary"] = run_summary(final_state)
         print(json.dumps(output, ensure_ascii=False, indent=2))
     finally:
@@ -90,7 +83,7 @@ def status(args: argparse.Namespace) -> int:
     ledger = _open(args.db)
     try:
         state = EvolutionDirector(ledger).replay(args.run_id)
-        print(json.dumps(_state_json(state), ensure_ascii=False, indent=2))
+        print(json.dumps(state_snapshot(state), ensure_ascii=False, indent=2))
     finally:
         ledger.close()
     return 0
@@ -256,7 +249,7 @@ def doctor(args: argparse.Namespace) -> int:
         report["manifest"] = {"checked": False}
 
     try:
-        from ..server import _PLUGIN_FILES, _plugin_root
+        from ..api.shared import _PLUGIN_FILES, _plugin_root
 
         plugin_root = _plugin_root()
         missing = [name for name in _PLUGIN_FILES if not (plugin_root / name).is_file()]
@@ -278,7 +271,7 @@ def doctor(args: argparse.Namespace) -> int:
 
 
 def serve_command(args: argparse.Namespace) -> int:
-    from ..server import serve
+    from ..api.runtime import serve
 
     config = load_local_config(args.config) if args.config else None
     if config is not None and config.manifest:
@@ -309,6 +302,22 @@ def data_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bundled_dsh_plugin_archive(plugin_root: Path) -> Path:
+    """Resolve only the archive that belongs to this Python package version."""
+
+    archive = (
+        plugin_root
+        / "dist"
+        / f"ecologyrsi-dsh-evolution-plugin-{__version__}.tgz"
+    )
+    if not archive.is_file():
+        raise RuntimeError(
+            "bundled DSH plugin archive is missing for package version "
+            f"{__version__}"
+        )
+    return archive
+
+
 def install_dsh_runtime(args: argparse.Namespace) -> int:
     """Install the bundled Cordis plugin and role presets into one DSH profile."""
 
@@ -328,9 +337,7 @@ def install_dsh_runtime(args: argparse.Namespace) -> int:
     if asset_root is None:
         raise RuntimeError("bundled DSH runtime assets are missing")
     plugin_root = asset_root / "integrations" / "dsh_ecology_plugin"
-    archives = sorted((plugin_root / "dist").glob("*.tgz"))
-    if len(archives) != 1:
-        raise RuntimeError("bundled DSH plugin archive is missing or ambiguous")
+    archive = _bundled_dsh_plugin_archive(plugin_root)
     installer = asset_root / "scripts" / "install_dsh_ecology_runtime.mjs"
     static_root = asset_root / "plugins" / "ecology_evolution"
     environment = dict(os.environ)
@@ -346,7 +353,7 @@ def install_dsh_runtime(args: argparse.Namespace) -> int:
         "--static-root",
         str(static_root),
         "--tgz",
-        str(archives[0]),
+        str(archive),
         "--profile",
         args.profile,
     ]

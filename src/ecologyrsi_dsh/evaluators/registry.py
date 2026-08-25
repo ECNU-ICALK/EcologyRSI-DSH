@@ -31,7 +31,6 @@ from ..evolution.promotion import (
     PROMOTION_BOOTSTRAP_RESAMPLES,
     PROMOTION_CONFIDENCE_LEVEL,
     PROMOTION_CONFIDENCE_METHOD,
-    PROMOTION_MAXIMUM_BLOCKS,
     PROMOTION_MINIMUM_PAIRED_BLOCKS,
     PROMOTION_POLICY_VERSION,
     V2_MINIMUM_SCORE_DELTA,
@@ -49,6 +48,7 @@ from .gateway_sample_adapter import (
     GatewaySampleTool,
 )
 from .dsh_sample_adapter import DshSampleCollaborationAdapter
+from .fitness import FitnessProfile
 from .shared_sample_context import sibling_stage_context_digest
 from .baselines import (
     BASELINE_PROFILE_VERSION,
@@ -71,17 +71,13 @@ from .metrics import (
     MAX_ROLLING_WINDOW_HOURS,
     NORMALIZATION_SCALE_METHOD,
     _exact_time_eligible_rows,
-    _clip_normalized_objective,
     _fit_bias,
     _greenhouse_parameters,
     _judge_metrics,
     _mae,
-    _normalized_absolute_error_reward,
     _normalization_scale,
     _rmse,
     _rolling_eligible_rows,
-    _skill_score,
-    _standard_deviation,
     artifact_set_digest,
 )
 from .objectives import (
@@ -90,6 +86,8 @@ from .objectives import (
     OBJECTIVE_COMPONENT_BOUND,
     OBJECTIVE_MISSING_PENALTY,
     aggregate_greenhouse_objective,
+    normalized_absolute_error_reward,
+    skill_score,
 )
 from .sample_execution import (
     DEFAULT_SAMPLE_EXECUTION_MIN_COVERAGE,
@@ -99,6 +97,7 @@ from .sample_execution import (
     SamplePredictionRequest,
     bounded_sample_execution_records,
     encode_sample_execution_trace,
+    summarize_tool_performance,
 )
 
 TOY_DATASET_ID = "generated-toy-series@1"
@@ -111,6 +110,7 @@ TOY_EVALUATOR_ID = "toy_time_forward@1"
 TOY_PREDICTOR_MODEL_ID = "toy-rolling-water@1"
 GREENHOUSE_ROLLING_PREDICTOR_ID = "greenhouse-rolling-residual@1"
 GREENHOUSE_OBJECTIVE_PROFILE_ID = "greenhouse_equal_weight_skill@1"
+GREENHOUSE_PRIMARY_FITNESS_DEFINITION = "weighted_symmetric_rmse_skill@1"
 # The profile keeps RMSE skill as the canonical selection objective.  Reward is
 # aggregated alongside it as a normalized, auditable learning signal; both
 # components are versioned so historical evaluations remain interpretable.
@@ -186,6 +186,7 @@ def _select_feedback_update_cohort(
     samples_per_update: int,
     dataset_digest: str,
     split_manifest_digest: str,
+    bundle_complete_origins: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Select one deterministic, task-balanced, rotating feedback window.
 
@@ -205,6 +206,14 @@ def _select_feedback_update_cohort(
         or samples_per_update < 1
     ):
         raise ValueError("samples_per_update must be a positive integer")
+    if bundle_complete_origins:
+        return _select_origin_bundled_feedback_cohort(
+            rows,
+            generation=generation,
+            prediction_cell_budget=samples_per_update,
+            dataset_digest=dataset_digest,
+            split_manifest_digest=split_manifest_digest,
+        )
 
     grouped: dict[tuple[str, int], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
     seen_identities: set[str] = set()
@@ -313,6 +322,151 @@ def _select_feedback_update_cohort(
         ],
     }
     return [row for row, _identity in selected], evidence
+
+
+def _select_origin_bundled_feedback_cohort(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    generation: int,
+    prediction_cell_budget: int,
+    dataset_digest: str,
+    split_manifest_digest: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Select complete target/horizon vectors at shared forecast origins."""
+
+    task_keys: set[tuple[str, int]] = set()
+    grouped: dict[
+        tuple[str, tuple[int, float, str]],
+        dict[tuple[str, int], tuple[dict[str, Any], dict[str, Any]]],
+    ] = {}
+    seen_identities: set[str] = set()
+    for raw_row in rows:
+        row = dict(raw_row)
+        identity = _feedback_sample_identity(row)
+        identity_digest = digest(identity)
+        if identity_digest in seen_identities:
+            raise ValueError(
+                "feedback update population contains duplicate sample identities"
+            )
+        seen_identities.add(identity_digest)
+        task_key = (str(identity["target"]), int(identity["horizon_hours"]))
+        task_keys.add(task_key)
+        origin_key = (
+            str(identity["partition"]),
+            _feedback_timestamp_sort_key(identity["origin_timestamp"]),
+        )
+        by_task = grouped.setdefault(origin_key, {})
+        if task_key in by_task:
+            raise ValueError("feedback origin contains a duplicate prediction cell")
+        by_task[task_key] = (row, identity)
+
+    ordered_tasks = sorted(task_keys)
+    complete_origins = [
+        (origin_key, grouped[origin_key])
+        for origin_key in sorted(grouped, key=lambda item: (item[0], item[1]))
+        if set(grouped[origin_key]) == task_keys
+    ]
+    cells_per_origin = len(ordered_tasks)
+    if cells_per_origin < 1:
+        selected_origin_count = 0
+    else:
+        selected_origin_count = min(
+            prediction_cell_budget // cells_per_origin,
+            len(complete_origins),
+        )
+    if complete_origins and selected_origin_count < 1:
+        raise ValueError(
+            "prediction cell budget cannot cover one complete forecast origin"
+        )
+    if not complete_origins:
+        window_offset = 0
+        window_cycle = 0
+        selected_origins: list[
+            tuple[
+                tuple[str, tuple[int, float, str]],
+                dict[tuple[str, int], tuple[dict[str, Any], dict[str, Any]]],
+            ]
+        ] = []
+    elif selected_origin_count >= len(complete_origins):
+        window_offset = 0
+        window_cycle = generation
+        selected_origins = list(complete_origins)
+    else:
+        absolute_offset = generation * selected_origin_count
+        window_offset = absolute_offset % len(complete_origins)
+        window_cycle = absolute_offset // len(complete_origins)
+        selected_origins = [
+            complete_origins[(window_offset + index) % len(complete_origins)]
+            for index in range(selected_origin_count)
+        ]
+
+    population_rows = [
+        value[1]
+        for _origin_key, by_task in complete_origins
+        for task in ordered_tasks
+        for value in (by_task[task],)
+    ]
+    selected_pairs = [
+        value
+        for _origin_key, by_task in selected_origins
+        for task in ordered_tasks
+        for value in (by_task[task],)
+    ]
+    selected_identities = [identity for _row, identity in selected_pairs]
+    population_count = len(population_rows)
+    selected_count = len(selected_pairs)
+    population_digest = digest(
+        {
+            "schema_version": _FEEDBACK_UPDATE_COHORT_SCHEMA_VERSION,
+            "selection_policy": "complete_origin_vector_rotating_window@1",
+            "dataset_digest": dataset_digest,
+            "split_manifest_digest": split_manifest_digest,
+            "rows": population_rows,
+        }
+    )
+    cohort_digest = digest(
+        {
+            "schema_version": _FEEDBACK_UPDATE_COHORT_SCHEMA_VERSION,
+            "dataset_digest": dataset_digest,
+            "split_manifest_digest": split_manifest_digest,
+            "prediction_cell_budget": prediction_cell_budget,
+            "cells_per_origin": cells_per_origin,
+            "window_offset": window_offset,
+            "rows": selected_identities,
+        }
+    )
+    evidence = {
+        "schema_version": _FEEDBACK_UPDATE_COHORT_SCHEMA_VERSION,
+        "selection_policy": "complete_origin_vector_rotating_window@1",
+        "generation": generation,
+        # Keep the historical field as the configured prediction-cell budget.
+        "samples_per_update": prediction_cell_budget,
+        "prediction_cell_budget": prediction_cell_budget,
+        "prediction_cells_per_origin": cells_per_origin,
+        "population_origin_count": len(complete_origins),
+        "selected_origin_count": len(selected_origins),
+        "population_count": population_count,
+        "population_digest": population_digest,
+        "selected_count": selected_count,
+        "deferred_count": max(0, population_count - selected_count),
+        "window_offset": window_offset,
+        "window_cycle": window_cycle,
+        "window_wraps": (
+            bool(complete_origins)
+            and window_offset + len(selected_origins) > len(complete_origins)
+        ),
+        "cohort_digest": cohort_digest,
+        "tasks": [
+            {
+                "target": target,
+                "horizon_hours": horizon,
+                "population_count": len(complete_origins),
+                "selected_count": len(selected_origins),
+            }
+            for target, horizon in ordered_tasks
+        ],
+    }
+    return [row for row, _identity in selected_pairs], evidence
 
 
 def _feedback_update_limit(task: TaskManifest) -> int | None:
@@ -477,7 +631,6 @@ def _greenhouse_scoring_contract() -> dict[str, Any]:
         "minimum_paired_blocks": PROMOTION_MINIMUM_PAIRED_BLOCKS,
         "block_hours": PROMOTION_BLOCK_HOURS,
         "bootstrap_resamples": PROMOTION_BOOTSTRAP_RESAMPLES,
-        "maximum_blocks": PROMOTION_MAXIMUM_BLOCKS,
         "hard_gates": _greenhouse_hard_gates(),
     }
 
@@ -624,6 +777,7 @@ class EvaluatorRegistry:
         dsh_revision_provider: Callable[[str], Mapping[str, int]] | None = None,
         dsh_identity_provider: Callable[[str, str], Mapping[str, str] | None]
         | None = None,
+        dsh_prediction_tool_binder: Callable[..., Any] | None = None,
     ) -> None:
         self.datasets = datasets
         self.model_gateway = model_gateway or ModelGateway.from_env()
@@ -632,6 +786,7 @@ class EvaluatorRegistry:
         self.dsh_runtime_provider = dsh_runtime_provider
         self.dsh_revision_provider = dsh_revision_provider
         self.dsh_identity_provider = dsh_identity_provider
+        self.dsh_prediction_tool_binder = dsh_prediction_tool_binder
 
     def _sample_executor_for_task(
         self,
@@ -642,11 +797,15 @@ class EvaluatorRegistry:
         | None = None,
         on_sample_control: Callable[[], str] | None = None,
         forecast_tool: Callable[[SamplePredictionRequest], float] | None = None,
+        forecast_bundle_tool: Callable[
+            [Sequence[SamplePredictionRequest]], Mapping[str, Any]
+        ]
+        | None = None,
         tools: Sequence[GatewaySampleTool] = (),
         run_id: str | None = None,
         candidate_id: str | None = None,
     ) -> CollaborativeSampleExecutor:
-        """Resolve the frozen per-sample runtime without changing old runs."""
+        """Resolve the frozen sample runtime for the current task."""
 
         if self._sample_executor_injected:
             return self.sample_executor
@@ -680,6 +839,21 @@ class EvaluatorRegistry:
             review_model_id = str(task.metadata.get("review_model_id") or "").strip()
             if not strategy_model_id or not review_model_id:
                 raise ValueError("DSH-native sample roles require frozen model routes")
+            if (
+                task.metadata.get("sample_agent_protocol")
+                != "dsh-strict-origin-bundle@3"
+            ):
+                raise ValueError(
+                    "DSH-native sample execution requires the strict origin-bundle protocol"
+                )
+            if forecast_bundle_tool is None:
+                raise ValueError(
+                    "DSH-native sample execution requires a registered vector prediction tool"
+                )
+            if self.dsh_prediction_tool_binder is None:
+                raise ValueError(
+                    "DSH-native sample execution requires an agent prediction-tool binder"
+                )
             raw_batch_size = task.metadata.get("sample_agent_batch_size", 128)
             raw_concurrency = task.metadata.get("sample_concurrency", 4)
             if (
@@ -705,9 +879,15 @@ class EvaluatorRegistry:
                 },
                 strategy_model_id=strategy_model_id,
                 review_model_id=review_model_id,
-                forecast_tool=forecast_tool,
-                tools=tools,
-                microbatch_size=int(raw_batch_size),
+                forecast_bundle_tool=forecast_bundle_tool,
+                prediction_tool_binder=self.dsh_prediction_tool_binder,
+                microbatch_size=min(
+                    128,
+                    max(
+                        int(raw_batch_size),
+                        int(task.metadata.get("prediction_cells_per_origin", 1)),
+                    ),
+                ),
                 sample_concurrency=int(raw_concurrency),
                 progress_callback=progress_callback,
                 run_control_callback=on_sample_control,
@@ -758,6 +938,7 @@ class EvaluatorRegistry:
             # physical critic remains authoritative after both model roles.
             remote_review_enabled=True,
             forecast_tool=forecast_tool,
+            forecast_bundle_tool=forecast_bundle_tool,
             tools=tools,
             microbatch_size=raw_batch_size,
             sample_concurrency=raw_concurrency,
@@ -784,7 +965,7 @@ class EvaluatorRegistry:
         task: TaskManifest,
         candidate: Candidate,
         proposal: Proposal,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         if task.metadata.get("execution_protocol") != "dsh_native_plugin_evolution@1":
             return {}
         names = (
@@ -804,6 +985,18 @@ class EvaluatorRegistry:
         genome_digest = proposal.metadata.get("genome_digest")
         if not isinstance(genome_digest, str):
             raise ValueError("DSH sample execution requires candidate genome identity")
+        agent_profile = proposal.metadata.get("candidate_agent_profile")
+        if (
+            not isinstance(agent_profile, Mapping)
+            or agent_profile.get("schema_version")
+            != "ecologyrsi-dsh.candidate-agent-profile/1"
+            or agent_profile.get("role") != "sample-planner"
+            or not isinstance(agent_profile.get("skill_name"), str)
+            or not agent_profile["skill_name"]
+        ):
+            raise ValueError(
+                "DSH sample execution requires a compiled candidate agent profile"
+            )
         return {
             "stage_context_digest": sibling_stage_context_digest(
                 task_manifest_digest=task.digest,
@@ -811,6 +1004,7 @@ class EvaluatorRegistry:
                 frozen_contract_digests=contracts,
             ),
             "candidate_genome_digest": genome_digest,
+            "candidate_agent_profile": dict(agent_profile),
         }
 
     def catalog(self) -> list[dict[str, Any]]:
@@ -825,7 +1019,7 @@ class EvaluatorRegistry:
                 "prediction_model_ids": [TOY_PREDICTOR_MODEL_ID],
                 "horizons_hours": [1],
                 "objective_profile": "toy_validation_skill@1",
-                "implementation": "toy-forward-split/3",
+                "implementation": "toy-forward-split/6",
             },
             {
                 "id": GREENHOUSE_EVALUATOR_ID,
@@ -841,7 +1035,7 @@ class EvaluatorRegistry:
                 ],
                 "horizons_hours": [1],
                 "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
-                "implementation": "greenhouse-one-hour-forward/7",
+                "implementation": "greenhouse-one-hour-forward/8",
             },
             {
                 "id": GREENHOUSE_MULTIHORIZON_EVALUATOR_ID,
@@ -856,7 +1050,7 @@ class EvaluatorRegistry:
                 ],
                 "horizons_hours": [1, 6, 24],
                 "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
-                "implementation": "greenhouse-multihorizon-forward/6",
+                "implementation": "greenhouse-multihorizon-forward/7",
             },
             {
                 "id": GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
@@ -875,32 +1069,52 @@ class EvaluatorRegistry:
                 ],
                 "horizons_hours": [1, 6, 24],
                 "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
-                "implementation": "greenhouse-multihorizon-forward/7",
+                "implementation": "greenhouse-multihorizon-forward/8",
             },
         ]
         for item in items:
-            target_count = (
-                len(GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS)
-                if item.get("objective_profile")
-                == GREENHOUSE_OBJECTIVE_PROFILE_ID
-                else 1
-            )
+            profile = self._fitness_profile_for_catalog_item(item)
+            target_count = len(profile.expected_targets)
             item["prediction_task_count"] = max(
                 1,
                 target_count * len(item.get("horizons_hours", ())),
             )
             item["minimum_samples_per_update"] = item["prediction_task_count"]
+            item["minimum_selection_samples_per_update"] = (
+                profile.minimum_balanced_samples_per_update()
+            )
+            item["minimum_selection_origin_samples_per_update"] = (
+                profile.minimum_balanced_origins_per_update()
+            )
+            item["prediction_cells_per_origin"] = profile.prediction_cell_count
+            item["fitness_profile"] = profile.to_dict()
+            item["fitness_profile_digest"] = profile.profile_digest
             digest_payload = {
                 "evaluator_id": item["id"],
                 "implementation": item.pop("implementation"),
                 "evaluation_partition": item["evaluation_partition"],
                 "prediction_model_ids": item["prediction_model_ids"],
                 "horizons_hours": item["horizons_hours"],
+                "fitness_profile": item["fitness_profile"],
             }
             if item.get("objective_profile") == GREENHOUSE_OBJECTIVE_PROFILE_ID:
                 digest_payload["scoring_contract"] = _greenhouse_scoring_contract()
             item["configuration_digest"] = digest(digest_payload)
         return items
+
+    @staticmethod
+    def _fitness_profile_for_catalog_item(
+        item: Mapping[str, Any],
+    ) -> FitnessProfile:
+        targets = (
+            tuple(GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS)
+            if item.get("objective_profile") == GREENHOUSE_OBJECTIVE_PROFILE_ID
+            else ("soil_water",)
+        )
+        return FitnessProfile(
+            expected_targets=targets,
+            expected_horizons=tuple(int(value) for value in item["horizons_hours"]),
+        )
 
     def predictor_catalog(self) -> list[dict[str, Any]]:
         items = [
@@ -985,25 +1199,6 @@ class EvaluatorRegistry:
             )
         return items
 
-    @staticmethod
-    def judge_catalog(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        built_in = {
-            "id": RULE_JUDGE_ID,
-            "label": "内置规则评审",
-            "model": "host-rule-gate",
-            "available": True,
-            "authenticated": True,
-            "role": "judge",
-        }
-        remote = []
-        for model in models:
-            item = dict(model)
-            item["id"] = item.get("id", item.get("model_id"))
-            item.setdefault("label", item.get("model", item["id"]))
-            item.setdefault("role", "policy_or_judge")
-            remote.append(item)
-        return [built_in, *remote]
-
     def default_evaluator(self, dataset_id: str) -> str:
         return (
             TOY_EVALUATOR_ID
@@ -1019,11 +1214,30 @@ class EvaluatorRegistry:
         )
 
     def minimum_samples_per_update(self, evaluator_id: str) -> int:
-        """Return the smallest cohort that can cover every scoring task once."""
+        """Return the smallest diagnostic cohort covering every scoring task."""
 
         for item in self.catalog():
             if item["id"] == evaluator_id:
                 return int(item["minimum_samples_per_update"])
+        raise ValueError(f"unknown evaluator_id: {evaluator_id}")
+
+    def minimum_selection_samples_per_update(self, evaluator_id: str) -> int:
+        """Return the smallest balanced cohort that can pass selection gates."""
+
+        for item in self.catalog():
+            if item["id"] == evaluator_id:
+                return int(item["minimum_selection_samples_per_update"])
+        raise ValueError(f"unknown evaluator_id: {evaluator_id}")
+
+    def fitness_profile(self, evaluator_id: str) -> FitnessProfile:
+        """Return the immutable Host-owned fitness profile for an evaluator."""
+
+        for item in self.catalog():
+            if item["id"] == evaluator_id:
+                raw = item["fitness_profile"]
+                if not isinstance(raw, Mapping):
+                    raise RuntimeError("evaluator fitness profile is invalid")
+                return FitnessProfile(**dict(raw))
         raise ValueError(f"unknown evaluator_id: {evaluator_id}")
 
     def evaluator_configuration_digest(self, evaluator_id: str) -> str:
@@ -1395,7 +1609,10 @@ class EvaluatorRegistry:
         if not isinstance(split_digest, str) or not split_digest.strip():
             raise ValueError("任务清单缺少服务端冻结的时间分区快照校验值")
         episode_id = metadata.get("episode_id")
-        if metadata.get("execution_protocol") == "dsh_native_plugin_evolution@1":
+        if (
+            metadata.get("execution_protocol") == "dsh_native_plugin_evolution@1"
+            and dataset_id != TOY_DATASET_ID
+        ):
             series = self.datasets.selection_view(
                 dataset_id,
                 str(episode_id) if episode_id is not None else None,
@@ -1416,6 +1633,10 @@ class EvaluatorRegistry:
                 history_steps=int(metadata.get("history_steps", 3)),
             )
         else:
+            # The deterministic toy fixture intentionally keeps its compact
+            # train/feedback split.  It cannot satisfy the four-stage evidence
+            # volume required for real datasets, but still needs frozen digest
+            # validation when exercised through the DSH-native runtime.
             series = self.datasets.series(
                 dataset_id,
                 str(episode_id) if episode_id is not None else None,
@@ -1507,6 +1728,33 @@ class EvaluatorRegistry:
             {**row, "partition": "validation"}
             for row in evaluation_metrics.get("prediction_preview", [])
         ]
+
+        def toy_forecast_bundle_tool(
+            requests: Sequence[SamplePredictionRequest],
+        ) -> Mapping[str, Any]:
+            if not requests:
+                raise ValueError("toy origin bundle must not be empty")
+            origin = requests[0].origin_timestamp
+            if any(request.origin_timestamp != origin for request in requests):
+                raise ValueError("toy origin bundle mixes forecast origins")
+            result: dict[str, Any] = {}
+            for request in requests:
+                if request.proposed_prediction is None:
+                    raise ValueError(
+                        "toy vector tool requires a frozen candidate prediction"
+                    )
+                result[request.sample_id] = {
+                    "predicted": request.proposed_prediction,
+                    "metadata": {
+                        "source_model_id": TOY_PREDICTOR_MODEL_ID,
+                        "prediction_unit": (
+                            "forecast_origin_with_target_horizon_vector"
+                        ),
+                        "origin_timestamp": origin,
+                    },
+                }
+            return result
+
         sample_batch = self._sample_executor_for_task(
             task,
             run_id=candidate.run_id,
@@ -1514,6 +1762,11 @@ class EvaluatorRegistry:
             progress_callback=on_evaluation_progress,
             model_usage_callback=on_model_usage,
             on_sample_control=on_sample_control,
+            forecast_bundle_tool=(
+                toy_forecast_bundle_tool
+                if task.metadata.get("sample_agent_mode") == "dsh_native_workflow"
+                else None
+            ),
         ).execute(
             raw_prediction_rows,
             context={
@@ -1553,8 +1806,22 @@ class EvaluatorRegistry:
             checkpoint_callback=on_sample_checkpoint,
         )
         scoring_rows = list(sample_batch.scoring_rows)
+        evaluation_index_rows = [
+            _feedback_sample_identity(row) for row in scoring_rows
+        ]
+        evaluation_index_digest = digest(
+            {
+                "dataset_digest": toy.dataset_digest,
+                "partition": "validation",
+                "rows": evaluation_index_rows,
+            }
+        )
         errors = [
             float(row["predicted"]) - float(row["observed"])
+            for row in scoring_rows
+        ]
+        baseline_errors = [
+            float(row["baseline"]) - float(row["observed"])
             for row in scoring_rows
         ]
         successful_examples = int(sample_batch.summary["succeeded_examples"])
@@ -1575,20 +1842,24 @@ class EvaluatorRegistry:
         if errors:
             evaluation_mae = _mae(errors)
             evaluation_rmse = _rmse(errors)
-            evaluation_score = max(0.0, 1.0 - evaluation_rmse)
+            baseline_rmse = _rmse(baseline_errors)
+            evaluation_score = skill_score(evaluation_rmse, baseline_rmse)
         else:
             evaluation_mae = 1.0
             evaluation_rmse = 1.0
-            evaluation_score = 0.0
+            baseline_rmse = 0.0
+            evaluation_score = -1.0
         constraint_violations = sum(
             not 0.0 <= float(row["predicted"]) <= 1.0
             for row in scoring_rows
         )
         scientific_pass = (
-            evaluation_rmse <= 0.12
+            evaluation_score > 0.0
+            and evaluation_rmse <= 0.12
             and float(evaluation_metrics.get("water_balance_error", 1.0)) <= 0.25
             and constraint_violations == 0
             and sample_coverage_pass
+            and bool(sample_batch.summary.get("strict_agent_chain_pass", True))
         )
         sample_execution_summary = dict(sample_batch.summary)
         sample_execution_summary.update(
@@ -1612,6 +1883,10 @@ class EvaluatorRegistry:
                 "score": evaluation_score,
                 "mae": evaluation_mae,
                 "rmse": evaluation_rmse,
+                "baseline_rmse": baseline_rmse,
+                "skill_score": evaluation_score,
+                "primary_fitness": evaluation_score,
+                "primary_fitness_definition": "symmetric_rmse_skill_vs_persistence@1",
                 "n": evaluation_used_examples,
                 "non_negative_state": 1.0 if constraint_violations == 0 else 0.0,
                 "constraint_violations": constraint_violations,
@@ -1639,6 +1914,10 @@ class EvaluatorRegistry:
                 "evaluation_scoring_fallback_examples": int(
                     sample_batch.summary["scoring_fallback_examples"]
                 ),
+                # Native runs freeze scheduling controls for the toy fixture
+                # too.  Persist its scored-row identity so the generation
+                # barrier can prove sibling candidates used one cohort.
+                "evaluation_index_digest": evaluation_index_digest,
                 "prediction_preview": scoring_rows[:_PREVIEW_ROWS_TOTAL],
             }
         )
@@ -1766,7 +2045,8 @@ class EvaluatorRegistry:
 
         defer_feedback_prediction = (
             not self._sample_executor_injected
-            and task.metadata.get("sample_agent_mode") == "gateway_microbatch"
+            and task.metadata.get("sample_agent_mode")
+            in {"gateway_microbatch", "dsh_native_workflow"}
         )
         generated_feedback_rows: list[dict[str, Any]] = []
         target_contexts: list[dict[str, Any]] = []
@@ -1822,6 +2102,10 @@ class EvaluatorRegistry:
                     samples_per_update=samples_per_update,
                     dataset_digest=series.digest,
                     split_manifest_digest=series.split_manifest_digest_sha256,
+                    bundle_complete_origins=(
+                        task.metadata.get("sample_agent_protocol")
+                        == "dsh-strict-origin-bundle@3"
+                    ),
                 )
             )
             selected_task_counts = _cohort_task_counts(
@@ -1871,6 +2155,29 @@ class EvaluatorRegistry:
             algorithm_name = GREENHOUSE_ROLLING_PREDICTOR_ID
             algorithm_revision = "unversioned"
         sample_policy = self._sample_execution_policy(task, execution_plan)
+
+        def rolling_forecast_bundle_tool(
+            requests: Sequence[SamplePredictionRequest],
+        ) -> Mapping[str, Any]:
+            if not requests:
+                raise ValueError("rolling origin bundle must not be empty")
+            origin = requests[0].origin_timestamp
+            if any(request.origin_timestamp != origin for request in requests):
+                raise ValueError("rolling origin bundle mixes forecast origins")
+            return {
+                request.sample_id: {
+                    "predicted": _rolling_tool_prediction(request),
+                    "metadata": {
+                        "source_model_id": GREENHOUSE_ROLLING_PREDICTOR_ID,
+                        "prediction_unit": (
+                            "forecast_origin_with_target_horizon_vector"
+                        ),
+                        "origin_timestamp": origin,
+                    },
+                }
+                for request in requests
+            }
+
         sample_batch = self._sample_executor_for_task(
             task,
             run_id=candidate.run_id,
@@ -1880,6 +2187,13 @@ class EvaluatorRegistry:
             on_sample_control=on_sample_control,
             forecast_tool=(
                 _rolling_tool_prediction if defer_feedback_prediction else None
+            ),
+            forecast_bundle_tool=(
+                rolling_forecast_bundle_tool
+                if defer_feedback_prediction
+                and task.metadata.get("sample_agent_mode")
+                == "dsh_native_workflow"
+                else None
             ),
         ).execute(
             generated_feedback_rows,
@@ -2088,11 +2402,11 @@ class EvaluatorRegistry:
             ]
             mean_reward = fmean(sample_rewards)
             raw_normalized_mean_reward, normalized_mean_reward = (
-                _normalized_absolute_error_reward(
+                normalized_absolute_error_reward(
                     baseline_errors, candidate_errors, scale
                 )
             )
-            task_skill = _skill_score(
+            task_skill = skill_score(
                 candidate_rmse / scale, baseline_rmse / scale
             )
             normalized_mean_rewards.append(normalized_mean_reward)
@@ -2165,7 +2479,7 @@ class EvaluatorRegistry:
             candidate_nrmse = None
             baseline_nrmse = None
         unweighted_skill_score = (
-            _skill_score(candidate_nrmse, baseline_nrmse)
+            skill_score(candidate_nrmse, baseline_nrmse)
             if candidate_nrmse is not None and baseline_nrmse is not None
             else -1.0
         )
@@ -2200,8 +2514,13 @@ class EvaluatorRegistry:
             and per_target_no_regression
             and constraint_violations <= GREENHOUSE_MAX_CONSTRAINT_VIOLATIONS
             and sample_execution_coverage_pass
+            and bool(sample_batch.summary.get("strict_agent_chain_pass", True))
         )
         sample_execution_summary = dict(sample_batch.summary)
+        sample_execution_summary["tool_performance"] = summarize_tool_performance(
+            sample_records,
+            scoring_rows,
+        )
         sample_execution_summary.update(
             {
                 "adapter_attempt_coverage": sample_batch.summary["coverage"],
@@ -2252,9 +2571,17 @@ class EvaluatorRegistry:
                 "objective_horizons": [1],
                 "objective_horizon_weighting": "equal",
                 "objective_score": objective_score,
+                "primary_fitness": objective_score,
+                "primary_fitness_definition": (
+                    GREENHOUSE_PRIMARY_FITNESS_DEFINITION
+                ),
                 "overall_reward": objective_aggregate[
                     "weighted_normalized_mean_reward"
                 ],
+                "auxiliary_mae_reward": objective_aggregate[
+                    "weighted_normalized_mean_reward"
+                ],
+                "auxiliary_mae_reward_definition": SAMPLE_REWARD_DEFINITION,
                 **objective_aggregate,
                 "normalization_scale_method": NORMALIZATION_SCALE_METHOD,
                 "normalization_scales": normalization_scales,
@@ -2461,7 +2788,8 @@ class EvaluatorRegistry:
         )
         defer_feedback_prediction = (
             not self._sample_executor_injected
-            and task.metadata.get("sample_agent_mode") == "gateway_microbatch"
+            and task.metadata.get("sample_agent_mode")
+            in {"gateway_microbatch", "dsh_native_workflow"}
         )
         prediction = fit_predict_exogenous_ridge(
             series,
@@ -2509,6 +2837,10 @@ class EvaluatorRegistry:
                     samples_per_update=samples_per_update,
                     dataset_digest=series.digest,
                     split_manifest_digest=series.split_manifest_digest_sha256,
+                    bundle_complete_origins=(
+                        task.metadata.get("sample_agent_protocol")
+                        == "dsh-strict-origin-bundle@3"
+                    ),
                 )
             )
         selected_task_counts = _cohort_task_counts(
@@ -2559,6 +2891,30 @@ class EvaluatorRegistry:
                 config=parameters,
             )
 
+        def candidate_forecast_bundle_tool(
+            requests: Sequence[SamplePredictionRequest],
+        ) -> Mapping[str, Any]:
+            """Execute the registered ridge once for one multi-output origin."""
+
+            if not requests:
+                raise ValueError("ridge origin bundle must not be empty")
+            origin = requests[0].origin_timestamp
+            if any(request.origin_timestamp != origin for request in requests):
+                raise ValueError("ridge origin bundle mixes forecast origins")
+            return {
+                request.sample_id: {
+                    "predicted": candidate_forecast_tool(request),
+                    "metadata": {
+                        "source_model_id": predictor_model_id,
+                        "prediction_unit": (
+                            "forecast_origin_with_target_horizon_vector"
+                        ),
+                        "origin_timestamp": origin,
+                    },
+                }
+                for request in requests
+            }
+
         def conservative_ridge_tool(
             request: SamplePredictionRequest,
             execution_context: Mapping[str, Any],
@@ -2599,7 +2955,16 @@ class EvaluatorRegistry:
             forecast_tool=(
                 candidate_forecast_tool if defer_feedback_prediction else None
             ),
-            tools=alternate_tools,
+            forecast_bundle_tool=(
+                candidate_forecast_bundle_tool
+                if defer_feedback_prediction
+                else None
+            ),
+            tools=(
+                ()
+                if task.metadata.get("sample_agent_mode") == "dsh_native_workflow"
+                else alternate_tools
+            ),
         ).execute(
             generated_feedback_rows,
             context={
@@ -2891,11 +3256,11 @@ class EvaluatorRegistry:
                 ]
                 mean_reward = fmean(sample_rewards)
                 raw_normalized_mean_reward, normalized_mean_reward = (
-                    _normalized_absolute_error_reward(
+                    normalized_absolute_error_reward(
                         baseline_errors, candidate_errors, scale
                     )
                 )
-                skill = _skill_score(candidate_nrmse, baseline_nrmse)
+                skill = skill_score(candidate_nrmse, baseline_nrmse)
                 invalid = sum(
                     1
                     for row in feedback_rows
@@ -2978,7 +3343,7 @@ class EvaluatorRegistry:
         if normalized_candidate:
             overall_nrmse: float | None = fmean(normalized_candidate)
             overall_baseline_nrmse: float | None = fmean(normalized_baseline)
-            overall_skill = _skill_score(
+            overall_skill = skill_score(
                 overall_nrmse, overall_baseline_nrmse
             )
         else:
@@ -3013,6 +3378,7 @@ class EvaluatorRegistry:
             and per_task_no_regression
             and constraint_violations <= GREENHOUSE_MAX_CONSTRAINT_VIOLATIONS
             and sample_execution_coverage_pass
+            and bool(sample_batch.summary.get("strict_agent_chain_pass", True))
         )
         horizon_results = []
         for horizon in horizons:
@@ -3043,7 +3409,7 @@ class EvaluatorRegistry:
                     "normalized_rmse": horizon_nrmse,
                     "baseline_normalized_rmse": horizon_baseline,
                     "skill_score": (
-                        _skill_score(horizon_nrmse, horizon_baseline)
+                        skill_score(horizon_nrmse, horizon_baseline)
                         if horizon_nrmse is not None and horizon_baseline is not None
                         else -1.0
                     ),
@@ -3067,6 +3433,10 @@ class EvaluatorRegistry:
             )
 
         sample_execution_summary = dict(sample_batch.summary)
+        sample_execution_summary["tool_performance"] = summarize_tool_performance(
+            sample_records,
+            scored_feedback_rows,
+        )
         sample_execution_summary.update(
             {
                 "adapter_attempt_coverage": sample_batch.summary["coverage"],
@@ -3126,9 +3496,15 @@ class EvaluatorRegistry:
             # Explicit objective fields are additive. ``skill_score`` and
             # ``mean_normalized_reward`` retain their historical semantics.
             "objective_score": objective_aggregate["weighted_skill_score"],
+            "primary_fitness": objective_aggregate["weighted_skill_score"],
+            "primary_fitness_definition": GREENHOUSE_PRIMARY_FITNESS_DEFINITION,
             "overall_reward": objective_aggregate[
                 "weighted_normalized_mean_reward"
             ],
+            "auxiliary_mae_reward": objective_aggregate[
+                "weighted_normalized_mean_reward"
+            ],
+            "auxiliary_mae_reward_definition": SAMPLE_REWARD_DEFINITION,
             **objective_aggregate,
             "normalization_scale_method": NORMALIZATION_SCALE_METHOD,
             "normalization_scales": normalization_scales,

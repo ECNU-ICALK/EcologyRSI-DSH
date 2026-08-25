@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+export PYTHONUTF8=1
+
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="$("$SCRIPT_DIR/select_python.sh")"
@@ -60,9 +64,9 @@ integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js
 integrations/dsh_ecology_plugin/lib/runtime/reconciliation.js
 integrations/dsh_ecology_plugin/lib/tools/agent-plugin.js
 integrations/dsh_ecology_plugin/schemas/genome-mutation.schema.json
-integrations/dsh_ecology_plugin/presets/ecology-coordinator-v1/preset.yml
-integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v1/agent.cordis.yml
-integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.15.tgz
+integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v6/agent.cordis.yml
+integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.26.tgz
 integrations/dsh_ecology_plugin/test/proxy_security.mjs
 "
 
@@ -183,7 +187,7 @@ DATA_ROOT="${ECOLOGYRSI_DATA_ROOT:-$ROOT_DIR/../EcologyRSI/data/greenhouse}"
 REAL_DATA_TESTS=0
 if ECOLOGYRSI_DATA_ROOT="$DATA_ROOT" PYTHONPATH="$ROOT_DIR/src" \
   "$PYTHON_BIN" - <<'PY'
-from ecologyrsi_dsh.datasets import DatasetRegistry
+from ecologyrsi_dsh.data.registry import DatasetRegistry
 
 required = {"agc_cucumber_2018", "agc_tomato_2019"}
 catalog = DatasetRegistry().catalog()["datasets"]

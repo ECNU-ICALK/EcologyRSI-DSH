@@ -1099,7 +1099,7 @@
       var errorText = Number.isFinite(error) ? "误差 " + signedNumber(error) : "误差未提供";
       var baselineText = Number.isFinite(baseline) ? "基线 " + formatNumber(baseline) : "基线未提供";
       var reward = Number(row.reward);
-      var rewardText = Number.isFinite(reward) ? "Reward " + signedNumber(reward) : "Reward 未提供";
+      var rewardText = Number.isFinite(reward) ? "辅助 MAE 改善 " + signedNumber(reward) : "辅助 MAE 改善未提供";
       var method = executionPredictionMethod(candidate, index, row);
       return "<article class=\"sample-inference-row " + tone + "\"><span class=\"sample-inference-index\">样本 " + escapeHTML(String(index + 1).padStart(2, "0")) + "</span><div class=\"sample-inference-main\"><strong>" + escapeHTML(String(target)) + " · " + escapeHTML(timeText + horizon) + "</strong><span>" + escapeHTML(executionInputSummary(row)) + "</span><small>预测 " + escapeHTML(predictionText) + " · 观测 " + escapeHTML(observedText) + " · " + escapeHTML(errorText) + " · " + escapeHTML(baselineText) + " · " + escapeHTML(rewardText) + "</small><small>步骤：" + escapeHTML(compactTechnicalText(String(method).slice(0, 180))) + "</small></div><div class=\"sample-inference-values\"><strong>" + escapeHTML(predictionText) + "</strong><span>" + escapeHTML(unitText(row.unit)) + "</span></div></article>";
     }).join("");
@@ -1442,8 +1442,10 @@
     candidateNode.textContent = "候选版本：" + formatNumber(Array.isArray(run.candidates) ? run.candidates.length : 0);
     var showLiveProgressDetail = Boolean(stageProgress && stageProgress.live);
     var showDrainedProgressDetail = Boolean(pausedDrained);
+    var originBundleProtocol = run.sample_agent_protocol === "dsh-strict-origin-bundle@3";
+    var progressUnitLabel = originBundleProtocol ? "预测时点" : "样本";
     var sampleRate = showLiveProgressDetail && Number(stageProgress.samples_per_minute);
-    var sampleRateText = Number.isFinite(sampleRate) && sampleRate > 0 ? " · " + formatNumber(sampleRate, 1) + " 样本/分钟" : "";
+    var sampleRateText = Number.isFinite(sampleRate) && sampleRate > 0 ? " · " + formatNumber(sampleRate, 1) + " " + progressUnitLabel + "/分钟" : "";
     var inFlight = (showLiveProgressDetail || showDrainedProgressDetail) && Number(stageProgress.in_flight_batches);
     var progressKind = stageProgress && stageProgress.progress_kind;
     var inFlightLabel = progressKind === "drained" ? "已排空" : runStatus === "paused" ? "暂停快照在飞" : "实际在飞";
@@ -1457,7 +1459,7 @@
     var remainingText = Number.isFinite(remainingSeconds) && remainingSeconds > 0 ? compactDuration(remainingSeconds) : "";
     var sampleOutcomeText = stageProgress && stageProgress.succeeded_samples != null && stageProgress.failed_samples != null ? " · 成功 " + formatNumber(stageProgress.succeeded_samples) + " · 失败 " + formatNumber(stageProgress.failed_samples) : "";
     var evidenceQualifierText = stageProgress && !stageProgress.live && stageProgress.evidence_qualifier ? " · " + stageProgress.evidence_qualifier : "";
-    sampleNode.textContent = stageProgress ? "样本进度：" + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + sampleOutcomeText + evidenceQualifierText + causalWaveText + inFlightText + queuedText + sampleRateText + (remainingText ? " · 预计剩余 " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测样本：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
+    sampleNode.textContent = stageProgress ? progressUnitLabel + "进度：" + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + sampleOutcomeText + evidenceQualifierText + causalWaveText + inFlightText + queuedText + sampleRateText + (remainingText ? " · 预计剩余 " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测评分单元：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
     if (tokenNode) {
       tokenNode.title = tokenBudgetScopeText(run);
       tokenNode.textContent = modelUsageTokenProgressText(run, stageProgress, candidate);
@@ -1502,12 +1504,28 @@
     var outcomeText = runOutcomeText(run) || displayRunStatusText(run, state.events);
     var sampleAgentTokenBudget = runUsesSampleAgentTokenBudget(run);
     var nativeDshRuntime = run.dsh_runtime && run.dsh_runtime.native === true;
+    var sampleBudget = Number(run.samples_per_update);
+    var selectionCellMinimum = Number(run.minimum_selection_samples_per_update);
+    var selectionOriginMinimum = Number(run.minimum_selection_origin_samples_per_update);
+    var cellsPerOrigin = Number(run.prediction_cells_per_origin);
+    if (!(cellsPerOrigin > 0) && selectionCellMinimum > 0 && selectionOriginMinimum > 0) {
+      cellsPerOrigin = Math.round(selectionCellMinimum / selectionOriginMinimum);
+    }
+    var originBudget = sampleBudget > 0 && cellsPerOrigin > 0 ? Math.floor(sampleBudget / cellsPerOrigin) : 0;
+    var sampleBudgetText = sampleBudget > 0
+      ? formatNumber(sampleBudget) + " 个评分单元" + (originBudget > 0 ? "，可覆盖 " + formatNumber(originBudget) + " 个完整预测时点" : "")
+      : "历史运行未配置";
+    var selectionThresholdText = selectionCellMinimum > 0
+      ? (selectionOriginMinimum > 0 ? formatNumber(selectionOriginMinimum) + " 个完整预测时点 / " : "") + formatNumber(selectionCellMinimum) + " 个评分单元" + (sampleBudget > 0 && sampleBudget < selectionCellMinimum ? "（诊断运行，本轮不可晋级）" : "")
+      : "历史运行未记录";
     var values = [
       ["研究领域", catalogReferenceLabel("domain_packs", configuration.domain_pack_id, configuration.domain_pack_id || "未提供")],
       ["策略模型（API）", modelReferenceLabel(configuration.policy_model_id)],
       ["独立评审模型（API）", modelReferenceLabel(configuration.judge_model_id)],
       ["每轮候选", formatNumber(run.candidates_per_generation || 1) + " 个版本"],
-      ["每轮智能体样本", Number(run.samples_per_update) > 0 ? formatNumber(run.samples_per_update) + " 个固定反馈样本" : "历史运行未配置"],
+      ["候选并发", Number(run.candidate_concurrency) > 0 ? formatNumber(run.candidate_concurrency) + " 个候选" : "历史运行按串行执行"],
+      ["每轮预测预算", sampleBudgetText],
+      ["晋级证据门槛", selectionThresholdText],
       ["请求微批", Number(run.sample_agent_batch_size) > 0 ? "先按因果预测起点组成 origin wave；每批最多 " + formatNumber(run.sample_agent_batch_size) + " 个样本，实际请求数以运行进度为准" : "历史运行未配置"],
       ["逐样本并发", Number(run.sample_concurrency) > 0 ? formatNumber(run.sample_concurrency) + " 个在飞请求" : "历史运行未配置"],
       [nativeDshRuntime ? "DSH 上下文管理" : sampleAgentTokenBudget ? "逐样本智能体 Token 硬预算" : "Token 账本（历史口径）", nativeDshRuntime ? "Session 压缩与输出长度由 DSH 统一管理" : Number(run.token_limit) > 0 ? formatNumber(run.token_limit) : "仅计量"],

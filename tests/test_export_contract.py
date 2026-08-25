@@ -15,9 +15,9 @@ from ecologyrsi_dsh import (
     TaskManifest,
     ToyCropSoilWater,
 )
-from ecologyrsi_dsh.cli import main
-from ecologyrsi_dsh.models import digest
-from ecologyrsi_dsh.reporting import export_errors, run_export
+from ecologyrsi_dsh.application.cli import main
+from ecologyrsi_dsh.core.models import digest
+from ecologyrsi_dsh.presentation.reporting import export_errors, run_export
 
 
 class ExportContractTests(unittest.TestCase):

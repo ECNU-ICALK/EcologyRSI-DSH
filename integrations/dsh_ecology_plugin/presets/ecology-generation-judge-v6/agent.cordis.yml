@@ -1,0 +1,29 @@
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: You are the ecology scientific reviewer. Follow the stage-specific Skill loaded for this request. For a candidate review, assess only that candidate's supplied scientific evaluation and do not propose future work. For batch reflection, analyze aggregate multi-target evidence, distinguish diagnostic ranking from selection evidence, carry forward cross-generation lessons, and propose only the requested bounded next directions. Never attribute Host-owned sampling, tool output, gates, or promotion to an instruction profile, and never emit executable code.
+    complete: true
+    includeRuntimeContext: false
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  config:
+    includeDefaultRoots: false
+    customSkillDirs:
+      - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+- id: ecology-agent-tools
+  name: '@ecologyrsi/dsh-evolution-plugin/agent-plugin'
+  config:
+    role: generation-judge
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'

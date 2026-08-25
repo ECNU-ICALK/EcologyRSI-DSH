@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 import sqlite3
 import threading
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from .models import canonical_json, digest, utc_now
@@ -630,8 +630,30 @@ class EventLedger:
                 ).fetchall()
         return tuple(self._row_to_event(row) for row in rows)
 
-    def iter_events(self, run_id: str | None = None, *, after_seq: int = 0) -> Iterator[Event]:
-        yield from self.events(run_id, after_seq=after_seq)
+    def event_by_id(self, event_id: str, *, run_id: str | None = None) -> Event | None:
+        """Return one indexed event, optionally requiring its run identity."""
+
+        event_id = self._required_text(event_id, "event_id")
+        if run_id is not None:
+            run_id = self._required_text(run_id, "run_id")
+        with self._lock:
+            if run_id is None:
+                row = self._connection.execute(
+                    """
+                    SELECT seq, event_id, run_id, kind, payload_json, created_at
+                    FROM evolution_events WHERE event_id = ?
+                    """,
+                    (event_id,),
+                ).fetchone()
+            else:
+                row = self._connection.execute(
+                    """
+                    SELECT seq, event_id, run_id, kind, payload_json, created_at
+                    FROM evolution_events WHERE event_id = ? AND run_id = ?
+                    """,
+                    (event_id, run_id),
+                ).fetchone()
+        return self._row_to_event(row) if row is not None else None
 
     def count(self, run_id: str | None = None) -> int:
         with self._lock:

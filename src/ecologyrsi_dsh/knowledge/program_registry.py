@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-import json
 import math
-from pathlib import Path
 from typing import Any
 
 from ..evolution.genome import (
@@ -182,21 +180,52 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
         },
     },
     "instruction_templates": {
-        "sample-planner@1": {
-            "version": "sample-planner-instruction/1",
+        "sample-planner-balanced@1": {
+            "version": "sample-planner-balanced-instruction/1",
+            "role": "sample-planner",
+            "skill_name": "origin-vector-forecasting-balanced",
             "parameters": {
                 "confidence_threshold": _parameter(
                     minimum=0.0, maximum=1.0, default=0.7
                 )
             },
         },
+        "sample-planner-anomaly-aware@1": {
+            "version": "sample-planner-anomaly-aware-instruction/1",
+            "role": "sample-planner",
+            "skill_name": "origin-vector-forecasting-anomaly-aware",
+            "parameters": {
+                "confidence_threshold": _parameter(
+                    minimum=0.0, maximum=1.0, default=0.75
+                )
+            },
+        },
+        "sample-planner-horizon-aware@1": {
+            "version": "sample-planner-horizon-aware-instruction/1",
+            "role": "sample-planner",
+            "skill_name": "origin-vector-forecasting-horizon-aware",
+            "parameters": {
+                "confidence_threshold": _parameter(
+                    minimum=0.0, maximum=1.0, default=0.65
+                )
+            },
+        },
         "sample-repair@1": {
             "version": "sample-repair-instruction/1",
+            "role": "sample-repair",
+            "skill_name": "origin-vector-forecasting-anomaly-aware",
             "parameters": {},
         },
-        "researcher@1": {"version": "researcher-instruction/1", "parameters": {}},
+        "researcher@1": {
+            "version": "researcher-instruction/1",
+            "role": "researcher",
+            "skill_name": "autonomous-ecology-research",
+            "parameters": {},
+        },
         "candidate-proposer@1": {
             "version": "candidate-proposer-instruction/1",
+            "role": "candidate-proposer",
+            "skill_name": "bounded-plugin-experiment",
             "parameters": {},
         },
     },
@@ -325,9 +354,11 @@ def _agent_program(programs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             "role_profiles": [
                 {
                     "role": "sample-planner",
-                    "preset_id": "ecology-sample-planner-v1",
+                    "preset_id": "ecology-sample-planner-v3",
                     "instruction_template_ref": _program_ref(
-                        programs, "instruction_templates", "sample-planner@1"
+                        programs,
+                        "instruction_templates",
+                        "sample-planner-balanced@1",
                     ),
                     "instruction_parameters": {"confidence_threshold": 0.7},
                     "response_schema_id": "sample-decisions@1",
@@ -413,6 +444,24 @@ class ProgramRegistrySnapshot:
             ),
             _seed_template(
                 thawed,
+                template_id="greenhouse-targetwise-default@1",
+                predictor_id="greenhouse-targetwise-ridge@1",
+                feature_policy_id="registered_greenhouse_features@1",
+            ),
+            _seed_template(
+                thawed,
+                template_id="greenhouse-exogenous-default@1",
+                predictor_id="greenhouse-exogenous-ridge@1",
+                feature_policy_id="registered_greenhouse_features@1",
+            ),
+            _seed_template(
+                thawed,
+                template_id="greenhouse-rolling-default@1",
+                predictor_id="greenhouse-rolling-residual@1",
+                feature_policy_id="registered_greenhouse_features@1",
+            ),
+            _seed_template(
+                thawed,
                 template_id="toy-default@1",
                 predictor_id="toy-rolling-water@1",
                 feature_policy_id="registered_toy_features@1",
@@ -452,6 +501,16 @@ class ProgramRegistrySnapshot:
             "id": program_id,
             "catalog_digest": _program_digest(category, program_id, value),
         }
+
+    def program_ids(self, category: str) -> tuple[str, ...]:
+        programs = deep_thaw_json(self._programs)
+        try:
+            values = programs[category]
+        except KeyError:
+            raise ValueError(f"unregistered program category: {category}") from None
+        if not isinstance(values, Mapping):
+            raise ValueError(f"invalid program category: {category}")
+        return tuple(sorted(str(program_id) for program_id in values))
 
     def seed_template(self, template_id: str) -> SeedGenomeTemplate:
         for template in self._seed_templates:
@@ -519,42 +578,6 @@ class ProgramRegistrySnapshot:
         policy = self.program("tool_policies", policy_id)
         return tuple(str(item) for item in policy["tool_ids"])
 
-    def migration_template(self, template_id: str) -> FrozenJsonObject:
-        if template_id != "legacy-dsh-native@1":
-            raise ValueError(f"unregistered migration template: {template_id}")
-        programs = deep_thaw_json(self._programs)
-        template: dict[str, Any] = {
-            "schema_version": "ecologyrsi-dsh.legacy-migration-template/1",
-            "template_id": template_id,
-            "predictor_refs": {
-                predictor_id: self.program_ref("predictors", predictor_id)
-                for predictor_id in programs["predictors"]
-            },
-            "feature_policy_ref": {
-                **self.program_ref(
-                    "feature_policies", "registered_greenhouse_features@1"
-                ),
-                "overrides": {},
-            },
-            "fit_policy_ref": {
-                **self.program_ref("fit_policies", "time_forward_fit@1"),
-                "overrides": {},
-            },
-            "uncertainty_policy_ref": {
-                **self.program_ref("uncertainty_policies", "none@1"),
-                "overrides": {},
-            },
-            "agent_program": _agent_program(programs),
-            "evidence_refs": [],
-        }
-        template["template_digest"] = _domain_digest(
-            "ecologyrsi-dsh/legacy-migration-template/1", template
-        )
-        frozen = deep_freeze_json(template)
-        assert isinstance(frozen, FrozenJsonObject)
-        return frozen
-
-
 def _validate_scalar_contract(value: Any, contract: Mapping[str, Any], name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"{name} must be numeric and not bool")
@@ -575,36 +598,7 @@ def current_program_registry() -> ProgramRegistrySnapshot:
     return _CURRENT_PROGRAM_REGISTRY
 
 
-@dataclass(frozen=True, slots=True)
-class LegacyProgramCatalog:
-    _value: FrozenJsonObject
-
-    def to_dict(self) -> dict[str, Any]:
-        return deep_thaw_json(self._value)
-
-
-def _load_legacy_catalog() -> LegacyProgramCatalog:
-    path = Path(__file__).with_name("legacy_program_catalog_0_2_2.json")
-    value = json.loads(path.read_text(encoding="utf-8"))
-    identity = dict(value)
-    supplied = identity.pop("catalog_digest", None)
-    expected = _domain_digest(
-        "ecologyrsi-dsh/legacy-program-catalog/0.2.2", identity
-    )
-    if supplied is not None and supplied != expected:
-        raise RuntimeError("legacy 0.2.2 program catalog digest mismatch")
-    value["catalog_digest"] = expected
-    frozen = deep_freeze_json(value)
-    assert isinstance(frozen, FrozenJsonObject)
-    return LegacyProgramCatalog(frozen)
-
-
-LEGACY_PROGRAM_CATALOG_0_2_2 = _load_legacy_catalog()
-
-
 __all__ = [
-    "LEGACY_PROGRAM_CATALOG_0_2_2",
-    "LegacyProgramCatalog",
     "ProgramRegistrySnapshot",
     "REGISTRY_SCHEMA_VERSION",
     "current_program_registry",

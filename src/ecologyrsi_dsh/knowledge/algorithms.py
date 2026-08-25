@@ -51,7 +51,7 @@ _CAPABILITIES: dict[str, dict[str, dict[str, Any]]] = {
         "adaptive_local@1": {"version": "bounded-feedback-local-search/6"},
         "dsh_authenticated@1": {"version": "authenticated-structured-proposal/7"},
         "autonomous_model@1": {
-            "version": "per-generation-research-runtime-adoption/8"
+            "version": "per-generation-research-runtime-adoption/9"
         },
     },
     "predictor": {
@@ -145,6 +145,20 @@ def registered_capability_ids(kind: str) -> frozenset[str]:
     """Return the immutable public ID set for one host capability kind."""
 
     return frozenset(_CAPABILITIES.get(str(kind), {}))
+
+
+def registered_predictor_evaluator_ids(predictor_id: str) -> tuple[str, ...]:
+    """Return the evaluator allowlist for one registered predictor.
+
+    Predictor/evaluator compatibility is a scientific execution boundary. Keep
+    its lookup next to the canonical capability registry so compilers, research
+    planning, and runtime admission cannot drift into separate maps.
+    """
+
+    capability = _CAPABILITIES["predictor"].get(str(predictor_id))
+    if capability is None:
+        return ()
+    return tuple(str(item) for item in capability.get("evaluator_ids", ()))
 
 
 def _text(value: Any, name: str) -> str:
@@ -1368,5 +1382,6 @@ __all__ = [
     "compile_algorithm_spec",
     "debug_algorithm_spec",
     "registered_capability_ids",
+    "registered_predictor_evaluator_ids",
     "resolve_predictor_adoption",
 ]

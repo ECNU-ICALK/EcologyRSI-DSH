@@ -14,7 +14,7 @@ from ecologyrsi_dsh import ExpertConsultation, TaskManifest
 from ecologyrsi_dsh.application.config import bind_toy_dataset
 from ecologyrsi_dsh.api.events import EventEndpointsMixin
 from ecologyrsi_dsh.core.ledger import ConcurrentRunMutationError, Event
-from ecologyrsi_dsh.server import EvolutionHTTPServer
+from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 
 
 class ExpertConsultationHTTPTests(unittest.TestCase):

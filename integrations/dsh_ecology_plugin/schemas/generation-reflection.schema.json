@@ -1,0 +1,66 @@
+{
+  "$id": "ecology-generation-reflection@1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "summary", "lessons", "recommended_search_queries",
+    "candidate_directions", "stop_recommendation"
+  ],
+  "properties": {
+    "schema_version": {"const": "ecologyrsi-dsh.generation-reflection/1"},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 6000},
+    "lessons": {
+      "type": "array", "minItems": 1, "maxItems": 16,
+      "items": {"type": "string", "minLength": 1, "maxLength": 800}
+    },
+    "recommended_search_queries": {
+      "type": "array", "minItems": 1, "maxItems": 6,
+      "items": {"type": "string", "minLength": 1, "maxLength": 180}
+    },
+    "candidate_directions": {
+      "type": "array", "minItems": 2, "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "direction_id", "title", "hypothesis", "target_weakness",
+          "capability_focus", "mutation_axis", "mutation_target", "mutation_direction", "evidence_refs",
+          "expected_tradeoff", "success_criterion"
+        ],
+        "properties": {
+          "direction_id": {"type": "string", "minLength": 1, "maxLength": 80},
+          "title": {"type": "string", "minLength": 1, "maxLength": 240},
+          "hypothesis": {"type": "string", "minLength": 1, "maxLength": 1600},
+          "target_weakness": {"type": "string", "minLength": 1, "maxLength": 800},
+          "capability_focus": {"type": "string", "minLength": 1, "maxLength": 240},
+          "mutation_axis": {
+            "enum": ["scientific_parameter", "registered_predictor", "instruction_profile"]
+          },
+          "mutation_target": {"type": "string", "minLength": 1, "maxLength": 160},
+          "mutation_direction": {
+            "enum": ["increase", "decrease", "select"]
+          },
+          "evidence_refs": {
+            "type": "array", "maxItems": 16,
+            "items": {"type": "string", "minLength": 1, "maxLength": 160}
+          },
+          "expected_tradeoff": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "success_criterion": {"type": "string", "minLength": 1, "maxLength": 1000}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"mutation_axis": {"const": "scientific_parameter"}}},
+            "then": {"properties": {"mutation_direction": {"enum": ["increase", "decrease"]}}}
+          },
+          {
+            "if": {"properties": {"mutation_axis": {"enum": ["registered_predictor", "instruction_profile"]}}},
+            "then": {"properties": {"mutation_direction": {"const": "select"}}}
+          }
+        ]
+      }
+    },
+    "stop_recommendation": {
+      "enum": ["continue", "converged", "insufficient_evidence"]
+    }
+  }
+}

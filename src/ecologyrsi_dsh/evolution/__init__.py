@@ -5,14 +5,11 @@ from .genome import (
     FrozenRunInitialization,
     GenomeBindingSubset,
     GenomeMutationContextV1,
-    ProjectedLegacyGenome,
     SeedGenomeTemplate,
     apply_genome_mutation,
     deep_freeze_json,
     deep_thaw_json,
-    legacy_genome_from_proposal,
     materialize_seed_genome,
-    migrate_legacy_seed,
 )
 
 __all__ = [
@@ -20,12 +17,9 @@ __all__ = [
     "FrozenRunInitialization",
     "GenomeBindingSubset",
     "GenomeMutationContextV1",
-    "ProjectedLegacyGenome",
     "SeedGenomeTemplate",
     "apply_genome_mutation",
     "deep_freeze_json",
     "deep_thaw_json",
-    "legacy_genome_from_proposal",
     "materialize_seed_genome",
-    "migrate_legacy_seed",
 ]

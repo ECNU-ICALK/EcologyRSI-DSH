@@ -17,7 +17,7 @@ from ecologyrsi_dsh.core.sample_results import (
     sample_result_batch_event_payload,
 )
 from ecologyrsi_dsh.data.toy import ToyCropSoilWater
-from ecologyrsi_dsh.reporting import run_completion_outcome, run_summary
+from ecologyrsi_dsh.presentation.reporting import run_completion_outcome, run_summary
 from ecologyrsi_dsh.api.generation_execution import _model_token_budget_state
 from ecologyrsi_dsh.api.projection import (
     _dsh_runtime_projection,
@@ -25,7 +25,7 @@ from ecologyrsi_dsh.api.projection import (
     _model_usage_summary,
     _public_evaluation_metrics,
 )
-from ecologyrsi_dsh.server import _projection_json
+from ecologyrsi_dsh.api.projection import _projection_json
 
 
 def _task(*, max_candidates: int = 1, max_generations: int = 1) -> TaskManifest:
@@ -41,6 +41,23 @@ def _task(*, max_candidates: int = 1, max_generations: int = 1) -> TaskManifest:
         },
         seed=3,
     )
+
+
+def _skill_evidence(stage: str, skill_name: str) -> dict:
+    return {
+        "schema_version": "ecologyrsi-dsh.skill-invocation-evidence/1",
+        "stage": stage,
+        "skill_name": skill_name,
+        "call_count": 1,
+        "successful_call_count": 1,
+        "call_seq": 1,
+        "result_seq": 2,
+        "first_tool_call_verified": True,
+        "next_tool_name": "structured_output",
+        "next_tool_call_seq": 3,
+        "order_verified": True,
+        "source": "dsh_session_event_log",
+    }
 
 
 class ExecutionProjectionTests(unittest.TestCase):
@@ -69,6 +86,10 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "output_schema_id": "ecology-research-result@1",
                     "result_digest": digest(structured),
                     "structured": structured,
+                    "skill_invocation_evidence": _skill_evidence(
+                        "generation.research",
+                        "autonomous-ecology-research",
+                    ),
                     "session_metrics": {
                         "schema_version": "ecologyrsi-dsh.dsh-session-metrics/1",
                         "session_id": "dsh-child-replay-1",
@@ -101,6 +122,89 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         self.assertEqual(state.events[-1].kind, "DshStructuredResultAccepted")
 
+    def test_sample_reflection_structured_result_replays(self) -> None:
+        with EventLedger() as ledger:
+            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            run_id = director.start_evolution(
+                _task(), run_id="run:projection-sample-reflection"
+            ).run.run_id
+            structured = {
+                "schema_version": "ecology-sample-reflection@1",
+                "wave_digest": "d" * 64,
+                "sample_id": "sample-1",
+                "outcome_class": "improved",
+                "error_source": "parameter",
+                "next_action": "keep",
+                "confidence": 0.9,
+                "summary": "The registered predictor improved this sample.",
+            }
+            ledger.append(
+                run_id,
+                "DshStructuredResultAccepted",
+                {
+                    "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
+                    "identity": {
+                        "run_id": run_id,
+                        "role": "sample-critic",
+                        "stage": "sample.reflect",
+                        "session_id": "dsh-child-reflector-1",
+                    },
+                    "output_schema_id": "ecology-sample-reflection@1",
+                    "result_digest": digest(structured),
+                    "structured": structured,
+                    "skill_invocation_evidence": _skill_evidence(
+                        "sample.reflect",
+                        "origin-vector-review",
+                    ),
+                },
+            )
+
+            state = director.state(run_id)
+
+        self.assertEqual(state.events[-1].kind, "DshStructuredResultAccepted")
+        self.assertEqual(state.events[-1].payload["identity"]["stage"], "sample.reflect")
+
+    def test_candidate_review_skill_evidence_replays(self) -> None:
+        with EventLedger() as ledger:
+            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            run_id = director.start_evolution(
+                _task(), run_id="run:projection-candidate-review"
+            ).run.run_id
+            structured = {
+                "schema_version": "ecology-generation-review@1",
+                "accepted": False,
+                "rationale": "The supplied candidate evidence is insufficient.",
+                "flags": ["insufficient_evidence"],
+            }
+            ledger.append(
+                run_id,
+                "DshStructuredResultAccepted",
+                {
+                    "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
+                    "identity": {
+                        "run_id": run_id,
+                        "role": "generation-judge",
+                        "stage": "generation.judge",
+                        "session_id": "dsh-child-candidate-review-1",
+                    },
+                    "output_schema_id": "ecology-generation-review@1",
+                    "result_digest": digest(structured),
+                    "structured": structured,
+                    "skill_invocation_evidence": _skill_evidence(
+                        "generation.judge",
+                        "candidate-scientific-review",
+                    ),
+                },
+            )
+
+            state = director.state(run_id)
+
+        self.assertEqual(state.events[-1].kind, "DshStructuredResultAccepted")
+        self.assertEqual(
+            state.events[-1].payload["skill_invocation_evidence"]["skill_name"],
+            "candidate-scientific-review",
+        )
+
     def test_dsh_runtime_projection_aggregates_real_session_usage(self) -> None:
         state = SimpleNamespace(
             run=SimpleNamespace(session_id="dsh-native:run:usage"),
@@ -111,7 +215,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     payload={
                         "execution_protocol": "dsh_native_plugin_evolution@1",
                         "capabilities_digest": "a" * 64,
-                        "preset_ids": ["ecology-sample-planner-v1"],
+                        "preset_ids": ["ecology-sample-planner-v3"],
                     },
                 ),
                 SimpleNamespace(
@@ -162,6 +266,32 @@ class ExecutionProjectionTests(unittest.TestCase):
         )
 
         self.assertEqual(public, {"score": 0.2})
+
+    def test_public_metrics_tolerate_malformed_historical_control(self) -> None:
+        public = _public_evaluation_metrics(
+            {
+                "generation_control_evaluations": [
+                    {
+                        "comparison_role": "search_parent",
+                        "candidate_id": "candidate:legacy-parent",
+                        "evaluation": {
+                            "candidate_id": "candidate:legacy-parent",
+                            "score": 0.2,
+                            "metrics": {
+                                "sample_execution": {
+                                    "strict_agent_chain_pass": True,
+                                }
+                            },
+                        },
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(len(public["generation_controls"]), 1)
+        self.assertIsNone(
+            public["generation_controls"][0]["evaluation_cohort_digest"]
+        )
 
     def test_candidate_execution_uses_the_adopted_prediction_model(self) -> None:
         task = TaskManifest(
@@ -267,6 +397,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                 "sample_agent_mode": "gateway_microbatch",
                 "sample_agent_batch_size": 128,
                 "samples_per_update": 500,
+                "candidate_concurrency": 4,
                 "sample_concurrency": 6,
                 "strategy_model_id": "strategy-model",
                 "review_model_id": "review-model",
@@ -318,9 +449,11 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(remote["sample_agent_batch_size"], 128)
         self.assertEqual(remote["samples_per_update"], 500)
         self.assertEqual(remote["sample_concurrency"], 6)
+        self.assertEqual(remote["candidate_concurrency"], 4)
         self.assertEqual(remote_projection["samples_per_update"], 500)
         self.assertEqual(remote_projection["sample_agent_batch_size"], 128)
         self.assertEqual(remote_projection["sample_concurrency"], 6)
+        self.assertEqual(remote_projection["candidate_concurrency"], 4)
         self.assertEqual(remote["strategy_model_id"], "strategy-model")
         self.assertEqual(remote["review_model_id"], "review-model")
         self.assertEqual(remote["sample_operation_max_tokens"]["sample.planner"], 3072)
@@ -340,6 +473,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         )
         self.assertIsNone(legacy["sample_agent_batch_size"])
         self.assertIsNone(legacy["samples_per_update"])
+        self.assertIsNone(legacy["candidate_concurrency"])
         self.assertEqual(
             remote_projection["execution_diagnostics"]["partition_scan_policy"],
             "full_training_fit_rotating_bounded_training_feedback_per_generation",

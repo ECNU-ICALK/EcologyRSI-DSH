@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ecologyrsi-dsh"
-version = "0.3.15"
+version = "0.3.26"
 description = "A small, replayable evolution core for EcologyRSI-DSH"
 readme = "README.md"
 license = "LicenseRef-Proprietary"
@@ -23,7 +23,7 @@ classifiers = [
 ]
 
 [project.scripts]
-ecologyrsi-dsh = "ecologyrsi_dsh.cli:main"
+ecologyrsi-dsh = "ecologyrsi_dsh.application.cli:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -73,26 +73,53 @@ where = ["src"]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/schemas" = [
     "integrations/dsh_ecology_plugin/schemas/*.json",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v1" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-coordinator-v1/*.yml",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3/*.yml",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-researcher-v1" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-researcher-v1/*.yml",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-researcher-v6" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-researcher-v6/*.yml",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v1" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v1/*.yml",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v3" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v3/*.yml",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v1" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v1/*.yml",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v3" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v3/*.yml",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v1" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v1/*.yml",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v3" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v3/*.yml",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v1" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v1/*.yml",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v6" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v6/*.yml",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3/skills/autonomous-ecology-research" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3/skills/autonomous-ecology-research/SKILL.md",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-researcher-v6/skills/autonomous-ecology-research" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-researcher-v6/skills/autonomous-ecology-research/SKILL.md",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v3/skills/bounded-plugin-experiment" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v3/skills/bounded-plugin-experiment/SKILL.md",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v3/skills/origin-vector-forecasting-balanced" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v3/skills/origin-vector-forecasting-balanced/SKILL.md",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v3/skills/origin-vector-forecasting-horizon-aware" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v3/skills/origin-vector-forecasting-horizon-aware/SKILL.md",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v3/skills/origin-vector-forecasting-anomaly-aware" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v3/skills/origin-vector-forecasting-anomaly-aware/SKILL.md",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v3/skills/origin-vector-review" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v3/skills/origin-vector-review/SKILL.md",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v6/skills/batch-scientific-reflection" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v6/skills/batch-scientific-reflection/SKILL.md",
+]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v6/skills/candidate-scientific-review" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v6/skills/candidate-scientific-review/SKILL.md",
 ]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/dist" = [
-    "integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.15.tgz",
+    "integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.26.tgz",
 ]
 "share/ecologyrsi-dsh/scripts" = [
     "scripts/install_dsh_ecology_runtime.mjs",

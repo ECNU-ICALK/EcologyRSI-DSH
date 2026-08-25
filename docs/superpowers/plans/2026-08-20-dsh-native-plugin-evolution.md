@@ -640,7 +640,7 @@ Expected: all pass without a real model call.
 
 - [ ] **Step 1: Write lifecycle RED tests**
 
-Assert atomic setup before Agent publication, unpredictable Session IDs, exact preset/model/preset-content/tool-surface binding, single-flight creation, standing-scope `restrict({allow: []})`, no tool-workflow/general subagent/Bash/FS/Web/MCP, fixed-script non-interpolation, structured args size/schema, `maxTotalAgents`/`maxConcurrent`/`maxItems`/sync timeout, context-pressure vs projected-usage semantics, and handle cleanup on Cordis teardown. Add a race fake where the child calls a tool before the start Promise/lifecycle event returns: a pre-registered binding must authorize exactly once using `session.header.parentSession` plus folded descriptor label. Test that same business idempotency with a new durable launch attempt gets a different label, process loss cannot reset the counter or reproduce any old label, and missing/wrong/reused/revoked/terminal labels fail closed while tombstones are never overwritten. Add cancellation while one-shot and continuable start Promises are unresolved: pending controllers abort, Promises settle, returned one-shot runs dispose, accepted continuables interrupt/drain, and clean completion is impossible while any pending start remains.
+Assert atomic setup before Agent publication, unpredictable Session IDs, exact preset/model/preset-content/tool-surface binding, single-flight creation, exact standing-scope tool surfaces plus execution guards, no tool-workflow/general subagent/Bash/FS/Web/MCP, fixed-script non-interpolation, structured args size/schema, `maxTotalAgents`/`maxConcurrent`/`maxItems`/sync timeout, context-pressure vs projected-usage semantics, and handle cleanup on Cordis teardown. Add a race fake where the child calls a tool before the start Promise/lifecycle event returns: a pre-registered binding must authorize exactly once using `session.header.parentSession` plus folded descriptor label. Test that same business idempotency with a new durable launch attempt gets a different label, process loss cannot reset the counter or reproduce any old label, and missing/wrong/reused/revoked/terminal labels fail closed while tombstones are never overwritten. Add cancellation while one-shot and continuable start Promises are unresolved: pending controllers abort, Promises settle, returned one-shot runs dispose, accepted continuables interrupt/drain, and clean completion is impossible while any pending start remains.
 
 - [ ] **Step 2: Run RED**
 
@@ -791,7 +791,7 @@ Expected: DSH-native tests pass and legacy read/diagnostic tests remain green.
 
 - [ ] **Step 1: Write cross-language schema RED tests**
 
-Load the same JSON schemas in Node and Python. Test exact role tool sets, unknown fields, cross-run/role/Session/revision calls, repeated idempotency keys, output validation, blocked label field names, `restrict({allow: []})` behavior, scope-local role tool visibility, direct execute denial, and Host-bound identity that model arguments cannot override.
+Load the same JSON schemas in Node and Python. Test exact role tool sets, unknown fields, cross-run/role/Session/revision calls, repeated idempotency keys, output validation, blocked label field names, descendant visibility of standing-scope role tools, rejection of undeclared extra tools, direct execute denial, and Host-bound identity that model arguments cannot override.
 
 - [ ] **Step 2: Run RED**
 
@@ -813,7 +813,7 @@ Research/proposal/judge use one-shot DSH output schemas and have no model-callab
 
 - [ ] **Step 4: Implement role registration plus execution guard**
 
-Export `lib/tools/agent-plugin.js` as an independent package subpath and load it from presets; never load Host `lib/index.js` in a role realm. In the preset standing scope, clear inherited tools with `restrict({allow: []})`, register only role-local tools, and add an execution guard. For child Agents the guard derives parent from `exec.agent.session.header.parentSession`, folds the known `subagent/descriptor` events for the never-reused launch label, atomically claims the pending reservation to `exec.agent.id`, and then checks the Host closure binding; lifecycle start events are too late to authorize the first call. Call `exec.concludeTurn()` only for planner/critic after Python durable acceptance.
+Export `lib/tools/agent-plugin.js` as an independent package subpath and load it from presets; never load Host `lib/index.js` in a role realm. In the preset standing scope, register only role-local tools and an execution guard, and make runtime readiness require the exact visible tool set. Do not install `restrict({allow: []})` in that standing scope: DSH descendants treat its tools as inherited, so the restriction would hide the required role tool as well. For child Agents the binding derives parent from `exec.agent.session.header.parentSession`, folds the known `subagent/descriptor` events for the never-reused launch label, atomically claims the pending reservation to `exec.agent.id`, and then checks the Host closure binding; lifecycle start events are too late to authorize the first call.
 
 - [ ] **Step 5: Implement Python state/idempotency validation**
 

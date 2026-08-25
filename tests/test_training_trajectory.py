@@ -13,8 +13,8 @@ from ecologyrsi_dsh import (
     TaskManifest,
     ToyCropSoilWater,
 )
-from ecologyrsi_dsh.models import Evaluation
-from ecologyrsi_dsh.reporting import training_assets
+from ecologyrsi_dsh.core.models import Evaluation
+from ecologyrsi_dsh.presentation.reporting import training_assets
 
 
 class TrainingTrajectoryContractTests(unittest.TestCase):

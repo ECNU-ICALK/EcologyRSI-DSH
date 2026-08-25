@@ -456,7 +456,9 @@ class ModelConnection:
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+    def redirect_request(  # type: ignore[no-untyped-def]
+        self, _req, _fp, code, msg, headers, _newurl
+    ):
         # Model credentials are origin-bound.  urllib otherwise copies the
         # Authorization header to a redirect target, including another
         # loopback port, so every redirect is rejected and must be configured

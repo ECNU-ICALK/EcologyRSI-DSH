@@ -11,7 +11,7 @@ from ..core.errors import (
     FROZEN_RUNTIME_BINDING_DRIFT_CODE,
     FROZEN_RUNTIME_BINDING_DRIFT_PUBLIC_MESSAGE,
 )
-from ..core.models import HumanIntervention, InterventionKind
+from ..core.models import Evaluation, HumanIntervention, InterventionKind
 from ..core.redaction import (
     public_error_summary,
     safe_error_code,
@@ -564,6 +564,9 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
         "sample_concurrency": state.task_manifest.metadata.get(
             "sample_concurrency"
         ),
+        "candidate_concurrency": state.task_manifest.metadata.get(
+            "candidate_concurrency"
+        ),
         "training_partition_rows": training_partition_rows,
         "training_eligible_examples": training_eligible_examples,
         "training_used_examples": training_used_examples,
@@ -648,6 +651,73 @@ def _public_evaluation_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     result.pop("sample_execution_records", None)
     result.pop("sample_execution_trace_archive", None)
     result.pop("promotion_block_evidence", None)
+    raw_controls = result.pop("generation_control_evaluations", None)
+    if isinstance(raw_controls, list):
+        controls: list[dict[str, Any]] = []
+        for raw in raw_controls:
+            if not isinstance(raw, Mapping):
+                continue
+            evaluation = raw.get("evaluation")
+            evaluation = evaluation if isinstance(evaluation, Mapping) else {}
+            control_metrics = evaluation.get("metrics")
+            control_metrics = (
+                control_metrics if isinstance(control_metrics, Mapping) else {}
+            )
+            sample_summary = control_metrics.get("sample_execution")
+            sample_summary = (
+                sample_summary if isinstance(sample_summary, Mapping) else {}
+            )
+            control_cohort_digest = None
+            if evaluation:
+                try:
+                    control_cohort_digest = evaluation_cohort_digest(
+                        Evaluation.from_dict(evaluation)
+                    )
+                except (TypeError, ValueError):
+                    # Historical or damaged control evidence must not make the
+                    # read-only UI fail.  The selection path validates the same
+                    # payload strictly and will refuse to advance the round.
+                    control_cohort_digest = None
+            controls.append(
+                {
+                    "comparison_role": raw.get("comparison_role"),
+                    "candidate_id": raw.get("candidate_id"),
+                    "score": _finite_number(evaluation.get("score")),
+                    "scientific_pass": control_metrics.get("scientific_pass"),
+                    "evaluation_cohort_digest": control_cohort_digest,
+                    "strict_agent_chain_pass": sample_summary.get(
+                        "strict_agent_chain_pass"
+                    ),
+                    "complete_agent_chains": sample_summary.get(
+                        "complete_agent_chains"
+                    ),
+                    "complete_origin_agent_chains": sample_summary.get(
+                        "complete_origin_agent_chains"
+                    ),
+                    "remote_planner_invocations": sample_summary.get(
+                        "remote_planner_invocations"
+                    ),
+                    "remote_critic_invocations": sample_summary.get(
+                        "remote_critic_invocations"
+                    ),
+                    "remote_reflection_invocations": sample_summary.get(
+                        "remote_reflection_invocations"
+                    ),
+                    "attempted_examples": sample_summary.get(
+                        "attempted_examples"
+                    ),
+                    "attempted_origin_samples": sample_summary.get(
+                        "attempted_origin_samples"
+                    ),
+                    "prediction_cell_count": sample_summary.get(
+                        "prediction_cell_count"
+                    ),
+                    "host_route_bypass_count": sample_summary.get(
+                        "host_route_bypass_count"
+                    ),
+                }
+            )
+        result["generation_controls"] = controls
     return result
 
 
@@ -1933,8 +2003,24 @@ def _dsh_runtime_projection(state: Any) -> dict[str, Any]:
         (event for event in state.events if event.kind == "DshRuntimeBound"),
         None,
     )
-    first_call_verified = any(
-        event.kind == "DshStructuredResultAccepted" for event in state.events
+    structured_events = [
+        event
+        for event in state.events
+        if event.kind == "DshStructuredResultAccepted"
+    ]
+    skill_evidence = [
+        event.payload.get("skill_invocation_evidence")
+        for event in structured_events
+        if isinstance(event.payload, Mapping)
+        and isinstance(event.payload.get("skill_invocation_evidence"), Mapping)
+    ]
+    first_call_verified = bool(structured_events) and (
+        len(skill_evidence) == len(structured_events)
+        and all(
+            item.get("first_tool_call_verified") is True
+            and item.get("order_verified") is True
+            for item in skill_evidence
+        )
     )
     if bound is None:
         return {
@@ -1942,6 +2028,13 @@ def _dsh_runtime_projection(state: Any) -> dict[str, Any]:
             "native": False,
             "capability_verified": False,
             "first_call_verified": False,
+            "skill_invocation": {
+                "required": False,
+                "all_verified": False,
+                "verified_call_count": 0,
+                "stages": [],
+                "skills": [],
+            },
             "context_pressure": {"available": False, "source": "not_dsh_native"},
             "provider_usage": {"available": False, "source": "not_dsh_native"},
         }
@@ -2031,6 +2124,17 @@ def _dsh_runtime_projection(state: Any) -> dict[str, Any]:
         "preset_ids": list(bound.payload["preset_ids"]),
         "root_session_id": state.run.session_id,
         "first_call_verified": first_call_verified,
+        "skill_invocation": {
+            "required": True,
+            "all_verified": first_call_verified,
+            "verified_call_count": len(skill_evidence),
+            "stages": sorted(
+                {str(item.get("stage")) for item in skill_evidence}
+            ),
+            "skills": sorted(
+                {str(item.get("skill_name")) for item in skill_evidence}
+            ),
+        },
         # DSH reports the TokenMeter pressure and Session projection usage as
         # distinct Host-owned measurements. Python never infers one from the
         # other and never relabels legacy ModelUsageRecorded receipts as DSH.
@@ -2370,6 +2474,8 @@ def _projection_json(state: Any) -> dict[str, Any]:
         ),
         "evaluator_digest": metadata.get("evaluator_digest"),
         "objective_profile": metadata.get("objective_profile"),
+        "fitness_profile": metadata.get("fitness_profile"),
+        "fitness_profile_digest": metadata.get("fitness_profile_digest"),
         "policy_model_id": metadata.get("policy_model_id", HOST_PARAMETER_GENERATOR_ID),
         "judge_model_id": metadata.get("judge_model_id", RULE_JUDGE_ID),
         "strategy_model_id": metadata.get(
@@ -2385,7 +2491,19 @@ def _projection_json(state: Any) -> dict[str, Any]:
         ),
         "sample_agent_batch_size": metadata.get("sample_agent_batch_size"),
         "samples_per_update": metadata.get("samples_per_update"),
+        "minimum_selection_samples_per_update": metadata.get(
+            "minimum_selection_samples_per_update"
+        ),
+        "minimum_selection_origin_samples_per_update": metadata.get(
+            "minimum_selection_origin_samples_per_update"
+        ),
+        "prediction_cells_per_origin": metadata.get(
+            "prediction_cells_per_origin"
+        ),
+        "sample_agent_protocol": metadata.get("sample_agent_protocol"),
+        "sample_budget_class": metadata.get("sample_budget_class"),
         "sample_concurrency": metadata.get("sample_concurrency", 4),
+        "candidate_concurrency": metadata.get("candidate_concurrency"),
         "sample_operation_max_tokens": metadata.get("sample_operation_max_tokens"),
         "sample_remote_critic_policy": metadata.get(
             "sample_remote_critic_policy"
@@ -2462,8 +2580,20 @@ def _projection_json(state: Any) -> dict[str, Any]:
         "max_candidates": task.max_candidates,
         "candidates_per_generation": task.candidates_per_generation,
         "samples_per_update": metadata.get("samples_per_update"),
+        "minimum_selection_samples_per_update": metadata.get(
+            "minimum_selection_samples_per_update"
+        ),
+        "minimum_selection_origin_samples_per_update": metadata.get(
+            "minimum_selection_origin_samples_per_update"
+        ),
+        "prediction_cells_per_origin": metadata.get(
+            "prediction_cells_per_origin"
+        ),
+        "sample_agent_protocol": metadata.get("sample_agent_protocol"),
+        "sample_budget_class": metadata.get("sample_budget_class"),
         "sample_agent_batch_size": metadata.get("sample_agent_batch_size"),
         "sample_concurrency": metadata.get("sample_concurrency"),
+        "candidate_concurrency": metadata.get("candidate_concurrency"),
         "budget": dict(task.budget),
         "token_usage_available": model_usage["available"],
         "tokens_used": model_usage.get(
@@ -2621,8 +2751,20 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
             metadata.get("knowledge_online_enabled", False)
         ),
         "samples_per_update": metadata.get("samples_per_update"),
+        "minimum_selection_samples_per_update": metadata.get(
+            "minimum_selection_samples_per_update"
+        ),
+        "minimum_selection_origin_samples_per_update": metadata.get(
+            "minimum_selection_origin_samples_per_update"
+        ),
+        "prediction_cells_per_origin": metadata.get(
+            "prediction_cells_per_origin"
+        ),
+        "sample_agent_protocol": metadata.get("sample_agent_protocol"),
+        "sample_budget_class": metadata.get("sample_budget_class"),
         "sample_agent_batch_size": metadata.get("sample_agent_batch_size"),
         "sample_concurrency": metadata.get("sample_concurrency"),
+        "candidate_concurrency": metadata.get("candidate_concurrency"),
     }
     return {
         "schema_version": "ecologyrsi-dsh.browser-run-summary/1",
@@ -2645,8 +2787,20 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
         "max_candidates": task.max_candidates,
         "candidates_per_generation": task.candidates_per_generation,
         "samples_per_update": metadata.get("samples_per_update"),
+        "minimum_selection_samples_per_update": metadata.get(
+            "minimum_selection_samples_per_update"
+        ),
+        "minimum_selection_origin_samples_per_update": metadata.get(
+            "minimum_selection_origin_samples_per_update"
+        ),
+        "prediction_cells_per_origin": metadata.get(
+            "prediction_cells_per_origin"
+        ),
+        "sample_agent_protocol": metadata.get("sample_agent_protocol"),
+        "sample_budget_class": metadata.get("sample_budget_class"),
         "sample_agent_batch_size": metadata.get("sample_agent_batch_size"),
         "sample_concurrency": metadata.get("sample_concurrency"),
+        "candidate_concurrency": metadata.get("candidate_concurrency"),
         "token_limit": _budget_value(task, "token_limit", 0),
         "budget": dict(task.budget),
         "seed_policy": task.seed_policy,

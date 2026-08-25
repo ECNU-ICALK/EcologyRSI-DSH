@@ -9,6 +9,11 @@ import random
 from typing import Any
 
 from ..core.models import TaskManifest, digest
+from ..evolution.promotion import (
+    PROMOTION_BLOCK_HOURS,
+    PROMOTION_MINIMUM_PAIRED_BLOCKS,
+    _validated_evidence,
+)
 
 
 FITNESS_PROFILE_VERSION = "fitness_profile@1"
@@ -39,7 +44,7 @@ class FitnessProfile:
     selection_minimum_score_delta: float = 0.005
     selection_minimum_coverage: float = 0.90
     selection_minimum_cell_samples: int = 40
-    selection_minimum_paired_blocks: int = 8
+    selection_minimum_paired_blocks: int = PROMOTION_MINIMUM_PAIRED_BLOCKS
     selection_minimum_valid_three_day_starts: int = 4
     moving_block_days: int = 3
     exploratory_resamples: int = 10_000
@@ -49,6 +54,8 @@ class FitnessProfile:
     evidence_class: str = EXPLORATORY_EVIDENCE_CLASS
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "expected_targets", tuple(self.expected_targets))
+        object.__setattr__(self, "expected_horizons", tuple(self.expected_horizons))
         if self.schema_version != FITNESS_PROFILE_VERSION:
             raise ValueError("unsupported fitness profile")
         if self.evidence_class != EXPLORATORY_EVIDENCE_CLASS:
@@ -87,6 +94,12 @@ class FitnessProfile:
             raise ValueError("selection coverage must be in (0, 1]")
         if not 0 < self.exploratory_quantile < 1:
             raise ValueError("exploratory quantile must be in (0, 1)")
+        if self.selection_minimum_score_delta < 0:
+            raise ValueError("selection score delta must be non-negative")
+        if self.latency_reference_ms <= 0:
+            raise ValueError("latency_reference_ms must be positive")
+        if not isinstance(self.require_predictive_intervals, bool):
+            raise TypeError("require_predictive_intervals must be a boolean")
 
     @classmethod
     def from_task(cls, task: TaskManifest) -> "FitnessProfile":
@@ -94,10 +107,18 @@ class FitnessProfile:
             raise TypeError("task must be a TaskManifest")
         raw = task.metadata.get("fitness_profile")
         if raw is None:
+            if task.metadata.get("fitness_profile_digest") is not None:
+                raise ValueError(
+                    "fitness_profile_digest cannot be frozen without fitness_profile"
+                )
             return cls()
         if not isinstance(raw, Mapping):
             raise TypeError("fitness_profile must be an object")
-        return cls(**dict(raw))
+        profile = cls(**dict(raw))
+        supplied_digest = task.metadata.get("fitness_profile_digest")
+        if supplied_digest is not None and supplied_digest != profile.profile_digest:
+            raise ValueError("fitness_profile_digest does not match fitness_profile")
+        return profile
 
     def with_overrides(self, **changes: Any) -> "FitnessProfile":
         """Test/configuration helper that still revalidates the whole profile."""
@@ -126,6 +147,41 @@ class FitnessProfile:
     def profile_digest(self) -> str:
         return digest(self.to_dict())
 
+    def minimum_balanced_samples_per_update(
+        self, *, block_hours: int = PROMOTION_BLOCK_HOURS
+    ) -> int:
+        """Return the smallest balanced hourly cohort that can satisfy all gates."""
+
+        return self.prediction_cell_count * self.minimum_balanced_origins_per_update(
+            block_hours=block_hours
+        )
+
+    @property
+    def prediction_cell_count(self) -> int:
+        return len(self.expected_targets) * len(self.expected_horizons)
+
+    def minimum_balanced_origins_per_update(
+        self, *, block_hours: int = PROMOTION_BLOCK_HOURS
+    ) -> int:
+        """Return forecast origins needed when every origin predicts all cells."""
+
+        if isinstance(block_hours, bool) or not isinstance(block_hours, int) or block_hours < 1:
+            raise ValueError("block_hours must be a positive integer")
+        blocks_for_contiguous_starts = (
+            self.selection_minimum_valid_three_day_starts
+            + self.moving_block_days
+            - 1
+        )
+        required_blocks = max(
+            self.selection_minimum_paired_blocks,
+            blocks_for_contiguous_starts,
+        )
+        samples_per_cell = max(
+            self.selection_minimum_cell_samples,
+            (required_blocks - 1) * block_hours + 1,
+        )
+        return samples_per_cell
+
 
 @dataclass(frozen=True, slots=True)
 class FitnessAssessment:
@@ -148,10 +204,18 @@ class FitnessAssessment:
     slot_index: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             name: getattr(self, name)
             for name in self.__dataclass_fields__
         }
+        # Infinite values are useful as internal ranking sentinels when an
+        # assessment has no usable score or objective cells.  They are not
+        # valid JSON evidence, so expose missing diagnostics as null while
+        # keeping the in-memory ordering semantics unchanged.
+        for name, value in result.items():
+            if isinstance(value, float) and not math.isfinite(value):
+                result[name] = None
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +309,46 @@ def _execution_policy_score(metrics: Mapping[str, Any]) -> float:
     return max(0.0, min(1.0, 1.0 - penalty))
 
 
+def _selection_block_summary(
+    evaluation: Any,
+) -> tuple[set[tuple[str, int]], dict[tuple[str, int], int], tuple[int, ...]] | None:
+    """Return validated cell coverage and calendar indices for selection evidence."""
+
+    evidence = _validated_evidence(evaluation)
+    if evidence is None:
+        return None
+    metrics = getattr(evaluation, "metrics", {})
+    raw = metrics.get("promotion_block_evidence", {}) if isinstance(metrics, Mapping) else {}
+    raw_blocks = raw.get("blocks", ()) if isinstance(raw, Mapping) else ()
+    block_ids_by_index: dict[int, str] = {}
+    for block in raw_blocks:
+        if not isinstance(block, Mapping):
+            return None
+        index = block.get("origin_block_index")
+        block_id = block.get("block_id")
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or not isinstance(block_id, str)
+            or index in block_ids_by_index
+        ):
+            return None
+        block_ids_by_index[index] = block_id
+    if set(block_ids_by_index.values()) != set(evidence["blocks"]):
+        return None
+    counts: dict[tuple[str, int], int] = {}
+    for block_id in block_ids_by_index.values():
+        for key, cell in evidence["blocks"][block_id].items():
+            if int(cell["succeeded"]) > 0:
+                counts[key] = counts.get(key, 0) + 1
+    grid = {
+        (target, horizon)
+        for target in evidence["weights"]
+        for horizon in evidence["horizons"]
+    }
+    return grid, counts, tuple(sorted(block_ids_by_index))
+
+
 def build_fitness_assessment(
     evaluation: Any,
     incumbent: Any | None,
@@ -287,6 +391,23 @@ def build_fitness_assessment(
     cells = _cell_map(evaluation)
     if set(cells) != expected_grid:
         failures.append("objective_grid_incomplete")
+    block_summary = _selection_block_summary(evaluation)
+    if block_summary is None:
+        evidence_grid: set[tuple[str, int]] = set()
+        paired_blocks_by_cell: dict[tuple[str, int], int] = {}
+        block_indices: tuple[int, ...] = ()
+        failures.append("promotion_block_evidence_invalid")
+    else:
+        evidence_grid, paired_blocks_by_cell, block_indices = block_summary
+        if evidence_grid != expected_grid:
+            failures.append("promotion_block_grid_mismatch")
+        if len(block_indices) < profile.selection_minimum_paired_blocks:
+            failures.append("paired_blocks_insufficient")
+        if (
+            len(_legal_starts(block_indices, profile.moving_block_days))
+            < profile.selection_minimum_valid_three_day_starts
+        ):
+            failures.append("continuous_blocks_insufficient")
     incumbent_cells = _cell_map(incumbent) if incumbent is not None else {}
     deltas: list[float] = []
     for key in sorted(expected_grid):
@@ -295,7 +416,7 @@ def build_fitness_assessment(
             continue
         coverage = row.get("sample_execution_coverage", row.get("coverage"))
         count = row.get("n", row.get("succeeded"))
-        blocks = row.get("paired_block_count", profile.selection_minimum_paired_blocks)
+        blocks = paired_blocks_by_cell.get(key)
         if (
             not isinstance(coverage, (int, float))
             or isinstance(coverage, bool)
@@ -305,7 +426,7 @@ def build_fitness_assessment(
             failures.append(f"cell_coverage_insufficient:{key[0]}:{key[1]}")
         if isinstance(count, bool) or not isinstance(count, int) or count < profile.selection_minimum_cell_samples:
             failures.append(f"cell_samples_insufficient:{key[0]}:{key[1]}")
-        if isinstance(blocks, bool) or not isinstance(blocks, int) or blocks < profile.selection_minimum_paired_blocks:
+        if blocks is None or blocks < profile.selection_minimum_paired_blocks:
             failures.append(f"cell_blocks_insufficient:{key[0]}:{key[1]}")
         try:
             current_skill = _cell_skill(row)
@@ -386,6 +507,8 @@ def fitness_ranking_key(assessment: FitnessAssessment) -> tuple[Any, ...]:
         assessment.primary_selection_gate,
         stability if stability is not None else -math.inf,
         assessment.robustness_min_cell_delta,
+        assessment.robustness_lower_quartile_cell_delta,
+        assessment.primary_score,
         assessment.uq_pass_or_not_required,
         -assessment.interval_score if assessment.interval_score is not None else 0.0,
         assessment.execution_policy_score,

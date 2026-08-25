@@ -45,5 +45,25 @@ export function resolvePluginConfig(config = {}, { defaultStaticRoot, env = proc
       600_000,
       "structuredStageTimeoutMs",
     ),
+    researchStageTimeoutMs: positiveInteger(
+      config.researchStageTimeoutMs,
+      1_800_000,
+      "researchStageTimeoutMs",
+    ),
+    structuredStageMinIntervalMs: positiveInteger(
+      config.structuredStageMinIntervalMs,
+      60_000,
+      "structuredStageMinIntervalMs",
+    ),
+    structuredStageFailureCooldownMs: positiveInteger(
+      config.structuredStageFailureCooldownMs,
+      60_000,
+      "structuredStageFailureCooldownMs",
+    ),
+    structuredStageMaxAttempts: positiveInteger(
+      config.structuredStageMaxAttempts,
+      2,
+      "structuredStageMaxAttempts",
+    ),
   });
 }

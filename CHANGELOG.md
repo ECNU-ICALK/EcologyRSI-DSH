@@ -2,6 +2,249 @@
 
 All notable changes to EcologyRSI-DSH are recorded in this file.
 
+## 0.3.26 - 2026-08-24
+
+### Changed
+
+- Publish Researcher and Generation Judge `v6` Skills that distinguish
+  diagnostic ranking from selection evidence and forbid claims that Planner
+  instructions can change Host-owned sampling or prediction-tool values.
+- Split single-candidate judging from batch reflection into separate Skills,
+  and persist one Host-authored rank-to-candidate-to-direction outcome mapping
+  for replay and next-generation research.
+- Require every scientific-parameter direction to declare `increase` or
+  `decrease`, jointly preflight sibling behaviors, and bind the proposer output
+  to that declared sign; predictor and instruction directions use `select`.
+- Make `mutation_direction` mandatory at both the JSON Schema and Python replay
+  boundaries; legacy direction records without it now fail closed.
+- Expose the frozen sample class, cells per origin, origin budget, effective
+  cell budget, unused remainder, selection eligibility, and required terminal
+  outcome as a machine-readable research and reflection contract.
+
+### Fixed
+
+- Reject and semantically retry diagnostic directions whose success criterion
+  requires eligibility, gate passage, or promotion, and instruction-profile
+  directions that claim sampling or numerical forecast effects, while allowing
+  explicit negated invariants such as “RMSE unchanged”.
+- Reject exact parameter assignments hidden in direction prose, reserve legal
+  behavior witnesses across every sibling axis, and retain additional
+  continuous witnesses after all eight hard-avoid slots are occupied.
+- Keep negation local to its actual clause when screening Host-owned claims,
+  recognize English and Chinese parameter-assignment aliases, and generate 16
+  distinct continuous witnesses even when the parent is close to a bound.
+- Report non-divisible budgets accurately: the default 1600-cell budget exposes
+  177 complete nine-cell origins, 1593 effective cells, and 7 unused cells.
+- Give DSH stage requests a timeout long enough for the DSH-owned two-attempt,
+  30-minute research deadline, preventing the sidecar from abandoning a live
+  Researcher and starting duplicate retries after 11 minutes.
+
+## 0.3.25 - 2026-08-24
+
+### Changed
+
+- Preflight every model-authored candidate direction against the frozen parent,
+  registered single-operation mutation contract, compiler, sibling directions,
+  and sufficiently supported hard-failure history before proposal generation.
+- Publish Researcher and Generation Judge `v5` Skills that require each
+  hypothesis to be completely testable by one registered operation.
+
+### Fixed
+
+- Preserve `insufficient_evidence` on current-run cross-generation summaries so
+  one-origin diagnostic candidates remain soft research evidence instead of
+  becoming permanent behavior bans.
+- Compact verbose per-cell tool statistics within the current-run experience
+  budget, preventing later research generations from failing before launch.
+- Reject predictor-switch directions that also require concurrent parameter
+  assignments and return precise Host feedback for a fresh model-authored plan.
+## 0.3.24 - 2026-08-24
+
+### Changed
+
+- Give autonomous research stages an independent 30-minute operational
+  timeout while retaining the bounded timeout for ordinary structured stages.
+- Supply the complete target-horizon objective matrix to search planning,
+  evidence synthesis, and generation reflection, and require research and
+  judging Skills to preserve all nine greenhouse forecast cells.
+- Publish the changed researcher and generation-judge presets under immutable
+  `v4` identities and retire their installed `v3` predecessors on upgrade.
+
+### Fixed
+
+- Treat one-origin diagnostic evidence as a soft research lesson rather than
+  a permanent failed-behavior ban, so later generations can retest a predictor
+  with a distinct parameter or Planner-Skill hypothesis.
+- Keep model-provider retry pacing run-local and prevent a slow research turn
+  from invalidating otherwise healthy multi-agent evolution runs.
+
+## 0.3.23 - 2026-08-24
+
+### Changed
+
+- Use the registered algorithm capability catalog as the single source of
+  predictor/evaluator compatibility for Genome compilation and candidate
+  research boundaries.
+- Precompile every model-authored Genome mutation before candidate creation;
+  invalid predictor/evaluator combinations now enter bounded proposer repair
+  instead of terminating the generation.
+
+### Fixed
+
+- Allow the registered targetwise ridge predictor with the multihorizon v2
+  evaluator and reject the one-hour rolling predictor from both multihorizon
+  evaluators.
+
+## 0.3.22 - 2026-08-24
+
+### Changed
+
+- Require every DSH child to load its role Skill before any prediction or
+  structured-output call, and persist the verified Session event ordering as
+  replayable evidence.
+- Expand autonomous candidate directions from numeric parameters alone to
+  three Host-registered axes: scientific parameters, predictor pipelines, and
+  Planner instruction/Skill profiles.
+- Carry the candidate-selected Planner instruction and Skill profile through
+  proposal persistence, Genome compilation, sample context, and DSH execution.
+- Release the Skill-bearing role presets under immutable `v3` identities and
+  remove superseded `v1`/`v2` presets during installation.
+
+### Fixed
+
+- Reject a candidate whose persisted Agent profile does not match the
+  materialized Genome, preventing evaluation under a different Planner Skill.
+- Make Skill-call evidence mandatory for accepted and replayed structured
+  results, including strict call order for the joint prediction tool.
+
+## 0.3.21 - 2026-08-24
+
+### Changed
+
+- Remove obsolete top-level compatibility modules, v1 role presets, and old
+  catalogue fixtures from the source delivery; the current package and DSH
+  runtime use only the canonical package layout and v2 presets.
+- Extend the native acceptance runner to reattach to an existing `run_id` and
+  use a one-hour default deadline appropriate for fully model-backed stages;
+  require the configured generation count and verify that each later search
+  plan consumes the preceding analysis and reflection digests.
+- Allow complete diagnostic Agent chains to continue across the configured
+  generation budget so cross-generation learning can be exercised cheaply,
+  while keeping diagnostic evidence categorically ineligible for promotion.
+
+### Fixed
+
+- Require same-cohort parent/control replay only for `selection_eligible`
+  generations; multi-generation diagnostic smoke runs now retain the strict
+  no-promotion boundary without failing because deliberately omitted formal
+  control evidence is unavailable.
+- Feed invalid autonomous search plans back to one fresh DSH search Agent for
+  a single bounded semantic rewrite, including the Host limits for query and
+  focus-area lengths; a second invalid result still fails closed and the Host
+  never truncates or invents model research content.
+- Persist the Host `RunCancelled` boundary and close all sidecar admissions
+  before waiting for DSH child-session disposal; a blocked or unavailable DSH
+  runtime can no longer leave the scientific run visibly `running`, pending
+  idempotent retries resume quiescence without appending a second terminal
+  event, and the response still waits for the Host generation lease to drain.
+- Resume a failed Critic from the durable Planner result without invoking the
+  Planner or its registered vector prediction tool a second time.
+- Verify replayed Planner identity, Genome/behavior/instance digests, and the
+  persisted prediction-tool output digest before admitting a Critic retry.
+- Restrict the prediction tool to `sample.plan`, and add direct event lookup so
+  retry recovery does not scan the complete event ledger.
+- Make the diagnostic non-promotion boundary explicit in generation analysis
+  and terminal outcomes instead of relying indirectly on sparse-sample fitness
+  failure.
+- Publish only the safe analysis/reflection provenance digests needed to audit
+  cross-generation context, and distinguish actual prediction budget from the
+  169-origin / 1521-cell selection threshold in the plugin UI.
+- Verify every file in the assembled delivery archive for credentials and make
+  artifact verification independent of removed compatibility modules.
+
+## 0.3.19 - 2026-08-23
+
+### Changed
+
+- Make `dsh-strict-origin-bundle@3` the sole DSH-native sample protocol and
+  remove the obsolete per-cell protocol and all v1 role presets.
+- Require every forecast origin to use a real Planner-owned vector-tool call,
+  one independent Critic, Host scoring, and one post-score Reflector before
+  its checkpoint can become durable.
+- Restrict real DSH-native greenhouse runs to the 3-target × 3-horizon
+  evaluator so one origin always carries all nine prediction cells.
+
+### Fixed
+
+- Consume the DSH Agent tool result even for a one-cell vector, preventing a
+  second Host scalar execution in toy and reduced-grid tests.
+- Add vector prediction tools to every reachable DSH-native evaluator path and
+  verify durable `DshPredictionToolExecuted` events in end-to-end acceptance.
+- Make delivery scripts set a UTF-8 locale in Chinese workspace paths.
+
+## 0.3.18 - 2026-08-23
+
+### Changed
+
+- Pace DSH structured Agent stages and failed-stage cooldowns at 60 seconds by
+  default so providers limited to roughly one request per minute do not turn
+  valid Planner, Critic, Reflector, or Judge work into false sample failures.
+- Retry one transient child-model failure with a fresh reservation and fresh
+  DSH child while keeping schema and identity violations fail closed.
+
+### Fixed
+
+- Defer DSH-native feedback prediction until the Sample Planner selects the
+  registered ridge tool, so one strict forecast origin now performs one real
+  nine-output tool invocation instead of wrapping nine eagerly computed
+  values as nine scalar tool calls.
+- Propagate retryable DSH 5xx/transport failures across sample workers,
+  evaluation, Judge, and generation finalization as resumable remote outages
+  instead of recording them as scientific `tool_error` outcomes.
+- Preserve immutable historical plugin archives by releasing these fixes as a
+  new package instead of replacing `0.3.17`.
+
+## 0.3.17 - 2026-08-23
+
+### Changed
+
+- Give research synthesis and generation reflection one bounded semantic repair
+  attempt carrying the Host validation detail and rejected-output digest.
+- Require every autonomous candidate direction to name exactly one parameter
+  axis registered for the frozen parent Genome, and require the accepted
+  mutation to implement that assigned axis.
+- Select a predictor-matched seed Genome template for new DSH-native runs and
+  derive restored-run mutation boundaries from the persisted parent Genome.
+
+### Fixed
+
+- Prevent valid horizon-targetwise mutations from being rejected against a
+  stale exogenous-ridge task boundary.
+- Preserve immutable historical plugin archives by releasing these fixes as a
+  new package instead of replacing `0.3.16`.
+
+## 0.3.16 - 2026-08-23
+
+### Added
+
+- Add the versioned `dsh-model-search-reflect@1` loop: model-authored search
+  plans, Host-frozen OpenAlex/catalog evidence, evidence-bound multi-direction
+  synthesis, one direction per candidate slot, and post-generation reflection.
+- Aggregate post-score sample-reflection outcome, error-source, and next-action
+  counts into the next generation's safe strategy context.
+
+### Changed
+
+- Execute all target × horizon predictions for one forecast origin through one
+  strict Planner → registered vector tool → Critic → score → Reflector chain.
+- Prioritize strategy-model queries ahead of deterministic Host search hints.
+- Return bounded Host mutation-validation details to proposal retries.
+- Version the autonomous-search and nine-cell forecast personas as immutable
+  `v2` presets while retaining the original `v1` trees for historical replay.
+- Select the bundled DSH plugin archive by the exact Python package version,
+  so historical archives in a source checkout cannot make installation
+  ambiguous.
+
 ## 0.3.15 - 2026-08-21
 
 DSH candidate-proposer convergence patch.

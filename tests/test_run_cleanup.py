@@ -13,9 +13,9 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from ecologyrsi_dsh.api import auto_progress as auto_progress_module
-from ecologyrsi_dsh.ledger import EventLedger
-from ecologyrsi_dsh.models import canonical_json, digest
-from ecologyrsi_dsh.server import EvolutionHTTPServer, EvolutionRequestHandler
+from ecologyrsi_dsh.core.ledger import EventLedger
+from ecologyrsi_dsh.core.models import canonical_json, digest
+from ecologyrsi_dsh.api.handler import EvolutionHTTPServer, EvolutionRequestHandler
 
 
 class RunCleanupHTTPTests(unittest.TestCase):

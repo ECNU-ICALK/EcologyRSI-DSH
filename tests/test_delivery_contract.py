@@ -8,7 +8,7 @@ import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from ecologyrsi_dsh.server import EvolutionHTTPServer
+from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 
 
 class DeliveryContractTests(unittest.TestCase):

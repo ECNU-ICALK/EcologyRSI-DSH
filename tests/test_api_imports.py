@@ -42,6 +42,7 @@ class APIImportIsolationTests(unittest.TestCase):
             "ecologyrsi_dsh.api.projection",
             "ecologyrsi_dsh.api.transport",
             "ecologyrsi_dsh.api.handler",
+            "ecologyrsi_dsh.api.runtime",
         )
         for module in modules:
             with self.subTest(module=module):
@@ -50,40 +51,6 @@ class APIImportIsolationTests(unittest.TestCase):
                     module,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_server_compatibility_exports_remain_importable(self) -> None:
-        result = self._fresh_python(
-            """
-from ecologyrsi_dsh.server import (
-    AUTO_ADVANCE_CONTINUOUS,
-    PLUGIN_MANIFEST,
-    EvolutionHTTPServer,
-    EvolutionRequestHandler,
-    _assert_http_scope,
-    _assert_manifest_http_scope,
-    _auto_advance_steps,
-    _budget_value,
-    _candidate_projection,
-    _derived_seed,
-    _evaluation_partition,
-    _event_type,
-    _expected_partition,
-    _intervention_projection,
-    _is_loopback_host,
-    _max_generations,
-    _parse_steps,
-    _PLUGIN_FILES,
-    _plugin_root,
-    _projection_json,
-    _public_intervention_receipt,
-    _request_integer,
-    _state_payload,
-    serve,
-)
-"""
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-
 
 if __name__ == "__main__":
     unittest.main()

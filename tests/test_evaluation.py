@@ -4,11 +4,12 @@ import json
 import math
 import os
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from ecologyrsi_dsh.core.models import digest
-from ecologyrsi_dsh.datasets import DatasetRegistry, DatasetSeries
-from ecologyrsi_dsh.evaluation import (
+from ecologyrsi_dsh.data.registry import DatasetRegistry, DatasetSeries
+from ecologyrsi_dsh.evaluators.registry import (
     EXOGENOUS_RIDGE_MODEL_ID,
     GREENHOUSE_EVALUATOR_ID,
     GREENHOUSE_MULTIHORIZON_EVALUATOR_ID,
@@ -20,20 +21,24 @@ from ecologyrsi_dsh.evaluation import (
     EvaluationBundle,
     EvaluatorRegistry,
 )
-from ecologyrsi_dsh.greenhouse import FeatureSpec
+from ecologyrsi_dsh.data.greenhouse import FeatureSpec
 from ecologyrsi_dsh.knowledge.algorithms import (
     compile_algorithm_spec,
+    registered_predictor_evaluator_ids,
     resolve_predictor_adoption,
 )
-from ecologyrsi_dsh.models import (
+from ecologyrsi_dsh.core.models import (
     Candidate,
     Evaluation,
     ModelArtifact,
     Proposal,
     TaskManifest,
 )
-from ecologyrsi_dsh.splits import IndexRange
-from ecologyrsi_dsh.evaluators.registry import _aggregate_greenhouse_objective
+from ecologyrsi_dsh.data.splits import IndexRange
+from ecologyrsi_dsh.evaluators.registry import (
+    _aggregate_greenhouse_objective,
+    _select_feedback_update_cohort,
+)
 
 DATASET_ID = "agc_cucumber_2018"
 SPLIT_DIGEST = "s" * 64
@@ -79,6 +84,75 @@ class _JudgeGatewayStub:
             "guidance": "将建议传入下一轮。",
             "parameter_override": self.parameter_override,
         }
+
+
+class _DshOriginRuntimeStub:
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+
+    def run_stage(self, request: dict) -> dict:
+        self.requests.append(request)
+        context = request["request"]["context"]
+        if request["stage"] == "sample.reflect":
+            structured = {
+                "schema_version": "ecology-sample-reflection@1",
+                "wave_digest": context["wave_digest"],
+                "sample_id": context["sample"]["sample_id"],
+                "outcome_class": "neutral",
+                "error_source": "unknown",
+                "next_action": "keep",
+                "confidence": 0.9,
+                "summary": "Keep the complete origin vector for evaluation.",
+            }
+        else:
+            samples = context["samples"]
+            if request["stage"] == "sample.critic":
+                next_tool = "accept"
+                schema_version = "ecology-sample-review@1"
+                reason_code = "accept_prediction"
+            else:
+                next_tool = context["available_tools"][0]["tool_id"]
+                schema_version = "ecology-sample-decisions@1"
+                reason_code = "initial_registered_route"
+            structured = {
+                "schema_version": schema_version,
+                "wave_digest": context["wave_digest"],
+                "decisions": [
+                    {
+                        "sample_id": item["sample_id"],
+                        "next_tool": next_tool,
+                        "reason_code": reason_code,
+                        "confidence": 0.9,
+                    }
+                    for item in samples
+                ],
+            }
+        return {"structured": structured, "result_digest": digest(structured)}
+
+
+class _DshPredictionBindingStub:
+    def __init__(self, values: dict, event_id: str) -> None:
+        self._values = values
+        self._event_id = event_id
+        self._output_digest = digest(values)
+
+    def prediction_bundle(self) -> dict:
+        return self._values
+
+    def audit_receipt(self) -> dict:
+        return {
+            "event_id": self._event_id,
+            "output_digest": self._output_digest,
+            "execution_owner": "dsh_agent_tool_call",
+        }
+
+
+@contextmanager
+def _dsh_prediction_tool_binder(**binding):
+    yield _DshPredictionBindingStub(
+        binding["executor"](),
+        f"{binding['run_id']}:tool:{binding['wave_digest']}",
+    )
 
 
 def _series(
@@ -619,6 +693,22 @@ class GreenhouseEvaluationTests(unittest.TestCase):
                 evaluator["minimum_samples_per_update"],
                 evaluator["prediction_task_count"],
             )
+            self.assertEqual(
+                evaluator["fitness_profile_digest"],
+                digest(evaluator["fitness_profile"]),
+            )
+        self.assertEqual(
+            evaluators[GREENHOUSE_MULTIHORIZON_EVALUATOR_ID][
+                "minimum_selection_samples_per_update"
+            ],
+            1_521,
+        )
+        self.assertEqual(
+            registry.minimum_selection_samples_per_update(
+                GREENHOUSE_MULTIHORIZON_EVALUATOR_ID
+            ),
+            1_521,
+        )
         self.assertEqual(
             evaluators[GREENHOUSE_MULTIHORIZON_EVALUATOR_ID]["prediction_model_ids"],
             [
@@ -627,20 +717,22 @@ class GreenhouseEvaluationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            evaluators[GREENHOUSE_MULTIHORIZON_EVALUATOR_ID][
-                "configuration_digest"
-            ],
-            "4ace89b5759e802b3c66980fc09f0ffe4238f46b96e3708a12a4a806d9c59624",
+            len(
+                evaluators[GREENHOUSE_MULTIHORIZON_EVALUATOR_ID][
+                    "configuration_digest"
+                ]
+            ),
+            64,
         )
         profile = registry.objective_profile(GREENHOUSE_MULTIHORIZON_EVALUATOR_ID)
-        self.assertEqual(profile["objective_aggregation_version"], "weighted_task_skill_reward@2")
+        self.assertEqual(profile["objective_aggregation_version"], "weighted_task_skill_reward@3")
         self.assertEqual(profile["baseline_profile_version"], "fit_selected_persistence_or_seasonal_24h@1")
         self.assertEqual(profile["minimum_practical_score_delta"], 0.005)
         self.assertEqual(profile["confidence_method"], "paired_moving_block_bootstrap@1")
         self.assertEqual(profile["block_hours"], 24)
         self.assertEqual(profile["bootstrap_resamples"], 1000)
-        self.assertEqual(profile["maximum_blocks"], 128)
-        self.assertEqual(profile["minimum_paired_blocks"], 4)
+        self.assertNotIn("maximum_blocks", profile)
+        self.assertEqual(profile["minimum_paired_blocks"], 8)
         self.assertEqual(profile["normalization_scale_method"], "training_fit_std_floor@1")
         self.assertEqual(profile["objective_component_bound"], 1.0)
         self.assertEqual(profile["baseline_selection_tolerance"], 1e-12)
@@ -666,6 +758,16 @@ class GreenhouseEvaluationTests(unittest.TestCase):
                 GREENHOUSE_MULTIHORIZON_EVALUATOR_ID,
                 GREENHOUSE_ROLLING_PREDICTOR_ID,
             )
+
+        for evaluator_id, evaluator in evaluators.items():
+            for predictor in registry.predictor_catalog():
+                predictor_id = predictor["id"]
+                self.assertEqual(
+                    predictor_id in evaluator["prediction_model_ids"],
+                    evaluator_id
+                    in registered_predictor_evaluator_ids(predictor_id),
+                    f"compatibility drift for {predictor_id} and {evaluator_id}",
+                )
 
     def test_targetwise_ridge_runs_full_evaluator_with_co2_persistence(self) -> None:
         parameters = {
@@ -745,6 +847,22 @@ class GreenhouseEvaluationTests(unittest.TestCase):
         self.assertAlmostEqual(
             bundle.evaluation.metrics["overall_reward"],
             bundle.evaluation.metrics["weighted_normalized_mean_reward"],
+        )
+        self.assertAlmostEqual(
+            bundle.evaluation.metrics["primary_fitness"],
+            bundle.evaluation.metrics["objective_score"],
+        )
+        self.assertEqual(
+            bundle.evaluation.metrics["primary_fitness_definition"],
+            "weighted_symmetric_rmse_skill@1",
+        )
+        self.assertAlmostEqual(
+            bundle.evaluation.metrics["auxiliary_mae_reward"],
+            bundle.evaluation.metrics["overall_reward"],
+        )
+        self.assertEqual(
+            bundle.evaluation.metrics["auxiliary_mae_reward_definition"],
+            bundle.evaluation.metrics["reward_definition"],
         )
 
     def test_horizon_targetwise_ridge_routes_cell_specific_parameters(self) -> None:
@@ -869,18 +987,18 @@ class GreenhouseEvaluationTests(unittest.TestCase):
 
         registry = EvaluatorRegistry(_DatasetStub(_series()))  # type: ignore[arg-type]
         implementations = {
-            "toy_time_forward@1": ("toy-forward-split/3", "toy-forward-split/2"),
+            "toy_time_forward@1": ("toy-forward-split/6", "toy-forward-split/5"),
             GREENHOUSE_EVALUATOR_ID: (
+                "greenhouse-one-hour-forward/8",
                 "greenhouse-one-hour-forward/7",
-                "greenhouse-one-hour-forward/6",
             ),
             GREENHOUSE_MULTIHORIZON_EVALUATOR_ID: (
-                "greenhouse-multihorizon-forward/6",
-                "greenhouse-multihorizon-forward/5",
-            ),
-            GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID: (
                 "greenhouse-multihorizon-forward/7",
                 "greenhouse-multihorizon-forward/6",
+            ),
+            GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID: (
+                "greenhouse-multihorizon-forward/8",
+                "greenhouse-multihorizon-forward/7",
             ),
         }
         for item in registry.catalog():
@@ -891,6 +1009,7 @@ class GreenhouseEvaluationTests(unittest.TestCase):
                 "evaluation_partition": item["evaluation_partition"],
                 "prediction_model_ids": item["prediction_model_ids"],
                 "horizons_hours": item["horizons_hours"],
+                "fitness_profile": item["fitness_profile"],
             }
             if item.get("objective_profile") == "greenhouse_equal_weight_skill@1":
                 scoring_contract = registry.objective_profile(item["id"])
@@ -912,7 +1031,7 @@ class GreenhouseEvaluationTests(unittest.TestCase):
         task_data["metadata"] = {
             **task_data["metadata"],
             "prediction_model_id": EXOGENOUS_RIDGE_MODEL_ID,
-            "evaluator_id": GREENHOUSE_MULTIHORIZON_EVALUATOR_ID,
+            "evaluator_id": GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
             "samples_per_update": 18,
         }
         task = TaskManifest.from_dict(task_data)
@@ -979,6 +1098,130 @@ class GreenhouseEvaluationTests(unittest.TestCase):
         self.assertEqual(
             next_generation.evaluation.metrics["feedback_update_window_offset"], 18
         )
+
+    def test_origin_bundled_cohort_selects_complete_nine_cell_vectors(self) -> None:
+        rows = [
+            {
+                "partition": "training_feedback",
+                "target": target,
+                "horizon_hours": horizon,
+                "origin_timestamp": origin,
+                "target_timestamp": origin + horizon,
+            }
+            for origin in range(5)
+            for target in (
+                "air_temperature",
+                "relative_humidity",
+                "co2_concentration",
+            )
+            for horizon in (1, 6, 24)
+        ]
+
+        selected, evidence = _select_feedback_update_cohort(
+            rows,
+            generation=0,
+            samples_per_update=18,
+            dataset_digest="d" * 64,
+            split_manifest_digest="s" * 64,
+            bundle_complete_origins=True,
+        )
+
+        self.assertEqual(len(selected), 18)
+        self.assertEqual({row["origin_timestamp"] for row in selected}, {0, 1})
+        self.assertEqual(evidence["selected_origin_count"], 2)
+        self.assertEqual(evidence["prediction_cells_per_origin"], 9)
+        self.assertEqual(
+            {
+                (row["target"], row["horizon_hours"])
+                for row in selected
+                if row["origin_timestamp"] == 0
+            },
+            {
+                (target, horizon)
+                for target in (
+                    "air_temperature",
+                    "relative_humidity",
+                    "co2_concentration",
+                )
+                for horizon in (1, 6, 24)
+            },
+        )
+
+    def test_dsh_native_ridge_is_invoked_once_per_nine_cell_origin(self) -> None:
+        series = _cohort_series()
+        runtime = _DshOriginRuntimeStub()
+        task_data = _task().to_dict()
+        task_data["metadata"] = {
+            **task_data["metadata"],
+            "prediction_model_id": EXOGENOUS_RIDGE_MODEL_ID,
+            "evaluator_id": GREENHOUSE_MULTIHORIZON_EVALUATOR_ID,
+            "sample_agent_mode": "dsh_native_workflow",
+            "sample_agent_protocol": "dsh-strict-origin-bundle@3",
+            "sample_agent_batch_size": 9,
+            "sample_concurrency": 1,
+            "prediction_cells_per_origin": 9,
+            "samples_per_update": 9,
+            "strategy_model_id": "dsh/strategy",
+            "review_model_id": "dsh/review",
+        }
+        task = TaskManifest.from_dict(task_data)
+        proposal = Proposal(
+            proposal_id="proposal:dsh-origin-ridge",
+            run_id="run:dsh-origin-ridge",
+            generation=0,
+            title="DSH origin-vector ridge",
+            changes={
+                "history_steps": 3,
+                "ridge_alpha": 0.1,
+                "residual_scale": 1.0,
+            },
+        )
+        candidate = Candidate(
+            candidate_id="candidate:dsh-origin-ridge",
+            run_id=proposal.run_id,
+            proposal_id=proposal.proposal_id,
+            generation=0,
+        )
+        registry = EvaluatorRegistry(
+            _DatasetStub(series),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            dsh_runtime_provider=lambda: runtime,
+            dsh_revision_provider=lambda _run_id: {
+                "run_state_revision": 1,
+                "ledger_expected_revision": 1,
+            },
+            dsh_identity_provider=lambda _run_id, _candidate_id: {
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            dsh_prediction_tool_binder=_dsh_prediction_tool_binder,
+        )
+
+        bundle = registry.evaluate_scientific(task, candidate, proposal)
+
+        summary = bundle.evaluation.metrics["sample_execution"]
+        self.assertEqual(
+            [item["stage"] for item in runtime.requests],
+            ["sample.plan", "sample.critic", "sample.reflect"],
+        )
+        self.assertEqual(
+            len(runtime.requests[0]["request"]["context"]["samples"]), 9
+        )
+        self.assertEqual(summary["attempted_origin_samples"], 1)
+        self.assertEqual(summary["prediction_cell_count"], 9)
+        self.assertEqual(summary["registered_prediction_tool_invocations"], 1)
+        self.assertEqual(summary["dsh_agent_prediction_tool_invocations"], 1)
+        registered_tool_evidence = {
+            (
+                tool["input_digest"],
+                tool["output_digest"],
+            )
+            for record in bundle.evaluation.metrics["sample_execution_records"]
+            for tool in record.get("tool_trace", ())
+            if tool.get("tool_id") == EXOGENOUS_RIDGE_MODEL_ID.removesuffix("@1")
+        }
+        self.assertEqual(len(registered_tool_evidence), 1)
 
     def test_legacy_manifest_keeps_full_feedback_cohort(self) -> None:
         series = _cohort_series()

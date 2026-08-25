@@ -211,7 +211,7 @@
 
   function normalizedSamplesPerUpdate(value) {
     var parsed = Math.floor(Number(value));
-    if (!Number.isFinite(parsed) || parsed < 1) { return 500; }
+    if (!Number.isFinite(parsed) || parsed < 1) { return 1600; }
     return Math.min(parsed, 100000);
   }
 
@@ -224,6 +224,12 @@
   function normalizedSampleConcurrency(value) {
     var parsed = Math.floor(Number(value));
     if (!Number.isFinite(parsed) || parsed < 1) { return 2; }
+    return Math.min(parsed, 8);
+  }
+
+  function normalizedCandidateConcurrency(value) {
+    var parsed = Math.floor(Number(value));
+    if (!Number.isFinite(parsed) || parsed < 1) { return 4; }
     return Math.min(parsed, 8);
   }
 
@@ -260,9 +266,12 @@
   function createRun(payload) {
     if (!hasCapability("evolution.run.create")) { showToast("当前 DSH 会话未授予创建进化运行的能力。"); return Promise.resolve(null); }
     var requestedSamplesPerUpdate = normalizedSamplesPerUpdate(payload.samples_per_update);
-    var minimumSamplesPerUpdate = samplesPerUpdateMinimum();
+    var minimumSamplesPerUpdate = samplesPerUpdateSelectionMinimum();
     if (requestedSamplesPerUpdate < minimumSamplesPerUpdate) {
-      showToast("每次更新样本数不足：当前评测至少需要 " + formatNumber(minimumSamplesPerUpdate) + " 个，确保每个目标与预测时距至少出现一次。");
+      var evaluator = selectedCatalogItem("evaluators", "#evaluator-id");
+      var cellsPerOrigin = Math.max(1, Number(evaluator && evaluator.prediction_task_count) || 1);
+      var minimumOrigins = Number(evaluator && evaluator.minimum_selection_origin_samples_per_update) || Math.ceil(minimumSamplesPerUpdate / cellsPerOrigin);
+      showToast("每次更新预测单元不足：严格 DSH 评测至少需要 " + formatNumber(minimumOrigins) + " 个完整预测时点（" + formatNumber(minimumSamplesPerUpdate) + " 个评分单元）。");
       var samplesPerUpdateField = $("#samples-per-update");
       if (samplesPerUpdateField && typeof samplesPerUpdateField.focus === "function") { samplesPerUpdateField.focus(); }
       return Promise.resolve(null);
@@ -291,6 +300,7 @@
       model_workflow: payload.model_workflow || "research_compile_evolve@1",
       knowledge_online_enabled: payload.knowledge_online_enabled,
       samples_per_update: requestedSamplesPerUpdate,
+      candidate_concurrency: normalizedCandidateConcurrency(payload.candidate_concurrency),
       sample_agent_batch_size: normalizedSampleAgentBatchSize(payload.sample_agent_batch_size),
       sample_concurrency: normalizedSampleConcurrency(payload.sample_concurrency),
       budget: {
@@ -301,38 +311,6 @@
       seed_policy: payload.fixed_seed ? "fixed" : "generated_and_recorded",
       requested_mode: "autonomous", auto_advance: payload.auto_advance === 0 ? 0 : continuousAutoAdvance ? true : 1
     };
-    var reusableRun = state.runs.find(function (run) { return pendingRunMatchesRequest(run, body); });
-    if (reusableRun) {
-      if (body.auto_advance === 0) { state.autoAdvanceOptOutRunIds[reusableRun.id] = true; }
-      else { delete state.autoAdvanceOptOutRunIds[reusableRun.id]; }
-      state.workspace = "process";
-      return selectRun(reusableRun.id, false).then(function (selected) {
-        if (!selected || !state.activeRun) {
-          showToast("检测到相同配置的等待运行，但重新读取失败。请刷新后重试。");
-          return null;
-        }
-        if (!pendingRunMatchesRequest(state.activeRun, body)) {
-          showToast("相同配置的运行状态已经变化。请再次启动以创建新运行。");
-          return null;
-        }
-        if (body.auto_advance > 0) {
-          if (serverAutoProgressEnabled(state.activeRun)) {
-            state.createStatus = createStatusForRun(state.activeRun, state.events);
-            ensureAutoAdvanceForRun(state.activeRun.id);
-            showToast("已切换到相同配置的运行。" + state.createStatus.message);
-            return state.activeRun;
-          }
-          showToast("已有相同配置的运行等待推进，正在继续执行首轮。");
-          return Promise.resolve(advanceRun({ automatic: true })).then(function () {
-            state.createStatus = createStatusForRun(state.activeRun, state.events);
-            ensureAutoAdvanceForRun(state.activeRun && state.activeRun.id);
-            return state.activeRun;
-          });
-        }
-        showToast("已有相同配置的运行等待推进，已切换到该运行。");
-        return state.activeRun;
-      });
-    }
     var signature = JSON.stringify(body);
     body.idempotency_key = commandKey("create", signature);
     state.busy = true;
@@ -398,38 +376,6 @@
       if (["true", "1", "yes", "on", "是"].indexOf(normalized) >= 0) { return true; }
     }
     return Boolean(value);
-  }
-
-  function pendingRunMatchesRequest(run, requestBody) {
-    // A server-managed continuous run is intentionally reusable while it is
-    // active: its worker owns the generation boundary and a second create
-    // request must not fork an identical search. Legacy runs are reusable only
-    // at a boundary where the browser is allowed to issue the next advance.
-    var autoManagedRunning = serverAutoProgressEnabled(run) && String(run.status || "").toLowerCase() === "running";
-    if (!autoManagedRunning && !runNeedsAdvanceAction(run, run && run.events)) { return false; }
-    var configuration = run.configuration || {};
-    var budget = run.budget || {};
-    var requestedBudget = requestBody.budget || {};
-    var effectiveBudget = normalizedEvolutionBudget(
-      requestBody.rounds || requestedBudget.max_generations,
-      requestedBudget.candidates_per_generation,
-      requestedBudget.max_candidates
-    );
-    return sameOptionalText(configuration.dataset_id || run.dataset_id, requestBody.dataset_id)
-      && sameOptionalText(configuration.episode_id || run.episode_id, requestBody.episode_id)
-      && sameOptionalText(configuration.execution_protocol || run.execution_protocol, requestBody.execution_protocol)
-      && sameOptionalText(configuration.strategy_model_id || configuration.policy_model_id, requestBody.strategy_model_id)
-      && sameOptionalText(configuration.review_model_id || configuration.judge_model_id, requestBody.review_model_id)
-      && normalizedBoolean(configuration.autonomous_mode) === normalizedBoolean(requestBody.autonomous_mode)
-      && sameOptionalText(configuration.model_workflow, requestBody.model_workflow)
-      && normalizedBoolean(configuration.knowledge_online_enabled) === normalizedBoolean(requestBody.knowledge_online_enabled)
-      && Number(run.total_generations || budget.max_generations || 0) === effectiveBudget.max_generations
-      && Number(run.candidates_per_generation || budget.candidates_per_generation || 0) === effectiveBudget.candidates_per_generation
-      && Number(run.max_candidates || budget.max_candidates || 0) === effectiveBudget.max_candidates
-      && Number(run.samples_per_update || configuration.samples_per_update || 0) === normalizedSamplesPerUpdate(requestBody.samples_per_update)
-      && Number(run.sample_agent_batch_size || configuration.sample_agent_batch_size || 0) === normalizedSampleAgentBatchSize(requestBody.sample_agent_batch_size)
-      && Number(run.sample_concurrency || configuration.sample_concurrency || 0) === normalizedSampleConcurrency(requestBody.sample_concurrency)
-      && sameOptionalText(run.seed_policy, requestBody.seed_policy);
   }
 
   function controlRun(action) {

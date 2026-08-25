@@ -15,7 +15,7 @@ import ecologyrsi_dsh.evaluators.sample_execution as sample_execution_module
 from ecologyrsi_dsh.core.models import Candidate, Proposal, TaskManifest
 from ecologyrsi_dsh.core.sample_results import build_sample_results
 from ecologyrsi_dsh.core.state import validate_evaluation_progress_payload
-from ecologyrsi_dsh.data.registry import DatasetSeries
+from ecologyrsi_dsh.data.registry import DatasetRegistry, DatasetSeries
 from ecologyrsi_dsh.evaluators.gateway_sample_adapter import (
     GatewaySampleCollaborationAdapter,
     GatewaySampleTool,
@@ -55,7 +55,7 @@ from ecologyrsi_dsh.integrations.model_gateway import (
     GatewayResponseError,
     ModelGateway,
 )
-from ecologyrsi_dsh.splits import IndexRange
+from ecologyrsi_dsh.data.splits import IndexRange
 
 
 class _DatasetStub:
@@ -1419,6 +1419,48 @@ class SampleExecutionTests(unittest.TestCase):
             {row["sample_id"] for row in batch.scoring_rows[1:]},
         )
         self.assertNotIn(persisted[0]["sample_id"], published_ids)
+
+    def test_checkpoint_resume_accepts_fit_selected_scoring_baseline(self):
+        rows = _rows()
+        first = self.execute(_FailureAdapter(), rows=rows)
+        finalized = dict(first.scoring_rows[0])
+        model_reference_baseline = float(finalized["baseline"])
+        finalized.update(
+            {
+                "baseline": model_reference_baseline - 1.0,
+                "baseline_id": "seasonal_24h",
+                "baseline_profile_digest": "a" * 64,
+                "model_reference_baseline": model_reference_baseline,
+            }
+        )
+        persisted = build_sample_results("candidate:test", (finalized,))
+        adapter = _FailureAdapter()
+
+        batch = CollaborativeSampleExecutor(
+            adapter, sleep=lambda _: None
+        ).execute(
+            rows,
+            context={
+                "candidate_id": "candidate:test",
+                "dataset_digest": "dataset:test",
+                "algorithm_id": "algorithm",
+                "algorithm_version": "1",
+            },
+            target_bounds={
+                "x": {"unit": "u", "minimum": -100.0, "maximum": 100.0}
+            },
+            algorithm_id="algorithm",
+            algorithm_version="1",
+            policy=SampleExecutionPolicy(max_attempts=1),
+            checkpoint_callback=lambda _descriptor: {
+                "rows": persisted,
+                "progress": None,
+            },
+        )
+
+        self.assertEqual(adapter.sample_calls, 2)
+        self.assertEqual(batch.summary["checkpoint_resumed_examples"], 1)
+        self.assertEqual(len(batch.scoring_rows), 3)
 
     def test_resumed_failure_stops_before_gateway_submission(self):
         rows = _many_rows(4)
@@ -4879,12 +4921,75 @@ class SampleExecutionTests(unittest.TestCase):
         summary = bundle.evaluation.metrics["sample_execution"]
         self.assertEqual(summary["failed_examples"], 0)
         self.assertTrue(summary["tool_performance"])
+        scientific_cells = {
+            (item["target"], item["horizon_hours"]): item
+            for item in bundle.evaluation.metrics["targets"]
+        }
+        tool_cells = {
+            (item["target"], item["horizon_hours"]): item
+            for item in summary["tool_performance"]
+        }
+        self.assertEqual(set(tool_cells), set(scientific_cells))
+        for cell, scientific in scientific_cells.items():
+            with self.subTest(cell=cell):
+                tool = tool_cells[cell]
+                self.assertAlmostEqual(
+                    tool["baseline_rmse"], scientific["baseline_rmse"]
+                )
+                self.assertAlmostEqual(tool["skill_score"], scientific["skill_score"])
         self.assertTrue(
             all(
                 record.get("attempt_trace")
                 for record in bundle.evaluation.metrics["sample_execution_records"]
             )
         )
+
+    def test_multihorizon_tool_performance_uses_fit_selected_baseline(self):
+        series = _series()
+        gateway = _SampleDecisionGatewayFake()
+        task = TaskManifest(
+            task_id="remote-multihorizon-tool-baseline",
+            objective="align tool feedback with the scientific baseline",
+            domain_pack="greenhouse_cucumber_2018",
+            visible_datasets=(series.dataset_id,),
+            metadata={
+                "evaluator_id": GREENHOUSE_MULTIHORIZON_EVALUATOR_ID,
+                "prediction_model_id": EXOGENOUS_RIDGE_MODEL_ID,
+                "episode_id": series.episode_id,
+                "dataset_digest": series.digest,
+                "split_manifest_digest": series.split_manifest_digest_sha256,
+                "sample_agent_mode": "gateway_microbatch",
+                "sample_agent_batch_size": 64,
+                "strategy_model_id": "strategy-model",
+                "review_model_id": "review-model",
+            },
+        )
+        candidate, proposal = _candidate(
+            {"history_steps": 3, "ridge_alpha": 0.1, "residual_scale": 0.5}
+        )
+
+        bundle = EvaluatorRegistry(
+            _DatasetStub(series), model_gateway=gateway
+        ).evaluate_scientific(task, candidate, proposal)
+
+        scientific_cells = {
+            (item["target"], item["horizon_hours"]): item
+            for item in bundle.evaluation.metrics["targets"]
+        }
+        tool_cells = {
+            (item["target"], item["horizon_hours"]): item
+            for item in bundle.evaluation.metrics["sample_execution"][
+                "tool_performance"
+            ]
+        }
+        self.assertEqual(set(tool_cells), set(scientific_cells))
+        for cell, scientific in scientific_cells.items():
+            with self.subTest(cell=cell):
+                tool = tool_cells[cell]
+                self.assertAlmostEqual(
+                    tool["baseline_rmse"], scientific["baseline_rmse"]
+                )
+                self.assertAlmostEqual(tool["skill_score"], scientific["skill_score"])
 
     def test_remote_rolling_evaluation_only_executes_selected_tool(self):
         series = _series()
@@ -5100,6 +5205,56 @@ class SampleExecutionTests(unittest.TestCase):
                 sample_executor=executor,
             ).evaluate_scientific(task, candidate, proposal)
             self._assert_evidence(bundle.evaluation.metrics)
+
+    def test_native_toy_evaluation_uses_compact_fixture_split(self):
+        executor = CollaborativeSampleExecutor(sleep=lambda _: None)
+        datasets = DatasetRegistry()
+        series = datasets.series(TOY_DATASET_ID)
+        task = TaskManifest(
+            task_id="native-toy-samples",
+            objective="exercise the toy fixture through the native runtime",
+            domain_pack="crop_soil_water",
+            visible_datasets=(TOY_DATASET_ID,),
+            metadata={
+                "execution_protocol": "dsh_native_plugin_evolution@1",
+                "evaluator_id": TOY_EVALUATOR_ID,
+                "prediction_model_id": TOY_PREDICTOR_MODEL_ID,
+                "episode_id": series.episode_id,
+                "dataset_digest": series.digest,
+                "split_manifest_digest": series.split_manifest_digest_sha256,
+                "samples_per_update": 18,
+            },
+        )
+        candidate, proposal = _candidate(
+            {"alpha": 0.4, "window": 5, "water_threshold": 0.4}
+        )
+
+        registry = EvaluatorRegistry(
+            datasets,
+            model_gateway=object(),
+            sample_executor=executor,
+        )
+        with patch.object(registry, "_dsh_sample_stage_context", return_value={}):
+            bundle = registry.evaluate_scientific(task, candidate, proposal)
+
+        self.assertEqual(bundle.artifact.model_id, TOY_PREDICTOR_MODEL_ID)
+        self.assertEqual(len(bundle.evaluation.metrics["evaluation_index_digest"]), 64)
+        self.assertAlmostEqual(
+            bundle.evaluation.score,
+            (
+                bundle.evaluation.metrics["baseline_rmse"]
+                - bundle.evaluation.metrics["rmse"]
+            )
+            / max(
+                bundle.evaluation.metrics["rmse"],
+                bundle.evaluation.metrics["baseline_rmse"],
+            ),
+        )
+        self.assertEqual(
+            bundle.evaluation.metrics["primary_fitness_definition"],
+            "symmetric_rmse_skill_vs_persistence@1",
+        )
+        self._assert_evidence(bundle.evaluation.metrics)
 
     def _assert_evidence(self, metrics):
         summary = metrics["sample_execution"]

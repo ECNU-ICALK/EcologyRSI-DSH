@@ -2,6 +2,9 @@ UV_PYTHON := $(shell command -v uv >/dev/null 2>&1 && uv python find --no-projec
 VENV_PYTHON := $(wildcard .venv/bin/python)
 PYTHON ?= $(if $(UV_PYTHON),$(UV_PYTHON),$(if $(VENV_PYTHON),$(VENV_PYTHON),python3))
 SOURCE_PATH := $(CURDIR)/src
+export LANG := en_US.UTF-8
+export LC_ALL := en_US.UTF-8
+export PYTHONUTF8 := 1
 
 .PHONY: help test verify release verify-artifacts
 

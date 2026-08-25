@@ -4,13 +4,18 @@ import { RoleAgentManager } from "./agents.js";
 import { NativeStageRunner } from "./stage-runner.js";
 
 const DEFAULT_PRESETS = Object.freeze([
-  "ecology-coordinator-v1",
-  "ecology-researcher-v1",
-  "ecology-candidate-proposer-v1",
-  "ecology-sample-planner-v1",
-  "ecology-sample-critic-v1",
-  "ecology-generation-judge-v1",
-].map((preset_id) => ({ preset_id, required_tools: [] })));
+  "ecology-coordinator-v3",
+  "ecology-researcher-v6",
+  "ecology-candidate-proposer-v3",
+  "ecology-sample-planner-v3",
+  "ecology-sample-critic-v3",
+  "ecology-generation-judge-v6",
+].map((preset_id) => ({
+  preset_id,
+  required_tools: preset_id === "ecology-sample-planner-v3"
+    ? ["ecology_execute_prediction_tool", "skill"]
+    : ["skill"],
+})));
 
 export class RuntimeController {
   constructor(ctx, { registry = new RuntimeRunRegistry(), presetCatalog = DEFAULT_PRESETS, stageRunner = null } = {}) {
@@ -56,7 +61,7 @@ export class RuntimeController {
     const reviewModel = frozen.review_model_id;
     try {
       await Promise.all(this.presetCatalog.map(({ preset_id }) => {
-      const role = preset_id.replace(/^ecology-/, "").replace(/-v1$/, "");
+      const role = preset_id.replace(/^ecology-/, "").replace(/-v\d+$/, "");
       const reviewRole = role === "sample-critic" || role === "generation-judge";
       return this.roleAgents.createRoleAgent({
         run_id: binding.run_id,
@@ -90,9 +95,22 @@ export class RuntimeController {
   async runStage(binding) {
     if (!this.stageRunner?.run) throw new Error("structured DSH stage runner is unavailable");
     const stageResult = await this.stageRunner.run(binding);
-    const accepted = await this.#mutation(binding, "running");
+    if (
+      stageResult?.skill_invocation_evidence?.first_tool_call_verified !== true
+      || stageResult?.skill_invocation_evidence?.order_verified !== true
+    ) {
+      throw new Error("DSH stage has no verified Skill-first execution evidence");
+    }
+    // Stage completion updates its frozen revision receipt but never owns run
+    // control. Pause/cancel may have won while this child was in flight.
+    const accepted = this.registry.refresh(binding);
     return {
-      ...accepted,
+      accepted: true,
+      run_id: accepted.run_id,
+      run_state_revision: accepted.run_state_revision,
+      stage_attempt: accepted.stage_attempt,
+      ledger_expected_revision: accepted.ledger_expected_revision,
+      idempotency_key: accepted.idempotency_key,
       structured: stageResult.structured,
       result_digest: stageResult.result_digest,
       session_id: stageResult.session_id,

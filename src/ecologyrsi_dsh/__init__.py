@@ -5,16 +5,9 @@ standard library.  A :class:`EvolutionDirector` owns the small state machine;
 all mutations are persisted as events before a projection is returned.
 """
 
-from .dsh import DSHAdapter, FakeDSHAdapter, MockDSHAdapter, StrategyRouterDSHAdapter
-from .director import EvolutionDirector, RunState
-from .ledger import Event, EventLedger
-from .model_gateway import (
-    GatewayConfigurationError,
-    GatewayResponseError,
-    ModelConnection,
-    ModelGateway,
-)
-from .models import (
+from .core.director import EvolutionDirector, RunState
+from .core.ledger import Event, EventLedger
+from .core.models import (
     Candidate,
     CandidateStatus,
     Evaluation,
@@ -31,7 +24,18 @@ from .models import (
     RunStatus,
     TaskManifest,
 )
-from .toy import Observation, ToyCropSoilWater
+from .data.toy import Observation, ToyCropSoilWater
+from .evolution.strategies import (
+    DSHAdapter,
+    FakeDSHAdapter,
+    StrategyRouterDSHAdapter,
+)
+from .integrations.model_gateway import (
+    GatewayConfigurationError,
+    GatewayResponseError,
+    ModelConnection,
+    ModelGateway,
+)
 from .version import __version__
 
 __all__ = [
@@ -50,7 +54,6 @@ __all__ = [
     "FakeDSHAdapter",
     "GatewayConfigurationError",
     "GatewayResponseError",
-    "MockDSHAdapter",
     "ModelConnection",
     "ModelGateway",
     "ModelArtifact",

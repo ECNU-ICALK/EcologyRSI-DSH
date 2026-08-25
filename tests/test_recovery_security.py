@@ -12,9 +12,9 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from ecologyrsi_dsh.server import EvolutionHTTPServer, EvolutionRequestHandler
-from ecologyrsi_dsh.ledger import EventLedger, SCHEMA_VERSION
-from ecologyrsi_dsh.models import canonical_json, digest
+from ecologyrsi_dsh.api.handler import EvolutionHTTPServer, EvolutionRequestHandler
+from ecologyrsi_dsh.core.ledger import EventLedger, SCHEMA_VERSION
+from ecologyrsi_dsh.core.models import canonical_json, digest
 
 
 class LedgerMigrationTests(unittest.TestCase):

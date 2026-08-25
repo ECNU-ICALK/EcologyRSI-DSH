@@ -10,7 +10,7 @@ from typing import Any
 
 OBJECTIVE_COMPONENT_BOUND = 1.0
 OBJECTIVE_MISSING_PENALTY = -1.0
-OBJECTIVE_AGGREGATION_VERSION = "weighted_task_skill_reward@2"
+OBJECTIVE_AGGREGATION_VERSION = "weighted_task_skill_reward@3"
 DEFAULT_TARGET_WEIGHTS = {
     "air_temperature": 1 / 3,
     "relative_humidity": 1 / 3,
@@ -40,7 +40,14 @@ def clip_normalized_objective(
 
 
 def skill_score(candidate_nrmse: float, baseline_nrmse: float) -> float:
-    """Return bounded relative RMSE improvement over a baseline."""
+    """Return a bounded, monotonic relative RMSE improvement over a baseline.
+
+    Dividing by the larger RMSE keeps the score in ``[-1, 1]`` without
+    collapsing every candidate worse than twice the baseline onto ``-1``.
+    Positive scores retain the familiar ``1 - candidate / baseline``
+    interpretation, while negative scores continue to distinguish poor
+    candidates during exploratory ranking.
+    """
 
     for name, value in (
         ("candidate_nrmse", candidate_nrmse),
@@ -55,11 +62,10 @@ def skill_score(candidate_nrmse: float, baseline_nrmse: float) -> float:
             raise ValueError(f"{name} must be a finite non-negative number")
     candidate = float(candidate_nrmse)
     baseline = float(baseline_nrmse)
-    if baseline > 1e-12:
-        value = 1.0 - candidate / baseline
-    else:
-        value = 0.0 if candidate <= 1e-12 else -1.0
-    return clip_normalized_objective(value)
+    denominator = max(candidate, baseline)
+    if denominator <= 1e-12:
+        return 0.0
+    return (baseline - candidate) / denominator
 
 
 def normalized_absolute_error_reward(

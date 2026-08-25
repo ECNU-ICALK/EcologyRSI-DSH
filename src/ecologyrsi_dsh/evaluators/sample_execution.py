@@ -19,10 +19,16 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 
+from ..core.errors import (
+    DshNativeRuntimeUnavailableError,
+    dsh_native_runtime_error_in_chain,
+    dsh_native_runtime_retryable,
+)
 from ..core.models import canonical_json, digest
 from ..core.redaction import safe_remote_reason_code
 from ..evolution.execution_plan import DerivedExecutionPlan
 from ..integrations.model_gateway import gateway_error_in_chain
+from .objectives import skill_score
 
 SAMPLE_EXECUTION_SCHEMA_VERSION = "ecologyrsi-dsh.sample-execution/2"
 SAMPLE_EXECUTION_TRACE_ARCHIVE_VERSION = "ecologyrsi-dsh.sample-execution-trace/2"
@@ -56,6 +62,9 @@ _FORBIDDEN_SAMPLE_CONTEXT_TOKENS = frozenset(
     for name in _FORBIDDEN_SAMPLE_CONTEXT_KEYS
 )
 _SAMPLE_CHECKPOINT_SCHEMA_VERSION = "ecologyrsi-dsh.sample-checkpoint/1"
+SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION = (
+    "ecologyrsi-dsh.sample-agent-chain-attestation/2"
+)
 
 
 class SampleExecutionContractError(ValueError):
@@ -380,6 +389,16 @@ class SampleExecutionBatch:
     scoring_rows: tuple[dict[str, Any], ...]
     records: tuple[dict[str, Any], ...]
     summary: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _StrictOriginBundle:
+    """One atomic forecast origin containing all target/horizon cells."""
+
+    origin_sample_id: str
+    rows: tuple[dict[str, Any], ...]
+    requests: tuple[SamplePredictionRequest, ...]
+    observed: tuple[float, ...]
 
 
 class _RegisteredSampleToolRuntime:
@@ -742,6 +761,32 @@ class CollaborativeSampleExecutor:
         canonical_json(context_data)
         plan, plan_attempts, plan_failure = self._prepare_plan(context_data, policy)
         plan_digest = digest(plan) if plan is not None else None
+        strict_origin_contract = bool(
+            plan is not None
+            and plan.get("sample_agent_protocol")
+            == "dsh-strict-origin-bundle@3"
+        )
+        strict_agent_contract = bool(
+            plan is not None
+            and plan.get("sample_agent_protocol")
+            == "dsh-strict-origin-bundle@3"
+        )
+        origin_bundles: tuple[_StrictOriginBundle, ...] = ()
+        origin_bundle_by_sample_id: dict[str, _StrictOriginBundle] = {}
+        if strict_origin_contract and rows:
+            origin_bundles = _strict_origin_bundles(
+                rows,
+                context=context_data,
+                target_bounds=target_bounds,
+                algorithm_id=algorithm_id,
+                algorithm_version=algorithm_version,
+            )
+            rows = tuple(row for bundle in origin_bundles for row in bundle.rows)
+            origin_bundle_by_sample_id = {
+                request.sample_id: bundle
+                for bundle in origin_bundles
+                for request in bundle.requests
+            }
         checkpoint = {
             "schema_version": _SAMPLE_CHECKPOINT_SCHEMA_VERSION,
             "cohort_digest": digest(
@@ -780,6 +825,16 @@ class CollaborativeSampleExecutor:
             algorithm_id=algorithm_id,
             algorithm_version=algorithm_version,
         )
+        if strict_origin_contract:
+            for bundle in origin_bundles:
+                resumed_count = sum(
+                    request.sample_id in resumed_rows
+                    for request in bundle.requests
+                )
+                if resumed_count not in {0, len(bundle.requests)}:
+                    raise SampleExecutionContractError(
+                        "strict origin checkpoint contains a partial prediction vector"
+                    )
         published_sample_ids: set[str] = set(resumed_rows)
         pending_rows = tuple(
             row
@@ -801,12 +856,25 @@ class CollaborativeSampleExecutor:
             rows,
             resumed_rows,
             checkpoint_response.get("progress"),
+            force_full_cohort=strict_agent_contract,
+            origin_bundles=origin_bundles,
         )
         outcome_setter = getattr(self.adapter, "set_outcome_callback", None)
         resume_setter = getattr(self.adapter, "set_resume_checkpoint", None)
         token_budget_setter = getattr(self.adapter, "set_token_budget_state", None)
         raw_rows_by_sample_id: dict[str, dict[str, Any]] = {}
-        if result_callback is not None and callable(outcome_setter):
+        # A strict sample is durable only after the post-score remote
+        # reflection has completed.  The adapter-level callback fires as soon
+        # as Planner -> tool -> Critic returns, so using it here would allow a
+        # crash to resume a prediction that has never crossed Reflector.
+        # Strict runs therefore publish only the finalized row below; an
+        # interrupted sample is deliberately executed again.
+        use_preflection_publication = bool(
+            result_callback is not None
+            and callable(outcome_setter)
+            and not strict_agent_contract
+        )
+        if use_preflection_publication:
             for raw_row in pending_rows:
                 projected = dict(raw_row)
                 try:
@@ -907,37 +975,49 @@ class CollaborativeSampleExecutor:
                 return finalized_statuses
 
         try:
-            if result_callback is not None and callable(outcome_setter):
+            if use_preflection_publication:
                 outcome_setter(publish_gateway_outcomes)
             if callable(resume_setter):
                 resume_setter(resume_checkpoint)
             if callable(token_budget_setter):
                 token_budget_setter(checkpoint_response.get("token_budget_state"))
-            first_attempt_outcomes = self._prepare_first_attempt_batch(
-                pending_rows,
-                context=context_data,
-                target_bounds=target_bounds,
-                algorithm_id=algorithm_id,
-                algorithm_version=algorithm_version,
-                plan=plan,
-            )
-            terminal_reason = _batch_terminal_reason(first_attempt_outcomes.values())
-            prefetched_attempt_outcomes = self._prepare_retry_attempt_waves(
-                pending_rows,
-                context=context_data,
-                target_bounds=target_bounds,
-                algorithm_id=algorithm_id,
-                algorithm_version=algorithm_version,
-                plan=plan,
-                policy=policy,
-                first_attempt_outcomes=first_attempt_outcomes,
-            )
+            if strict_agent_contract:
+                # A strict sample is one transactional semantic chain.  Do not
+                # prefetch Planner/Critic outcomes for the whole cohort and
+                # postpone every Reflector until the end: a pause would then
+                # discard hours of completed remote work.  The ordinary loop
+                # below executes and checkpoints each complete chain before
+                # beginning the next sample.
+                terminal_reason = None
+                prefetched_attempt_outcomes = {}
+            else:
+                first_attempt_outcomes = self._prepare_first_attempt_batch(
+                    pending_rows,
+                    context=context_data,
+                    target_bounds=target_bounds,
+                    algorithm_id=algorithm_id,
+                    algorithm_version=algorithm_version,
+                    plan=plan,
+                )
+                terminal_reason = _batch_terminal_reason(
+                    first_attempt_outcomes.values()
+                )
+                prefetched_attempt_outcomes = self._prepare_retry_attempt_waves(
+                    pending_rows,
+                    context=context_data,
+                    target_bounds=target_bounds,
+                    algorithm_id=algorithm_id,
+                    algorithm_version=algorithm_version,
+                    plan=plan,
+                    policy=policy,
+                    first_attempt_outcomes=first_attempt_outcomes,
+                )
         finally:
-            if result_callback is not None and callable(outcome_setter):
+            if use_preflection_publication:
                 outcome_setter(None)
-            if callable(resume_setter):
+            if callable(resume_setter) and not strict_agent_contract:
                 resume_setter(None)
-            if callable(token_budget_setter):
+            if callable(token_budget_setter) and not strict_agent_contract:
                 token_budget_setter(None)
 
         successful_rows: list[dict[str, Any]] = []
@@ -958,21 +1038,88 @@ class CollaborativeSampleExecutor:
         critic_outcome_counts: dict[str, int] = {}
         reason_code_counts: dict[str, int] = {}
         repair_tool_outcomes: dict[str, dict[str, int]] = {}
+        prepared_origin_ids: set[str] = set()
+        prepared_origin_reflections: dict[str, dict[str, Any]] = {}
+        origin_publication_rows: dict[str, list[dict[str, Any]]] = {}
 
         def append_scoring_row(finalized: Mapping[str, Any]) -> None:
             """Publish only rows finalized by host validation or fallback."""
 
             projected = dict(finalized)
-            scoring_rows.append(projected)
-            if result_callback is None:
-                return
             sample_id = projected.get("sample_id")
+            if strict_origin_contract and isinstance(sample_id, str):
+                origin_bundle = origin_bundle_by_sample_id.get(sample_id)
+                if origin_bundle is not None:
+                    projected["origin_sample_id"] = (
+                        origin_bundle.origin_sample_id
+                    )
+            scoring_rows.append(projected)
             if isinstance(sample_id, str) and sample_id in published_sample_ids:
                 return
-            finalized_result_rows.append(projected)
-            if len(finalized_result_rows) >= result_batch_size:
-                result_callback(tuple(finalized_result_rows))
-                finalized_result_rows.clear()
+            if strict_origin_contract:
+                if not isinstance(sample_id, str):
+                    raise SampleExecutionContractError(
+                        "strict origin result requires sample_id"
+                    )
+                bundle = origin_bundle_by_sample_id.get(sample_id)
+                if bundle is None:
+                    raise SampleExecutionContractError(
+                        "strict origin result is outside the frozen bundle cohort"
+                    )
+                bucket = origin_publication_rows.setdefault(
+                    bundle.origin_sample_id, []
+                )
+                bucket.append(projected)
+                if len(bucket) > len(bundle.requests):
+                    raise SampleExecutionContractError(
+                        "strict origin result contains duplicate prediction cells"
+                    )
+                if len(bucket) < len(bundle.requests):
+                    return
+                bucket_ids = {str(item.get("sample_id")) for item in bucket}
+                expected_ids = {request.sample_id for request in bundle.requests}
+                if bucket_ids != expected_ids:
+                    raise SampleExecutionContractError(
+                        "strict origin result does not cover its complete prediction vector"
+                    )
+                if result_callback is not None:
+                    result_callback(tuple(bucket))
+                published_sample_ids.update(expected_ids)
+                origin_publication_rows.pop(bundle.origin_sample_id, None)
+                progress_recorder = getattr(
+                    self.adapter, "record_finalized_origin_progress", None
+                )
+                if callable(progress_recorder):
+                    progress_recorder(
+                        status=(
+                            "succeeded"
+                            if all(
+                                item.get("sample_execution_status") == "succeeded"
+                                for item in bucket
+                            )
+                            else "failed"
+                        ),
+                        prediction_cell_count=len(bucket),
+                    )
+                return
+            if result_callback is not None:
+                finalized_result_rows.append(projected)
+                publication_batch_size = (
+                    1 if strict_agent_contract else result_batch_size
+                )
+                if len(finalized_result_rows) >= publication_batch_size:
+                    result_callback(tuple(finalized_result_rows))
+                    finalized_result_rows.clear()
+            if strict_agent_contract:
+                progress_recorder = getattr(
+                    self.adapter, "record_finalized_sample_progress", None
+                )
+                if callable(progress_recorder):
+                    progress_recorder(
+                        status=str(
+                            projected.get("sample_execution_status") or "failed"
+                        )
+                    )
 
         for raw_row in rows:
             row = dict(raw_row)
@@ -1099,6 +1246,14 @@ class CollaborativeSampleExecutor:
                     "batch_plan_digest": plan_digest,
                     "checkpoint_resumed": True,
                 }
+                if isinstance(resumed.get("sample_reflection"), Mapping):
+                    record["sample_reflection"] = dict(
+                        resumed["sample_reflection"]
+                    )
+                if isinstance(resumed.get("sample_agent_chain"), Mapping):
+                    record["sample_agent_chain"] = dict(
+                        resumed["sample_agent_chain"]
+                    )
                 if status == "succeeded":
                     task_count["succeeded_examples"] += 1
                     successful_rows.append(scoring_row)
@@ -1124,11 +1279,60 @@ class CollaborativeSampleExecutor:
                 records.append(record)
                 append_scoring_row(scoring_row)
                 continue
+            if strict_origin_contract:
+                bundle = origin_bundle_by_sample_id.get(request.sample_id)
+                if bundle is None:
+                    raise SampleExecutionContractError(
+                        "strict origin sample is outside the frozen bundle cohort"
+                    )
+                if bundle.origin_sample_id not in prepared_origin_ids:
+                    first_attempt_outcomes = self._prepare_first_attempt_batch(
+                        bundle.rows,
+                        context=context_data,
+                        target_bounds=target_bounds,
+                        algorithm_id=algorithm_id,
+                        algorithm_version=algorithm_version,
+                        plan=plan,
+                    )
+                    origin_outcomes = self._prepare_retry_attempt_waves(
+                        bundle.rows,
+                        context=context_data,
+                        target_bounds=target_bounds,
+                        algorithm_id=algorithm_id,
+                        algorithm_version=algorithm_version,
+                        plan=plan,
+                        policy=policy,
+                        first_attempt_outcomes=first_attempt_outcomes,
+                    )
+                    prefetched_attempt_outcomes.update(origin_outcomes)
+                    prepared_origin_reflections.update(
+                        self._prepare_origin_reflection(
+                            bundle,
+                            prefetched_attempt_outcomes=origin_outcomes,
+                            policy=policy,
+                        )
+                    )
+                    prepared_origin_ids.add(bundle.origin_sample_id)
+                    origin_terminal_reason = _batch_terminal_reason(
+                        first_attempt_outcomes.values()
+                    )
+                    if origin_terminal_reason is not None:
+                        terminal_reason = origin_terminal_reason
             if plan is None:
                 category, retryable, error_type = plan_failure or (
                     "batch_plan_failure",
                     False,
                     "UnknownPlanFailure",
+                )
+                reflection, reflection_decision = _run_sample_reflection(
+                    self.adapter,
+                    request,
+                    observed=observed,
+                    predicted=None,
+                    status="failed",
+                    failure_class="batch_plan_" + category,
+                    agent_decisions=(),
+                    tool_calls=(),
                 )
                 record = _failed_record(
                     request,
@@ -1140,8 +1344,19 @@ class CollaborativeSampleExecutor:
                     plan_digest=None,
                     adapter=self.adapter,
                 )
+                if reflection is not None:
+                    record["sample_reflection"] = reflection
+                if reflection_decision is not None:
+                    _attach_execution_trace(record, [reflection_decision], [])
                 records.append(record)
-                append_scoring_row(_fallback_scoring_row(row, request, record))
+                fallback_row = _fallback_scoring_row(row, request, record)
+                if reflection is not None:
+                    fallback_row["sample_reflection"] = reflection
+                if strict_agent_contract:
+                    fallback_row["sample_agent_chain"] = (
+                        _sample_agent_chain_attestation(record)
+                    )
+                append_scoring_row(fallback_row)
                 scoring_fallback_examples += 1
                 task_count["failed_examples"] += 1
                 failure_counts[record["failure"]["class"]] = (
@@ -1266,6 +1481,21 @@ class CollaborativeSampleExecutor:
                     False,
                     "UnknownSampleFailure",
                 )
+                reflection, reflection_decision = _run_sample_reflection(
+                    self.adapter,
+                    request,
+                    observed=observed,
+                    predicted=None,
+                    status="failed",
+                    failure_class=category,
+                    agent_decisions=prior_decisions,
+                    tool_calls=prior_tools,
+                    prepared_reflection=prepared_origin_reflections.get(
+                        request.sample_id
+                    ),
+                )
+                if reflection_decision is not None:
+                    prior_decisions.append(reflection_decision)
                 record = _failed_record(
                     request,
                     observed=observed,
@@ -1309,8 +1539,17 @@ class CollaborativeSampleExecutor:
                 _attach_execution_trace(record, prior_decisions, prior_tools)
                 if attempt_trace:
                     record["attempt_trace"] = attempt_trace
+                if reflection is not None:
+                    record["sample_reflection"] = reflection
                 records.append(record)
-                append_scoring_row(_fallback_scoring_row(row, request, record))
+                fallback_row = _fallback_scoring_row(row, request, record)
+                if reflection is not None:
+                    fallback_row["sample_reflection"] = reflection
+                if strict_agent_contract:
+                    fallback_row["sample_agent_chain"] = (
+                        _sample_agent_chain_attestation(record)
+                    )
+                append_scoring_row(fallback_row)
                 scoring_fallback_examples += 1
                 task_count["failed_examples"] += 1
                 task_count["retry_count"] += max(0, attempts - 1)
@@ -1324,6 +1563,21 @@ class CollaborativeSampleExecutor:
             tools = _bounded_public_steps(
                 [*prior_tools, *result["tool_calls"]]
             )
+            reflection, reflection_decision = _run_sample_reflection(
+                self.adapter,
+                request,
+                observed=observed,
+                predicted=predicted,
+                status="succeeded",
+                failure_class=None,
+                agent_decisions=decisions,
+                tool_calls=tools,
+                prepared_reflection=prepared_origin_reflections.get(
+                    request.sample_id
+                ),
+            )
+            if reflection_decision is not None:
+                decisions.append(reflection_decision)
             _record_feedback_steps(
                 result["agent_decisions"],
                 result["tool_calls"],
@@ -1388,6 +1642,8 @@ class CollaborativeSampleExecutor:
             _attach_execution_trace(record, decisions, tools)
             if attempt_trace:
                 record["attempt_trace"] = attempt_trace
+            if reflection is not None:
+                record["sample_reflection"] = reflection
             records.append(record)
             if failure_history:
                 record["failure_history"] = [dict(item) for item in failure_history]
@@ -1401,9 +1657,19 @@ class CollaborativeSampleExecutor:
             executed_row["sample_execution_retry_count"] = attempts - 1
             executed_row["action_digest"] = action_digest
             executed_row["scoring_fallback"] = None
+            if reflection is not None:
+                executed_row["sample_reflection"] = reflection
+            if strict_agent_contract:
+                executed_row["sample_agent_chain"] = (
+                    _sample_agent_chain_attestation(record)
+                )
             successful_rows.append(executed_row)
             append_scoring_row(executed_row)
 
+        if strict_origin_contract and origin_publication_rows:
+            raise SampleExecutionContractError(
+                "strict origin publication ended with an incomplete prediction vector"
+            )
         if result_callback is not None and finalized_result_rows:
             result_callback(tuple(finalized_result_rows))
             finalized_result_rows.clear()
@@ -1440,7 +1706,150 @@ class CollaborativeSampleExecutor:
             reason_code_counts=reason_code_counts,
             repair_tool_outcomes=repair_tool_outcomes,
         )
-        tool_performance = _tool_performance(records, scoring_rows)
+        tool_performance = summarize_tool_performance(records, scoring_rows)
+        remote_planner_invocations = 0
+        remote_critic_invocations = 0
+        remote_reflection_invocations = 0
+        host_route_bypass_count = 0
+        complete_agent_chains = 0
+        counted_origin_invocations: set[str] = set()
+        registered_tool_invocation_keys: set[tuple[str, str, str]] = set()
+        dsh_agent_tool_event_ids: set[str] = set()
+        for record in records:
+            for tool in record.get("tool_trace", ()):
+                if (
+                    isinstance(tool, Mapping)
+                    and tool.get("status") == "completed"
+                    and tool.get("tool_id") != "physical-range-check"
+                ):
+                    registered_tool_invocation_keys.add(
+                        (
+                            str(tool.get("tool_id") or ""),
+                            str(tool.get("input_digest") or ""),
+                            str(tool.get("output_digest") or ""),
+                        )
+                    )
+                    if tool.get("execution_owner") == "dsh_agent_tool_call":
+                        event_id = tool.get("dsh_tool_event_id")
+                        if isinstance(event_id, str) and event_id:
+                            dsh_agent_tool_event_ids.add(event_id)
+            raw_reflection = record.get("sample_reflection")
+            record_bundle = origin_bundle_by_sample_id.get(
+                str(record.get("sample_id") or "")
+            )
+            origin_sample_id = (
+                str(raw_reflection.get("origin_sample_id"))
+                if strict_origin_contract
+                and isinstance(raw_reflection, Mapping)
+                and raw_reflection.get("origin_sample_id")
+                else record_bundle.origin_sample_id
+                if strict_origin_contract and record_bundle is not None
+                else None
+            )
+            count_invocations = bool(
+                origin_sample_id is None
+                or origin_sample_id not in counted_origin_invocations
+            )
+            if origin_sample_id is not None:
+                counted_origin_invocations.add(origin_sample_id)
+            attestation = record.get("sample_agent_chain")
+            if isinstance(attestation, Mapping):
+                if count_invocations:
+                    remote_planner_invocations += int(
+                        attestation.get("planner_invocations", 0)
+                    )
+                    remote_critic_invocations += int(
+                        attestation.get("critic_invocations", 0)
+                    )
+                    remote_reflection_invocations += int(
+                        attestation.get("reflector_invocations", 0)
+                    )
+                    host_route_bypass_count += int(
+                        attestation.get("host_route_bypass_count", 0)
+                    )
+                complete_agent_chains += int(
+                    attestation.get("complete") is True
+                )
+                continue
+            role_list = [
+                str(item.get("role") or "")
+                for item in record.get("agent_trace", ())
+                if isinstance(item, Mapping)
+            ]
+            roles = set(role_list)
+            if count_invocations:
+                remote_planner_invocations += sum(
+                    role == "remote_planner_agent" for role in role_list
+                )
+                remote_critic_invocations += sum(
+                    role == "remote_critic_agent" for role in role_list
+                )
+                remote_reflection_invocations += sum(
+                    role == "remote_reflector_agent" for role in role_list
+                )
+                host_route_bypass_count += sum(
+                    role == "host_deterministic_router" for role in role_list
+                )
+            if (
+                "remote_planner_agent" in roles
+                and "remote_critic_agent" in roles
+                and isinstance(record.get("sample_reflection"), Mapping)
+            ):
+                complete_agent_chains += 1
+        strict_chain_denominator = max(0, attempted - input_failures)
+        strict_agent_chain_coverage = (
+            complete_agent_chains / strict_chain_denominator
+            if strict_chain_denominator
+            else 0.0
+        )
+        strict_agent_chain_pass = bool(
+            not strict_agent_contract
+            or (
+                strict_chain_denominator == attempted
+                and complete_agent_chains == attempted
+                and host_route_bypass_count == 0
+            )
+        )
+        succeeded_sample_ids = {
+            str(row.get("sample_id"))
+            for row in successful_rows
+            if isinstance(row.get("sample_id"), str)
+        }
+        complete_chain_sample_ids = {
+            str(record.get("sample_id"))
+            for record in records
+            if (
+                isinstance(record.get("sample_agent_chain"), Mapping)
+                and record["sample_agent_chain"].get("complete") is True
+            )
+            or (
+                isinstance(record.get("sample_reflection"), Mapping)
+                and any(
+                    item.get("role") == "remote_planner_agent"
+                    for item in record.get("agent_trace", ())
+                    if isinstance(item, Mapping)
+                )
+                and any(
+                    item.get("role") == "remote_critic_agent"
+                    for item in record.get("agent_trace", ())
+                    if isinstance(item, Mapping)
+                )
+            )
+        }
+        succeeded_origins = sum(
+            all(
+                request.sample_id in succeeded_sample_ids
+                for request in bundle.requests
+            )
+            for bundle in origin_bundles
+        )
+        complete_origin_agent_chains = sum(
+            all(
+                request.sample_id in complete_chain_sample_ids
+                for request in bundle.requests
+            )
+            for bundle in origin_bundles
+        )
         summary = {
             "schema_version": SAMPLE_EXECUTION_SCHEMA_VERSION,
             "mode": plan_mode,
@@ -1476,6 +1885,45 @@ class CollaborativeSampleExecutor:
             "algorithm": {"id": algorithm_id, "version": algorithm_version},
             "execution_policy": "feedback_driven_retry_repair_or_skip",
             "remote_sample_agents": remote_sample_agents,
+            "strict_agent_contract": strict_agent_contract,
+            "remote_planner_invocations": remote_planner_invocations,
+            "remote_critic_invocations": remote_critic_invocations,
+            "remote_reflection_invocations": remote_reflection_invocations,
+            "registered_prediction_tool_invocations": len(
+                registered_tool_invocation_keys
+            ),
+            "dsh_agent_prediction_tool_invocations": len(
+                dsh_agent_tool_event_ids
+            ),
+            "host_route_bypass_count": host_route_bypass_count,
+            "complete_agent_chains": complete_agent_chains,
+            "complete_origin_agent_chains": (
+                complete_origin_agent_chains
+                if strict_origin_contract
+                else complete_agent_chains
+            ),
+            "strict_agent_chain_coverage": strict_agent_chain_coverage,
+            "strict_agent_chain_pass": strict_agent_chain_pass,
+            "prediction_unit": (
+                "forecast_origin_with_target_horizon_vector"
+                if strict_origin_contract
+                else "target_horizon_cell"
+            ),
+            "attempted_origin_samples": (
+                len(origin_bundles) if strict_origin_contract else attempted
+            ),
+            "succeeded_origin_samples": (
+                succeeded_origins if strict_origin_contract else succeeded
+            ),
+            "failed_origin_samples": (
+                len(origin_bundles) - succeeded_origins
+                if strict_origin_contract
+                else failed
+            ),
+            "prediction_cell_count": attempted,
+            "prediction_cells_per_origin": (
+                len(origin_bundles[0].requests) if origin_bundles else 1
+            ),
             "remote_roles": (
                 list(public_plan.get("remote_roles", []))
                 if public_plan is not None
@@ -1493,6 +1941,11 @@ class CollaborativeSampleExecutor:
             "action_catalog": list(action_catalog.values()),
             "trace_digest": trace_digest,
         }
+        if strict_agent_contract:
+            if callable(resume_setter):
+                resume_setter(None)
+            if callable(token_budget_setter):
+                token_budget_setter(None)
         return SampleExecutionBatch(
             successful_rows=tuple(successful_rows),
             scoring_rows=tuple(scoring_rows),
@@ -1576,6 +2029,9 @@ class CollaborativeSampleExecutor:
             raise
         except Exception as exc:  # noqa: BLE001 - isolate remote microbatch failures
             if gateway_error_in_chain(exc, retryable_only=True) is not None:
+                raise
+            dsh_error = dsh_native_runtime_error_in_chain(exc)
+            if dsh_error is not None and dsh_native_runtime_retryable(dsh_error):
                 raise
             return {
                 request.sample_id: SamplePredictionOutcome(
@@ -1707,6 +2163,9 @@ class CollaborativeSampleExecutor:
             except Exception as exc:  # noqa: BLE001 - isolate one retry wave
                 if gateway_error_in_chain(exc, retryable_only=True) is not None:
                     raise
+                dsh_error = dsh_native_runtime_error_in_chain(exc)
+                if dsh_error is not None and dsh_native_runtime_retryable(dsh_error):
+                    raise
                 raw_outcomes = tuple(
                     SamplePredictionOutcome(sample_id=request.sample_id, error=exc)
                     for request in retry_requests
@@ -1742,6 +2201,87 @@ class CollaborativeSampleExecutor:
                 active.append(request)
         return outcomes
 
+    def _prepare_origin_reflection(
+        self,
+        bundle: _StrictOriginBundle,
+        *,
+        prefetched_attempt_outcomes: Mapping[
+            tuple[str, int], SamplePredictionOutcome
+        ],
+        policy: SampleExecutionPolicy,
+    ) -> dict[str, dict[str, Any]]:
+        """Host-score a complete vector, then invoke one remote Reflector."""
+
+        reflector = getattr(self.adapter, "reflect_origin", None)
+        if not callable(reflector):
+            raise SampleExecutionContractError(
+                "strict origin protocol requires an origin reflector"
+            )
+        scored_cells: list[dict[str, Any]] = []
+        for request, observed in zip(bundle.requests, bundle.observed):
+            predicted: float | None = None
+            status = "failed"
+            failure_class: str | None = "missing_prediction_outcome"
+            agent_decisions: Sequence[Mapping[str, Any]] = ()
+            tool_calls: Sequence[Mapping[str, Any]] = ()
+            for attempt in range(1, policy.max_attempts + 1):
+                outcome = prefetched_attempt_outcomes.get(
+                    (request.sample_id, attempt)
+                )
+                if outcome is None:
+                    break
+                failure = _prefetched_outcome_failure(outcome, request)
+                if failure is None:
+                    assert outcome.result is not None
+                    result = _host_critic_result(
+                        _validated_result(outcome.result), request
+                    )
+                    predicted = float(result["predicted"])
+                    status = "succeeded"
+                    failure_class = None
+                    agent_decisions = result["agent_decisions"]
+                    tool_calls = result["tool_calls"]
+                    break
+                failure_class, retryable, _error_type = classify_sample_failure(
+                    failure
+                )
+                _feedback, decisions, tools = _failure_feedback_from_exception(
+                    failure,
+                    attempt,
+                    failure=(failure_class, retryable, type(failure).__name__),
+                )
+                agent_decisions = decisions
+                tool_calls = tools
+                if not retryable:
+                    break
+            scored_cells.append(
+                {
+                    "sample_id": request.sample_id,
+                    "target": request.target,
+                    "horizon_hours": request.horizon_hours,
+                    "status": status,
+                    "observed": float(observed),
+                    "predicted": predicted,
+                    "baseline": float(request.baseline),
+                    "failure_class": failure_class,
+                    "agent_decision_digests": [
+                        str(item.get("response_digest"))
+                        for item in agent_decisions
+                        if item.get("response_digest")
+                    ],
+                    "tool_output_digests": [
+                        str(item.get("output_digest"))
+                        for item in tool_calls
+                        if item.get("output_digest")
+                    ],
+                }
+            )
+        raw = reflector(bundle.requests, scored_cells=scored_cells)
+        reflection = _validated_origin_reflection(raw, bundle)
+        return {
+            request.sample_id: reflection for request in bundle.requests
+        }
+
     def _backoff(self, policy: SampleExecutionPolicy, failed_attempt: int) -> None:
         if policy.retry_backoff_seconds <= 0:
             return
@@ -1760,11 +2300,52 @@ def _feedback_aggregates(
     """Create label-free signals that later generations may safely reuse."""
 
     recovered_by_failure_class: dict[str, int] = {}
+    reflection_outcome_counts: dict[str, int] = {}
+    reflection_error_source_counts: dict[str, int] = {}
+    reflection_next_action_counts: dict[str, int] = {}
+    seen_reflections: set[str] = set()
 
     def increment(counter: dict[str, int], key: str) -> None:
         counter[key] = counter.get(key, 0) + 1
 
     for record in records:
+        reflection = record.get("sample_reflection")
+        if isinstance(reflection, Mapping):
+            reflection_identity = str(
+                reflection.get("wave_digest")
+                or reflection.get("response_digest")
+                or record.get("sample_id")
+                or ""
+            )
+            if reflection_identity and reflection_identity not in seen_reflections:
+                seen_reflections.add(reflection_identity)
+                for field_name, counter, allowed in (
+                    (
+                        "outcome_class",
+                        reflection_outcome_counts,
+                        {"improved", "degraded", "neutral", "failed"},
+                    ),
+                    (
+                        "error_source",
+                        reflection_error_source_counts,
+                        {
+                            "model",
+                            "feature",
+                            "parameter",
+                            "tool",
+                            "execution",
+                            "unknown",
+                        },
+                    ),
+                    (
+                        "next_action",
+                        reflection_next_action_counts,
+                        {"keep", "increase", "decrease", "repair", "inspect", "stop"},
+                    ),
+                ):
+                    value = reflection.get(field_name)
+                    if isinstance(value, str) and value in allowed:
+                        increment(counter, value)
         if record.get("status") != "succeeded":
             continue
         history = record.get("failure_history")
@@ -1790,10 +2371,19 @@ def _feedback_aggregates(
         "recovered_by_failure_class": dict(
             sorted(recovered_by_failure_class.items())
         ),
+        "reflection_outcome_counts": dict(
+            sorted(reflection_outcome_counts.items())
+        ),
+        "reflection_error_source_counts": dict(
+            sorted(reflection_error_source_counts.items())
+        ),
+        "reflection_next_action_counts": dict(
+            sorted(reflection_next_action_counts.items())
+        ),
     }
 
 
-def _tool_performance(
+def summarize_tool_performance(
     records: Sequence[Mapping[str, Any]],
     scoring_rows: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1948,11 +2538,7 @@ def _tool_performance(
                     "baseline_mae": baseline_mae,
                     "baseline_rmse": baseline_rmse,
                     "rmse_improvement": baseline_rmse - rmse,
-                    "skill_score": (
-                        1.0 - rmse / baseline_rmse
-                        if baseline_rmse > 1e-15
-                        else 0.0
-                    ),
+                    "skill_score": skill_score(rmse, baseline_rmse),
                 }
             )
         result.append(public)
@@ -2014,6 +2600,21 @@ def classify_sample_failure(exc: BaseException) -> tuple[str, bool, str]:
     if isinstance(exc, SampleExecutionAttemptError):
         return exc.failure_class, exc.retryable, exc.error_type
     error_type = type(exc).__name__[:120]
+    if isinstance(exc, DshNativeRuntimeUnavailableError):
+        status_code = getattr(exc, "status_code", None)
+        error_code = str(getattr(exc, "error_code", "") or "")
+        retryable = dsh_native_runtime_retryable(exc)
+        if status_code == 429:
+            return "rate_limited", True, error_type
+        if status_code == 408:
+            return "timeout", True, error_type
+        if error_code == "dsh_native_runtime_transport_error":
+            return "connection", True, error_type
+        if retryable:
+            return "remote_transient", True, error_type
+        if error_code == "dsh_native_runtime_contract_error":
+            return "invalid_output", False, error_type
+        return "remote_rejected", False, error_type
     gateway_retryable = getattr(exc, "retryable", None)
     gateway_status = getattr(exc, "status_code", None)
     gateway_split_eligible = getattr(exc, "split_eligible", None)
@@ -2135,6 +2736,118 @@ def _sample_id(
     return "prediction-sample:" + digest(identity)[:32]
 
 
+def forecast_origin_sample_id(
+    requests: Sequence[SamplePredictionRequest],
+) -> str:
+    """Return the stable identity shared by one vector prediction chain."""
+
+    if not requests:
+        raise SampleExecutionContractError("forecast origin bundle must not be empty")
+    first = requests[0]
+    if any(
+        request.candidate_id != first.candidate_id
+        or request.dataset_digest != first.dataset_digest
+        or request.partition != first.partition
+        or request.origin_timestamp != first.origin_timestamp
+        for request in requests
+    ):
+        raise SampleExecutionContractError(
+            "forecast origin bundle mixes incompatible sample origins"
+        )
+    sample_ids = [request.sample_id for request in requests]
+    if len(sample_ids) != len(set(sample_ids)):
+        raise SampleExecutionContractError(
+            "forecast origin bundle sample identifiers must be unique"
+        )
+    return "origin:" + digest(
+        {
+            "candidate_id": first.candidate_id,
+            "dataset_digest": first.dataset_digest,
+            "partition": first.partition,
+            "origin_timestamp": first.origin_timestamp,
+            "sample_ids": sorted(sample_ids),
+        }
+    )
+
+
+def _strict_origin_bundles(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    context: Mapping[str, Any],
+    target_bounds: Mapping[str, Mapping[str, Any]],
+    algorithm_id: str,
+    algorithm_version: str,
+) -> tuple[_StrictOriginBundle, ...]:
+    """Validate and order complete multi-output forecast-origin bundles."""
+
+    grouped: dict[str, list[tuple[dict[str, Any], SamplePredictionRequest, float]]] = {}
+    group_order: list[str] = []
+    all_tasks: set[tuple[str, int]] = set()
+    for raw_row in rows:
+        row = dict(raw_row)
+        request, observed = _request_from_row(
+            row,
+            context=context,
+            target_bounds=target_bounds,
+            algorithm_id=algorithm_id,
+            algorithm_version=algorithm_version,
+        )
+        origin_key = canonical_json(
+            {
+                "partition": request.partition,
+                "origin_timestamp": request.origin_timestamp,
+            }
+        )
+        if origin_key not in grouped:
+            grouped[origin_key] = []
+            group_order.append(origin_key)
+        grouped[origin_key].append((row, request, observed))
+        all_tasks.add((request.target, request.horizon_hours))
+
+    bundles: list[_StrictOriginBundle] = []
+    raw_horizons = context.get("horizons_hours")
+    expected_tasks = (
+        {
+            (str(target), int(horizon))
+            for target in target_bounds
+            for horizon in raw_horizons
+            if isinstance(horizon, int)
+            and not isinstance(horizon, bool)
+            and horizon > 0
+        }
+        if isinstance(raw_horizons, (list, tuple))
+        else set(all_tasks)
+    )
+    if expected_tasks and all_tasks != expected_tasks:
+        raise SampleExecutionContractError(
+            "strict origin cohort does not cover the configured target/horizon grid"
+        )
+    for origin_key in group_order:
+        values = sorted(
+            grouped[origin_key],
+            key=lambda item: (item[1].target, item[1].horizon_hours),
+        )
+        tasks = [(item[1].target, item[1].horizon_hours) for item in values]
+        if len(tasks) != len(set(tasks)):
+            raise SampleExecutionContractError(
+                "strict origin bundle contains duplicate target/horizon cells"
+            )
+        if set(tasks) != expected_tasks:
+            raise SampleExecutionContractError(
+                "strict origin bundle must contain every target/horizon cell"
+            )
+        requests = tuple(item[1] for item in values)
+        bundles.append(
+            _StrictOriginBundle(
+                origin_sample_id=forecast_origin_sample_id(requests),
+                rows=tuple(item[0] for item in values),
+                requests=requests,
+                observed=tuple(item[2] for item in values),
+            )
+        )
+    return tuple(bundles)
+
+
 def _validated_checkpoint_rows(
     value: Any,
     *,
@@ -2243,7 +2956,8 @@ def _validated_checkpoint_rows(
                 item.get("observed"), "checkpoint observed"
             ),
             "baseline": _finite_float(
-                item.get("baseline"), "checkpoint baseline"
+                item.get("model_reference_baseline", item.get("baseline")),
+                "checkpoint model reference baseline",
             ),
         }
         if canonical_json(actual) != canonical_json(expected):
@@ -2376,6 +3090,12 @@ def _checkpoint_scoring_row(
                 if isinstance(item, Mapping)
             ],
         }
+    agent_chain = resumed.get("sample_agent_chain")
+    if isinstance(agent_chain, Mapping):
+        projected["sample_agent_chain"] = dict(agent_chain)
+    origin_sample_id = resumed.get("origin_sample_id")
+    if isinstance(origin_sample_id, str) and origin_sample_id.startswith("origin:"):
+        projected["origin_sample_id"] = origin_sample_id
     return projected
 
 
@@ -2383,6 +3103,9 @@ def _adapter_resume_checkpoint(
     rows: Sequence[Mapping[str, Any]],
     resumed_rows: Mapping[str, Mapping[str, Any]],
     progress: Any,
+    *,
+    force_full_cohort: bool = False,
+    origin_bundles: Sequence[_StrictOriginBundle] = (),
 ) -> dict[str, Any] | None:
     task_totals: dict[tuple[str, int], int] = {}
     for row in rows:
@@ -2405,7 +3128,7 @@ def _adapter_resume_checkpoint(
         resumed_failed_by_task[key] = resumed_failed_by_task.get(key, 0) + 1
 
     prior = dict(progress) if isinstance(progress, Mapping) else {}
-    if not resumed_rows and not prior:
+    if not resumed_rows and not prior and not force_full_cohort:
         return None
 
     def prior_count(name: str, default: int = 0) -> int:
@@ -2416,7 +3139,9 @@ def _adapter_resume_checkpoint(
             else 0
         )
 
-    batch_index = prior_count("batch_index")
+    batch_index = (
+        len(resumed_rows) if force_full_cohort else prior_count("batch_index")
+    )
     progress_id = prior_count("progress_id")
     split_recovered = min(
         prior_count("adaptive_split_recovered_samples"), len(resumed_rows)
@@ -2425,14 +3150,15 @@ def _adapter_resume_checkpoint(
         prior_count("adaptive_split_failed_samples"),
         len(resumed_rows) - split_recovered,
     )
-    return {
+    result = {
         "completed_samples": len(resumed_rows),
         "succeeded_samples": succeeded,
         "failed_samples": len(resumed_rows) - succeeded,
         "total_samples": len(rows),
         "batch_index": batch_index,
         "batch_count": max(
-            prior_count("batch_count"), batch_index
+            prior_count("batch_count"),
+            len(rows) if force_full_cohort else batch_index,
         ),
         "progress_id": progress_id,
         "gateway_request_count": prior_count(
@@ -2457,6 +3183,26 @@ def _adapter_resume_checkpoint(
             for (target, horizon), total in sorted(task_totals.items())
         ],
     }
+    if origin_bundles:
+        completed_origins = [
+            bundle
+            for bundle in origin_bundles
+            if all(request.sample_id in resumed_rows for request in bundle.requests)
+        ]
+        result.update(
+            {
+                "completed_origin_samples": len(completed_origins),
+                "succeeded_origin_samples": sum(
+                    all(
+                        resumed_rows[request.sample_id].get("status") == "succeeded"
+                        for request in bundle.requests
+                    )
+                    for bundle in completed_origins
+                ),
+                "total_origin_samples": len(origin_bundles),
+            }
+        )
+    return result
 
 
 def _invalid_input_record(
@@ -2561,6 +3307,149 @@ def _validated_result(value: Any) -> dict[str, Any]:
         "agent_decisions": decisions,
         "tool_calls": tools,
     }
+
+
+def _validated_origin_reflection(
+    value: Any,
+    bundle: _StrictOriginBundle,
+) -> dict[str, Any]:
+    required = {
+        "schema_version",
+        "sample_id",
+        "origin_sample_id",
+        "cell_sample_ids",
+        "outcome_class",
+        "error_source",
+        "next_action",
+        "confidence",
+        "summary",
+        "model_id",
+        "response_digest",
+        "wave_digest",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise SampleExecutionContractError(
+            "origin reflection fields do not match the strict contract"
+        )
+    reflection = dict(value)
+    if (
+        reflection["schema_version"]
+        != "ecologyrsi-dsh.sample-origin-reflection/1"
+        or reflection["sample_id"] != bundle.origin_sample_id
+        or reflection["origin_sample_id"] != bundle.origin_sample_id
+    ):
+        raise SampleExecutionContractError("origin reflection identity mismatch")
+    expected_ids = [request.sample_id for request in bundle.requests]
+    if reflection["cell_sample_ids"] != expected_ids:
+        raise SampleExecutionContractError(
+            "origin reflection prediction-cell membership mismatch"
+        )
+    for name in ("response_digest", "wave_digest"):
+        value_digest = reflection[name]
+        if (
+            not isinstance(value_digest, str)
+            or len(value_digest) != 64
+            or any(character not in "0123456789abcdef" for character in value_digest)
+        ):
+            raise SampleExecutionContractError(
+                f"origin reflection {name} must be a SHA-256 digest"
+            )
+    return reflection
+
+
+def _run_sample_reflection(
+    adapter: Any,
+    request: SamplePredictionRequest,
+    *,
+    observed: float,
+    predicted: float | None,
+    status: str,
+    failure_class: str | None,
+    agent_decisions: Sequence[Mapping[str, Any]],
+    tool_calls: Sequence[Mapping[str, Any]],
+    prepared_reflection: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Run an optional post-score reflector and return its public evidence."""
+
+    if prepared_reflection is None:
+        reflector = getattr(adapter, "reflect_sample", None)
+        if not callable(reflector):
+            return None, None
+        raw = reflector(
+            request,
+            observed=observed,
+            predicted=predicted,
+            status=status,
+            failure_class=failure_class,
+            agent_decisions=agent_decisions,
+            tool_calls=tool_calls,
+        )
+    else:
+        raw = prepared_reflection
+    if not isinstance(raw, Mapping):
+        raise SampleExecutionContractError(
+            "sample reflector must return an object"
+        )
+    required = {
+        "schema_version",
+        "sample_id",
+        "outcome_class",
+        "error_source",
+        "next_action",
+        "confidence",
+        "summary",
+        "model_id",
+        "response_digest",
+        "wave_digest",
+    }
+    origin_required = required | {"origin_sample_id", "cell_sample_ids"}
+    if frozenset(raw) not in {frozenset(required), frozenset(origin_required)}:
+        raise SampleExecutionContractError(
+            "sample reflection fields do not match the strict contract"
+        )
+    reflection = dict(raw)
+    origin_reflection = (
+        reflection["schema_version"]
+        == "ecologyrsi-dsh.sample-origin-reflection/1"
+    )
+    if not origin_reflection and (
+        reflection["schema_version"] != "ecology-sample-reflection@1"
+    ):
+        raise SampleExecutionContractError(
+            "sample reflection schema version mismatch"
+        )
+    if origin_reflection:
+        raw_ids = reflection.get("cell_sample_ids")
+        if (
+            reflection.get("sample_id") != reflection.get("origin_sample_id")
+            or not isinstance(raw_ids, list)
+            or request.sample_id not in raw_ids
+        ):
+            raise SampleExecutionContractError(
+                "sample origin reflection membership mismatch"
+            )
+    elif reflection["sample_id"] != request.sample_id:
+        raise SampleExecutionContractError("sample reflection identity mismatch")
+    for name in ("response_digest", "wave_digest"):
+        value = reflection[name]
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise SampleExecutionContractError(
+                f"sample reflection {name} must be a SHA-256 digest"
+            )
+    decision = {
+        "role": "remote_reflector_agent",
+        "decision": f"reflect_sample:{reflection['outcome_class']}",
+        "status": "completed",
+        "model_id": str(reflection["model_id"])[:200],
+        "reason_code": f"reflection_{reflection['next_action']}"[:160],
+        "confidence": float(reflection["confidence"]),
+        "response_digest": reflection["response_digest"],
+    }
+    return reflection, decision
 
 
 def _host_critic_result(
@@ -2796,6 +3685,9 @@ def _public_steps(value: Any, *, kind: str, id_field: str) -> list[dict[str, Any
             "status",
             "input_digest",
             "output_digest",
+            "execution_owner",
+            "dsh_tool_event_id",
+            "dsh_tool_output_digest",
         }
     )
     required = (
@@ -2870,6 +3762,9 @@ def _attach_execution_trace(
                 "status",
                 "input_digest",
                 "output_digest",
+                "execution_owner",
+                "dsh_tool_event_id",
+                "dsh_tool_output_digest",
             )
             if name in item
         }
@@ -2882,6 +3777,76 @@ def _attach_execution_trace(
     if tools:
         record["tool_trace"] = tools
         record["tool_trace_digest"] = digest(tools)
+
+
+def _sample_agent_chain_attestation(
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind the minimal proof needed to resume a strict completed sample."""
+
+    agent_trace = record.get("agent_trace")
+    agents = (
+        [dict(item) for item in agent_trace if isinstance(item, Mapping)]
+        if isinstance(agent_trace, (list, tuple))
+        else []
+    )
+    tool_trace = record.get("tool_trace")
+    tools = (
+        [dict(item) for item in tool_trace if isinstance(item, Mapping)]
+        if isinstance(tool_trace, (list, tuple))
+        else []
+    )
+    roles = [str(item.get("role") or "") for item in agents]
+    reflection = record.get("sample_reflection")
+    reflection = dict(reflection) if isinstance(reflection, Mapping) else {}
+    planner_invocations = roles.count("remote_planner_agent")
+    critic_invocations = roles.count("remote_critic_agent")
+    reflector_invocations = roles.count("remote_reflector_agent")
+    host_route_bypass_count = roles.count("host_deterministic_router")
+    registered_tool_invocations = sum(
+        str(item.get("tool_id") or "") != "physical-range-check"
+        and str(item.get("status") or "") == "completed"
+        for item in tools
+    )
+    dsh_agent_tool_invocations = sum(
+        item.get("execution_owner") == "dsh_agent_tool_call"
+        and isinstance(item.get("dsh_tool_event_id"), str)
+        and bool(item.get("dsh_tool_event_id"))
+        for item in tools
+    )
+    response_digest = reflection.get("response_digest")
+    wave_digest = reflection.get("wave_digest")
+    body = {
+        "schema_version": SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION,
+        "sample_id": str(record.get("sample_id") or ""),
+        "planner_invocations": planner_invocations,
+        "registered_tool_invocations": registered_tool_invocations,
+        "dsh_agent_tool_invocations": dsh_agent_tool_invocations,
+        "critic_invocations": critic_invocations,
+        "reflector_invocations": reflector_invocations,
+        "host_route_bypass_count": host_route_bypass_count,
+        "agent_trace_digest": record.get("agent_trace_digest"),
+        "tool_trace_digest": record.get("tool_trace_digest"),
+        "reflection_response_digest": (
+            response_digest if isinstance(response_digest, str) else None
+        ),
+        "reflection_wave_digest": (
+            wave_digest if isinstance(wave_digest, str) else None
+        ),
+        "complete": bool(
+            planner_invocations >= 1
+            and registered_tool_invocations >= 1
+            and dsh_agent_tool_invocations >= 1
+            and critic_invocations >= 1
+            and reflector_invocations >= 1
+            and host_route_bypass_count == 0
+            and isinstance(response_digest, str)
+            and bool(response_digest)
+            and isinstance(wave_digest, str)
+            and bool(wave_digest)
+        ),
+    }
+    return {**body, "attestation_digest": digest(body)}
 
 
 def _attempt_trace_entry(
@@ -2928,6 +3893,9 @@ def _attempt_trace_entry(
                 "status",
                 "input_digest",
                 "output_digest",
+                "execution_owner",
+                "dsh_tool_event_id",
+                "dsh_tool_output_digest",
             )
             if name in selected
         }

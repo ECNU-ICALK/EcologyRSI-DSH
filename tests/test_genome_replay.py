@@ -13,14 +13,22 @@ from ecologyrsi_dsh.core.models import (
     Proposal,
     TaskManifest,
     canonical_json,
+    digest,
 )
 from ecologyrsi_dsh.evolution.genome import (
     GenomeMutationContextV1,
     apply_genome_mutation,
 )
-from ecologyrsi_dsh.evolution.analysis import GenerationAnalysis
+from ecologyrsi_dsh.evolution.workflow_ir import resolve_candidate_agent_profile
+from ecologyrsi_dsh.evolution.analysis import (
+    GenerationAnalysis,
+    build_cross_generation_experience,
+)
 from ecologyrsi_dsh.evolution.batches import start_generation_batch
-from ecologyrsi_dsh.evolution.strategies import FakeDSHAdapter
+from ecologyrsi_dsh.evolution.strategies import (
+    FakeDSHAdapter,
+    _native_evolution_reflection_from_experience,
+)
 from ecologyrsi_dsh.knowledge.algorithms import AlgorithmAttempt
 from ecologyrsi_dsh.knowledge.program_registry import current_program_registry
 
@@ -59,16 +67,6 @@ def _new_task() -> TaskManifest:
     )
 
 
-def _legacy_task() -> TaskManifest:
-    return TaskManifest(
-        task_id="legacy-replay",
-        objective="predict water",
-        domain_pack="crop-soil-water@toy",
-        visible_datasets=("generated-toy-series@1",),
-        budget={"max_candidates": 1},
-    )
-
-
 class GenomeReplayTests(unittest.TestCase):
     def setUp(self) -> None:
         self.ledger = EventLedger()
@@ -84,13 +82,19 @@ class GenomeReplayTests(unittest.TestCase):
 
     def _proposal(self, run_id: str, *, slot_index: int = 0) -> Proposal:
         state = self.director.state(run_id)
-        parent = state.materialized_seed_genome()
+        generation = state.run.generation
+        parent = state.parent_genome_for_generation(generation)
+        parent_candidate_id = (
+            state.analysis_for(generation - 1).search_parent_candidate_id
+            if generation > 0 and state.analysis_for(generation - 1) is not None
+            else None
+        )
         context = GenomeMutationContextV1(
             run_id=run_id,
-            generation=0,
+            generation=generation,
             slot_index=slot_index,
             slot_seed=100 + slot_index,
-            parent_candidate_id=None,
+            parent_candidate_id=parent_candidate_id,
             parent_genome_digest=parent.genome_digest,
             generation_batch_digest="1" * 64,
             research_iteration_digest="2" * 64,
@@ -100,21 +104,35 @@ class GenomeReplayTests(unittest.TestCase):
         )
         child = apply_genome_mutation(
             parent,
-            {"schema_version": "ecologyrsi-dsh.genome-mutation/1", "operations": []},
+            {
+                "schema_version": "ecologyrsi-dsh.genome-mutation/1",
+                "operations": [
+                    {
+                        "op": "set_bounded_parameter",
+                        "name": "ridge_alpha",
+                        "value": 0.2 + generation / 10,
+                    }
+                ],
+            },
             context,
             current_program_registry(),
         )
         return Proposal(
-            proposal_id=f"proposal:genome:{slot_index}",
+            proposal_id=f"proposal:genome:{generation}:{slot_index}",
             run_id=run_id,
-            generation=0,
+            generation=generation,
             title=f"bounded child {slot_index}",
             changes=dict(child.scientific_program["parameter_overrides"]),
+            parent_candidate_id=parent_candidate_id,
             metadata={
                 "execution_protocol": "dsh_native_plugin_evolution@1",
                 "evolution_genome_canonical_json": canonical_json(child.to_dict()),
                 "genome_digest": child.genome_digest,
                 "behavior_digest": child.behavior_digest,
+                "candidate_agent_profile": resolve_candidate_agent_profile(
+                    child,
+                    current_program_registry(),
+                ),
             },
         )
 
@@ -124,8 +142,193 @@ class GenomeReplayTests(unittest.TestCase):
         return self.director.spawn_candidate(
             run_id,
             proposal,
-            candidate_id=f"candidate:genome:{slot_index}",
+            candidate_id=(
+                f"candidate:genome:{self.director.state(run_id).run.generation}:"
+                f"{slot_index}"
+            ),
             slot_index=slot_index,
+        )
+
+    def test_cross_generation_experience_keeps_full_behavior_identity(self) -> None:
+        run_id = self._start_new("run:behavior-experience")
+        candidate = self._spawn(run_id)
+        proposal = self.director.state(run_id).proposal(candidate.proposal_id)
+        analysis = GenerationAnalysis(
+            run_id=run_id,
+            generation=0,
+            candidate_count=1,
+            eligible_count=0,
+            outcome="no_eligible_candidate",
+            search_parent_candidate_id=candidate.candidate_id,
+            ranking=(
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "classification": "scientific_gate_failed",
+                    "parameters": dict(proposal.changes),
+                },
+            ),
+            insufficient_evidence=True,
+        )
+        self.ledger.append(
+            run_id,
+            "GenerationAnalyzed",
+            {"analysis": analysis.to_dict()},
+        )
+
+        experience = build_cross_generation_experience(
+            self.director.state(run_id), 1
+        )
+        behavior = experience["generations"][0]["modifications"][
+            "candidate_behaviors"
+        ][0]
+
+        self.assertEqual(behavior["behavior_digest"], proposal.metadata["behavior_digest"])
+        self.assertEqual(behavior["parameters_digest"], digest(dict(proposal.changes)))
+        self.assertEqual(behavior["classification"], "scientific_gate_failed")
+        self.assertTrue(
+            experience["generations"][0]["gate_result"][
+                "insufficient_evidence"
+            ]
+        )
+        reflection = _native_evolution_reflection_from_experience(
+            experience,
+            current_run_id=run_id,
+        )
+        self.assertEqual(reflection["avoid_behaviors"], [])
+
+    def test_native_approval_uses_recorded_adaptive_champion_not_legacy_policy(
+        self,
+    ) -> None:
+        run_id = self._start_new("run:native-selection-authority")
+        first = self._spawn(run_id)
+        first_artifact = ModelArtifact(
+            artifact_id="artifact:native-selection:first",
+            run_id=run_id,
+            candidate_id=first.candidate_id,
+            model_id="greenhouse-horizon-targetwise-ridge@1",
+            dataset_digest="2" * 64,
+            training_partition="training_fit",
+            training_rows=10,
+        )
+        self.director.record_artifact(first_artifact)
+        self.director.record_evaluation(
+            Evaluation(
+                evaluation_id="evaluation:native-selection:first",
+                run_id=run_id,
+                candidate_id=first.candidate_id,
+                score=0.2,
+                passed=True,
+                evaluator_digest="6" * 64,
+                artifact_digest=first_artifact.digest,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "recorded generation champion"):
+            self.director.decide_promotion(
+                Promotion(
+                    promotion_id="promotion:native-selection:premature",
+                    run_id=run_id,
+                    candidate_id=first.candidate_id,
+                    decision=PromotionDecision.APPROVED,
+                    reason="must not bypass unified generation selection",
+                )
+            )
+        first_analysis = GenerationAnalysis(
+            run_id=run_id,
+            generation=0,
+            candidate_count=1,
+            eligible_count=1,
+            outcome="promoted",
+            selected_candidate_id=first.candidate_id,
+            champion_candidate_id=first.candidate_id,
+            incumbent_after_candidate_id=first.candidate_id,
+            search_parent_candidate_id=first.candidate_id,
+            ranking=(
+                {
+                    "candidate_id": first.candidate_id,
+                    "primary_selection_gate": True,
+                },
+            ),
+        )
+        self.ledger.append(
+            run_id,
+            "GenerationAnalyzed",
+            {"analysis": first_analysis.to_dict()},
+        )
+        self.director.decide_promotion(
+            Promotion(
+                promotion_id="promotion:native-selection:first",
+                run_id=run_id,
+                candidate_id=first.candidate_id,
+                decision=PromotionDecision.APPROVED,
+                reason="recorded first-generation adaptive champion",
+            )
+        )
+        self.director.advance_generation(run_id)
+
+        second = self._spawn(run_id)
+        second_artifact = ModelArtifact(
+            artifact_id="artifact:native-selection:second",
+            run_id=run_id,
+            candidate_id=second.candidate_id,
+            model_id="greenhouse-horizon-targetwise-ridge@1",
+            dataset_digest="2" * 64,
+            training_partition="training_fit",
+            training_rows=10,
+        )
+        self.director.record_artifact(second_artifact)
+        self.director.record_evaluation(
+            Evaluation(
+                evaluation_id="evaluation:native-selection:second",
+                run_id=run_id,
+                candidate_id=second.candidate_id,
+                score=0.3,
+                passed=True,
+                metrics={
+                    "objective_aggregation_version": "weighted_task_skill_reward@3"
+                },
+                evaluator_digest="6" * 64,
+                artifact_digest=second_artifact.digest,
+            )
+        )
+        second_analysis = GenerationAnalysis(
+            run_id=run_id,
+            generation=1,
+            candidate_count=1,
+            eligible_count=1,
+            outcome="promoted",
+            selected_candidate_id=second.candidate_id,
+            champion_candidate_id=second.candidate_id,
+            incumbent_before_candidate_id=first.candidate_id,
+            incumbent_after_candidate_id=second.candidate_id,
+            search_parent_candidate_id=second.candidate_id,
+            ranking=(
+                {
+                    "candidate_id": second.candidate_id,
+                    "primary_selection_gate": True,
+                    "selection_status": "selection_only",
+                },
+            ),
+        )
+        self.ledger.append(
+            run_id,
+            "GenerationAnalyzed",
+            {"analysis": second_analysis.to_dict()},
+        )
+
+        promotion = self.director.decide_promotion(
+            Promotion(
+                promotion_id="promotion:native-selection:second",
+                run_id=run_id,
+                candidate_id=second.candidate_id,
+                decision=PromotionDecision.APPROVED,
+                reason="recorded max-T adaptive champion",
+            )
+        )
+
+        self.assertIs(promotion.decision, PromotionDecision.APPROVED)
+        self.assertEqual(
+            self.director.state(run_id).run.best_candidate_id,
+            second.candidate_id,
         )
 
     def _record_artifact_and_evaluation(self, run_id: str, candidate_id: str):
@@ -168,23 +371,6 @@ class GenomeReplayTests(unittest.TestCase):
         )
         with self.assertRaisesRegex((TypeError, ValueError), "genome|canonical"):
             self.director.submit_proposal(proposal)
-
-    def test_legacy_protocol_accepts_missing_genome_fields(self) -> None:
-        self.director.start_evolution(_legacy_task(), run_id="run:legacy")
-        proposal = Proposal(
-            proposal_id="proposal:legacy",
-            run_id="run:legacy",
-            generation=0,
-            title="historical proposal",
-            changes={"alpha": 0.5},
-        )
-        self.director.submit_proposal(proposal)
-        candidate = self.director.spawn_candidate("run:legacy", proposal)
-        self.assertIsNone(
-            self.director.state("run:legacy").candidate_identity_binding(
-                candidate.candidate_id
-            )
-        )
 
     def test_materialized_seed_canonical_json_precedes_first_generation_batch(
         self,
@@ -404,29 +590,6 @@ class GenomeReplayTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "phenotype|identity binding"):
             self.director.state(run_id)
-
-    def test_projected_legacy_genome_cannot_be_promoted_or_resumed_without_migration_seed(
-        self,
-    ) -> None:
-        run_id = self._start_new()
-        proposal = self._proposal(run_id)
-        metadata = dict(proposal.metadata)
-        projected = {
-            "schema_version": "ecologyrsi-dsh.legacy-genome-projection/1",
-            "projected": True,
-            "inheritable": False,
-        }
-        metadata["evolution_genome_canonical_json"] = canonical_json(projected)
-        invalid = Proposal(
-            **{
-                **proposal.to_dict(),
-                "proposal_id": "proposal:projected-legacy",
-                "metadata": metadata,
-            }
-        )
-        with self.assertRaisesRegex(ValueError, "genome|schema|migration"):
-            self.director.submit_proposal(invalid)
-
 
 if __name__ == "__main__":
     unittest.main()

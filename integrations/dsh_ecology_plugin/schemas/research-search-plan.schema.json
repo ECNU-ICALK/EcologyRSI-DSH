@@ -1,0 +1,22 @@
+{
+  "$id": "ecology-research-search-plan@1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "search_queries", "focus_areas", "rationale"],
+  "properties": {
+    "schema_version": {"const": "ecologyrsi-dsh.research-search-plan/1"},
+    "search_queries": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "items": {"type": "string", "minLength": 1, "maxLength": 180}
+    },
+    "focus_areas": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {"type": "string", "minLength": 1, "maxLength": 240}
+    },
+    "rationale": {"type": "string", "minLength": 1, "maxLength": 4000}
+  }
+}

@@ -3,18 +3,39 @@ import { createHash } from "node:crypto";
 import {
   cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, writeFile,
 } from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
 export const PRESET_IDS = Object.freeze([
+  "ecology-coordinator-v3",
+  "ecology-researcher-v6",
+  "ecology-candidate-proposer-v3",
+  "ecology-sample-planner-v3",
+  "ecology-sample-critic-v3",
+  "ecology-generation-judge-v6",
+]);
+const OBSOLETE_PRESET_IDS = Object.freeze([
   "ecology-coordinator-v1",
   "ecology-researcher-v1",
   "ecology-candidate-proposer-v1",
   "ecology-sample-planner-v1",
   "ecology-sample-critic-v1",
   "ecology-generation-judge-v1",
+  "ecology-coordinator-v2",
+  "ecology-researcher-v2",
+  "ecology-candidate-proposer-v2",
+  "ecology-sample-planner-v2",
+  "ecology-sample-critic-v2",
+  "ecology-generation-judge-v2",
+  "ecology-researcher-v3",
+  "ecology-generation-judge-v3",
+  "ecology-researcher-v4",
+  "ecology-generation-judge-v4",
+  "ecology-researcher-v5",
+  "ecology-generation-judge-v5",
 ]);
 
 const BEGIN = "# BEGIN ECOLOGYRSI DSH RUNTIME (managed)";
@@ -87,12 +108,73 @@ async function fsyncTree(root) {
   }
 }
 
-export async function installPresetTree({ sourceRoot, dshHome }) {
+async function resolveExecutable(command, env = process.env) {
+  if (path.isAbsolute(command) || path.dirname(command) !== ".") {
+    return await realpath(path.resolve(command));
+  }
+  const extensions = process.platform === "win32"
+    ? (env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";")
+    : [""];
+  for (const directory of String(env.PATH || "").split(path.delimiter)) {
+    if (!directory) continue;
+    for (const extension of extensions) {
+      const candidate = path.join(directory, `${command}${extension}`);
+      try {
+        if ((await stat(candidate)).isFile()) return await realpath(candidate);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+  }
+  throw new Error(`DSH executable is not available: ${command}`);
+}
+
+async function validatePresetTreeWithDsh(sourcePath, dshBin) {
+  const executable = await resolveExecutable(dshBin);
+  let packageJson;
+  try {
+    packageJson = await realpath(path.resolve(
+      path.dirname(executable),
+      "..",
+      "@deepseek-ai",
+      "dsh",
+      "package.json",
+    ));
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  const requireFromDsh = createRequire(packageJson);
+  let modulePath;
+  try {
+    modulePath = requireFromDsh.resolve("@deepseek-ai/dsh-agent-presets");
+  } catch (error) {
+    if (error.code === "MODULE_NOT_FOUND") return;
+    throw error;
+  }
+  const { scanRoot } = await import(pathToFileURL(modulePath).href);
+  const rows = await scanRoot({ path: sourcePath, trust: "user" });
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  for (const id of PRESET_IDS) {
+    const row = byId.get(id);
+    if (row == null) throw new Error(`DSH preset is missing: ${id}`);
+    if (row.broken) throw new Error(`DSH preset ${id} is invalid: ${row.broken}`);
+  }
+}
+
+export async function installPresetTree({ sourceRoot, dshHome, dshBin = null }) {
   const sourcePath = fileURLToPath(sourceRoot instanceof URL ? sourceRoot : pathToFileURL(path.resolve(sourceRoot)));
   const destinationRoot = path.join(path.resolve(dshHome), ".agent-presets");
+  if (dshBin != null) await validatePresetTreeWithDsh(sourcePath, dshBin);
   await assertNoSymlink(dshHome);
   await mkdir(destinationRoot, { recursive: true, mode: 0o700 });
   await assertNoSymlink(destinationRoot, dshHome);
+  for (const id of OBSOLETE_PRESET_IDS) {
+    const target = path.join(destinationRoot, id);
+    if (!(await exists(target))) continue;
+    await assertNoSymlink(target, dshHome);
+    await rm(target, { recursive: true, force: false });
+  }
   for (const id of PRESET_IDS) {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) throw new Error(`invalid preset id: ${id}`);
     const source = path.join(sourcePath, id);
@@ -134,22 +216,34 @@ export async function installManagedPatch({ dshHome, staticRoot, profile = "web"
   if (await exists(target)) previous = await readFile(target, "utf8");
   const begin = previous.indexOf(BEGIN);
   const end = previous.indexOf(END);
-  const legacyPattern = /- insert:\n    - id: ecologyrsi-evolution\n      name: '@ecologyrsi\/dsh-evolution-plugin'\n      inject: \[webServer\]\n      config:\n        staticRoot: '[^'\n]+'\n        backendOrigin: 'http:\/\/127\.0\.0\.1:8777'\n?/;
-  const legacyMatch = begin < 0 && end < 0 ? previous.match(legacyPattern) : null;
+  const meaningfulLines = previous
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+  const emptyDocumentMatch = (
+    begin < 0
+    && end < 0
+    && meaningfulLines.length === 1
+    && meaningfulLines[0] === "[]"
+  )
+    ? previous.match(/^[ \t]*\[\][ \t]*$/m)
+    : null;
   const outsideManaged = previous.replace(
     previous.slice(Math.max(begin, 0), end >= 0 ? end + END.length : 0),
     "",
   );
   if (
     (begin >= 0) !== (end >= 0)
-    || (/id:\s*ecologyrsi-evolution/.test(outsideManaged) && legacyMatch == null)
+    || /id:\s*ecologyrsi-evolution/.test(outsideManaged)
   ) {
     throw new Error("refusing unmanaged or malformed ecologyrsi Host patch");
   }
   let next;
   if (begin >= 0) next = `${previous.slice(0, begin)}${managed}${previous.slice(end + END.length).replace(/^\n/, "")}`;
-  else if (legacyMatch != null && legacyMatch.index != null) {
-    next = `${previous.slice(0, legacyMatch.index)}${managed}${previous.slice(legacyMatch.index + legacyMatch[0].length)}`;
+  else if (emptyDocumentMatch != null && emptyDocumentMatch.index != null) {
+    next = `${previous.slice(0, emptyDocumentMatch.index)}${managed}${previous
+      .slice(emptyDocumentMatch.index + emptyDocumentMatch[0].length)
+      .replace(/^\r?\n/, "")}`;
   }
   else next = `${previous}${previous && !previous.endsWith("\n") ? "\n" : ""}${managed}`;
   if (next !== previous) await atomicWrite(target, next);
@@ -195,9 +289,16 @@ export async function installRuntime({
       ["plugin", "--profile", profile, "add", "--save-exact", `file:${stable}`],
       { cwd: dshHome },
     );
-    await installPresetTree({ sourceRoot: path.join(pluginRoot, "presets"), dshHome });
+    await installPresetTree({
+      sourceRoot: path.join(pluginRoot, "presets"),
+      dshHome,
+      dshBin,
+    });
     await installManagedPatch({ dshHome, staticRoot, profile });
-    run(dshBin, ["--profile", profile, "--dump-config"], { cwd: dshHome });
+    run(dshBin, ["--profile", profile, "--dump-config"], {
+      cwd: dshHome,
+      stdio: ["ignore", "ignore", "inherit"],
+    });
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

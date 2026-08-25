@@ -3,12 +3,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const ids = [
-  "ecology-coordinator-v1",
-  "ecology-researcher-v1",
-  "ecology-candidate-proposer-v1",
-  "ecology-sample-planner-v1",
-  "ecology-sample-critic-v1",
-  "ecology-generation-judge-v1",
+  "ecology-coordinator-v3",
+  "ecology-researcher-v6",
+  "ecology-candidate-proposer-v3",
+  "ecology-sample-planner-v3",
+  "ecology-sample-critic-v3",
+  "ecology-generation-judge-v6",
 ];
 
 test("six legal role presets expose only the narrow agent plane", async () => {
@@ -27,9 +27,47 @@ test("six legal role presets expose only the narrow agent plane", async () => {
 });
 
 test("only workflow-driving roles mount the non-model-facing worker service", async () => {
-  const workerRoles = new Set(["ecology-coordinator-v1", "ecology-sample-planner-v1"]);
+  const workerRoles = new Set(["ecology-coordinator-v3", "ecology-sample-planner-v3"]);
   for (const id of ids) {
     const text = await readFile(new URL(`../presets/${id}/agent.cordis.yml`, import.meta.url), "utf8");
     assert.equal(text.includes("@deepseek-ai/dsh-workflow-worker-thread"), workerRoles.has(id));
   }
+});
+
+test("generation judge preset separates candidate review from batch reflection", async () => {
+  const composition = await readFile(
+    new URL(
+      "../presets/ecology-generation-judge-v6/agent.cordis.yml",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const skillsRoot = new URL(
+    "../presets/ecology-generation-judge-v6/skills/",
+    import.meta.url,
+  );
+  const candidateReview = await readFile(
+    new URL("candidate-scientific-review/SKILL.md", skillsRoot),
+    "utf8",
+  );
+  const batchReflection = await readFile(
+    new URL("batch-scientific-reflection/SKILL.md", skillsRoot),
+    "utf8",
+  );
+
+  assert.match(composition, /Follow the stage-specific Skill/i);
+  assert.match(composition, /For a candidate review/);
+  assert.match(composition, /For batch reflection/);
+  assert.match(candidateReview, /name: candidate-scientific-review/);
+  assert.match(candidateReview, /candidate_id/);
+  assert.match(candidateReview, /proposal_id/);
+  assert.match(candidateReview, /scientific_evaluation/);
+  assert.match(candidateReview, /fitness_profile_digest/);
+  assert.match(candidateReview, /evaluation_cohort_digest/);
+  assert.match(candidateReview, /schema_version[\s\S]*accepted[\s\S]*rationale[\s\S]*flags/);
+  assert.match(candidateReview, /Never propose next-generation directions/i);
+  assert.match(candidateReview, /not selection, ranking, promotion/i);
+  assert.doesNotMatch(candidateReview, /Propose exactly the requested number/i);
+  assert.match(batchReflection, /name: batch-scientific-reflection/);
+  assert.match(batchReflection, /Propose exactly the requested number/i);
 });

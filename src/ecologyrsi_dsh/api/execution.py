@@ -7,6 +7,7 @@ from typing import Any
 
 from ..core.ledger import CommandInProgressError, CommandReceipt
 from ..core.redaction import safe_error_code
+from ..integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 from .generation_execution import complete_if_budget_exhausted, execute_generation
 from .shared import (
     _assert_http_scope,
@@ -107,6 +108,19 @@ class ExecutionEndpointsMixin:
             expected = ", ".join(allowed)
             raise RuntimeError(
                 f"run {run_id} is {state.run.status.value}; expected {expected}"
+            )
+        if (
+            action in {"start", "resume"}
+            and state.task_manifest.metadata.get("execution_protocol")
+            == DSH_NATIVE_EXECUTION_PROTOCOL
+        ):
+            # A DSH process restart clears its in-memory run registry while the
+            # Python scientific ledger remains durable.  Recreate and validate
+            # that exact frozen runtime binding before sending start/resume;
+            # otherwise the runtime can only reject the control as unknown.
+            self._validate_frozen_runtime_bindings(
+                state.task_manifest,
+                run_id=state.run.run_id,
             )
         return state
 

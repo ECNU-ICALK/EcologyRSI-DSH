@@ -12,6 +12,10 @@ from ..evolution.analysis import (
     sample_update_windows_enabled,
 )
 from ..knowledge.algorithms import AlgorithmAttempt
+from ..knowledge.autonomous_cycle import (
+    GenerationReflection,
+    GenerationSearchPlan,
+)
 from ..knowledge.models import KnowledgeAssessment, KnowledgeSnapshot
 from ..knowledge.research_iteration import ResearchIteration
 from .ledger import Event
@@ -34,6 +38,67 @@ from .models import (
 )
 
 DSH_NATIVE_EVOLUTION_PROTOCOL = "dsh_native_plugin_evolution@1"
+
+_DSH_STAGE_SKILLS: dict[str, frozenset[str]] = {
+    "generation.research": frozenset({"autonomous-ecology-research"}),
+    "generation.search-plan": frozenset({"autonomous-ecology-research"}),
+    "generation.research-synthesis": frozenset({"autonomous-ecology-research"}),
+    "generation.reflect": frozenset({"batch-scientific-reflection"}),
+    "candidate.propose": frozenset({"bounded-plugin-experiment"}),
+    "generation.judge": frozenset({"candidate-scientific-review"}),
+    "sample.plan": frozenset(
+        {
+            "origin-vector-forecasting-balanced",
+            "origin-vector-forecasting-anomaly-aware",
+            "origin-vector-forecasting-horizon-aware",
+        }
+    ),
+    "sample.critic": frozenset({"origin-vector-review"}),
+    "sample.reflect": frozenset({"origin-vector-review"}),
+}
+
+
+def _validate_dsh_skill_evidence(value: Any, *, stage: str) -> None:
+    fields = {
+        "schema_version",
+        "stage",
+        "skill_name",
+        "call_count",
+        "successful_call_count",
+        "call_seq",
+        "result_seq",
+        "first_tool_call_verified",
+        "next_tool_name",
+        "next_tool_call_seq",
+        "order_verified",
+        "source",
+    }
+    expected_next = (
+        "ecology_execute_prediction_tool"
+        if stage == "sample.plan"
+        else "structured_output"
+    )
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != fields
+        or value.get("schema_version")
+        != "ecologyrsi-dsh.skill-invocation-evidence/1"
+        or value.get("stage") != stage
+        or value.get("skill_name") not in _DSH_STAGE_SKILLS.get(stage, frozenset())
+        or value.get("call_count") != 1
+        or value.get("successful_call_count") != 1
+        or value.get("first_tool_call_verified") is not True
+        or value.get("next_tool_name") != expected_next
+        or value.get("order_verified") is not True
+        or value.get("source") != "dsh_session_event_log"
+    ):
+        raise ValueError("DSH Skill invocation evidence is invalid")
+    sequence = [value.get(name) for name in ("call_seq", "result_seq", "next_tool_call_seq")]
+    if (
+        any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in sequence)
+        or not sequence[0] < sequence[1] < sequence[2]
+    ):
+        raise ValueError("DSH Skill invocation evidence order is invalid")
 
 
 def _validate_dsh_session_metrics(value: Any, *, session_id: str) -> None:
@@ -232,6 +297,7 @@ _TERMINAL_RUN_STATUSES = frozenset(
 )
 _EVOLUTION_STAGES = frozenset(
     {
+        "search",
         "research",
         "proposal",
         "candidate",
@@ -239,6 +305,7 @@ _EVOLUTION_STAGES = frozenset(
         "evaluation",
         "judge",
         "decision",
+        "reflection",
     }
 )
 _EVOLUTION_STAGE_STATUSES = frozenset({"started", "completed", "failed"})
@@ -578,6 +645,8 @@ class RunState:
     research_iterations: tuple[ResearchIteration, ...]
     algorithm_attempts: tuple[AlgorithmAttempt, ...]
     events: tuple[Event, ...]
+    generation_search_plans: tuple[GenerationSearchPlan, ...] = ()
+    generation_reflections: tuple[GenerationReflection, ...] = ()
     expert_consultations: tuple[ExpertConsultation, ...] = ()
     expert_consultation_answers: tuple[ExpertConsultationAnswer, ...] = ()
     materialized_seed_genome_canonical_json: str | None = None
@@ -636,6 +705,26 @@ class RunState:
             None,
         )
 
+    def search_plan_for(self, generation: int) -> GenerationSearchPlan | None:
+        return next(
+            (
+                item
+                for item in reversed(self.generation_search_plans)
+                if item.generation == generation
+            ),
+            None,
+        )
+
+    def reflection_for(self, generation: int) -> GenerationReflection | None:
+        return next(
+            (
+                item
+                for item in reversed(self.generation_reflections)
+                if item.generation == generation
+            ),
+            None,
+        )
+
     def knowledge_assessment_for(
         self, generation: int
     ) -> KnowledgeAssessment | None:
@@ -688,19 +777,6 @@ class RunState:
             raise ValueError("historical candidate has no persisted DSH-native genome")
         return genome
 
-    def projected_legacy_genome_for(self, candidate_id: str):
-        from ..evolution.genome import legacy_genome_from_proposal
-
-        candidate = self.candidate(candidate_id)
-        proposal = self.proposal(candidate.proposal_id)
-        if persisted_genome_from_proposal(proposal) is not None:
-            raise ValueError("DSH-native candidates do not use legacy projection")
-        return legacy_genome_from_proposal(
-            proposal,
-            self.task_manifest,
-            self.knowledge_for(candidate.generation),
-        )
-
     def parent_genome_for_generation(self, generation: int):
         batch = self.batch_for(generation)
         if batch is not None and batch.parent_genome_canonical_json is not None:
@@ -748,12 +824,6 @@ class RunState:
                 "compiled_behavior_digest": binding["compiled_behavior_digest"],
                 "evaluation_cohort_digest": binding["evaluation_cohort_digest"],
             }
-        )
-
-    def algorithm_debug_passed(self, candidate_id: str) -> bool:
-        return any(
-            item.phase == "debug" and item.status == "passed"
-            for item in self.algorithm_attempts_for(candidate_id)
         )
 
     @property
@@ -824,9 +894,12 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
     knowledge_snapshots: dict[int, KnowledgeSnapshot] = {}
     knowledge_assessments: dict[int, KnowledgeAssessment] = {}
     research_iterations: dict[int, ResearchIteration] = {}
+    generation_search_plans: dict[int, GenerationSearchPlan] = {}
+    generation_reflections: dict[int, GenerationReflection] = {}
     algorithm_attempts: list[AlgorithmAttempt] = []
     candidate_identity_bindings: dict[str, dict[str, Any]] = {}
     formal_stage_seals: dict[str, dict[str, Any]] = {}
+    dsh_prediction_tool_events: dict[str, tuple[int, dict[str, Any]]] = {}
     formal_stage_started = False
 
     for event in events[1:]:
@@ -1091,6 +1164,26 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     else CandidateStatus.DUPLICATE
                 )
                 candidates[candidate_id] = replace(candidate, status=status)
+        elif event.kind == "GenerationSearchPlanned":
+            item = GenerationSearchPlan.from_dict(payload["search_plan"])
+            if item.run_id != run.run_id:
+                raise ValueError("generation search plan belongs to another run")
+            previous = generation_analyses.get(item.generation - 1)
+            previous_reflection = generation_reflections.get(item.generation - 1)
+            if item.source_analysis_digest != (
+                previous.analysis_digest if previous is not None else None
+            ):
+                raise ValueError("generation search plan previous analysis mismatch")
+            if item.source_reflection_digest != (
+                previous_reflection.reflection_digest
+                if previous_reflection is not None
+                else None
+            ):
+                raise ValueError("generation search plan previous reflection mismatch")
+            existing = generation_search_plans.get(item.generation)
+            if existing is not None and existing.to_dict() != item.to_dict():
+                raise ValueError("generation has multiple search plans")
+            generation_search_plans[item.generation] = item
         elif event.kind == "GenerationBatchStarted":
             if expected_seed_canonical is not None and materialized_seed_canonical is None:
                 raise ValueError("generation batch cannot precede seed materialization")
@@ -1123,6 +1216,17 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
         elif event.kind == "GenerationAnalyzed":
             item = GenerationAnalysis.from_dict(payload["analysis"])
             generation_analyses[item.generation] = item
+        elif event.kind == "GenerationReflected":
+            item = GenerationReflection.from_dict(payload["reflection"])
+            if item.run_id != run.run_id:
+                raise ValueError("generation reflection belongs to another run")
+            analysis = generation_analyses.get(item.generation)
+            if analysis is None or analysis.analysis_digest != item.analysis_digest:
+                raise ValueError("generation reflection analysis mismatch")
+            existing = generation_reflections.get(item.generation)
+            if existing is not None and existing.to_dict() != item.to_dict():
+                raise ValueError("generation has multiple reflections")
+            generation_reflections[item.generation] = item
         elif event.kind == "GenerationKnowledgeRetrieved":
             item = KnowledgeSnapshot.from_dict(payload["knowledge_snapshot"])
             knowledge_snapshots[item.generation] = item
@@ -1323,9 +1427,10 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 "output_schema_id",
                 "result_digest",
                 "structured",
+                "skill_invocation_evidence",
             }
             if not required_fields.issubset(payload) or set(payload) - (
-                required_fields | {"session_metrics"}
+                required_fields | {"session_metrics", "required_tool_receipt"}
             ):
                 raise ValueError("DshStructuredResultAccepted payload is invalid")
             if payload["schema_version"] != "ecologyrsi-dsh.structured-result-accepted/1":
@@ -1340,6 +1445,18 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 "generation.research": (
                     "researcher",
                     "ecology-research-result@1",
+                ),
+                "generation.search-plan": (
+                    "researcher",
+                    "ecology-research-search-plan@1",
+                ),
+                "generation.research-synthesis": (
+                    "researcher",
+                    "ecology-research-synthesis@1",
+                ),
+                "generation.reflect": (
+                    "generation-judge",
+                    "ecology-generation-reflection@1",
                 ),
                 "candidate.propose": (
                     "candidate-proposer",
@@ -1357,12 +1474,20 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     "sample-critic",
                     "ecology-sample-review@1",
                 ),
+                "sample.reflect": (
+                    "sample-critic",
+                    "ecology-sample-reflection@1",
+                ),
             }
             contract = stage_contracts.get(identity.get("stage"))
             if contract is None or (
                 identity.get("role"), payload["output_schema_id"]
             ) != contract:
                 raise ValueError("DSH structured-result stage contract mismatch")
+            _validate_dsh_skill_evidence(
+                payload["skill_invocation_evidence"],
+                stage=str(identity.get("stage") or ""),
+            )
             if "session_metrics" in payload:
                 session_id = identity.get("session_id")
                 if not isinstance(session_id, str) or not session_id:
@@ -1370,6 +1495,84 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 _validate_dsh_session_metrics(
                     payload["session_metrics"], session_id=session_id
                 )
+            tool_receipt = payload.get("required_tool_receipt")
+            if identity.get("stage") == "sample.plan":
+                if not isinstance(tool_receipt, Mapping):
+                    raise ValueError(
+                        "sample.plan structured result is missing its prediction-tool receipt"
+                    )
+                tool_event_record = dsh_prediction_tool_events.get(
+                    str(tool_receipt.get("event_id") or "")
+                )
+                if tool_event_record is None:
+                    raise ValueError(
+                        "sample.plan prediction-tool receipt is not bound to a prior event"
+                    )
+                tool_event_seq, tool_event = tool_event_record
+                if (
+                    set(tool_receipt)
+                    != {
+                        "event_id",
+                        "event_seq",
+                        "request_digest",
+                        "output_digest",
+                        "execution_owner",
+                    }
+                    or tool_receipt.get("event_seq") != tool_event_seq
+                    or tool_receipt.get("execution_owner") != "dsh_agent_tool_call"
+                    or tool_receipt.get("request_digest")
+                    != tool_event.get("request_digest")
+                    or tool_receipt.get("output_digest")
+                    != tool_event.get("output_digest")
+                    or tool_event.get("stage_attempt")
+                    != identity.get("stage_attempt")
+                    or tool_event.get("idempotency_key")
+                    != identity.get("idempotency_key")
+                    or tool_event.get("wave_digest")
+                    != structured.get("wave_digest")
+                ):
+                    raise ValueError(
+                        "sample.plan prediction-tool receipt is not bound to a prior event"
+                    )
+            elif tool_receipt is not None:
+                raise ValueError(
+                    "non-Planner structured result cannot claim a prediction-tool receipt"
+                )
+        elif event.kind == "DshPredictionToolExecuted":
+            expected_fields = {
+                "schema_version",
+                "stage",
+                "stage_attempt",
+                "idempotency_key",
+                "tool_id",
+                "wave_digest",
+                "sample_ids",
+                "prediction_count",
+                "request_digest",
+                "output_digest",
+                "execution_owner",
+            }
+            sample_ids = payload.get("sample_ids")
+            if (
+                set(payload) != expected_fields
+                or payload.get("schema_version")
+                != "ecologyrsi-dsh.dsh-prediction-tool-executed/1"
+                or payload.get("stage") != "sample.plan"
+                or payload.get("execution_owner") != "dsh_agent_tool_call"
+                or not isinstance(sample_ids, list)
+                or not sample_ids
+                or len(sample_ids) != len(set(sample_ids))
+                or payload.get("prediction_count") != len(sample_ids)
+                or not all(isinstance(item, str) and item for item in sample_ids)
+                or not all(
+                    isinstance(payload.get(name), str)
+                    and len(payload[name]) == 64
+                    and all(character in "0123456789abcdef" for character in payload[name])
+                    for name in ("wave_digest", "request_digest", "output_digest")
+                )
+            ):
+                raise ValueError("DshPredictionToolExecuted payload is invalid")
+            dsh_prediction_tool_events[event.event_id] = (event.seq, dict(payload))
         elif event.kind == "DshChildLaunchReserved":
             if set(payload) != {
                 "schema_version",
@@ -1469,6 +1672,8 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
         research_iterations=tuple(research_iterations.values()),
         algorithm_attempts=tuple(algorithm_attempts),
         events=events,
+        generation_search_plans=tuple(generation_search_plans.values()),
+        generation_reflections=tuple(generation_reflections.values()),
         expert_consultations=tuple(expert_consultations.values()),
         expert_consultation_answers=tuple(expert_consultation_answers.values()),
         materialized_seed_genome_canonical_json=materialized_seed_canonical,

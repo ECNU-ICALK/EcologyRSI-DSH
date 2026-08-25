@@ -14,23 +14,15 @@ import hashlib
 import json
 import math
 import re
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import Any, TypeAlias
 import unicodedata
 
-from ..core.models import Proposal, TaskManifest, digest
-
-if TYPE_CHECKING:
-    from ..knowledge.models import KnowledgeSnapshot
-
-
-GENOME_SCHEMA_VERSION = "ecologyrsi-dsh.plugin-genome/1"
-GENOME_CANONICAL_VERSION = "plugin-genome-canonical-json@1"
+GENOME_SCHEMA_VERSION = "ecologyrsi-dsh.plugin-genome/2"
 SEED_TEMPLATE_SCHEMA_VERSION = "ecologyrsi-dsh.seed-genome-template/1"
 MUTATION_SCHEMA_VERSION = "ecologyrsi-dsh.genome-mutation/1"
-LEGACY_PROJECTION_SCHEMA_VERSION = "ecologyrsi-dsh.legacy-genome-projection/1"
-LEGACY_ADAPTER_VERSION = "legacy-proposal-genome-adapter@0.2.2"
-MATERIALIZER_VERSION = "seed-genome-materializer@1"
-MIGRATION_MATERIALIZER_VERSION = "legacy-genome-migration@1"
+MATERIALIZER_VERSION = "seed-genome-materializer@2"
+TRUST_REGION_MUTATION_OPERATOR_ID = "bounded-trust-region-mutation@2"
+TRUST_REGION_MAX_NORMALIZED_STEP = 0.15
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PROGRAM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*(?:@[A-Za-z0-9][A-Za-z0-9._-]*)?$")
@@ -565,11 +557,10 @@ def _lineage(value: Any) -> dict[str, Any]:
         "mutation_digest",
         "source_research_iteration_digest",
         "source_knowledge_snapshot_digest",
-        "migration_source",
     }
     raw = _exact_mapping(value, "lineage", fields)
     origin = _text(raw["origin_kind"], "lineage.origin_kind")
-    if origin not in {"seed_catalog", "legacy_migration", "bounded_mutation"}:
+    if origin not in {"seed_catalog", "bounded_mutation"}:
         raise ValueError("unsupported lineage origin_kind")
     result: dict[str, Any] = {"origin_kind": origin}
     nullable_texts = {"parent_candidate_id"}
@@ -592,14 +583,7 @@ def _lineage(value: Any) -> dict[str, Any]:
     )
     for name in ("generation", "slot_index", "slot_seed"):
         result[name] = None if raw[name] is None else _integer(raw[name], f"lineage.{name}", minimum=0)
-    migration = raw["migration_source"]
-    if migration is not None:
-        if not isinstance(migration, Mapping):
-            raise TypeError("lineage.migration_source must be an object or null")
-        migration = deep_thaw_json(deep_freeze_json(migration))
-    result["migration_source"] = migration
-
-    if origin in {"seed_catalog", "legacy_migration"}:
+    if origin == "seed_catalog":
         for name in (
             "parent_candidate_id",
             "parent_genome_digest",
@@ -615,10 +599,6 @@ def _lineage(value: Any) -> dict[str, Any]:
         ):
             if result[name] is not None:
                 raise ValueError(f"{origin} lineage cannot contain {name}")
-        if origin == "seed_catalog" and migration is not None:
-            raise ValueError("seed_catalog lineage cannot contain migration_source")
-        if origin == "legacy_migration" and migration is None:
-            raise ValueError("legacy_migration lineage requires migration_source")
     else:
         required = (
             "parent_genome_digest",
@@ -638,8 +618,6 @@ def _lineage(value: Any) -> dict[str, Any]:
             raise ValueError("first generation parent_candidate_id must be null")
         if result["generation"] > 0 and result["parent_candidate_id"] is None:
             raise ValueError("later generations require parent_candidate_id")
-        if migration is not None:
-            raise ValueError("bounded_mutation lineage cannot contain migration_source")
     return result
 
 
@@ -737,7 +715,7 @@ class EcologyEvolutionPluginGenome:
             raise ValueError("plugin genome behavior_digest mismatch")
         normalized["behavior_digest"] = behavior_digest
         identity = dict(normalized)
-        genome_digest = _domain_digest("ecologyrsi-dsh/plugin-genome/1", identity)
+        genome_digest = _domain_digest("ecologyrsi-dsh/plugin-genome/2", identity)
         if "genome_digest" in raw and _digest_text(
             raw["genome_digest"], "genome_digest"
         ) != genome_digest:
@@ -785,7 +763,7 @@ class EcologyEvolutionPluginGenome:
         return deep_thaw_json(self._value)
 
 
-def _empty_root_lineage(origin_kind: str, migration_source: Any = None) -> dict[str, Any]:
+def _empty_root_lineage(origin_kind: str) -> dict[str, Any]:
     return {
         "origin_kind": origin_kind,
         "parent_candidate_id": None,
@@ -799,7 +777,6 @@ def _empty_root_lineage(origin_kind: str, migration_source: Any = None) -> dict[
         "mutation_digest": None,
         "source_research_iteration_digest": None,
         "source_knowledge_snapshot_digest": None,
-        "migration_source": migration_source,
     }
 
 
@@ -891,16 +868,57 @@ def _operation(raw_value: Any, fields: set[str], op_name: str) -> dict[str, Any]
     return raw
 
 
+def _validate_trust_region_parameter_step(
+    *,
+    name: str,
+    previous: Any,
+    proposed: int | float,
+    contract: Mapping[str, Any],
+) -> None:
+    """Reject a one-axis mutation that moves too far across its frozen bounds."""
+
+    minimum = _finite_number(contract.get("minimum"), f"parameter {name} minimum")
+    maximum = _finite_number(contract.get("maximum"), f"parameter {name} maximum")
+    if float(maximum) <= float(minimum):
+        raise ValueError(f"parameter {name} has invalid trust-region bounds")
+    previous_value = _finite_number(previous, f"parent parameter {name}")
+    previous_float = float(previous_value)
+    proposed_float = float(proposed)
+    if not float(minimum) <= previous_float <= float(maximum):
+        raise ValueError(f"parent parameter {name} is outside trust-region bounds")
+
+    # Positive parameters spanning several orders of magnitude (for example
+    # ridge regularization) are compared in log space. Other parameters use
+    # their ordinary bounded range. Both yield a unitless step in [0, 1].
+    if float(minimum) > 0 and float(maximum) / float(minimum) >= 100:
+        denominator = math.log(float(maximum)) - math.log(float(minimum))
+        normalized_step = abs(
+            math.log(proposed_float) - math.log(previous_float)
+        ) / denominator
+    else:
+        normalized_step = abs(proposed_float - previous_float) / (
+            float(maximum) - float(minimum)
+        )
+    if normalized_step > TRUST_REGION_MAX_NORMALIZED_STEP + 1e-12:
+        raise ValueError(
+            f"mutation parameter {name} normalized trust-region step "
+            f"{normalized_step:.6g} exceeds maximum "
+            f"{TRUST_REGION_MAX_NORMALIZED_STEP:.2f}"
+        )
+
+
 def apply_genome_mutation(
     parent: EcologyEvolutionPluginGenome,
     accepted_mutation: Mapping[str, Any],
     context: GenomeMutationContextV1,
     registry: Any,
+    *,
+    parameter_schemas: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> EcologyEvolutionPluginGenome:
     """Apply one host-validated mutation without ever accepting executable code."""
 
     if not isinstance(parent, EcologyEvolutionPluginGenome):
-        raise TypeError("projected legacy views require explicit migration before mutation")
+        raise TypeError("parent must be an EcologyEvolutionPluginGenome")
     if not isinstance(context, GenomeMutationContextV1):
         raise TypeError("context must be GenomeMutationContextV1")
     if context.parent_genome_digest != parent.genome_digest:
@@ -915,10 +933,19 @@ def apply_genome_mutation(
     operations = raw["operations"]
     if isinstance(operations, (str, bytes)) or not isinstance(operations, Sequence):
         raise TypeError("mutation operations must be an array")
-    if len(operations) > 32:
-        raise ValueError("mutation contains too many operations")
+    if not 1 <= len(operations) <= 4:
+        raise ValueError("mutation operations must contain between 1 and 4 items")
+    strict_trust_region = (
+        context.mutation_operator_id == TRUST_REGION_MUTATION_OPERATOR_ID
+    )
+    if strict_trust_region and len(operations) != 1:
+        raise ValueError(
+            "bounded trust-region mutation must contain exactly one operation"
+        )
     normalized_mutation = deep_thaw_json(deep_freeze_json(raw))
     result = parent.to_dict()
+    parent_scientific = deep_thaw_json(deep_freeze_json(result["scientific_program"]))
+    parent_agent = deep_thaw_json(deep_freeze_json(result["agent_program"]))
     scientific = result["scientific_program"]
     agent = result["agent_program"]
     for raw_operation in operations:
@@ -932,12 +959,40 @@ def apply_genome_mutation(
             registry.validate_parameter(
                 scientific["predictor_ref"]["id"], name, value
             )
+            if scientific["parameter_overrides"].get(name) == value:
+                raise ValueError(f"mutation operation {op} does not change {name}")
+            if strict_trust_region:
+                schemas = parameter_schemas
+                if schemas is None:
+                    predictor = registry.program(
+                        "predictors", scientific["predictor_ref"]["id"]
+                    )
+                    schemas = predictor.get("parameters")
+                if not isinstance(schemas, Mapping) or not isinstance(
+                    schemas.get(name), Mapping
+                ):
+                    raise ValueError(
+                        f"mutation parameter {name} has no frozen trust-region schema"
+                    )
+                _validate_trust_region_parameter_step(
+                    name=name,
+                    previous=scientific["parameter_overrides"].get(name),
+                    proposed=value,
+                    contract=schemas[name],
+                )
             scientific["parameter_overrides"][name] = value
         elif op == "select_registered_pipeline":
             item = _operation(raw_operation, {"predictor_id"}, op)
             predictor_id = _text(item["predictor_id"], "predictor_id", pattern=_PROGRAM_ID_RE)
-            scientific["predictor_ref"] = registry.program_ref("predictors", predictor_id)
-            scientific["parameter_overrides"] = registry.predictor_defaults(predictor_id)
+            predictor_ref = registry.program_ref("predictors", predictor_id)
+            parameter_overrides = registry.predictor_defaults(predictor_id)
+            if (
+                scientific["predictor_ref"] == predictor_ref
+                and scientific["parameter_overrides"] == parameter_overrides
+            ):
+                raise ValueError(f"mutation operation {op} does not change the pipeline")
+            scientific["predictor_ref"] = predictor_ref
+            scientific["parameter_overrides"] = parameter_overrides
         elif op in {
             "select_registered_feature_policy",
             "select_registered_fit_policy",
@@ -957,25 +1012,35 @@ def apply_genome_mutation(
                 category,
                 _text(item["program_id"], "program_id", pattern=_PROGRAM_ID_RE),
             )
-            scientific[field_name] = {**ref, "overrides": {}}
+            selected = {**ref, "overrides": {}}
+            if scientific[field_name] == selected:
+                raise ValueError(f"mutation operation {op} does not change {field_name}")
+            scientific[field_name] = selected
         elif op == "select_registered_workflow_template":
             item = _operation(raw_operation, {"workflow_template_id"}, op)
             workflow_id = _text(
                 item["workflow_template_id"], "workflow_template_id", pattern=_PROGRAM_ID_RE
             )
-            agent["candidate_execution_program"]["workflow_template_ref"] = registry.program_ref(
-                "workflow_templates", workflow_id
-            )
-            agent["candidate_execution_program"]["workflow_overrides"] = registry.workflow_defaults(
-                workflow_id
-            )
+            workflow_ref = registry.program_ref("workflow_templates", workflow_id)
+            workflow_overrides = registry.workflow_defaults(workflow_id)
+            execution_program = agent["candidate_execution_program"]
+            if (
+                execution_program["workflow_template_ref"] == workflow_ref
+                and execution_program["workflow_overrides"] == workflow_overrides
+            ):
+                raise ValueError(f"mutation operation {op} does not change the workflow")
+            execution_program["workflow_template_ref"] = workflow_ref
+            execution_program["workflow_overrides"] = workflow_overrides
         elif op == "set_bounded_workflow_parameter":
             item = _operation(raw_operation, {"name", "value"}, op)
             name = _text(item["name"], "workflow parameter", pattern=_PROGRAM_ID_RE)
             value = _finite_number(item["value"], f"workflow parameter {name}")
             workflow_id = agent["candidate_execution_program"]["workflow_template_ref"]["id"]
             registry.validate_workflow_parameter(workflow_id, name, value)
-            agent["candidate_execution_program"]["workflow_overrides"][name] = value
+            workflow_overrides = agent["candidate_execution_program"]["workflow_overrides"]
+            if workflow_overrides.get(name) == value:
+                raise ValueError(f"mutation operation {op} does not change {name}")
+            workflow_overrides[name] = value
         elif op == "select_instruction_template":
             item = _operation(raw_operation, {"role", "instruction_template_id"}, op)
             role = _text(item["role"], "mutation role", pattern=_PRESET_ID_RE)
@@ -991,14 +1056,29 @@ def apply_genome_mutation(
             )
             if profile is None:
                 raise ValueError("mutation role is not registered in candidate execution")
-            profile["instruction_template_ref"] = registry.program_ref(
-                "instruction_templates",
-                _text(
-                    item["instruction_template_id"],
-                    "instruction_template_id",
-                    pattern=_PROGRAM_ID_RE,
-                ),
+            instruction_template_id = _text(
+                item["instruction_template_id"],
+                "instruction_template_id",
+                pattern=_PROGRAM_ID_RE,
             )
+            instruction_template = registry.program(
+                "instruction_templates",
+                instruction_template_id,
+            )
+            if instruction_template.get("role") != role:
+                raise ValueError(
+                    "instruction template is not registered for the mutation role"
+                )
+            instruction_template_ref = registry.program_ref(
+                "instruction_templates",
+                instruction_template_id,
+            )
+            if (
+                profile["instruction_template_ref"] == instruction_template_ref
+                and not profile["instruction_parameters"]
+            ):
+                raise ValueError(f"mutation operation {op} does not change {role}")
+            profile["instruction_template_ref"] = instruction_template_ref
             profile["instruction_parameters"] = {}
         elif op == "set_instruction_parameter":
             item = _operation(raw_operation, {"role", "name", "value"}, op)
@@ -1020,6 +1100,8 @@ def apply_genome_mutation(
             registry.validate_instruction_parameter(
                 profile["instruction_template_ref"]["id"], name, value
             )
+            if profile["instruction_parameters"].get(name) == value:
+                raise ValueError(f"mutation operation {op} does not change {name}")
             profile["instruction_parameters"][name] = value
         elif op == "narrow_role_tool_policy":
             item = _operation(raw_operation, {"role", "enabled_tool_ids"}, op)
@@ -1043,9 +1125,14 @@ def apply_genome_mutation(
             inherited = set(profile["enabled_tool_ids"])
             if not set(requested).issubset(base & inherited):
                 raise ValueError("enabled tool policy must be a subset of the inherited base tools")
+            if set(requested) == inherited:
+                raise ValueError(f"mutation operation {op} does not change {role}")
             profile["enabled_tool_ids"] = requested
         else:
             raise ValueError(f"unsupported genome mutation operation: {op}")
+
+    if scientific == parent_scientific and agent == parent_agent:
+        raise ValueError("mutation produces the same genome as its parent")
 
     mutation_digest = _domain_digest(
         "ecologyrsi-dsh/genome-mutation/1",
@@ -1067,284 +1154,10 @@ def apply_genome_mutation(
         "mutation_digest": mutation_digest,
         "source_research_iteration_digest": context.research_iteration_digest,
         "source_knowledge_snapshot_digest": context.knowledge_snapshot_digest,
-        "migration_source": None,
     }
     result["scientific_program"] = scientific
     result["agent_program"] = agent
     return EcologyEvolutionPluginGenome.from_dict(result)
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectedLegacyGenome:
-    _value: FrozenJsonObject
-
-    @property
-    def projection_digest(self) -> str:
-        return str(self._value["projection_digest"])
-
-    @property
-    def legacy_algorithm_ir(self) -> FrozenJsonObject:
-        value = self._value["legacy_algorithm_ir"]
-        assert isinstance(value, FrozenJsonObject)
-        return value
-
-    def to_dict(self) -> dict[str, Any]:
-        return deep_thaw_json(self._value)
-
-
-def _legacy_catalog_dict(legacy_catalog: Any) -> dict[str, Any]:
-    if hasattr(legacy_catalog, "to_dict"):
-        value = legacy_catalog.to_dict()
-    else:
-        value = deep_thaw_json(legacy_catalog)
-    if not isinstance(value, Mapping):
-        raise TypeError("legacy catalog must be an immutable mapping")
-    return dict(value)
-
-
-def legacy_genome_from_proposal(
-    proposal: Proposal,
-    task: TaskManifest,
-    knowledge_snapshot: KnowledgeSnapshot | None,
-    legacy_catalog: Any = None,
-    *,
-    current_registry: Any = None,
-) -> ProjectedLegacyGenome:
-    """Project a historical proposal using only the shipped 0.2.2 catalog."""
-
-    from ..knowledge.models import KnowledgeSnapshot
-
-    del current_registry  # Explicitly excluded from legacy replay identity.
-    if legacy_catalog is None:
-        from ..knowledge.program_registry import LEGACY_PROGRAM_CATALOG_0_2_2
-
-        legacy_catalog = LEGACY_PROGRAM_CATALOG_0_2_2
-    if not isinstance(proposal, Proposal) or not isinstance(task, TaskManifest):
-        raise TypeError("legacy projection requires Proposal and TaskManifest")
-    if knowledge_snapshot is not None and not isinstance(
-        knowledge_snapshot, KnowledgeSnapshot
-    ):
-        raise TypeError("knowledge_snapshot must be KnowledgeSnapshot or null")
-    if proposal.run_id != (knowledge_snapshot.run_id if knowledge_snapshot else proposal.run_id):
-        raise ValueError("legacy knowledge snapshot is outside the proposal run")
-    if knowledge_snapshot is not None and proposal.generation != knowledge_snapshot.generation:
-        raise ValueError("legacy knowledge snapshot is outside the proposal generation")
-    catalog = _legacy_catalog_dict(legacy_catalog)
-    if catalog.get("schema_version") != "ecologyrsi-dsh.legacy-program-catalog/0.2.2":
-        raise ValueError("unsupported legacy program catalog")
-    plan = proposal.metadata.get("plan")
-    plan = dict(plan) if isinstance(plan, Mapping) else {}
-    adoption = proposal.metadata.get("prediction_model_adoption")
-    adoption = dict(adoption) if isinstance(adoption, Mapping) else {}
-    prediction_model = plan.get("prediction_model")
-    requested = (
-        str(prediction_model.get("id") or "").strip()
-        if isinstance(prediction_model, Mapping)
-        else ""
-    )
-    predictor_id = requested or str(adoption.get("adopted_id") or "").strip() or str(
-        task.metadata.get("prediction_model_id") or "toy-rolling-water@1"
-    ).strip()
-    predictors = catalog.get("predictors")
-    if not isinstance(predictors, Mapping) or predictor_id not in predictors:
-        raise ValueError("legacy predictor is not in the frozen 0.2.2 catalog")
-    predictor = dict(predictors[predictor_id])
-    evaluator_id = str(
-        task.metadata.get("evaluator_id") or predictor.get("default_evaluator_id") or ""
-    ).strip()
-    parameters = dict(proposal.changes)
-    expected_parameters = set(predictor.get("parameter_names", ()))
-    if set(parameters) != expected_parameters:
-        raise ValueError("legacy proposal parameters do not match the frozen predictor")
-    for name, value in parameters.items():
-        _finite_number(value, f"legacy parameter {name}")
-    dataset_digest = task.metadata.get("dataset_digest")
-    if not isinstance(dataset_digest, str) or not dataset_digest.strip():
-        dataset_digest = digest({"legacy_visible_datasets": list(task.visible_datasets)})
-    split_manifest_digest = task.metadata.get("split_manifest_digest")
-    if not isinstance(split_manifest_digest, str) or not split_manifest_digest.strip():
-        split_manifest_digest = digest(
-            {
-                "legacy_task_manifest_digest": task.digest,
-                "allowed_partitions": ["training_fit", "training_feedback"],
-            }
-        )
-    blueprint = plan.get("algorithm_blueprint")
-    synthesis = plan.get("algorithm_synthesis")
-    blueprint_refs = set(
-        str(item)
-        for item in (
-            blueprint.get("evidence_refs", ()) if isinstance(blueprint, Mapping) else ()
-        )
-    )
-    evidence_mappings: list[dict[str, str]] = []
-    if knowledge_snapshot is not None:
-        for card in knowledge_snapshot.cards:
-            capability_ids = tuple(card.capability_ids) or (
-                ((card.capability_id,) if card.capability_id else ())
-            )
-            if card.knowledge_id in blueprint_refs and predictor_id in capability_ids:
-                decision = "adopted"
-            elif card.knowledge_id in blueprint_refs or not capability_ids:
-                decision = "research_only"
-            elif predictor_id in capability_ids and card.executable:
-                decision = "adopted"
-            else:
-                decision = "not_selected"
-            evidence_mappings.append(
-                {"knowledge_id": card.knowledge_id, "decision": decision}
-            )
-    if isinstance(blueprint, Mapping):
-        blueprint_pipeline = str(blueprint.get("pipeline_id") or "").strip()
-        if blueprint_pipeline:
-            evidence_mappings.append(
-                {
-                    "knowledge_id": f"model-blueprint:pipeline:{blueprint_pipeline}"[:300],
-                    "decision": (
-                        "adopted" if blueprint_pipeline == predictor_id else "not_selected"
-                    ),
-                }
-            )
-    if isinstance(prediction_model, Mapping):
-        planned_predictor = str(prediction_model.get("id") or "").strip()
-        if planned_predictor:
-            evidence_mappings.append(
-                {
-                    "knowledge_id": f"model-plan:predictor:{planned_predictor}"[:300],
-                    "decision": (
-                        "adopted" if planned_predictor == predictor_id else "not_selected"
-                    ),
-                }
-            )
-    identity: dict[str, Any] = {
-        "schema_version": "ecologyrsi-dsh.algorithm-ir/1",
-        "predictor_id": predictor_id,
-        "evaluator_id": evaluator_id,
-        "pipeline_version": predictor["pipeline_version"],
-        "parameters": parameters,
-        "dataset_digest": str(dataset_digest),
-        "split_manifest_digest": str(split_manifest_digest),
-        "allowed_partitions": ["training_fit", "training_feedback"],
-        "operators": list(predictor["operators"]),
-        "evidence_mappings": evidence_mappings,
-        "source_plan_digest": digest(plan) if plan else None,
-        "knowledge_snapshot_digest": (
-            knowledge_snapshot.snapshot_digest if knowledge_snapshot is not None else None
-        ),
-        "lowering_policy": "host-registered-operator-lowering@1",
-        "security_boundary": {
-            "registered_operators_only": True,
-            "model_generated_code_execution": False,
-            "dynamic_imports": False,
-            "shell_execution": False,
-        },
-    }
-    if isinstance(blueprint, Mapping):
-        normalized_blueprint = dict(blueprint)
-        identity["source_blueprint_digest"] = digest(normalized_blueprint)
-    if isinstance(synthesis, Mapping):
-        identity["source_synthesis_digest"] = digest(dict(synthesis))
-    legacy_ir = {**identity, "ir_digest": digest(identity)}
-    catalog_digest = str(catalog.get("catalog_digest") or "")
-    if _SHA256_RE.fullmatch(catalog_digest) is None:
-        catalog_without_digest = dict(catalog)
-        catalog_without_digest.pop("catalog_digest", None)
-        catalog_digest = _domain_digest(
-            "ecologyrsi-dsh/legacy-program-catalog/0.2.2", catalog_without_digest
-        )
-    compiler_source = {
-        "algorithm_blueprint": blueprint if isinstance(blueprint, Mapping) else None,
-        "algorithm_synthesis": synthesis if isinstance(synthesis, Mapping) else None,
-        "prediction_model_adoption": adoption or None,
-        "proposal_changes": parameters,
-    }
-    projection = {
-        "schema_version": LEGACY_PROJECTION_SCHEMA_VERSION,
-        "projected": True,
-        "inheritable": False,
-        "adapter_version": LEGACY_ADAPTER_VERSION,
-        "legacy_catalog_digest": catalog_digest,
-        "source_proposal_digest": proposal.digest,
-        "task_manifest_digest": task.digest,
-        "knowledge_snapshot_digest": (
-            knowledge_snapshot.snapshot_digest if knowledge_snapshot is not None else None
-        ),
-        "legacy_compiler_source": compiler_source,
-        "legacy_algorithm_ir": legacy_ir,
-        "projection_identity_knowledge": (
-            knowledge_snapshot.snapshot_digest
-            if knowledge_snapshot is not None
-            else str(catalog.get("no_snapshot_sentinel"))
-        ),
-    }
-    projection_digest = _domain_digest(
-        "ecologyrsi-dsh/legacy-genome-projection/1", projection
-    )
-    projection["projection_digest"] = projection_digest
-    frozen = deep_freeze_json(projection)
-    assert isinstance(frozen, FrozenJsonObject)
-    return ProjectedLegacyGenome(frozen)
-
-
-def migrate_legacy_seed(
-    projected_legacy: ProjectedLegacyGenome,
-    bindings: FrozenRunInitialization,
-    frozen_migration_template: Mapping[str, Any] | FrozenJsonObject,
-) -> EcologyEvolutionPluginGenome:
-    if not isinstance(projected_legacy, ProjectedLegacyGenome):
-        raise TypeError("legacy migration requires a projected legacy genome")
-    if not isinstance(bindings, FrozenRunInitialization):
-        raise TypeError("legacy migration requires FrozenRunInitialization")
-    template = deep_thaw_json(frozen_migration_template)
-    if not isinstance(template, Mapping):
-        raise TypeError("frozen migration template must be an object")
-    required = {
-        "schema_version",
-        "template_id",
-        "template_digest",
-        "predictor_refs",
-        "feature_policy_ref",
-        "fit_policy_ref",
-        "uncertainty_policy_ref",
-        "agent_program",
-        "evidence_refs",
-    }
-    if set(template) != required:
-        raise ValueError("frozen migration template has unsupported or missing fields")
-    projected = projected_legacy.to_dict()
-    legacy_ir = projected["legacy_algorithm_ir"]
-    predictor_id = legacy_ir["predictor_id"]
-    predictor_refs = template["predictor_refs"]
-    if not isinstance(predictor_refs, Mapping) or predictor_id not in predictor_refs:
-        raise ValueError("migration template cannot map the legacy predictor")
-    migration_source = {
-        "projection_digest": projected_legacy.projection_digest,
-        "source_proposal_digest": projected["source_proposal_digest"],
-        "legacy_adapter_version": projected["adapter_version"],
-        "legacy_catalog_digest": projected["legacy_catalog_digest"],
-        "migration_template_id": template["template_id"],
-        "migration_template_digest": template["template_digest"],
-    }
-    scientific = {
-        "predictor_ref": predictor_refs[predictor_id],
-        "parameter_overrides": legacy_ir["parameters"],
-        "feature_policy_ref": template["feature_policy_ref"],
-        "fit_policy_ref": template["fit_policy_ref"],
-        "uncertainty_policy_ref": template["uncertainty_policy_ref"],
-    }
-    evidence_refs = list(template["evidence_refs"])
-    evidence_refs.append("legacy:" + projected_legacy.projection_digest)
-    return EcologyEvolutionPluginGenome.from_dict(
-        {
-            "schema_version": GENOME_SCHEMA_VERSION,
-            "genome_revision": 1,
-            "lineage": _empty_root_lineage("legacy_migration", migration_source),
-            "scientific_program": scientific,
-            "agent_program": template["agent_program"],
-            **bindings.bindings.to_dict(),
-            "evidence_refs": evidence_refs,
-        }
-    )
 
 
 __all__ = [
@@ -1353,16 +1166,15 @@ __all__ = [
     "FrozenJsonArray",
     "FrozenJsonObject",
     "FrozenRunInitialization",
-    "GENOME_CANONICAL_VERSION",
     "GENOME_SCHEMA_VERSION",
+    "MATERIALIZER_VERSION",
+    "TRUST_REGION_MAX_NORMALIZED_STEP",
+    "TRUST_REGION_MUTATION_OPERATOR_ID",
     "GenomeBindingSubset",
     "GenomeMutationContextV1",
-    "ProjectedLegacyGenome",
     "SeedGenomeTemplate",
     "apply_genome_mutation",
     "deep_freeze_json",
     "deep_thaw_json",
-    "legacy_genome_from_proposal",
     "materialize_seed_genome",
-    "migrate_legacy_seed",
 ]

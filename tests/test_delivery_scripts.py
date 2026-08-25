@@ -58,19 +58,16 @@ class DeliveryScriptTests(unittest.TestCase):
         self.assertEqual(published, [])
         self.assertEqual(not_ignored, [])
 
-    def _tracked_payloads(self) -> list[tuple[str, bytes]]:
-        names = subprocess.run(
-            ["git", "ls-files", "-z"],
-            cwd=ROOT,
-            check=True,
-            capture_output=True,
-        ).stdout.split(b"\0")
+    def _release_payloads(self) -> list[tuple[str, bytes]]:
+        """Read the exact source set used by the delivery archive.
+
+        This intentionally includes newly created, not-yet-committed files and
+        excludes tracked files deleted from the working tree.
+        """
+
         payloads: list[tuple[str, bytes]] = []
-        for raw_name in names:
-            if not raw_name:
-                continue
-            name = raw_name.decode("utf-8")
-            path = ROOT / name
+        for path in included_source_files(ROOT):
+            name = path.relative_to(ROOT).as_posix()
             payloads.append((name, path.read_bytes()))
             if path.suffix == ".tgz":
                 with tarfile.open(path, "r:gz") as archive:
@@ -82,7 +79,7 @@ class DeliveryScriptTests(unittest.TestCase):
                             payloads.append((f"{name}:{member.name}", handle.read()))
         return payloads
 
-    def test_tracked_release_content_contains_no_private_material(self) -> None:
+    def test_release_content_contains_no_private_material(self) -> None:
         configured_email = subprocess.run(
             ["git", "config", "user.email"],
             cwd=ROOT,
@@ -92,7 +89,7 @@ class DeliveryScriptTests(unittest.TestCase):
         private_home = str(Path.home()).encode("utf-8")
         violations: set[tuple[str, str]] = set()
 
-        for name, payload in self._tracked_payloads():
+        for name, payload in self._release_payloads():
             source_name = name.split(":", 1)[0]
             if source_name not in INTENTIONAL_PATH_FIXTURES:
                 if private_home in payload or PRIVATE_HOME_PATTERN.search(payload):

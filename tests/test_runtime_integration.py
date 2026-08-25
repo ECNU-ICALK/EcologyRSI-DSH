@@ -14,8 +14,9 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.integrations.model_gateway import GatewayResponseError
-from ecologyrsi_dsh.server import EvolutionHTTPServer
+from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 
 
 class _AuthenticatedModelStubHandler(BaseHTTPRequestHandler):
@@ -123,6 +124,12 @@ class RuntimeIntegrationTests(unittest.TestCase):
                     "minimum_samples_per_update"
                 ],
                 9,
+            )
+            self.assertEqual(
+                evaluators["greenhouse_multihorizon_time_forward@1"][
+                    "minimum_selection_samples_per_update"
+                ],
+                1_521,
             )
         self.assertEqual(
             evaluators["toy_time_forward@1"]["prediction_task_count"],
@@ -672,6 +679,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                         "max_candidates": 1,
                     },
                     "samples_per_update": 321,
+                    "candidate_concurrency": 3,
                     "sample_concurrency": 3,
                     "sample_agent_batch_size": 16,
                     "auto_advance": 0,
@@ -683,6 +691,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                 (
                     ("samples_per_update", 8),
                     ("samples_per_update", 100_001),
+                    ("candidate_concurrency", 9),
                     ("sample_concurrency", 9),
                     ("sample_agent_batch_size", 129),
                 )
@@ -718,14 +727,23 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
             64,
         )
         self.assertEqual(
-            created["projection"]["configuration"]["samples_per_update"], 500
+            created["projection"]["configuration"]["samples_per_update"], 1_600
         )
         self.assertEqual(
             created["projection"]["configuration"]["sample_concurrency"], 2
         )
+        self.assertEqual(
+            created["projection"]["configuration"]["candidate_concurrency"], 4
+        )
         explicit_configuration = explicit_created["projection"]["configuration"]
         self.assertEqual(explicit_configuration["samples_per_update"], 321)
+        self.assertEqual(explicit_configuration["sample_budget_class"], "diagnostic_smoke")
+        self.assertEqual(
+            explicit_configuration["minimum_selection_samples_per_update"],
+            1_521,
+        )
         self.assertEqual(explicit_configuration["sample_concurrency"], 3)
+        self.assertEqual(explicit_configuration["candidate_concurrency"], 3)
         self.assertEqual(explicit_configuration["sample_agent_batch_size"], 16)
         self.assertEqual(
             created["projection"]["configuration"]["sample_operation_max_tokens"],
@@ -737,7 +755,10 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
         )
         self.assertEqual(
             created["projection"]["configuration"]["sample_remote_critic_policy"],
-            {"version": "always@1"},
+            {
+                "version": "uncertain_or_failure@1",
+                "min_planner_confidence": 0.9,
+            },
         )
         self.assertEqual(
             created["projection"]["configuration"][
@@ -767,8 +788,17 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
         )
 
         state = self.server.director.state(created["projection"]["run_id"])
-        self.assertEqual(state.task_manifest.metadata["samples_per_update"], 500)
+        self.assertEqual(state.task_manifest.metadata["samples_per_update"], 1_600)
+        self.assertEqual(
+            state.task_manifest.metadata["sample_budget_class"],
+            "selection_eligible",
+        )
+        self.assertEqual(
+            state.task_manifest.metadata["fitness_profile_digest"],
+            digest(state.task_manifest.metadata["fitness_profile"]),
+        )
         self.assertEqual(state.task_manifest.metadata["sample_concurrency"], 2)
+        self.assertEqual(state.task_manifest.metadata["candidate_concurrency"], 4)
         self.assertEqual(state.task_manifest.metadata["sample_agent_batch_size"], 64)
         self.assertEqual(
             state.task_manifest.metadata["sample_planner_prompt_profile"],

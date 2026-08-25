@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from ..core.models import (
@@ -18,8 +20,14 @@ from ..core.models import (
 from .workflow_ir import DEFAULT_COMPILER_SEMANTIC_DIGEST
 from ..knowledge.algorithms import AlgorithmCompileError, resolve_predictor_adoption
 from ..knowledge.research_iteration import ResearchIteration
+from ..knowledge.autonomous_cycle import (
+    AUTONOMOUS_RESEARCH_PROTOCOL,
+    GenerationReflection,
+    GenerationSearchPlan,
+)
 from ..knowledge.retrieval import (
     assess_generation_knowledge,
+    generation_query_hints,
     retrieve_generation_knowledge,
 )
 from .analysis import (
@@ -197,6 +205,123 @@ def _autonomous_research_enabled(state: Any) -> bool:
     ) == "autonomous_model@1"
 
 
+def _model_search_cycle_enabled(state: Any) -> bool:
+    return (
+        state.task_manifest.metadata.get("execution_protocol")
+        == "dsh_native_plugin_evolution@1"
+        and state.task_manifest.metadata.get("autonomous_research_protocol")
+        == AUTONOMOUS_RESEARCH_PROTOCOL
+    )
+
+
+def _generation_parent_candidate_id(state: Any) -> str | None:
+    parent_candidate_id = state.run.best_candidate_id
+    previous = (
+        state.analysis_for(state.run.generation - 1)
+        if state.run.generation > 0
+        else None
+    )
+    if previous is not None:
+        parent_candidate_id = (
+            _search_parent_from_analysis(state, previous) or parent_candidate_id
+        )
+    for intervention in state.pending_interventions:
+        if intervention.kind is InterventionKind.PARENT_SELECTION:
+            parent_candidate_id = intervention.target_candidate_id
+    return parent_candidate_id
+
+
+def _next_stage_attempt(state: Any, stage: str) -> int:
+    attempts = [
+        int(event.payload.get("attempt") or 0)
+        for event in state.events
+        if event.kind == "EvolutionStageRecorded"
+        and event.payload.get("generation") == state.run.generation
+        and event.payload.get("stage") == stage
+        and event.payload.get("status") in {"started", "failed"}
+    ]
+    return max(attempts, default=0) + 1
+
+
+def _ensure_generation_search_plan(
+    director: Any,
+    state: Any,
+    *,
+    candidate_count: int,
+) -> GenerationSearchPlan | None:
+    """Obtain and persist model-authored queries before any online retrieval."""
+
+    if not _model_search_cycle_enabled(state):
+        return None
+    existing = state.search_plan_for(state.run.generation)
+    if existing is not None:
+        return existing
+    planner = getattr(director.dsh, "plan_generation_search", None)
+    if not callable(planner):
+        raise RuntimeError("DSH strategy adapter has no generation search planner")
+    generation = state.run.generation
+    previous = state.analysis_for(generation - 1) if generation > 0 else None
+    previous_reflection = (
+        state.reflection_for(generation - 1) if generation > 0 else None
+    )
+    parent_candidate_id = _generation_parent_candidate_id(state)
+    parent = (
+        state.materialized_seed_genome()
+        if generation == 0
+        else state.persisted_genome_for(parent_candidate_id)
+    )
+    attempt = _next_stage_attempt(state, "search")
+    director.record_evolution_stage(
+        state.run.run_id,
+        generation=generation,
+        stage="search",
+        status="started",
+        attempt=attempt,
+    )
+    state = director.state(state.run.run_id)
+    try:
+        search_plan = planner(
+            run=state.run,
+            task=state.task_manifest,
+            parent_genome=parent.to_dict(),
+            previous_generation_analysis=(
+                previous.to_dict() if previous is not None else None
+            ),
+            previous_generation_reflection=(
+                previous_reflection.to_dict()
+                if previous_reflection is not None
+                else None
+            ),
+            current_plan=_latest_research_plan(state, generation),
+            host_query_hints=generation_query_hints(state),
+            candidate_count=candidate_count,
+            run_state_revision=state.events[-1].seq,
+            stage_attempt=attempt,
+            ledger_expected_revision=director.ledger.latest_seq(),
+        )
+        if not isinstance(search_plan, GenerationSearchPlan):
+            raise TypeError("generation search planner must return GenerationSearchPlan")
+        recorded = director.record_generation_search_plan(search_plan)
+    except Exception:
+        director.record_evolution_stage(
+            state.run.run_id,
+            generation=generation,
+            stage="search",
+            status="failed",
+            attempt=attempt,
+            public_error="模型检索规划失败或未通过宿主契约校验。",
+        )
+        raise
+    director.record_evolution_stage(
+        state.run.run_id,
+        generation=generation,
+        stage="search",
+        status="completed",
+        attempt=attempt,
+    )
+    return recorded
+
+
 def _latest_research_plan(state: Any, generation: int) -> dict[str, Any]:
     previous_iteration = state.research_iteration_for(generation - 1)
     if previous_iteration is not None:
@@ -241,6 +366,9 @@ def _ensure_generation_research_iteration(
     director: Any,
     state: Any,
     knowledge: Any,
+    *,
+    candidate_count: int,
+    search_plan: GenerationSearchPlan | None = None,
 ) -> ResearchIteration | None:
     generation = state.run.generation
     if not _autonomous_research_enabled(state):
@@ -249,6 +377,16 @@ def _ensure_generation_research_iteration(
     if existing is not None:
         if existing.knowledge_snapshot_digest != knowledge.snapshot_digest:
             raise RuntimeError("generation research iteration knowledge changed")
+        if _model_search_cycle_enabled(state):
+            if search_plan is None:
+                raise RuntimeError("generation research iteration has no search plan")
+            recorded_search = existing.plan.get("generation_search_plan")
+            if (
+                not isinstance(recorded_search, Mapping)
+                or recorded_search.get("search_plan_digest")
+                != search_plan.search_plan_digest
+            ):
+                raise RuntimeError("generation research iteration search plan changed")
         started_attempts = [
             int(event.payload.get("attempt") or 0)
             for event in state.events
@@ -331,7 +469,7 @@ def _ensure_generation_research_iteration(
             )
         plan = dict(raw_plan)
         status = "recovered_existing_proposal"
-    elif generation == 0 and current_plan:
+    elif generation == 0 and current_plan and not _model_search_cycle_enabled(state):
         # The creation-time model call is generation zero's research call.
         plan = current_plan
         status = "initial_frozen"
@@ -343,15 +481,7 @@ def _ensure_generation_research_iteration(
                 selected_pending_ids,
                 selected_answer_ids,
             ) = _expert_collaboration_context(state, generation)
-            failed_attempts = [
-                int(event.payload.get("attempt") or 0)
-                for event in state.events
-                if event.kind == "EvolutionStageRecorded"
-                and event.payload.get("generation") == generation
-                and event.payload.get("stage") == "research"
-                and event.payload.get("status") == "failed"
-            ]
-            research_attempt = max(failed_attempts, default=0) + 1
+            research_attempt = _next_stage_attempt(state, "research")
             director.record_evolution_stage(
                 state.run.run_id,
                 generation=generation,
@@ -373,12 +503,27 @@ def _ensure_generation_research_iteration(
                     "current_plan": current_plan,
                     "cross_generation_experience": cross_generation_experience,
                     "expert_collaboration": expert_collaboration,
+                    "candidate_count": candidate_count,
+                    "generation_search_plan": (
+                        search_plan.to_dict() if search_plan is not None else None
+                    ),
+                    "previous_generation_reflection": (
+                        state.reflection_for(generation - 1).to_dict()
+                        if generation > 0
+                        and state.reflection_for(generation - 1) is not None
+                        else None
+                    ),
                 }
                 if (
                     state.task_manifest.metadata.get("execution_protocol")
                     == "dsh_native_plugin_evolution@1"
                 ):
-                    parent = state.parent_genome_for_generation(generation)
+                    parent_candidate_id = _generation_parent_candidate_id(state)
+                    parent = (
+                        state.materialized_seed_genome()
+                        if generation == 0
+                        else state.persisted_genome_for(parent_candidate_id)
+                    )
                     planner_kwargs.update(
                         {
                             "parent_genome": parent.to_dict(),
@@ -390,6 +535,13 @@ def _ensure_generation_research_iteration(
                 raw_result = planner(
                     **planner_kwargs,
                 )
+            except (TypeError, ValueError) as exc:
+                record_research_failure(
+                    "远程研究计划响应未通过宿主契约校验。"
+                )
+                raise ResearchResponseContractError(
+                    "research response failed host contract validation"
+                ) from exc
             except Exception:
                 record_research_failure(
                     "远程研究计划请求失败；运行将按既定重试与失败策略处理。"
@@ -516,7 +668,16 @@ def start_generation_batch(director: Any, run_id: str) -> GenerationBatch:
             or knowledge.snapshot_digest != existing.knowledge_snapshot_digest
         ):
             raise RuntimeError("generation batch knowledge snapshot is missing")
-        _ensure_generation_research_iteration(director, state, knowledge)
+        search_plan = state.search_plan_for(existing.generation)
+        if _model_search_cycle_enabled(state) and search_plan is None:
+            raise RuntimeError("generation batch search plan is missing")
+        _ensure_generation_research_iteration(
+            director,
+            state,
+            knowledge,
+            candidate_count=existing.batch_size,
+            search_plan=search_plan,
+        )
         return existing
     current_count = sum(
         item.generation == state.run.generation for item in state.candidates
@@ -527,9 +688,23 @@ def start_generation_batch(director: Any, run_id: str) -> GenerationBatch:
     requested = state.task_manifest.candidates_per_generation
     batch_size = min(max(current_count, requested), remaining + current_count)
 
+    search_plan = _ensure_generation_search_plan(
+        director,
+        state,
+        candidate_count=batch_size,
+    )
+    state = director.state(run_id)
+
     knowledge = state.knowledge_for(state.run.generation)
     if knowledge is None:
-        knowledge = retrieve_generation_knowledge(state)
+        knowledge = retrieve_generation_knowledge(
+            state,
+            query_terms=(
+                list(search_plan.search_queries)
+                if search_plan is not None
+                else None
+            ),
+        )
         director.ledger.append(
             run_id,
             "GenerationKnowledgeRetrieved",
@@ -539,7 +714,13 @@ def start_generation_batch(director: Any, run_id: str) -> GenerationBatch:
         state = director.state(run_id)
         knowledge = state.knowledge_for(state.run.generation) or knowledge
 
-    _ensure_generation_research_iteration(director, state, knowledge)
+    _ensure_generation_research_iteration(
+        director,
+        state,
+        knowledge,
+        candidate_count=batch_size,
+        search_plan=search_plan,
+    )
     state = director.state(run_id)
 
     previous = (
@@ -547,14 +728,7 @@ def start_generation_batch(director: Any, run_id: str) -> GenerationBatch:
         if state.run.generation > 0
         else None
     )
-    parent_candidate_id = state.run.best_candidate_id
-    if previous is not None:
-        parent_candidate_id = (
-            _search_parent_from_analysis(state, previous) or parent_candidate_id
-        )
-    for intervention in state.pending_interventions:
-        if intervention.kind is InterventionKind.PARENT_SELECTION:
-            parent_candidate_id = intervention.target_candidate_id
+    parent_candidate_id = _generation_parent_candidate_id(state)
     if parent_candidate_id is not None:
         director._completed_parent_context(state, parent_candidate_id)
 
@@ -575,6 +749,11 @@ def start_generation_batch(director: Any, run_id: str) -> GenerationBatch:
         research = state.research_iteration_for(state.run.generation)
         stage_context_digests = {
             "knowledge_snapshot_digest": knowledge.snapshot_digest,
+            **(
+                {"generation_search_plan_digest": search_plan.search_plan_digest}
+                if search_plan is not None
+                else {}
+            ),
             "research_iteration_digest": (
                 research.iteration_digest
                 if research is not None
@@ -674,6 +853,7 @@ def _decision_reason(analysis: GenerationAnalysis, candidate_id: str) -> str:
         return "候选未进入本轮稳定排名。"
     reason = str(row.get("selection_reason") or "not_selected")
     labels = {
+        "diagnostic_smoke_search_parent_only": "候选仅在诊断样本上排名第一，可供后续搜索参考，但证据不足以晋级。",
         "generation_best_did_not_improve_incumbent": "本轮排名第一，但未严格优于运行当前最优方案。",
         "cohort_changed_batch_champion": "本轮固定样本窗口排名第一；因窗口变化，未比较跨窗口原始分数。",
         "cohort_changed_search_parent_only": "本轮固定样本窗口排名第一；因窗口变化，仅作为后续搜索父方案，未作正式晋升。",
@@ -686,6 +866,162 @@ def _decision_reason(analysis: GenerationAnalysis, candidate_id: str) -> str:
         "duplicate": "候选参数与同轮较早候选重复，未重复评测。",
     }
     return labels.get(reason, f"候选未保留：{reason}。")
+
+
+def _canonical_candidate_outcomes(
+    state: Any,
+    *,
+    generation: int,
+    analysis: GenerationAnalysis,
+) -> tuple[dict[str, Any], ...]:
+    """Bind each ranked result to its durable candidate and direction identity."""
+
+    candidates = {
+        item.candidate_id: item
+        for item in state.candidates
+        if item.generation == generation
+    }
+    rows: dict[str, Mapping[str, Any]] = {}
+    for row in analysis.ranking:
+        candidate_id = row.get("candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            raise RuntimeError("generation ranking contains an invalid candidate id")
+        if candidate_id in rows:
+            raise RuntimeError("generation ranking contains a duplicate candidate")
+        rows[candidate_id] = row
+    if len(candidates) != analysis.candidate_count or set(rows) != set(candidates):
+        raise RuntimeError(
+            "generation ranking does not match the generation candidate set"
+        )
+
+    outcomes: list[dict[str, Any]] = []
+    for candidate_id, row in rows.items():
+        candidate = candidates[candidate_id]
+        proposal = state.proposal(candidate.proposal_id)
+        metadata = proposal.metadata
+        outcomes.append(
+            {
+                "rank": row.get("rank"),
+                "candidate_id": candidate_id,
+                "direction_id": metadata.get("candidate_direction_id"),
+                "direction_digest": metadata.get("candidate_direction_digest"),
+                "slot_index": candidate.slot_index,
+                "status": candidate.status.value,
+                "score": row.get("score"),
+                "eligible": row.get("eligible"),
+                "classification": row.get("classification"),
+                "selection_reason": row.get("selection_reason"),
+                "mutation_operations": metadata.get("mutation_operations"),
+                "behavior_digest": metadata.get("behavior_digest"),
+            }
+        )
+    outcomes.sort(
+        key=lambda item: (
+            item["rank"] is None,
+            item["rank"] if item["rank"] is not None else 0,
+            item["slot_index"],
+            item["candidate_id"],
+        )
+    )
+    return tuple(outcomes)
+
+
+def _ensure_generation_reflection(
+    director: Any,
+    state: Any,
+    batch: GenerationBatch,
+    analysis: GenerationAnalysis,
+) -> GenerationReflection | None:
+    """Reflect once on aggregate batch evidence and seed the next generation."""
+
+    if not _model_search_cycle_enabled(state):
+        return None
+    candidate_outcomes = _canonical_candidate_outcomes(
+        state,
+        generation=batch.generation,
+        analysis=analysis,
+    )
+    existing = state.reflection_for(batch.generation)
+    if existing is not None:
+        if existing.analysis_digest != analysis.analysis_digest:
+            raise RuntimeError("generation reflection analysis changed")
+        if existing.canonical_candidate_outcomes != candidate_outcomes:
+            raise RuntimeError("generation reflection candidate outcomes changed")
+        return existing
+    reflector = getattr(director.dsh, "reflect_generation", None)
+    if not callable(reflector):
+        raise RuntimeError("DSH strategy adapter has no generation reflector")
+    if not isinstance(batch.parent_genome_canonical_json, str):
+        raise RuntimeError("generation reflection is missing the frozen parent genome")
+    parent_genome = json.loads(batch.parent_genome_canonical_json)
+    reflection_analysis = analysis.to_dict()
+    reflection_analysis.pop("ranking", None)
+    attempt = _next_stage_attempt(state, "reflection")
+    director.record_evolution_stage(
+        state.run.run_id,
+        generation=batch.generation,
+        stage="reflection",
+        status="started",
+        attempt=attempt,
+    )
+    state = director.state(state.run.run_id)
+    try:
+        reflection = reflector(
+            run=state.run,
+            task=state.task_manifest,
+            parent_genome=parent_genome,
+            generation_analysis=reflection_analysis,
+            knowledge_snapshot=(
+                state.knowledge_for(batch.generation).proposal_context()
+                if state.knowledge_for(batch.generation) is not None
+                else None
+            ),
+            research_iteration=(
+                state.research_iteration_for(batch.generation).to_dict()
+                if state.research_iteration_for(batch.generation) is not None
+                else None
+            ),
+            candidate_outcomes=list(candidate_outcomes),
+            direction_count=min(
+                8,
+                max(2, int(state.task_manifest.candidates_per_generation)),
+            ),
+            run_state_revision=state.events[-1].seq,
+            stage_attempt=attempt,
+            ledger_expected_revision=director.ledger.latest_seq(),
+        )
+        if not isinstance(reflection, GenerationReflection):
+            raise TypeError(
+                "generation reflector must return GenerationReflection"
+            )
+        if reflection.canonical_candidate_outcomes:
+            raise ValueError(
+                "generation reflector cannot author canonical candidate outcomes"
+            )
+        reflection = replace(
+            reflection,
+            canonical_candidate_outcomes=candidate_outcomes,
+            reflection_digest="",
+        )
+        recorded = director.record_generation_reflection(reflection)
+    except Exception:
+        director.record_evolution_stage(
+            state.run.run_id,
+            generation=batch.generation,
+            stage="reflection",
+            status="failed",
+            attempt=attempt,
+            public_error="批次反思失败或未通过宿主契约校验。",
+        )
+        raise
+    director.record_evolution_stage(
+        state.run.run_id,
+        generation=batch.generation,
+        stage="reflection",
+        status="completed",
+        attempt=attempt,
+    )
+    return recorded
 
 
 def finalize_generation_batch(director: Any, run_id: str) -> GenerationAnalysis:
@@ -707,6 +1043,9 @@ def finalize_generation_batch(director: Any, run_id: str) -> GenerationAnalysis:
         )
         state = director.state(run_id)
         analysis = state.analysis_for(batch.generation) or analysis
+
+    _ensure_generation_reflection(director, state, batch, analysis)
+    state = director.state(run_id)
 
     if (
         state.task_manifest.metadata.get("execution_protocol")

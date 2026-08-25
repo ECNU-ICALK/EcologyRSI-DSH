@@ -15,8 +15,8 @@ from urllib.error import HTTPError, URLError
 from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.core.redaction import REDACTED
 from ecologyrsi_dsh.integrations import model_gateway as model_gateway_module
-from ecologyrsi_dsh.ledger import EventLedger
-from ecologyrsi_dsh.model_gateway import (
+from ecologyrsi_dsh.core.ledger import EventLedger
+from ecologyrsi_dsh.integrations.model_gateway import (
     GatewayConfigurationError,
     GatewayResponseError,
     ModelConnection,

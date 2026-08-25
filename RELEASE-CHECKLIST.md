@@ -60,8 +60,9 @@ ECOLOGYRSI_TEST_REAL_DATA=1 PYTHONPATH=src \
 - [ ] 多时距评测展示 3 个目标 × 3 个时距的 9 组结果、每时距汇总及预测起点/目标时间；滚动残差模型不能绑定多时距评测器。
 - [ ] `passed` 要求固定科学门禁通过并且独立 judge 接受；judge 不能覆盖科学失败，页面不把 `passed` 等同于搜索保留或正式验证。
 - [ ] 固定样本窗口的晋升规则通过测试：缺少可验证 evaluation/cohort digest 时禁止晋升；同轮候选 cohort digest 必须一致，否则 fail-closed；同轮只在相同 cohort 内稳定排名。
-- [ ] incumbent 与本轮候选的 cohort、评测器、objective、数据/分区和基线 digest 相同时，新版要求 `candidate_score - incumbent_score > 0.005`；候选与 incumbent 必须具有完全一致的 24 小时预测起点块身份，块内保存 RMSE-skill 充分统计量且最多 128 块；配对区块数不少于 4 时，1,000 次 bootstrap 的 95% 置信区间下界还必须大于 0。旧评估回放仅在共同合同匹配时保留 `1e-12` 规则；cohort 改变时不得直接比较跨窗口原始分数。
+- [ ] incumbent 与本轮候选的 cohort、评测器、objective、数据/分区和基线 digest 必须一致；候选与 incumbent 必须具有完全一致的 24 小时预测起点块身份，私有计算使用全部 RMSE-skill 充分统计量且公共投影不暴露区块明细。DSH-native 将同轮全部候选作为一个比较族，要求 `candidate_score - incumbent_score > 0.005`、不少于 8 个配对区块、连续 3 日 moving-block 起点和 centered max-T 稳定性下界大于 0；其他当前评测路径使用配对 bootstrap。cohort 改变时不得直接比较跨窗口原始分数。
 - [ ] 外部或人工构造的 `approved` 决策不能绕过 `passed`、cohort 完整性和上述晋升校验，违规请求 fail-closed。
+- [ ] DSH-native 的 `approved` 必须绑定账本中统一轮末分析选出的 champion；跨代失败黑名单按完整 `behavior_digest` 精确匹配，不能因科学参数相同而拒绝不同 agent 程序。
 - [ ] 投影包含 `causal_interpretation=false`，页面和文档没有把历史回放表述为因果或反事实效果。
 
 ## 5. 策略、模型与 DSH 网关
@@ -69,6 +70,8 @@ ECOLOGYRSI_TEST_REAL_DATA=1 PYTHONPATH=src \
 - [ ] 目录展示 `parameter_sweep@1`、`adaptive_local@1`、`dsh_authenticated@1` 和 `autonomous_model@1` 四种策略；其中自主调研策略仍只能编译宿主已登记的有界能力。
 - [ ] 目录展示合成、滚动残差、外生变量岭回归预测模型及兼容评测器；不兼容组合在创建运行前 fail-closed。
 - [ ] 第二轮候选真实继承父参数；自适应策略消费上一轮指标，DSH 策略消费脱敏父代指标和 judge 建议。
+- [ ] 模型候选方向按轴显式声明 `increase`、`decrease` 或 `select`；参数提案相对冻结父值方向一致，同批方向通过联合 behavior witness 预检，自由文本中的精确参数赋值被拒绝。
+- [ ] `generation.judge` 只加载单候选审查 Skill，`generation.reflect` 只加载批次反思 Skill；反思上下文只有一份按 rank 排序且显式绑定 candidate/direction digest 的 Host 映射，下一代仍重新执行 Host 预检。
 - [ ] 本地两种策略只能使用 `host_parameter_generator@1`。
 - [ ] DSH 策略只接受具有 `propose` 角色、安全可执行后端路由和服务端凭据的远程模型。
 - [ ] 独立 judge 可选 `rule_judge@1`，或具有 `judge` 角色、安全可执行后端路由和服务端凭据的远程模型。
@@ -92,7 +95,7 @@ ECOLOGYRSI_TEST_REAL_DATA=1 PYTHONPATH=src \
 ## 6. 运行、产物与人工干预
 
 - [ ] 创建运行时冻结数据、分区、领域包、预测模型、策略、评测器、policy、judge、预算、seed、`candidates_per_generation`、`samples_per_update`、`sample_agent_batch_size`、`sample_concurrency`、在线知识设置及全部配置 digest；推进前检测实现或远程配置漂移。
-- [ ] 工作台默认 5 轮、每轮 4 个候选、总预算 20、每轮 500 个反馈样本、同一 causal origin wave 内微批上限 64、样本并发 2、逐样本智能体 Token 预算 100,000,000，并提交 `auto_progress=true`；参数页不以样本数除以微批上限伪造请求次数，实际请求数以运行进度为准；服务端自动逐轮推进，浏览器只轮询，不出现要求点击“下一轮”的 `waiting` 状态。
+- [ ] 工作台默认 5 轮、每轮 4 个候选、总预算 20、每轮 1600 个反馈样本、同一 causal origin wave 内微批上限 64、样本并发 2、逐样本智能体 Token 预算 100,000,000，并提交 `auto_progress=true`；参数页不以样本数除以微批上限伪造请求次数，实际请求数以运行进度为准；服务端自动逐轮推进，浏览器只轮询，不出现要求点击“下一轮”的 `waiting` 状态。
 - [ ] 用户调整轮数或每轮候选数时，未手工覆盖的总预算同步为两者乘积；总预算不足时创建被明确阻止，不能提前耗尽却仍声称完成配置轮数。
 - [ ] 暂停在当前轮次边界生效，恢复后重新入队；多个连续运行按轮公平交替，重启只恢复未归档运行。
 - [ ] 服务重启后，冻结远程 policy/judge 的角色、凭据、目录可用性、执行可用性和配置 digest 仍逐项检查；任一项不匹配时 fail closed。

@@ -1,0 +1,36 @@
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      You are the ecology research agent. Plan bounded scholarly searches over
+      the complete target-horizon objective; after retrieval, synthesize only
+      Host-frozen evidence into distinct candidate directions that are each
+      fully testable by exactly one registered mutation operation. Respect the
+      frozen evidence budget: a diagnostic run can compare hypotheses but
+      cannot become selection-eligible or promote a candidate. Never invent
+      sources, sample-control powers, or executable code.
+    complete: true
+    includeRuntimeContext: false
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  config:
+    includeDefaultRoots: false
+    customSkillDirs:
+      - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+- id: ecology-agent-tools
+  name: '@ecologyrsi/dsh-evolution-plugin/agent-plugin'
+  config:
+    role: researcher
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'

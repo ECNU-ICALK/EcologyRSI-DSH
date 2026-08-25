@@ -2,7 +2,7 @@
 
 window.EcologyDSHHost = (function () {
   var pluginId = "ecologyrsi.evolution";
-  var pluginVersion = "0.3.15";
+  var pluginVersion = "0.3.26";
   var contextProtocol = "ecology-evolution.host-context/1";
   var supportedApiPaths = [
     "/api",
@@ -44,7 +44,7 @@ window.EcologyDSHHost = (function () {
   }
 
   var apiBase;
-  try { apiBase = normalizeBase(query.get("api") || "/api"); } catch (error) { apiBase = "/api"; }
+  try { apiBase = normalizeBase(query.get("api") || "/api/ecology-evolution"); } catch (error) { apiBase = "/api/ecology-evolution"; }
 
   function isTrustedParentOrigin(origin) {
     return origin === window.location.origin || explicitParentOrigins.indexOf(origin) >= 0;

@@ -11,6 +11,7 @@ import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -20,6 +21,10 @@ from time import monotonic
 from typing import Any, Protocol
 from uuid import uuid4
 
+from ..core.errors import (
+    dsh_native_runtime_error_in_chain,
+    dsh_native_runtime_retryable,
+)
 from ..core.models import canonical_json, digest
 from ..core.redaction import safe_remote_reason_code
 from ..integrations.model_gateway import GatewayResponseError, ModelGateway
@@ -112,6 +117,7 @@ _DECISION_CONTEXT_FIELDS = (
     "tool_experience",
     "stage_context_digest",
     "candidate_genome_digest",
+    "candidate_agent_profile",
 )
 _FORBIDDEN_OUTCOME_KEYS = frozenset(
     {
@@ -286,6 +292,10 @@ class GatewaySampleCollaborationAdapter:
             [SamplePredictionRequest], float | Mapping[str, Any]
         ]
         | None = None,
+        forecast_bundle_tool: Callable[
+            [Sequence[SamplePredictionRequest]], Mapping[str, Any]
+        ]
+        | None = None,
         tools: Sequence[GatewaySampleTool] = (),
         microbatch_size: int = _MAX_GATEWAY_BATCH_SIZE,
         sample_concurrency: int = _DEFAULT_SAMPLE_CONCURRENCY,
@@ -298,6 +308,8 @@ class GatewaySampleCollaborationAdapter:
         remote_critic_policy: Mapping[str, Any] | None = None,
         sample_planner_prompt_profile: Mapping[str, Any] | None = None,
         sample_truncation_retry_policy: Mapping[str, Any] | None = None,
+        require_remote_planner: bool = False,
+        require_remote_critic: bool = False,
         token_limit: int = 0,
         token_reservation_per_wave: int = 0,
     ) -> None:
@@ -318,6 +330,14 @@ class GatewaySampleCollaborationAdapter:
         self.remote_critic_policy = _normalized_remote_critic_policy(
             remote_critic_policy
         )
+        if not isinstance(require_remote_planner, bool):
+            raise TypeError("require_remote_planner must be a boolean")
+        if not isinstance(require_remote_critic, bool):
+            raise TypeError("require_remote_critic must be a boolean")
+        if require_remote_critic and not remote_review_enabled:
+            raise ValueError("required remote critic needs remote review")
+        self.require_remote_planner = require_remote_planner
+        self.require_remote_critic = require_remote_critic
         self.sample_planner_prompt_profile = (
             normalized_sample_planner_prompt_profile(sample_planner_prompt_profile)
         )
@@ -389,6 +409,8 @@ class GatewaySampleCollaborationAdapter:
             )
         if self.sample_truncation_retry_policy is not None:
             self.adapter_version += "-truncation-retry"
+        if self.require_remote_planner or self.require_remote_critic:
+            self.adapter_version += "-strict-remote"
         self._token_budget_tokens_used = 0
         self._token_budget_missing_call_count = 0
         # Installed only for the duration of one host executor call. It sees
@@ -401,6 +423,9 @@ class GatewaySampleCollaborationAdapter:
         # planner cohort. Repair calls deliberately keep their own denominator.
         self._resume_checkpoint: dict[str, Any] | None = None
         self._forecast_tool = forecast_tool or _legacy_candidate_forecast
+        if forecast_bundle_tool is not None and not callable(forecast_bundle_tool):
+            raise TypeError("forecast_bundle_tool must be callable")
+        self._forecast_bundle_tool = forecast_bundle_tool
         indexed: dict[str, GatewaySampleTool] = {}
         for tool in tools:
             if not isinstance(tool, GatewaySampleTool):
@@ -409,6 +434,21 @@ class GatewaySampleCollaborationAdapter:
                 raise ValueError(f"duplicate sample tool id: {tool.tool_id}")
             indexed[tool.tool_id] = tool
         self._tools = indexed
+
+    def _prediction_tool_context(
+        self,
+        *,
+        role: str,
+        model_id: str,
+        requests: Sequence[SamplePredictionRequest],
+        samples: Sequence[Mapping[str, Any]],
+        context: Mapping[str, Any],
+        available_tools: Sequence[Mapping[str, Any]],
+    ) -> Any:
+        """Optional agent-owned tool binding used by the DSH adapter."""
+
+        del role, model_id, requests, samples, context, available_tools
+        return nullcontext(None)
 
     def set_outcome_callback(
         self, callback: SampleOutcomeCallback | None
@@ -706,6 +746,8 @@ class GatewaySampleCollaborationAdapter:
             "strategy_model_id": self.strategy_model_id,
             "review_model_id": self.review_model_id,
             "remote_review_enabled": self.remote_review_enabled,
+            "require_remote_planner": self.require_remote_planner,
+            "require_remote_critic": self.require_remote_critic,
             "microbatch_size": self.microbatch_size,
             "sample_concurrency": self.sample_concurrency,
             "gateway_batch_limit": _MAX_GATEWAY_BATCH_SIZE,
@@ -763,7 +805,10 @@ class GatewaySampleCollaborationAdapter:
         }
         if self.remote_critic_policy is not None:
             plan["remote_critic_policy"] = dict(self.remote_critic_policy)
-            if self.remote_critic_policy["version"] == _ALWAYS_CRITIC_POLICY:
+            if (
+                self.require_remote_critic
+                or self.remote_critic_policy["version"] == _ALWAYS_CRITIC_POLICY
+            ):
                 plan["routing_policy"] = (
                     "remote_planner_then_host_tool_then_remote_critic_then_"
                     "host_constraint_critic;remote_critic_reviews_every_sample;"
@@ -1275,7 +1320,7 @@ class GatewaySampleCollaborationAdapter:
         ) -> None:
             """Publish actual scheduler state without exposing sample content."""
 
-            stopped = poll_run_control()
+            poll_run_control()
             if cancelled_control_latched():
                 return
             # A paused run may still be draining physical requests. Waiting
@@ -1308,6 +1353,16 @@ class GatewaySampleCollaborationAdapter:
                 state["adaptive_split_failed_samples"],
                 max(0, completed - split_recovered),
             )
+            effective_queued_batches = (
+                0
+                if progress_kind == "drained"
+                else max(
+                    queued_batches,
+                    batches_by_role[role]
+                    - int(state["batch_index"])
+                    - in_flight_batches,
+                )
+            )
             self._progress_callback(
                 {
                     "schema_version": "ecologyrsi-dsh.sample-microbatch-progress/3",
@@ -1323,7 +1378,7 @@ class GatewaySampleCollaborationAdapter:
                     "succeeded_samples": succeeded,
                     "failed_samples": completed - succeeded,
                     "in_flight_batches": in_flight_batches,
-                    "queued_batches": queued_batches,
+                    "queued_batches": effective_queued_batches,
                     "gateway_request_count": state["gateway_request_count"],
                     "adaptive_split_trigger_count": state["adaptive_split_trigger_count"],
                     "adaptive_split_count": state["adaptive_split_count"],
@@ -1354,7 +1409,7 @@ class GatewaySampleCollaborationAdapter:
         ) -> tuple[
             list[SamplePredictionOutcome | None],
             _ChunkRoutingDiagnostics,
-            GatewayResponseError | None,
+            BaseException | None,
             bool,
         ]:
             """Run one independent gateway microbatch in a worker.
@@ -1404,6 +1459,13 @@ class GatewaySampleCollaborationAdapter:
                             error=exc,
                         )
             except BaseException as exc:  # noqa: BLE001 - isolate one chunk
+                dsh_error = dsh_native_runtime_error_in_chain(exc)
+                if dsh_error is not None and dsh_native_runtime_retryable(dsh_error):
+                    # Native DSH service/provider outages are generation-level
+                    # retry boundaries, not scientific sample failures. Keep
+                    # the original exception so the outer runner can resume
+                    # from the durable checkpoint after its cooldown.
+                    return local_outcomes, local_diagnostics, exc, False
                 # A transport/client defect must not discard sibling samples.
                 for index in chunk:
                     if local_outcomes[index] is None:
@@ -1585,7 +1647,7 @@ class GatewaySampleCollaborationAdapter:
             else None
         )
         next_schedule = 0
-        recoverable_gateway_error: GatewayResponseError | None = None
+        recoverable_remote_error: BaseException | None = None
         with ThreadPoolExecutor(
             max_workers=worker_count,
             thread_name_prefix="sample-gateway",
@@ -1638,7 +1700,7 @@ class GatewaySampleCollaborationAdapter:
                 opening_new_window = not in_flight
                 while (
                     coverage_stop is None
-                    and recoverable_gateway_error is None
+                    and recoverable_remote_error is None
                     and first_usage_callback_error is None
                     and coordinator_error is None
                     and budget_error is None
@@ -1740,9 +1802,9 @@ class GatewaySampleCollaborationAdapter:
                     ) in completed_results:
                         if (
                             schedule_gateway_error is not None
-                            and recoverable_gateway_error is None
+                            and recoverable_remote_error is None
                         ):
-                            recoverable_gateway_error = schedule_gateway_error
+                            recoverable_remote_error = schedule_gateway_error
 
                     completed_progress: list[
                         tuple[str, str, int, dict[str, int]]
@@ -2009,8 +2071,8 @@ class GatewaySampleCollaborationAdapter:
                 reserved_tokens=current_reserved_tokens(),
             )
 
-        if recoverable_gateway_error is not None:
-            raise recoverable_gateway_error
+        if recoverable_remote_error is not None:
+            raise recoverable_remote_error
 
         if coverage_stop is not None:
             final_coverage_stop = _coverage_stop_decision(
@@ -2071,6 +2133,8 @@ class GatewaySampleCollaborationAdapter:
             and None not in requested_tools
             else None
         )
+        deterministic_single_tool = False
+        prediction_tool_execution = None
         if forced_tool is not None:
             decisions = {
                 requests[index].sample_id: {
@@ -2111,71 +2175,175 @@ class GatewaySampleCollaborationAdapter:
                     for index in indices
                 ]
                 context = self._gateway_context(plans[indices[0]], role=role)
-            available_tools = _tool_union(
+            sample_tool_catalogs = [
                 self._available_tool_catalog(
                     requests[index], plans[index], role=role
                 )
                 for index in indices
+            ]
+            available_tools = _tool_union(sample_tool_catalogs)
+            deterministic_single_tool = (
+                role == "planner"
+                and not self.require_remote_planner
+                and len(available_tools) == 1
+                and all(catalog == available_tools for catalog in sample_tool_catalogs)
             )
-            try:
-                raw_response = self._gateway_decide(
-                    self.strategy_model_id,
-                    role=role,
-                    samples=sample_payloads,
-                    context=context,
-                    available_tools=available_tools,
-                    allow_format_retry=split_depth == 0,
-                    diagnostics=diagnostics,
-                )
+            if deterministic_single_tool:
+                selected_tool = available_tools[0]
+                decisions = {
+                    requests[index].sample_id: {
+                        "sample_id": requests[index].sample_id,
+                        "next_tool": selected_tool["tool_id"],
+                        "reason_code": "initial_registered_route",
+                        "confidence": 1.0,
+                        "response_digest": digest(
+                            {
+                                "role": "host_deterministic_router",
+                                "sample_id": requests[index].sample_id,
+                                "attempt": attempts[index],
+                                "tool": selected_tool,
+                            }
+                        ),
+                    }
+                    for index in indices
+                }
+            else:
                 try:
-                    decisions = _validated_decisions(
-                        raw_response,
-                        [requests[index].sample_id for index in indices],
-                        model_id=self.strategy_model_id,
+                    with self._prediction_tool_context(
                         role=role,
+                        model_id=self.strategy_model_id,
+                        requests=[requests[index] for index in indices],
+                        samples=sample_payloads,
+                        context=context,
+                        available_tools=available_tools,
+                    ) as prediction_tool_execution:
+                        raw_response = self._gateway_decide(
+                            self.strategy_model_id,
+                            role=role,
+                            samples=sample_payloads,
+                            context=context,
+                            available_tools=available_tools,
+                            allow_format_retry=split_depth == 0,
+                            diagnostics=diagnostics,
+                        )
+                        try:
+                            decisions = _validated_decisions(
+                                raw_response,
+                                [requests[index].sample_id for index in indices],
+                                model_id=self.strategy_model_id,
+                                role=role,
+                            )
+                        except _GatewayDecisionContractError:
+                            raise
+                        except SampleExecutionContractError as exc:
+                            raise _GatewayDecisionContractError(
+                                "sample gateway decision response violated its contract",
+                                repair_eligible=False,
+                            ) from exc
+                except SampleExecutionControlError:
+                    raise
+                except GatewayResponseError as exc:
+                    if exc.retryable:
+                        raise
+                    self._handle_routing_failure(
+                        exc,
+                        requests,
+                        plans,
+                        attempts,
+                        indices,
+                        role=role,
+                        outcomes=outcomes,
+                        diagnostics=diagnostics,
+                        split_depth=split_depth,
+                        split_floor=split_floor,
                     )
-                except _GatewayDecisionContractError:
-                    raise
-                except SampleExecutionContractError as exc:
-                    raise _GatewayDecisionContractError(
-                        "sample gateway decision response violated its contract",
-                        repair_eligible=False,
-                    ) from exc
-            except SampleExecutionControlError:
-                raise
-            except GatewayResponseError as exc:
-                if exc.retryable:
-                    raise
-                self._handle_routing_failure(
-                    exc,
-                    requests,
-                    plans,
-                    attempts,
-                    indices,
-                    role=role,
-                    outcomes=outcomes,
-                    diagnostics=diagnostics,
-                    split_depth=split_depth,
-                    split_floor=split_floor,
-                )
-                return
-            except Exception as exc:  # noqa: BLE001 - isolate remote microbatch
-                self._handle_routing_failure(
-                    exc,
-                    requests,
-                    plans,
-                    attempts,
-                    indices,
-                    role=role,
-                    outcomes=outcomes,
-                    diagnostics=diagnostics,
-                    split_depth=split_depth,
-                    split_floor=split_floor,
-                )
-                return
+                    return
+                except Exception as exc:  # noqa: BLE001 - isolate remote microbatch
+                    self._handle_routing_failure(
+                        exc,
+                        requests,
+                        plans,
+                        attempts,
+                        indices,
+                        role=role,
+                        outcomes=outcomes,
+                        diagnostics=diagnostics,
+                        split_depth=split_depth,
+                        split_floor=split_floor,
+                    )
+                    return
 
         if split_depth > 0:
             diagnostics.adaptive_split_recovered_samples += len(indices)
+
+        bundle_predictions: dict[str, tuple[float, str]] = {}
+        bundle_error: BaseException | None = None
+        bundle_input_digest: str | None = None
+        bundle_audit: dict[str, Any] = {}
+        if (
+            role == "planner"
+            and (
+                prediction_tool_execution is not None
+                or self._forecast_bundle_tool is not None
+            )
+            and len({attempts[index] for index in indices}) == 1
+            and all(
+                str(decisions[requests[index].sample_id]["next_tool"])
+                == requests[index].algorithm_id
+                for index in indices
+            )
+        ):
+            bundle_requests = tuple(requests[index] for index in indices)
+            bundle_input = {
+                "samples": [request.to_dict() for request in bundle_requests],
+                "attempt": attempts[indices[0]],
+                "selected_tool": bundle_requests[0].algorithm_id,
+                "batch_plan_digest": digest(plans[indices[0]]),
+            }
+            bundle_input_digest = digest(bundle_input)
+            try:
+                if prediction_tool_execution is not None:
+                    raw_bundle = prediction_tool_execution.prediction_bundle()
+                    receipt = prediction_tool_execution.audit_receipt()
+                    bundle_audit = {
+                        "execution_owner": receipt["execution_owner"],
+                        "dsh_tool_event_id": receipt["event_id"],
+                        "dsh_tool_output_digest": receipt["output_digest"],
+                    }
+                else:
+                    raw_bundle = self._forecast_bundle_tool(bundle_requests)
+                if not isinstance(raw_bundle, Mapping):
+                    raise SampleExecutionContractError(
+                        "registered forecast bundle tool must return an object"
+                    )
+                expected_ids = {request.sample_id for request in bundle_requests}
+                if set(raw_bundle) != expected_ids:
+                    raise SampleExecutionContractError(
+                        "registered forecast bundle tool must return every sample_id exactly once"
+                    )
+                public_outputs: dict[str, Any] = {}
+                normalized: dict[str, float] = {}
+                for request in bundle_requests:
+                    predicted, public_output = _normalized_tool_output(
+                        raw_bundle[request.sample_id],
+                        "registered forecast bundle tool output",
+                    )
+                    normalized[request.sample_id] = predicted
+                    public_outputs[request.sample_id] = public_output
+                shared_output_digest = digest(
+                    {
+                        "prediction_unit": (
+                            "forecast_origin_with_target_horizon_vector"
+                        ),
+                        "outputs": public_outputs,
+                    }
+                )
+                bundle_predictions = {
+                    sample_id: (predicted, shared_output_digest)
+                    for sample_id, predicted in normalized.items()
+                }
+            except Exception as exc:  # noqa: BLE001 - isolate bundle tool
+                bundle_error = exc
 
         successful: list[dict[str, Any]] = []
         tool_failures: list[dict[str, Any]] = []
@@ -2197,6 +2365,16 @@ class GatewaySampleCollaborationAdapter:
                 []
                 if requested_repair_tool is not None
                 else [
+                    {
+                        "role": "host_deterministic_router",
+                        "decision": f"deterministic_single_tool:{next_tool}",
+                        "status": "completed",
+                        "reason_code": decision["reason_code"],
+                        "confidence": decision["confidence"],
+                        "response_digest": decision["response_digest"],
+                    }
+                    if deterministic_single_tool
+                    else
                     _agent_step(
                         decision,
                         role=role,
@@ -2237,14 +2415,21 @@ class GatewaySampleCollaborationAdapter:
                     else None
                 ),
             }
-            input_digest = digest(tool_input)
+            input_digest = bundle_input_digest or digest(tool_input)
             try:
-                predicted, output_digest = self._invoke_tool(
-                    request,
-                    next_tool,
-                    attempt=attempt,
-                    plan=plans[index],
-                )
+                if bundle_input_digest is not None:
+                    if bundle_error is not None:
+                        raise bundle_error
+                    predicted, output_digest = bundle_predictions[
+                        request.sample_id
+                    ]
+                else:
+                    predicted, output_digest = self._invoke_tool(
+                        request,
+                        next_tool,
+                        attempt=attempt,
+                        plan=plans[index],
+                    )
             except Exception as exc:  # noqa: BLE001 - isolate registered sample tool
                 failure_class, retryable, error_type = classify_sample_failure(exc)
                 failed_tool = {
@@ -2272,6 +2457,7 @@ class GatewaySampleCollaborationAdapter:
                 "status": "completed",
                 "input_digest": input_digest,
                 "output_digest": output_digest,
+                **bundle_audit,
             }
             successful.append(
                 {
@@ -2311,6 +2497,8 @@ class GatewaySampleCollaborationAdapter:
             return
         if successful:
             if (
+                self.require_remote_critic
+                or
                 self.remote_critic_policy is None
                 or self.remote_critic_policy["version"] == _ALWAYS_CRITIC_POLICY
             ):
@@ -2365,6 +2553,9 @@ class GatewaySampleCollaborationAdapter:
         split_depth: int,
         split_floor: int,
     ) -> None:
+        dsh_error = dsh_native_runtime_error_in_chain(exc)
+        if dsh_error is not None and dsh_native_runtime_retryable(dsh_error):
+            raise exc
         split_eligible = _is_adaptive_split_failure(exc)
         if split_eligible:
             diagnostics.adaptive_split_trigger_count += 1
@@ -2492,6 +2683,9 @@ class GatewaySampleCollaborationAdapter:
                 raise
             except Exception as exc:  # noqa: BLE001 - isolate critic microbatch
                 if isinstance(exc, GatewayResponseError) and exc.retryable:
+                    raise
+                dsh_error = dsh_native_runtime_error_in_chain(exc)
+                if dsh_error is not None and dsh_native_runtime_retryable(dsh_error):
                     raise
                 critic_failure, classified_retryable, _error_type = (
                     classify_sample_failure(exc)
@@ -2707,11 +2901,13 @@ class GatewaySampleCollaborationAdapter:
             except Exception as exc:  # noqa: BLE001 - isolate optional remote review
                 if isinstance(exc, GatewayResponseError) and exc.retryable:
                     raise
-                failure_class, retryable, error_type = classify_sample_failure(exc)
+                dsh_error = dsh_native_runtime_error_in_chain(exc)
+                if dsh_error is not None and dsh_native_runtime_retryable(dsh_error):
+                    raise
+                failure_class, _retryable, error_type = classify_sample_failure(exc)
                 split_eligible = _is_adaptive_split_failure(exc)
                 if split_eligible:
                     failure_class = "invalid_output"
-                    retryable = _is_sample_repair_eligible_failure(exc)
                 authentication_failed = (
                     isinstance(exc, GatewayResponseError)
                     and exc.status_code in {401, 403}
@@ -2738,13 +2934,21 @@ class GatewaySampleCollaborationAdapter:
                             }
                         ),
                     }
-                    if authentication_failed:
+                    if self.require_remote_critic or authentication_failed:
                         outcomes[item["index"]] = SamplePredictionOutcome(
                             sample_id=request.sample_id,
                             error=SampleExecutionAttemptError(
-                                "remote critic authentication failed",
+                                (
+                                    "required remote critic review failed"
+                                    if self.require_remote_critic
+                                    else "remote critic authentication failed"
+                                ),
                                 failure_class=failure_class,
-                                retryable=False,
+                                retryable=(
+                                    False
+                                    if authentication_failed
+                                    else bool(_retryable or split_eligible)
+                                ),
                                 error_type=error_type,
                                 agent_decisions=(*item["agent_steps"], critic_step),
                                 tool_calls=(item["tool_step"],),
@@ -2888,6 +3092,7 @@ class GatewaySampleCollaborationAdapter:
                     "candidate_parameters",
                     "derived_execution_plan",
                     "tool_experience",
+                    "candidate_agent_profile",
                 )
                 if name in decision_context
             }
@@ -2899,6 +3104,9 @@ class GatewaySampleCollaborationAdapter:
                     ),
                     "batch_plan_digest": digest(plan),
                     "evolution_context": evolution_context,
+                    "candidate_agent_profile": decision_context.get(
+                        "candidate_agent_profile"
+                    ),
                     "shared_sample_contexts": {
                         str(key): dict(value)
                         for key, value in shared_sample_contexts.items()

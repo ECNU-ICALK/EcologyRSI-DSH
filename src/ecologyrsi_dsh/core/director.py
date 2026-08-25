@@ -18,7 +18,7 @@ from ..evolution.analysis import (
 from ..evolution.execution_plan import derive_execution_plan
 from ..evolution.genome import (
     FrozenRunInitialization,
-    SeedGenomeTemplate,
+    MATERIALIZER_VERSION,
     materialize_seed_genome,
 )
 from ..evolution.workflow_ir import (
@@ -26,6 +26,7 @@ from ..evolution.workflow_ir import (
     CompilationInstanceContext,
     bind_phenotype_instance,
     compile_plugin_behavior,
+    resolve_candidate_agent_profile,
 )
 from ..evolution.promotion import assess_promotion_improvement
 from ..evolution.strategies import (
@@ -37,6 +38,11 @@ from ..knowledge.algorithms import (
     AlgorithmAttempt,
     PredictorAdoption,
     resolve_predictor_adoption,
+)
+from ..knowledge.autonomous_cycle import (
+    AUTONOMOUS_RESEARCH_PROTOCOL,
+    GenerationReflection,
+    GenerationSearchPlan,
 )
 from ..knowledge.research_iteration import ResearchIteration
 from ..knowledge.program_registry import current_program_registry
@@ -144,6 +150,73 @@ def _frozen_runtime_binding(state: RunState) -> dict[str, Any] | None:
             "prediction_model_adoption": dict(adoption),
         }
     return None
+
+
+def _generation_sibling_behaviors(
+    state: RunState,
+    *,
+    generation: int,
+    slot_index: int,
+) -> list[dict[str, Any]]:
+    """Project prior same-generation proposals into a bounded avoid set."""
+
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str]] = set()
+    siblings = sorted(
+        (
+            item
+            for item in state.candidates
+            if item.generation == generation and item.slot_index < slot_index
+        ),
+        key=lambda item: (item.slot_index, item.candidate_id),
+    )
+    for candidate in siblings[:7]:
+        proposal = state.proposal(candidate.proposal_id)
+        parameters = dict(proposal.changes)
+        parameters_digest = digest(parameters)
+        metadata = proposal.metadata if isinstance(proposal.metadata, Mapping) else {}
+        behavior_digest = metadata.get("behavior_digest")
+        if not isinstance(behavior_digest, str) or len(behavior_digest) != 64:
+            behavior_digest = None
+        identity = state.candidate_identity_binding(candidate.candidate_id)
+        compiled_behavior_digest = (
+            identity.get("compiled_behavior_digest")
+            if isinstance(identity, Mapping)
+            else None
+        )
+        if (
+            not isinstance(compiled_behavior_digest, str)
+            or len(compiled_behavior_digest) != 64
+        ):
+            compiled_behavior_digest = None
+        genome_digest = metadata.get("genome_digest")
+        if not isinstance(genome_digest, str) or len(genome_digest) != 64:
+            genome_digest = None
+        predictor_id = state.task_manifest.metadata.get("prediction_model_id")
+        genome = persisted_genome_from_proposal(proposal)
+        if genome is not None:
+            predictor_id = genome.scientific_program["predictor_ref"]["id"]
+        elif isinstance(metadata.get("prediction_model_adoption"), Mapping):
+            predictor_id = metadata["prediction_model_adoption"].get("adopted_id")
+        uniqueness = (behavior_digest, parameters_digest)
+        if uniqueness in seen:
+            continue
+        seen.add(uniqueness)
+        row: dict[str, Any] = {
+            "slot_index": candidate.slot_index,
+            "parameters": parameters,
+            "parameters_digest": parameters_digest,
+        }
+        if isinstance(predictor_id, str) and predictor_id.strip():
+            row["prediction_model_id"] = predictor_id
+        if genome_digest is not None:
+            row["genome_digest"] = genome_digest
+        if behavior_digest is not None:
+            row["behavior_digest"] = behavior_digest
+        if compiled_behavior_digest is not None:
+            row["compiled_behavior_digest"] = compiled_behavior_digest
+        rows.append(row)
+    return rows
 
 
 def _task_for_proposal_predictor(
@@ -346,7 +419,7 @@ class EvolutionDirector:
             seed = materialize_seed_genome(template, initialization)
             payload["genome_initialization"] = {
                 "schema_version": "ecologyrsi-dsh.run-genome-initialization/1",
-                "materializer_version": "seed-genome-materializer@1",
+                "materializer_version": MATERIALIZER_VERSION,
                 "seed_template_canonical_json": canonical_json(template.to_dict()),
                 "seed_template_digest": template.template_digest,
                 "materialization_input": initialization.to_dict(),
@@ -622,6 +695,11 @@ class EvolutionDirector:
                         "slot_index": slot_index,
                         "batch_size": generation_batch.batch_size,
                         "round_parent_candidate_id": generation_batch.parent_candidate_id,
+                        "sibling_candidate_behaviors": _generation_sibling_behaviors(
+                            state,
+                            generation=generation_batch.generation,
+                            slot_index=slot_index,
+                        ),
                         "previous_generation_analysis": (
                             previous_analysis.to_dict()
                             if previous_analysis is not None
@@ -896,6 +974,94 @@ class EvolutionDirector:
             raise RuntimeError("research iteration was not recorded")
         return recorded
 
+    def record_generation_search_plan(
+        self,
+        search_plan: GenerationSearchPlan,
+    ) -> GenerationSearchPlan:
+        """Persist one immutable model-authored search plan for a generation."""
+
+        if not isinstance(search_plan, GenerationSearchPlan):
+            raise TypeError("search_plan must be a GenerationSearchPlan")
+        state = self.state(search_plan.run_id)
+        self._require_status(state.run, RunStatus.RUNNING)
+        if search_plan.generation != state.run.generation:
+            raise ValueError("search plan is outside the current generation")
+        previous = (
+            state.analysis_for(search_plan.generation - 1)
+            if search_plan.generation > 0
+            else None
+        )
+        reflection = (
+            state.reflection_for(search_plan.generation - 1)
+            if search_plan.generation > 0
+            else None
+        )
+        if search_plan.source_analysis_digest != (
+            previous.analysis_digest if previous is not None else None
+        ):
+            raise ValueError("search plan previous analysis does not match")
+        if search_plan.source_reflection_digest != (
+            reflection.reflection_digest if reflection is not None else None
+        ):
+            raise ValueError("search plan previous reflection does not match")
+        existing = state.search_plan_for(search_plan.generation)
+        if existing is not None:
+            if existing.to_dict() != search_plan.to_dict():
+                raise ValueError("generation already has a different search plan")
+            return existing
+        self.ledger.append(
+            search_plan.run_id,
+            "GenerationSearchPlanned",
+            {"search_plan": search_plan.to_dict()},
+            event_id=(
+                f"{search_plan.run_id}:generation:{search_plan.generation}:"
+                "search-planned"
+            ),
+            expected_run_seq=state.events[-1].seq,
+        )
+        recorded = self.state(search_plan.run_id).search_plan_for(
+            search_plan.generation
+        )
+        if recorded is None:  # pragma: no cover - append/replay invariant
+            raise RuntimeError("generation search plan was not recorded")
+        return recorded
+
+    def record_generation_reflection(
+        self,
+        reflection: GenerationReflection,
+    ) -> GenerationReflection:
+        """Persist one batch-level model reflection after aggregate analysis."""
+
+        if not isinstance(reflection, GenerationReflection):
+            raise TypeError("reflection must be a GenerationReflection")
+        state = self.state(reflection.run_id)
+        self._require_status(state.run, RunStatus.RUNNING)
+        if reflection.generation != state.run.generation:
+            raise ValueError("reflection is outside the current generation")
+        analysis = state.analysis_for(reflection.generation)
+        if analysis is None or analysis.analysis_digest != reflection.analysis_digest:
+            raise ValueError("reflection analysis does not match")
+        existing = state.reflection_for(reflection.generation)
+        if existing is not None:
+            if existing.to_dict() != reflection.to_dict():
+                raise ValueError("generation already has a different reflection")
+            return existing
+        self.ledger.append(
+            reflection.run_id,
+            "GenerationReflected",
+            {"reflection": reflection.to_dict()},
+            event_id=(
+                f"{reflection.run_id}:generation:{reflection.generation}:reflected"
+            ),
+            expected_run_seq=state.events[-1].seq,
+        )
+        recorded = self.state(reflection.run_id).reflection_for(
+            reflection.generation
+        )
+        if recorded is None:  # pragma: no cover - append/replay invariant
+            raise RuntimeError("generation reflection was not recorded")
+        return recorded
+
     def record_expert_consultation(
         self, consultation: ExpertConsultation
     ) -> ExpertConsultation:
@@ -1101,6 +1267,16 @@ class EvolutionDirector:
                     or DEFAULT_COMPILER_SEMANTIC_DIGEST
                 ),
             )
+            expected_agent_profile = resolve_candidate_agent_profile(
+                genome,
+                registry,
+            )
+            if proposal_obj.metadata.get("candidate_agent_profile") != (
+                expected_agent_profile
+            ):
+                raise ValueError(
+                    "candidate proposal agent profile does not match its Genome"
+                )
             metadata = state.task_manifest.metadata
             instance_context = CompilationInstanceContext(
                 run_id=run_id,
@@ -1158,7 +1334,9 @@ class EvolutionDirector:
         if not isinstance(artifact, ModelArtifact):
             raise TypeError("artifact must be a ModelArtifact")
         state = self.state(artifact.run_id)
-        self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
+        # A paused run may retain sample checkpoints, but it must not publish
+        # a newly finalized training artifact after the pause boundary.
+        self._require_status(state.run, RunStatus.RUNNING)
         candidate = state.candidate(artifact.candidate_id)
         if candidate.run_id != artifact.run_id:
             raise ValueError("candidate belongs to another run")
@@ -1338,7 +1516,9 @@ class EvolutionDirector:
         sample_results: Mapping[str, Any] | None = None,
     ) -> Evaluation:
         state = self.state(evaluation.run_id)
-        self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
+        # Final scientific outcomes are execution writes, not pause-time
+        # checkpoints. Resume the run before sealing an evaluation.
+        self._require_status(state.run, RunStatus.RUNNING)
         candidate = state.candidate(evaluation.candidate_id)
         if candidate.run_id != evaluation.run_id:
             raise ValueError("candidate belongs to another run")
@@ -1492,10 +1672,28 @@ class EvolutionDirector:
                 and event.payload.get("revision") == revision
                 and event.payload.get("role") == "planner"
             ]
+            expected_progress_count = expected_count
+            if (
+                state.task_manifest.metadata.get("sample_agent_protocol")
+                == "dsh-strict-origin-bundle@3"
+            ):
+                cells_per_origin = state.task_manifest.metadata.get(
+                    "prediction_cells_per_origin"
+                )
+                if (
+                    isinstance(cells_per_origin, bool)
+                    or not isinstance(cells_per_origin, int)
+                    or cells_per_origin < 1
+                    or expected_count % cells_per_origin != 0
+                ):
+                    raise ValueError(
+                        "origin-bundle checkpoint has an invalid prediction-cell count"
+                    )
+                expected_progress_count = expected_count // cells_per_origin
             if (
                 planner_progress
                 and int(planner_progress[-1].payload["total_samples"])
-                != expected_count
+                != expected_progress_count
             ):
                 raise ValueError(
                     "sample result progress total does not match the checkpoint cohort"
@@ -1609,7 +1807,7 @@ class EvolutionDirector:
         """
 
         state = self.state(evaluation.run_id)
-        self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
+        self._require_status(state.run, RunStatus.RUNNING)
         candidate = state.candidate(evaluation.candidate_id)
         existing = state.evaluation_for(candidate.candidate_id)
         if existing is None:
@@ -1689,6 +1887,34 @@ class EvolutionDirector:
             if not evaluation.passed:
                 raise ValueError("approved promotion requires a passing evaluation")
             incumbent = self._approved_incumbent(state)
+            dsh_native = is_dsh_native_protocol(state.task_manifest)
+            if dsh_native:
+                analysis = state.analysis_for(candidate.generation)
+                champion_row = (
+                    next(
+                        (
+                            row
+                            for row in analysis.ranking
+                            if row.get("candidate_id") == candidate.candidate_id
+                        ),
+                        None,
+                    )
+                    if analysis is not None
+                    else None
+                )
+                if (
+                    analysis is None
+                    or analysis.outcome != "promoted"
+                    or analysis.selected_candidate_id != candidate.candidate_id
+                    or analysis.champion_candidate_id != candidate.candidate_id
+                    or analysis.incumbent_after_candidate_id != candidate.candidate_id
+                    or champion_row is None
+                    or champion_row.get("primary_selection_gate") is not True
+                ):
+                    raise ValueError(
+                        "DSH-native approval requires the recorded generation champion "
+                        "to pass the adaptive selection gate"
+                    )
             if sample_update_windows_enabled(state.task_manifest):
                 cohort_digest = evaluation_cohort_digest(evaluation)
                 if cohort_digest is None:
@@ -1733,16 +1959,14 @@ class EvolutionDirector:
                     "used as a search parent"
                 )
             if (
-                incumbent is not None
+                not dsh_native
+                and incumbent is not None
                 and cohort_comparison
                 in {"legacy_full_cohort", "same_cohort"}
             ):
                 assessment = assess_promotion_improvement(
                     evaluation,
                     incumbent[1],
-                    execution_protocol=state.task_manifest.metadata.get(
-                        "execution_protocol"
-                    ),
                 )
                 if not assessment["comparable"]:
                     raise ValueError(
@@ -1815,6 +2039,16 @@ class EvolutionDirector:
                     raise RuntimeError("cannot advance an incomplete generation batch")
                 if state.analysis_for(state.run.generation) is None:
                     raise RuntimeError("cannot advance generation before batch analysis")
+                if (
+                    state.task_manifest.metadata.get(
+                        "autonomous_research_protocol"
+                    )
+                    == AUTONOMOUS_RESEARCH_PROTOCOL
+                    and state.reflection_for(state.run.generation) is None
+                ):
+                    raise RuntimeError(
+                        "cannot advance generation before batch reflection"
+                    )
                 undecided = [
                     item.candidate_id
                     for item in current
@@ -2633,7 +2867,7 @@ class EvolutionDirector:
         state = self.state(run_id)
         if not is_dsh_native_protocol(state.task_manifest):
             raise ValueError("formal stage tokens require the DSH-native protocol")
-        candidate = state.candidate(candidate_id)
+        state.candidate(candidate_id)
         if stage == "validation":
             if state.run.selection_incumbent_id != candidate_id:
                 raise ValueError("validation requires the locked selection incumbent")

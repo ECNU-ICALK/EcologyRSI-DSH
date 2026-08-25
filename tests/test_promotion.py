@@ -3,7 +3,10 @@ from __future__ import annotations
 import unittest
 
 from ecologyrsi_dsh.core.models import Evaluation, digest
+from ecologyrsi_dsh.evaluators.objectives import OBJECTIVE_AGGREGATION_VERSION
 from ecologyrsi_dsh.evolution.promotion import (
+    PROMOTION_BLOCK_EVIDENCE_VERSION,
+    PROMOTION_SCORE_DEFINITION,
     assess_promotion_improvement,
     build_promotion_block_evidence,
 )
@@ -29,11 +32,10 @@ def _block_evidence(scores: tuple[float, ...]) -> dict:
         ]
         blocks.append({"block_id": f"{index:064x}", "cells": cells})
     body = {
-        "schema_version": "paired_24h_objective_sufficient_statistics@1",
+        "schema_version": PROMOTION_BLOCK_EVIDENCE_VERSION,
         "block_hours": 24,
-        "maximum_blocks": 128,
-        "objective_aggregation_version": "weighted_task_skill_reward@2",
-        "score_definition": "coverage_penalized_weighted_rmse_skill@2",
+        "objective_aggregation_version": OBJECTIVE_AGGREGATION_VERSION,
+        "score_definition": PROMOTION_SCORE_DEFINITION,
         "target_weights": {target: 1 / 3 for target in TARGETS},
         "horizons": [1],
         "block_count": len(blocks),
@@ -77,51 +79,20 @@ class PromotionPolicyTests(unittest.TestCase):
     def test_three_or_seven_blocks_are_insufficient_and_fail_closed(self) -> None:
         for count in (3, 7):
             incumbent = _evaluation(
-                f"old-{count}", 0.4, version="weighted_task_skill_reward@2", block_scores=(0.0,) * count
+                f"old-{count}",
+                0.4,
+                version=OBJECTIVE_AGGREGATION_VERSION,
+                block_scores=(0.0,) * count,
             )
             candidate = _evaluation(
-                f"new-{count}", 0.5, version="weighted_task_skill_reward@2", block_scores=(0.1,) * count
+                f"new-{count}",
+                0.5,
+                version=OBJECTIVE_AGGREGATION_VERSION,
+                block_scores=(0.1,) * count,
             )
-            assessment = assess_promotion_improvement(
-                candidate,
-                incumbent,
-                execution_protocol="dsh_native_plugin_evolution@1",
-            )
+            assessment = assess_promotion_improvement(candidate, incumbent)
             self.assertFalse(assessment["improved"])
             self.assertEqual(assessment["reason_code"], "insufficient_evidence")
-
-    def test_adaptively_reused_selection_rows_cannot_produce_confirmatory_promotion(self) -> None:
-        incumbent = _evaluation(
-            "old-adaptive", 0.4, version="weighted_task_skill_reward@2", block_scores=(0.0,) * 8
-        )
-        candidate = _evaluation(
-            "new-adaptive", 0.5, version="weighted_task_skill_reward@2", block_scores=(0.1,) * 8
-        )
-        assessment = assess_promotion_improvement(
-            candidate,
-            incumbent,
-            execution_protocol="dsh_native_plugin_evolution@1",
-        )
-        self.assertEqual(assessment["evidence_class"], "exploratory_adaptive_data")
-        self.assertTrue(assessment["selection_only"])
-        self.assertFalse(assessment["validated"])
-        self.assertFalse(assessment["confirmed"])
-
-    def test_legacy_confidence_pass_cannot_validate_a_new_protocol_candidate(self) -> None:
-        incumbent = _evaluation(
-            "old-legacy-field", 0.4, version="weighted_task_skill_reward@2", block_scores=(0.0,) * 8
-        )
-        candidate = _evaluation(
-            "new-legacy-field", 0.5, version="weighted_task_skill_reward@2", block_scores=(0.1,) * 8
-        )
-        candidate.metrics["confidence_pass"] = True
-        assessment = assess_promotion_improvement(
-            candidate,
-            incumbent,
-            execution_protocol="dsh_native_plugin_evolution@1",
-        )
-        self.assertFalse(assessment["validated"])
-        self.assertFalse(assessment["confirmed"])
 
     def test_legacy_evaluations_keep_strict_epsilon_policy(self) -> None:
         incumbent = _evaluation("old", 0.8)
@@ -139,9 +110,9 @@ class PromotionPolicyTests(unittest.TestCase):
 
     def test_v2_requires_practical_score_improvement(self) -> None:
         blocks = (0.0, 0.0, 0.0)
-        incumbent = _evaluation("old", 0.4, version="weighted_task_skill_reward@2", block_scores=blocks)
+        incumbent = _evaluation("old", 0.4, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=blocks)
         assessment = assess_promotion_improvement(
-            _evaluation("new", 0.404, version="weighted_task_skill_reward@2", block_scores=(0.1, 0.1, 0.1)),
+            _evaluation("new", 0.404, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.1, 0.1, 0.1)),
             incumbent,
         )
 
@@ -151,13 +122,13 @@ class PromotionPolicyTests(unittest.TestCase):
 
     def test_v2_fails_closed_on_baseline_profile_mismatch(self) -> None:
         incumbent = _evaluation(
-            "old", 0.4, version="weighted_task_skill_reward@2", block_scores=(0.0,) * 4
+            "old", 0.4, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.0,) * 4
         )
         assessment = assess_promotion_improvement(
             _evaluation(
                 "new",
                 0.5,
-                version="weighted_task_skill_reward@2",
+                version=OBJECTIVE_AGGREGATION_VERSION,
                 baseline_digest="a" * 64,
                 block_scores=(0.1,) * 4,
             ),
@@ -170,10 +141,10 @@ class PromotionPolicyTests(unittest.TestCase):
 
     def test_v2_requires_complete_digest_and_objective_contracts(self) -> None:
         incumbent = _evaluation(
-            "old", 0.4, version="weighted_task_skill_reward@2", block_scores=(0.0,) * 4
+            "old", 0.4, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.0,) * 4
         )
         missing_digest = _evaluation(
-            "missing", 0.5, version="weighted_task_skill_reward@2", block_scores=(0.1,) * 4
+            "missing", 0.5, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.1,) * 4
         )
         incumbent.metrics.pop("dataset_digest")
         missing_digest.metrics.pop("dataset_digest")
@@ -182,10 +153,10 @@ class PromotionPolicyTests(unittest.TestCase):
         )
 
         incumbent = _evaluation(
-            "old-weights", 0.4, version="weighted_task_skill_reward@2", block_scores=(0.0,) * 4
+            "old-weights", 0.4, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.0,) * 4
         )
         changed_weights = _evaluation(
-            "new-weights", 0.5, version="weighted_task_skill_reward@2", block_scores=(0.1,) * 4
+            "new-weights", 0.5, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.1,) * 4
         )
         evidence = changed_weights.metrics["promotion_block_evidence"]
         evidence["target_weights"] = {
@@ -202,14 +173,14 @@ class PromotionPolicyTests(unittest.TestCase):
 
     def test_v2_uses_deterministic_paired_block_confidence_interval(self) -> None:
         incumbent = _evaluation(
-            "old", 0.4, version="weighted_task_skill_reward@2", block_scores=(0.0,) * 6
+            "old", 0.4, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.0,) * 8
         )
         positive = assess_promotion_improvement(
             _evaluation(
                 "positive",
                 0.42,
-                version="weighted_task_skill_reward@2",
-                block_scores=(0.02,) * 6,
+                version=OBJECTIVE_AGGREGATION_VERSION,
+                block_scores=(0.02,) * 8,
             ),
             incumbent,
         )
@@ -217,8 +188,17 @@ class PromotionPolicyTests(unittest.TestCase):
             _evaluation(
                 "unstable",
                 0.42,
-                version="weighted_task_skill_reward@2",
-                block_scores=(0.08, 0.08, 0.08, -0.05, -0.05, -0.05),
+                version=OBJECTIVE_AGGREGATION_VERSION,
+                block_scores=(
+                    0.08,
+                    0.08,
+                    0.08,
+                    0.08,
+                    -0.05,
+                    -0.05,
+                    -0.05,
+                    -0.05,
+                ),
             ),
             incumbent,
         )
@@ -240,10 +220,10 @@ class PromotionPolicyTests(unittest.TestCase):
         )
 
         incumbent = _evaluation(
-            "old", 0.4, version="weighted_task_skill_reward@2", block_scores=(0.0,) * 4
+            "old", 0.4, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.0,) * 4
         )
         candidate = _evaluation(
-            "new", 0.5, version="weighted_task_skill_reward@2", block_scores=(0.1,) * 4
+            "new", 0.5, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.1,) * 4
         )
         evidence = candidate.metrics["promotion_block_evidence"]
         evidence["blocks"].pop()
@@ -256,10 +236,10 @@ class PromotionPolicyTests(unittest.TestCase):
         self.assertEqual(assessment["reason_code"], "mismatched_block_identities")
 
         short_ids = _evaluation(
-            "short-ids", 0.5, version="weighted_task_skill_reward@2", block_scores=(0.1,) * 4
+            "short-ids", 0.5, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.1,) * 4
         )
         short_incumbent = _evaluation(
-            "short-old", 0.4, version="weighted_task_skill_reward@2", block_scores=(0.0,) * 4
+            "short-old", 0.4, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.0,) * 4
         )
         for evaluation in (short_ids, short_incumbent):
             evidence = evaluation.metrics["promotion_block_evidence"]
@@ -315,7 +295,7 @@ class PromotionPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(evidence["block_count"], 2)
-        self.assertLessEqual(evidence["block_count"], 128)
+        self.assertNotIn("maximum_blocks", evidence)
         first_cell = evidence["blocks"][0]["cells"][0]
         self.assertEqual(first_cell["eligible"], 1)
         self.assertEqual(first_cell["succeeded"], 1)
@@ -323,6 +303,33 @@ class PromotionPolicyTests(unittest.TestCase):
         second_cell = evidence["blocks"][1]["cells"][0]
         self.assertEqual(second_cell["eligible"], 1)
         self.assertEqual(second_cell["succeeded"], 0)
+
+    def test_block_evidence_keeps_every_private_origin_block(self) -> None:
+        rows = [
+            {
+                "target": target,
+                "horizon_hours": 1,
+                "origin_timestamp": block_index * 24,
+                "observed": 2.0,
+                "predicted": 1.0,
+                "baseline": 0.0,
+                "normalization_scale": 2.0,
+                "sample_execution_status": "succeeded",
+            }
+            for block_index in range(129)
+            for target in TARGETS
+        ]
+
+        evidence = build_promotion_block_evidence(
+            rows,
+            horizons=(1,),
+            target_weights={target: 1 / 3 for target in TARGETS},
+            dataset_digest="d" * 64,
+            split_manifest_digest_sha256="e" * 64,
+        )
+
+        self.assertEqual(evidence["block_count"], 129)
+        self.assertEqual(len(evidence["blocks"]), 129)
 
 
 if __name__ == "__main__":

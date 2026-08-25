@@ -20,6 +20,9 @@ SAMPLE_RESULT_BATCH_SCHEMA_VERSION = (
 )
 SAMPLE_RESULTS_ARCHIVE_VERSION = "ecologyrsi-dsh.evaluation-sample-results-archive/1"
 SAMPLE_RESULTS_ENCODING = "zlib+base64+canonical-json"
+SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION = (
+    "ecologyrsi-dsh.sample-agent-chain-attestation/2"
+)
 SAMPLE_REWARD_DEFINITION_V1 = "absolute_error_improvement_vs_persistence@1"
 SAMPLE_REWARD_DEFINITION_V2 = (
     "absolute_error_improvement_vs_fit_selected_baseline@2"
@@ -31,6 +34,92 @@ SUPPORTED_SAMPLE_REWARD_DEFINITIONS = frozenset(
 MAX_SAMPLE_RESULTS_RECORDS = 100_000
 MAX_SAMPLE_RESULTS_COMPRESSED_BYTES = 32 * 1024 * 1024
 MAX_SAMPLE_RESULTS_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
+
+
+def _sample_agent_chain_attestation(
+    value: Any,
+    *,
+    sample_id: str,
+) -> dict[str, Any] | None:
+    """Validate the bounded proof that a persisted sample finished all agents."""
+
+    if value is None:
+        return None
+    required = {
+        "schema_version",
+        "sample_id",
+        "planner_invocations",
+        "registered_tool_invocations",
+        "dsh_agent_tool_invocations",
+        "critic_invocations",
+        "reflector_invocations",
+        "host_route_bypass_count",
+        "agent_trace_digest",
+        "tool_trace_digest",
+        "reflection_response_digest",
+        "reflection_wave_digest",
+        "complete",
+        "attestation_digest",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError("sample_agent_chain fields do not match its schema")
+    projected = dict(value)
+    if projected["schema_version"] != SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION:
+        raise ValueError("sample_agent_chain schema version is unsupported")
+    if projected["sample_id"] != sample_id:
+        raise ValueError("sample_agent_chain belongs to a different sample")
+    for name in (
+        "planner_invocations",
+        "registered_tool_invocations",
+        "dsh_agent_tool_invocations",
+        "critic_invocations",
+        "reflector_invocations",
+        "host_route_bypass_count",
+    ):
+        count = projected[name]
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or not 0 <= count <= 64
+        ):
+            raise ValueError(f"sample_agent_chain.{name} is invalid")
+    for name in (
+        "agent_trace_digest",
+        "tool_trace_digest",
+        "reflection_response_digest",
+        "reflection_wave_digest",
+    ):
+        value_digest = projected[name]
+        if value_digest is not None and (
+            not isinstance(value_digest, str)
+            or len(value_digest) != 64
+            or any(character not in "0123456789abcdef" for character in value_digest)
+        ):
+            raise ValueError(f"sample_agent_chain.{name} must be a SHA-256 digest")
+    if not isinstance(projected["complete"], bool):
+        raise ValueError("sample_agent_chain.complete must be a boolean")
+    if projected["complete"] and not (
+        projected["planner_invocations"] >= 1
+        and projected["registered_tool_invocations"] >= 1
+        and projected["dsh_agent_tool_invocations"] >= 1
+        and projected["critic_invocations"] >= 1
+        and projected["reflector_invocations"] >= 1
+        and projected["host_route_bypass_count"] == 0
+        and all(
+            projected[name] is not None
+            for name in (
+                "agent_trace_digest",
+                "tool_trace_digest",
+                "reflection_response_digest",
+                "reflection_wave_digest",
+            )
+        )
+    ):
+        raise ValueError("complete sample_agent_chain lacks strict agent evidence")
+    attestation_digest = projected.pop("attestation_digest")
+    if attestation_digest != digest(projected):
+        raise ValueError("sample_agent_chain attestation digest does not match")
+    return {**projected, "attestation_digest": attestation_digest}
 
 
 def build_sample_results(
@@ -156,6 +245,23 @@ def build_sample_results(
             "scoring_fallback_source": scoring_fallback_source,
             "failure_class": failure_class,
         }
+        sample_agent_chain = _sample_agent_chain_attestation(
+            source.get("sample_agent_chain"),
+            sample_id=projected["sample_id"],
+        )
+        if sample_agent_chain is not None:
+            projected["sample_agent_chain"] = sample_agent_chain
+        raw_origin_sample_id = source.get("origin_sample_id")
+        if raw_origin_sample_id is not None:
+            origin_sample_id = _required_text(
+                raw_origin_sample_id,
+                f"scoring_rows[{index}].origin_sample_id",
+            )
+            if not origin_sample_id.startswith("origin:"):
+                raise ValueError(
+                    f"scoring_rows[{index}].origin_sample_id is invalid"
+                )
+            projected["origin_sample_id"] = origin_sample_id
         has_baseline_profile = any(
             name in source
             for name in (

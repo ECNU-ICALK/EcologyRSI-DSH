@@ -1,17 +1,42 @@
 import { assertModelArgumentsSafe, TOOL_DEFINITIONS } from "./definitions.js";
 
-export const ROLE_TOOL_NAMES = Object.freeze({
-  coordinator: ["ecology_get_run_context"],
-  researcher: ["ecology_get_run_context", "ecology_get_research_evidence"],
-  "candidate-proposer": ["ecology_get_run_context", "ecology_get_research_evidence", "ecology_get_generation_summary"],
-  "sample-planner": ["ecology_get_run_context", "ecology_get_sample_wave", "ecology_execute_prediction_tool", "ecology_submit_sample_decisions"],
-  "sample-critic": ["ecology_get_sample_wave", "ecology_get_prediction_summary", "ecology_submit_sample_review"],
-  "generation-judge": ["ecology_get_generation_summary"],
+export const ROLE_PLUGIN_TOOL_NAMES = Object.freeze({
+  coordinator: [],
+  researcher: [],
+  "candidate-proposer": [],
+  "sample-planner": ["ecology_execute_prediction_tool"],
+  "sample-critic": [],
+  "generation-judge": [],
 });
+
+export const ROLE_TOOL_NAMES = Object.freeze({
+  coordinator: ["skill"],
+  researcher: ["skill"],
+  "candidate-proposer": ["skill"],
+  "sample-planner": ["skill", "ecology_execute_prediction_tool"],
+  "sample-critic": ["skill"],
+  "generation-judge": ["skill"],
+});
+
+const STRUCTURED_OUTPUT_TOOL = "structured_output";
+
+export function registerRoleToolGuard(ctx, role) {
+  const names = ROLE_TOOL_NAMES[role];
+  if (!names) throw new Error(`unknown ecology role: ${role}`);
+  if (typeof ctx?.tools?.guard !== "function") {
+    throw new Error("DSH tools.guard is required in the agent standing scope");
+  }
+  const allowed = new Set([...names, STRUCTURED_OUTPUT_TOOL]);
+  return ctx.tools.guard((exec) => (
+    allowed.has(exec?.name)
+      ? undefined
+      : `tool ${String(exec?.name || "<unknown>")} is outside the frozen ${role} role surface`
+  ));
+}
 
 export function registerRoleTools(ctx, config = {}) {
   const role = String(config.role || "");
-  const names = ROLE_TOOL_NAMES[role];
+  const names = ROLE_PLUGIN_TOOL_NAMES[role];
   if (!names) throw new Error(`unknown ecology role: ${role}`);
   const register = ctx?.tools?.register || ctx?.tools?.define;
   if (typeof register !== "function") throw new Error("DSH tool registration service is required");
@@ -28,7 +53,6 @@ export function registerRoleTools(ctx, config = {}) {
         body: { identity: binding, arguments: structuredClone(args) },
         signal: exec?.signal,
       });
-      if (definition.concludesTurn && result?.accepted === true) exec?.concludeTurn?.();
       return result;
     };
     const disposer = register.call(ctx.tools, {

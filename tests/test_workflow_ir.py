@@ -1,33 +1,25 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import unittest
 
-from ecologyrsi_dsh.core.models import Proposal, TaskManifest
+from ecologyrsi_dsh.core.models import TaskManifest
 from ecologyrsi_dsh.evolution.genome import (
     FrozenRunInitialization,
     GenomeMutationContextV1,
     apply_genome_mutation,
-    legacy_genome_from_proposal,
     materialize_seed_genome,
 )
 from ecologyrsi_dsh.evolution.workflow_ir import (
     CompilationInstanceContext,
     bind_phenotype_instance,
     compile_dsh_workflow_spec,
-    compile_legacy_algorithm_ir,
     compile_plugin_behavior,
 )
-from ecologyrsi_dsh.knowledge.models import KnowledgeSnapshot
 from ecologyrsi_dsh.knowledge.program_registry import (
     ProgramRegistrySnapshot,
     current_program_registry,
 )
-
-
-_FIXTURES = Path(__file__).with_name("fixtures")
-
 
 def _task() -> TaskManifest:
     return TaskManifest(
@@ -78,11 +70,15 @@ def _initialization(task: TaskManifest) -> FrozenRunInitialization:
     )
 
 
-def _seed(task: TaskManifest | None = None):
+def _seed(
+    task: TaskManifest | None = None,
+    *,
+    template_id: str = "greenhouse-default@1",
+):
     task = task or _task()
     registry = current_program_registry()
     return materialize_seed_genome(
-        registry.seed_template("greenhouse-default@1"), _initialization(task)
+        registry.seed_template(template_id), _initialization(task)
     )
 
 
@@ -103,7 +99,16 @@ def _child(task: TaskManifest, *, slot_index: int, slot_seed: int):
     )
     return apply_genome_mutation(
         parent,
-        {"schema_version": "ecologyrsi-dsh.genome-mutation/1", "operations": []},
+        {
+            "schema_version": "ecologyrsi-dsh.genome-mutation/1",
+            "operations": [
+                {
+                    "op": "set_bounded_parameter",
+                    "name": "ridge_alpha",
+                    "value": 0.2,
+                }
+            ],
+        },
         context,
         current_program_registry(),
     )
@@ -140,6 +145,37 @@ def _instance_context(
 
 
 class WorkflowIRTests(unittest.TestCase):
+    def test_targetwise_ridge_compiles_with_multihorizon_v2(self) -> None:
+        task = _task()
+        behavior = compile_plugin_behavior(
+            _seed(task, template_id="greenhouse-targetwise-default@1"),
+            task,
+            None,
+            current_program_registry(),
+        )
+
+        self.assertEqual(
+            behavior.algorithm_behavior["predictor_id"],
+            "greenhouse-targetwise-ridge@1",
+        )
+        self.assertEqual(
+            behavior.algorithm_behavior["evaluator_id"],
+            "greenhouse_multihorizon_time_forward@2",
+        )
+
+    def test_rolling_residual_rejects_multihorizon_evaluator(self) -> None:
+        task = _task()
+        with self.assertRaisesRegex(
+            ValueError,
+            "predictor and evaluator bindings are incompatible",
+        ):
+            compile_plugin_behavior(
+                _seed(task, template_id="greenhouse-rolling-default@1"),
+                task,
+                None,
+                current_program_registry(),
+            )
+
     def test_one_resolved_behavior_has_one_compiled_behavior_digest(self) -> None:
         task = _task()
         genome = _child(task, slot_index=0, slot_seed=10)
@@ -339,22 +375,6 @@ class WorkflowIRTests(unittest.TestCase):
                     bind_phenotype_instance(
                         behavior, CompilationInstanceContext.from_dict(changed)
                     )
-
-    def test_legacy_adapter_and_new_compiler_equal_old_full_algorithm_ir_dict(
-        self,
-    ) -> None:
-        fixture = json.loads(
-            (_FIXTURES / "legacy_program_0_2_2.json").read_text(encoding="utf-8")
-        )
-        task = TaskManifest.from_dict(fixture["task"])
-        proposal = Proposal.from_dict(fixture["proposal"])
-        snapshot = KnowledgeSnapshot.from_dict(fixture["knowledge_snapshot"])
-        projected = legacy_genome_from_proposal(proposal, task, snapshot)
-
-        self.assertEqual(
-            compile_legacy_algorithm_ir(projected), fixture["legacy_algorithm_ir"]
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

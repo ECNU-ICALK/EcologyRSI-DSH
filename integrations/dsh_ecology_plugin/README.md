@@ -16,6 +16,10 @@ Session、受限 preset、subagent 和 Workflow 执行；Python sidecar 只保�
 不可变基因组编译和追加式事件账本。上下文压缩、输出长度和多智能体生命周期
 均交由 DSH 管理，不设逐样本 Token 硬上限。
 
+Generation Judge preset 内部使用两个职责隔离的 Skill：`candidate-scientific-review`
+只审查单个候选的冻结科学证据，`batch-scientific-reflection` 只读取 Host 生成的
+rank→candidate→direction 聚合映射并提出建议；后者不能替代下一代 Host 预检，也不拥有选择或晋级权限。
+
 安装已打包的运行时：
 
 ```bash
@@ -31,9 +35,16 @@ Node 宿主插件的 API 代理支持以下配置：
 config:
   staticRoot: /absolute/path/to/EcologyRSI-DSH/plugins/ecology_evolution
   backendOrigin: http://127.0.0.1:8777
+  # 普通结构化阶段 10 分钟；长上下文调研阶段默认 30 分钟
+  structuredStageTimeoutMs: 600000
+  researchStageTimeoutMs: 1800000
   # 可选：也可以省略此项，直接使用 Node 进程环境变量
   serviceToken: replace-with-runtime-token
 ```
+
+`researchStageTimeoutMs` 只用于搜索规划和证据综合等 researcher 阶段，
+避免大上下文、慢推理模型被普通 10 分钟阶段上限误伤；样本预测、
+批评与候选提案仍使用 `structuredStageTimeoutMs`。
 
 `serviceToken` 也可以省略，插件会读取 Node 进程的
 `ECOLOGYRSI_SERVICE_TOKEN`。配置后，代理在服务端覆盖 iframe 请求中的

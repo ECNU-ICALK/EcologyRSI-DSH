@@ -11,7 +11,7 @@ from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import CandidateStatus, Proposal, TaskManifest, digest
 from ecologyrsi_dsh.data.toy import ToyCropSoilWater
-from ecologyrsi_dsh.dsh import FakeDSHAdapter
+from ecologyrsi_dsh.evolution.strategies import FakeDSHAdapter
 from ecologyrsi_dsh.evolution.batches import start_generation_batch
 from ecologyrsi_dsh.knowledge.algorithm_smoke import (
     ALGORITHM_SMOKE_VERSION,

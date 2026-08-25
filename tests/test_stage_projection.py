@@ -12,8 +12,8 @@ from ecologyrsi_dsh import (
 from ecologyrsi_dsh.knowledge.algorithms import resolve_predictor_adoption
 from ecologyrsi_dsh.knowledge.research_iteration import ResearchIteration
 from ecologyrsi_dsh.knowledge.retrieval import retrieve_generation_knowledge
-from ecologyrsi_dsh.reporting import rounds, run_summary, training_assets
-from ecologyrsi_dsh.server import _projection_json
+from ecologyrsi_dsh.presentation.reporting import rounds, run_summary, training_assets
+from ecologyrsi_dsh.api.projection import _projection_json
 
 
 def task() -> TaskManifest:
@@ -40,6 +40,97 @@ def stage_payload(*, stage: str = "proposal", status: str = "started") -> dict:
 
 
 class EvolutionStageProjectionTests(unittest.TestCase):
+    def test_round_projects_completed_native_dsh_research_and_reflection(
+        self,
+    ) -> None:
+        with EventLedger() as ledger:
+            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            run_id = "run:native-research-round-summary"
+            director.start_evolution(task(), run_id=run_id)
+            state = director.state(run_id)
+            snapshot = retrieve_generation_knowledge(state)
+            ledger.append(
+                run_id,
+                "GenerationKnowledgeRetrieved",
+                {"knowledge_snapshot": snapshot.to_dict()},
+            )
+            plan = {
+                "status": "model_generated",
+                "prediction_model": {"id": "toy-rolling-water@1"},
+                "dsh_research_summary": (
+                    "Prioritize the weak 24-hour target while keeping the "
+                    "registered predictor boundary."
+                ),
+                "dsh_research_evidence": [
+                    {
+                        "finding": "The preceding 24-hour skill was negative.",
+                        "relevance": "Test a small registered parameter delta.",
+                        "evidence_digest": "a" * 64,
+                    }
+                ],
+                "dsh_evolution_reflection": {
+                    "schema_version": "ecologyrsi-dsh.evolution-reflection/2",
+                    "avoid_behaviors": [
+                        {
+                            "behavior_digest": "b" * 64,
+                            "prediction_model_id": "toy-rolling-water@1",
+                            "parameters_digest": "c" * 64,
+                            "reason": "scientific_gate_failed",
+                            "source_run_id": "run:prior",
+                            "source_generation": 0,
+                        }
+                    ],
+                    "active_unresolved": [
+                        {
+                            "failure_code": "scientific_gate_failed",
+                            "next_action": "improve_24h_skill",
+                        }
+                    ],
+                    "policy": {
+                        "exact_failed_behavior_replay": "reject_and_retry_once",
+                        "host_enforced": True,
+                    },
+                },
+            }
+            adoption = resolve_predictor_adoption(state.task_manifest, plan)
+            iteration = ResearchIteration(
+                run_id=run_id,
+                generation=0,
+                status="model_generated",
+                plan=plan,
+                prediction_model_adoption=adoption.to_dict(),
+                knowledge_snapshot_digest=snapshot.snapshot_digest,
+                model_id="dsh-researcher",
+            )
+            director.record_research_iteration(iteration)
+
+            projected = rounds(director.state(run_id))[0]["research_iteration"]
+
+            self.assertEqual(projected["analysis_summary"]["status"], "completed")
+            self.assertEqual(
+                projected["analysis_summary"]["summary"],
+                plan["dsh_research_summary"],
+            )
+            self.assertEqual(
+                projected["analysis_summary"]["source"], "dsh_native_research"
+            )
+            self.assertEqual(
+                projected["analysis_summary"]["key_findings"][0]["finding"],
+                "The preceding 24-hour skill was negative.",
+            )
+            self.assertEqual(
+                projected["final_plan"]["status"], "ready_for_host_compilation"
+            )
+            self.assertEqual(
+                projected["evolution_reflection"]["avoid_behavior_count"], 1
+            )
+            self.assertEqual(
+                projected["evolution_reflection"]["active_unresolved"][0][
+                    "next_action"
+                ],
+                "improve_24h_skill",
+            )
+
     def _candidate_stage_views(
         self,
         director: EvolutionDirector,

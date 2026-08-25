@@ -314,6 +314,8 @@
     var latestDebug = debugAttempts[debugAttempts.length - 1] || {};
     var coverage = candidateEvidenceMetric(summary, sample.metrics, "coverage", "sample_execution_coverage");
     var attempted = candidateEvidenceMetric(summary, sample.metrics, "attempted_examples", null);
+    var attemptedOrigins = candidateEvidenceMetric(summary, sample.metrics, "attempted_origin_samples", null);
+    var predictionCells = candidateEvidenceMetric(summary, sample.metrics, "prediction_cell_count", null);
     if (attempted == null && summary.eligible_examples != null) { attempted = summary.eligible_examples; }
     var projectedTraceStatus = String(sample.trace.status || "").toLowerCase();
     if (attempted == null && ["completed", "failed", "skipped"].indexOf(projectedTraceStatus) >= 0 && sample.trace.sample_count != null) { attempted = sample.trace.sample_count; }
@@ -321,6 +323,24 @@
     var failed = candidateEvidenceMetric(summary, sample.metrics, "failed_examples", "sample_execution_failed_examples");
     var retries = candidateEvidenceMetric(summary, sample.metrics, "retry_count", null);
     var repairs = candidateEvidenceMetric(summary, sample.metrics, "repair_count", null);
+    var plannerCalls = candidateEvidenceMetric(summary, sample.metrics, "remote_planner_invocations", null);
+    var criticCalls = candidateEvidenceMetric(summary, sample.metrics, "remote_critic_invocations", null);
+    var reflectorCalls = candidateEvidenceMetric(summary, sample.metrics, "remote_reflection_invocations", null);
+    var completeChains = candidateEvidenceMetric(summary, sample.metrics, "complete_origin_agent_chains", null);
+    if (completeChains == null) { completeChains = candidateEvidenceMetric(summary, sample.metrics, "complete_agent_chains", null); }
+    var strictChainCoverage = candidateEvidenceMetric(summary, sample.metrics, "strict_agent_chain_coverage", null);
+    var hostBypasses = candidateEvidenceMetric(summary, sample.metrics, "host_route_bypass_count", null);
+    var strictChainPass = summary.strict_agent_chain_pass;
+    var generationControls = Array.isArray(sample.metrics.generation_controls) ? sample.metrics.generation_controls : [];
+    var controlPasses = generationControls.filter(function (item) {
+      return item && item.strict_agent_chain_pass === true && Number(item.host_route_bypass_count || 0) === 0;
+    }).length;
+    var controlPlannerCalls = generationControls.reduce(function (total, item) { return total + Number(item && item.remote_planner_invocations || 0); }, 0);
+    var controlCriticCalls = generationControls.reduce(function (total, item) { return total + Number(item && item.remote_critic_invocations || 0); }, 0);
+    var controlReflectorCalls = generationControls.reduce(function (total, item) { return total + Number(item && item.remote_reflection_invocations || 0); }, 0);
+    var controlCallNote = generationControls.length
+      ? "对照链 P/C/R=" + formatNumber(controlPlannerCalls) + "/" + formatNumber(controlCriticCalls) + "/" + formatNumber(controlReflectorCalls)
+      : "首代无需历史对照";
     var sourcePlan = candidateEvidenceObject(candidate.model_plan);
     var hasResearch = sources.length > 0 || Object.keys(sourcePlan).length > 0 || candidate.proposal_source;
     var sampleStatus = sample.trace.status || (Object.keys(summary).length ? "completed" : "pending");
@@ -348,9 +368,11 @@
     var specificationStatus = algorithmSpec.algorithm_id ? "completed" : duplicateSkipped ? "skipped" : "pending";
     var compileStatus = latestCompile.status || (execution.status === "compile_failed" ? "failed" : algorithmSpec.algorithm_id ? "passed" : duplicateSkipped ? "skipped" : "pending");
     var debugStatus = latestDebug.status || (execution.status === "debug_passed" ? "passed" : execution.status === "debug_failed" ? "failed" : duplicateSkipped ? "skipped" : "pending");
+    var originBundleProtocol = run && run.sample_agent_protocol === "dsh-strict-origin-bundle@3";
+    var progressUnit = originBundleProtocol ? "预测时点" : "样本";
     var progressCountText = progressCompleted != null && progressTotal != null
-      ? "已完成 " + formatNumber(progressCompleted) + " / " + formatNumber(progressTotal) + " 个样本"
-      : progressCompleted != null ? "已完成 " + formatNumber(progressCompleted) + " 个样本" : "等待首个样本回执";
+      ? "已完成 " + formatNumber(progressCompleted) + " / " + formatNumber(progressTotal) + " 个" + progressUnit
+      : progressCompleted != null ? "已完成 " + formatNumber(progressCompleted) + " 个" + progressUnit : "等待首个" + progressUnit + "回执";
     var sampleStageValue = liveProgress
       ? (progressPaused ? (progressKind === "drained" ? "已暂停且请求已排空；" : "已暂停，正在排空在途请求；") : "") + progressCountText
       : coverage != null
@@ -360,7 +382,7 @@
         : sampleStatus === "failed"
           ? "执行失败，未形成覆盖率"
           : sampleStatus === "completed"
-            ? attempted == null ? "已完成，旧运行未记录覆盖率" : "已执行 " + formatNumber(attempted) + " 个样本；旧运行未记录覆盖率"
+            ? attempted == null ? "已完成，旧运行未记录覆盖率" : originBundleProtocol && attemptedOrigins != null ? "已执行 " + formatNumber(attemptedOrigins) + " 个预测时点 / " + formatNumber(predictionCells == null ? attempted : predictionCells) + " 个评分单元" : "已执行 " + formatNumber(attempted) + " 个样本；旧运行未记录覆盖率"
             : ["running", "evaluating"].indexOf(sampleStatus) >= 0
               ? "逐样本执行中"
               : "等待逐样本执行";
@@ -370,11 +392,11 @@
     }
     var remainingBatches = candidateFiniteNumber(liveProgress && liveProgress.remaining_batches);
     var remainingParts = [];
-    if (remainingSamples != null) { remainingParts.push("剩余 " + formatNumber(remainingSamples) + " 个样本"); }
+    if (remainingSamples != null) { remainingParts.push("剩余 " + formatNumber(remainingSamples) + " 个" + progressUnit); }
     if (remainingBatches != null) { remainingParts.push(formatNumber(remainingBatches) + " 个微批"); }
     var sampleStageNote = liveProgress
       ? (progressPaused ? "恢复后继续" : "训练反馈分区") + (remainingParts.length ? " · " + remainingParts.join("、") : "")
-      : attempted == null ? "训练反馈分区" : formatNumber(attempted) + " 个可评测样本";
+      : attempted == null ? "训练反馈分区" : originBundleProtocol && attemptedOrigins != null ? formatNumber(attemptedOrigins) + " 个预测时点 / " + formatNumber(predictionCells == null ? attempted : predictionCells) + " 个评分单元" : formatNumber(attempted) + " 个可评测样本";
     var stages = [
       candidateEvidenceStage("01", "研究证据", hasResearch ? "completed" : "pending", sources.length ? formatNumber(sources.length) + " 条来源映射" : candidateProposalSourceText(candidate.proposal_source), "结构化资料与历史失败进入候选生成"),
       candidateEvidenceStage("02", "算法规范", specificationStatus, algorithmSpec.algorithm_id || (duplicateSkipped ? "重复参数，沿用已有候选证据" : "等待生成 AlgorithmSpec"), algorithmSpec.tool_ids ? formatNumber(algorithmSpec.tool_ids.length) + " 个已登记工具" : "只允许宿主登记能力"),
@@ -397,7 +419,13 @@
       candidateEvidenceStat("成功", succeeded == null ? "—" : formatNumber(succeeded), liveProgress && progressTotal != null ? "已完成 " + formatNumber(attempted) + " / " + formatNumber(progressTotal) : attempted == null ? "逐样本预测" : "共尝试 " + formatNumber(attempted), succeeded == null ? "is-pending" : "is-positive"),
       candidateEvidenceStat("失败", failed == null ? "—" : formatNumber(failed), "失败样本使用保守计分", failed == null ? "is-pending" : Number(failed) > 0 ? "is-warning" : "is-positive"),
       candidateEvidenceStat("重试", retries == null ? "—" : formatNumber(retries), "瞬时错误按预算退避重试", retries == null ? "is-pending" : Number(retries) > 0 ? "is-running" : ""),
-      candidateEvidenceStat("修复", repairs == null ? "—" : formatNumber(repairs), "越界预测采用有界修复", repairs == null ? "is-pending" : Number(repairs) > 0 ? "is-warning" : "")
+      candidateEvidenceStat("修复", repairs == null ? "—" : formatNumber(repairs), "越界预测采用有界修复", repairs == null ? "is-pending" : Number(repairs) > 0 ? "is-warning" : ""),
+      candidateEvidenceStat("Planner 调用", plannerCalls == null ? "—" : formatNumber(plannerCalls), originBundleProtocol ? "每个预测时点一次，覆盖完整向量" : "每个有效样本独立调用", plannerCalls == null ? "is-pending" : "is-positive"),
+      candidateEvidenceStat("Critic 调用", criticCalls == null ? "—" : formatNumber(criticCalls), "工具执行后远程审核", criticCalls == null ? "is-pending" : "is-positive"),
+      candidateEvidenceStat("Reflector 调用", reflectorCalls == null ? "—" : formatNumber(reflectorCalls), "宿主评分后远程反思", reflectorCalls == null ? "is-pending" : "is-positive"),
+      candidateEvidenceStat("完整智能体链", completeChains == null ? "—" : formatNumber(completeChains), strictChainCoverage == null ? "覆盖率未记录" : "覆盖率 " + candidateEvidencePercent(strictChainCoverage), strictChainPass === false ? "is-warning" : strictChainPass === true ? "is-positive" : "is-pending"),
+      candidateEvidenceStat("Host 路由旁路", hostBypasses == null ? "—" : formatNumber(hostBypasses), "严格协议要求为 0", hostBypasses == null ? "is-pending" : Number(hostBypasses) > 0 ? "is-warning" : "is-positive"),
+      candidateEvidenceStat("同 cohort 对照", generationControls.length ? formatNumber(controlPasses) + " / " + formatNumber(generationControls.length) : "—", controlCallNote, generationControls.length && controlPasses === generationControls.length ? "is-positive" : generationControls.length ? "is-warning" : "is-pending")
     ].join("");
     var shownAttempts = attempts.slice(Math.max(0, attempts.length - 6));
     var attemptHtml = shownAttempts.length ? "<ol class=\"candidate-attempt-list\">" + shownAttempts.map(function (attempt) {
@@ -638,7 +666,7 @@
       var prediction = scoringFallback
         ? "<span class=\"candidate-sample-value-stack\"><strong>" + escapeHTML(candidateSampleValue(row.predicted)) + "</strong><small>评分惩罚值</small></span>"
         : escapeHTML(candidateSampleValue(row.predicted));
-      return "<tr class=\"candidate-sample-row " + status.rowClass + "\" data-sample-id=\"" + escapeHTML(sampleId) + "\"><td data-label=\"时间\"><span class=\"candidate-sample-time\"><strong>" + escapeHTML(targetTime == null ? "—" : formatObservationTime(targetTime)) + "</strong><small>" + escapeHTML(originTime == null ? "起点未提供" : "起点 " + formatObservationTime(originTime)) + "</small></span></td><td data-label=\"目标\"><span class=\"candidate-sample-target\"><strong>" + escapeHTML(targetLabels[row.target] || row.target || "预测目标") + "</strong><small title=\"" + escapeHTML(sampleId) + "\">" + escapeHTML(sampleMeta) + "</small></span></td><td data-label=\"时距\">" + escapeHTML(row.horizon_hours == null ? "—" : formatNumber(row.horizon_hours) + " 小时") + "</td><td data-label=\"真实值\" class=\"candidate-sample-number\">" + escapeHTML(candidateSampleValue(row.observed)) + "</td><td data-label=\"预测值\" class=\"candidate-sample-number candidate-sample-prediction\">" + prediction + "</td><td data-label=\"Reward（原始单位）\" class=\"candidate-sample-number candidate-sample-reward " + rewardClass + "\" title=\"相对持续性基线的绝对误差改善，正值更好；保留目标原始单位，只能在同一目标内比较\">" + escapeHTML(candidateSampleValue(row.reward)) + "</td><td data-label=\"状态\"><span class=\"candidate-sample-status\"><strong class=\"pill " + status.className + "\">" + escapeHTML(status.text) + "</strong>" + (executionDetail ? "<small title=\"" + escapeHTML(executionDetail) + "\">" + escapeHTML(executionDetail) + "</small>" : "") + "</span></td></tr>";
+      return "<tr class=\"candidate-sample-row " + status.rowClass + "\" data-sample-id=\"" + escapeHTML(sampleId) + "\"><td data-label=\"时间\"><span class=\"candidate-sample-time\"><strong>" + escapeHTML(targetTime == null ? "—" : formatObservationTime(targetTime)) + "</strong><small>" + escapeHTML(originTime == null ? "起点未提供" : "起点 " + formatObservationTime(originTime)) + "</small></span></td><td data-label=\"目标\"><span class=\"candidate-sample-target\"><strong>" + escapeHTML(targetLabels[row.target] || row.target || "预测目标") + "</strong><small title=\"" + escapeHTML(sampleId) + "\">" + escapeHTML(sampleMeta) + "</small></span></td><td data-label=\"时距\">" + escapeHTML(row.horizon_hours == null ? "—" : formatNumber(row.horizon_hours) + " 小时") + "</td><td data-label=\"真实值\" class=\"candidate-sample-number\">" + escapeHTML(candidateSampleValue(row.observed)) + "</td><td data-label=\"预测值\" class=\"candidate-sample-number candidate-sample-prediction\">" + prediction + "</td><td data-label=\"辅助 MAE 改善（原始单位）\" class=\"candidate-sample-number candidate-sample-reward " + rewardClass + "\" title=\"相对冻结评分基线的绝对误差改善，是辅助学习信号，正值更好；候选排名使用 RMSE 技能主适应度\">" + escapeHTML(candidateSampleValue(row.reward)) + "</td><td data-label=\"状态\"><span class=\"candidate-sample-status\"><strong class=\"pill " + status.className + "\">" + escapeHTML(status.text) + "</strong>" + (executionDetail ? "<small title=\"" + escapeHTML(executionDetail) + "\">" + escapeHTML(executionDetail) + "</small>" : "") + "</span></td></tr>";
     }).join("");
   }
   function renderCandidateSamples() {

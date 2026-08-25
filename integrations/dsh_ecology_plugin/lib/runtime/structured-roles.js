@@ -65,6 +65,13 @@ export async function runStructuredRole(
     } catch (error) {
       throw phaseError("structured_child_result_failed", error);
     }
+    if (result?.stopReason && result.stopReason !== "completed") {
+      throw phaseError(
+        result.stopReason === "aborted"
+          ? "structured_child_aborted"
+          : "structured_child_model_error",
+      );
+    }
     const structured = result?.structured;
     if (!structured || typeof structured !== "object" || Array.isArray(structured)) {
       throw phaseError("structured_result_missing");
