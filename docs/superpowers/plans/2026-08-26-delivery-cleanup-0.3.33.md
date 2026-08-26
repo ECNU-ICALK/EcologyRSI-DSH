@@ -689,7 +689,7 @@ Expected: version assertions still observe `0.3.32` or old documentation/default
 
 - [ ] **Step 3: Bump all active version locations to 0.3.33**
 
-Update Python, browser, DSH package, NOTICE, manifest, wheel data path, verifier path, and lockfile. Add a `0.3.33 - 2026-08-26` CHANGELOG entry grouped into runtime correctness, replay safety, cleanup, delivery, and deployment.
+Update Python, browser, DSH package, NOTICE, manifest, wheel data path, verifier path, and lockfile. Add a `0.3.33 - 2026-08-27` CHANGELOG entry grouped into runtime correctness, replay safety, cleanup, delivery, and deployment.
 
 - [ ] **Step 4: Replace stale operational wording**
 
@@ -700,7 +700,7 @@ Document exactly:
 筛选：每候选 64 个完整预测时点
 正式评估：Top 2，各 500 个完整预测时点
 候选并发：4
-逐样本并发：8
+逐样本并发：默认 64，可配置 1–128
 同 provider 的 DSH stage 全局在飞上限：128
 ```
 
