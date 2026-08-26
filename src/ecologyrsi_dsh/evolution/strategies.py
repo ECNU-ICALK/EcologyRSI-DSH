@@ -178,7 +178,7 @@ def _forecast_objective_context(task: TaskManifest) -> dict[str, Any]:
         "complete_matrix_required": bool(cells),
         "joint_prediction_call_per_origin": (
             task.metadata.get("sample_agent_protocol")
-            == "dsh-strict-origin-bundle@3"
+            in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
         ),
     }
     dataset_display_name = task.metadata.get("dataset_display_name")

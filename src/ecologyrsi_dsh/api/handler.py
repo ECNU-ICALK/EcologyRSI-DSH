@@ -79,7 +79,7 @@ _DEFAULT_REAL_RUN_TOKEN_LIMIT = 100_000_000
 _REAL_RUN_TOKEN_RESERVATION_PER_CALL = 262_144
 _SAMPLE_TOKEN_BUDGET_POLICY = "hard_gateway_call_reservation@1"
 _SAMPLE_TOKEN_BUDGET_SCOPE = "sample_agent_gateway_calls_only@1"
-_DEFAULT_REAL_SAMPLE_CONCURRENCY = 2
+_DEFAULT_REAL_SAMPLE_CONCURRENCY = 8
 _MAX_REAL_SAMPLE_CONCURRENCY = 8
 _DEFAULT_REAL_CANDIDATE_CONCURRENCY = 4
 _MAX_REAL_CANDIDATE_CONCURRENCY = 8
@@ -122,7 +122,7 @@ _DEFAULT_SAMPLE_REMOTE_CRITIC_POLICY = {
     "version": "uncertain_or_failure@1",
     "min_planner_confidence": 0.9,
 }
-_STRICT_SAMPLE_AGENT_PROTOCOL = "dsh-strict-origin-bundle@3"
+_STRICT_SAMPLE_AGENT_PROTOCOL = "dsh-strict-origin-bundle@4"
 _STRICT_SAMPLE_REMOTE_CRITIC_POLICY = {"version": "always@1"}
 _STRICT_SAMPLE_REFLECTION_POLICY = "always_remote_post_score@1"
 _DSH_NATIVE_PRESET_IDS = (
@@ -2480,7 +2480,7 @@ class EvolutionRequestHandler(
                 ),
                 "sample_agent_batch_size": sample_agent_batch_size,
                 # Causal origin waves are independent schedules. New real
-                # runs use two bounded sample workers per candidate by
+                # runs use up to eight provider-wide sample requests by
                 # default; an explicit value remains part of the immutable
                 # manifest. Candidate-level parallelism is frozen separately.
                 "sample_concurrency": sample_concurrency,
@@ -2863,9 +2863,10 @@ class EvolutionRequestHandler(
                 expected_profile.minimum_balanced_samples_per_update()
             ):
                 raise FrozenRuntimeBindingDriftError("selection sample threshold")
-            if metadata.get("sample_agent_protocol") == (
-                "dsh-strict-origin-bundle@3"
-            ) and (
+            if metadata.get("sample_agent_protocol") in {
+                "dsh-strict-origin-bundle@3",
+                "dsh-strict-origin-bundle@4",
+            } and (
                 metadata.get("minimum_selection_origin_samples_per_update")
                 != expected_profile.minimum_balanced_origins_per_update()
                 or metadata.get("prediction_cells_per_origin")

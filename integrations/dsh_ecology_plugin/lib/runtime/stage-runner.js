@@ -573,8 +573,9 @@ export class NativeStageRunner {
     sidecar,
     structuredStageTimeoutMs = 600_000,
     researchStageTimeoutMs = 1_800_000,
-    sampleCriticStageTimeoutMs = 180_000,
-    structuredStageMinIntervalMs = 60_000,
+    sampleCriticStageTimeoutMs = 600_000,
+    structuredStageMinIntervalMs = 0,
+    structuredStageMaxInFlight = 8,
     structuredStageFailureCooldownMs = 60_000,
     structuredStageMaxAttempts = 2,
     providerStageGate = null,
@@ -599,6 +600,7 @@ export class NativeStageRunner {
     this.providerStageGate = providerStageGate || new ProviderStageGate({
       minimumIntervalMs: structuredStageMinIntervalMs,
       failureCooldownMs: structuredStageFailureCooldownMs,
+      maxInFlight: structuredStageMaxInFlight,
     });
     this.pendingStarts = new PendingChildStarts(ctx, {
       launchFence: this.providerStageGate,

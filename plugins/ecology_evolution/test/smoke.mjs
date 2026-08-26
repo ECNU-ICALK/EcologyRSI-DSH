@@ -1304,6 +1304,58 @@ assert.ok(monitorNodes["#execution-heartbeat"].textContent.includes("sample.crit
 assert.ok(monitorNodes["#execution-heartbeat"].textContent.includes("角色 sample-critic"));
 assert.ok(monitorNodes["#execution-heartbeat"].textContent.includes("DSH 更新"));
 
+const screeningCandidate = {
+  ...pausedCandidate,
+  id: "candidate:screening",
+  candidate_id: "candidate:screening",
+  status: "spawned",
+  execution: {
+    current_stage: "evaluation",
+    stages: {
+      proposal: "completed", candidate: "completed", training: "pending",
+      evaluation: "pending", judge: "pending", decision: "pending",
+    },
+  },
+};
+const screeningRun = {
+  ...pausedDrainedRun,
+  id: "run:screening-live",
+  status: "running",
+  auto_progress: true,
+  sample_agent_protocol: "dsh-strict-origin-bundle@4",
+  candidates: [screeningCandidate],
+  rounds: [{generation: 1, stages: screeningCandidate.execution.stages, candidates: [{candidate_id: screeningCandidate.id, stages: screeningCandidate.execution.stages}]}],
+  execution_diagnostics: {},
+  execution_progress: {
+    phase: "evaluation",
+    current_stage: "evaluation",
+    current_generation: 1,
+    completed_generations: 0,
+    current_candidate_id: screeningCandidate.id,
+    progress_percent: 7,
+    stage_progress: {
+      evaluation_phase: "screening",
+      progress_kind: "waiting",
+      completed_samples: 1,
+      total_samples: 256,
+      succeeded_samples: 1,
+      failed_samples: 0,
+      in_flight_batches: 8,
+      queued_batches: 247,
+      queue_semantics: "awaiting_origin_submission",
+      updated_at: "2026-08-26T06:44:03Z",
+    },
+  },
+};
+modelSandbox.renderExecutionMonitor(screeningRun);
+assert.equal(monitorNodes["#execution-monitor-status"].textContent, "模型执行中");
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("预测时点进度：1 / 256"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("实际在飞 8 wave"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("待调度 247"));
+assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("排队 247"), false);
+modelSandbox.renderAutonomyProgress(screeningRun);
+assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "模型执行中");
+
 const completedHeartbeatSnapshot = modelSandbox.executionSampleProgressSnapshot({
   status: "completed",
   execution_diagnostics: {
@@ -2547,7 +2599,7 @@ assert.match(html, /id="show-archived-runs"/);
 assert.match(html, /id="archive-button"/);
 assert.match(html, /id="delete-button"/);
 assert.equal(manifest.display_name, "生态模型进化工作台");
-assert.equal(manifest.version, "0.3.28");
+assert.equal(manifest.version, "0.3.32");
 assert.equal(manifest.entrypoint.file, "index.html");
 assert.equal(manifest.entrypoint.route, "/plugins/ecology/evolution/");
 assert.equal(manifest.development_only, false);

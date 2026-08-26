@@ -187,6 +187,7 @@ def _select_feedback_update_cohort(
     dataset_digest: str,
     split_manifest_digest: str,
     bundle_complete_origins: bool = False,
+    origin_window_offset: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Select one deterministic, task-balanced, rotating feedback window.
 
@@ -213,6 +214,7 @@ def _select_feedback_update_cohort(
             prediction_cell_budget=samples_per_update,
             dataset_digest=dataset_digest,
             split_manifest_digest=split_manifest_digest,
+            origin_window_offset=origin_window_offset,
         )
 
     grouped: dict[tuple[str, int], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
@@ -331,6 +333,7 @@ def _select_origin_bundled_feedback_cohort(
     prediction_cell_budget: int,
     dataset_digest: str,
     split_manifest_digest: str,
+    origin_window_offset: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Select complete target/horizon vectors at shared forecast origins."""
 
@@ -392,7 +395,20 @@ def _select_origin_bundled_feedback_cohort(
         window_cycle = generation
         selected_origins = list(complete_origins)
     else:
-        absolute_offset = generation * selected_origin_count
+        if (
+            origin_window_offset is not None
+            and (
+                isinstance(origin_window_offset, bool)
+                or not isinstance(origin_window_offset, int)
+                or origin_window_offset < 0
+            )
+        ):
+            raise ValueError("origin_window_offset must be a non-negative integer")
+        absolute_offset = (
+            origin_window_offset
+            if origin_window_offset is not None
+            else generation * selected_origin_count
+        )
         window_offset = absolute_offset % len(complete_origins)
         window_cycle = absolute_offset // len(complete_origins)
         selected_origins = [
@@ -841,7 +857,7 @@ class EvaluatorRegistry:
                 raise ValueError("DSH-native sample roles require frozen model routes")
             if (
                 task.metadata.get("sample_agent_protocol")
-                != "dsh-strict-origin-bundle@3"
+                not in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
             ):
                 raise ValueError(
                     "DSH-native sample execution requires the strict origin-bundle protocol"
@@ -2104,7 +2120,10 @@ class EvaluatorRegistry:
                     split_manifest_digest=series.split_manifest_digest_sha256,
                     bundle_complete_origins=(
                         task.metadata.get("sample_agent_protocol")
-                        == "dsh-strict-origin-bundle@3"
+                        in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
+                    ),
+                    origin_window_offset=task.metadata.get(
+                        "evaluation_origin_window_offset"
                     ),
                 )
             )
@@ -2219,6 +2238,9 @@ class EvaluatorRegistry:
                 ),
                 "sample_concurrency": task.metadata.get(
                     "sample_concurrency", 4
+                ),
+                "candidate_concurrency": task.metadata.get(
+                    "candidate_concurrency", 1
                 ),
                 **(
                     {
@@ -2839,7 +2861,10 @@ class EvaluatorRegistry:
                     split_manifest_digest=series.split_manifest_digest_sha256,
                     bundle_complete_origins=(
                         task.metadata.get("sample_agent_protocol")
-                        == "dsh-strict-origin-bundle@3"
+                        in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
+                    ),
+                    origin_window_offset=task.metadata.get(
+                        "evaluation_origin_window_offset"
                     ),
                 )
             )
@@ -2992,6 +3017,9 @@ class EvaluatorRegistry:
                 ),
                 "sample_concurrency": task.metadata.get(
                     "sample_concurrency", 4
+                ),
+                "candidate_concurrency": task.metadata.get(
+                    "candidate_concurrency", 1
                 ),
                 **(
                     {

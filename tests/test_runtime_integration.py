@@ -730,7 +730,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
             created["projection"]["configuration"]["samples_per_update"], 1_600
         )
         self.assertEqual(
-            created["projection"]["configuration"]["sample_concurrency"], 2
+            created["projection"]["configuration"]["sample_concurrency"], 8
         )
         self.assertEqual(
             created["projection"]["configuration"]["candidate_concurrency"], 4
@@ -797,7 +797,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
             state.task_manifest.metadata["fitness_profile_digest"],
             digest(state.task_manifest.metadata["fitness_profile"]),
         )
-        self.assertEqual(state.task_manifest.metadata["sample_concurrency"], 2)
+        self.assertEqual(state.task_manifest.metadata["sample_concurrency"], 8)
         self.assertEqual(state.task_manifest.metadata["candidate_concurrency"], 4)
         self.assertEqual(state.task_manifest.metadata["sample_agent_batch_size"], 64)
         self.assertEqual(

@@ -77,6 +77,44 @@ class GatewayRetryCircuitTests(unittest.TestCase):
             **self._failure_kwargs(attempt, failure_epoch=failure_epoch),
         )
 
+    def _record_dsh_success(self, *, generation: int = 0):
+        structured = {
+            "schema_version": "ecology-sample-reflection@1",
+            "summary": "The DSH runtime returned a valid structured result.",
+        }
+        return self.ledger.append(
+            self.run_id,
+            "DshStructuredResultAccepted",
+            {
+                "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
+                "identity": {
+                    "run_id": self.run_id,
+                    "generation": generation,
+                    "role": "sample-critic",
+                    "stage": "sample.reflect",
+                    "session_id": "dsh-child-retry-recovery",
+                },
+                "output_schema_id": "ecology-sample-reflection@1",
+                "result_digest": digest(structured),
+                "structured": structured,
+                "skill_invocation_evidence": {
+                    "schema_version": "ecologyrsi-dsh.skill-invocation-evidence/1",
+                    "stage": "sample.reflect",
+                    "skill_name": "origin-vector-review",
+                    "call_count": 1,
+                    "successful_call_count": 1,
+                    "call_seq": 1,
+                    "result_seq": 2,
+                    "first_tool_call_verified": True,
+                    "next_tool_name": "structured_output",
+                    "next_tool_call_seq": 3,
+                    "order_verified": True,
+                    "source": "dsh_session_event_log",
+                },
+            },
+            event_id=f"{self.run_id}:dsh-success:{generation}",
+        )
+
     def _race_failure_against(self, failure: dict, competing_action):
         entered_append = threading.Event()
         release_append = threading.Event()
@@ -368,6 +406,82 @@ class GatewayRetryCircuitTests(unittest.TestCase):
             1,
         )
         self.assertEqual(recovered_then_failed.event.payload["breaker_epoch"], 2)
+
+    def test_dsh_structured_success_breaks_native_runtime_retry_epoch(self) -> None:
+        for attempt in range(1, 6):
+            state = self.director.state(self.run_id)
+            decision = self.director.schedule_gateway_retry_or_pause(
+                self.run_id,
+                run_incarnation=state.events[0].seq,
+                generation=0,
+                stage="evaluation",
+                retry_class="dsh_native_runtime",
+                failure_id=digest({"native-failure": attempt}),
+                attempt_anchor_seq=state.events[-1].seq,
+                delay_seconds=0.0,
+                last_error_code="dsh_native_runtime_unavailable",
+            )
+            self.assertEqual(decision.outcome, "scheduled")
+
+        accepted = self._record_dsh_success()
+        state = self.director.state(self.run_id)
+        recovered_then_failed = self.director.schedule_gateway_retry_or_pause(
+            self.run_id,
+            run_incarnation=state.events[0].seq,
+            generation=0,
+            stage="evaluation",
+            retry_class="dsh_native_runtime",
+            failure_id=digest("native-failure-after-accepted-result"),
+            attempt_anchor_seq=accepted.seq,
+            delay_seconds=0.0,
+            last_error_code="dsh_native_runtime_unavailable",
+        )
+
+        self.assertEqual(recovered_then_failed.outcome, "scheduled")
+        self.assertEqual(
+            recovered_then_failed.event.payload["consecutive_failures"],
+            1,
+        )
+        self.assertEqual(recovered_then_failed.event.payload["breaker_epoch"], 2)
+
+    def test_legacy_v2_native_retry_after_structured_success_still_replays(self) -> None:
+        """0.3.27 did not treat unrelated DSH success as an epoch reset."""
+
+        state = self.director.state(self.run_id)
+        attempt_anchor_seq = state.events[-1].seq
+        self._record_dsh_success()
+        timestamp = datetime(2026, 8, 26, 4, 0, tzinfo=timezone.utc).isoformat()
+        legacy_payload = {
+            "schema_version": "ecologyrsi-dsh.gateway-retry-scheduled/2",
+            "run_incarnation": state.events[0].seq,
+            "generation": 0,
+            "stage": "generation",
+            "retry_class": "dsh_native_runtime",
+            "breaker_epoch": 1,
+            "failure_id": digest("legacy-native-retry-after-dsh-success"),
+            "attempt_anchor_seq": attempt_anchor_seq,
+            "consecutive_failures": 1,
+            "retry_limit": 6,
+            "first_failure_at": timestamp,
+            "last_failure_at": timestamp,
+            "last_error_code": "dsh_native_runtime_unavailable",
+            "retry_at": timestamp,
+            "delay_seconds": 0.0,
+            "attempt": 1,
+            "error_code": "dsh_native_runtime_unavailable",
+            "reason": "DSH 智能体运行时暂时不可用，已安排有界延迟重试。",
+        }
+        self.ledger.append(
+            self.run_id,
+            "GatewayRetryScheduled",
+            legacy_payload,
+            event_id=f"{self.run_id}:legacy-native-retry-after-success",
+        )
+
+        replayed = self.director.state(self.run_id)
+
+        self.assertEqual(replayed.run.status.value, "running")
+        self.assertEqual(replayed.events[-1].payload, legacy_payload)
 
     def test_threshold_cas_loses_cleanly_to_cancellation(self) -> None:
         for attempt in range(1, 6):

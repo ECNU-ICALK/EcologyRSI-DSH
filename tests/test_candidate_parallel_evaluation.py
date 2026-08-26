@@ -29,6 +29,29 @@ class _Director:
 
 
 class CandidateParallelEvaluationTests(unittest.TestCase):
+    def test_screening_freezes_deterministic_top_two_by_evidence(self) -> None:
+        candidates = tuple(
+            SimpleNamespace(slot_index=index, candidate_id=f"candidate-{index}")
+            for index in range(4)
+        )
+        screening = {
+            "candidate-0": {"score": 0.8, "constraint_violations": 1},
+            "candidate-1": {"score": 0.5, "constraint_violations": 0},
+            "candidate-2": {"score": 0.7, "constraint_violations": 0},
+            "candidate-3": {"score": 0.7, "constraint_violations": 0},
+        }
+
+        selected = generation_execution._select_screening_finalists(
+            candidates,
+            screening,
+            top_k=2,
+        )
+
+        self.assertEqual(
+            [candidate.candidate_id for candidate in selected],
+            ["candidate-2", "candidate-3"],
+        )
+
     def test_candidate_signature_distinguishes_agent_behavior(self) -> None:
         state = SimpleNamespace(
             task_manifest=SimpleNamespace(

@@ -368,7 +368,7 @@
     var specificationStatus = algorithmSpec.algorithm_id ? "completed" : duplicateSkipped ? "skipped" : "pending";
     var compileStatus = latestCompile.status || (execution.status === "compile_failed" ? "failed" : algorithmSpec.algorithm_id ? "passed" : duplicateSkipped ? "skipped" : "pending");
     var debugStatus = latestDebug.status || (execution.status === "debug_passed" ? "passed" : execution.status === "debug_failed" ? "failed" : duplicateSkipped ? "skipped" : "pending");
-    var originBundleProtocol = run && run.sample_agent_protocol === "dsh-strict-origin-bundle@3";
+    var originBundleProtocol = run && String(run.sample_agent_protocol || "").indexOf("dsh-strict-origin-bundle@") === 0;
     var progressUnit = originBundleProtocol ? "预测时点" : "样本";
     var progressCountText = progressCompleted != null && progressTotal != null
       ? "已完成 " + formatNumber(progressCompleted) + " / " + formatNumber(progressTotal) + " 个" + progressUnit

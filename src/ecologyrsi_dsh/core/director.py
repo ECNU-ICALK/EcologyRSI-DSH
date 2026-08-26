@@ -117,6 +117,7 @@ _SAMPLE_RESULTS_RESUME_SCHEMA_VERSION = (
     "ecologyrsi-dsh.evaluation-sample-results-resume/1"
 )
 _GATEWAY_RETRY_SCHEMA_VERSION = "ecologyrsi-dsh.gateway-retry-scheduled/2"
+_DSH_CONTINUITY_RESET_CONTRACT = "dsh_structured_success@1"
 _GATEWAY_RETRY_LIMIT = 6
 _GATEWAY_RETRY_EPOCH_SECONDS = 30 * 60
 _GATEWAY_RETRY_MAX_DELAY_SECONDS = 60 * 60
@@ -782,17 +783,34 @@ class EvolutionDirector:
                 or attempt_anchor_seq > state.events[-1].seq
             ):
                 return GatewayRetryDecision("superseded", None)
-            if any(
-                event.seq > attempt_anchor_seq
-                and (
-                    event.kind == "RunResumed"
-                    or (
-                        event.kind == "EvolutionStageRecorded"
-                        and int(event.payload.get("generation", -1)) == generation
-                        and event.payload.get("stage") == normalized_stage
-                        and event.payload.get("status") == "completed"
-                    )
+            generation_boundary_seq = max(
+                (
+                    event.seq
+                    for event in state.events
+                    if event.kind == "GenerationAdvanced"
+                    and int(event.payload.get("generation", -1)) == generation
+                ),
+                default=run_incarnation,
+            )
+
+            def is_retry_reset_event(event: Event) -> bool:
+                if event.kind == "RunResumed":
+                    return True
+                if (
+                    event.kind == "EvolutionStageRecorded"
+                    and int(event.payload.get("generation", -1)) == generation
+                    and event.payload.get("stage") == normalized_stage
+                    and event.payload.get("status") == "completed"
+                ):
+                    return True
+                return bool(
+                    normalized_retry_class == "dsh_native_runtime"
+                    and event.kind == "DshStructuredResultAccepted"
+                    and event.seq > generation_boundary_seq
                 )
+
+            if any(
+                event.seq > attempt_anchor_seq and is_retry_reset_event(event)
                 for event in state.events
             ):
                 return GatewayRetryDecision("superseded", None)
@@ -800,13 +818,7 @@ class EvolutionDirector:
             reset_events = [
                 event
                 for event in state.events
-                if event.kind == "RunResumed"
-                or (
-                    event.kind == "EvolutionStageRecorded"
-                    and int(event.payload.get("generation", -1)) == generation
-                    and event.payload.get("stage") == normalized_stage
-                    and event.payload.get("status") == "completed"
-                )
+                if is_retry_reset_event(event)
             ]
             reset_event = reset_events[-1] if reset_events else None
             reset_seq = reset_event.seq if reset_event is not None else run_incarnation
@@ -958,6 +970,10 @@ class EvolutionDirector:
                     "error_code": normalized_error_code,
                     "reason": retry_reason,
                 }
+                if normalized_retry_class == "dsh_native_runtime":
+                    payload["continuity_reset_contract"] = (
+                        _DSH_CONTINUITY_RESET_CONTRACT
+                    )
                 outcome = "scheduled"
             try:
                 event = self.ledger.append(
@@ -1904,6 +1920,122 @@ class EvolutionDirector:
         )
         return self.state(run_id).candidate(candidate_id)
 
+    def record_candidate_screening(
+        self,
+        run_id: str,
+        *,
+        candidate_id: str,
+        generation: int,
+        score: float,
+        passed: bool,
+        constraint_violations: int,
+        origin_count: int,
+        prediction_cell_count: int,
+        cohort_digest: str | None,
+    ) -> Event:
+        """Persist the concise restart boundary for one screening evaluation."""
+
+        state = self.state(run_id)
+        self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
+        candidate = state.candidate(candidate_id)
+        if candidate.generation != generation:
+            raise ValueError("screening generation does not match candidate")
+        if candidate.status is not CandidateStatus.SPAWNED:
+            raise ValueError("only a new candidate can be screened")
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(float(score))
+            or not isinstance(passed, bool)
+            or isinstance(constraint_violations, bool)
+            or not isinstance(constraint_violations, int)
+            or constraint_violations < 0
+            or isinstance(origin_count, bool)
+            or not isinstance(origin_count, int)
+            or origin_count < 1
+            or isinstance(prediction_cell_count, bool)
+            or not isinstance(prediction_cell_count, int)
+            or prediction_cell_count < origin_count
+        ):
+            raise ValueError("candidate screening evidence is invalid")
+        payload = {
+            "schema_version": "ecologyrsi-dsh.candidate-screening/1",
+            "generation": generation,
+            "candidate_id": candidate_id,
+            "score": float(score),
+            "passed": passed,
+            "constraint_violations": constraint_violations,
+            "origin_count": origin_count,
+            "prediction_cell_count": prediction_cell_count,
+            "cohort_digest": cohort_digest,
+        }
+        return self.ledger.append(
+            run_id,
+            "CandidateScreeningRecorded",
+            payload,
+            event_id=f"{run_id}:generation:{generation}:screening:{candidate_id}",
+        )
+
+    def freeze_formal_selection_cohort(
+        self,
+        run_id: str,
+        *,
+        generation: int,
+        selected_candidate_ids: Sequence[str],
+        screening_digest: str,
+    ) -> Event:
+        """Freeze the only candidates admitted to the formal 500-origin pass."""
+
+        state = self.state(run_id)
+        self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
+        selected = tuple(str(item) for item in selected_candidate_ids)
+        if not selected or len(selected) != len(set(selected)):
+            raise ValueError("formal selection cohort must contain unique candidates")
+        for candidate_id in selected:
+            candidate = state.candidate(candidate_id)
+            if candidate.generation != generation:
+                raise ValueError("formal selection candidate is outside generation")
+        payload = {
+            "schema_version": "ecologyrsi-dsh.formal-selection-cohort/1",
+            "generation": generation,
+            "selected_candidate_ids": list(selected),
+            "screening_digest": screening_digest,
+        }
+        return self.ledger.append(
+            run_id,
+            "FormalSelectionCohortFrozen",
+            payload,
+            event_id=f"{run_id}:generation:{generation}:formal-selection",
+        )
+
+    def screen_out_candidate(
+        self,
+        run_id: str,
+        candidate_id: str,
+        *,
+        generation: int,
+        formal_selection_event_id: str,
+    ) -> Candidate:
+        state = self.state(run_id)
+        self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
+        candidate = state.candidate(candidate_id)
+        if candidate.status is CandidateStatus.SCREENED_OUT:
+            return candidate
+        if candidate.status is not CandidateStatus.SPAWNED:
+            raise ValueError("only a new candidate can be screened out")
+        self.ledger.append(
+            run_id,
+            "CandidateScreenedOut",
+            {
+                "candidate_id": candidate_id,
+                "generation": generation,
+                "formal_selection_event_id": formal_selection_event_id,
+                "reason": "not_selected_by_screening_top_k",
+            },
+            event_id=f"{run_id}:generation:{generation}:screened-out:{candidate_id}",
+        )
+        return self.state(run_id).candidate(candidate_id)
+
     def mark_candidate_duplicate(
         self,
         run_id: str,
@@ -2098,7 +2230,7 @@ class EvolutionDirector:
             expected_progress_count = expected_count
             if (
                 state.task_manifest.metadata.get("sample_agent_protocol")
-                == "dsh-strict-origin-bundle@3"
+                in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
             ):
                 cells_per_origin = state.task_manifest.metadata.get(
                     "prediction_cells_per_origin"
@@ -2449,6 +2581,7 @@ class EvolutionDirector:
                     CandidateStatus.REJECTED,
                     CandidateStatus.FAILED,
                     CandidateStatus.DUPLICATE,
+                    CandidateStatus.SCREENED_OUT,
                 )
             ]
             if incomplete:

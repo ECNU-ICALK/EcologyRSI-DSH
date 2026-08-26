@@ -11,7 +11,9 @@ test("research stages have an independent long-running timeout", () => {
   });
   assert.equal(defaults.structuredStageTimeoutMs, 600_000);
   assert.equal(defaults.researchStageTimeoutMs, 1_800_000);
-  assert.equal(defaults.sampleCriticStageTimeoutMs, 180_000);
+  assert.equal(defaults.sampleCriticStageTimeoutMs, 600_000);
+  assert.equal(defaults.structuredStageMinIntervalMs, 0);
+  assert.equal(defaults.structuredStageMaxInFlight, 8);
 
   const configured = resolvePluginConfig({
     researchStageTimeoutMs: 900_000,
@@ -22,6 +24,27 @@ test("research stages have an independent long-running timeout", () => {
   });
   assert.equal(configured.researchStageTimeoutMs, 900_000);
   assert.equal(configured.sampleCriticStageTimeoutMs, 120_000);
+});
+
+test("provider admission accepts zero start interval and bounds concurrency", () => {
+  const configured = resolvePluginConfig({
+    structuredStageMinIntervalMs: 0,
+    structuredStageMaxInFlight: 4,
+  }, {
+    defaultStaticRoot: "/tmp/ecologyrsi-static",
+    env: {},
+  });
+  assert.equal(configured.structuredStageMinIntervalMs, 0);
+  assert.equal(configured.structuredStageMaxInFlight, 4);
+  for (const value of [0, 9]) {
+    assert.throws(
+      () => resolvePluginConfig({ structuredStageMaxInFlight: value }, {
+        defaultStaticRoot: "/tmp/ecologyrsi-static",
+        env: {},
+      }),
+      /structuredStageMaxInFlight must be between 1 and 8/,
+    );
+  }
 });
 
 test("sample critic stage timeout must be positive", () => {

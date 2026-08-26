@@ -2,7 +2,7 @@
 
 window.EcologyDSHHost = (function () {
   var pluginId = "ecologyrsi.evolution";
-  var pluginVersion = "0.3.28";
+  var pluginVersion = "0.3.32";
   var contextProtocol = "ecology-evolution.host-context/1";
   var supportedApiPaths = [
     "/api",

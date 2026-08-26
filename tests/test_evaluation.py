@@ -1147,6 +1147,50 @@ class GreenhouseEvaluationTests(unittest.TestCase):
             },
         )
 
+    def test_screening_and_formal_origin_windows_are_disjoint(self) -> None:
+        rows = [
+            {
+                "partition": "training_feedback",
+                "target": target,
+                "horizon_hours": horizon,
+                "origin_timestamp": origin,
+                "target_timestamp": origin + horizon,
+            }
+            for origin in range(700)
+            for target in (
+                "air_temperature",
+                "relative_humidity",
+                "co2_concentration",
+            )
+            for horizon in (1, 6, 24)
+        ]
+        screening, screening_evidence = _select_feedback_update_cohort(
+            rows,
+            generation=0,
+            samples_per_update=64 * 9,
+            dataset_digest="d" * 64,
+            split_manifest_digest="s" * 64,
+            bundle_complete_origins=True,
+            origin_window_offset=0,
+        )
+        formal, formal_evidence = _select_feedback_update_cohort(
+            rows,
+            generation=0,
+            samples_per_update=500 * 9,
+            dataset_digest="d" * 64,
+            split_manifest_digest="s" * 64,
+            bundle_complete_origins=True,
+            origin_window_offset=64,
+        )
+
+        screening_origins = {row["origin_timestamp"] for row in screening}
+        formal_origins = {row["origin_timestamp"] for row in formal}
+        self.assertEqual(len(screening_origins), 64)
+        self.assertEqual(len(formal_origins), 500)
+        self.assertTrue(screening_origins.isdisjoint(formal_origins))
+        self.assertEqual(screening_evidence["window_offset"], 0)
+        self.assertEqual(formal_evidence["window_offset"], 64)
+
     def test_dsh_native_ridge_is_invoked_once_per_nine_cell_origin(self) -> None:
         series = _cohort_series()
         runtime = _DshOriginRuntimeStub()

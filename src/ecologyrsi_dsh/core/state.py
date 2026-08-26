@@ -502,6 +502,7 @@ _EVOLUTION_STAGE_PAYLOAD_FIELDS = frozenset(
     }
 )
 _GATEWAY_RETRY_SCHEMA_VERSION = "ecologyrsi-dsh.gateway-retry-scheduled/2"
+_DSH_CONTINUITY_RESET_CONTRACT = "dsh_structured_success@1"
 _GATEWAY_RETRY_CLASSES = frozenset(
     {
         "model_gateway",
@@ -593,6 +594,9 @@ _GATEWAY_RETRY_V2_FIELDS = frozenset(
         "error_code",
         "reason",
     }
+)
+_GATEWAY_RETRY_V2_CONTINUITY_FIELDS = (
+    _GATEWAY_RETRY_V2_FIELDS | {"continuity_reset_contract"}
 )
 _GATEWAY_CIRCUIT_PAUSE_FIELDS = frozenset(
     {
@@ -749,7 +753,11 @@ def _aware_timestamp(value: Any) -> datetime | None:
 
 
 def _validate_gateway_retry_v2_payload(payload: Mapping[str, Any]) -> None:
-    if set(payload) != _GATEWAY_RETRY_V2_FIELDS:
+    payload_fields = set(payload)
+    if payload_fields not in {
+        _GATEWAY_RETRY_V2_FIELDS,
+        _GATEWAY_RETRY_V2_CONTINUITY_FIELDS,
+    }:
         raise ValueError("GatewayRetryScheduled v2 payload is invalid")
     run_incarnation = payload.get("run_incarnation")
     generation = payload.get("generation")
@@ -799,6 +807,14 @@ def _validate_gateway_retry_v2_payload(payload: Mapping[str, Any]) -> None:
         or float(delay) < 0
         or payload.get("reason")
         != _GATEWAY_RETRY_POLICIES[payload.get("retry_class")][2]
+        or (
+            "continuity_reset_contract" in payload
+            and (
+                payload.get("retry_class") != "dsh_native_runtime"
+                or payload.get("continuity_reset_contract")
+                != _DSH_CONTINUITY_RESET_CONTRACT
+            )
+        )
     ):
         raise ValueError("GatewayRetryScheduled v2 payload is invalid")
     first = _aware_timestamp(payload.get("first_failure_at"))
@@ -1454,6 +1470,7 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
     gateway_retry_max_epoch: dict[tuple[int, int, str, str], int] = {}
     gateway_retry_failure_ids: set[str] = set()
     gateway_retry_stage_success_seq: dict[tuple[int, str], int] = {}
+    gateway_retry_dsh_success_seq: dict[int, int] = {}
     latest_run_resumed: Event | None = None
     events_by_seq = {event.seq: event for event in events}
 
@@ -1465,12 +1482,22 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             str(payload["retry_class"]),
         )
 
-    def gateway_retry_reset_seq(scope: tuple[int, int, str, str]) -> int:
-        _incarnation, generation, stage, _retry_class = scope
+    def gateway_retry_reset_seq(
+        scope: tuple[int, int, str, str],
+        *,
+        dsh_continuity_reset: bool = False,
+    ) -> int:
+        _incarnation, generation, stage, retry_class = scope
         return max(
             int(created.seq),
             int(latest_run_resumed.seq) if latest_run_resumed is not None else 0,
             gateway_retry_stage_success_seq.get((generation, stage), 0),
+            (
+                gateway_retry_dsh_success_seq.get(generation, 0)
+                if retry_class == "dsh_native_runtime"
+                and dsh_continuity_reset
+                else 0
+            ),
         )
 
     def gateway_retry_expected_epoch(
@@ -1565,7 +1592,13 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                         "gateway circuit pause requires a running current generation"
                     )
                 scope = gateway_retry_scope(payload)
-                reset_seq = gateway_retry_reset_seq(scope)
+                reset_seq = gateway_retry_reset_seq(
+                    scope,
+                    dsh_continuity_reset=(
+                        payload.get("continuity_reset_contract")
+                        == _DSH_CONTINUITY_RESET_CONTRACT
+                    ),
+                )
                 prior_retry = active_gateway_retry(scope, reset_seq=reset_seq)
                 first_retry = gateway_retry_first_by_scope.get(scope)
                 first_failure_event = (
@@ -1840,15 +1873,19 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 candidates[item.candidate_id] = replace(
                     candidate, status=status, promotion_id=item.promotion_id
                 )
-        elif event.kind in {"CandidateFailed", "CandidateMarkedDuplicate"}:
+        elif event.kind in {
+            "CandidateFailed",
+            "CandidateMarkedDuplicate",
+            "CandidateScreenedOut",
+        }:
             candidate_id = str(payload["candidate_id"])
             candidate = candidates.get(candidate_id)
             if candidate is not None:
-                status = (
-                    CandidateStatus.FAILED
-                    if event.kind == "CandidateFailed"
-                    else CandidateStatus.DUPLICATE
-                )
+                status = {
+                    "CandidateFailed": CandidateStatus.FAILED,
+                    "CandidateMarkedDuplicate": CandidateStatus.DUPLICATE,
+                    "CandidateScreenedOut": CandidateStatus.SCREENED_OUT,
+                }[event.kind]
                 candidates[candidate_id] = replace(candidate, status=status)
         elif event.kind == "GenerationSearchPlanned":
             item = GenerationSearchPlan.from_dict(payload["search_plan"])
@@ -2232,6 +2269,11 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 raise ValueError(
                     "non-Planner structured result cannot claim a prediction-tool receipt"
                 )
+            # A successfully admitted DSH result proves runtime continuity.
+            # It closes only the native-runtime retry epoch for the generation
+            # in which it was accepted; model/persistence retry classes remain
+            # independent.
+            gateway_retry_dsh_success_seq[int(run.generation)] = event.seq
         elif event.kind == "DshRetrievalExecuted":
             _validate_dsh_retrieval_event(payload, run_id=run.run_id)
         elif event.kind == "DshPredictionToolExecuted":
@@ -2320,7 +2362,13 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                         "GatewayRetryScheduled scope does not match the running run"
                     )
                 scope = gateway_retry_scope(payload)
-                reset_seq = gateway_retry_reset_seq(scope)
+                reset_seq = gateway_retry_reset_seq(
+                    scope,
+                    dsh_continuity_reset=(
+                        payload.get("continuity_reset_contract")
+                        == _DSH_CONTINUITY_RESET_CONTRACT
+                    ),
+                )
                 prior_retry = active_gateway_retry(scope, reset_seq=reset_seq)
                 anchor = int(payload["attempt_anchor_seq"])
                 anchor_event = events_by_seq.get(anchor)

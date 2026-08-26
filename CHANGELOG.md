@@ -2,6 +2,50 @@
 
 All notable changes to EcologyRSI-DSH are recorded in this file.
 
+## 0.3.32 - 2026-08-26
+
+### Fixed
+
+- Anchor recoverable parallel-evaluation failures after every admitted sibling
+  settles, so a successful DSH child cannot supersede another child's retry and
+  leave an unfinished run with an idle scheduler.
+- Requeue durable auto-progress runs discovered in the running-but-idle state
+  during scheduler diagnostics, preserving their existing evaluation checkpoint.
+
+## 0.3.31 - 2026-08-26
+
+### Fixed
+
+- Project two-stage screening progress directly from durable DSH child events,
+  so the workbench reports completed, in-flight, and not-yet-submitted origins
+  instead of showing a live screening pass as an empty scheduler queue.
+
+## 0.3.30 - 2026-08-26
+
+### Fixed
+
+- Raise the sample critic/reflect operational deadline from 3 to 10 minutes so
+  valid provider responses under eight-way load do not occupy a worker until a
+  premature timeout prevents origin-chain refill.
+
+## 0.3.29 - 2026-08-26
+
+### Changed
+
+- Replace the provider-wide serial 60-second launch interval with a FIFO
+  concurrency gate capped at eight physical requests, and run complete origin
+  chains concurrently under the strict `dsh-strict-origin-bundle@4` protocol.
+- Evaluate every sibling on a disjoint 64-origin screening window, freeze a
+  deterministic Top 2, and use the configured 500-origin window only for the
+  formal pass.
+
+### Fixed
+
+- Reset native-runtime retry epochs after durable DSH success without
+  invalidating legacy 0.3.27 retry chains during ledger replay.
+- Prevent same-generation structured success from leaving a recovered run in
+  an endless native-runtime retry cycle.
+
 ## 0.3.28 - 2026-08-26
 
 ### Changed

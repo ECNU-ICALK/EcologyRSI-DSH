@@ -40,15 +40,15 @@ config:
   # 普通结构化阶段 10 分钟；长上下文调研阶段默认 30 分钟
   structuredStageTimeoutMs: 600000
   researchStageTimeoutMs: 1800000
-  # 评分前 sample critic 独立上限 3 分钟
-  sampleCriticStageTimeoutMs: 180000
+  # 评分前 sample critic/reflect 独立上限 10 分钟
+  sampleCriticStageTimeoutMs: 600000
   # 可选：也可以省略此项，直接使用 Node 进程环境变量
   serviceToken: replace-with-runtime-token
 ```
 
 `researchStageTimeoutMs` 只用于搜索规划和证据综合等 researcher 阶段，
 避免大上下文、慢推理模型被普通 10 分钟阶段上限误伤。
-`sampleCriticStageTimeoutMs` 只用于评分前 sample critic，用于限制无效结构化输出后的异常长生成；
+`sampleCriticStageTimeoutMs` 只用于评分前 sample critic/reflect；默认 10 分钟，以覆盖高并发下正常的长响应，同时仍限制无效结构化输出后的异常长生成；
 样本预测、候选提案、评分和反思仍使用 `structuredStageTimeoutMs`。
 
 `serviceToken` 也可以省略，插件会读取 Node 进程的

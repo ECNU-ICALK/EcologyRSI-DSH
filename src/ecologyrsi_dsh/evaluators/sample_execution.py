@@ -15,6 +15,7 @@ import socket
 import time
 import zlib
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -761,15 +762,16 @@ class CollaborativeSampleExecutor:
         canonical_json(context_data)
         plan, plan_attempts, plan_failure = self._prepare_plan(context_data, policy)
         plan_digest = digest(plan) if plan is not None else None
-        strict_origin_contract = bool(
-            plan is not None
-            and plan.get("sample_agent_protocol")
-            == "dsh-strict-origin-bundle@3"
+        sample_agent_protocol = (
+            str(plan.get("sample_agent_protocol")) if plan is not None else ""
         )
-        strict_agent_contract = bool(
-            plan is not None
-            and plan.get("sample_agent_protocol")
-            == "dsh-strict-origin-bundle@3"
+        strict_origin_contract = sample_agent_protocol in {
+            "dsh-strict-origin-bundle@3",
+            "dsh-strict-origin-bundle@4",
+        }
+        strict_agent_contract = strict_origin_contract
+        concurrent_origin_contract = (
+            sample_agent_protocol == "dsh-strict-origin-bundle@4"
         )
         origin_bundles: tuple[_StrictOriginBundle, ...] = ()
         origin_bundle_by_sample_id: dict[str, _StrictOriginBundle] = {}
@@ -1041,6 +1043,68 @@ class CollaborativeSampleExecutor:
         prepared_origin_ids: set[str] = set()
         prepared_origin_reflections: dict[str, dict[str, Any]] = {}
         origin_publication_rows: dict[str, list[dict[str, Any]]] = {}
+        origin_executor: ThreadPoolExecutor | None = None
+        origin_futures: dict[
+            str,
+            Future[
+                tuple[
+                    dict[tuple[str, int], SamplePredictionOutcome],
+                    dict[str, dict[str, Any]],
+                    str | None,
+                ]
+            ],
+        ] = {}
+        remaining_origin_bundles: Any = iter(())
+
+        def submit_next_origin_bundle() -> bool:
+            if origin_executor is None:
+                return False
+            try:
+                bundle = next(remaining_origin_bundles)
+            except StopIteration:
+                return False
+            origin_futures[bundle.origin_sample_id] = origin_executor.submit(
+                self._prepare_strict_origin_bundle,
+                bundle,
+                context=context_data,
+                target_bounds=target_bounds,
+                algorithm_id=algorithm_id,
+                algorithm_version=algorithm_version,
+                plan=plan,
+                policy=policy,
+            )
+            return True
+
+        if concurrent_origin_contract and origin_bundles:
+            pending_origin_bundles = tuple(
+                bundle
+                for bundle in origin_bundles
+                if not all(
+                    request.sample_id in resumed_rows
+                    for request in bundle.requests
+                )
+            )
+            configured_concurrency = int(
+                context_data.get(
+                    "sample_concurrency",
+                    getattr(self.adapter, "sample_concurrency", 1),
+                )
+            )
+            candidate_concurrency = max(
+                1, int(context_data.get("candidate_concurrency", 1))
+            )
+            local_worker_count = min(
+                len(pending_origin_bundles),
+                max(1, math.ceil(configured_concurrency / candidate_concurrency)),
+            )
+            if local_worker_count:
+                origin_executor = ThreadPoolExecutor(
+                    max_workers=local_worker_count,
+                    thread_name_prefix="dsh-origin",
+                )
+                remaining_origin_bundles = iter(pending_origin_bundles)
+                for _ in range(local_worker_count):
+                    submit_next_origin_bundle()
 
         def append_scoring_row(finalized: Mapping[str, Any]) -> None:
             """Publish only rows finalized by host validation or fallback."""
@@ -1101,6 +1165,11 @@ class CollaborativeSampleExecutor:
                         ),
                         prediction_cell_count=len(bucket),
                     )
+                if (
+                    concurrent_origin_contract
+                    and bundle.origin_sample_id in prepared_origin_ids
+                ):
+                    submit_next_origin_bundle()
                 return
             if result_callback is not None:
                 finalized_result_rows.append(projected)
@@ -1286,36 +1355,44 @@ class CollaborativeSampleExecutor:
                         "strict origin sample is outside the frozen bundle cohort"
                     )
                 if bundle.origin_sample_id not in prepared_origin_ids:
-                    first_attempt_outcomes = self._prepare_first_attempt_batch(
-                        bundle.rows,
-                        context=context_data,
-                        target_bounds=target_bounds,
-                        algorithm_id=algorithm_id,
-                        algorithm_version=algorithm_version,
-                        plan=plan,
-                    )
-                    origin_outcomes = self._prepare_retry_attempt_waves(
-                        bundle.rows,
-                        context=context_data,
-                        target_bounds=target_bounds,
-                        algorithm_id=algorithm_id,
-                        algorithm_version=algorithm_version,
-                        plan=plan,
-                        policy=policy,
-                        first_attempt_outcomes=first_attempt_outcomes,
-                    )
-                    prefetched_attempt_outcomes.update(origin_outcomes)
-                    prepared_origin_reflections.update(
-                        self._prepare_origin_reflection(
+                    if concurrent_origin_contract:
+                        future = origin_futures.pop(
+                            bundle.origin_sample_id, None
+                        )
+                        if future is None:
+                            raise SampleExecutionContractError(
+                                "strict origin scheduler lost a frozen origin"
+                            )
+                        try:
+                            (
+                                origin_outcomes,
+                                origin_reflections,
+                                origin_terminal_reason,
+                            ) = future.result()
+                        except BaseException:
+                            if origin_executor is not None:
+                                origin_executor.shutdown(
+                                    wait=True, cancel_futures=True
+                                )
+                                origin_executor = None
+                            raise
+                    else:
+                        (
+                            origin_outcomes,
+                            origin_reflections,
+                            origin_terminal_reason,
+                        ) = self._prepare_strict_origin_bundle(
                             bundle,
-                            prefetched_attempt_outcomes=origin_outcomes,
+                            context=context_data,
+                            target_bounds=target_bounds,
+                            algorithm_id=algorithm_id,
+                            algorithm_version=algorithm_version,
+                            plan=plan,
                             policy=policy,
                         )
-                    )
+                    prefetched_attempt_outcomes.update(origin_outcomes)
+                    prepared_origin_reflections.update(origin_reflections)
                     prepared_origin_ids.add(bundle.origin_sample_id)
-                    origin_terminal_reason = _batch_terminal_reason(
-                        first_attempt_outcomes.values()
-                    )
                     if origin_terminal_reason is not None:
                         terminal_reason = origin_terminal_reason
             if plan is None:
@@ -1670,6 +1747,9 @@ class CollaborativeSampleExecutor:
             raise SampleExecutionContractError(
                 "strict origin publication ended with an incomplete prediction vector"
             )
+        if origin_executor is not None:
+            origin_executor.shutdown(wait=True, cancel_futures=False)
+            origin_executor = None
         if result_callback is not None and finalized_result_rows:
             result_callback(tuple(finalized_result_rows))
             finalized_result_rows.clear()
@@ -2070,6 +2150,52 @@ class CollaborativeSampleExecutor:
                 outcome = raw_outcome
             outcomes[request.sample_id] = outcome
         return outcomes
+
+    def _prepare_strict_origin_bundle(
+        self,
+        bundle: _StrictOriginBundle,
+        *,
+        context: Mapping[str, Any],
+        target_bounds: Mapping[str, Mapping[str, Any]],
+        algorithm_id: str,
+        algorithm_version: str,
+        plan: Mapping[str, Any] | None,
+        policy: SampleExecutionPolicy,
+    ) -> tuple[
+        dict[tuple[str, int], SamplePredictionOutcome],
+        dict[str, dict[str, Any]],
+        str | None,
+    ]:
+        """Prepare one complete Planner/tool/Critic/Reflector origin chain."""
+
+        first_attempt_outcomes = self._prepare_first_attempt_batch(
+            bundle.rows,
+            context=context,
+            target_bounds=target_bounds,
+            algorithm_id=algorithm_id,
+            algorithm_version=algorithm_version,
+            plan=plan,
+        )
+        origin_outcomes = self._prepare_retry_attempt_waves(
+            bundle.rows,
+            context=context,
+            target_bounds=target_bounds,
+            algorithm_id=algorithm_id,
+            algorithm_version=algorithm_version,
+            plan=plan,
+            policy=policy,
+            first_attempt_outcomes=first_attempt_outcomes,
+        )
+        origin_reflections = self._prepare_origin_reflection(
+            bundle,
+            prefetched_attempt_outcomes=origin_outcomes,
+            policy=policy,
+        )
+        return (
+            origin_outcomes,
+            origin_reflections,
+            _batch_terminal_reason(first_attempt_outcomes.values()),
+        )
 
     def _prepare_retry_attempt_waves(
         self,

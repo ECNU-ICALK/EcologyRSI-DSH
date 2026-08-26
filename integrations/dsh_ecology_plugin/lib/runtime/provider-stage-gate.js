@@ -5,6 +5,13 @@ function boundedDelay(value, name) {
   return value;
 }
 
+function boundedConcurrency(value) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 8) {
+    throw new Error("maxInFlight must be between 1 and 8");
+  }
+  return value;
+}
+
 function sleep(milliseconds, signal) {
   if (milliseconds <= 0) return Promise.resolve();
   return new Promise((resolve) => {
@@ -41,77 +48,136 @@ async function abortable(operation, signal) {
 }
 
 /**
- * Provider-scoped admission for model-backed stages.
+ * Provider-wide FIFO admission for model-backed stages.
  *
- * Calls are serialized and spaced within one run/provider pair. Independent
- * evolution runs may therefore use the same provider concurrently, while a
- * single run still cannot make every sibling hit the same RPM window.
+ * The concurrency bound is physical, not multiplied by candidate or run
+ * count. Optional RPM spacing is measured between starts. Successful
+ * completions never create a new cooldown; only an explicit penalty does.
  */
 export class ProviderStageGate {
   constructor({
-    minimumIntervalMs = 30_000,
+    minimumIntervalMs = 0,
     failureCooldownMs = 30_000,
+    maxInFlight = 8,
     now = Date.now,
     delay = sleep,
   } = {}) {
     this.minimumIntervalMs = boundedDelay(minimumIntervalMs, "minimumIntervalMs");
     this.failureCooldownMs = boundedDelay(failureCooldownMs, "failureCooldownMs");
+    this.maxInFlight = boundedConcurrency(maxInFlight);
     this.now = now;
     this.delay = delay;
-    this.tails = new Map();
+    this.queues = new Map();
+    this.active = new Map();
     this.nextAllowedAt = new Map();
+    this.pumping = new Set();
     this.records = new Set();
     this.closedRuns = new Set();
   }
 
   async run(provider, operation, { runId = null } = {}) {
     const providerKey = String(provider || "default");
-    const key = `${providerKey}\u0000${String(runId || "unscoped")}`;
     if (typeof operation !== "function") throw new Error("provider stage operation is required");
     this.assertRunOpen(runId);
-    const previous = this.tails.get(key) || Promise.resolve();
     const controller = new AbortController();
-    const record = { runId, controller, promise: null };
-    const current = abortable(previous.catch(() => {}), controller.signal).then(async () => {
-      const wait = Math.max(
-        0,
-        (this.nextAllowedAt.get(key) || 0) - this.now(),
-        (this.nextAllowedAt.get(providerKey) || 0) - this.now(),
-      );
-      if (wait > 0) {
-        await abortable(
-          Promise.resolve(this.delay(wait, controller.signal)),
-          controller.signal,
+    let resolveCaller;
+    let rejectCaller;
+    const caller = new Promise((resolve, reject) => {
+      resolveCaller = resolve;
+      rejectCaller = reject;
+    });
+    const record = {
+      runId,
+      providerKey,
+      operation,
+      controller,
+      resolveCaller,
+      rejectCaller,
+      promise: caller,
+      completion: null,
+      status: "queued",
+    };
+    this.records.add(record);
+    const queue = this.queues.get(providerKey) || [];
+    queue.push(record);
+    this.queues.set(providerKey, queue);
+    void this.pump(providerKey);
+    return await caller;
+  }
+
+  async pump(providerKey) {
+    if (this.pumping.has(providerKey)) return;
+    this.pumping.add(providerKey);
+    try {
+      while ((this.active.get(providerKey) || 0) < this.maxInFlight) {
+        const queue = this.queues.get(providerKey);
+        if (!queue?.length) {
+          this.queues.delete(providerKey);
+          return;
+        }
+        const record = queue[0];
+        if (record.controller.signal.aborted || this.closedRuns.has(record.runId)) {
+          queue.shift();
+          record.status = "cancelled";
+          record.rejectCaller(admissionClosedError());
+          this.records.delete(record);
+          continue;
+        }
+        const wait = Math.max(
+          0,
+          (this.nextAllowedAt.get(providerKey) || 0) - this.now(),
         );
-      }
-      if (controller.signal.aborted) throw admissionClosedError();
-      this.assertRunOpen(runId);
-      try {
-        return await operation();
-      } finally {
+        if (wait > 0) {
+          try {
+            await abortable(
+              Promise.resolve(this.delay(wait, record.controller.signal)),
+              record.controller.signal,
+            );
+          } catch (error) {
+            queue.shift();
+            record.status = "cancelled";
+            record.rejectCaller(error);
+            this.records.delete(record);
+            continue;
+          }
+        }
+        if (record.controller.signal.aborted || this.closedRuns.has(record.runId)) {
+          continue;
+        }
+        queue.shift();
+        record.status = "active";
+        this.active.set(providerKey, (this.active.get(providerKey) || 0) + 1);
         this.nextAllowedAt.set(
-          key,
+          providerKey,
           Math.max(
-            this.nextAllowedAt.get(key) || 0,
+            this.nextAllowedAt.get(providerKey) || 0,
             this.now() + this.minimumIntervalMs,
           ),
         );
+        const operationPromise = Promise.resolve().then(record.operation);
+        record.completion = operationPromise;
+        void abortable(operationPromise, record.controller.signal).then(
+          record.resolveCaller,
+          record.rejectCaller,
+        );
+        const release = () => {
+          record.status = "completed";
+          this.records.delete(record);
+          const remaining = Math.max(0, (this.active.get(providerKey) || 1) - 1);
+          if (remaining === 0) this.active.delete(providerKey);
+          else this.active.set(providerKey, remaining);
+          void this.pump(providerKey);
+        };
+        void operationPromise.then(release, release);
       }
-    });
-    // Keep queue ordering independent from the caller-facing promise. A queued
-    // run may be cancelled immediately, but its successor must still wait for
-    // the predecessor that the cancelled run was originally queued behind.
-    const barrier = Promise.allSettled([previous, current]).then(() => undefined);
-    record.promise = current;
-    this.records.add(record);
-    this.tails.set(key, barrier);
-    void barrier.then(() => {
-      if (this.tails.get(key) === barrier) this.tails.delete(key);
-    });
-    try {
-      return await current;
     } finally {
-      this.records.delete(record);
+      this.pumping.delete(providerKey);
+      if (
+        (this.queues.get(providerKey)?.length || 0) > 0
+        && (this.active.get(providerKey) || 0) < this.maxInFlight
+      ) {
+        queueMicrotask(() => { void this.pump(providerKey); });
+      }
     }
   }
 
@@ -128,6 +194,7 @@ export class ProviderStageGate {
     for (const record of this.records) {
       if (record.runId === runId) record.controller.abort();
     }
+    for (const providerKey of this.queues.keys()) void this.pump(providerKey);
   }
 
   closeRun(runId) {
@@ -147,7 +214,9 @@ export class ProviderStageGate {
     while (true) {
       const selected = [...this.records].filter((record) => record.runId === runId);
       if (selected.length === 0) return;
-      await Promise.allSettled(selected.map((record) => record.promise));
+      await Promise.allSettled(
+        selected.map((record) => record.completion || record.promise),
+      );
     }
   }
 }

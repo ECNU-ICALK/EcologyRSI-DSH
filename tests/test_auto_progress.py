@@ -1122,6 +1122,110 @@ class AutoProgressHTTPTests(unittest.TestCase):
         )
         self.assertIn("DSH 智能体运行时暂时不可用", retry_event.payload["reason"])
 
+    def test_sibling_dsh_success_cannot_orphan_a_failed_parallel_attempt(
+        self,
+    ) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "parallel-dsh-success-before-failure",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        with self.server.mutation_lock:
+            self.server.director.start_run(run_id)
+
+        outage = DshNativeRuntimeUnavailableError(
+            "one parallel DSH child timed out",
+            error_code="runtime_controller_failed",
+            status_code=502,
+        )
+        attempt = 0
+
+        def settle_parallel_attempt(*_args, **_kwargs):
+            nonlocal attempt
+            attempt += 1
+            structured = {
+                "schema_version": "ecology-sample-reflection@1",
+                "summary": (
+                    "A sibling child completed before failure "
+                    f"attempt {attempt} surfaced."
+                ),
+            }
+            self.server.ledger.append(
+                run_id,
+                "DshStructuredResultAccepted",
+                {
+                    "schema_version": (
+                        "ecologyrsi-dsh.structured-result-accepted/1"
+                    ),
+                    "identity": {
+                        "run_id": run_id,
+                        "role": "sample-critic",
+                        "stage": "sample.reflect",
+                        "session_id": "successful-parallel-sibling",
+                    },
+                    "output_schema_id": "ecology-sample-reflection@1",
+                    "result_digest": digest(structured),
+                    "structured": structured,
+                    "skill_invocation_evidence": {
+                        "schema_version": (
+                            "ecologyrsi-dsh.skill-invocation-evidence/1"
+                        ),
+                        "stage": "sample.reflect",
+                        "skill_name": "origin-vector-review",
+                        "call_count": 1,
+                        "successful_call_count": 1,
+                        "call_seq": 1,
+                        "result_seq": 2,
+                        "first_tool_call_verified": True,
+                        "next_tool_name": "structured_output",
+                        "next_tool_call_seq": 3,
+                        "order_verified": True,
+                        "source": "dsh_session_event_log",
+                    },
+                },
+                event_id=f"{run_id}:successful-parallel-sibling:{attempt}",
+            )
+            raise outage
+
+        with (
+            patch.object(
+                auto_progress_module,
+                "execute_generation",
+                side_effect=settle_parallel_attempt,
+            ),
+            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
+        ):
+            outcomes = [
+                self.server.auto_progress._run_one_generation(run_id)
+                for _ in range(2)
+            ]
+
+        self.assertEqual(outcomes, [True, True])
+        state = self.server.director.state(run_id)
+        retries = [
+            event for event in state.events if event.kind == "GatewayRetryScheduled"
+        ]
+        self.assertEqual(len(retries), 2)
+        retry = retries[-1]
+        self.assertGreater(
+            retry.payload["attempt_anchor_seq"],
+            state.events[0].seq,
+        )
+        self.assertEqual(state.run.status.value, "running")
+        self.assertFalse(any(event.kind == "RunFailed" for event in state.events))
+
     def test_six_dsh_runtime_failures_open_independent_durable_circuit(self) -> None:
         status, created = self.request(
             "/runs",
@@ -2052,6 +2156,51 @@ class AutoProgressHTTPTests(unittest.TestCase):
         diagnostics = self.server.auto_progress.diagnostics(run_id)
         self.assertEqual(diagnostics["run_state"], "idle")
         self.assertEqual(diagnostics["cooldown_run_count"], 0)
+
+    def test_diagnostics_requeues_running_auto_progress_run_when_scheduler_idle(
+        self,
+    ) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "diagnostics-recovers-idle-running-run",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        with self.server.mutation_lock:
+            self.server.director.start_run(run_id)
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def hold_generation(*_args, **_kwargs):
+            entered.set()
+            release.wait(timeout=2)
+            return self.server.director.state(run_id)
+
+        try:
+            with patch.object(
+                auto_progress_module,
+                "execute_generation",
+                side_effect=hold_generation,
+            ):
+                initial = self.server.auto_progress.diagnostics(run_id)
+                self.assertNotEqual(initial["run_state"], "idle")
+                self.assertTrue(entered.wait(timeout=1))
+                live = self.server.auto_progress.diagnostics(run_id)
+                self.assertEqual(live["run_state"], "running")
+        finally:
+            release.set()
 
     def test_diagnostics_clears_cooldown_for_every_terminal_status(self) -> None:
         transitions = (

@@ -49,6 +49,8 @@ from .shared import (
     _max_generations,
 )
 
+_TWO_STAGE_SCREENING_ORIGINS = 64
+
 # The browser projection is intentionally a compact operational trace.  It is
 # not a model chain-of-thought export: only values already produced by the
 # evaluator and a fixed list of host-controlled steps are exposed.
@@ -1532,6 +1534,165 @@ def _dsh_evolution_stage(stage: str | None) -> str | None:
     return None
 
 
+def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
+    """Project live two-stage screening from durable DSH child events.
+
+    Screening intentionally does not publish formal sample rows.  The child
+    ledger still proves completed reflections and currently active provider
+    calls, so expose those aggregate counts without treating not-yet-submitted
+    origins as provider-queued requests.
+    """
+
+    metadata = state.task_manifest.metadata
+    if (
+        metadata.get("sample_agent_protocol")
+        != "dsh-strict-origin-bundle@4"
+        or metadata.get("two_stage_evaluation_enabled", True) is not True
+        or state.run.status.value != "running"
+    ):
+        return None
+    generation = int(state.run.generation)
+    candidates = tuple(
+        candidate
+        for candidate in state.candidates
+        if int(candidate.generation) == generation
+    )
+    if len(candidates) <= 2:
+        return None
+    batch_start = next(
+        (
+            event
+            for event in reversed(state.events)
+            if event.kind == "GenerationBatchStarted"
+            and isinstance(event.payload.get("batch"), Mapping)
+            and int(event.payload["batch"].get("generation", -1)) == generation
+        ),
+        None,
+    )
+    if batch_start is None:
+        return None
+    batch_seq = int(batch_start.seq)
+    if any(
+        event.kind == "FormalSelectionCohortFrozen"
+        and int(event.seq) > batch_seq
+        and int(event.payload.get("generation", -1)) == generation
+        for event in state.events
+    ):
+        return None
+
+    sample_events: list[Any] = []
+    latest_launch_by_key: dict[str, tuple[Any, Mapping[str, Any]]] = {}
+    accepted_reservations: set[str] = set()
+    completed_reflections: dict[str, Any] = {}
+    launch_count = 0
+    for event in state.events:
+        if int(event.seq) <= batch_seq:
+            continue
+        if event.kind == "DshChildLaunchReserved":
+            launch = event.payload.get("launch")
+            if not isinstance(launch, Mapping) or not str(
+                launch.get("stage") or ""
+            ).startswith("sample."):
+                continue
+            key = str(launch.get("idempotency_key") or "").strip()
+            if not key:
+                continue
+            launch_count += 1
+            latest_launch_by_key[key] = (event, launch)
+            sample_events.append(event)
+        elif event.kind == "DshStructuredResultAccepted":
+            identity = event.payload.get("identity")
+            if not isinstance(identity, Mapping) or not str(
+                identity.get("stage") or ""
+            ).startswith("sample."):
+                continue
+            reservation_id = str(
+                identity.get("child_reservation_id") or ""
+            ).strip()
+            if reservation_id:
+                accepted_reservations.add(reservation_id)
+            if identity.get("stage") == "sample.reflect":
+                key = str(identity.get("idempotency_key") or "").strip()
+                if key:
+                    completed_reflections[key] = event
+            sample_events.append(event)
+    if not sample_events:
+        return None
+
+    total = len(candidates) * _TWO_STAGE_SCREENING_ORIGINS
+    completed = min(total, len(completed_reflections))
+    remaining = max(0, total - completed)
+    configured_concurrency = metadata.get("sample_concurrency", 4)
+    if (
+        isinstance(configured_concurrency, bool)
+        or not isinstance(configured_concurrency, int)
+        or not 1 <= configured_concurrency <= 8
+    ):
+        configured_concurrency = None
+    outstanding = sum(
+        1
+        for _event, launch in latest_launch_by_key.values()
+        if str(launch.get("reservation_id") or "").strip()
+        not in accepted_reservations
+    )
+    in_flight = min(
+        remaining,
+        outstanding,
+        configured_concurrency if configured_concurrency is not None else 8,
+    )
+    queued = max(0, remaining - in_flight)
+    reflection_events = sorted(
+        completed_reflections.values(), key=lambda event: int(event.seq)
+    )
+    samples_per_minute = None
+    if len(reflection_events) >= 2:
+        started = datetime.fromisoformat(reflection_events[0].created_at)
+        ended = datetime.fromisoformat(reflection_events[-1].created_at)
+        elapsed_minutes = max(0.0, (ended - started).total_seconds() / 60.0)
+        if elapsed_minutes > 0:
+            samples_per_minute = round(
+                (len(reflection_events) - 1) / elapsed_minutes, 3
+            )
+    estimated_remaining_seconds = (
+        round(60.0 * remaining / samples_per_minute)
+        if samples_per_minute is not None and samples_per_minute > 0
+        else None
+    )
+    latest = max(sample_events, key=lambda event: int(event.seq))
+    return {
+        "schema_version": "ecologyrsi-dsh.screening-progress/1",
+        "evaluation_phase": "screening",
+        "progress_kind": "waiting" if in_flight else "completed_batch",
+        "role": "planner",
+        "model_id": None,
+        "batch_index": completed,
+        "batch_count": total,
+        "batch_size": 1 if completed else 0,
+        "completed_samples": completed,
+        "total_samples": total,
+        "succeeded_samples": completed,
+        "failed_samples": 0,
+        "gateway_request_count": launch_count,
+        "adaptive_split_trigger_count": 0,
+        "adaptive_split_count": 0,
+        "adaptive_split_max_depth": 0,
+        "adaptive_split_recovered_samples": 0,
+        "adaptive_split_failed_samples": 0,
+        "causal_wave_sample_count": 1,
+        "in_flight_batches": in_flight,
+        "queued_batches": queued,
+        "queue_semantics": "awaiting_origin_submission",
+        "configured_concurrency": configured_concurrency,
+        "samples_per_minute": samples_per_minute,
+        "gateway_calls_per_minute": None,
+        "estimated_remaining_seconds": estimated_remaining_seconds,
+        "progress_percent": round(100.0 * completed / max(1, total), 1),
+        "updated_at": latest.created_at,
+        "event_seq": latest.seq,
+        "evidence_source": "durable_dsh_screening_child_events",
+    }
+
+
 def _dsh_activity_projection(
     state: Any,
     *,
@@ -1723,6 +1884,13 @@ def _run_execution_progress(state: Any) -> dict[str, Any]:
         active_candidate_id = None
 
     stage_progress = _evaluation_progress_projection(state, active_candidate_id)
+    if stage_progress is None:
+        stage_progress = _screening_progress_projection(state)
+        if stage_progress is not None:
+            # Two-stage screening runs before formal Artifact/Evaluation rows
+            # exist, but durable sample child events prove that evaluation is
+            # active.  Do not mislabel this interval as a scheduler queue.
+            current_stage = "evaluation"
     superseded_sample_revision = _superseded_sample_revision_projection(
         state, active_candidate_id
     )
@@ -2738,6 +2906,9 @@ def _projection_json(state: Any) -> dict[str, Any]:
         "sample_budget_class": metadata.get("sample_budget_class"),
         "sample_concurrency": metadata.get("sample_concurrency", 4),
         "candidate_concurrency": metadata.get("candidate_concurrency"),
+        "two_stage_evaluation_enabled": metadata.get(
+            "two_stage_evaluation_enabled", True
+        ),
         "sample_operation_max_tokens": metadata.get("sample_operation_max_tokens"),
         "sample_remote_critic_policy": metadata.get(
             "sample_remote_critic_policy"
@@ -2829,6 +3000,9 @@ def _projection_json(state: Any) -> dict[str, Any]:
         "sample_agent_batch_size": metadata.get("sample_agent_batch_size"),
         "sample_concurrency": metadata.get("sample_concurrency"),
         "candidate_concurrency": metadata.get("candidate_concurrency"),
+        "two_stage_evaluation_enabled": metadata.get(
+            "two_stage_evaluation_enabled", True
+        ),
         "budget": dict(task.budget),
         "token_usage_available": model_usage["available"],
         "tokens_used": model_usage.get(
@@ -3000,6 +3174,9 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
         "sample_agent_batch_size": metadata.get("sample_agent_batch_size"),
         "sample_concurrency": metadata.get("sample_concurrency"),
         "candidate_concurrency": metadata.get("candidate_concurrency"),
+        "two_stage_evaluation_enabled": metadata.get(
+            "two_stage_evaluation_enabled", True
+        ),
     }
     return {
         "schema_version": "ecologyrsi-dsh.browser-run-summary/1",
@@ -3037,6 +3214,9 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
         "sample_agent_batch_size": metadata.get("sample_agent_batch_size"),
         "sample_concurrency": metadata.get("sample_concurrency"),
         "candidate_concurrency": metadata.get("candidate_concurrency"),
+        "two_stage_evaluation_enabled": metadata.get(
+            "two_stage_evaluation_enabled", True
+        ),
         "token_limit": _budget_value(task, "token_limit", 0),
         "budget": dict(task.budget),
         "seed_policy": task.seed_policy,

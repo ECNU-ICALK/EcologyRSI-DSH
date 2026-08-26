@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from pathlib import Path
+import threading
 import unittest
 
 from ecologyrsi_dsh.api.dsh_tools import DshPredictionToolBinding, DshToolService
@@ -1003,6 +1004,103 @@ class DshSampleExecutionTests(unittest.TestCase):
             [(1, 1)],
         )
 
+    def test_v4_origin_protocol_runs_bounded_origin_chains_concurrently(self) -> None:
+        class ConcurrentRuntime(_SampleRuntime):
+            def __init__(self) -> None:
+                super().__init__()
+                self.lock = threading.Lock()
+                self.release = threading.Event()
+                self.active_planners = 0
+                self.maximum_planners = 0
+
+            def run_stage(self, request: dict) -> dict:
+                if request["stage"] == "sample.plan":
+                    with self.lock:
+                        self.active_planners += 1
+                        self.maximum_planners = max(
+                            self.maximum_planners, self.active_planners
+                        )
+                        if self.active_planners == 2:
+                            self.release.set()
+                    self.release.wait(timeout=0.25)
+                    try:
+                        return super().run_stage(request)
+                    finally:
+                        with self.lock:
+                            self.active_planners -= 1
+                return super().run_stage(request)
+
+        runtime = ConcurrentRuntime()
+        adapter = DshSampleCollaborationAdapter(
+            run_id="run-origin-concurrency",
+            runtime_provider=lambda: runtime,
+            revision_provider=lambda _run_id: {
+                "run_state_revision": 1,
+                "ledger_expected_revision": 1,
+            },
+            identity_digests={
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            strategy_model_id="dsh/strategy",
+            review_model_id="dsh/review",
+            forecast_bundle_tool=_constant_forecast_bundle(21.5),
+            prediction_tool_binder=_fake_agent_prediction_binder,
+            sample_concurrency=2,
+            microbatch_size=9,
+        )
+        rows = [
+            {
+                "partition": "training_feedback",
+                "target": "air_temperature",
+                "unit": "degC",
+                "horizon_hours": 1,
+                "origin_timestamp": origin,
+                "target_timestamp": origin + 1,
+                "baseline": 20.0,
+                "observed": 21.0,
+                "label_free_context": {
+                    "schema_version": "ecologyrsi-dsh.label-free-sample-context/1",
+                    "history_window": [20.0],
+                    "causal_provenance": {
+                        "schema_version": "ecologyrsi-dsh.causal-sample-provenance/1",
+                        "origin_cutoff_timestamp": origin,
+                        "latest_context_timestamp": origin,
+                        "history_timestamps": [origin],
+                    },
+                },
+            }
+            for origin in (100, 200)
+        ]
+
+        batch = CollaborativeSampleExecutor(adapter).execute(
+            rows,
+            context={
+                "run_id": "run-origin-concurrency",
+                "candidate_id": "candidate-1",
+                "dataset_digest": "d" * 64,
+                "partition": "training_feedback",
+                "algorithm_id": "registered-predictor",
+                "algorithm_version": "1",
+                "sample_concurrency": 2,
+                "candidate_concurrency": 1,
+            },
+            target_bounds={
+                "air_temperature": {
+                    "unit": "degC",
+                    "minimum": -20.0,
+                    "maximum": 80.0,
+                }
+            },
+            algorithm_id="registered-predictor",
+            algorithm_version="1",
+        )
+
+        self.assertEqual(adapter.plan_batch({})["sample_agent_protocol"], "dsh-strict-origin-bundle@4")
+        self.assertEqual(runtime.maximum_planners, 2)
+        self.assertEqual(batch.summary["attempted_origin_samples"], 2)
+
     def test_origin_bundle_progress_does_not_mix_cell_split_counts_with_origins(
         self,
     ) -> None:
@@ -1128,6 +1226,7 @@ class DshSampleExecutionTests(unittest.TestCase):
             forecast_bundle_tool=_constant_forecast_bundle(21.5),
             prediction_tool_binder=_fake_agent_prediction_binder,
             progress_callback=record_progress,
+            sample_concurrency=1,
         )
         rows = []
         for index in (1, 2):
@@ -1210,11 +1309,12 @@ class DshSampleExecutionTests(unittest.TestCase):
                     item["batch_index"],
                     item["completed_samples"],
                     item["total_samples"],
+                    item["in_flight_batches"],
                     item["queued_batches"],
                 )
                 for item in completed
             ],
-            [(1, 1, 2, 1), (2, 2, 2, 0)],
+            [(1, 1, 2, 1, 0), (2, 2, 2, 0, 0)],
         )
         self.assertEqual(batch.summary["complete_agent_chains"], 2)
         self.assertTrue(batch.summary["strict_agent_chain_pass"])

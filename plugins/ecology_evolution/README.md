@@ -84,7 +84,7 @@ DSH-native 运行不设逐样本 Token 硬预算。页面只读显示 DSH TokenM
 插件加载后向父窗口发送：
 
 ```json
-{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.3.28"}
+{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.3.32"}
 ```
 
 宿主通过 `postMessage` 返回。最小兼容合同只要求同源代理地址和短期能力令牌；身份、能力范围和模型目录可选：
@@ -142,3 +142,7 @@ node test/smoke.mjs
 ```
 
 插件崩溃或断线不会改变 SQLite 事件账本中的真实运行状态。
+
+当前新建运行协议为 `dsh-strict-origin-bundle@4`：逐样本并发默认 8，
+provider 级最多同时放行 8 个请求。每轮对全部候选先执行 64 个完整预测
+时点的筛选，确定性冻结 Top 2 后再执行互不重叠的 500 时点正式评估。

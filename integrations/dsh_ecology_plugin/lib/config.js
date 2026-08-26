@@ -17,6 +17,22 @@ function positiveInteger(value, fallback, name) {
   return result;
 }
 
+function nonNegativeInteger(value, fallback, name) {
+  const result = value == null ? fallback : value;
+  if (!Number.isSafeInteger(result) || result < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+  return result;
+}
+
+function boundedConcurrency(value, fallback, name) {
+  const result = value == null ? fallback : value;
+  if (!Number.isSafeInteger(result) || result < 1 || result > 8) {
+    throw new Error(`${name} must be between 1 and 8`);
+  }
+  return result;
+}
+
 export function resolvePluginConfig(config = {}, { defaultStaticRoot, env = process.env } = {}) {
   return Object.freeze({
     staticRoot: config.staticRoot || defaultStaticRoot,
@@ -50,13 +66,18 @@ export function resolvePluginConfig(config = {}, { defaultStaticRoot, env = proc
       "researchStageTimeoutMs",
     ),
     sampleCriticStageTimeoutMs: validateStructuredTimeoutMs(
-      positiveInteger(config.sampleCriticStageTimeoutMs, 180_000, "sampleCriticStageTimeoutMs"),
+      positiveInteger(config.sampleCriticStageTimeoutMs, 600_000, "sampleCriticStageTimeoutMs"),
       "sampleCriticStageTimeoutMs",
     ),
-    structuredStageMinIntervalMs: positiveInteger(
+    structuredStageMinIntervalMs: nonNegativeInteger(
       config.structuredStageMinIntervalMs,
-      60_000,
+      0,
       "structuredStageMinIntervalMs",
+    ),
+    structuredStageMaxInFlight: boundedConcurrency(
+      config.structuredStageMaxInFlight,
+      8,
+      "structuredStageMaxInFlight",
     ),
     structuredStageFailureCooldownMs: positiveInteger(
       config.structuredStageFailureCooldownMs,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from threading import RLock
 from typing import Any
 
 from ..core.models import digest
@@ -243,6 +244,8 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
         self._strict_progress_state: dict[str, int] | None = None
         self._strict_progress_id = 0
         self._strict_latest_gateway_progress: dict[str, Any] | None = None
+        self._strict_progress_lock = RLock()
+        self._strict_max_in_flight = sample_concurrency
         client = _DshSampleDecisionClient(
             run_id=run_id,
             runtime_provider=runtime_provider,
@@ -278,7 +281,7 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
         # single explicit protocol identity instead.
         self.adapter_id = "dsh-native-sample-collaboration"
         self._decision_client = client
-        self.adapter_version = "3-strict-origin-bundle"
+        self.adapter_version = "4-concurrent-origin-bundle"
 
     def _prediction_tool_context(
         self,
@@ -336,111 +339,127 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
     def set_resume_checkpoint(self, checkpoint: Mapping[str, Any] | None) -> None:
         """Keep cumulative progress while strict chains stream one sample at a time."""
 
-        super().set_resume_checkpoint(checkpoint)
-        self._durable_outcome_statuses = {} if checkpoint is not None else None
-        self._planner_progress_session = None
-        if checkpoint is None:
-            self._strict_progress_state = None
-            self._strict_progress_id = 0
-            self._strict_latest_gateway_progress = None
-            return
-        self._strict_progress_state = {
-            "completed_samples": int(
-                checkpoint.get(
-                    "completed_origin_samples", checkpoint["completed_samples"]
-                )
-            ),
-            "succeeded_samples": int(
-                checkpoint.get(
-                    "succeeded_origin_samples", checkpoint["succeeded_samples"]
-                )
-            ),
-            "total_samples": int(
-                checkpoint.get("total_origin_samples", checkpoint["total_samples"])
-            ),
-            "batch_index": int(
-                checkpoint.get(
-                    "completed_origin_samples", checkpoint["completed_samples"]
-                )
-            ),
-            "batch_count": max(
-                int(
-                    checkpoint.get(
-                        "total_origin_samples", checkpoint["total_samples"]
-                    )
-                ),
-                int(
+        with self._strict_progress_lock:
+            super().set_resume_checkpoint(checkpoint)
+            # The base adapter's cumulative session is invocation-local and
+            # cannot be shared by concurrent origin chains. Strict progress is
+            # aggregated below after each complete origin is durable.
+            self._resume_checkpoint = None
+            self._durable_outcome_statuses = None
+            self._planner_progress_session = None
+            if checkpoint is None:
+                self._strict_progress_state = None
+                self._strict_progress_id = 0
+                self._strict_latest_gateway_progress = None
+                return
+            self._strict_progress_state = {
+                "completed_samples": int(
                     checkpoint.get(
                         "completed_origin_samples", checkpoint["completed_samples"]
                     )
                 ),
-            ),
-        }
-        self._strict_progress_id = int(checkpoint.get("progress_id", 0))
-        self._strict_latest_gateway_progress = None
+                "succeeded_samples": int(
+                    checkpoint.get(
+                        "succeeded_origin_samples", checkpoint["succeeded_samples"]
+                    )
+                ),
+                "total_samples": int(
+                    checkpoint.get("total_origin_samples", checkpoint["total_samples"])
+                ),
+                "batch_index": int(
+                    checkpoint.get(
+                        "completed_origin_samples", checkpoint["completed_samples"]
+                    )
+                ),
+                "batch_count": max(
+                    int(
+                        checkpoint.get(
+                            "total_origin_samples", checkpoint["total_samples"]
+                        )
+                    ),
+                    int(
+                        checkpoint.get(
+                            "completed_origin_samples", checkpoint["completed_samples"]
+                        )
+                    ),
+                ),
+            }
+            self._strict_progress_id = int(checkpoint.get("progress_id", 0))
+            self._strict_latest_gateway_progress = None
 
     def _handle_strict_gateway_progress(self, progress: Mapping[str, Any]) -> None:
         """Expose gateway activity without counting a pre-reflection sample."""
 
-        if self._strict_progress_callback is None:
-            return
-        state = self._strict_progress_state
-        if state is None:
-            return
-        projected = dict(progress)
+        with self._strict_progress_lock:
+            if self._strict_progress_callback is None:
+                return
+            state = self._strict_progress_state
+            if state is None:
+                return
+            projected = dict(progress)
         # The gateway routes all cells together, but its adaptive split
         # diagnostics are expressed in cell counts. Public progress is in
         # completed forecast origins, so do not mix those units.
-        projected["adaptive_split_recovered_samples"] = 0
-        projected["adaptive_split_failed_samples"] = 0
-        self._strict_latest_gateway_progress = projected
-        self._strict_progress_id += 1
-        completed = int(state["completed_samples"])
-        succeeded = int(state["succeeded_samples"])
-        progress_kind = str(projected.get("progress_kind") or "waiting")
-        if progress_kind == "completed_batch":
-            progress_kind = "waiting"
-        projected.update(
-            {
-                "progress_id": self._strict_progress_id,
-                "progress_kind": progress_kind,
-                "batch_index": int(state["batch_index"]),
-                "batch_count": int(state["batch_count"]),
-                "batch_size": 0,
-                "completed_samples": completed,
-                "total_samples": int(state["total_samples"]),
-                "succeeded_samples": succeeded,
-                "failed_samples": completed - succeeded,
-                "queued_batches": (
-                    0
-                    if progress_kind == "drained"
-                    else max(0, int(state["total_samples"]) - completed)
-                ),
-            }
-        )
-        self._strict_progress_callback(projected)
+            projected["adaptive_split_recovered_samples"] = 0
+            projected["adaptive_split_failed_samples"] = 0
+            self._strict_latest_gateway_progress = projected
+            self._strict_progress_id += 1
+            completed = int(state["completed_samples"])
+            succeeded = int(state["succeeded_samples"])
+            remaining = max(0, int(state["total_samples"]) - completed)
+            progress_kind = str(projected.get("progress_kind") or "waiting")
+            if progress_kind == "completed_batch":
+                progress_kind = "waiting"
+            in_flight = min(
+                remaining,
+                max(0, int(projected.get("in_flight_batches", 0))),
+            )
+            projected.update(
+                {
+                    "progress_id": self._strict_progress_id,
+                    "progress_kind": progress_kind,
+                    "batch_index": int(state["batch_index"]),
+                    "batch_count": int(state["batch_count"]),
+                    "batch_size": 0,
+                    "completed_samples": completed,
+                    "total_samples": int(state["total_samples"]),
+                    "succeeded_samples": succeeded,
+                    "failed_samples": completed - succeeded,
+                    "in_flight_batches": in_flight,
+                    "queued_batches": (
+                        0
+                        if progress_kind == "drained"
+                        else max(
+                            0,
+                            min(self._strict_max_in_flight, remaining) - in_flight,
+                        )
+                    ),
+                }
+            )
+            self._strict_progress_callback(projected)
 
     def record_finalized_sample_progress(self, *, status: str) -> None:
         """Advance strict progress only after reflection and durable publication."""
 
-        if self._strict_progress_callback is None:
-            return
-        state = self._strict_progress_state
-        if state is None:
-            return
-        if status not in {"succeeded", "failed"}:
-            raise SampleExecutionContractError(
-                "strict finalized sample status is invalid"
-            )
-        state["completed_samples"] += 1
-        state["succeeded_samples"] += int(status == "succeeded")
-        state["batch_index"] = state["completed_samples"]
-        self._strict_progress_id += 1
-        completed = int(state["completed_samples"])
-        succeeded = int(state["succeeded_samples"])
-        projected = dict(self._strict_latest_gateway_progress or {})
-        projected.update(
-            {
+        with self._strict_progress_lock:
+            if self._strict_progress_callback is None:
+                return
+            state = self._strict_progress_state
+            if state is None:
+                return
+            if status not in {"succeeded", "failed"}:
+                raise SampleExecutionContractError(
+                    "strict finalized sample status is invalid"
+                )
+            state["completed_samples"] += 1
+            state["succeeded_samples"] += int(status == "succeeded")
+            state["batch_index"] = state["completed_samples"]
+            self._strict_progress_id += 1
+            completed = int(state["completed_samples"])
+            succeeded = int(state["succeeded_samples"])
+            remaining = max(0, int(state["total_samples"]) - completed)
+            projected = dict(self._strict_latest_gateway_progress or {})
+            projected.update({
                 "schema_version": "ecologyrsi-dsh.sample-microbatch-progress/3",
                 "role": "planner",
                 "model_id": self.strategy_model_id,
@@ -453,13 +472,10 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
                 "total_samples": int(state["total_samples"]),
                 "succeeded_samples": succeeded,
                 "failed_samples": completed - succeeded,
-                "in_flight_batches": 0,
-                "queued_batches": max(
-                    0, int(state["total_samples"]) - completed
-                ),
-            }
-        )
-        self._strict_progress_callback(projected)
+                "in_flight_batches": min(self._strict_max_in_flight, remaining),
+                "queued_batches": 0,
+            })
+            self._strict_progress_callback(projected)
 
     def record_finalized_origin_progress(
         self,
@@ -483,7 +499,7 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
         plan = dict(super().plan_batch(context))
         plan.update(
             {
-                "sample_agent_protocol": "dsh-strict-origin-bundle@3",
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "sample_prompt_batch_size": 1,
                 "prediction_unit": "forecast_origin_with_target_horizon_vector",
                 "execution_mode": "per_origin_remote_agent_vector_tool_loop",

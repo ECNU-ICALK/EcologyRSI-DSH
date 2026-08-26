@@ -96,6 +96,7 @@ class CandidateStatus(str, Enum):
     REJECTED = "rejected"
     FAILED = "failed"
     DUPLICATE = "duplicate"
+    SCREENED_OUT = "screened_out"
 
 
 class PromotionDecision(str, Enum):

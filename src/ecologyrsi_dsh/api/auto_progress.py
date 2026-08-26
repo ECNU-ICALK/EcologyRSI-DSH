@@ -178,6 +178,7 @@ class AutoProgressManager:
         # externally completed run or a dead Timer cannot remain visible as a
         # permanent cooldown (and cannot orphan a still-running run).
         self._reconcile_retry_cooldowns()
+        self._reconcile_idle_running_run(target_run_id)
         with self._state_lock:
             running_items = set(self._running)
             scheduled_items = set(self._scheduled)
@@ -252,6 +253,34 @@ class AutoProgressManager:
                     and active_worker_count >= self._worker_count
                 ),
             }
+
+    def _reconcile_idle_running_run(self, run_id: str) -> bool:
+        """Requeue an enabled durable run missing all scheduler ownership."""
+
+        if not run_id or self._stop.is_set():
+            return False
+        with self._state_lock:
+            scheduler_owned = any(
+                item[0] == run_id
+                for item in (
+                    *self._scheduled,
+                    *self._running,
+                    *self._retry_timers,
+                    *self._retry_not_before,
+                )
+            )
+        if scheduler_owned:
+            return False
+        try:
+            state = self.server.director.state(run_id)
+        except (KeyError, ValueError):
+            return False
+        if (
+            state.run.status is not RunStatus.RUNNING
+            or not auto_progress_enabled(state)
+        ):
+            return False
+        return self._schedule_work_item((run_id, _run_incarnation(state)))
 
     def schedule(self, run_id: str) -> bool:
         """Queue a run once; return ``True`` when a new work item was added."""
@@ -839,6 +868,11 @@ class AutoProgressManager:
                     recovery_state = self._state_for_work_item(work_item)
                 except (KeyError, ValueError):
                     recovery_state = None
+                retry_attempt_anchor_seq = (
+                    self._attempt_authority_seq(recovery_state)
+                    if recovery_state is not None
+                    else attempt_anchor_seq
+                )
                 recovery_stage = _latest_failed_stage(recovery_state)
                 research_contract_error = _exception_of_type(
                     exc,
@@ -895,7 +929,7 @@ class AutoProgressManager:
                         retry_delay,
                         deferred_error,
                         stage=recovery_stage,
-                        attempt_anchor_seq=attempt_anchor_seq,
+                        attempt_anchor_seq=retry_attempt_anchor_seq,
                     )
                 terminal_failure = not retryable or failures >= self._retry_limit
                 retry_terminal_write = False
@@ -1157,6 +1191,17 @@ class AutoProgressManager:
                 and later.payload.get("stage") == retry.payload.get("stage")
                 and later.payload.get("status") == "completed"
             ):
+                return int(events[-1].seq)
+            if (
+                retry.payload.get("retry_class") == "dsh_native_runtime"
+                and later.kind == "DshStructuredResultAccepted"
+            ):
+                # Candidate workers drain every admitted sibling before their
+                # failure reaches this scheduler. A later accepted DSH child
+                # therefore belongs to the settled retry attempt, not to a
+                # future call. Anchor the failure report after that sibling so
+                # its success resets the old breaker epoch without swallowing
+                # the still-failed parallel work.
                 return int(events[-1].seq)
         return int(retry.seq)
 

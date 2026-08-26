@@ -61,6 +61,11 @@
           ? "DSH 上下文压力（会话最大当前值）：" + formatNumber(maximumCurrentTokens) + " Token"
           : "DSH 上下文压力：等待 Session 计量";
       var parts = [pressureText];
+      if (Number.isFinite(pressureRatio)) {
+        if (pressureRatio >= 1) { parts.push("硬上限已到达，停止新请求"); }
+        else if (pressureRatio >= 0.85) { parts.push("高压力预警（≥85%）"); }
+        else if (pressureRatio >= 0.70) { parts.push("压力提醒（≥70%）"); }
+      }
       if (provider.available === true && Number.isFinite(Number(provider.total_tokens))) {
         parts.push("供应商报告累计用量：" + formatNumber(Number(provider.total_tokens)) + " Token");
       } else {
@@ -683,6 +688,10 @@
     var runStatus = String(run.status || "").toLowerCase();
     var paused = runStatus === "paused";
     var stageProgress = run.execution_progress && run.execution_progress.stage_progress;
+    if (executionRunAllowsLiveStatus(run) && stageProgress && stageProgress.evaluation_phase === "screening") {
+      statuses[2] = "running";
+      active = 2;
+    }
     var pausedDrained = paused && stageProgress && stageProgress.progress_kind === "drained";
     var overall = runStatus === "failed" ? "failed" : runStatus === "cancelled" ? "cancelled" : runStatus === "completed" ? "completed" : paused ? "paused" : active >= 0 ? "running" : run.generation > 0 ? "completed" : "pending";
     var automatic = runHasContinuousAutoProgress(run) || state.autoAdvanceRunId === run.id;
@@ -1472,7 +1481,7 @@
     candidateNode.textContent = "候选版本：" + formatNumber(Array.isArray(run.candidates) ? run.candidates.length : 0);
     var showLiveProgressDetail = Boolean(stageProgress && stageProgress.live);
     var showDrainedProgressDetail = Boolean(pausedDrained);
-    var originBundleProtocol = run.sample_agent_protocol === "dsh-strict-origin-bundle@3";
+    var originBundleProtocol = String(run.sample_agent_protocol || "").indexOf("dsh-strict-origin-bundle@") === 0;
     var progressUnitLabel = originBundleProtocol ? "预测时点" : "样本";
     var sampleRate = showLiveProgressDetail && Number(stageProgress.samples_per_minute);
     var sampleRateText = Number.isFinite(sampleRate) && sampleRate > 0 ? " · " + formatNumber(sampleRate, 1) + " " + progressUnitLabel + "/分钟" : "";
@@ -1481,7 +1490,7 @@
     var inFlightLabel = progressKind === "drained" ? "已排空" : runStatus === "paused" ? "暂停快照在飞" : "实际在飞";
     var inFlightText = Number.isInteger(inFlight) && inFlight >= 0 ? " · " + inFlightLabel + " " + formatNumber(inFlight) + " wave" : "";
     var queued = (showLiveProgressDetail || showDrainedProgressDetail) && Number(stageProgress.queued_batches);
-    var queuedLabel = progressKind === "drained" ? "暂停后排队" : runStatus === "paused" ? "暂停快照排队" : "排队";
+    var queuedLabel = progressKind === "drained" ? "暂停后排队" : runStatus === "paused" ? "暂停快照排队" : stageProgress && stageProgress.queue_semantics === "awaiting_origin_submission" ? "待调度" : "排队";
     var queuedText = Number.isInteger(queued) && queued >= 0 ? " · " + queuedLabel + " " + formatNumber(queued) : "";
     var causalWave = showLiveProgressDetail && Number(stageProgress.causal_wave_sample_count);
     var causalWaveText = Number.isInteger(causalWave) && causalWave > 0 ? " · 本波次 " + formatNumber(causalWave) : "";
@@ -1555,6 +1564,7 @@
       ["每轮候选", formatNumber(run.candidates_per_generation || 1) + " 个版本"],
       ["候选并发", Number(run.candidate_concurrency) > 0 ? formatNumber(run.candidate_concurrency) + " 个候选" : "历史运行按串行执行"],
       ["每轮预测预算", sampleBudgetText],
+      ["候选评估阶段", run.two_stage_evaluation_enabled === false ? "单阶段正式评估" : "全部候选先筛选 64 个预测时点，Top 2 再正式评估 " + formatNumber(originBudget || 500) + " 个时点（窗口不重叠）"],
       ["晋级证据门槛", selectionThresholdText],
       ["请求微批", Number(run.sample_agent_batch_size) > 0 ? "先按因果预测起点组成 origin wave；每批最多 " + formatNumber(run.sample_agent_batch_size) + " 个样本，实际请求数以运行进度为准" : "历史运行未配置"],
       ["逐样本并发", Number(run.sample_concurrency) > 0 ? formatNumber(run.sample_concurrency) + " 个在飞请求" : "历史运行未配置"],

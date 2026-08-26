@@ -3,9 +3,10 @@ import test from "node:test";
 
 import { ProviderStageGate } from "../lib/runtime/provider-stage-gate.js";
 
-test("provider stage gate serializes one run/provider pair", async () => {
-  const gate = new ProviderStageGate({ minimumIntervalMs: 1 });
+test("provider stage gate enforces the configured provider-wide concurrency", async () => {
+  const gate = new ProviderStageGate({ minimumIntervalMs: 0, maxInFlight: 2 });
   let releaseFirst;
+  let releaseSecond;
   let active = 0;
   let maximum = 0;
   const first = gate.run("pjlab", async () => {
@@ -19,24 +20,28 @@ test("provider stage gate serializes one run/provider pair", async () => {
   const second = gate.run("pjlab", async () => {
     active += 1;
     maximum = Math.max(maximum, active);
+    await new Promise((resolve) => { releaseSecond = resolve; });
     active -= 1;
     return "second";
   }, { runId: "run-one" });
-  const independent = gate.run(
-    "freerouter",
-    async () => "independent",
-    { runId: "run-one" },
-  );
+  let thirdStarted = false;
+  const third = gate.run("pjlab", async () => {
+    thirdStarted = true;
+    return "third";
+  }, { runId: "run-two" });
 
-  assert.equal(await independent, "independent");
-  assert.equal(maximum, 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(maximum, 2);
+  assert.equal(thirdStarted, false);
   releaseFirst();
+  assert.equal(await third, "third");
+  releaseSecond();
   assert.deepEqual(await Promise.all([first, second]), ["first", "second"]);
-  assert.equal(maximum, 1);
+  assert.equal(maximum, 2);
 });
 
 test("provider stage gate allows independent runs on the same provider", async () => {
-  const gate = new ProviderStageGate({ minimumIntervalMs: 0 });
+  const gate = new ProviderStageGate({ minimumIntervalMs: 0, maxInFlight: 2 });
   let releaseFirst;
   let active = 0;
   let maximum = 0;
@@ -60,11 +65,31 @@ test("provider stage gate allows independent runs on the same provider", async (
   await first;
 });
 
+test("successful work does not add a completion-time cooldown", async () => {
+  let now = 1_000;
+  const waits = [];
+  const gate = new ProviderStageGate({
+    minimumIntervalMs: 10,
+    maxInFlight: 1,
+    now: () => now,
+    delay: async (milliseconds) => {
+      waits.push(milliseconds);
+      now += milliseconds;
+    },
+  });
+
+  await gate.run("pjlab", async () => { now += 100; }, { runId: "run-one" });
+  await gate.run("pjlab", async () => {}, { runId: "run-one" });
+
+  assert.deepEqual(waits, []);
+});
+
 test("provider stage gate applies a bounded cooldown after a failed turn", async () => {
   let now = 1_000;
   const waits = [];
   const gate = new ProviderStageGate({
     minimumIntervalMs: 10,
+    maxInFlight: 1,
     failureCooldownMs: 30,
     now: () => now,
     delay: async (milliseconds) => {
@@ -85,6 +110,7 @@ test("provider stage gate revokes a run waiting for its own interval", async () 
   let now = 1_000;
   const gate = new ProviderStageGate({
     minimumIntervalMs: 10,
+    maxInFlight: 1,
     now: () => now,
     delay: () => new Promise(() => {}),
   });

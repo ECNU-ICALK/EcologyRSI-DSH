@@ -32,7 +32,7 @@ GENERATION_CONTROL_EVALUATION_SCHEMA = (
 )
 GENERATION_CONTROL_POLICY = "same_cohort_search_parent_and_formal_elite@1"
 STRICT_SAMPLE_AGENT_PROTOCOLS = frozenset(
-    {"dsh-strict-origin-bundle@3"}
+    {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
 )
 _EXPERIENCE_MAX_GENERATIONS = 6
 _EXPERIENCE_SCAN_GENERATIONS = 24
@@ -828,6 +828,8 @@ def _candidate_row(state: Any, candidate: Any, parent_id: str | None) -> dict[st
     classification = (
         "duplicate"
         if candidate.status is CandidateStatus.DUPLICATE
+        else "screened_out"
+        if candidate.status is CandidateStatus.SCREENED_OUT
         else f"algorithm_{failed_algorithm_attempt.phase}_failed"
         if failed_algorithm_attempt is not None
         else "execution_failed"
@@ -3467,6 +3469,7 @@ def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationA
         CandidateStatus.REJECTED,
         CandidateStatus.FAILED,
         CandidateStatus.DUPLICATE,
+        CandidateStatus.SCREENED_OUT,
     }
     if any(item.status not in terminal for item in candidates):
         raise RuntimeError("generation batch still has unfinished candidates")

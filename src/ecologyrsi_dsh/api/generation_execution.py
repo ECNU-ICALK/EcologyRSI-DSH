@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from ..core.errors import (
@@ -72,6 +73,265 @@ from .candidate_scheduler import (
 
 _ALGORITHM_SMOKE_MAX_ATTEMPTS = 3
 _MAX_CANDIDATE_CONCURRENCY = 8
+_SCREENING_ORIGIN_COUNT = 64
+_FORMAL_FINALIST_COUNT = 2
+
+
+def _select_screening_finalists(
+    candidates: Any,
+    screening_by_candidate_id: Mapping[str, Mapping[str, Any]],
+    *,
+    top_k: int = _FORMAL_FINALIST_COUNT,
+) -> tuple[Any, ...]:
+    """Freeze finalists with an evidence-only, deterministic tie break."""
+
+    eligible = tuple(
+        candidate
+        for candidate in candidates
+        if candidate.candidate_id in screening_by_candidate_id
+    )
+    ranked = sorted(
+        eligible,
+        key=lambda candidate: (
+            int(
+                screening_by_candidate_id[candidate.candidate_id].get(
+                    "constraint_violations", 0
+                )
+            ),
+            -float(screening_by_candidate_id[candidate.candidate_id]["score"]),
+            int(candidate.slot_index),
+            str(candidate.candidate_id),
+        ),
+    )
+    return tuple(ranked[: max(1, int(top_k))])
+
+
+def _formal_selection_event(state: Any, generation: int) -> Any | None:
+    return next(
+        (
+            event
+            for event in reversed(getattr(state, "events", ()))
+            if event.kind == "FormalSelectionCohortFrozen"
+            and int(event.payload.get("generation", -1)) == generation
+        ),
+        None,
+    )
+
+
+def _screening_records(
+    state: Any, generation: int
+) -> dict[str, Mapping[str, Any]]:
+    return {
+        str(event.payload["candidate_id"]): event.payload
+        for event in getattr(state, "events", ())
+        if event.kind == "CandidateScreeningRecorded"
+        and event.payload.get("schema_version")
+        == "ecologyrsi-dsh.candidate-screening/1"
+        and int(event.payload.get("generation", -1)) == generation
+    }
+
+
+def _two_stage_screening_enabled(state: Any, candidates: Any) -> bool:
+    metadata = state.task_manifest.metadata
+    return bool(
+        len(tuple(candidates)) > _FORMAL_FINALIST_COUNT
+        and metadata.get("sample_agent_protocol")
+        == "dsh-strict-origin-bundle@4"
+        and metadata.get("sample_budget_class") == "selection_eligible"
+        and metadata.get("two_stage_evaluation_enabled", True) is True
+    )
+
+
+def _phase_task_manifest(task: Any, generation: int, phase: str) -> Any:
+    cells_per_origin = int(task.metadata.get("prediction_cells_per_origin", 1))
+    formal_cells = int(task.metadata.get("samples_per_update", cells_per_origin))
+    formal_origins = max(1, formal_cells // cells_per_origin)
+    generation_stride = _SCREENING_ORIGIN_COUNT + formal_origins
+    if phase == "screening":
+        origin_count = _SCREENING_ORIGIN_COUNT
+        origin_offset = generation * generation_stride
+    elif phase == "formal":
+        origin_count = formal_origins
+        origin_offset = generation * generation_stride + _SCREENING_ORIGIN_COUNT
+    else:
+        raise ValueError("unknown evaluation phase")
+    return replace(
+        task,
+        metadata={
+            **dict(task.metadata),
+            "evaluation_phase": phase,
+            "evaluation_origin_window_offset": origin_offset,
+            "samples_per_update": origin_count * cells_per_origin,
+            "evaluation_origin_count": origin_count,
+            "two_stage_evaluation_enabled": True,
+        },
+    )
+
+
+def _screen_candidate(endpoint: Any, run_id: str, candidate_id: str) -> None:
+    """Evaluate one restart-safe 64-origin screening cohort."""
+
+    state = endpoint.server.director.state(run_id)
+    if state.run.status is not RunStatus.RUNNING:
+        return
+    candidate = state.candidate(candidate_id)
+    if candidate.candidate_id in _screening_records(state, candidate.generation):
+        return
+    if candidate.status is not CandidateStatus.SPAWNED:
+        return
+    proposal = state.proposal(candidate.proposal_id)
+    if not _ensure_candidate_algorithm_ready(endpoint, state, proposal, candidate):
+        return
+    state = endpoint.server.director.state(run_id)
+    candidate = state.candidate(candidate_id)
+    compiled = state.compiled_algorithm_for(candidate_id)
+    if compiled is None:
+        raise RuntimeError("screened candidate is missing its compiled algorithm")
+    screening_task = _phase_task_manifest(
+        state.task_manifest, candidate.generation, "screening"
+    )
+
+    def sample_run_control() -> str:
+        status = endpoint.server.director.state(run_id).run.status
+        if status is RunStatus.RUNNING:
+            return "running"
+        if status is RunStatus.PAUSED:
+            return "paused"
+        return "cancelled"
+
+    try:
+        bundle = endpoint.server.evaluators.evaluate_scientific(
+            screening_task,
+            candidate,
+            proposal,
+            algorithm_spec=AlgorithmSpec.from_dict(compiled),
+            on_training_complete=lambda: None,
+            on_sample_control=sample_run_control,
+        )
+    except (SampleExecutionPausedError, SampleExecutionCancelledError):
+        return
+    except Exception as exc:  # noqa: BLE001 - preserve remote retry boundary
+        if _recoverable_evaluation_error(exc):
+            raise
+        _director_mutation(
+            endpoint,
+            "fail_candidate",
+            run_id,
+            candidate_id,
+            f"候选筛选评测失败：{public_exception_summary(exc)}",
+        )
+        return
+
+    summary = bundle.evaluation.metrics.get("sample_execution")
+    attempted_origins = (
+        int(summary.get("attempted_origin_samples", 0))
+        if isinstance(summary, Mapping)
+        else 0
+    )
+    prediction_cells = (
+        int(summary.get("prediction_cell_count", 0))
+        if isinstance(summary, Mapping)
+        else 0
+    )
+    if attempted_origins < _SCREENING_ORIGIN_COUNT:
+        raise RuntimeError("screening did not cover the frozen 64-origin cohort")
+    _director_mutation(
+        endpoint,
+        "record_candidate_screening",
+        run_id,
+        candidate_id=candidate_id,
+        generation=candidate.generation,
+        score=bundle.evaluation.score,
+        passed=bundle.evaluation.passed,
+        constraint_violations=max(
+            0, int(bundle.evaluation.metrics.get("constraint_violations", 0))
+        ),
+        origin_count=attempted_origins,
+        prediction_cell_count=prediction_cells,
+        cohort_digest=(
+            str(bundle.evaluation.metrics.get("feedback_update_cohort_digest"))
+            if bundle.evaluation.metrics.get("feedback_update_cohort_digest")
+            else None
+        ),
+    )
+
+
+def _prepare_formal_finalists(
+    endpoint: Any,
+    run_id: str,
+    candidates: Any,
+    *,
+    max_concurrency: int,
+) -> tuple[Any, ...]:
+    state = endpoint.server.director.state(run_id)
+    generation = int(candidates[0].generation)
+    frozen = _formal_selection_event(state, generation)
+    if frozen is None:
+        tasks = tuple(
+            CandidateEvaluationTask(
+                slot_index=int(candidate.slot_index),
+                candidate_id=str(candidate.candidate_id),
+            )
+            for candidate in candidates
+            if candidate.status is CandidateStatus.SPAWNED
+        )
+        run_candidate_evaluations(
+            tasks,
+            max_concurrency=max_concurrency,
+            evaluate=lambda candidate_id: _screen_candidate(
+                endpoint, run_id, candidate_id
+            ),
+            admission_open=lambda: (
+                endpoint.server.director.state(run_id).run.status
+                is RunStatus.RUNNING
+            ),
+        )
+        state = endpoint.server.director.state(run_id)
+        if state.run.status is not RunStatus.RUNNING:
+            return ()
+        screening = _screening_records(state, generation)
+        refreshed = tuple(state.candidate(item.candidate_id) for item in candidates)
+        finalists = _select_screening_finalists(
+            refreshed,
+            screening,
+            top_k=_FORMAL_FINALIST_COUNT,
+        )
+        if len(finalists) < _FORMAL_FINALIST_COUNT:
+            _director_mutation(
+                endpoint,
+                "fail_run",
+                run_id,
+                "两阶段评估失败：筛选阶段不足 2 个可用候选。",
+            )
+            return ()
+        selected_ids = tuple(item.candidate_id for item in finalists)
+        frozen = _director_mutation(
+            endpoint,
+            "freeze_formal_selection_cohort",
+            run_id,
+            generation=generation,
+            selected_candidate_ids=selected_ids,
+            screening_digest=digest(
+                [screening[candidate_id] for candidate_id in sorted(screening)]
+            ),
+        )
+        state = endpoint.server.director.state(run_id)
+    selected_ids = tuple(frozen.payload["selected_candidate_ids"])
+    for candidate in tuple(state.candidate(item.candidate_id) for item in candidates):
+        if (
+            candidate.candidate_id not in selected_ids
+            and candidate.status is CandidateStatus.SPAWNED
+        ):
+            _director_mutation(
+                endpoint,
+                "screen_out_candidate",
+                run_id,
+                candidate.candidate_id,
+                generation=generation,
+                formal_selection_event_id=frozen.event_id,
+            )
+    state = endpoint.server.director.state(run_id)
+    return tuple(state.candidate(candidate_id) for candidate_id in selected_ids)
 
 
 def _director_mutation(
@@ -167,16 +427,31 @@ def _evaluate_generation_controls(
 ) -> list[dict[str, Any]]:
     """Re-evaluate the search parent and formal elite on the current cohort."""
 
+    formal_event = _formal_selection_event(state, candidate.generation)
+    control_candidate_id = (
+        str(formal_event.payload["selected_candidate_ids"][0])
+        if formal_event is not None
+        else None
+    )
     if (
-        candidate.slot_index != 0
+        (
+            candidate.candidate_id != control_candidate_id
+            if control_candidate_id is not None
+            else candidate.slot_index != 0
+        )
         or candidate.generation <= 0
         or state.task_manifest.metadata.get("sample_agent_protocol")
-        != "dsh-strict-origin-bundle@3"
+        not in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
         or state.task_manifest.metadata.get("sample_budget_class")
         != "selection_eligible"
         or not isinstance(endpoint.server.evaluators, EvaluatorRegistry)
     ):
         return []
+    evaluation_task = (
+        _phase_task_manifest(state.task_manifest, candidate.generation, "formal")
+        if formal_event is not None
+        else state.task_manifest
+    )
     batch = state.batch_for(candidate.generation)
     if batch is None:
         raise RuntimeError("strict generation control requires a frozen batch")
@@ -240,7 +515,7 @@ def _evaluate_generation_controls(
         spec_data["generation"] = candidate.generation
         replay_spec = AlgorithmSpec.from_dict(spec_data)
         bundle = endpoint.server.evaluators.evaluate_scientific(
-            state.task_manifest,
+            evaluation_task,
             replay_candidate,
             replay_proposal,
             on_training_complete=lambda: None,
@@ -1324,6 +1599,13 @@ def _evaluate_candidate(endpoint: Any, run_id: str, candidate_id: str) -> None:
     if compiled_algorithm is None:
         raise RuntimeError("debugged candidate is missing its compiled algorithm spec")
     algorithm_spec = AlgorithmSpec.from_dict(compiled_algorithm)
+    formal_event = _formal_selection_event(state, candidate.generation)
+    evaluation_task = (
+        _phase_task_manifest(state.task_manifest, candidate.generation, "formal")
+        if formal_event is not None
+        and candidate.candidate_id in formal_event.payload["selected_candidate_ids"]
+        else state.task_manifest
+    )
     active_stage = "training"
     _record_stage(
         endpoint,
@@ -1535,7 +1817,7 @@ def _evaluate_candidate(endpoint: Any, run_id: str, candidate_id: str) -> None:
                 record_evaluation_progress
             )
         bundle = endpoint.server.evaluators.evaluate_scientific(
-            state.task_manifest,
+            evaluation_task,
             candidate,
             proposal,
             **evaluation_kwargs,
@@ -1787,7 +2069,7 @@ def complete_if_budget_exhausted(
         reasons.append("generation_budget_exhausted")
     diagnostic_smoke = (
         state.task_manifest.metadata.get("sample_agent_protocol")
-        == "dsh-strict-origin-bundle@3"
+        in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
         and state.task_manifest.metadata.get("sample_budget_class")
         == "diagnostic_smoke"
     )
@@ -1831,7 +2113,7 @@ def _generation_evidence_failure(state: Any, generation: int) -> str | None:
         )
     if strict_generation_controls_required(state.task_manifest, generation) or (
         state.task_manifest.metadata.get("sample_agent_protocol")
-        == "dsh-strict-origin-bundle@3"
+        in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
     ):
         metadata = state.task_manifest.metadata
         sample_budget_class = metadata.get("sample_budget_class")
@@ -1992,12 +2274,22 @@ def _evaluate_generation_candidates(
             "candidate_concurrency must be an integer between 1 and "
             f"{_MAX_CANDIDATE_CONCURRENCY}"
         )
+    frozen_candidates = tuple(candidates)
+    if _two_stage_screening_enabled(state, frozen_candidates):
+        frozen_candidates = _prepare_formal_finalists(
+            endpoint,
+            run_id,
+            frozen_candidates,
+            max_concurrency=raw_concurrency,
+        )
+        if not frozen_candidates:
+            return
     tasks = tuple(
         CandidateEvaluationTask(
             slot_index=int(candidate.slot_index),
             candidate_id=str(candidate.candidate_id),
         )
-        for candidate in candidates
+        for candidate in frozen_candidates
     )
     run_candidate_evaluations(
         tasks,

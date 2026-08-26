@@ -1150,6 +1150,7 @@ def candidate_is_terminal(candidate: Any) -> bool:
         CandidateStatus.REJECTED,
         CandidateStatus.FAILED,
         CandidateStatus.DUPLICATE,
+        CandidateStatus.SCREENED_OUT,
     }
 
 

@@ -389,7 +389,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --samples-per-task 1 \
   --minimum-coverage 0.8 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.28-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.32-real-api-agent-tool-acceptance.json
 ```
 
 验收无论通过或失败都会原子写入 JSON 报告；省略 `--output` 时默认写到系统临时目录下的
@@ -566,7 +566,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --db /tmp/ecologyrsi-dsh-dsh-adapter.sqlite3 \
   --samples-per-task 1 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.28-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.32-real-api-agent-tool-acceptance.json
 ```
 
 构建 wheel、sdist 和完整交付包需要 `uv`：
@@ -596,3 +596,17 @@ PYTHONPATH=src python -m ecologyrsi_dsh summary run:demo --db /tmp/ecologyrsi-de
 - 单进程锁和 SQLite 适用于本地交付与研究验证，不是多租户、高并发生产架构。
 
 发布前的人工验收项与安全边界见 `RELEASE-CHECKLIST.md`。
+
+## 0.3.32 运行时更新
+
+新建严格运行使用 `dsh-strict-origin-bundle@4`。工作台仍以“完整预测
+次数”接收每次更新预算，默认 500 次；温室任务会换算为 4,500 个内部
+评分单元。逐样本并发默认且最多为 8，并由 provider 级 FIFO 闸门统一
+限制。每轮先让全部候选在互不重叠的 64 个预测时点上筛选，再冻结 Top 2
+进入 500 个预测时点的正式评估窗口；页面进度和排队数均按预测时点解释。
+sample critic/reflect 的默认运行时限为 10 分钟，避免八路并发下有效长响应
+被原 3 分钟边界提前终止；该限制仍是端到端硬截止时间。
+
+并发候选结算失败时，自动推进会以全部已入场兄弟任务完成后的最新账本
+序号提交重试，不再让某个兄弟任务的成功结果吞掉其他超时任务；若运行仍为
+“运行中”而调度器意外空闲，工作台状态轮询会自动将其重新入队。

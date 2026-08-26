@@ -518,7 +518,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         )
         self.assertEqual(
             state.task_manifest.metadata["sample_agent_protocol"],
-            "dsh-strict-origin-bundle@3",
+            "dsh-strict-origin-bundle@4",
         )
         self.assertEqual(state.task_manifest.metadata["sample_prompt_batch_size"], 1)
         self.assertEqual(
