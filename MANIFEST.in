@@ -8,6 +8,9 @@ prune docs/superpowers
 exclude docs/项目整体Review与方案B优化报告.md
 recursive-include plugins/ecology_evolution *.html *.css *.js *.json *.md *.mjs
 recursive-include integrations/dsh_ecology_plugin *.js *.mjs *.json *.md *.yml
+prune integrations/dsh_ecology_plugin/.runtime
+prune integrations/dsh_ecology_plugin/.dsh
+prune integrations/dsh_ecology_plugin/.ssh
 include integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.32.tgz
 recursive-include scripts *.sh *.py *.mjs
 recursive-include tests *.py *.json
@@ -15,3 +18,4 @@ global-exclude *.py[cod] __pycache__ .DS_Store *.sqlite3
 global-exclude .env .env.* .npmrc .pypirc *.pem *.key *.p12 *.pfx
 global-exclude *[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]*.yml
 global-exclude *[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]*.yaml
+global-exclude */.runtime/* */.dsh/* */.ssh/*

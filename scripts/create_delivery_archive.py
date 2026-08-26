@@ -11,10 +11,16 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
 from pathlib import Path
+
+try:
+    from .release_safety import checked_lstat, require_regular_file
+except ImportError:
+    from release_safety import checked_lstat, require_regular_file
 
 ROOT_FILES = (
     ".gitignore",
@@ -40,7 +46,7 @@ SOURCE_DIRS = (
 )
 IGNORED_PARTS = {"__pycache__", ".pytest_cache", ".DS_Store", "build", "dist"}
 IGNORED_SUFFIXES = {".pyc", ".pyo", ".sqlite3"}
-SENSITIVE_PARTS = {".dsh", ".ssh"}
+SENSITIVE_PARTS = {".dsh", ".runtime", ".ssh"}
 SENSITIVE_NAMES = {".env", ".npmrc", ".pypirc"}
 SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
 
@@ -53,16 +59,11 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _reject_symlink_components(root: Path, path: Path, label: str) -> None:
-    current = root
-    for part in path.relative_to(root).parts:
-        current /= part
-        if current.is_symlink():
-            raise RuntimeError(f"symlink is not allowed for {label}: {current}")
-
-
 def project_version(root: Path) -> str:
-    text = (root / "pyproject.toml").read_text(encoding="utf-8")
+    metadata = require_regular_file(
+        root, root / "pyproject.toml", "project metadata"
+    )
+    text = metadata.read_text(encoding="utf-8")
     match = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', text)
     if match is None:
         raise RuntimeError("project version is missing")
@@ -71,7 +72,12 @@ def project_version(root: Path) -> str:
 
 def packed_plugin(root: Path, version: str) -> Path:
     plugin_dist = root / "integrations/dsh_ecology_plugin/dist"
-    _reject_symlink_components(root, plugin_dist, "packed DSH plugin directory")
+    checked_lstat(
+        root,
+        plugin_dist,
+        "packed DSH plugin directory",
+        allow_missing=True,
+    )
     candidates = sorted(plugin_dist.glob("ecologyrsi-dsh-evolution-plugin-*.tgz"))
     expected_name = f"ecologyrsi-dsh-evolution-plugin-{version}.tgz"
     if len(candidates) != 1 or candidates[0].name != expected_name:
@@ -81,11 +87,10 @@ def packed_plugin(root: Path, version: str) -> Path:
             f"found: {names}"
         )
     plugin = candidates[0]
-    _reject_symlink_components(root, plugin, "packed DSH plugin")
-    return plugin
+    return require_regular_file(root, plugin, "packed DSH plugin")
 
 
-def _is_sensitive_source(relative: Path) -> bool:
+def is_sensitive_source(relative: Path) -> bool:
     folded_parts = tuple(part.casefold() for part in relative.parts)
     name = relative.name.casefold()
     return (
@@ -105,7 +110,14 @@ def _git_ignored_sources(root: Path, paths: list[Path]) -> set[str]:
         text=True,
     )
     if repository.returncode != 0:
-        return set()
+        raise RuntimeError("public source selection requires a Git repository")
+    repository_root = Path(repository.stdout.strip())
+    try:
+        is_repository_root = repository_root.samefile(root)
+    except OSError:
+        is_repository_root = False
+    if not is_repository_root:
+        raise RuntimeError("public source selection requires the repository root")
     names = [path.relative_to(root).as_posix() for path in paths]
     if not names:
         return set()
@@ -125,12 +137,17 @@ def included_source_files(root: Path) -> list[Path]:
     explicit_files = [root / name for name in ROOT_FILES]
     explicit_files.append(packed_plugin(root, project_version(root)))
     for path in explicit_files:
-        _reject_symlink_components(root, path, "delivery source")
+        require_regular_file(root, path, "delivery source")
     files = list(explicit_files)
     candidates: list[Path] = []
     for directory in SOURCE_DIRS:
         source_directory = root / directory
-        _reject_symlink_components(root, source_directory, "delivery source directory")
+        checked_lstat(
+            root,
+            source_directory,
+            "delivery source directory",
+            allow_missing=True,
+        )
         for path in source_directory.rglob("*"):
             relative = path.relative_to(root)
             if any(
@@ -138,7 +155,7 @@ def included_source_files(root: Path) -> list[Path]:
                 for part in relative.parts
             ):
                 continue
-            if path.suffix in IGNORED_SUFFIXES or _is_sensitive_source(relative):
+            if path.suffix in IGNORED_SUFFIXES or is_sensitive_source(relative):
                 continue
             candidates.append(path)
     ignored = _git_ignored_sources(root, candidates)
@@ -146,10 +163,11 @@ def included_source_files(root: Path) -> list[Path]:
         relative = path.relative_to(root).as_posix()
         if relative in ignored:
             continue
-        if path.is_symlink():
-            raise RuntimeError(f"symlink is not allowed for delivery source: {path}")
-        if path.is_file():
+        path_stat = checked_lstat(root, path, "delivery source")
+        if path_stat is not None and stat.S_ISREG(path_stat.st_mode):
             files.append(path)
+        elif path_stat is not None and not stat.S_ISDIR(path_stat.st_mode):
+            raise RuntimeError(f"delivery source has unsupported file type: {path}")
     missing = [str(path) for path in files if not path.is_file()]
     if missing:
         raise RuntimeError("missing delivery inputs: " + ", ".join(missing))
@@ -214,10 +232,13 @@ def add_bytes(archive: tarfile.TarFile, name: str, data: bytes, *, mtime: int, e
 
 def create_archive(root: Path, dist: Path) -> Path:
     version = project_version(root)
+    sources = included_source_files(root)
     wheel = next(iter(sorted(dist.glob(f"ecologyrsi_dsh-{version}-*.whl"))), None)
     sdist = next(iter(sorted(dist.glob(f"ecologyrsi_dsh-{version}.tar.gz"))), None)
     if wheel is None or sdist is None:
         raise RuntimeError("wheel and sdist must be built before the delivery archive")
+    require_regular_file(dist, wheel, "wheel artifact")
+    require_regular_file(dist, sdist, "sdist artifact")
     plugin = packed_plugin(root, version)
     distributed_plugin = dist / plugin.name
     shutil.copyfile(plugin, distributed_plugin)
@@ -240,9 +261,10 @@ def create_archive(root: Path, dist: Path) -> Path:
     with output.open("wb") as raw:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=timestamp) as compressed:
             with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive:
-                for path in included_source_files(root):
+                for path in sources:
                     relative = path.relative_to(root).as_posix()
                     executable = relative.startswith("scripts/") and path.suffix in {".sh", ".py"}
+                    require_regular_file(root, path, "delivery source")
                     add_bytes(
                         archive,
                         f"{prefix}/{relative}",

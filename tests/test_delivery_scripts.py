@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -39,6 +40,256 @@ INTENTIONAL_PATH_FIXTURES = {
 
 
 class DeliveryScriptTests(unittest.TestCase):
+    def test_non_git_public_source_selection_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-non-git-source-") as directory:
+            fixture = Path(directory)
+            version = "0.3.33"
+            self._write_minimal_source_fixture(fixture, version=version)
+            runtime_auth = (
+                fixture / "integrations/dsh_ecology_plugin/.runtime/auth.json"
+            )
+            runtime_auth.parent.mkdir(parents=True)
+            runtime_auth.write_text('{"token": "cornflower"}\n', encoding="utf-8")
+            dist = fixture / "dist"
+            dist.mkdir()
+            (dist / f"ecologyrsi_dsh-{version}-py3-none-any.whl").write_bytes(
+                b"fake-wheel"
+            )
+            (dist / f"ecologyrsi_dsh-{version}.tar.gz").write_bytes(b"fake-sdist")
+
+            with self.assertRaisesRegex(RuntimeError, "Git repository"):
+                included_source_files(fixture)
+            with self.assertRaisesRegex(RuntimeError, "Git repository"):
+                create_archive(fixture, dist)
+            self.assertFalse((dist / "BUILD-INFO.json").exists())
+
+    def test_sensitive_runtime_directories_cannot_enter_delivery(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-sensitive-delivery-") as directory:
+            fixture = Path(directory)
+            version = "0.3.33"
+            self._write_minimal_source_fixture(fixture, version=version)
+            sensitive = {
+                "integrations/dsh_ecology_plugin/.runtime/auth.json": (
+                    '{"token": "cornflower"}\n'
+                ),
+                "integrations/dsh_ecology_plugin/.dsh/settings.yml": (
+                    "password: meadow\n"
+                ),
+                "integrations/dsh_ecology_plugin/.ssh/config.json": (
+                    '{"host": "example.invalid"}\n'
+                ),
+            }
+            for relative, content in sensitive.items():
+                path = fixture / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            self._commit_fixture(fixture)
+            dist = fixture / "dist"
+            dist.mkdir()
+            (dist / f"ecologyrsi_dsh-{version}-py3-none-any.whl").write_bytes(
+                b"fake-wheel"
+            )
+            (dist / f"ecologyrsi_dsh-{version}.tar.gz").write_bytes(b"fake-sdist")
+
+            included = {
+                path.relative_to(fixture).as_posix()
+                for path in included_source_files(fixture)
+            }
+            delivery = create_archive(fixture, dist)
+
+            self.assertTrue(set(sensitive).isdisjoint(included))
+            build_info = json.loads(
+                (dist / "BUILD-INFO.json").read_text(encoding="utf-8")
+            )
+            self.assertIs(build_info["dirty"], False)
+            with tarfile.open(delivery, "r:gz") as archive:
+                names = set(archive.getnames())
+            self.assertFalse(
+                any(any(f"/{part}/" in f"/{name}/" for part in (".runtime", ".dsh", ".ssh")) for name in names)
+            )
+
+    def test_sensitive_runtime_directories_cannot_enter_sdist(self) -> None:
+        sensitive = {
+            "integrations/dsh_ecology_plugin/.runtime/auth.json": (
+                '{"token": "cornflower"}\n'
+            ),
+            "integrations/dsh_ecology_plugin/.dsh/settings.yml": "password: meadow\n",
+            "integrations/dsh_ecology_plugin/.ssh/config.json": (
+                '{"host": "example.invalid"}\n'
+            ),
+        }
+        try:
+            for relative, content in sensitive.items():
+                path = ROOT / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            with tempfile.TemporaryDirectory(
+                prefix="ecologyrsi-sensitive-sdist-"
+            ) as directory:
+                result = subprocess.run(
+                    ["uv", "build", "--sdist", "--out-dir", directory, str(ROOT)],
+                    cwd=ROOT,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                sdist = next(Path(directory).glob("*.tar.gz"))
+                with tarfile.open(sdist, "r:gz") as archive:
+                    names = set(archive.getnames())
+                self.assertFalse(any(any(name.endswith(f"/{relative}") for name in names) for relative in sensitive))
+                verified = self._verify_sdist(sdist)
+                self.assertEqual(
+                    verified.returncode, 0, verified.stdout + verified.stderr
+                )
+        finally:
+            for relative in sensitive:
+                path = ROOT / relative
+                path.unlink(missing_ok=True)
+                path.parent.rmdir()
+
+    def test_sdist_verifier_rejects_unexpected_sensitive_member(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-sdist-leak-") as directory:
+            temporary = Path(directory)
+            built = subprocess.run(
+                ["uv", "build", "--sdist", "--out-dir", str(temporary), str(ROOT)],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            sdist = next(temporary.glob("*.tar.gz"))
+            leaked = temporary / "leaked.tar.gz"
+            self._copy_tar_with_extra_file(
+                sdist,
+                leaked,
+                f"ecologyrsi_dsh-{project_version(ROOT)}/"
+                "integrations/dsh_ecology_plugin/.runtime/auth.json",
+                b'{"token": "cornflower"}\n',
+            )
+
+            verified = self._verify_sdist(leaked)
+
+            self.assertNotEqual(verified.returncode, 0)
+            self.assertIn("sensitive member", verified.stdout + verified.stderr)
+
+    def test_project_version_rejects_symlink_before_reading(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-version-symlink-") as directory:
+            fixture = Path(directory)
+            external = fixture / "external.toml"
+            external.write_text(
+                '[project]\nname = "ecologyrsi-dsh"\nversion = "0.3.33"\n',
+                encoding="utf-8",
+            )
+            (fixture / "pyproject.toml").symlink_to(external)
+
+            with self.assertRaisesRegex(RuntimeError, "symlink.*pyproject.toml"):
+                project_version(fixture)
+
+    def test_artifact_verifier_rejects_distributed_plugin_symlink_first(self) -> None:
+        version = project_version(ROOT)
+        source_plugin = next(
+            (ROOT / "integrations/dsh_ecology_plugin/dist").glob("*.tgz")
+        )
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-plugin-artifact-link-") as directory:
+            dist = Path(directory)
+            (dist / f"ecologyrsi_dsh-{version}-py3-none-any.whl").write_bytes(
+                b"not-a-wheel"
+            )
+            (dist / f"ecologyrsi_dsh-{version}.tar.gz").write_bytes(b"not-an-sdist")
+            (dist / f"ecologyrsi-dsh-{version}-delivery.tar.gz").write_bytes(
+                b"not-a-delivery"
+            )
+            (dist / "BUILD-INFO.json").write_text("{}\n", encoding="utf-8")
+            (dist / source_plugin.name).symlink_to(source_plugin)
+
+            verified = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python",
+                    str(ROOT / "scripts/verify_artifacts.py"),
+                    str(dist),
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(verified.returncode, 0)
+            self.assertIn(
+                "npm plugin archive is a symlink",
+                verified.stdout + verified.stderr,
+            )
+
+    def test_sdist_verifier_rejects_link_member_before_extracting(self) -> None:
+        version = project_version(ROOT)
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-sdist-link-") as directory:
+            sdist = Path(directory) / f"ecologyrsi_dsh-{version}.tar.gz"
+            with tarfile.open(sdist, "w:gz") as archive:
+                member = tarfile.TarInfo(f"ecologyrsi_dsh-{version}/README.md")
+                member.type = tarfile.SYMTYPE
+                member.linkname = "../../outside"
+                archive.addfile(member)
+
+            verified = self._verify_sdist(sdist)
+
+            self.assertNotEqual(verified.returncode, 0)
+            self.assertIn("sdist contains linked member", verified.stdout + verified.stderr)
+
+    def test_delivery_verifier_rejects_link_member_before_extracting(self) -> None:
+        version = project_version(ROOT)
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-delivery-link-") as directory:
+            temporary = Path(directory)
+            delivery = temporary / f"ecologyrsi-dsh-{version}-delivery.tar.gz"
+            with tarfile.open(delivery, "w:gz") as archive:
+                member = tarfile.TarInfo(f"ecologyrsi-dsh-{version}/README.md")
+                member.type = tarfile.LNKTYPE
+                member.linkname = f"ecologyrsi-dsh-{version}/outside"
+                archive.addfile(member)
+            placeholders = [
+                temporary / f"ecologyrsi_dsh-{version}-py3-none-any.whl",
+                temporary / f"ecologyrsi_dsh-{version}.tar.gz",
+                temporary / f"ecologyrsi-dsh-evolution-plugin-{version}.tgz",
+                temporary / "BUILD-INFO.json",
+            ]
+            for path in placeholders:
+                path.write_bytes(b"placeholder")
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(ROOT / "scripts")
+            verified = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python",
+                    "-c",
+                    (
+                        "from pathlib import Path; from verify_artifacts import "
+                        "verify_delivery_archive; import sys; "
+                        "verify_delivery_archive(*map(Path, sys.argv[1:6]), "
+                        "sys.argv[6], Path(sys.argv[7]))"
+                    ),
+                    str(delivery),
+                    *(str(path) for path in placeholders),
+                    version,
+                    str(ROOT),
+                ],
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(verified.returncode, 0)
+            self.assertIn(
+                "delivery archive contains linked member",
+                verified.stdout + verified.stderr,
+            )
+
     def test_ignored_credentials_cannot_enter_clean_delivery(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ecologyrsi-credential-fixture-") as directory:
             fixture = Path(directory)
@@ -741,6 +992,45 @@ class DeliveryScriptTests(unittest.TestCase):
             text=True,
         ).stdout.strip()
         self.assertIn(version, {"(3, 10)", "(3, 11)", "(3, 12)"})
+
+    @staticmethod
+    def _copy_tar_with_extra_file(
+        source: Path, destination: Path, name: str, data: bytes
+    ) -> None:
+        with tarfile.open(source, "r:gz") as incoming:
+            with tarfile.open(destination, "w:gz") as outgoing:
+                for member in incoming.getmembers():
+                    handle = incoming.extractfile(member) if member.isfile() else None
+                    outgoing.addfile(member, handle)
+                extra = tarfile.TarInfo(name)
+                extra.size = len(data)
+                outgoing.addfile(extra, io.BytesIO(data))
+
+    @staticmethod
+    def _verify_sdist(sdist: Path) -> subprocess.CompletedProcess[str]:
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(ROOT / "scripts")
+        return subprocess.run(
+            [
+                "uv",
+                "run",
+                "--no-project",
+                "python",
+                "-c",
+                (
+                    "from pathlib import Path; from verify_artifacts import "
+                    "verify_sdist; import sys; verify_sdist(Path(sys.argv[1]), "
+                    "Path(sys.argv[2]), sys.argv[3])"
+                ),
+                str(sdist),
+                str(ROOT),
+                project_version(ROOT),
+            ],
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
 
     @staticmethod
     def _write_minimal_source_fixture(root: Path, *, version: str) -> Path:

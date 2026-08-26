@@ -10,20 +10,17 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+try:
+    from .release_safety import checked_lstat, require_regular_file
+except ImportError:
+    from release_safety import checked_lstat, require_regular_file
+
 LEGAL_FILES = ("LICENSE", "NOTICE")
-
-
-def _reject_symlink_components(root: Path, path: Path, label: str) -> None:
-    current = root
-    for part in path.relative_to(root).parts:
-        current /= part
-        if current.is_symlink():
-            raise RuntimeError(f"symlink is not allowed for {label}: {current}")
 
 
 def build_plugin(root: Path, output_dir: Path) -> Path:
     package_root = root / "integrations/dsh_ecology_plugin"
-    _reject_symlink_components(root, package_root, "DSH plugin source directory")
+    checked_lstat(root, package_root, "DSH plugin source directory")
     package_json = package_root / "package.json"
     selected_symlinks = [
         path for path in package_root.rglob("*") if path.is_symlink()
@@ -32,7 +29,7 @@ def build_plugin(root: Path, output_dir: Path) -> Path:
         raise RuntimeError(
             f"symlink is not allowed in DSH plugin source: {selected_symlinks[0]}"
         )
-    _reject_symlink_components(root, package_json, "package.json")
+    require_regular_file(root, package_json, "package.json")
     package = json.loads(package_json.read_text(encoding="utf-8"))
     patterns = package.get("files")
     if not isinstance(patterns, list) or not all(
@@ -52,11 +49,8 @@ def build_plugin(root: Path, output_dir: Path) -> Path:
             if pattern in LEGAL_FILES:
                 continue
             for source in package_root.glob(pattern):
-                if source.is_symlink():
-                    raise RuntimeError(
-                        f"symlink is not allowed in DSH plugin source: {source}"
-                    )
-                if not source.is_file():
+                source_stat = checked_lstat(root, source, "DSH plugin source")
+                if source_stat is None or not source.is_file():
                     continue
                 relative = source.relative_to(package_root)
                 destination = staging / relative
@@ -64,7 +58,7 @@ def build_plugin(root: Path, output_dir: Path) -> Path:
                 shutil.copy2(source, destination)
         for legal_name in LEGAL_FILES:
             legal_source = root / legal_name
-            _reject_symlink_components(root, legal_source, "legal source")
+            require_regular_file(root, legal_source, "legal source")
             shutil.copy2(legal_source, staging / legal_name)
 
         result = subprocess.run(

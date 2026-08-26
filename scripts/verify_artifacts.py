@@ -9,6 +9,7 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -23,9 +24,15 @@ from urllib.request import urlopen
 
 from create_delivery_archive import (
     included_source_files,
+    is_sensitive_source,
     packed_plugin,
     project_version,
 )
+
+try:
+    from .release_safety import checked_lstat, require_regular_file
+except ImportError:
+    from release_safety import checked_lstat, require_regular_file
 
 INTERNAL_SOURCE_MARKERS = (
     "/docs/superpowers/",
@@ -38,6 +45,7 @@ def sha256_bytes(data: bytes) -> str:
 
 
 def sha256(path: Path) -> str:
+    require_regular_file(path.parent, path, "checksum input")
     return sha256_bytes(path.read_bytes())
 
 
@@ -64,17 +72,37 @@ def reject_internal_sources(names: set[str], label: str) -> None:
         raise RuntimeError(f"{label} contains internal source: {', '.join(leaked)}")
 
 
-def _reject_symlink_components(root: Path, path: Path, label: str) -> None:
-    current = root
-    for part in path.relative_to(root).parts:
-        current /= part
-        if current.is_symlink():
-            raise RuntimeError(f"{label} is a symlink: {current}")
+def _reject_tar_links(archive: tarfile.TarFile, label: str) -> list[tarfile.TarInfo]:
+    members = archive.getmembers()
+    linked = [member.name for member in members if member.issym() or member.islnk()]
+    if linked:
+        raise RuntimeError(f"{label} contains linked member: {', '.join(linked)}")
+    unsupported = [
+        member.name
+        for member in members
+        if not member.isfile() and not member.isdir()
+    ]
+    if unsupported:
+        raise RuntimeError(
+            f"{label} contains unsupported member: {', '.join(unsupported)}"
+        )
+    return members
 
 
-def _matching_member(archive: Any, member_name: str, source: Path, label: str) -> None:
-    if source.is_symlink():
-        raise RuntimeError(f"{label} source is a symlink: {source}")
+def _reject_sensitive_members(names: set[str], label: str) -> None:
+    sensitive = sorted(name for name in names if is_sensitive_source(Path(name)))
+    if sensitive:
+        raise RuntimeError(f"{label} contains sensitive member: {', '.join(sensitive)}")
+
+
+def _matching_member(
+    archive: Any,
+    member_name: str,
+    source_root: Path,
+    source: Path,
+    label: str,
+) -> None:
+    require_regular_file(source_root, source, f"{label} source")
     try:
         data = archive.read(member_name)
     except KeyError as exc:
@@ -84,6 +112,7 @@ def _matching_member(archive: Any, member_name: str, source: Path, label: str) -
 
 
 def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
+    require_regular_file(wheel.parent, wheel, "wheel archive")
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
         reject_internal_sources(names, "wheel")
@@ -164,7 +193,7 @@ def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
             if not source.is_file() or source.suffix not in {".py", ".json"}:
                 continue
             member_name = source.relative_to(source_root / "src").as_posix()
-            _matching_member(archive, member_name, source, "wheel")
+            _matching_member(archive, member_name, source_root, source, "wheel")
 
         data_root = f"ecologyrsi_dsh-{version}.data/data/share/ecologyrsi-dsh"
         wheel_sources = [source_root / "datasets/autonomous_greenhouse.json"]
@@ -192,15 +221,43 @@ def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
         wheel_sources += [source_root / "scripts/install_dsh_ecology_runtime.mjs"]
         for source in wheel_sources:
             relative = source.relative_to(source_root).as_posix()
-            _matching_member(archive, f"{data_root}/{relative}", source, "wheel")
+            _matching_member(
+                archive, f"{data_root}/{relative}", source_root, source, "wheel"
+            )
 
 
 def verify_sdist(sdist: Path, source_root: Path, version: str) -> None:
+    require_regular_file(sdist.parent, sdist, "sdist archive")
     with tarfile.open(sdist, "r:gz") as archive:
-        names = set(archive.getnames())
+        members = _reject_tar_links(archive, "sdist")
+        names = {member.name for member in members}
         reject_internal_sources(names, "sdist")
+        _reject_sensitive_members(names, "sdist")
         prefix = f"ecologyrsi_dsh-{version}"
-        for source in included_source_files(source_root):
+        sources = included_source_files(source_root)
+        expected_files = {
+            f"{prefix}/{source.relative_to(source_root).as_posix()}"
+            for source in sources
+            if source.relative_to(source_root).as_posix() != ".gitignore"
+        }
+        expected_files.update(
+            {
+                f"{prefix}/PKG-INFO",
+                f"{prefix}/setup.cfg",
+                f"{prefix}/src/ecologyrsi_dsh.egg-info/PKG-INFO",
+                f"{prefix}/src/ecologyrsi_dsh.egg-info/SOURCES.txt",
+                f"{prefix}/src/ecologyrsi_dsh.egg-info/dependency_links.txt",
+                f"{prefix}/src/ecologyrsi_dsh.egg-info/entry_points.txt",
+                f"{prefix}/src/ecologyrsi_dsh.egg-info/top_level.txt",
+            }
+        )
+        actual_files = {member.name for member in members if member.isfile()}
+        unexpected = sorted(actual_files - expected_files)
+        if unexpected:
+            raise RuntimeError(
+                "sdist contains unexpected source: " + ", ".join(unexpected)
+            )
+        for source in sources:
             relative = source.relative_to(source_root).as_posix()
             if relative == ".gitignore":
                 continue
@@ -289,9 +346,39 @@ def verify_delivery_archive(
     source_root: Path,
 ) -> None:
     prefix = f"ecologyrsi-dsh-{version}"
+    require_regular_file(delivery.parent, delivery, "delivery archive")
+    for artifact, label in (
+        (wheel, "wheel artifact"),
+        (sdist, "sdist artifact"),
+        (plugin, "npm plugin artifact"),
+        (build_info_path, "BUILD-INFO.json"),
+    ):
+        require_regular_file(artifact.parent, artifact, label)
     with tarfile.open(delivery, "r:gz") as archive:
-        names = set(archive.getnames())
+        members = _reject_tar_links(archive, "delivery archive")
+        names = {member.name for member in members}
         reject_internal_sources(names, "delivery archive")
+        _reject_sensitive_members(names, "delivery archive")
+        sources = included_source_files(source_root)
+        expected_names = {
+            f"{prefix}/{source.relative_to(source_root).as_posix()}"
+            for source in sources
+        }
+        expected_names.update(
+            {
+                f"{prefix}/artifacts/{artifact.name}"
+                for artifact in (wheel, sdist, plugin)
+            }
+        )
+        expected_names.update(
+            {f"{prefix}/BUILD-INFO.json", f"{prefix}/SHA256SUMS"}
+        )
+        unexpected = sorted(names - expected_names)
+        if unexpected:
+            raise RuntimeError(
+                "delivery archive contains unexpected member: "
+                + ", ".join(unexpected)
+            )
         assert_suffixes(
             names,
             (
@@ -337,7 +424,7 @@ def verify_delivery_archive(
             ),
             "delivery archive",
         )
-        for source in included_source_files(source_root):
+        for source in sources:
             relative = source.relative_to(source_root).as_posix()
             member = archive.extractfile(f"{prefix}/{relative}")
             if member is None:
@@ -370,13 +457,17 @@ def verify_delivery_archive(
 
 
 def verify_external_checksums(dist: Path, artifacts: tuple[Path, ...]) -> None:
-    sums = parse_checksums((dist / "SHA256SUMS").read_bytes())
+    sums_path = require_regular_file(
+        dist, dist / "SHA256SUMS", "external SHA256SUMS"
+    )
+    sums = parse_checksums(sums_path.read_bytes())
     for artifact in artifacts:
         if sha256(artifact) != sums.get(artifact.name):
             raise RuntimeError(f"external checksum mismatch: {artifact.name}")
 
 
 def verify_build_info(path: Path, version: str, source_root: Path) -> None:
+    require_regular_file(path.parent, path, "BUILD-INFO.json")
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("schema_version") != "ecologyrsi-dsh.build-info/1":
         raise RuntimeError("BUILD-INFO.json schema version mismatch")
@@ -407,35 +498,24 @@ def verify_build_info(path: Path, version: str, source_root: Path) -> None:
 
 
 def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
-    if plugin.is_symlink():
-        raise RuntimeError(f"npm plugin archive is a symlink: {plugin}")
+    require_regular_file(plugin.parent, plugin, "npm plugin archive")
     integration_root = source_root / "integrations/dsh_ecology_plugin"
-    _reject_symlink_components(
-        source_root, integration_root, "npm plugin source directory"
-    )
     package_json = integration_root / "package.json"
-    _reject_symlink_components(source_root, package_json, "npm package source")
+    require_regular_file(source_root, package_json, "npm package source")
     for legal_name in ("LICENSE", "NOTICE"):
         legal_source = source_root / legal_name
-        _reject_symlink_components(source_root, legal_source, "legal source")
+        require_regular_file(source_root, legal_source, "legal source")
     selected_symlinks = [
         path for path in integration_root.rglob("*") if path.is_symlink()
     ]
     if selected_symlinks:
         raise RuntimeError(f"npm plugin source is a symlink: {selected_symlinks[0]}")
     with tarfile.open(plugin, "r:gz") as archive:
-        linked_members = [
-            member.name
-            for member in archive.getmembers()
-            if member.issym() or member.islnk()
-        ]
-        if linked_members:
-            raise RuntimeError(
-                "npm plugin contains linked member: " + ", ".join(linked_members)
-            )
-        names = set(archive.getnames())
+        members = _reject_tar_links(archive, "npm plugin")
+        names = {member.name for member in members}
+        _reject_sensitive_members(names, "npm plugin")
         file_names = {
-            member.name for member in archive.getmembers() if member.isfile()
+            member.name for member in members if member.isfile()
         }
         required = {
             "package/package.json",
@@ -495,9 +575,8 @@ def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
             if pattern in {"LICENSE", "NOTICE"}:
                 continue
             for source in integration_root.glob(pattern):
-                if source.is_symlink():
-                    raise RuntimeError(f"npm plugin source is a symlink: {source}")
-                if source.is_file() and not source.is_symlink():
+                require_regular_file(source_root, source, "npm plugin source")
+                if source.is_file():
                     relative = source.relative_to(integration_root).as_posix()
                     expected_sources[f"package/{relative}"] = source
         missing_selected = sorted(set(expected_sources) - file_names)
@@ -512,6 +591,7 @@ def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
                 "npm plugin contains unselected source: " + ", ".join(unexpected)
             )
         for member_name, source in expected_sources.items():
+            require_regular_file(source_root, source, "npm plugin source")
             member = archive.extractfile(member_name)
             if member is None or member.read() != source.read_bytes():
                 raise RuntimeError(f"npm plugin is stale: {member_name}")
@@ -738,7 +818,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dist", type=Path)
     args = parser.parse_args()
-    dist = args.dist.resolve()
+    dist = args.dist.absolute()
+    dist_stat = checked_lstat(dist.parent, dist, "artifact directory")
+    if dist_stat is None or not stat.S_ISDIR(dist_stat.st_mode):
+        raise RuntimeError(f"artifact directory is not a directory: {dist}")
     source_root = Path(__file__).resolve().parents[1]
     expected_version = project_version(source_root)
     wheel = one(sorted(dist.glob("ecologyrsi_dsh-*.whl")), "wheel")
@@ -746,6 +829,11 @@ def main() -> int:
     delivery = one(sorted(dist.glob("ecologyrsi-dsh-*-delivery.tar.gz")), "delivery archive")
     plugin = one(sorted(dist.glob("ecologyrsi-dsh-evolution-plugin-*.tgz")), "npm plugin")
     build_info_path = one(sorted(dist.glob("BUILD-INFO.json")), "BUILD-INFO.json")
+    require_regular_file(dist, wheel, "wheel archive")
+    require_regular_file(dist, sdist, "sdist archive")
+    require_regular_file(dist, delivery, "delivery archive")
+    require_regular_file(dist, plugin, "npm plugin archive")
+    require_regular_file(dist, build_info_path, "BUILD-INFO.json")
     version = wheel.name.split("-")[1]
     if version != expected_version:
         raise RuntimeError(
@@ -757,12 +845,12 @@ def main() -> int:
             f"npm plugin filename {plugin.name!r} does not match version {version}"
         )
     source_plugin = packed_plugin(source_root, version)
+    verify_npm_plugin(plugin, version, source_root)
     if source_plugin.read_bytes() != plugin.read_bytes():
         raise RuntimeError("distributed npm plugin differs from nested source plugin")
 
     verify_wheel(wheel, version, source_root)
     verify_sdist(sdist, source_root, version)
-    verify_npm_plugin(plugin, version, source_root)
     verify_build_info(build_info_path, version, source_root)
     verify_delivery_archive(
         delivery,
