@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from typing import Iterator
 
 
+DEFAULT_SAMPLE_CONCURRENCY = 64
+MAX_SAMPLE_CONCURRENCY = 128
+HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK = 4
+
+
 @dataclass
 class _RunAdmissionState:
     limit: int
@@ -76,4 +81,9 @@ class RunSampleAdmission:
             }
 
 
-__all__ = ["RunSampleAdmission"]
+__all__ = [
+    "DEFAULT_SAMPLE_CONCURRENCY",
+    "HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK",
+    "MAX_SAMPLE_CONCURRENCY",
+    "RunSampleAdmission",
+]

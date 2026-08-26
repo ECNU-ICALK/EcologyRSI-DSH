@@ -226,8 +226,8 @@
 
   function normalizedSampleConcurrency(value) {
     var parsed = Math.floor(Number(value));
-    if (!Number.isFinite(parsed) || parsed < 1) { return 8; }
-    return Math.min(parsed, 8);
+    if (!Number.isFinite(parsed) || parsed < 1) { return sampleConcurrencyDefault; }
+    return Math.min(parsed, sampleConcurrencyMaximum);
   }
 
   function normalizedCandidateConcurrency(value) {

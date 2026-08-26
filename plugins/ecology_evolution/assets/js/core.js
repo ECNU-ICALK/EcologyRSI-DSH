@@ -4,6 +4,8 @@
   var $$ = function (selector) { return Array.prototype.slice.call(document.querySelectorAll(selector)); };
   var dataRequestTimeout = 30000;
   var evolutionCommandTimeout = 120000;
+  var sampleConcurrencyDefault = 64;
+  var sampleConcurrencyMaximum = 128;
   var query = new URLSearchParams(window.location.search);
 
   var statusLabels = {

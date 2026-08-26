@@ -4892,7 +4892,7 @@ class SampleExecutionTests(unittest.TestCase):
                 self.assertEqual(progress[0]["adaptive_split_trigger_count"], 0)
                 self.assertEqual(progress[0]["adaptive_split_count"], 0)
 
-    def test_registry_binds_run_and_frozen_limit_to_dsh_origin_admission(self):
+    def test_registry_binds_historical_and_max_run_limits_to_dsh_origin_admission(self):
         provider_calls: list[tuple[str, int]] = []
 
         @contextmanager
@@ -4916,34 +4916,59 @@ class SampleExecutionTests(unittest.TestCase):
             dsh_prediction_tool_binder=lambda *args, **kwargs: (args, kwargs),
             origin_admission_provider=provider,
         )
-        task = TaskManifest(
-            task_id="dsh-origin-admission",
-            objective="bind exact run sample admission",
-            domain_pack="greenhouse_cucumber_2018",
-            visible_datasets=("agc_cucumber_2018",),
-            metadata={
-                "sample_agent_mode": "dsh_native_workflow",
-                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
-                "sample_agent_batch_size": 16,
-                "sample_concurrency": 8,
-                "prediction_cells_per_origin": 1,
-                "strategy_model_id": "dsh/strategy",
-                "review_model_id": "dsh/review",
-            },
+        for limit in (8, 128):
+            with self.subTest(limit=limit):
+                task = TaskManifest(
+                    task_id=f"dsh-origin-admission-{limit}",
+                    objective="bind exact run sample admission",
+                    domain_pack="greenhouse_cucumber_2018",
+                    visible_datasets=("agc_cucumber_2018",),
+                    metadata={
+                        "sample_agent_mode": "dsh_native_workflow",
+                        "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                        "sample_agent_batch_size": 16,
+                        "sample_concurrency": limit,
+                        "prediction_cells_per_origin": 1,
+                        "strategy_model_id": "dsh/strategy",
+                        "review_model_id": "dsh/review",
+                    },
+                )
+
+                executor = registry._sample_executor_for_task(
+                    task,
+                    run_id=f"run:admission:{limit}",
+                    candidate_id=f"candidate:admission:{limit}",
+                    forecast_bundle_tool=lambda _requests: {},
+                )
+
+                self.assertIsNotNone(executor.origin_admission)
+                assert executor.origin_admission is not None
+                with executor.origin_admission():
+                    pass
+
+        self.assertEqual(
+            provider_calls,
+            [("run:admission:8", 8), ("run:admission:128", 128)],
         )
 
-        executor = registry._sample_executor_for_task(
-            task,
-            run_id="run:admission",
-            candidate_id="candidate:admission",
-            forecast_bundle_tool=lambda _requests: {},
-        )
+    def test_gateway_adapter_accepts_historical_and_max_sample_concurrency(self):
+        gateway = _SampleDecisionGatewayFake()
 
-        self.assertIsNotNone(executor.origin_admission)
-        assert executor.origin_admission is not None
-        with executor.origin_admission():
-            pass
-        self.assertEqual(provider_calls, [("run:admission", 8)])
+        for limit in (8, 128):
+            with self.subTest(limit=limit):
+                adapter = GatewaySampleCollaborationAdapter(
+                    gateway,
+                    strategy_model_id="strategy-model",
+                    sample_concurrency=limit,
+                )
+                self.assertEqual(adapter.sample_concurrency, limit)
+
+        with self.assertRaisesRegex(ValueError, "between 1 and 128"):
+            GatewaySampleCollaborationAdapter(
+                gateway,
+                strategy_model_id="strategy-model",
+                sample_concurrency=129,
+            )
 
     def test_registry_selects_gateway_executor_only_for_frozen_new_runs(self):
         gateway = _SampleDecisionGatewayFake()
@@ -4982,6 +5007,7 @@ class SampleExecutionTests(unittest.TestCase):
         )
         self.assertEqual(remote_executor.adapter.strategy_model_id, "strategy-model")
         self.assertEqual(remote_executor.adapter.microbatch_size, 64)
+        self.assertEqual(remote_executor.adapter.sample_concurrency, 4)
         self.assertTrue(remote_executor.adapter.remote_review_enabled)
         self.assertEqual(remote_executor.adapter.review_model_id, "review-model")
         self.assertEqual(

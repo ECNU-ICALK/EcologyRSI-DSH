@@ -741,7 +741,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     },
                     "samples_per_update": 450,
                     "candidate_concurrency": 3,
-                    "sample_concurrency": 3,
+                    "sample_concurrency": 128,
                     "sample_agent_batch_size": 16,
                     "auto_advance": 0,
                     "idempotency_key": "autonomous-runtime-explicit-sampling",
@@ -776,7 +776,6 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     ("samples_per_update", 4_501),
                     ("samples_per_update", 100_001),
                     ("candidate_concurrency", 9),
-                    ("sample_concurrency", 9),
                     ("sample_agent_batch_size", 129),
                 )
             ):
@@ -800,6 +799,28 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                         },
                     )
                 )
+            rejected_sample_concurrency = []
+            for index, value in enumerate((True, 0, -1, 129, "64")):
+                rejected_sample_concurrency.append(
+                    self.request(
+                        "/runs",
+                        "POST",
+                        {
+                            "domain_pack_id": "greenhouse_environment@1",
+                            "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                            "dataset_id": "agc_cucumber_2018",
+                            "strategy_model_id": "dsh-policy",
+                            "review_model_id": "dsh-judge",
+                            "autonomous_mode": True,
+                            "prediction_model_id": "greenhouse-exogenous-ridge@1",
+                            "evaluator_id": "greenhouse_multihorizon_time_forward@2",
+                            "budget": {"max_generations": 1, "max_candidates": 1},
+                            "sample_concurrency": value,
+                            "auto_advance": 0,
+                            "idempotency_key": f"invalid-sample-concurrency-{index}",
+                        },
+                    )
+                )
         self.assertEqual(status, 201, created)
         self.assertEqual(strict_status, 201, strict_created)
         self.assertEqual(explicit_status, 201, explicit_created)
@@ -809,6 +830,14 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
         self.assertTrue(
             all(status == 400 for status, _payload in rejected_sampling_controls),
             rejected_sampling_controls,
+        )
+        self.assertTrue(
+            all(
+                status == 400
+                and "between 1 and 128" in payload.get("error", "")
+                for status, payload in rejected_sample_concurrency
+            ),
+            rejected_sample_concurrency,
         )
         self.assertEqual(self.model_server.requests, [])  # type: ignore[attr-defined]
         self.assertEqual(
@@ -826,7 +855,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
             500,
         )
         self.assertEqual(
-            created["projection"]["configuration"]["sample_concurrency"], 8
+            created["projection"]["configuration"]["sample_concurrency"], 64
         )
         self.assertEqual(
             created["projection"]["configuration"]["candidate_concurrency"], 4
@@ -849,7 +878,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
             explicit_configuration["minimum_selection_samples_per_update"],
             1_521,
         )
-        self.assertEqual(explicit_configuration["sample_concurrency"], 3)
+        self.assertEqual(explicit_configuration["sample_concurrency"], 128)
         self.assertEqual(explicit_configuration["candidate_concurrency"], 3)
         self.assertEqual(explicit_configuration["sample_agent_batch_size"], 16)
         self.assertEqual(
@@ -904,7 +933,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
             state.task_manifest.metadata["fitness_profile_digest"],
             digest(state.task_manifest.metadata["fitness_profile"]),
         )
-        self.assertEqual(state.task_manifest.metadata["sample_concurrency"], 8)
+        self.assertEqual(state.task_manifest.metadata["sample_concurrency"], 64)
         self.assertEqual(state.task_manifest.metadata["candidate_concurrency"], 4)
         self.assertEqual(state.task_manifest.metadata["sample_agent_batch_size"], 64)
         self.assertEqual(

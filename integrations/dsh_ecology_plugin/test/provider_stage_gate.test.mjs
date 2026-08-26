@@ -3,6 +3,42 @@ import test from "node:test";
 
 import { ProviderStageGate } from "../lib/runtime/provider-stage-gate.js";
 
+test("provider stage gate defaults to and accepts exactly 128 in flight", async () => {
+  const gate = new ProviderStageGate({ minimumIntervalMs: 0 });
+  let active = 0;
+  let maximum = 0;
+  let release;
+  const hold = new Promise((resolve) => { release = resolve; });
+  const firstWave = Array.from({ length: 128 }, (_, index) => gate.run(
+    "pjlab",
+    async () => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await hold;
+      active -= 1;
+      return index;
+    },
+    { runId: "run-128" },
+  ));
+  let overflowStarted = false;
+  const overflow = gate.run(
+    "pjlab",
+    async () => { overflowStarted = true; },
+    { runId: "run-128" },
+  );
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(maximum, 128);
+  assert.equal(overflowStarted, false);
+  release();
+  await Promise.all([...firstWave, overflow]);
+
+  assert.throws(
+    () => new ProviderStageGate({ maxInFlight: 129 }),
+    /maxInFlight must be between 1 and 128/,
+  );
+});
+
 test("provider stage gate enforces the configured provider-wide concurrency", async () => {
   const gate = new ProviderStageGate({ minimumIntervalMs: 0, maxInFlight: 2 });
   let releaseFirst;

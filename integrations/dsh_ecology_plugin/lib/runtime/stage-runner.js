@@ -8,7 +8,10 @@ import {
 import { MAX_REQUEST_TIMEOUT_MS, SidecarClient } from "../sidecar/client.js";
 import { dshSessionMetrics } from "./agents.js";
 import { ChildBindingRegistry } from "./child-bindings.js";
-import { ProviderStageGate } from "./provider-stage-gate.js";
+import {
+  MAX_STRUCTURED_STAGE_IN_FLIGHT,
+  ProviderStageGate,
+} from "./provider-stage-gate.js";
 import {
   createStructuredDeadline,
   remainingStructuredDeadlineMs,
@@ -590,7 +593,7 @@ export class NativeStageRunner {
     researchStageTimeoutMs = 1_800_000,
     sampleCriticStageTimeoutMs = 600_000,
     structuredStageMinIntervalMs = 0,
-    structuredStageMaxInFlight = 8,
+    structuredStageMaxInFlight = MAX_STRUCTURED_STAGE_IN_FLIGHT,
     structuredStageFailureCooldownMs = 60_000,
     structuredStageMaxAttempts = 2,
     providerStageGate = null,

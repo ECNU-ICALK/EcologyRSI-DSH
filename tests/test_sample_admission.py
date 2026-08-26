@@ -92,6 +92,15 @@ class RunSampleAdmissionTests(unittest.TestCase):
             {"limit": 8, "active": 0, "waiting": 0},
         )
 
+    def test_exact_limit_sixty_four_with_sixty_five_callers(self) -> None:
+        _admission, maximum_active, errors = self._exercise_limit(
+            limit=64,
+            worker_groups=(65,),
+        )
+
+        self.assertEqual(maximum_active, 64)
+        self.assertEqual(errors, [])
+
     def test_exact_non_divisible_limit_three_with_eight_callers(self) -> None:
         _admission, maximum_active, errors = self._exercise_limit(
             limit=3,

@@ -528,7 +528,7 @@
       && predictionOriginsPerUpdate <= predictionOriginsPerUpdateMaximum();
     var executionParametersReady = Number.isInteger(candidateConcurrency) && candidateConcurrency >= 1 && candidateConcurrency <= 8
       && Number.isInteger(sampleAgentBatchSize) && sampleAgentBatchSize >= 1 && sampleAgentBatchSize <= 128
-      && Number.isInteger(sampleConcurrency) && sampleConcurrency >= 1 && sampleConcurrency <= 8;
+      && Number.isInteger(sampleConcurrency) && sampleConcurrency >= 1 && sampleConcurrency <= sampleConcurrencyMaximum;
     var separated = $("#policy-model-id").value && $("#judge-model-id").value && $("#policy-model-id").value !== $("#judge-model-id").value;
     var dshReady = (state.connection === "online" || state.usingDemo) && hasCapability("evolution.projection.read");
     var selectedDataset = selectedCatalogItem("datasets", "#dataset-id");

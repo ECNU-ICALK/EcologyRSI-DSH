@@ -1828,7 +1828,7 @@ modelSandbox.request = async (path, options) => {
   assert.equal(options.body.samples_per_update, 4500);
   assert.equal(options.body.candidate_concurrency, 4);
   assert.equal(options.body.sample_agent_batch_size, 64);
-  assert.equal(options.body.sample_concurrency, 8);
+  assert.equal(options.body.sample_concurrency, 64);
   return {
     projection: {
       run_id: "run:new-queued", status: "running", generation: 0, candidates_count: 0,
@@ -1836,7 +1836,7 @@ modelSandbox.request = async (path, options) => {
       budget: {max_generations: 2, candidates_per_generation: 3, max_candidates: 6},
       configuration: {
         dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a", review_model_id: "judge-a",
-        samples_per_update: 4500, candidate_concurrency: 4, sample_agent_batch_size: 64, sample_concurrency: 8,
+        samples_per_update: 4500, candidate_concurrency: 4, sample_agent_batch_size: 64, sample_concurrency: 64,
       },
     },
   };
@@ -1856,7 +1856,7 @@ assert.deepEqual(
 assert.equal(newlyQueuedRun.samples_per_update, 4500);
 assert.equal(newlyQueuedRun.candidate_concurrency, 4);
 assert.equal(newlyQueuedRun.sample_agent_batch_size, 64);
-assert.equal(newlyQueuedRun.sample_concurrency, 8);
+assert.equal(newlyQueuedRun.sample_concurrency, 64);
 assert.equal(modelSandbox.state.createStatus.state, "queued");
 assert.equal(modelSandbox.state.candidateSelectionPinned, false);
 assert.match(createToasts.at(-1), /已排队/);
@@ -2497,7 +2497,7 @@ const budgetNodes = {
   "#candidates-per-generation": makeControlNode("4"),
   "#samples-per-update": makeControlNode("500"),
   "#sample-agent-batch-size": makeControlNode("64"),
-  "#sample-concurrency": makeControlNode("8"),
+  "#sample-concurrency": makeControlNode("64"),
   "#max-candidates": makeControlNode("20"),
   "#max-candidates-help": makeControlNode(),
 };
@@ -2527,8 +2527,9 @@ assert.equal(budgetSandbox.normalizedPredictionOriginsPerUpdate("99999"), 11111)
 assert.equal(budgetSandbox.normalizedSampleAgentBatchSize("64"), 64);
 assert.equal(budgetSandbox.normalizedSampleAgentBatchSize("invalid"), 64);
 assert.equal(budgetSandbox.normalizedSampleConcurrency("8"), 8);
-assert.equal(budgetSandbox.normalizedSampleConcurrency("99"), 8);
-assert.equal(budgetSandbox.normalizedSampleConcurrency("invalid"), 8);
+assert.equal(budgetSandbox.normalizedSampleConcurrency("128"), 128);
+assert.equal(budgetSandbox.normalizedSampleConcurrency("129"), 128);
+assert.equal(budgetSandbox.normalizedSampleConcurrency("invalid"), 64);
 
 const parameterNodes = {
   "#max-generations": makeControlNode("5"),
@@ -2537,7 +2538,7 @@ const parameterNodes = {
   "#samples-per-update": makeControlNode("500"),
   "#sample-agent-batch-size": makeControlNode("64"),
   "#candidate-concurrency": makeControlNode("4"),
-  "#sample-concurrency": makeControlNode("8"),
+  "#sample-concurrency": makeControlNode("64"),
   "#parameter-summary-pill": makeControlNode(),
   "#agent-update-scope": makeControlNode(),
   "#parameter-budget-state": makeControlNode(),
@@ -2765,7 +2766,7 @@ assert.match(html, /id="candidates-per-generation"[^>]*value="4"/);
 assert.match(html, /<span>每次更新完整预测次数<\/span><input id="samples-per-update"[^>]*name="prediction_origins_per_update"[^>]*value="500"/);
 assert.match(html, /id="candidate-concurrency"[^>]*value="4"/);
 assert.match(html, /id="sample-agent-batch-size"[^>]*value="64"/);
-assert.match(html, /id="sample-concurrency"[^>]*value="8"/);
+assert.match(html, /id="sample-concurrency"[^>]*max="128"[^>]*value="64"/);
 assert.match(html, /id="max-candidates"[^>]*value="20"/);
 assert.doesNotMatch(html, /id="token-limit"/);
 assert.ok(html.includes("样本先按因果预测起点组成 origin wave"));

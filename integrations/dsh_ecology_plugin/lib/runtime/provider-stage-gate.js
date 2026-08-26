@@ -1,3 +1,5 @@
+export const MAX_STRUCTURED_STAGE_IN_FLIGHT = 128;
+
 function boundedDelay(value, name) {
   if (!Number.isSafeInteger(value) || value < 0 || value > 3_600_000) {
     throw new Error(`${name} must be an integer between 0 and 3600000`);
@@ -6,8 +8,14 @@ function boundedDelay(value, name) {
 }
 
 function boundedConcurrency(value) {
-  if (!Number.isSafeInteger(value) || value < 1 || value > 8) {
-    throw new Error("maxInFlight must be between 1 and 8");
+  if (
+    !Number.isSafeInteger(value)
+    || value < 1
+    || value > MAX_STRUCTURED_STAGE_IN_FLIGHT
+  ) {
+    throw new Error(
+      `maxInFlight must be between 1 and ${MAX_STRUCTURED_STAGE_IN_FLIGHT}`,
+    );
   }
   return value;
 }
@@ -58,7 +66,7 @@ export class ProviderStageGate {
   constructor({
     minimumIntervalMs = 0,
     failureCooldownMs = 30_000,
-    maxInFlight = 8,
+    maxInFlight = MAX_STRUCTURED_STAGE_IN_FLIGHT,
     now = Date.now,
     delay = sleep,
   } = {}) {

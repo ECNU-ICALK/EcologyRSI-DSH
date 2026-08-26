@@ -1,4 +1,5 @@
 import { validateLoopbackOrigin } from "./security.js";
+import { MAX_STRUCTURED_STAGE_IN_FLIGHT } from "./runtime/provider-stage-gate.js";
 import { validateStructuredTimeoutMs } from "./runtime/structured-deadline.js";
 
 export const DEFAULT_BACKEND_ORIGIN = "http://127.0.0.1:8777";
@@ -27,8 +28,14 @@ function nonNegativeInteger(value, fallback, name) {
 
 function boundedConcurrency(value, fallback, name) {
   const result = value == null ? fallback : value;
-  if (!Number.isSafeInteger(result) || result < 1 || result > 8) {
-    throw new Error(`${name} must be between 1 and 8`);
+  if (
+    !Number.isSafeInteger(result)
+    || result < 1
+    || result > MAX_STRUCTURED_STAGE_IN_FLIGHT
+  ) {
+    throw new Error(
+      `${name} must be between 1 and ${MAX_STRUCTURED_STAGE_IN_FLIGHT}`,
+    );
   }
   return result;
 }
@@ -76,7 +83,7 @@ export function resolvePluginConfig(config = {}, { defaultStaticRoot, env = proc
     ),
     structuredStageMaxInFlight: boundedConcurrency(
       config.structuredStageMaxInFlight,
-      8,
+      MAX_STRUCTURED_STAGE_IN_FLIGHT,
       "structuredStageMaxInFlight",
     ),
     structuredStageFailureCooldownMs: positiveInteger(

@@ -21,6 +21,10 @@ from time import monotonic
 from typing import Any, Protocol
 from uuid import uuid4
 
+from ..api.sample_admission import (
+    HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
+    MAX_SAMPLE_CONCURRENCY,
+)
 from ..core.errors import (
     dsh_native_runtime_error_in_chain,
     dsh_native_runtime_retryable,
@@ -51,8 +55,6 @@ _MAX_GATEWAY_PAYLOAD_BYTES = 4_000_000
 _MIN_GATEWAY_SPLIT_BATCH_SIZE = 8
 _MAX_GATEWAY_SPLIT_DEPTH = 4
 _DEFAULT_FINE_GRAINED_SPLIT_WAVE_SIZE = 16
-_MAX_SAMPLE_CONCURRENCY = 8
-_DEFAULT_SAMPLE_CONCURRENCY = 4
 _MAX_SAMPLE_OUTPUT_TOKENS = 8_192
 _TRUNCATION_RETRY_POLICY = "escalate_once@1"
 _PROGRESS_HEARTBEAT_SECONDS = 60.0
@@ -298,7 +300,7 @@ class GatewaySampleCollaborationAdapter:
         | None = None,
         tools: Sequence[GatewaySampleTool] = (),
         microbatch_size: int = _MAX_GATEWAY_BATCH_SIZE,
-        sample_concurrency: int = _DEFAULT_SAMPLE_CONCURRENCY,
+        sample_concurrency: int = HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
         minimum_split_batch_size: int | None = None,
         max_split_depth: int = _MAX_GATEWAY_SPLIT_DEPTH,
         progress_callback: SampleProgressCallback | None = None,
@@ -356,9 +358,12 @@ class GatewaySampleCollaborationAdapter:
         if (
             isinstance(sample_concurrency, bool)
             or not isinstance(sample_concurrency, int)
-            or not 1 <= sample_concurrency <= _MAX_SAMPLE_CONCURRENCY
+            or not 1 <= sample_concurrency <= MAX_SAMPLE_CONCURRENCY
         ):
-            raise ValueError("sample_concurrency must be between 1 and 8")
+            raise ValueError(
+                "sample_concurrency must be between 1 and "
+                f"{MAX_SAMPLE_CONCURRENCY}"
+            )
         self.sample_concurrency = sample_concurrency
         self._split_default_small_waves = minimum_split_batch_size is None
         if minimum_split_batch_size is None:

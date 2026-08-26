@@ -128,7 +128,7 @@
                   <label><span>候选并发数</span><input id="candidate-concurrency" name="candidate_concurrency" form="start-form" type="number" min="1" max="8" step="1" value="4" required><small>同一轮最多同时评测的候选数；每个候选仍使用独立 DSH 子会话和相同反馈样本集合。</small></label>
                   <label><span>每次更新完整预测次数</span><input id="samples-per-update" name="prediction_origins_per_update" form="start-form" type="number" min="169" max="11111" step="1" value="500" aria-describedby="samples-per-update-help" required><small id="samples-per-update-help">一次完整预测同时返回全部目标与时距；当前每次包含 9 个内部评分单元。</small></label>
                   <label><span>请求微批样本数</span><input id="sample-agent-batch-size" name="sample_agent_batch_size" form="start-form" type="number" min="1" max="128" step="1" value="64" required><small>样本先按因果预测起点组成 origin wave，同组超过该上限时才继续切分；实际请求数以运行进度为准。</small></label>
-                  <label><span>逐样本并发请求数</span><input id="sample-concurrency" name="sample_concurrency" form="start-form" type="number" min="1" max="8" step="1" value="8" required><small>同时在飞的独立样本请求上限，默认 8；不改变评测样本集合。</small></label>
+                  <label><span>逐样本并发请求数</span><input id="sample-concurrency" name="sample_concurrency" form="start-form" type="number" min="1" max="128" step="1" value="64" required><small>同时在飞的独立样本请求上限，默认 64；不改变评测样本集合。</small></label>
                   <label><span>候选总预算</span><input id="max-candidates" name="max_candidates" form="start-form" type="number" min="1" max="256" value="20" aria-describedby="max-candidates-help" required><small id="max-candidates-help">默认随轮数和每轮候选数同步；当前完整预算需要 20 个候选。</small></label>
                 </div>
                 <div class="parameter-switches">

@@ -63,7 +63,11 @@ from ..version import __version__
 from .auto_progress import AutoProgressManager
 from .dsh_tools import DshToolService
 from .projection import _state_payload
-from .sample_admission import RunSampleAdmission
+from .sample_admission import (
+    DEFAULT_SAMPLE_CONCURRENCY,
+    MAX_SAMPLE_CONCURRENCY,
+    RunSampleAdmission,
+)
 from .shared import (
     AUTO_ADVANCE_CONTINUOUS,
     _assert_http_scope,
@@ -82,8 +86,6 @@ _DEFAULT_REAL_RUN_TOKEN_LIMIT = 100_000_000
 _REAL_RUN_TOKEN_RESERVATION_PER_CALL = 262_144
 _SAMPLE_TOKEN_BUDGET_POLICY = "hard_gateway_call_reservation@1"
 _SAMPLE_TOKEN_BUDGET_SCOPE = "sample_agent_gateway_calls_only@1"
-_DEFAULT_REAL_SAMPLE_CONCURRENCY = 8
-_MAX_REAL_SAMPLE_CONCURRENCY = 8
 _DEFAULT_REAL_CANDIDATE_CONCURRENCY = 4
 _MAX_REAL_CANDIDATE_CONCURRENCY = 8
 _DEFAULT_SAMPLES_PER_UPDATE = 1_600
@@ -1450,10 +1452,10 @@ class EvolutionRequestHandler(
                     sample_concurrency = _request_integer(
                         body["sample_concurrency"], "sample_concurrency", minimum=1
                     )
-                    if sample_concurrency > _MAX_REAL_SAMPLE_CONCURRENCY:
+                    if sample_concurrency > MAX_SAMPLE_CONCURRENCY:
                         raise ValueError(
                             "sample_concurrency must be between 1 and "
-                            f"{_MAX_REAL_SAMPLE_CONCURRENCY}"
+                            f"{MAX_SAMPLE_CONCURRENCY}"
                         )
                     metadata["sample_concurrency"] = sample_concurrency
                 # Older/plugin-generated requests may include the optional
@@ -2373,15 +2375,15 @@ class EvolutionRequestHandler(
                     f"{_MAX_REAL_CANDIDATE_CONCURRENCY}"
                 )
             if sample_concurrency is None:
-                sample_concurrency = _DEFAULT_REAL_SAMPLE_CONCURRENCY
+                sample_concurrency = DEFAULT_SAMPLE_CONCURRENCY
             if (
                 isinstance(sample_concurrency, bool)
                 or not isinstance(sample_concurrency, int)
-                or not 1 <= sample_concurrency <= _MAX_REAL_SAMPLE_CONCURRENCY
+                or not 1 <= sample_concurrency <= MAX_SAMPLE_CONCURRENCY
             ):
                 raise ValueError(
                     "sample_concurrency must be an integer between 1 and "
-                    f"{_MAX_REAL_SAMPLE_CONCURRENCY}"
+                    f"{MAX_SAMPLE_CONCURRENCY}"
                 )
             if samples_per_update is None:
                 samples_per_update = (

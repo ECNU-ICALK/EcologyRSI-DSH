@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from statistics import fmean
 from typing import Any
 
+from ..api.sample_admission import (
+    HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
+    MAX_SAMPLE_CONCURRENCY,
+)
 from ..core.models import (
     Candidate,
     Evaluation,
@@ -875,7 +879,10 @@ class EvaluatorRegistry:
                     "DSH-native sample execution requires an agent prediction-tool binder"
                 )
             raw_batch_size = task.metadata.get("sample_agent_batch_size", 128)
-            raw_concurrency = task.metadata.get("sample_concurrency", 4)
+            raw_concurrency = task.metadata.get(
+                "sample_concurrency",
+                HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
+            )
             if (
                 isinstance(raw_batch_size, bool)
                 or not isinstance(raw_batch_size, int)
@@ -885,9 +892,12 @@ class EvaluatorRegistry:
             if (
                 isinstance(raw_concurrency, bool)
                 or not isinstance(raw_concurrency, int)
-                or not 1 <= raw_concurrency <= 8
+                or not 1 <= raw_concurrency <= MAX_SAMPLE_CONCURRENCY
             ):
-                raise ValueError("DSH sample concurrency must be between 1 and 8")
+                raise ValueError(
+                    "DSH sample concurrency must be between 1 and "
+                    f"{MAX_SAMPLE_CONCURRENCY}"
+                )
             adapter = DshSampleCollaborationAdapter(
                 run_id=run_id,
                 runtime_provider=self.dsh_runtime_provider,
@@ -947,13 +957,19 @@ class EvaluatorRegistry:
             raise ValueError(
                 "sample_agent_batch_size must be an integer between 1 and 128"
             )
-        raw_concurrency = task.metadata.get("sample_concurrency", 4)
+        raw_concurrency = task.metadata.get(
+            "sample_concurrency",
+            HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
+        )
         if (
             isinstance(raw_concurrency, bool)
             or not isinstance(raw_concurrency, int)
-            or not 1 <= raw_concurrency <= 8
+            or not 1 <= raw_concurrency <= MAX_SAMPLE_CONCURRENCY
         ):
-            raise ValueError("sample_concurrency must be an integer between 1 and 8")
+            raise ValueError(
+                "sample_concurrency must be an integer between 1 and "
+                f"{MAX_SAMPLE_CONCURRENCY}"
+            )
         review_model_id = str(
             task.metadata.get("review_model_id") or ""
         ).strip()
@@ -2253,7 +2269,8 @@ class EvaluatorRegistry:
                     "sample_agent_batch_size", 128
                 ),
                 "sample_concurrency": task.metadata.get(
-                    "sample_concurrency", 4
+                    "sample_concurrency",
+                    HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
                 ),
                 "candidate_concurrency": task.metadata.get(
                     "candidate_concurrency", 1
@@ -3033,7 +3050,8 @@ class EvaluatorRegistry:
                     "sample_agent_batch_size", 128
                 ),
                 "sample_concurrency": task.metadata.get(
-                    "sample_concurrency", 4
+                    "sample_concurrency",
+                    HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
                 ),
                 "candidate_concurrency": task.metadata.get(
                     "candidate_concurrency", 1
