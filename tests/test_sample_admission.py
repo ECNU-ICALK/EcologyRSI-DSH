@@ -112,7 +112,7 @@ class RunSampleAdmissionTests(unittest.TestCase):
         self.assertEqual(maximum_active, 8)
         self.assertEqual(errors, [])
 
-    def test_configured_sixty_four_uses_adaptive_slow_start_without_a_burst(self) -> None:
+    def test_configured_sixty_four_uses_additive_ramp_without_a_burst(self) -> None:
         admission = RunSampleAdmission()
 
         with admission.admit("run:adaptive", 64):
@@ -126,7 +126,21 @@ class RunSampleAdmissionTests(unittest.TestCase):
                 pass
         self.assertEqual(
             admission.snapshot("run:adaptive")["adaptive_limit"],
-            16,
+            9,
+        )
+
+    def test_replayed_successes_cannot_exponentially_jump_to_configured_limit(
+        self,
+    ) -> None:
+        admission = RunSampleAdmission()
+
+        for _ in range(204):
+            with admission.admit("run:replayed", 64):
+                pass
+
+        self.assertEqual(
+            admission.snapshot("run:replayed")["adaptive_limit"],
+            22,
         )
 
     def test_retryable_provider_failure_reduces_adaptive_limit_once(self) -> None:
@@ -136,7 +150,7 @@ class RunSampleAdmissionTests(unittest.TestCase):
                 pass
         self.assertEqual(
             admission.snapshot("run:congested")["adaptive_limit"],
-            16,
+            9,
         )
 
         with self.assertRaises(DshNativeRuntimeUnavailableError):
@@ -149,14 +163,15 @@ class RunSampleAdmissionTests(unittest.TestCase):
 
         snapshot = admission.snapshot("run:congested")
         self.assertEqual(snapshot["limit"], 64)
-        self.assertEqual(snapshot["adaptive_limit"], 8)
+        self.assertEqual(snapshot["adaptive_limit"], 4)
         self.assertEqual(snapshot["congestion_events"], 1)
 
     def test_overlapping_failure_reduces_after_success_grows_window(self) -> None:
         admission = RunSampleAdmission()
-        for _ in range(8):
+        for _ in range(sum(range(8, 16))):
             with admission.admit("run:mixed", 64):
                 pass
+
         for _ in range(15):
             with admission.admit("run:mixed", 64):
                 pass
@@ -168,7 +183,7 @@ class RunSampleAdmissionTests(unittest.TestCase):
         successful.__exit__(None, None, None)
         self.assertEqual(
             admission.snapshot("run:mixed")["adaptive_limit"],
-            32,
+            17,
         )
 
         error = DshNativeRuntimeUnavailableError(
@@ -181,7 +196,7 @@ class RunSampleAdmissionTests(unittest.TestCase):
         )
 
         snapshot = admission.snapshot("run:mixed")
-        self.assertEqual(snapshot["adaptive_limit"], 16)
+        self.assertEqual(snapshot["adaptive_limit"], 8)
         self.assertEqual(snapshot["congestion_events"], 1)
 
     def test_exact_non_divisible_limit_three_with_eight_callers(self) -> None:

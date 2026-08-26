@@ -42,7 +42,6 @@ class _RunAdmissionState:
     congestion_events: int = 0
     adjustment_epoch: int = 0
     congestion_epoch: int = 0
-    slow_start: bool = True
 
 
 class RunSampleAdmission:
@@ -102,7 +101,6 @@ class RunSampleAdmission:
                     state.adaptive_limit = max(1, state.adaptive_limit // 2)
                     state.successful_since_adjustment = 0
                     state.congestion_events += 1
-                    state.slow_start = False
                     state.adjustment_epoch += 1
                     state.congestion_epoch += 1
                 self._condition.notify_all()
@@ -119,11 +117,7 @@ class RunSampleAdmission:
                     ):
                         state.adaptive_limit = min(
                             state.limit,
-                            (
-                                state.adaptive_limit * 2
-                                if state.slow_start
-                                else state.adaptive_limit + 1
-                            ),
+                            state.adaptive_limit + 1,
                         )
                         state.successful_since_adjustment = 0
                         state.adjustment_epoch += 1
