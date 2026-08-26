@@ -225,6 +225,71 @@ class AutoProgressHTTPTests(unittest.TestCase):
         self.assertEqual(retry_class, "dsh_native_runtime")
         self.assertEqual(error_code, "dsh_native_runtime_http_error")
 
+    def test_untrusted_dsh_error_code_never_reaches_ledger_or_public_export(
+        self,
+    ) -> None:
+        secret = "sk_live_abc123credential"
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "untrusted-dsh-retry-error-code",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        with self.server.mutation_lock:
+            self.server.director.start_run(run_id)
+        outage = DshNativeRuntimeUnavailableError(
+            "DSH returned an untrusted remote error code",
+            error_code=secret,
+            status_code=502,
+        )
+
+        with (
+            patch.object(
+                auto_progress_module,
+                "execute_generation",
+                side_effect=outage,
+            ),
+            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
+        ):
+            self.assertTrue(self.server.auto_progress._run_one_generation(run_id))
+
+        state = self.server.director.state(run_id)
+        retry = next(
+            event
+            for event in reversed(state.events)
+            if event.kind == "GatewayRetryScheduled"
+        )
+        self.assertEqual(
+            retry.payload["last_error_code"],
+            "dsh_native_runtime_unavailable",
+        )
+        with sqlite3.connect(Path(self.directory.name) / "events.sqlite3") as database:
+            stored_payloads = database.execute(
+                "SELECT payload_json FROM evolution_events WHERE run_id = ?",
+                (run_id,),
+            ).fetchall()
+        projection = self.request(f"/runs/{run_id}")[1]
+        exported_events = self.request(f"/runs/{run_id}/events")[1]
+        exposed = json.dumps(
+            {
+                "database": stored_payloads,
+                "projection": projection,
+                "events": exported_events,
+            }
+        )
+        self.assertNotIn(secret, exposed)
+
     def test_retry_backoff_does_not_mix_durable_failure_classes(self) -> None:
         status, created = self.request(
             "/runs",

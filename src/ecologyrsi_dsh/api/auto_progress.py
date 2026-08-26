@@ -32,6 +32,7 @@ from ..core.errors import (
     dsh_native_runtime_retryable,
 )
 from ..core.redaction import public_exception_summary
+from ..core.state import gateway_retry_error_code
 from ..evaluators.sample_execution import SampleResultCallbackError
 from ..evolution.batches import ResearchResponseContractError
 from ..integrations.model_gateway import gateway_error_in_chain
@@ -1392,17 +1393,6 @@ def _parse_retry_at(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _safe_retry_error_code(value: Any, *, fallback: str) -> str:
-    normalized = str(value or "").strip().lower()
-    if (
-        normalized
-        and len(normalized) <= 80
-        and normalized.replace("_", "").replace("-", "").isalnum()
-    ):
-        return normalized
-    return fallback
-
-
 def _retry_class_and_error_code(
     exc: BaseException | None,
     *,
@@ -1416,18 +1406,18 @@ def _retry_class_and_error_code(
     if dsh_error is not None:
         return (
             "dsh_native_runtime",
-            _safe_retry_error_code(
+            gateway_retry_error_code(
+                "dsh_native_runtime",
                 getattr(dsh_error, "error_code", None),
-                fallback="dsh_native_runtime_unavailable",
             ),
         )
     gateway_error = gateway_error_in_chain(exc) if exc is not None else None
     if gateway_error is not None:
         return (
             "model_gateway",
-            _safe_retry_error_code(
+            gateway_retry_error_code(
+                "model_gateway",
                 getattr(gateway_error, "error_code", None),
-                fallback="gateway_response_error",
             ),
         )
     if (

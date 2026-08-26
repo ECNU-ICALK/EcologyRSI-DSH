@@ -214,3 +214,38 @@ unrelated full-repository expansion during final handoff.
 No plan, spec, progress, Task 3/4 implementation, production service, port,
 database, or active run was modified. No automatic half-open probe was added;
 explicit resume remains the only operator authorization for a new epoch.
+
+## Fix Round 1/5 — replayable pause evidence and owned error codes
+
+Base: `803a2af4dfdf6a169c2b1c3c05470800f37ea4e5`
+
+- Every circuit pause now persists `pause_trigger` as exactly
+  `failure_limit`, `epoch_elapsed`, or `retry_deadline_reaches_epoch`, plus the
+  configured epoch seconds, exact epoch deadline, and proposed retry time.
+  Replay verifies the selected predicate and its priority, rejecting a
+  count-2/limit-6 pause without evidence and inconsistent trigger evidence.
+- Retry error codes use one per-class Host-owned allowlist and fixed generic
+  mapping at the auto-progress boundary and again at the director append
+  boundary. Replay independently rejects unowned codes. The token-shaped
+  `sk_live_abc123credential` regression proves the value is absent from the
+  SQLite event payload, run projection, and public event export.
+
+The new focused tests were first run against `803a2af4` and produced the
+intended RED result: 8 tests, 5 failures and 3 errors. Missing trigger fields,
+the accepted forged pause, and the raw token-shaped error code accounted for
+all failures. After the minimal implementation the same 8 tests passed.
+
+Final Task 5 focused verification:
+
+```bash
+.venv/bin/python -m unittest \
+  tests.test_gateway_retry_circuit tests.test_auto_progress -v
+```
+
+```text
+Ran 82 tests in 26.154s
+OK
+```
+
+`node plugins/ecology_evolution/test/smoke.mjs`, Python `compileall`, and
+`git diff --check` also exited 0. No unrelated full-repository suite was run.

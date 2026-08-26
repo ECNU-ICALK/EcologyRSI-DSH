@@ -81,6 +81,7 @@ from .exposure_registry import (
 from .state import (
     DSH_NATIVE_EVOLUTION_PROTOCOL,
     RunState,
+    gateway_retry_error_code,
     is_dsh_native_protocol,
     persisted_genome_from_proposal,
     project_run_state,
@@ -745,9 +746,9 @@ class EvolutionDirector:
             or float(delay_seconds) < 0
         ):
             raise ValueError("delay_seconds must be a finite non-negative number")
-        normalized_error_code = _gateway_retry_machine_code(
+        normalized_error_code = gateway_retry_error_code(
+            normalized_retry_class,
             last_error_code,
-            fallback=f"{normalized_retry_class}_unavailable",
         )
         retry_event_id = f"{run_id}:gateway-retry:{normalized_failure_id}"
         pause_event_id = f"{run_id}:gateway-circuit:{normalized_failure_id}"
@@ -885,22 +886,25 @@ class EvolutionDirector:
                 0.0,
                 (last_failure_at - first_failure_at).total_seconds(),
             )
-            remaining_epoch_seconds = max(
-                0.0,
-                _GATEWAY_RETRY_EPOCH_SECONDS - elapsed_seconds,
-            )
             bounded_delay = min(
                 float(delay_seconds),
                 _GATEWAY_RETRY_MAX_DELAY_SECONDS,
             )
             first_failure_text = first_failure_at.isoformat()
             last_failure_text = last_failure_at.isoformat()
-            should_pause = (
-                consecutive_failures >= _GATEWAY_RETRY_LIMIT
-                or elapsed_seconds >= _GATEWAY_RETRY_EPOCH_SECONDS
-                or bounded_delay >= remaining_epoch_seconds
+            epoch_deadline_at = first_failure_at + timedelta(
+                seconds=_GATEWAY_RETRY_EPOCH_SECONDS
             )
-            if should_pause:
+            proposed_retry_at = last_failure_at + timedelta(seconds=bounded_delay)
+            if consecutive_failures >= _GATEWAY_RETRY_LIMIT:
+                pause_trigger = "failure_limit"
+            elif elapsed_seconds >= _GATEWAY_RETRY_EPOCH_SECONDS:
+                pause_trigger = "epoch_elapsed"
+            elif proposed_retry_at >= epoch_deadline_at:
+                pause_trigger = "retry_deadline_reaches_epoch"
+            else:
+                pause_trigger = None
+            if pause_trigger is not None:
                 kind = "RunPaused"
                 event_id = pause_event_id
                 payload = {
@@ -918,6 +922,10 @@ class EvolutionDirector:
                     "last_failure_at": last_failure_text,
                     "last_error_code": normalized_error_code,
                     "suggested_action": suggested_action,
+                    "pause_trigger": pause_trigger,
+                    "epoch_seconds": _GATEWAY_RETRY_EPOCH_SECONDS,
+                    "epoch_deadline_at": epoch_deadline_at.isoformat(),
+                    "proposed_retry_at": proposed_retry_at.isoformat(),
                 }
                 outcome = "paused"
             else:

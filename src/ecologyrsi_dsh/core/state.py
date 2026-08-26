@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 from typing import Any
 
@@ -530,6 +530,42 @@ _GATEWAY_RETRY_POLICIES = {
 _GATEWAY_CIRCUIT_CODES = frozenset(
     policy[0] for policy in _GATEWAY_RETRY_POLICIES.values()
 )
+_GATEWAY_RETRY_EPOCH_SECONDS = 30 * 60
+_GATEWAY_RETRY_ERROR_CODE_POLICIES = {
+    "model_gateway": (
+        frozenset(
+            {
+                "gateway_response_error",
+                "gateway_unavailable",
+                "output_truncated",
+                "research_algorithm_contract_invalid",
+                "response_choices_invalid",
+                "response_content_type_invalid",
+                "response_envelope_invalid",
+                "response_format_invalid",
+                "response_message_missing",
+                "final_content_missing",
+            }
+        ),
+        "gateway_response_error",
+    ),
+    "dsh_native_runtime": (
+        frozenset(
+            {
+                "dsh_native_runtime_http_error",
+                "dsh_native_runtime_not_ready",
+                "dsh_native_runtime_transport_error",
+                "dsh_native_runtime_unavailable",
+            }
+        ),
+        "dsh_native_runtime_unavailable",
+    ),
+    "research_timeout": (frozenset({"timeout"}), "timeout"),
+    "sample_result_persistence": (
+        frozenset({"sample_result_callback_error"}),
+        "sample_result_callback_error",
+    ),
+}
 _GATEWAY_RETRY_V2_FIELDS = frozenset(
     {
         "schema_version",
@@ -565,6 +601,10 @@ _GATEWAY_CIRCUIT_PAUSE_FIELDS = frozenset(
         "last_failure_at",
         "last_error_code",
         "suggested_action",
+        "pause_trigger",
+        "epoch_seconds",
+        "epoch_deadline_at",
+        "proposed_retry_at",
     }
 )
 _GATEWAY_CIRCUIT_RESUME_FIELDS = frozenset(
@@ -675,6 +715,17 @@ def _bounded_machine_code(value: Any) -> bool:
     )
 
 
+def gateway_retry_error_code(retry_class: str, value: Any) -> str:
+    """Map untrusted boundary codes onto a Host-owned per-class vocabulary."""
+
+    policy = _GATEWAY_RETRY_ERROR_CODE_POLICIES.get(retry_class)
+    if policy is None:
+        raise ValueError("unknown gateway retry class")
+    allowed, generic = policy
+    candidate = str(value or "").strip().lower()
+    return candidate if candidate in allowed else generic
+
+
 def _aware_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -729,6 +780,11 @@ def _validate_gateway_retry_v2_payload(payload: Mapping[str, Any]) -> None:
         or consecutive >= retry_limit
         or payload.get("attempt") != consecutive
         or not _bounded_machine_code(payload.get("last_error_code"))
+        or gateway_retry_error_code(
+            str(payload.get("retry_class")),
+            payload.get("last_error_code"),
+        )
+        != payload.get("last_error_code")
         or payload.get("error_code") != payload.get("last_error_code")
         or isinstance(delay, bool)
         or not isinstance(delay, (int, float))
@@ -760,6 +816,8 @@ def _validate_gateway_circuit_pause_payload(payload: Mapping[str, Any]) -> None:
     breaker_epoch = payload.get("breaker_epoch")
     consecutive = payload.get("consecutive_failures")
     retry_limit = payload.get("retry_limit")
+    pause_trigger = payload.get("pause_trigger")
+    epoch_seconds = payload.get("epoch_seconds")
     policy = _GATEWAY_RETRY_POLICIES.get(payload.get("retry_class"))
     if (
         policy is None
@@ -779,13 +837,52 @@ def _validate_gateway_circuit_pause_payload(payload: Mapping[str, Any]) -> None:
         or not 3 <= retry_limit <= 12
         or consecutive > retry_limit
         or not _bounded_machine_code(payload.get("last_error_code"))
+        or gateway_retry_error_code(
+            str(payload.get("retry_class")),
+            payload.get("last_error_code"),
+        )
+        != payload.get("last_error_code")
         or payload.get("suggested_action") != policy[1]
+        or pause_trigger
+        not in {
+            "failure_limit",
+            "epoch_elapsed",
+            "retry_deadline_reaches_epoch",
+        }
+        or isinstance(epoch_seconds, bool)
+        or not isinstance(epoch_seconds, int)
     ):
         raise ValueError("gateway circuit pause payload is invalid")
     first = _aware_timestamp(payload.get("first_failure_at"))
     last = _aware_timestamp(payload.get("last_failure_at"))
+    epoch_deadline = _aware_timestamp(payload.get("epoch_deadline_at"))
+    proposed_retry = _aware_timestamp(payload.get("proposed_retry_at"))
     if first is None or last is None or last < first:
         raise ValueError("gateway circuit pause payload is invalid")
+    elapsed_seconds = (last - first).total_seconds()
+    evidence_valid = (
+        epoch_seconds == _GATEWAY_RETRY_EPOCH_SECONDS
+        and epoch_deadline == first + timedelta(seconds=epoch_seconds)
+        and proposed_retry is not None
+        and proposed_retry >= last
+    )
+    if pause_trigger == "failure_limit":
+        evidence_valid = evidence_valid and consecutive == retry_limit
+    elif pause_trigger == "epoch_elapsed":
+        evidence_valid = (
+            evidence_valid
+            and consecutive < retry_limit
+            and elapsed_seconds >= epoch_seconds
+        )
+    else:
+        evidence_valid = (
+            evidence_valid
+            and consecutive < retry_limit
+            and elapsed_seconds < epoch_seconds
+            and proposed_retry >= epoch_deadline
+        )
+    if not evidence_valid:
+        raise ValueError("gateway circuit pause trigger evidence is invalid")
 
 
 def _validate_gateway_circuit_resume_payload(payload: Mapping[str, Any]) -> None:
