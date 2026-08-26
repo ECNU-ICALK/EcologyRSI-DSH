@@ -48,6 +48,15 @@ from ..knowledge.autonomous_cycle import (
 from ..knowledge.research_iteration import ResearchIteration
 from ..knowledge.program_registry import current_program_registry
 from .ledger import ConcurrentRunMutationError, Event, EventLedger
+from .retry_policy import (
+    GATEWAY_CIRCUIT_CODES,
+    GATEWAY_RETRY_CLASSES,
+    GATEWAY_RETRY_EPOCH_SECONDS,
+    GATEWAY_RETRY_LIMIT,
+    GATEWAY_RETRY_MAX_DELAY_SECONDS,
+    GATEWAY_RETRY_SCHEMA_VERSION,
+    retry_policy,
+)
 from .models import (
     Candidate,
     CandidateStatus,
@@ -125,44 +134,7 @@ _SAMPLE_RESULTS_START_SCHEMA_VERSION = (
 _SAMPLE_RESULTS_RESUME_SCHEMA_VERSION = (
     "ecologyrsi-dsh.evaluation-sample-results-resume/1"
 )
-_GATEWAY_RETRY_SCHEMA_VERSION = "ecologyrsi-dsh.gateway-retry-scheduled/2"
 _DSH_CONTINUITY_RESET_CONTRACT = "dsh_structured_success@1"
-_GATEWAY_RETRY_LIMIT = 6
-_GATEWAY_RETRY_EPOCH_SECONDS = 30 * 60
-_GATEWAY_RETRY_MAX_DELAY_SECONDS = 60 * 60
-_GATEWAY_RETRY_CLASSES = frozenset(
-    {
-        "model_gateway",
-        "dsh_native_runtime",
-        "research_timeout",
-        "sample_result_persistence",
-    }
-)
-_GATEWAY_RETRY_POLICIES = {
-    "model_gateway": (
-        "gateway_retry_circuit_open",
-        "check_gateway_then_resume",
-        "模型网关暂时不可用，已安排有界延迟重试。",
-    ),
-    "dsh_native_runtime": (
-        "dsh_runtime_retry_circuit_open",
-        "check_dsh_runtime_then_resume",
-        "DSH 智能体运行时暂时不可用，已安排有界延迟重试。",
-    ),
-    "research_timeout": (
-        "research_timeout_retry_circuit_open",
-        "check_gateway_then_resume",
-        "研究阶段模型请求超时，已安排有界延迟重试。",
-    ),
-    "sample_result_persistence": (
-        "sample_persistence_retry_circuit_open",
-        "check_persistence_then_resume",
-        "样本结果持久化暂时不可用，已安排有界延迟重试。",
-    ),
-}
-_GATEWAY_CIRCUIT_CODES = frozenset(
-    policy[0] for policy in _GATEWAY_RETRY_POLICIES.values()
-)
 _TARGET_EVALUATION_METRICS = frozenset(
     {
         "baseline_mae",
@@ -610,7 +582,7 @@ class EvolutionDirector:
                 )
                 if (
                     paused is not None
-                    and paused.payload.get("code") in _GATEWAY_CIRCUIT_CODES
+                    and paused.payload.get("code") in GATEWAY_CIRCUIT_CODES
                 ):
                     raise RuntimeError(
                         "gateway circuit requires an explicit resume"
@@ -676,7 +648,7 @@ class EvolutionDirector:
             )
             if (
                 paused is None
-                or paused.payload.get("code") not in _GATEWAY_CIRCUIT_CODES
+                or paused.payload.get("code") not in GATEWAY_CIRCUIT_CODES
             ):
                 return {}
             epoch = paused.payload.get("breaker_epoch")
@@ -732,11 +704,12 @@ class EvolutionDirector:
             retry_class,
             fallback="",
         )
-        if normalized_retry_class not in _GATEWAY_RETRY_CLASSES:
+        if normalized_retry_class not in GATEWAY_RETRY_CLASSES:
             raise ValueError("unknown gateway retry class")
-        circuit_code, suggested_action, retry_reason = _GATEWAY_RETRY_POLICIES[
-            normalized_retry_class
-        ]
+        policy = retry_policy(normalized_retry_class)
+        circuit_code = policy.circuit_code
+        suggested_action = policy.suggested_action
+        retry_reason = policy.public_reason
         normalized_failure_id = str(failure_id or "").strip().lower()
         if (
             len(normalized_failure_id) != 64
@@ -835,7 +808,7 @@ class EvolutionDirector:
                 event
                 for event in state.events
                 if event.kind == "GatewayRetryScheduled"
-                and event.payload.get("schema_version") == _GATEWAY_RETRY_SCHEMA_VERSION
+                and event.payload.get("schema_version") == GATEWAY_RETRY_SCHEMA_VERSION
                 and int(event.payload.get("run_incarnation", -1)) == run_incarnation
                 and int(event.payload.get("generation", -1)) == generation
                 and event.payload.get("stage") == normalized_stage
@@ -909,20 +882,20 @@ class EvolutionDirector:
             )
             bounded_delay = min(
                 float(delay_seconds),
-                _GATEWAY_RETRY_MAX_DELAY_SECONDS,
+                GATEWAY_RETRY_MAX_DELAY_SECONDS,
             )
             first_failure_text = first_failure_at.isoformat()
             last_failure_text = last_failure_at.isoformat()
             epoch_deadline_at = first_failure_at + timedelta(
-                seconds=_GATEWAY_RETRY_EPOCH_SECONDS
+                seconds=GATEWAY_RETRY_EPOCH_SECONDS
             )
             persisted_retry_delay = round(bounded_delay, 3)
             proposed_retry_at = last_failure_at + timedelta(
                 seconds=persisted_retry_delay
             )
-            if consecutive_failures >= _GATEWAY_RETRY_LIMIT:
+            if consecutive_failures >= GATEWAY_RETRY_LIMIT:
                 pause_trigger = "failure_limit"
-            elif elapsed_seconds >= _GATEWAY_RETRY_EPOCH_SECONDS:
+            elif elapsed_seconds >= GATEWAY_RETRY_EPOCH_SECONDS:
                 pause_trigger = "epoch_elapsed"
             elif proposed_retry_at >= epoch_deadline_at:
                 pause_trigger = "retry_deadline_reaches_epoch"
@@ -939,15 +912,15 @@ class EvolutionDirector:
                     "breaker_epoch": breaker_epoch,
                     "consecutive_failures": min(
                         consecutive_failures,
-                        _GATEWAY_RETRY_LIMIT,
+                        GATEWAY_RETRY_LIMIT,
                     ),
-                    "retry_limit": _GATEWAY_RETRY_LIMIT,
+                    "retry_limit": GATEWAY_RETRY_LIMIT,
                     "first_failure_at": first_failure_text,
                     "last_failure_at": last_failure_text,
                     "last_error_code": normalized_error_code,
                     "suggested_action": suggested_action,
                     "pause_trigger": pause_trigger,
-                    "epoch_seconds": _GATEWAY_RETRY_EPOCH_SECONDS,
+                    "epoch_seconds": GATEWAY_RETRY_EPOCH_SECONDS,
                     "epoch_deadline_at": epoch_deadline_at.isoformat(),
                     "proposed_retry_at": proposed_retry_at.isoformat(),
                     "retry_delay_seconds": persisted_retry_delay,
@@ -959,7 +932,7 @@ class EvolutionDirector:
                 kind = "GatewayRetryScheduled"
                 event_id = retry_event_id
                 payload = {
-                    "schema_version": _GATEWAY_RETRY_SCHEMA_VERSION,
+                    "schema_version": GATEWAY_RETRY_SCHEMA_VERSION,
                     "run_incarnation": run_incarnation,
                     "generation": generation,
                     "stage": normalized_stage,
@@ -968,7 +941,7 @@ class EvolutionDirector:
                     "failure_id": normalized_failure_id,
                     "attempt_anchor_seq": attempt_anchor_seq,
                     "consecutive_failures": consecutive_failures,
-                    "retry_limit": _GATEWAY_RETRY_LIMIT,
+                    "retry_limit": GATEWAY_RETRY_LIMIT,
                     "first_failure_at": first_failure_text,
                     "last_failure_at": last_failure_text,
                     "last_error_code": normalized_error_code,

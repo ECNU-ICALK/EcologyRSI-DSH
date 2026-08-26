@@ -949,7 +949,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         director.create_run(self.task, run_id=run_id)
         director.start_run(run_id)
 
-        batch = start_generation_batch(director, run_id)
+        start_generation_batch(director, run_id)
 
         requests = [
             item

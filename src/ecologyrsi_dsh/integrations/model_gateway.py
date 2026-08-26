@@ -25,6 +25,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from ..core.errors import walk_exception_graph
 from ..core.models import ExpertUncertaintyType, digest
 from ..core.redaction import (
     REMOTE_REASON_CODES,
@@ -138,28 +139,11 @@ def gateway_error_in_chain(
 
     if not isinstance(exc, BaseException):
         return None
-    pending: list[tuple[BaseException, int]] = [(exc, 0)]
-    seen: set[int] = set()
-    while pending:
-        current, depth = pending.pop()
-        identity = id(current)
-        if identity in seen or depth > max_depth:
-            continue
-        seen.add(identity)
-        if isinstance(current, GatewayResponseError):
-            if not retryable_only or current.retryable:
-                return current
-        for related in (
-            getattr(current, "__cause__", None),
-            getattr(current, "__context__", None),
+    for candidate in walk_exception_graph(exc, max_depth=max_depth):
+        if isinstance(candidate, GatewayResponseError) and (
+            not retryable_only or candidate.retryable
         ):
-            if isinstance(related, BaseException):
-                pending.append((related, depth + 1))
-        exceptions = getattr(current, "exceptions", None)
-        if isinstance(exceptions, (tuple, list)):
-            for related in exceptions:
-                if isinstance(related, BaseException):
-                    pending.append((related, depth + 1))
+            return candidate
     return None
 
 

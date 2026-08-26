@@ -144,13 +144,16 @@ def _arm_structured_envelope(
         stage=identity["stage"],
         idempotency_key=identity["idempotency_key"],
     )
+    request_id_digest = digest(
+        {
+            "run_id": identity["run_id"],
+            "stage": identity["stage"],
+            "idempotency_key": identity["idempotency_key"],
+        }
+    )
     service.allocate_child_reservation(
         {
-            "request_id": f"arm-{digest({
-                'run_id': identity['run_id'],
-                'stage': identity['stage'],
-                'idempotency_key': identity['idempotency_key'],
-            })}",
+            "request_id": f"arm-{request_id_digest}",
             "run_id": identity["run_id"],
             "parent_session_id": identity["session_id"],
             "role": identity["role"],
@@ -176,12 +179,15 @@ def _append_recorded_planner_result(
     """Append one durable Planner result, optionally corrupting its binding."""
 
     idempotency_key = f"restart-planner-{case}"
+    prediction_event_digest = digest(
+        {
+            "idempotency_key": idempotency_key,
+            "tool_name": "ecology_execute_prediction_tool",
+        }
+    )
     prediction_event_id = (
         f"run:tool-test:dsh-prediction-tool:"
-        f"{digest({
-            'idempotency_key': idempotency_key,
-            'tool_name': 'ecology_execute_prediction_tool',
-        })}"
+        f"{prediction_event_digest}"
     )
     prediction_payload = {
         "schema_version": "ecologyrsi-dsh.dsh-prediction-tool-executed/1",
@@ -257,12 +263,15 @@ def _append_recorded_planner_result(
     }
     if case != "missing-receipt":
         accepted_payload["required_tool_receipt"] = receipt
+    accepted_event_digest = digest(
+        {
+            "stage": "sample.plan",
+            "idempotency_key": idempotency_key,
+        }
+    )
     accepted_event_id = (
         f"run:tool-test:dsh-structured:"
-        f"{digest({
-            'stage': 'sample.plan',
-            'idempotency_key': idempotency_key,
-        })}"
+        f"{accepted_event_digest}"
     )
     accepted_event = ledger.append(
         "run:tool-test",
@@ -333,12 +342,15 @@ def _race_structured_append_winner(
             if not before_append.wait(1):
                 raise AssertionError("legal request did not reach its final append")
             identity = envelope["identity"]
+            event_digest = digest(
+                {
+                    "stage": identity["stage"],
+                    "idempotency_key": identity["idempotency_key"],
+                }
+            )
             event_id = (
                 f"{identity['run_id']}:dsh-structured:"
-                f"{digest({
-                    'stage': identity['stage'],
-                    'idempotency_key': identity['idempotency_key'],
-                })}"
+                f"{event_digest}"
             )
             original_append(
                 identity["run_id"],
@@ -1058,9 +1070,12 @@ class DshToolServiceTests(unittest.TestCase):
             "run_id": corrupt_run,
             "idempotency_key": corrupt_key,
         }
+        corrupt_event_digest = digest(
+            {"stage": "generation.research", "idempotency_key": corrupt_key}
+        )
         corrupt_event_id = (
             f"{corrupt_run}:dsh-structured:"
-            f"{digest({'stage': 'generation.research', 'idempotency_key': corrupt_key})}"
+            f"{corrupt_event_digest}"
         )
         self.ledger.append(
             corrupt_run,
@@ -1465,12 +1480,15 @@ class DshToolServiceTests(unittest.TestCase):
                 envelope["skill_invocation_evidence"]
             ),
         }
+        event_digest = digest(
+            {
+                "stage": "generation.research",
+                "idempotency_key": "deadline-result",
+            }
+        )
         event_id = (
             "run:tool-test:dsh-structured:"
-            f"{digest({
-                'stage': 'generation.research',
-                'idempotency_key': 'deadline-result',
-            })}"
+            f"{event_digest}"
         )
         self.ledger.append(
             "run:tool-test",

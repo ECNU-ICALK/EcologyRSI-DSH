@@ -91,7 +91,7 @@ def _download_verified_source(source: Mapping[str, Any], destination: Path) -> s
                 source["download_url"],
                 headers={"User-Agent": "EcologyRSI-DSH/0.2"},
             )
-            checksum = hashlib.md5()
+            checksum = hashlib.md5(usedforsecurity=False)
             downloaded = 0
             with urllib.request.urlopen(request, timeout=120) as response:
                 final_url = response.geturl()
@@ -376,7 +376,7 @@ def _unchecked_source_archive(source: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _file_md5(path: Path) -> str:
-    checksum = hashlib.md5()
+    checksum = hashlib.md5(usedforsecurity=False)
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             checksum.update(chunk)

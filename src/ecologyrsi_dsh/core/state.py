@@ -39,6 +39,14 @@ from .models import (
     digest,
 )
 from .protocols import supports_two_stage_screening
+from .retry_policy import (
+    GATEWAY_CIRCUIT_CODES,
+    GATEWAY_RETRY_CLASSES,
+    GATEWAY_RETRY_EPOCH_SECONDS,
+    GATEWAY_RETRY_MAX_DELAY_SECONDS,
+    GATEWAY_RETRY_POLICIES,
+    GATEWAY_RETRY_SCHEMA_VERSION,
+)
 from .sample_budget import complete_origin_count
 from .screening import (
     FORMAL_SELECTION_SCHEMA_V1,
@@ -512,43 +520,7 @@ _EVOLUTION_STAGE_PAYLOAD_FIELDS = frozenset(
         "public_error",
     }
 )
-_GATEWAY_RETRY_SCHEMA_VERSION = "ecologyrsi-dsh.gateway-retry-scheduled/2"
 _DSH_CONTINUITY_RESET_CONTRACT = "dsh_structured_success@1"
-_GATEWAY_RETRY_CLASSES = frozenset(
-    {
-        "model_gateway",
-        "dsh_native_runtime",
-        "research_timeout",
-        "sample_result_persistence",
-    }
-)
-_GATEWAY_RETRY_POLICIES = {
-    "model_gateway": (
-        "gateway_retry_circuit_open",
-        "check_gateway_then_resume",
-        "模型网关暂时不可用，已安排有界延迟重试。",
-    ),
-    "dsh_native_runtime": (
-        "dsh_runtime_retry_circuit_open",
-        "check_dsh_runtime_then_resume",
-        "DSH 智能体运行时暂时不可用，已安排有界延迟重试。",
-    ),
-    "research_timeout": (
-        "research_timeout_retry_circuit_open",
-        "check_gateway_then_resume",
-        "研究阶段模型请求超时，已安排有界延迟重试。",
-    ),
-    "sample_result_persistence": (
-        "sample_persistence_retry_circuit_open",
-        "check_persistence_then_resume",
-        "样本结果持久化暂时不可用，已安排有界延迟重试。",
-    ),
-}
-_GATEWAY_CIRCUIT_CODES = frozenset(
-    policy[0] for policy in _GATEWAY_RETRY_POLICIES.values()
-)
-_GATEWAY_RETRY_EPOCH_SECONDS = 30 * 60
-_GATEWAY_RETRY_MAX_DELAY_SECONDS = 60 * 60
 _GATEWAY_RETRY_ERROR_CODE_POLICIES = {
     "model_gateway": (
         frozenset(
@@ -779,7 +751,7 @@ def _validate_gateway_retry_v2_payload(payload: Mapping[str, Any]) -> None:
     delay = payload.get("delay_seconds")
     failure_id = payload.get("failure_id")
     if (
-        payload.get("schema_version") != _GATEWAY_RETRY_SCHEMA_VERSION
+        payload.get("schema_version") != GATEWAY_RETRY_SCHEMA_VERSION
         or isinstance(run_incarnation, bool)
         or not isinstance(run_incarnation, int)
         or run_incarnation < 1
@@ -787,7 +759,7 @@ def _validate_gateway_retry_v2_payload(payload: Mapping[str, Any]) -> None:
         or not isinstance(generation, int)
         or generation < 0
         or not _bounded_machine_code(payload.get("stage"))
-        or payload.get("retry_class") not in _GATEWAY_RETRY_CLASSES
+        or payload.get("retry_class") not in GATEWAY_RETRY_CLASSES
         or isinstance(breaker_epoch, bool)
         or not isinstance(breaker_epoch, int)
         or breaker_epoch < 1
@@ -817,7 +789,7 @@ def _validate_gateway_retry_v2_payload(payload: Mapping[str, Any]) -> None:
         or not math.isfinite(float(delay))
         or float(delay) < 0
         or payload.get("reason")
-        != _GATEWAY_RETRY_POLICIES[payload.get("retry_class")][2]
+        != GATEWAY_RETRY_POLICIES[payload.get("retry_class")].public_reason
         or (
             "continuity_reset_contract" in payload
             and (
@@ -838,7 +810,7 @@ def _validate_gateway_retry_v2_payload(payload: Mapping[str, Any]) -> None:
         or last < first
         or retry_at < last
         or abs((retry_at - last).total_seconds() - float(delay)) > 0.0015
-        or (retry_at - first).total_seconds() >= 30 * 60
+        or (retry_at - first).total_seconds() >= GATEWAY_RETRY_EPOCH_SECONDS
     ):
         raise ValueError("GatewayRetryScheduled v2 payload is invalid")
 
@@ -853,10 +825,10 @@ def _validate_gateway_circuit_pause_payload(payload: Mapping[str, Any]) -> None:
     pause_trigger = payload.get("pause_trigger")
     epoch_seconds = payload.get("epoch_seconds")
     retry_delay = payload.get("retry_delay_seconds")
-    policy = _GATEWAY_RETRY_POLICIES.get(payload.get("retry_class"))
+    policy = GATEWAY_RETRY_POLICIES.get(payload.get("retry_class"))
     if (
         policy is None
-        or payload.get("code") != policy[0]
+        or payload.get("code") != policy.circuit_code
         or isinstance(generation, bool)
         or not isinstance(generation, int)
         or generation < 0
@@ -877,7 +849,7 @@ def _validate_gateway_circuit_pause_payload(payload: Mapping[str, Any]) -> None:
             payload.get("last_error_code"),
         )
         != payload.get("last_error_code")
-        or payload.get("suggested_action") != policy[1]
+        or payload.get("suggested_action") != policy.suggested_action
         or pause_trigger
         not in {
             "failure_limit",
@@ -889,7 +861,7 @@ def _validate_gateway_circuit_pause_payload(payload: Mapping[str, Any]) -> None:
         or isinstance(retry_delay, bool)
         or not isinstance(retry_delay, (int, float))
         or not math.isfinite(float(retry_delay))
-        or not 0 <= float(retry_delay) <= _GATEWAY_RETRY_MAX_DELAY_SECONDS
+        or not 0 <= float(retry_delay) <= GATEWAY_RETRY_MAX_DELAY_SECONDS
     ):
         raise ValueError("gateway circuit pause payload is invalid")
     first = _aware_timestamp(payload.get("first_failure_at"))
@@ -925,7 +897,7 @@ def _validate_gateway_circuit_pause_trigger_evidence(
     proposed_retry = last + timedelta(seconds=retry_delay)
     elapsed_seconds = (last - first).total_seconds()
     evidence_valid = (
-        epoch_seconds == _GATEWAY_RETRY_EPOCH_SECONDS
+        epoch_seconds == GATEWAY_RETRY_EPOCH_SECONDS
         and payload_first == first
         and payload_last == last
         and payload_epoch_deadline == epoch_deadline
@@ -959,13 +931,13 @@ def _validate_gateway_circuit_resume_payload(payload: Mapping[str, Any]) -> None
     generation = payload.get("generation")
     breaker_epoch = payload.get("breaker_epoch")
     origin_epoch = payload.get("origin_breaker_epoch")
-    policy = _GATEWAY_RETRY_POLICIES.get(payload.get("retry_class"))
+    policy = GATEWAY_RETRY_POLICIES.get(payload.get("retry_class"))
     if (
         policy is None
-        or payload.get("resume_origin") != policy[0]
+        or payload.get("resume_origin") != policy.circuit_code
         or not isinstance(payload.get("origin_pause_event_id"), str)
         or not payload["origin_pause_event_id"].strip()
-        or payload.get("retry_class") not in _GATEWAY_RETRY_CLASSES
+        or payload.get("retry_class") not in GATEWAY_RETRY_CLASSES
         or isinstance(generation, bool)
         or not isinstance(generation, int)
         or generation < 0
@@ -1551,7 +1523,7 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             and latest_run_resumed.payload.get("generation") == generation
             and latest_run_resumed.payload.get("stage") == stage
             and latest_run_resumed.payload.get("resume_origin")
-            == _GATEWAY_RETRY_POLICIES[retry_class][0]
+            == GATEWAY_RETRY_POLICIES[retry_class].circuit_code
         ):
             return int(latest_run_resumed.payload["breaker_epoch"])
         return gateway_retry_max_epoch.get(scope, 0) + 1
@@ -1620,7 +1592,7 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     run, status=RunStatus.RUNNING, session_id=payload["session_id"]
                 )
         elif event.kind == "RunPaused":
-            if payload.get("code") in _GATEWAY_CIRCUIT_CODES:
+            if payload.get("code") in GATEWAY_CIRCUIT_CODES:
                 _validate_gateway_circuit_pause_payload(payload)
                 if (
                     run.status is not RunStatus.RUNNING
@@ -1688,7 +1660,7 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 run = replace(run, status=RunStatus.PAUSED)
         elif event.kind == "RunResumed":
             if active_gateway_circuit_pause is not None:
-                if payload.get("resume_origin") not in _GATEWAY_CIRCUIT_CODES:
+                if payload.get("resume_origin") not in GATEWAY_CIRCUIT_CODES:
                     raise ValueError(
                         "gateway circuit requires an exact RunResumed origin"
                     )
@@ -1707,7 +1679,7 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     raise ValueError(
                         "gateway circuit resume does not match the active pause"
                     )
-            elif payload.get("resume_origin") in _GATEWAY_CIRCUIT_CODES:
+            elif payload.get("resume_origin") in GATEWAY_CIRCUIT_CODES:
                 _validate_gateway_circuit_resume_payload(payload)
                 raise ValueError(
                     "gateway circuit resume does not match the active pause"
@@ -2591,7 +2563,7 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             # A gateway cooldown is an operational heartbeat only.  It must
             # survive replay so a browser refresh can distinguish a live run
             # waiting on a busy provider from a stalled/failed run.
-            if payload.get("schema_version") == _GATEWAY_RETRY_SCHEMA_VERSION:
+            if payload.get("schema_version") == GATEWAY_RETRY_SCHEMA_VERSION:
                 _validate_gateway_retry_v2_payload(payload)
                 if (
                     run.status is not RunStatus.RUNNING

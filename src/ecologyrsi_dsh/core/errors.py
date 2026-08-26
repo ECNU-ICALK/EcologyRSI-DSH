@@ -2,6 +2,67 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+
+
+def walk_exception_graph(
+    exc: BaseException,
+    *,
+    max_depth: int = 32,
+    max_nodes: int = 256,
+) -> Iterator[BaseException]:
+    """Yield a bounded, cycle-safe exception graph in causal order.
+
+    Exception groups are read through their ``exceptions`` attribute so this
+    module remains importable on Python 3.10, where ``ExceptionGroup`` is not
+    a builtin name.
+    """
+
+    if max_depth < 0 or max_nodes <= 0:
+        return
+    pending: list[tuple[BaseException, int]] = [(exc, 0)]
+    seen: set[int] = set()
+    visited = 0
+    while pending and visited < max_nodes:
+        current, depth = pending.pop()
+        identity = id(current)
+        if identity in seen or depth > max_depth:
+            continue
+        seen.add(identity)
+        visited += 1
+        yield current
+        if depth == max_depth:
+            continue
+        related: list[BaseException] = []
+        cause = getattr(current, "__cause__", None)
+        if isinstance(cause, BaseException):
+            related.append(cause)
+        context = getattr(current, "__context__", None)
+        if isinstance(context, BaseException):
+            related.append(context)
+        grouped = getattr(current, "exceptions", None)
+        if isinstance(grouped, (tuple, list)):
+            related.extend(item for item in grouped if isinstance(item, BaseException))
+        remaining = max_nodes - visited
+        pending.extend(
+            (item, depth + 1) for item in reversed(related[:remaining])
+        )
+
+
+def find_exception(
+    exc: BaseException,
+    expected_type: type[BaseException],
+    predicate: Callable[[BaseException], bool] | None = None,
+) -> BaseException | None:
+    """Return the first matching exception from a bounded exception graph."""
+
+    for current in walk_exception_graph(exc):
+        if isinstance(current, expected_type) and (
+            predicate is None or predicate(current)
+        ):
+            return current
+    return None
+
 
 FROZEN_RUNTIME_BINDING_DRIFT_CODE = "frozen_runtime_binding_drift"
 FROZEN_RUNTIME_BINDING_DRIFT_PUBLIC_MESSAGE = (
@@ -84,27 +145,7 @@ def dsh_native_runtime_error_in_chain(
 ) -> DshNativeRuntimeUnavailableError | None:
     """Find the bounded DSH error that owns retry classification."""
 
-    pending: list[tuple[BaseException, int]] = [(exc, 0)]
-    seen: set[int] = set()
-    while pending:
-        current, depth = pending.pop()
-        identity = id(current)
-        if identity in seen or depth > max_depth:
-            continue
-        seen.add(identity)
-        if isinstance(current, DshNativeRuntimeUnavailableError):
-            return current
-        for related in (
-            getattr(current, "__cause__", None),
-            getattr(current, "__context__", None),
-        ):
-            if isinstance(related, BaseException):
-                pending.append((related, depth + 1))
-        grouped = getattr(current, "exceptions", None)
-        if isinstance(grouped, (tuple, list)):
-            pending.extend(
-                (related, depth + 1)
-                for related in grouped
-                if isinstance(related, BaseException)
-            )
+    for candidate in walk_exception_graph(exc, max_depth=max_depth):
+        if isinstance(candidate, DshNativeRuntimeUnavailableError):
+            return candidate
     return None

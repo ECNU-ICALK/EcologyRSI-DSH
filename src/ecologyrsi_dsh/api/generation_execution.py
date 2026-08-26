@@ -9,6 +9,7 @@ from typing import Any
 from ..core.errors import (
     dsh_native_runtime_error_in_chain,
     dsh_native_runtime_retryable,
+    walk_exception_graph,
 )
 from ..core.models import (
     Candidate,
@@ -656,30 +657,12 @@ def _recoverable_evaluation_error(exc: BaseException) -> bool:
     dsh_error = dsh_native_runtime_error_in_chain(exc)
     if dsh_error is not None and dsh_native_runtime_retryable(dsh_error):
         return True
-    pending: list[tuple[BaseException, int]] = [(exc, 0)]
-    seen: set[int] = set()
-    while pending:
-        current, depth = pending.pop()
-        identity = id(current)
-        if identity in seen or depth > 32:
-            continue
-        seen.add(identity)
+    for current in walk_exception_graph(exc):
         if isinstance(
             current,
             (SampleResultCallbackError, SampleExecutionControlError),
         ):
             return True
-        for related in (
-            getattr(current, "__cause__", None),
-            getattr(current, "__context__", None),
-        ):
-            if isinstance(related, BaseException):
-                pending.append((related, depth + 1))
-        grouped = getattr(current, "exceptions", None)
-        if isinstance(grouped, (tuple, list)):
-            for related in grouped:
-                if isinstance(related, BaseException):
-                    pending.append((related, depth + 1))
     return False
 
 

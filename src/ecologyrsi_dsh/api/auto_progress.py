@@ -30,6 +30,7 @@ from ..core.models import digest
 from ..core.errors import (
     dsh_native_runtime_error_in_chain,
     dsh_native_runtime_retryable,
+    find_exception,
 )
 from ..core.redaction import public_exception_summary
 from ..core.state import gateway_retry_error_code
@@ -874,13 +875,13 @@ class AutoProgressManager:
                     else attempt_anchor_seq
                 )
                 recovery_stage = _latest_failed_stage(recovery_state)
-                research_contract_error = _exception_of_type(
+                research_contract_error = find_exception(
                     exc,
                     ResearchResponseContractError,
                 )
                 if (
                     recovery_stage == "research"
-                    and research_contract_error is not None
+                    and isinstance(research_contract_error, ResearchResponseContractError)
                 ):
                     validation_detail = str(
                         getattr(
@@ -1468,12 +1469,12 @@ def _retry_class_and_error_code(
     if (
         exc is not None
         and stage == "research"
-        and _contains_exception_type(exc, TimeoutError)
+        and find_exception(exc, TimeoutError) is not None
     ):
         # Keep the established public error code while separating timeout
         # failures into their own finite breaker scope.
         return "research_timeout", "timeout"
-    if exc is not None and _contains_exception_type(exc, SampleResultCallbackError):
+    if exc is not None and find_exception(exc, SampleResultCallbackError) is not None:
         return "sample_result_persistence", "sample_result_callback_error"
     return "model_gateway", "gateway_unavailable"
 
@@ -1544,7 +1545,7 @@ def _progress_failure_retryable(
                 stage=stage,
             )
         )
-    if _contains_exception_type(exc, SampleResultCallbackError):
+    if find_exception(exc, SampleResultCallbackError) is not None:
         # Sample-result writes are part of the durable evaluation boundary.
         # A transient ledger/IPC failure must be retried after a cooldown, not
         # converted into a terminal generation failure after three attempts.
@@ -1570,57 +1571,11 @@ def _retry_later_error(
         ):
             return gateway_error
         return None
-    if stage == "research" and _contains_exception_type(exc, TimeoutError):
+    if stage == "research" and find_exception(exc, TimeoutError) is not None:
         return exc
-    if _contains_exception_type(exc, SampleResultCallbackError):
+    if find_exception(exc, SampleResultCallbackError) is not None:
         return exc
     return None
-
-
-def _exception_of_type(
-    exc: BaseException,
-    expected_type: type[BaseException],
-    *,
-    max_depth: int = 32,
-) -> BaseException | None:
-    """Return the first matching exception from a bounded exception graph."""
-
-    pending: list[tuple[BaseException, int]] = [(exc, 0)]
-    seen: set[int] = set()
-    while pending:
-        current, depth = pending.pop()
-        identity = id(current)
-        if identity in seen or depth > max_depth:
-            continue
-        seen.add(identity)
-        if isinstance(current, expected_type):
-            return current
-        for related in (
-            getattr(current, "__cause__", None),
-            getattr(current, "__context__", None),
-        ):
-            if isinstance(related, BaseException):
-                pending.append((related, depth + 1))
-        related_group = getattr(current, "exceptions", None)
-        if isinstance(related_group, (tuple, list)):
-            for related in related_group:
-                if isinstance(related, BaseException):
-                    pending.append((related, depth + 1))
-    return None
-
-
-def _contains_exception_type(
-    exc: BaseException,
-    expected_type: type[BaseException],
-    *,
-    max_depth: int = 32,
-) -> bool:
-    """Return whether an exception chain contains ``expected_type``."""
-    return _exception_of_type(
-        exc,
-        expected_type,
-        max_depth=max_depth,
-    ) is not None
 
 
 __all__ = ["AutoProgressManager", "auto_progress_enabled"]
