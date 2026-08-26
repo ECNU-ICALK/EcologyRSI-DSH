@@ -13,6 +13,19 @@ MAX_SAMPLE_CONCURRENCY = 128
 HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK = 4
 
 
+def validate_sample_concurrency(value: object) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_SAMPLE_CONCURRENCY
+    ):
+        raise ValueError(
+            "sample_concurrency must be between 1 and "
+            f"{MAX_SAMPLE_CONCURRENCY}"
+        )
+    return value
+
+
 @dataclass
 class _RunAdmissionState:
     limit: int
@@ -86,4 +99,5 @@ __all__ = [
     "HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK",
     "MAX_SAMPLE_CONCURRENCY",
     "RunSampleAdmission",
+    "validate_sample_concurrency",
 ]

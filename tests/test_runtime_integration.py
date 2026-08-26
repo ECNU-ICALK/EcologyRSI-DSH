@@ -436,6 +436,44 @@ class RuntimeIntegrationTests(unittest.TestCase):
         self.assertNotIn("prediction_preview", json.dumps(asset))
         self.assertEqual(projection["rounds"][0]["stages"]["training"], "completed")
 
+    def test_full_manifest_overlay_uses_shared_sample_concurrency_boundary(
+        self,
+    ) -> None:
+        def request_body(value: object, index: int) -> dict:
+            return {
+                "run_id": f"run:sample-concurrency-overlay:{index}",
+                "task_manifest": {
+                    "task_id": f"sample-concurrency-overlay-{index}",
+                    "objective": "validate full-manifest sample concurrency overlay",
+                    "domain_pack": "crop_soil_water",
+                    "visible_datasets": ["generated-toy-series@1"],
+                    "budget": 1,
+                    "seed": 7,
+                    "seed_policy": "fixed",
+                    "policy_version": "policy@1",
+                    "metadata": {"evaluation_partition": "validation"},
+                },
+                "sample_concurrency": value,
+                "auto_advance": 0,
+            }
+
+        for index, value in enumerate((True, "64", 0, -1, 129)):
+            with self.subTest(value=value):
+                status, rejected = self.request(
+                    "/runs",
+                    "POST",
+                    request_body(value, index),
+                )
+                self.assertEqual(status, 400, rejected)
+                self.assertIn("between 1 and 128", rejected.get("error", ""))
+
+        status, created = self.request(
+            "/runs",
+            "POST",
+            request_body(128, 128),
+        )
+        self.assertEqual(status, 201, created)
+
 
 class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
     def setUp(self) -> None:

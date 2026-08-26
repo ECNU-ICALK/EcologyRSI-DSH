@@ -65,8 +65,8 @@ from .dsh_tools import DshToolService
 from .projection import _state_payload
 from .sample_admission import (
     DEFAULT_SAMPLE_CONCURRENCY,
-    MAX_SAMPLE_CONCURRENCY,
     RunSampleAdmission,
+    validate_sample_concurrency,
 )
 from .shared import (
     AUTO_ADVANCE_CONTINUOUS,
@@ -1449,15 +1449,9 @@ class EvolutionRequestHandler(
                         body["rounds"], "rounds", minimum=1
                     )
                 if "sample_concurrency" in body:
-                    sample_concurrency = _request_integer(
-                        body["sample_concurrency"], "sample_concurrency", minimum=1
+                    metadata["sample_concurrency"] = validate_sample_concurrency(
+                        body["sample_concurrency"]
                     )
-                    if sample_concurrency > MAX_SAMPLE_CONCURRENCY:
-                        raise ValueError(
-                            "sample_concurrency must be between 1 and "
-                            f"{MAX_SAMPLE_CONCURRENCY}"
-                        )
-                    metadata["sample_concurrency"] = sample_concurrency
                 # Older/plugin-generated requests may include the optional
                 # field as JSON null.  Treat null exactly like omission; real
                 # autonomous runs receive the frozen default during binding.
@@ -2376,15 +2370,7 @@ class EvolutionRequestHandler(
                 )
             if sample_concurrency is None:
                 sample_concurrency = DEFAULT_SAMPLE_CONCURRENCY
-            if (
-                isinstance(sample_concurrency, bool)
-                or not isinstance(sample_concurrency, int)
-                or not 1 <= sample_concurrency <= MAX_SAMPLE_CONCURRENCY
-            ):
-                raise ValueError(
-                    "sample_concurrency must be an integer between 1 and "
-                    f"{MAX_SAMPLE_CONCURRENCY}"
-                )
+            sample_concurrency = validate_sample_concurrency(sample_concurrency)
             if samples_per_update is None:
                 samples_per_update = (
                     scoring_cell_budget(500, prediction_cells_per_origin)
