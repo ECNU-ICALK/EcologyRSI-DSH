@@ -16,6 +16,7 @@ import time
 import zlib
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -709,9 +710,13 @@ class CollaborativeSampleExecutor:
         adapter: SamplePredictionAdapter | None = None,
         *,
         sleep: Callable[[float], None] = time.sleep,
+        origin_admission: Callable[[], AbstractContextManager[None]] | None = None,
     ) -> None:
+        if origin_admission is not None and not callable(origin_admission):
+            raise TypeError("origin_admission must be callable")
         self.adapter = adapter or RegisteredToolCollaborationAdapter()
         self._sleep = sleep
+        self.origin_admission = origin_admission
 
     def execute(
         self,
@@ -2169,34 +2174,40 @@ class CollaborativeSampleExecutor:
     ]:
         """Prepare one complete Planner/tool/Critic/Reflector origin chain."""
 
-        first_attempt_outcomes = self._prepare_first_attempt_batch(
-            bundle.rows,
-            context=context,
-            target_bounds=target_bounds,
-            algorithm_id=algorithm_id,
-            algorithm_version=algorithm_version,
-            plan=plan,
+        admission = (
+            self.origin_admission()
+            if self.origin_admission is not None
+            else nullcontext()
         )
-        origin_outcomes = self._prepare_retry_attempt_waves(
-            bundle.rows,
-            context=context,
-            target_bounds=target_bounds,
-            algorithm_id=algorithm_id,
-            algorithm_version=algorithm_version,
-            plan=plan,
-            policy=policy,
-            first_attempt_outcomes=first_attempt_outcomes,
-        )
-        origin_reflections = self._prepare_origin_reflection(
-            bundle,
-            prefetched_attempt_outcomes=origin_outcomes,
-            policy=policy,
-        )
-        return (
-            origin_outcomes,
-            origin_reflections,
-            _batch_terminal_reason(first_attempt_outcomes.values()),
-        )
+        with admission:
+            first_attempt_outcomes = self._prepare_first_attempt_batch(
+                bundle.rows,
+                context=context,
+                target_bounds=target_bounds,
+                algorithm_id=algorithm_id,
+                algorithm_version=algorithm_version,
+                plan=plan,
+            )
+            origin_outcomes = self._prepare_retry_attempt_waves(
+                bundle.rows,
+                context=context,
+                target_bounds=target_bounds,
+                algorithm_id=algorithm_id,
+                algorithm_version=algorithm_version,
+                plan=plan,
+                policy=policy,
+                first_attempt_outcomes=first_attempt_outcomes,
+            )
+            origin_reflections = self._prepare_origin_reflection(
+                bundle,
+                prefetched_attempt_outcomes=origin_outcomes,
+                policy=policy,
+            )
+            return (
+                origin_outcomes,
+                origin_reflections,
+                _batch_terminal_reason(first_attempt_outcomes.values()),
+            )
 
     def _prepare_retry_attempt_waves(
         self,

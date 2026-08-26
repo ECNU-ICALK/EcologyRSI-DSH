@@ -1490,22 +1490,24 @@
     var inFlightLabel = progressKind === "drained" ? "已排空" : runStatus === "paused" ? "暂停快照在飞" : "实际在飞";
     var inFlightText = Number.isInteger(inFlight) && inFlight >= 0 ? " · " + inFlightLabel + " " + formatNumber(inFlight) + " wave" : "";
     var queued = (showLiveProgressDetail || showDrainedProgressDetail) && Number(stageProgress.queued_batches);
-    var queuedLabel = progressKind === "drained" ? "暂停后排队" : runStatus === "paused" ? "暂停快照排队" : stageProgress && stageProgress.queue_semantics === "awaiting_origin_submission" ? "待调度" : "排队";
+    var queuedLabel = progressKind === "drained" ? "暂停后排队" : runStatus === "paused" ? "暂停快照排队" : stageProgress && stageProgress.queue_semantics === "awaiting_origin_submission" ? "待提交" : "排队";
     var queuedText = Number.isInteger(queued) && queued >= 0 ? " · " + queuedLabel + " " + formatNumber(queued) : "";
+    var awaitingSubmission = (showLiveProgressDetail || showDrainedProgressDetail) && Number(stageProgress.awaiting_submission_batches);
+    var awaitingSubmissionText = Number.isInteger(awaitingSubmission) && awaitingSubmission >= 0 ? " · 待提交 " + formatNumber(awaitingSubmission) : "";
     var causalWave = showLiveProgressDetail && Number(stageProgress.causal_wave_sample_count);
     var causalWaveText = Number.isInteger(causalWave) && causalWave > 0 ? " · 本波次 " + formatNumber(causalWave) : "";
     var remainingSeconds = showLiveProgressDetail && Number(stageProgress.estimated_remaining_seconds);
     var remainingText = Number.isFinite(remainingSeconds) && remainingSeconds > 0 ? compactDuration(remainingSeconds) : "";
     var sampleOutcomeText = stageProgress && stageProgress.succeeded_samples != null && stageProgress.failed_samples != null ? " · 成功 " + formatNumber(stageProgress.succeeded_samples) + " · 失败 " + formatNumber(stageProgress.failed_samples) : "";
     var evidenceQualifierText = stageProgress && !stageProgress.live && stageProgress.evidence_qualifier ? " · " + stageProgress.evidence_qualifier : "";
-    sampleNode.textContent = stageProgress ? progressUnitLabel + "进度：" + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + sampleOutcomeText + evidenceQualifierText + causalWaveText + inFlightText + queuedText + sampleRateText + (remainingText ? " · 预计剩余 " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测评分单元：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
+    sampleNode.textContent = stageProgress ? progressUnitLabel + "进度：" + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + sampleOutcomeText + evidenceQualifierText + causalWaveText + inFlightText + queuedText + awaitingSubmissionText + sampleRateText + (remainingText ? " · 预计剩余 " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测评分单元：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
     if (tokenNode) {
       tokenNode.title = tokenBudgetScopeText(run);
       tokenNode.textContent = modelUsageTokenProgressText(run, stageProgress, candidate);
     }
     if (heartbeatNode) {
       if (stageProgress && stageProgress.updated_at && stageProgress.live) {
-        heartbeatNode.textContent = "评测心跳：" + formatTime(stageProgress.updated_at) + (stageProgress.progress_kind === "waiting" ? " · 网关执行中" + inFlightText + queuedText : causalWaveText ? " · 已提交" + causalWaveText + inFlightText + queuedText : inFlightText + queuedText) + (dshActivity ? " · " + dshActivity.heartbeat : "");
+        heartbeatNode.textContent = "评测心跳：" + formatTime(stageProgress.updated_at) + (stageProgress.progress_kind === "waiting" ? " · 网关执行中" + inFlightText + queuedText + awaitingSubmissionText : causalWaveText ? " · 已提交" + causalWaveText + inFlightText + queuedText + awaitingSubmissionText : inFlightText + queuedText + awaitingSubmissionText) + (dshActivity ? " · " + dshActivity.heartbeat : "");
       } else if (stageProgress && stageProgress.updated_at) {
         heartbeatNode.textContent = (paused ? "最近评测记录：" : "评测证据：") + formatTime(stageProgress.updated_at) + (pausedDrained ? " · 暂停后请求已排空" + inFlightText + queuedText : stageProgress.evidence_qualifier ? " · " + stageProgress.evidence_qualifier : "");
       } else if (liveAllowed) {

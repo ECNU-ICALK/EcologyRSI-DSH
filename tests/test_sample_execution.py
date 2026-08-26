@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 import zlib
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import ecologyrsi_dsh.evaluators.gateway_sample_adapter as gateway_sample_adapter_module
@@ -42,6 +43,7 @@ from ecologyrsi_dsh.evaluators.sample_execution import (
     SampleExecutionControlUnavailableError,
     SampleExecutionPausedError,
     SampleExecutionPolicy,
+    SamplePredictionOutcome,
     SamplePredictionRequest,
     encode_sample_execution_trace,
 )
@@ -1247,6 +1249,115 @@ class SampleExecutionTests(unittest.TestCase):
             SAMPLE_EXECUTION_TRACE_ARCHIVE_VERSION,
             "ecologyrsi-dsh.sample-execution-trace/2",
         )
+
+    def test_origin_admission_wraps_strict_chain_without_entering_context(self):
+        gate = {"active": 0}
+        gate_events: list[str] = []
+
+        @contextmanager
+        def origin_admission():
+            gate_events.append("enter")
+            gate["active"] += 1
+            try:
+                yield
+            finally:
+                gate["active"] -= 1
+                gate_events.append("exit")
+
+        class StrictOriginAdapter(_FailureAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                self.plan_contexts: list[dict] = []
+                self.remote_requests: list[dict] = []
+
+            def plan_batch(self, context):
+                self.plan_contexts.append(dict(context))
+                return {
+                    "plan_id": "strict-origin@4",
+                    "algorithm": context["algorithm_id"],
+                    "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                }
+
+            def predict_samples(self, requests, plans, *, attempts):
+                del plans, attempts
+                self.assertEqualGateActive()
+                self.remote_requests.extend(request.to_dict() for request in requests)
+                return tuple(
+                    SamplePredictionOutcome(
+                        sample_id=request.sample_id,
+                        result={
+                            "predicted": request.proposed_prediction,
+                            "agent_decisions": [{
+                                "role": "planner",
+                                "decision": "predict",
+                                "status": "completed",
+                            }],
+                            "tool_calls": [{
+                                "tool_id": "fake-tool",
+                                "version": "1",
+                                "status": "completed",
+                            }],
+                        },
+                    )
+                    for request in requests
+                )
+
+            def reflect_origin(self, requests, *, scored_cells):
+                del scored_cells
+                self.assertEqualGateActive()
+                origin_sample_id = sample_execution_module.forecast_origin_sample_id(
+                    requests
+                )
+                return {
+                    "schema_version": "ecologyrsi-dsh.sample-origin-reflection/1",
+                    "sample_id": origin_sample_id,
+                    "origin_sample_id": origin_sample_id,
+                    "cell_sample_ids": [request.sample_id for request in requests],
+                    "outcome_class": "neutral",
+                    "error_source": "unknown",
+                    "next_action": "keep",
+                    "confidence": 0.5,
+                    "summary": "strict origin completed",
+                    "model_id": "fake-reflector",
+                    "response_digest": "a" * 64,
+                    "wave_digest": "b" * 64,
+                }
+
+            @staticmethod
+            def assertEqualGateActive():
+                if gate["active"] != 1:
+                    raise AssertionError("strict origin chain ran outside admission")
+
+        adapter = StrictOriginAdapter()
+        executor = CollaborativeSampleExecutor(
+            adapter,
+            sleep=lambda _: None,
+            origin_admission=origin_admission,
+        )
+        row = _rows()[0]
+
+        batch = executor.execute(
+            [row],
+            context={
+                "candidate_id": "candidate:test",
+                "dataset_digest": "dataset:test",
+                "algorithm_id": "algorithm",
+                "algorithm_version": "1",
+                "sample_concurrency": 8,
+                "candidate_concurrency": 3,
+            },
+            target_bounds={
+                "x": {"unit": "u", "minimum": -100.0, "maximum": 100.0}
+            },
+            algorithm_id="algorithm",
+            algorithm_version="1",
+        )
+
+        self.assertEqual(batch.summary["attempted_origin_samples"], 1)
+        self.assertEqual(gate_events, ["enter", "exit"])
+        self.assertEqual(gate["active"], 0)
+        self.assertNotIn("origin_admission", adapter.plan_contexts[0])
+        self.assertNotIn("origin_admission", json.dumps(adapter.remote_requests))
 
     def execute(
         self,
@@ -4780,6 +4891,59 @@ class SampleExecutionTests(unittest.TestCase):
                 self.assertEqual(progress[0]["gateway_request_count"], 1)
                 self.assertEqual(progress[0]["adaptive_split_trigger_count"], 0)
                 self.assertEqual(progress[0]["adaptive_split_count"], 0)
+
+    def test_registry_binds_run_and_frozen_limit_to_dsh_origin_admission(self):
+        provider_calls: list[tuple[str, int]] = []
+
+        @contextmanager
+        def provider(run_id: str, limit: int):
+            provider_calls.append((run_id, limit))
+            yield
+
+        registry = EvaluatorRegistry(
+            object(),
+            model_gateway=object(),
+            dsh_runtime_provider=lambda: object(),
+            dsh_revision_provider=lambda _run_id: {
+                "run_state_revision": 1,
+                "ledger_expected_revision": 1,
+            },
+            dsh_identity_provider=lambda _run_id, _candidate_id: {
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            dsh_prediction_tool_binder=lambda *args, **kwargs: (args, kwargs),
+            origin_admission_provider=provider,
+        )
+        task = TaskManifest(
+            task_id="dsh-origin-admission",
+            objective="bind exact run sample admission",
+            domain_pack="greenhouse_cucumber_2018",
+            visible_datasets=("agc_cucumber_2018",),
+            metadata={
+                "sample_agent_mode": "dsh_native_workflow",
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                "sample_agent_batch_size": 16,
+                "sample_concurrency": 8,
+                "prediction_cells_per_origin": 1,
+                "strategy_model_id": "dsh/strategy",
+                "review_model_id": "dsh/review",
+            },
+        )
+
+        executor = registry._sample_executor_for_task(
+            task,
+            run_id="run:admission",
+            candidate_id="candidate:admission",
+            forecast_bundle_tool=lambda _requests: {},
+        )
+
+        self.assertIsNotNone(executor.origin_admission)
+        assert executor.origin_admission is not None
+        with executor.origin_admission():
+            pass
+        self.assertEqual(provider_calls, [("run:admission", 8)])
 
     def test_registry_selects_gateway_executor_only_for_frozen_new_runs(self):
         gateway = _SampleDecisionGatewayFake()

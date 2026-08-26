@@ -63,6 +63,7 @@ from ..version import __version__
 from .auto_progress import AutoProgressManager
 from .dsh_tools import DshToolService
 from .projection import _state_payload
+from .sample_admission import RunSampleAdmission
 from .shared import (
     AUTO_ADVANCE_CONTINUOUS,
     _assert_http_scope,
@@ -378,6 +379,7 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
         try:
             self.ledger = EventLedger(db_path)
             self.dsh_tools = DshToolService(self.ledger)
+            self.sample_admission = RunSampleAdmission()
             self.datasets = DatasetRegistry()
             self.model_gateway = ModelGateway.from_env(verification_store=self.ledger)
             runtime_origin = os.environ.get("ECOLOGYRSI_DSH_RUNTIME_URL", "").strip()
@@ -409,6 +411,7 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
                     self.director.state(run_id).candidate_identity_binding(candidate_id)
                 ),
                 dsh_prediction_tool_binder=self.dsh_tools.bind_prediction_tool,
+                origin_admission_provider=self.sample_admission.admit,
             )
             self.director = EvolutionDirector(self.ledger, self.strategy_router)
             # A mutation spans several append-only events.  Serial execution keeps

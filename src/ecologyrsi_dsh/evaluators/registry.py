@@ -795,6 +795,7 @@ class EvaluatorRegistry:
         dsh_identity_provider: Callable[[str, str], Mapping[str, str] | None]
         | None = None,
         dsh_prediction_tool_binder: Callable[..., Any] | None = None,
+        origin_admission_provider: Callable[[str, int], Any] | None = None,
     ) -> None:
         self.datasets = datasets
         self.model_gateway = model_gateway or ModelGateway.from_env()
@@ -804,6 +805,7 @@ class EvaluatorRegistry:
         self.dsh_revision_provider = dsh_revision_provider
         self.dsh_identity_provider = dsh_identity_provider
         self.dsh_prediction_tool_binder = dsh_prediction_tool_binder
+        self.origin_admission_provider = origin_admission_provider
 
     def _sample_executor_for_task(
         self,
@@ -914,7 +916,18 @@ class EvaluatorRegistry:
                     "sample_planner_prompt_profile"
                 ),
             )
-            return CollaborativeSampleExecutor(adapter)
+            return CollaborativeSampleExecutor(
+                adapter,
+                origin_admission=(
+                    (
+                        lambda: self.origin_admission_provider(
+                            run_id, int(raw_concurrency)
+                        )
+                    )
+                    if self.origin_admission_provider is not None
+                    else None
+                ),
+            )
         if mode != "gateway_microbatch":
             raise ValueError(f"unsupported sample_agent_mode: {mode}")
 

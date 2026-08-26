@@ -1620,7 +1620,16 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         return None
 
     total = len(candidates) * _TWO_STAGE_SCREENING_ORIGINS
-    completed = min(total, len(completed_reflections))
+    completed = len(completed_reflections)
+    failed = sum(
+        event.payload.get("structured", {}).get("outcome_class") == "failed"
+        for event in completed_reflections.values()
+    )
+    succeeded = sum(
+        event.payload.get("structured", {}).get("outcome_class")
+        in {"improved", "degraded", "neutral"}
+        for event in completed_reflections.values()
+    )
     remaining = max(0, total - completed)
     configured_concurrency = metadata.get("sample_concurrency", 4)
     if (
@@ -1636,11 +1645,11 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         not in accepted_reservations
     )
     in_flight = min(
-        remaining,
         outstanding,
         configured_concurrency if configured_concurrency is not None else 8,
     )
-    queued = max(0, remaining - in_flight)
+    provider_queued = max(0, outstanding - in_flight)
+    awaiting_submission = max(0, total - completed - outstanding)
     reflection_events = sorted(
         completed_reflections.values(), key=lambda event: int(event.seq)
     )
@@ -1670,8 +1679,8 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         "batch_size": 1 if completed else 0,
         "completed_samples": completed,
         "total_samples": total,
-        "succeeded_samples": completed,
-        "failed_samples": 0,
+        "succeeded_samples": succeeded,
+        "failed_samples": failed,
         "gateway_request_count": launch_count,
         "adaptive_split_trigger_count": 0,
         "adaptive_split_count": 0,
@@ -1680,8 +1689,9 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         "adaptive_split_failed_samples": 0,
         "causal_wave_sample_count": 1,
         "in_flight_batches": in_flight,
-        "queued_batches": queued,
-        "queue_semantics": "awaiting_origin_submission",
+        "queued_batches": provider_queued,
+        "awaiting_submission_batches": awaiting_submission,
+        "queue_semantics": "provider_admission_only",
         "configured_concurrency": configured_concurrency,
         "samples_per_minute": samples_per_minute,
         "gateway_calls_per_minute": None,

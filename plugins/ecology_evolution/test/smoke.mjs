@@ -1338,11 +1338,12 @@ const screeningRun = {
       progress_kind: "waiting",
       completed_samples: 1,
       total_samples: 256,
-      succeeded_samples: 1,
-      failed_samples: 0,
-      in_flight_batches: 8,
-      queued_batches: 247,
-      queue_semantics: "awaiting_origin_submission",
+      succeeded_samples: 0,
+      failed_samples: 1,
+      in_flight_batches: 2,
+      queued_batches: 0,
+      awaiting_submission_batches: 253,
+      queue_semantics: "provider_admission_only",
       updated_at: "2026-08-26T06:44:03Z",
     },
   },
@@ -1350,9 +1351,10 @@ const screeningRun = {
 modelSandbox.renderExecutionMonitor(screeningRun);
 assert.equal(monitorNodes["#execution-monitor-status"].textContent, "模型执行中");
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("预测时点进度：1 / 256"));
-assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("实际在飞 8 wave"));
-assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("待调度 247"));
-assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("排队 247"), false);
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("实际在飞 2 wave"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("排队 0"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("待提交 253"));
+assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("排队 253"), false);
 modelSandbox.renderAutonomyProgress(screeningRun);
 assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "模型执行中");
 

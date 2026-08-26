@@ -115,11 +115,14 @@ class ExecutionProjectionTests(unittest.TestCase):
             SimpleNamespace(
                 seq=15,
                 kind="DshStructuredResultAccepted",
-                payload={"identity": {
-                    "stage": "sample.reflect",
-                    "idempotency_key": "run:test:sample.reflect:origin-a",
-                    "child_reservation_id": "reservation-reflect-a",
-                }},
+                payload={
+                    "identity": {
+                        "stage": "sample.reflect",
+                        "idempotency_key": "run:test:sample.reflect:origin-a",
+                        "child_reservation_id": "reservation-reflect-a",
+                    },
+                    "structured": {"outcome_class": "failed"},
+                },
                 created_at="2026-08-26T06:01:00+00:00",
             ),
         )
@@ -139,9 +142,12 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["evaluation_phase"], "screening")
         self.assertEqual(progress["completed_samples"], 1)
         self.assertEqual(progress["total_samples"], 256)
+        self.assertEqual(progress["succeeded_samples"], 0)
+        self.assertEqual(progress["failed_samples"], 1)
         self.assertEqual(progress["in_flight_batches"], 2)
-        self.assertEqual(progress["queued_batches"], 253)
-        self.assertEqual(progress["queue_semantics"], "awaiting_origin_submission")
+        self.assertEqual(progress["queued_batches"], 0)
+        self.assertEqual(progress["awaiting_submission_batches"], 253)
+        self.assertEqual(progress["queue_semantics"], "provider_admission_only")
 
     def test_completed_run_hides_recovered_failed_stage(self) -> None:
         failed_stage = SimpleNamespace(
