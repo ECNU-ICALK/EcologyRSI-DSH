@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.create_delivery_archive import (
     ROOT_FILES,
@@ -854,7 +855,10 @@ class DeliveryScriptTests(unittest.TestCase):
             wheel.write_bytes(b"fake-wheel")
             sdist.write_bytes(b"fake-sdist")
 
-            delivery = create_archive(fixture, dist)
+            # This fixture asserts the default zero epoch independently of a
+            # release caller's exported reproducible-build timestamp.
+            with mock.patch.dict(os.environ, {"SOURCE_DATE_EPOCH": "0"}):
+                delivery = create_archive(fixture, dist)
 
             self.assertTrue((dist / "BUILD-INFO.json").is_file())
             external_build_info = json.loads(
