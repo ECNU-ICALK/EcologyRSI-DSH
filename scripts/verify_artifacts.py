@@ -4,23 +4,33 @@
 from __future__ import annotations
 
 import argparse
-from email.parser import BytesParser
-from email.policy import default
 import hashlib
 import json
 import os
-from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
+import zipfile
+from email.parser import BytesParser
+from email.policy import default
+from pathlib import Path
 from typing import Any
 from urllib.request import urlopen
-import zipfile
 
-from create_delivery_archive import included_source_files, project_version
+from create_delivery_archive import (
+    included_source_files,
+    packed_plugin,
+    project_version,
+)
+
+INTERNAL_SOURCE_MARKERS = (
+    "/docs/superpowers/",
+    "/docs/项目整体Review与方案B优化报告.md",
+)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -44,6 +54,16 @@ def assert_suffixes(names: set[str], suffixes: tuple[str, ...], label: str) -> N
         raise RuntimeError(f"{label} is missing: {', '.join(missing)}")
 
 
+def reject_internal_sources(names: set[str], label: str) -> None:
+    leaked = sorted(
+        name
+        for name in names
+        if any(marker in f"/{name}" for marker in INTERNAL_SOURCE_MARKERS)
+    )
+    if leaked:
+        raise RuntimeError(f"{label} contains internal source: {', '.join(leaked)}")
+
+
 def _matching_member(archive: Any, member_name: str, source: Path, label: str) -> None:
     try:
         data = archive.read(member_name)
@@ -56,6 +76,9 @@ def _matching_member(archive: Any, member_name: str, source: Path, label: str) -
 def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
+        reject_internal_sources(names, "wheel")
+        if any(name.endswith("/plugins/ecology_evolution/test/smoke.mjs") for name in names):
+            raise RuntimeError("wheel must not include the browser smoke test")
         assert_suffixes(
             names,
             (
@@ -143,7 +166,6 @@ def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
             }
         ]
         wheel_sources += sorted((source_root / "plugins/ecology_evolution/assets/js").glob("*.js"))
-        wheel_sources += [source_root / "plugins/ecology_evolution/test/smoke.mjs"]
         integration_root = source_root / "integrations/dsh_ecology_plugin"
         wheel_sources += [integration_root / "README.md", integration_root / "package.json"]
         for directory in ("lib", "schemas", "presets", "dist"):
@@ -166,6 +188,7 @@ def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
 def verify_sdist(sdist: Path, source_root: Path, version: str) -> None:
     with tarfile.open(sdist, "r:gz") as archive:
         names = set(archive.getnames())
+        reject_internal_sources(names, "sdist")
         prefix = f"ecologyrsi_dsh-{version}"
         for source in included_source_files(source_root):
             relative = source.relative_to(source_root).as_posix()
@@ -251,12 +274,14 @@ def verify_delivery_archive(
     wheel: Path,
     sdist: Path,
     plugin: Path,
+    build_info_path: Path,
     version: str,
     source_root: Path,
 ) -> None:
     prefix = f"ecologyrsi-dsh-{version}"
     with tarfile.open(delivery, "r:gz") as archive:
         names = set(archive.getnames())
+        reject_internal_sources(names, "delivery archive")
         assert_suffixes(
             names,
             (
@@ -297,6 +322,7 @@ def verify_delivery_archive(
                 f"/artifacts/{wheel.name}",
                 f"/artifacts/{sdist.name}",
                 f"/artifacts/{plugin.name}",
+                "/BUILD-INFO.json",
                 "/SHA256SUMS",
             ),
             "delivery archive",
@@ -323,6 +349,14 @@ def verify_delivery_archive(
             data = member.read()
             if sha256_bytes(data) != sums.get(f"artifacts/{artifact.name}"):
                 raise RuntimeError(f"delivery checksum mismatch: {artifact.name}")
+        build_info_member = archive.extractfile(f"{prefix}/BUILD-INFO.json")
+        if build_info_member is None:
+            raise RuntimeError("delivery BUILD-INFO.json cannot be read")
+        build_info_data = build_info_member.read()
+        if build_info_data != build_info_path.read_bytes():
+            raise RuntimeError("delivery BUILD-INFO.json differs from external copy")
+        if sha256_bytes(build_info_data) != sums.get("BUILD-INFO.json"):
+            raise RuntimeError("delivery BUILD-INFO.json checksum mismatch")
 
 
 def verify_external_checksums(dist: Path, artifacts: tuple[Path, ...]) -> None:
@@ -332,11 +366,46 @@ def verify_external_checksums(dist: Path, artifacts: tuple[Path, ...]) -> None:
             raise RuntimeError(f"external checksum mismatch: {artifact.name}")
 
 
+def verify_build_info(path: Path, version: str, source_root: Path) -> None:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != "ecologyrsi-dsh.build-info/1":
+        raise RuntimeError("BUILD-INFO.json schema version mismatch")
+    if payload.get("version") != version:
+        raise RuntimeError("BUILD-INFO.json release version mismatch")
+    commit = payload.get("commit")
+    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise RuntimeError("BUILD-INFO.json commit is invalid")
+    current_commit = subprocess.check_output(
+        ["git", "-C", str(source_root), "rev-parse", "HEAD"], text=True
+    ).strip()
+    if commit != current_commit:
+        raise RuntimeError("BUILD-INFO.json commit differs from current source")
+    if payload.get("dirty") is not False:
+        raise RuntimeError("release BUILD-INFO.json must record dirty=false")
+    source_date_epoch = payload.get("source_date_epoch")
+    if (
+        not isinstance(source_date_epoch, int)
+        or isinstance(source_date_epoch, bool)
+        or not 0 <= source_date_epoch <= 2**63 - 1
+    ):
+        raise RuntimeError("BUILD-INFO.json source_date_epoch is invalid")
+    tools = payload.get("tools")
+    if not isinstance(tools, dict) or set(tools) != {"python", "node", "npm", "uv"}:
+        raise RuntimeError("BUILD-INFO.json tool inventory is invalid")
+    if any(not isinstance(value, str) or not value.strip() for value in tools.values()):
+        raise RuntimeError("BUILD-INFO.json tool versions must be non-empty strings")
+
+
 def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
     with tarfile.open(plugin, "r:gz") as archive:
         names = set(archive.getnames())
+        file_names = {
+            member.name for member in archive.getmembers() if member.isfile()
+        }
         required = {
             "package/package.json",
+            "package/LICENSE",
+            "package/NOTICE",
             "package/lib/index.js",
             "package/lib/tools/agent-plugin.js",
             "package/lib/tools/retrieval.js",
@@ -376,8 +445,37 @@ def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
         forbidden = ("credential", "session.jsonl", ".sqlite", ".log", ".env", ".dsh/")
         if any(any(token in name.casefold() for token in forbidden) for name in names):
             raise RuntimeError("npm plugin contains private runtime material")
-        for member_name in required - {"package/package.json"}:
-            source = source_root / "integrations/dsh_ecology_plugin" / member_name.removeprefix("package/")
+
+        integration_root = source_root / "integrations/dsh_ecology_plugin"
+        expected_sources = {
+            "package/package.json": integration_root / "package.json",
+            "package/LICENSE": source_root / "LICENSE",
+            "package/NOTICE": source_root / "NOTICE",
+        }
+        patterns = package.get("files")
+        if not isinstance(patterns, list) or not all(
+            isinstance(pattern, str) and pattern for pattern in patterns
+        ):
+            raise RuntimeError("npm plugin files contract is invalid")
+        for pattern in patterns:
+            if pattern in {"LICENSE", "NOTICE"}:
+                continue
+            for source in integration_root.glob(pattern):
+                if source.is_file() and not source.is_symlink():
+                    relative = source.relative_to(integration_root).as_posix()
+                    expected_sources[f"package/{relative}"] = source
+        missing_selected = sorted(set(expected_sources) - file_names)
+        if missing_selected:
+            raise RuntimeError(
+                "npm plugin is missing selected source: "
+                + ", ".join(missing_selected)
+            )
+        unexpected = sorted(file_names - set(expected_sources))
+        if unexpected:
+            raise RuntimeError(
+                "npm plugin contains unselected source: " + ", ".join(unexpected)
+            )
+        for member_name, source in expected_sources.items():
             member = archive.extractfile(member_name)
             if member is None or member.read() != source.read_bytes():
                 raise RuntimeError(f"npm plugin is stale: {member_name}")
@@ -611,17 +709,37 @@ def main() -> int:
     sdist = one(sorted(dist.glob("ecologyrsi_dsh-*.tar.gz")), "sdist")
     delivery = one(sorted(dist.glob("ecologyrsi-dsh-*-delivery.tar.gz")), "delivery archive")
     plugin = one(sorted(dist.glob("ecologyrsi-dsh-evolution-plugin-*.tgz")), "npm plugin")
+    build_info_path = one(sorted(dist.glob("BUILD-INFO.json")), "BUILD-INFO.json")
     version = wheel.name.split("-")[1]
     if version != expected_version:
         raise RuntimeError(
             f"release artifacts are version {version}, current source is {expected_version}"
         )
+    expected_plugin_name = f"ecologyrsi-dsh-evolution-plugin-{version}.tgz"
+    if plugin.name != expected_plugin_name:
+        raise RuntimeError(
+            f"npm plugin filename {plugin.name!r} does not match version {version}"
+        )
+    source_plugin = packed_plugin(source_root, version)
+    if source_plugin.read_bytes() != plugin.read_bytes():
+        raise RuntimeError("distributed npm plugin differs from nested source plugin")
 
     verify_wheel(wheel, version, source_root)
     verify_sdist(sdist, source_root, version)
     verify_npm_plugin(plugin, version, source_root)
-    verify_delivery_archive(delivery, wheel, sdist, plugin, version, source_root)
-    verify_external_checksums(dist, (wheel, sdist, plugin, delivery))
+    verify_build_info(build_info_path, version, source_root)
+    verify_delivery_archive(
+        delivery,
+        wheel,
+        sdist,
+        plugin,
+        build_info_path,
+        version,
+        source_root,
+    )
+    verify_external_checksums(
+        dist, (wheel, sdist, plugin, delivery, build_info_path)
+    )
     installed_smoke(wheel, version)
     print(f"release artifact verification: ok ({version})")
     return 0

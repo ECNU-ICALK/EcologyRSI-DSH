@@ -11,14 +11,20 @@ PYTHON_BIN="$("$SCRIPT_DIR/select_python.sh")"
 MODE="${1:---source-only}"
 
 case "$MODE" in
-  --source-only|--artifacts) ;;
+  --source-only|--artifacts|--artifacts-only) ;;
   *)
-    echo "usage: $0 [--source-only|--artifacts]" >&2
+    echo "usage: $0 [--source-only|--artifacts|--artifacts-only]" >&2
     exit 2
     ;;
 esac
 
 cd "$ROOT_DIR"
+
+if [ "$MODE" = "--artifacts-only" ]; then
+  "$PYTHON_BIN" scripts/verify_artifacts.py dist
+  echo "delivery verification: ok ($MODE)"
+  exit 0
+fi
 
 "$PYTHON_BIN" - <<'PY'
 import sys
@@ -68,7 +74,6 @@ integrations/dsh_ecology_plugin/schemas/genome-mutation.schema.json
 integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v7/agent.cordis.yml
-integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.32.tgz
 integrations/dsh_ecology_plugin/test/proxy_security.mjs
 "
 
@@ -131,6 +136,17 @@ host_plugin = json.loads(
 if host_plugin.get("version") != project_version:
     raise SystemExit(
         f"host plugin version {host_plugin.get('version')!r} != project version {project_version!r}"
+    )
+plugin_archives = sorted(
+    (root / "integrations/dsh_ecology_plugin/dist").glob(
+        "ecologyrsi-dsh-evolution-plugin-*.tgz"
+    )
+)
+expected_plugin_name = f"ecologyrsi-dsh-evolution-plugin-{project_version}.tgz"
+if len(plugin_archives) != 1 or plugin_archives[0].name != expected_plugin_name:
+    names = ", ".join(path.name for path in plugin_archives) or "none"
+    raise SystemExit(
+        f"exactly one packed DSH plugin is required for version {project_version}; found: {names}"
     )
 if host_plugin.get("private") is not True or host_plugin.get("license") != "UNLICENSED":
     raise SystemExit("the proprietary host plugin must be private and UNLICENSED")
@@ -215,7 +231,8 @@ fi
 find plugins/ecology_evolution -name '*.js' -exec node --check {} \;
 node plugins/ecology_evolution/test/smoke.mjs
 find integrations/dsh_ecology_plugin -name '*.js' -exec node --check {} \;
-node integrations/dsh_ecology_plugin/test/proxy_security.mjs
+node --test integrations/dsh_ecology_plugin/test/*.test.mjs \
+  integrations/dsh_ecology_plugin/test/proxy_security.mjs
 
 if [ "$MODE" = "--artifacts" ]; then
   "$PYTHON_BIN" scripts/verify_artifacts.py dist

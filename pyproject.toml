@@ -48,9 +48,6 @@ where = ["src"]
 "share/ecologyrsi-dsh/plugins/ecology_evolution/assets/js" = [
     "plugins/ecology_evolution/assets/js/*.js",
 ]
-"share/ecologyrsi-dsh/plugins/ecology_evolution/test" = [
-    "plugins/ecology_evolution/test/smoke.mjs",
-]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin" = [
     "integrations/dsh_ecology_plugin/README.md",
     "integrations/dsh_ecology_plugin/package.json",

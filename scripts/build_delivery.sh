@@ -14,9 +14,11 @@ PLUGIN_DIST="$PLUGIN_ROOT/dist"
 
 cd "$ROOT_DIR"
 
-mkdir -p "$PLUGIN_DIST"
-find "$PLUGIN_DIST" -maxdepth 1 -type f -name '*.tgz' -delete
-npm pack "$PLUGIN_ROOT" --pack-destination "$PLUGIN_DIST"
+if [ "${ECOLOGYRSI_ALLOW_DIRTY_BUILD:-0}" != "1" ] && \
+  [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+  echo "release builds require a clean worktree; set ECOLOGYRSI_ALLOW_DIRTY_BUILD=1 for a non-final candidate" >&2
+  exit 1
+fi
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "uv is required to build release artifacts" >&2
@@ -24,6 +26,12 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 PYTHON="$PYTHON_BIN" "$SCRIPT_DIR/verify_delivery.sh" --source-only
+
+mkdir -p "$PLUGIN_DIST"
+find "$PLUGIN_DIST" -maxdepth 1 -type f -name '*.tgz' -delete
+"$PYTHON_BIN" "$SCRIPT_DIR/build_dsh_plugin.py" \
+  --root "$ROOT_DIR" \
+  --output-dir "$PLUGIN_DIST"
 
 mkdir -p "$DIST_DIR"
 uv build \
@@ -36,7 +44,7 @@ uv build \
   --root "$ROOT_DIR" \
   --dist "$DIST_DIR"
 
-PYTHON="$PYTHON_BIN" "$SCRIPT_DIR/verify_delivery.sh" --artifacts
+PYTHON="$PYTHON_BIN" "$SCRIPT_DIR/verify_delivery.sh" --artifacts-only
 
 echo "release artifacts:"
 find "$DIST_DIR" -maxdepth 1 -type f -print | sort

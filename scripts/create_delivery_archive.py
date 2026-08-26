@@ -7,12 +7,14 @@ import argparse
 import gzip
 import hashlib
 import io
+import json
 import os
-from pathlib import Path
 import re
 import shutil
+import subprocess
+import sys
 import tarfile
-
+from pathlib import Path
 
 ROOT_FILES = (
     ".gitignore",
@@ -31,7 +33,7 @@ SOURCE_DIRS = (
     "tests",
     "examples",
     "datasets",
-    "docs",
+    "docs/screenshots",
     "plugins",
     "integrations",
     "scripts",
@@ -56,8 +58,22 @@ def project_version(root: Path) -> str:
     return match.group(1)
 
 
+def packed_plugin(root: Path, version: str) -> Path:
+    plugin_dist = root / "integrations/dsh_ecology_plugin/dist"
+    candidates = sorted(plugin_dist.glob("ecologyrsi-dsh-evolution-plugin-*.tgz"))
+    expected_name = f"ecologyrsi-dsh-evolution-plugin-{version}.tgz"
+    if len(candidates) != 1 or candidates[0].name != expected_name:
+        names = ", ".join(path.name for path in candidates) or "none"
+        raise RuntimeError(
+            f"exactly one packed DSH plugin is required for version {version}; "
+            f"found: {names}"
+        )
+    return candidates[0]
+
+
 def included_source_files(root: Path) -> list[Path]:
     files = [root / name for name in ROOT_FILES]
+    files.append(packed_plugin(root, project_version(root)))
     for directory in SOURCE_DIRS:
         for path in (root / directory).rglob("*"):
             if not path.is_file() or path.is_symlink():
@@ -75,6 +91,50 @@ def included_source_files(root: Path) -> list[Path]:
     if missing:
         raise RuntimeError("missing delivery inputs: " + ", ".join(missing))
     return sorted(set(files), key=lambda path: path.relative_to(root).as_posix())
+
+
+def _command_version(command: list[str]) -> str:
+    try:
+        value = subprocess.check_output(
+            command,
+            stderr=subprocess.STDOUT,
+            text=True,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(f"cannot determine tool version: {command[0]}") from exc
+    if not value:
+        raise RuntimeError(f"empty tool version: {command[0]}")
+    return value
+
+
+def build_info(root: Path, version: str) -> dict[str, object]:
+    commit = _command_version(["git", "-C", str(root), "rev-parse", "HEAD"])
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise RuntimeError("build commit must be 40 lowercase hexadecimal characters")
+    dirty_output = subprocess.check_output(
+        ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=normal"],
+        text=True,
+    )
+    source_date_text = os.environ.get("SOURCE_DATE_EPOCH", "0")
+    try:
+        source_date_epoch = int(source_date_text)
+    except ValueError as exc:
+        raise RuntimeError("SOURCE_DATE_EPOCH must be an integer") from exc
+    if not 0 <= source_date_epoch <= 2**63 - 1:
+        raise RuntimeError("SOURCE_DATE_EPOCH is outside the supported range")
+    return {
+        "schema_version": "ecologyrsi-dsh.build-info/1",
+        "version": version,
+        "commit": commit,
+        "dirty": bool(dirty_output),
+        "source_date_epoch": source_date_epoch,
+        "tools": {
+            "python": _command_version([sys.executable, "--version"]),
+            "node": _command_version(["node", "--version"]),
+            "npm": _command_version(["npm", "--version"]),
+            "uv": _command_version(["uv", "--version"]),
+        },
+    }
 
 
 def add_bytes(archive: tarfile.TarFile, name: str, data: bytes, *, mtime: int, executable: bool = False) -> None:
@@ -95,26 +155,23 @@ def create_archive(root: Path, dist: Path) -> Path:
     sdist = next(iter(sorted(dist.glob(f"ecologyrsi_dsh-{version}.tar.gz"))), None)
     if wheel is None or sdist is None:
         raise RuntimeError("wheel and sdist must be built before the delivery archive")
-    plugins = sorted(
-        (root / "integrations/dsh_ecology_plugin/dist").glob(
-            f"ecologyrsi-dsh-evolution-plugin-{version}.tgz"
-        )
-    )
-    if len(plugins) != 1:
-        raise RuntimeError(
-            f"exactly one packed DSH plugin is required for version {version}"
-        )
-    plugin = plugins[0]
+    plugin = packed_plugin(root, version)
     distributed_plugin = dist / plugin.name
     shutil.copyfile(plugin, distributed_plugin)
 
     output = dist / f"ecologyrsi-dsh-{version}-delivery.tar.gz"
     prefix = f"ecologyrsi-dsh-{version}"
     timestamp = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
+    build_info_path = dist / "BUILD-INFO.json"
+    build_info_data = (
+        json.dumps(build_info(root, version), indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    build_info_path.write_bytes(build_info_data)
     internal_checksums = (
         f"{sha256(wheel)}  artifacts/{wheel.name}\n"
         f"{sha256(sdist)}  artifacts/{sdist.name}\n"
         f"{sha256(distributed_plugin)}  artifacts/{distributed_plugin.name}\n"
+        f"{hashlib.sha256(build_info_data).hexdigest()}  BUILD-INFO.json\n"
     ).encode("ascii")
 
     with output.open("wb") as raw:
@@ -139,13 +196,19 @@ def create_archive(root: Path, dist: Path) -> Path:
                     )
                 add_bytes(
                     archive,
+                    f"{prefix}/BUILD-INFO.json",
+                    build_info_data,
+                    mtime=timestamp,
+                )
+                add_bytes(
+                    archive,
                     f"{prefix}/SHA256SUMS",
                     internal_checksums,
                     mtime=timestamp,
                 )
 
     checksums = dist / "SHA256SUMS"
-    artifacts = (wheel, sdist, distributed_plugin, output)
+    artifacts = (wheel, sdist, distributed_plugin, output, build_info_path)
     checksums.write_text(
         "".join(f"{sha256(path)}  {path.name}\n" for path in artifacts),
         encoding="ascii",

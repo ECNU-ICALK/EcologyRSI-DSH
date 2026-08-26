@@ -65,7 +65,9 @@
     "lib/**/*.js",
     "presets/**/*.yml",
     "presets/**/*.md",
-    "schemas/*.json"
+    "schemas/*.json",
+    "LICENSE",
+    "NOTICE"
   ],
   "license": "UNLICENSED"
 }

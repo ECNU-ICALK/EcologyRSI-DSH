@@ -24,4 +24,4 @@ release:
 	@PYTHON="$(PYTHON)" ./scripts/build_delivery.sh
 
 verify-artifacts:
-	@PYTHON="$(PYTHON)" ./scripts/verify_delivery.sh --artifacts
+	@PYTHON="$(PYTHON)" ./scripts/verify_delivery.sh --artifacts-only
