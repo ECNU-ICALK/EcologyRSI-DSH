@@ -38,6 +38,17 @@ from .models import (
     canonical_json,
     digest,
 )
+from .protocols import supports_two_stage_screening
+from .sample_budget import complete_origin_count
+from .screening import (
+    FORMAL_SELECTION_SCHEMA_V1,
+    FORMAL_SELECTION_SCHEMA_V2,
+    SCREENED_OUT_SCHEMA_V1,
+    SCREENING_SCHEMA_V1,
+    SCREENING_SCHEMA_V2,
+    screening_cohort_digest,
+    screening_record_digest,
+)
 
 DSH_NATIVE_EVOLUTION_PROTOCOL = "dsh_native_plugin_evolution@1"
 
@@ -1215,6 +1226,9 @@ class RunState:
     materialized_seed_genome_canonical_json: str | None = None
     candidate_identity_bindings: tuple[Mapping[str, Any], ...] = ()
     formal_stage_seals: tuple[Mapping[str, Any], ...] = ()
+    candidate_screening_events: tuple[Event, ...] = ()
+    formal_selection_events: tuple[Event, ...] = ()
+    screened_out_events: tuple[Event, ...] = ()
 
     def proposal(self, proposal_id: str) -> Proposal:
         for item in self.proposals:
@@ -1227,6 +1241,27 @@ class RunState:
             if item.candidate_id == candidate_id:
                 return item
         raise KeyError(f"unknown candidate: {candidate_id}")
+
+    def screening_for(self, generation: int, candidate_id: str) -> Event | None:
+        return next(
+            (
+                event
+                for event in reversed(self.candidate_screening_events)
+                if event.payload["generation"] == generation
+                and event.payload["candidate_id"] == candidate_id
+            ),
+            None,
+        )
+
+    def formal_selection_for(self, generation: int) -> Event | None:
+        return next(
+            (
+                event
+                for event in reversed(self.formal_selection_events)
+                if event.payload["generation"] == generation
+            ),
+            None,
+        )
 
     def evaluation_for(self, candidate_id: str) -> Evaluation | None:
         return next(
@@ -1462,6 +1497,9 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
     algorithm_attempts: list[AlgorithmAttempt] = []
     candidate_identity_bindings: dict[str, dict[str, Any]] = {}
     formal_stage_seals: dict[str, dict[str, Any]] = {}
+    candidate_screening_events: dict[tuple[int, str], Event] = {}
+    formal_selection_events: dict[int, Event] = {}
+    screened_out_events: dict[tuple[int, str], Event] = {}
     dsh_prediction_tool_events: dict[str, tuple[int, dict[str, Any]]] = {}
     formal_stage_started = False
     active_gateway_circuit_pause: Event | None = None
@@ -1744,6 +1782,163 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     "identity_binding": binding,
                 }
             candidates[item.candidate_id] = item
+        elif event.kind == "CandidateScreeningRecorded":
+            schema_version = payload.get("schema_version")
+            expected_fields = {
+                "schema_version",
+                "generation",
+                "candidate_id",
+                "score",
+                "passed",
+                "constraint_violations",
+                "origin_count",
+                "prediction_cell_count",
+                "cohort_digest",
+            }
+            if schema_version == SCREENING_SCHEMA_V2:
+                expected_fields.add("record_digest")
+            elif schema_version != SCREENING_SCHEMA_V1:
+                raise ValueError("unsupported candidate screening schema")
+            if set(payload) != expected_fields:
+                raise ValueError("candidate screening payload is invalid")
+            generation = payload["generation"]
+            candidate_id = payload["candidate_id"]
+            if (
+                isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or generation < 0
+                or not isinstance(candidate_id, str)
+                or not candidate_id.strip()
+            ):
+                raise ValueError("candidate screening identity is invalid")
+            candidate = candidates.get(candidate_id)
+            if candidate is None:
+                raise ValueError("screening candidate is missing")
+            if candidate.generation != generation:
+                raise ValueError("screening generation does not match candidate")
+            score = payload["score"]
+            constraint_violations = payload["constraint_violations"]
+            origin_count = payload["origin_count"]
+            prediction_cell_count = payload["prediction_cell_count"]
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, (int, float))
+                or not math.isfinite(float(score))
+                or not isinstance(payload["passed"], bool)
+                or isinstance(constraint_violations, bool)
+                or not isinstance(constraint_violations, int)
+                or constraint_violations < 0
+                or isinstance(origin_count, bool)
+                or not isinstance(origin_count, int)
+                or origin_count < 1
+                or isinstance(prediction_cell_count, bool)
+                or not isinstance(prediction_cell_count, int)
+                or prediction_cell_count < origin_count
+            ):
+                raise ValueError("candidate screening evidence is invalid")
+            cohort_digest = payload["cohort_digest"]
+            strict_selection = bool(
+                supports_two_stage_screening(
+                    task.metadata.get("sample_agent_protocol")
+                )
+                and task.metadata.get("sample_budget_class") == "selection_eligible"
+                and task.metadata.get("two_stage_evaluation_enabled", True) is True
+            )
+            if (
+                schema_version == SCREENING_SCHEMA_V2 or cohort_digest is not None
+            ) and (
+                not isinstance(cohort_digest, str)
+                or len(cohort_digest) != 64
+                or any(character not in "0123456789abcdef" for character in cohort_digest)
+            ):
+                raise ValueError("screening cohort_digest must be a SHA-256 digest")
+            if strict_selection:
+                cells_per_origin = task.metadata.get("prediction_cells_per_origin")
+                if (
+                    cohort_digest is None
+                    or isinstance(cells_per_origin, bool)
+                    or not isinstance(cells_per_origin, int)
+                    or cells_per_origin < 1
+                    or origin_count != 64
+                    or complete_origin_count(
+                        prediction_cell_count, cells_per_origin
+                    )
+                    != 64
+                ):
+                    raise ValueError("strict-v4 screening evidence is incomplete")
+            if schema_version == SCREENING_SCHEMA_V2:
+                record_digest = payload["record_digest"]
+                if (
+                    not isinstance(record_digest, str)
+                    or len(record_digest) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in record_digest
+                    )
+                    or record_digest != screening_record_digest(payload)
+                ):
+                    raise ValueError("candidate screening record_digest is invalid")
+            key = (generation, candidate_id)
+            existing = candidate_screening_events.get(key)
+            if existing is not None:
+                if canonical_json(existing.payload) != canonical_json(payload):
+                    raise ValueError("conflicting screening record")
+            else:
+                if candidate.status is not CandidateStatus.SPAWNED:
+                    raise ValueError("only a new candidate can be screened")
+                candidate_screening_events[key] = event
+        elif event.kind == "FormalSelectionCohortFrozen":
+            if payload.get("schema_version") not in {
+                FORMAL_SELECTION_SCHEMA_V1,
+                FORMAL_SELECTION_SCHEMA_V2,
+            } or set(payload) != {
+                "schema_version",
+                "generation",
+                "selected_candidate_ids",
+                "screening_digest",
+            }:
+                raise ValueError("formal selection payload is invalid")
+            generation = payload["generation"]
+            selected = payload["selected_candidate_ids"]
+            if (
+                isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or generation < 0
+                or not isinstance(selected, list)
+                or len(selected) != 2
+                or any(not isinstance(item, str) or not item.strip() for item in selected)
+                or len(set(selected)) != 2
+            ):
+                raise ValueError("formal selected candidate count is invalid")
+            for candidate_id in selected:
+                candidate = candidates.get(candidate_id)
+                if candidate is None or candidate.generation != generation:
+                    raise ValueError("formal selected candidate is outside generation")
+                if (generation, candidate_id) not in candidate_screening_events:
+                    raise ValueError("formal selection is missing screening evidence")
+            screening_digest = payload["screening_digest"]
+            if (
+                not isinstance(screening_digest, str)
+                or len(screening_digest) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in screening_digest
+                )
+            ):
+                raise ValueError("formal screening_digest must be a SHA-256 digest")
+            generation_records = [
+                screening_event.payload
+                for (item_generation, _candidate_id), screening_event in candidate_screening_events.items()
+                if item_generation == generation
+            ]
+            if screening_digest != screening_cohort_digest(generation_records):
+                raise ValueError("formal screening digest does not match screening cohort")
+            existing = formal_selection_events.get(generation)
+            if existing is not None:
+                if canonical_json(existing.payload) != canonical_json(payload):
+                    raise ValueError("conflicting formal selection")
+            else:
+                formal_selection_events[generation] = event
         elif event.kind == "ArtifactRecorded":
             item = ModelArtifact.from_dict(payload["artifact"])
             if is_dsh_native_protocol(task):
@@ -1873,10 +2068,54 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 candidates[item.candidate_id] = replace(
                     candidate, status=status, promotion_id=item.promotion_id
                 )
+        elif event.kind == "CandidateScreenedOut":
+            legacy_fields = {
+                "candidate_id",
+                "generation",
+                "formal_selection_event_id",
+                "reason",
+            }
+            if set(payload) == legacy_fields:
+                pass
+            elif (
+                payload.get("schema_version") != SCREENED_OUT_SCHEMA_V1
+                or set(payload) != legacy_fields | {"schema_version"}
+            ):
+                raise ValueError("candidate screened-out payload is invalid")
+            candidate_id = payload["candidate_id"]
+            generation = payload["generation"]
+            candidate = candidates.get(candidate_id) if isinstance(candidate_id, str) else None
+            if (
+                candidate is None
+                or isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or candidate.generation != generation
+                or candidate.status
+                not in {CandidateStatus.SPAWNED, CandidateStatus.SCREENED_OUT}
+            ):
+                raise ValueError("screened-out candidate generation is invalid")
+            formal = formal_selection_events.get(generation)
+            if formal is None or payload["formal_selection_event_id"] != formal.event_id:
+                raise ValueError("screened-out candidate formal selection is missing")
+            if candidate.candidate_id in formal.payload["selected_candidate_ids"]:
+                raise ValueError("selected candidate cannot be screened out")
+            if (generation, candidate.candidate_id) not in candidate_screening_events:
+                raise ValueError("screened-out candidate is missing screening evidence")
+            if payload["reason"] != "not_selected_by_screening_top_k":
+                raise ValueError("screened-out candidate reason is invalid")
+            key = (generation, candidate.candidate_id)
+            existing = screened_out_events.get(key)
+            if existing is not None:
+                if canonical_json(existing.payload) != canonical_json(payload):
+                    raise ValueError("conflicting screened-out candidate")
+            else:
+                screened_out_events[key] = event
+            candidates[candidate.candidate_id] = replace(
+                candidate, status=CandidateStatus.SCREENED_OUT
+            )
         elif event.kind in {
             "CandidateFailed",
             "CandidateMarkedDuplicate",
-            "CandidateScreenedOut",
         }:
             candidate_id = str(payload["candidate_id"])
             candidate = candidates.get(candidate_id)
@@ -1884,7 +2123,6 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 status = {
                     "CandidateFailed": CandidateStatus.FAILED,
                     "CandidateMarkedDuplicate": CandidateStatus.DUPLICATE,
-                    "CandidateScreenedOut": CandidateStatus.SCREENED_OUT,
                 }[event.kind]
                 candidates[candidate_id] = replace(candidate, status=status)
         elif event.kind == "GenerationSearchPlanned":
@@ -2436,6 +2674,20 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
         else:
             raise ValueError(f"unknown event kind: {event.kind}")
 
+    for generation, formal in formal_selection_events.items():
+        generation_records = [
+            screening_event.payload
+            for (
+                item_generation,
+                _candidate_id,
+            ), screening_event in candidate_screening_events.items()
+            if item_generation == generation
+        ]
+        if formal.payload["screening_digest"] != screening_cohort_digest(
+            generation_records
+        ):
+            raise ValueError("formal screening digest does not match screening cohort")
+
     approved = []
     for candidate in candidates.values():
         if candidate.status is not CandidateStatus.PROMOTED:
@@ -2498,6 +2750,9 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
         materialized_seed_genome_canonical_json=materialized_seed_canonical,
         candidate_identity_bindings=tuple(candidate_identity_bindings.values()),
         formal_stage_seals=tuple(formal_stage_seals.values()),
+        candidate_screening_events=tuple(candidate_screening_events.values()),
+        formal_selection_events=tuple(formal_selection_events.values()),
+        screened_out_events=tuple(screened_out_events.values()),
     )
 
 

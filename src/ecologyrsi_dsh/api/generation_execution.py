@@ -34,6 +34,7 @@ from ..core.sample_results import (
     sample_results_event_payload,
 )
 from ..core.sample_budget import complete_origin_count
+from ..core.screening import screening_cohort_digest
 from ..evaluators.registry import RULE_JUDGE_ID, EvaluationBundle, EvaluatorRegistry
 from ..evaluators.gateway_sample_adapter import ModelTokenBudgetExhaustedError
 from ..evaluators.sample_execution import (
@@ -112,28 +113,19 @@ def _select_screening_finalists(
 
 
 def _formal_selection_event(state: Any, generation: int) -> Any | None:
-    return next(
-        (
-            event
-            for event in reversed(getattr(state, "events", ()))
-            if event.kind == "FormalSelectionCohortFrozen"
-            and int(event.payload.get("generation", -1)) == generation
-        ),
-        None,
-    )
+    lookup = getattr(state, "formal_selection_for", None)
+    return lookup(generation) if callable(lookup) else None
 
 
 def _screening_records(
     state: Any, generation: int
 ) -> dict[str, Mapping[str, Any]]:
-    return {
-        str(event.payload["candidate_id"]): event.payload
-        for event in getattr(state, "events", ())
-        if event.kind == "CandidateScreeningRecorded"
-        and event.payload.get("schema_version")
-        == "ecologyrsi-dsh.candidate-screening/1"
-        and int(event.payload.get("generation", -1)) == generation
-    }
+    records: dict[str, Mapping[str, Any]] = {}
+    for candidate in state.candidates:
+        event = state.screening_for(generation, candidate.candidate_id)
+        if event is not None:
+            records[candidate.candidate_id] = event.payload
+    return records
 
 
 def _two_stage_screening_enabled(state: Any, candidates: Any) -> bool:
@@ -315,9 +307,7 @@ def _prepare_formal_finalists(
             run_id,
             generation=generation,
             selected_candidate_ids=selected_ids,
-            screening_digest=digest(
-                [screening[candidate_id] for candidate_id in sorted(screening)]
-            ),
+            screening_digest=screening_cohort_digest(tuple(screening.values())),
         )
         state = endpoint.server.director.state(run_id)
     selected_ids = tuple(frozen.payload["selected_candidate_ids"])

@@ -66,8 +66,15 @@ from .models import (
     canonical_json,
     digest,
 )
-from .protocols import is_strict_origin_protocol
+from .protocols import is_strict_origin_protocol, supports_two_stage_screening
 from .sample_budget import complete_origin_count
+from .screening import (
+    FORMAL_SELECTION_SCHEMA_V2,
+    SCREENED_OUT_SCHEMA_V1,
+    SCREENING_SCHEMA_V2,
+    screening_cohort_digest,
+    screening_record_digest,
+)
 from .sample_results import (
     MAX_SAMPLE_RESULTS_RECORDS,
     decode_sample_result_batch,
@@ -1960,8 +1967,34 @@ class EvolutionDirector:
             or prediction_cell_count < origin_count
         ):
             raise ValueError("candidate screening evidence is invalid")
+        if (
+            not isinstance(cohort_digest, str)
+            or len(cohort_digest) != 64
+            or any(character not in "0123456789abcdef" for character in cohort_digest)
+        ):
+            raise ValueError("screening cohort_digest must be a SHA-256 digest")
+        if (
+            supports_two_stage_screening(
+                state.task_manifest.metadata.get("sample_agent_protocol")
+            )
+            and state.task_manifest.metadata.get("sample_budget_class")
+            == "selection_eligible"
+            and state.task_manifest.metadata.get("two_stage_evaluation_enabled", True)
+            is True
+        ):
+            cells_per_origin = state.task_manifest.metadata.get(
+                "prediction_cells_per_origin"
+            )
+            if (
+                isinstance(cells_per_origin, bool)
+                or not isinstance(cells_per_origin, int)
+                or cells_per_origin < 1
+                or origin_count != 64
+                or complete_origin_count(prediction_cell_count, cells_per_origin) != 64
+            ):
+                raise ValueError("strict-v4 screening evidence is incomplete")
         payload = {
-            "schema_version": "ecologyrsi-dsh.candidate-screening/1",
+            "schema_version": SCREENING_SCHEMA_V2,
             "generation": generation,
             "candidate_id": candidate_id,
             "score": float(score),
@@ -1971,6 +2004,7 @@ class EvolutionDirector:
             "prediction_cell_count": prediction_cell_count,
             "cohort_digest": cohort_digest,
         }
+        payload["record_digest"] = screening_record_digest(payload)
         return self.ledger.append(
             run_id,
             "CandidateScreeningRecorded",
@@ -1991,14 +2025,26 @@ class EvolutionDirector:
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
         selected = tuple(str(item) for item in selected_candidate_ids)
-        if not selected or len(selected) != len(set(selected)):
-            raise ValueError("formal selection cohort must contain unique candidates")
+        if len(selected) != 2 or len(selected) != len(set(selected)):
+            raise ValueError("formal selection cohort must contain exactly 2 candidates")
         for candidate_id in selected:
             candidate = state.candidate(candidate_id)
             if candidate.generation != generation:
                 raise ValueError("formal selection candidate is outside generation")
+        screening_records = [
+            event.payload
+            for event in state.candidate_screening_events
+            if event.payload["generation"] == generation
+        ]
+        if any(
+            state.screening_for(generation, candidate_id) is None
+            for candidate_id in selected
+        ):
+            raise ValueError("formal selection is missing screening evidence")
+        if screening_digest != screening_cohort_digest(screening_records):
+            raise ValueError("formal screening digest does not match screening cohort")
         payload = {
-            "schema_version": "ecologyrsi-dsh.formal-selection-cohort/1",
+            "schema_version": FORMAL_SELECTION_SCHEMA_V2,
             "generation": generation,
             "selected_candidate_ids": list(selected),
             "screening_digest": screening_digest,
@@ -2021,20 +2067,36 @@ class EvolutionDirector:
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
         candidate = state.candidate(candidate_id)
+        payload = {
+            "schema_version": SCREENED_OUT_SCHEMA_V1,
+            "candidate_id": candidate_id,
+            "generation": generation,
+            "formal_selection_event_id": formal_selection_event_id,
+            "reason": "not_selected_by_screening_top_k",
+        }
+        event_id = f"{run_id}:generation:{generation}:screened-out:{candidate_id}"
         if candidate.status is CandidateStatus.SCREENED_OUT:
+            self.ledger.append(
+                run_id,
+                "CandidateScreenedOut",
+                payload,
+                event_id=event_id,
+            )
             return candidate
         if candidate.status is not CandidateStatus.SPAWNED:
             raise ValueError("only a new candidate can be screened out")
+        if candidate.generation != generation:
+            raise ValueError("screened-out candidate generation is invalid")
+        formal = state.formal_selection_for(generation)
+        if formal is None or formal.event_id != formal_selection_event_id:
+            raise ValueError("screened-out candidate formal selection is missing")
+        if candidate_id in formal.payload["selected_candidate_ids"]:
+            raise ValueError("selected candidate cannot be screened out")
         self.ledger.append(
             run_id,
             "CandidateScreenedOut",
-            {
-                "candidate_id": candidate_id,
-                "generation": generation,
-                "formal_selection_event_id": formal_selection_event_id,
-                "reason": "not_selected_by_screening_top_k",
-            },
-            event_id=f"{run_id}:generation:{generation}:screened-out:{candidate_id}",
+            payload,
+            event_id=event_id,
         )
         return self.state(run_id).candidate(candidate_id)
 

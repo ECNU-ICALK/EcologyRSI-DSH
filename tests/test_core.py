@@ -146,6 +146,18 @@ class CoreTests(unittest.TestCase):
                 ),
             )
 
+    def test_legacy_run_has_empty_structured_screening_state(self) -> None:
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        director = EvolutionDirector(ledger, FakeDSHAdapter(max_proposals=1))
+        state = director.start_evolution(manifest(1), run_id="run:legacy-screening")
+
+        self.assertEqual(state.candidate_screening_events, ())
+        self.assertEqual(state.formal_selection_events, ())
+        self.assertEqual(state.screened_out_events, ())
+        self.assertIsNone(state.screening_for(0, "candidate:missing"))
+        self.assertIsNone(state.formal_selection_for(0))
+
     def test_full_loop_replays_from_sqlite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "events.sqlite3"

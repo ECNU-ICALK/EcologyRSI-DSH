@@ -37,7 +37,11 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
         screening = {
             "candidate-0": {"score": 0.8, "constraint_violations": 1},
             "candidate-1": {"score": 0.5, "constraint_violations": 0},
-            "candidate-2": {"score": 0.7, "constraint_violations": 0},
+            "candidate-2": {
+                "score": 0.7,
+                "passed": False,
+                "constraint_violations": 0,
+            },
             "candidate-3": {"score": 0.7, "constraint_violations": 0},
         }
 
