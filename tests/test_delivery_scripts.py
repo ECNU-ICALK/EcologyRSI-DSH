@@ -174,6 +174,196 @@ class DeliveryScriptTests(unittest.TestCase):
             self.assertNotEqual(verified.returncode, 0)
             self.assertIn("sensitive member", verified.stdout + verified.stderr)
 
+    def test_sdist_verifier_rejects_unexpected_empty_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-sdist-directory-") as directory:
+            temporary = Path(directory)
+            built = subprocess.run(
+                ["uv", "build", "--sdist", "--out-dir", str(temporary), str(ROOT)],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            sdist = next(temporary.glob("*.tar.gz"))
+            modified = temporary / "unexpected-directory.tar.gz"
+            self._copy_tar_with_extra_directory(
+                sdist,
+                modified,
+                f"ecologyrsi_dsh-{project_version(ROOT)}/"
+                "unexpected-empty-directory",
+            )
+
+            verified = self._verify_sdist(modified)
+
+            self.assertNotEqual(verified.returncode, 0)
+            self.assertIn("unexpected member", verified.stdout + verified.stderr)
+
+    def test_plugin_builder_cli_rejects_symlinked_root(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-plugin-root-link-") as directory:
+            temporary = Path(directory)
+            root = temporary / "source"
+            self._write_plugin_build_fixture(root)
+            linked_root = temporary / "linked-source"
+            linked_root.symlink_to(root, target_is_directory=True)
+            output = temporary / "output"
+
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python",
+                    str(ROOT / "scripts/build_dsh_plugin.py"),
+                    "--root",
+                    str(linked_root),
+                    "--output-dir",
+                    str(output),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("build root is a symlink", result.stdout + result.stderr)
+            self.assertFalse(output.exists())
+
+    def test_plugin_builder_cli_rejects_symlinked_output_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-plugin-output-link-") as directory:
+            temporary = Path(directory)
+            root = temporary / "source"
+            self._write_plugin_build_fixture(root)
+            real_output = temporary / "real-output"
+            real_output.mkdir()
+            linked_output = temporary / "linked-output"
+            linked_output.symlink_to(real_output, target_is_directory=True)
+
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python",
+                    str(ROOT / "scripts/build_dsh_plugin.py"),
+                    "--root",
+                    str(root),
+                    "--output-dir",
+                    str(linked_output),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "plugin output directory is a symlink",
+                result.stdout + result.stderr,
+            )
+            self.assertEqual(list(real_output.iterdir()), [])
+
+    def test_delivery_archive_cli_rejects_symlinked_root(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-delivery-root-link-") as directory:
+            temporary = Path(directory)
+            root = temporary / "source"
+            version = "0.3.33"
+            self._write_minimal_source_fixture(root, version=version)
+            self._commit_fixture(root)
+            linked_root = temporary / "linked-source"
+            linked_root.symlink_to(root, target_is_directory=True)
+            dist = temporary / "dist"
+            self._write_fake_python_artifacts(dist, version)
+
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python",
+                    str(ROOT / "scripts/create_delivery_archive.py"),
+                    "--root",
+                    str(linked_root),
+                    "--dist",
+                    str(dist),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("delivery root is a symlink", result.stdout + result.stderr)
+            self.assertFalse((dist / "BUILD-INFO.json").exists())
+
+    def test_delivery_archive_cli_rejects_symlinked_dist(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-delivery-dist-link-") as directory:
+            temporary = Path(directory)
+            root = temporary / "source"
+            version = "0.3.33"
+            self._write_minimal_source_fixture(root, version=version)
+            self._commit_fixture(root)
+            real_dist = temporary / "real-dist"
+            self._write_fake_python_artifacts(real_dist, version)
+            linked_dist = temporary / "linked-dist"
+            linked_dist.symlink_to(real_dist, target_is_directory=True)
+
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python",
+                    str(ROOT / "scripts/create_delivery_archive.py"),
+                    "--root",
+                    str(root),
+                    "--dist",
+                    str(linked_dist),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "delivery output directory is a symlink",
+                result.stdout + result.stderr,
+            )
+            self.assertFalse((real_dist / "BUILD-INFO.json").exists())
+
+    def test_delivery_archive_cli_accepts_lexical_temp_paths(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-delivery-cli-") as directory:
+            temporary = Path(directory)
+            root = temporary / "source"
+            version = "0.3.33"
+            self._write_minimal_source_fixture(root, version=version)
+            self._commit_fixture(root)
+            dist = temporary / "dist"
+            self._write_fake_python_artifacts(dist, version)
+
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python",
+                    str(ROOT / "scripts/create_delivery_archive.py"),
+                    "--root",
+                    str(root),
+                    "--dist",
+                    str(dist),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(
+                (dist / f"ecologyrsi-dsh-{version}-delivery.tar.gz").is_file()
+            )
+
     def test_project_version_rejects_symlink_before_reading(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ecologyrsi-version-symlink-") as directory:
             fixture = Path(directory)
@@ -1007,6 +1197,19 @@ class DeliveryScriptTests(unittest.TestCase):
                 outgoing.addfile(extra, io.BytesIO(data))
 
     @staticmethod
+    def _copy_tar_with_extra_directory(
+        source: Path, destination: Path, name: str
+    ) -> None:
+        with tarfile.open(source, "r:gz") as incoming:
+            with tarfile.open(destination, "w:gz") as outgoing:
+                for member in incoming.getmembers():
+                    handle = incoming.extractfile(member) if member.isfile() else None
+                    outgoing.addfile(member, handle)
+                extra = tarfile.TarInfo(name)
+                extra.type = tarfile.DIRTYPE
+                outgoing.addfile(extra)
+
+    @staticmethod
     def _verify_sdist(sdist: Path) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment["PYTHONPATH"] = str(ROOT / "scripts")
@@ -1062,6 +1265,34 @@ class DeliveryScriptTests(unittest.TestCase):
         plugin.parent.mkdir(parents=True)
         plugin.write_bytes(b"fixture plugin")
         return plugin
+
+    @staticmethod
+    def _write_plugin_build_fixture(root: Path) -> None:
+        package_root = root / "integrations/dsh_ecology_plugin"
+        (package_root / "lib").mkdir(parents=True)
+        (package_root / "lib/index.js").write_text(
+            "export const fixture = true;\n", encoding="utf-8"
+        )
+        (root / "LICENSE").write_text("fixture license\n", encoding="utf-8")
+        (root / "NOTICE").write_text("fixture notice\n", encoding="utf-8")
+        (package_root / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "@ecologyrsi/dsh-evolution-plugin",
+                    "version": "0.3.33",
+                    "files": ["lib/**/*.js", "LICENSE", "NOTICE"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _write_fake_python_artifacts(dist: Path, version: str) -> None:
+        dist.mkdir()
+        (dist / f"ecologyrsi_dsh-{version}-py3-none-any.whl").write_bytes(
+            b"fake-wheel"
+        )
+        (dist / f"ecologyrsi_dsh-{version}.tar.gz").write_bytes(b"fake-sdist")
 
     @staticmethod
     def _commit_fixture(root: Path) -> None:

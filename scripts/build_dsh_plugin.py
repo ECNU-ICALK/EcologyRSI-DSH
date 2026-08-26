@@ -11,9 +11,9 @@ import tempfile
 from pathlib import Path
 
 try:
-    from .release_safety import checked_lstat, require_regular_file
+    from .release_safety import checked_lstat, require_directory, require_regular_file
 except ImportError:
-    from release_safety import checked_lstat, require_regular_file
+    from release_safety import checked_lstat, require_directory, require_regular_file
 
 LEGAL_FILES = ("LICENSE", "NOTICE")
 
@@ -80,7 +80,16 @@ def main() -> int:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
-    archive = build_plugin(args.root.resolve(), args.output_dir.resolve())
+    root = args.root.absolute()
+    output_dir = args.output_dir.absolute()
+    require_directory(Path(root.anchor), root, "build root")
+    require_directory(
+        Path(output_dir.anchor),
+        output_dir,
+        "plugin output directory",
+        allow_missing=True,
+    )
+    archive = build_plugin(root, output_dir)
     print(archive)
     return 0
 

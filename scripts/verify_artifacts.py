@@ -18,7 +18,7 @@ import time
 import zipfile
 from email.parser import BytesParser
 from email.policy import default
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.request import urlopen
 
@@ -93,6 +93,16 @@ def _reject_sensitive_members(names: set[str], label: str) -> None:
     sensitive = sorted(name for name in names if is_sensitive_source(Path(name)))
     if sensitive:
         raise RuntimeError(f"{label} contains sensitive member: {', '.join(sensitive)}")
+
+
+def _archive_parent_directories(names: set[str]) -> set[str]:
+    directories: set[str] = set()
+    for name in names:
+        parent = PurePosixPath(name).parent
+        while parent != PurePosixPath("."):
+            directories.add(parent.as_posix())
+            parent = parent.parent
+    return directories
 
 
 def _matching_member(
@@ -251,11 +261,11 @@ def verify_sdist(sdist: Path, source_root: Path, version: str) -> None:
                 f"{prefix}/src/ecologyrsi_dsh.egg-info/top_level.txt",
             }
         )
-        actual_files = {member.name for member in members if member.isfile()}
-        unexpected = sorted(actual_files - expected_files)
+        expected_directories = _archive_parent_directories(expected_files)
+        unexpected = sorted(names - expected_files - expected_directories)
         if unexpected:
             raise RuntimeError(
-                "sdist contains unexpected source: " + ", ".join(unexpected)
+                "sdist contains unexpected member: " + ", ".join(unexpected)
             )
         for source in sources:
             relative = source.relative_to(source_root).as_posix()

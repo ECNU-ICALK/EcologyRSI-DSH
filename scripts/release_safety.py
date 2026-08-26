@@ -8,6 +8,16 @@ import stat
 from pathlib import Path
 
 
+def _lexical_absolute(path: Path) -> Path:
+    absolute = Path(os.path.abspath(path))
+    if len(absolute.parts) < 2:
+        return absolute
+    anchor = Path(absolute.anchor)
+    trusted_top_level = anchor / absolute.parts[1]
+    canonical_top_level = Path(os.path.realpath(trusted_top_level))
+    return canonical_top_level.joinpath(*absolute.parts[2:])
+
+
 def checked_lstat(
     root: Path,
     path: Path,
@@ -17,8 +27,8 @@ def checked_lstat(
 ) -> os.stat_result | None:
     """Return the final lstat without following any component symlink."""
 
-    lexical_root = Path(os.path.abspath(root))
-    lexical_path = Path(os.path.abspath(path))
+    lexical_root = _lexical_absolute(root)
+    lexical_path = _lexical_absolute(path)
     try:
         relative = lexical_path.relative_to(lexical_root)
     except ValueError as exc:
@@ -47,4 +57,21 @@ def require_regular_file(root: Path, path: Path, label: str) -> Path:
     path_stat = checked_lstat(root, path, label)
     if path_stat is None or not stat.S_ISREG(path_stat.st_mode):
         raise RuntimeError(f"{label} is not a regular file: {path}")
+    return path
+
+
+def require_directory(
+    root: Path,
+    path: Path,
+    label: str,
+    *,
+    allow_missing: bool = False,
+) -> Path:
+    """Require a directory without resolving caller-controlled symlinks."""
+
+    path_stat = checked_lstat(root, path, label, allow_missing=allow_missing)
+    if path_stat is None and allow_missing:
+        return path
+    if path_stat is None or not stat.S_ISDIR(path_stat.st_mode):
+        raise RuntimeError(f"{label} is not a directory: {path}")
     return path

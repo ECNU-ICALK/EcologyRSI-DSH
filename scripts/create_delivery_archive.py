@@ -18,9 +18,9 @@ import tarfile
 from pathlib import Path
 
 try:
-    from .release_safety import checked_lstat, require_regular_file
+    from .release_safety import checked_lstat, require_directory, require_regular_file
 except ImportError:
-    from release_safety import checked_lstat, require_regular_file
+    from release_safety import checked_lstat, require_directory, require_regular_file
 
 ROOT_FILES = (
     ".gitignore",
@@ -306,7 +306,11 @@ def main() -> int:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--dist", type=Path, required=True)
     args = parser.parse_args()
-    output = create_archive(args.root.resolve(), args.dist.resolve())
+    root = args.root.absolute()
+    dist = args.dist.absolute()
+    require_directory(Path(root.anchor), root, "delivery root")
+    require_directory(Path(dist.anchor), dist, "delivery output directory")
+    output = create_archive(root, dist)
     print(output)
     return 0
 
