@@ -5446,6 +5446,45 @@ class SampleExecutionTests(unittest.TestCase):
         )
         self._assert_evidence(bundle.evaluation.metrics)
 
+    def test_native_toy_diagnostic_honors_one_origin_sample_budget(self):
+        executor = CollaborativeSampleExecutor(sleep=lambda _: None)
+        datasets = DatasetRegistry()
+        series = datasets.series(TOY_DATASET_ID)
+        task = TaskManifest(
+            task_id="native-toy-one-origin",
+            objective="bound the native toy diagnostic to one forecast origin",
+            domain_pack="crop_soil_water",
+            visible_datasets=(TOY_DATASET_ID,),
+            metadata={
+                "execution_protocol": "dsh_native_plugin_evolution@1",
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                "evaluator_id": TOY_EVALUATOR_ID,
+                "prediction_model_id": TOY_PREDICTOR_MODEL_ID,
+                "episode_id": series.episode_id,
+                "dataset_digest": series.digest,
+                "split_manifest_digest": series.split_manifest_digest_sha256,
+                "samples_per_update": 1,
+            },
+        )
+        candidate, proposal = _candidate(
+            {"alpha": 0.4, "window": 5, "water_threshold": 0.4}
+        )
+
+        registry = EvaluatorRegistry(
+            datasets,
+            model_gateway=object(),
+            sample_executor=executor,
+        )
+        with patch.object(registry, "_dsh_sample_stage_context", return_value={}):
+            bundle = registry.evaluate_scientific(task, candidate, proposal)
+
+        summary = bundle.evaluation.metrics["sample_execution"]
+        self.assertEqual(summary["attempted_examples"], 1)
+        self.assertEqual(bundle.evaluation.metrics["n"], 1)
+        self.assertEqual(bundle.evaluation.metrics["evaluation_selected_examples"], 1)
+        self.assertEqual(bundle.evaluation.metrics["evaluation_deferred_examples"], 16)
+        self.assertTrue(summary["coverage_pass"])
+
     def _assert_evidence(self, metrics):
         summary = metrics["sample_execution"]
         records = metrics["sample_execution_records"]

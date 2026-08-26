@@ -1789,6 +1789,35 @@ class EvaluatorRegistry:
             {**row, "partition": "validation"}
             for row in evaluation_metrics.get("prediction_preview", [])
         ]
+        feedback_update_cohort: dict[str, Any] | None = None
+        samples_per_update = _feedback_update_limit(task)
+        if samples_per_update is not None:
+            split_manifest_digest = task.metadata.get("split_manifest_digest")
+            if (
+                not isinstance(split_manifest_digest, str)
+                or not split_manifest_digest
+            ):
+                raise ValueError(
+                    "bounded toy evaluation requires a frozen split manifest digest"
+                )
+            raw_prediction_rows, feedback_update_cohort = (
+                _select_feedback_update_cohort(
+                    raw_prediction_rows,
+                    generation=candidate.generation,
+                    samples_per_update=samples_per_update,
+                    dataset_digest=toy.dataset_digest,
+                    split_manifest_digest=split_manifest_digest,
+                    bundle_complete_origins=(
+                        is_strict_origin_protocol(
+                            task.metadata.get("sample_agent_protocol")
+                        )
+                    ),
+                    origin_window_offset=task.metadata.get(
+                        "evaluation_origin_window_offset"
+                    ),
+                )
+            )
+        evaluation_eligible_examples = len(raw_prediction_rows)
 
         def toy_forecast_bundle_tool(
             requests: Sequence[SamplePredictionRequest],
@@ -1845,6 +1874,14 @@ class EvaluatorRegistry:
                 "derived_execution_plan": execution_plan.to_dict(),
                 **(
                     {
+                        "samples_per_update": samples_per_update,
+                        "feedback_update_cohort": feedback_update_cohort,
+                    }
+                    if feedback_update_cohort is not None
+                    else {}
+                ),
+                **(
+                    {
                         "sample_planner_prompt_profile": task.metadata[
                             "sample_planner_prompt_profile"
                         ]
@@ -1888,15 +1925,15 @@ class EvaluatorRegistry:
         successful_examples = int(sample_batch.summary["succeeded_examples"])
         evaluation_used_examples = len(scoring_rows)
         evaluation_skipped_examples = max(
-            0, evaluation_partition_rows - evaluation_used_examples
+            0, evaluation_eligible_examples - evaluation_used_examples
         )
         sample_coverage = (
-            successful_examples / evaluation_partition_rows
-            if evaluation_partition_rows
+            successful_examples / evaluation_eligible_examples
+            if evaluation_eligible_examples
             else 0.0
         )
         sample_coverage_pass = (
-            evaluation_partition_rows > 0
+            evaluation_eligible_examples > 0
             and sample_coverage >= sample_policy.minimum_coverage
             and sample_coverage >= sample_policy.minimum_task_coverage
         )
@@ -1926,17 +1963,36 @@ class EvaluatorRegistry:
         sample_execution_summary.update(
             {
                 "adapter_attempt_coverage": sample_batch.summary["coverage"],
-                "eligible_examples": evaluation_partition_rows,
+                "eligible_examples": evaluation_eligible_examples,
                 "succeeded_examples": successful_examples,
                 "scored_examples": evaluation_used_examples,
                 "skipped_examples": evaluation_skipped_examples,
                 "input_unavailable_examples": max(
-                    0, evaluation_partition_rows - len(sample_batch.records)
+                    0, evaluation_eligible_examples - len(sample_batch.records)
                 ),
                 "coverage": sample_coverage,
                 "coverage_pass": sample_coverage_pass,
                 "per_task_coverage_pass": sample_coverage_pass,
                 "incomplete_prediction_tasks": int(not scoring_rows),
+                **(
+                    {
+                        "samples_per_update": samples_per_update,
+                        "feedback_population_examples": int(
+                            feedback_update_cohort["population_count"]
+                        ),
+                        "feedback_selected_examples": int(
+                            feedback_update_cohort["selected_count"]
+                        ),
+                        "feedback_deferred_examples": int(
+                            feedback_update_cohort["deferred_count"]
+                        ),
+                        "feedback_update_cohort_digest": feedback_update_cohort[
+                            "cohort_digest"
+                        ],
+                    }
+                    if feedback_update_cohort is not None
+                    else {}
+                ),
             }
         )
         evaluation_metrics.update(
@@ -1955,9 +2011,34 @@ class EvaluatorRegistry:
                 "execution_mode": "registered_lightweight",
                 "fit_method": "toy_score",
                 "evaluation_partition_rows": evaluation_partition_rows,
-                "evaluation_eligible_examples": evaluation_partition_rows,
+                "evaluation_eligible_examples": evaluation_eligible_examples,
                 "evaluation_used_examples": evaluation_used_examples,
                 "evaluation_skipped_examples": evaluation_skipped_examples,
+                **(
+                    {
+                        "evaluation_available_examples": int(
+                            feedback_update_cohort["population_count"]
+                        ),
+                        "evaluation_selected_examples": int(
+                            feedback_update_cohort["selected_count"]
+                        ),
+                        "evaluation_deferred_examples": int(
+                            feedback_update_cohort["deferred_count"]
+                        ),
+                        "samples_per_update": samples_per_update,
+                        "feedback_update_cohort_digest": feedback_update_cohort[
+                            "cohort_digest"
+                        ],
+                        "feedback_update_window_offset": feedback_update_cohort[
+                            "window_offset"
+                        ],
+                        "feedback_update_population_count": feedback_update_cohort[
+                            "population_count"
+                        ],
+                    }
+                    if feedback_update_cohort is not None
+                    else {}
+                ),
                 "sample_execution": sample_execution_summary,
                 "sample_execution_records": bounded_sample_execution_records(
                     sample_batch.records
