@@ -263,6 +263,7 @@ function workflowDeadlineHarness({
   runRegistry = { get: () => ({ status: "running" }) },
   persist = async (options) => ({ accepted: true, result_digest: options.body.result_digest }),
   onReservation = () => {},
+  onPenalty = () => {},
   maxAttempts = 1,
 } = {}) {
   const listeners = new Map();
@@ -317,7 +318,7 @@ function workflowDeadlineHarness({
     structuredStageMaxAttempts: maxAttempts,
     providerStageGate: {
       run: async (_provider, operation) => operation(),
-      penalize: () => {},
+      penalize: onPenalty,
     },
   });
   return { runner, listeners, sessions };
@@ -1589,6 +1590,58 @@ test("Workflow failed child capture evidence cannot authorize a non-null-batch s
   assert.equal(starts, 1);
 });
 
+test("Workflow cancelled, error, unknown, and legacy aborted stops are exact nonretry boundaries", async () => {
+  const cases = [
+    { stopReason: "cancelled", expectedCode: "structured_child_aborted" },
+    { stopReason: "error", expectedCode: "structured_child_model_error" },
+    { stopReason: "future-stop-token", expectedCode: "structured_child_model_error" },
+    { stopReason: "aborted", expectedCode: "structured_child_aborted" },
+  ];
+
+  for (const { stopReason, expectedCode } of cases) {
+    let starts = 0;
+    let penalties = 0;
+    let persistCalls = 0;
+    const reservations = [];
+    const harness = workflowDeadlineHarness({
+      timeoutMs: 1_000,
+      maxAttempts: 2,
+      onReservation: (_options, attempt) => reservations.push(attempt),
+      onPenalty: () => { penalties += 1; },
+      persist: async () => {
+        persistCalls += 1;
+        return { accepted: true };
+      },
+      startWorkflow: () => {
+        starts += 1;
+        return {
+          result: Promise.resolve({ value: null, stopReason, agentsStarted: 0 }),
+          cancel: () => {},
+          dispose: async () => {},
+        };
+      },
+    });
+
+    const error = await harness.runner.run(samplePlanBinding()).then(
+      () => null,
+      (caught) => caught,
+    );
+    assert.deepEqual({
+      code: error?.code,
+      reservations,
+      starts,
+      penalties,
+      persistCalls,
+    }, {
+      code: expectedCode,
+      reservations: [1],
+      starts: 1,
+      penalties: 0,
+      persistCalls: 0,
+    }, stopReason);
+  }
+});
+
 test("direct phase causes cannot spoof either retry allowlist code", async () => {
   const context = {
     schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
@@ -2471,11 +2524,23 @@ test("sample planner retries reuse one absolute local and frozen server deadline
       reservationTimeouts.push(options.timeoutMs);
       armedTimeouts.push(options.body.timeout_ms);
     },
-    startWorkflow: ({ request, listeners }) => {
+    startWorkflow: ({ request, listeners, sessions }) => {
       workflowStarts += 1;
       if (workflowStarts === 1) {
+        const childId = "workflow-deadline-missing-child";
+        sessions.set(childId, {
+          id: childId,
+          events: rc6ConsumedEvents("origin-vector-forecasting-balanced", {
+            prediction: true,
+          }),
+        });
+        publishWorkflowChild(listeners, request, childId, "failed");
         return {
-          result: Promise.resolve({ stopReason: "model_error", error: "private" }),
+          result: Promise.resolve({
+            value: [null],
+            stopReason: "completed",
+            agentsStarted: 1,
+          }),
           cancel: () => {},
           dispose: async () => { blockFor(30); },
         };

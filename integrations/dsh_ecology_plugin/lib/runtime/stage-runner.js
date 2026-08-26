@@ -1097,8 +1097,10 @@ export class NativeStageRunner {
         && typeof structured === "object"
         && !Array.isArray(structured);
       if (settled?.stopReason !== "completed") {
-        if (settled?.stopReason === "aborted") throw structuredPhaseError("aborted");
-        throw structuredPhaseError("model");
+        if (["cancelled", "aborted"].includes(settled?.stopReason)) {
+          throw structuredPhaseError("aborted");
+        }
+        throw structuredPhaseError("model_terminal");
       }
       if (!validStructured) {
         const failedNullItem = childOutcome === "failed"

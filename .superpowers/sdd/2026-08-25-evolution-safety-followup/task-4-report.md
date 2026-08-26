@@ -430,3 +430,112 @@ Every negative capture-classification case makes one reservation/start and zero
 structured-result persistence calls. Both positive missing cases consume the
 exact two-attempt budget and still persist zero results when exhausted; existing
 missing-then-valid paths persist exactly once.
+
+## Fix Round 3/5 — exact Workflow stop-reason allowlist
+
+### Runtime contract
+
+- The Workflow seam now follows the rc.6 stop-reason union exactly. Top-level
+  `cancelled` and defensive legacy `aborted` are freshly wrapped as the trusted
+  nonretry `aborted` phase with public code `structured_child_aborted`.
+- Top-level `error` and every unknown non-completed token are freshly wrapped
+  as the trusted nonretry `model_terminal` phase. The stable public code remains
+  `structured_child_model_error`, but its private provenance cannot enter the
+  model retry allowlist.
+- A Workflow top-level stop token never creates the private retryable `model`
+  origin. Local direct-child model failures retain that origin and their
+  existing bounded retry; Workflow sample capture-missing retains only the
+  Round 2 completed/`[null]` plus failed-child/event-evidence route.
+- The absolute-deadline retry test now uses that natural capture-missing route
+  instead of the non-existent Workflow `model_error` token.
+
+### RED evidence
+
+The deterministic RED command was:
+
+```bash
+node --check integrations/dsh_ecology_plugin/test/stage_runner.test.mjs && \
+node --test --test-name-pattern='exact nonretry boundaries|absolute local' \
+  integrations/dsh_ecology_plugin/test/stage_runner.test.mjs
+```
+
+```text
+tests 2
+pass 1
+fail 1
+duration_ms 96.650292
+```
+
+The natural capture-missing deadline retry passed. The exact boundary matrix
+failed first on rc.6 `cancelled`: the old branch returned
+`structured_child_model_error` instead of `structured_child_aborted` and was
+eligible for a second reservation/penalty. The same old catch-all branch made
+`error` and unknown tokens retryable model origins.
+
+### GREEN evidence
+
+After the minimal stop-reason mapping, the focused provenance and retry set
+passed:
+
+```bash
+node --test \
+  --test-name-pattern='exact nonretry boundaries|absolute local|transient child model failure|exact INVALID_ARGS|failed child no-call' \
+  integrations/dsh_ecology_plugin/test/stage_runner.test.mjs
+```
+
+```text
+tests 6
+pass 6
+fail 0
+duration_ms 96.836916
+```
+
+Each `cancelled`, `error`, unknown, and legacy `aborted` case asserts the exact
+tuple of one reservation, one Workflow start, zero provider penalties, and zero
+persistence calls. The same run proves direct trusted model and natural direct
+and Workflow capture-missing retries remain enabled.
+
+Final focused runtime suite:
+
+```bash
+node --test \
+  integrations/dsh_ecology_plugin/test/stage_runner.test.mjs \
+  integrations/dsh_ecology_plugin/test/structured_roles.test.mjs \
+  integrations/dsh_ecology_plugin/test/workflow_lifecycle.test.mjs \
+  integrations/dsh_ecology_plugin/test/launch_fence.test.mjs
+```
+
+```text
+tests 77
+pass 77
+fail 0
+duration_ms 543.867917
+```
+
+Complete plugin Node suite:
+
+```bash
+node --test integrations/dsh_ecology_plugin/test/*.mjs
+```
+
+```text
+tests 173
+pass 173
+fail 0
+duration_ms 671.762834
+```
+
+Related Python sample and durable-tool contracts:
+
+```bash
+PYTHONPATH=src /Users/jiezhou/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 \
+  -m unittest tests.test_dsh_sample_execution tests.test_dsh_tool_contracts -v
+```
+
+```text
+Ran 62 tests in 2.200s
+OK
+```
+
+The changed JavaScript files also passed `node --check`; `git diff --check`
+completed with no diagnostics.
