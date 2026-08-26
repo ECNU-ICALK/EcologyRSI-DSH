@@ -65,6 +65,111 @@ def _skill_evidence(stage: str, skill_name: str) -> dict:
 
 
 class ExecutionProjectionTests(unittest.TestCase):
+    def test_screening_progress_counts_planner_as_terminal_for_aggregate_reflection(
+        self,
+    ) -> None:
+        events = (
+            SimpleNamespace(
+                seq=10,
+                kind="GenerationBatchStarted",
+                payload={"batch": {"generation": 0}},
+                created_at="2026-08-26T05:59:59+00:00",
+            ),
+            SimpleNamespace(
+                seq=11,
+                kind="DshChildLaunchReserved",
+                payload={"launch": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:origin-a",
+                    "reservation_id": "reservation-plan-a",
+                }},
+                created_at="2026-08-26T06:00:00+00:00",
+            ),
+            SimpleNamespace(
+                seq=12,
+                kind="DshStructuredResultAccepted",
+                payload={"identity": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:origin-a",
+                    "child_reservation_id": "reservation-plan-a",
+                }},
+                created_at="2026-08-26T06:00:01+00:00",
+            ),
+        )
+        state = SimpleNamespace(
+            run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
+            task_manifest=SimpleNamespace(metadata={
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                "two_stage_evaluation_enabled": True,
+                "sample_reflection_policy": "candidate_aggregate_post_score@1",
+                "sample_concurrency": 64,
+            }),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            events=events,
+        )
+
+        progress = _screening_progress_projection(state)
+
+        self.assertEqual(progress["completed_samples"], 1)
+        self.assertEqual(progress["succeeded_samples"], 1)
+        self.assertEqual(progress["failed_samples"], 0)
+        self.assertEqual(progress["in_flight_batches"], 0)
+        self.assertEqual(progress["awaiting_submission_batches"], 255)
+
+    def test_screening_progress_retires_launches_before_retry_boundary(self) -> None:
+        events = (
+            SimpleNamespace(
+                seq=10,
+                kind="GenerationBatchStarted",
+                payload={"batch": {"generation": 0}},
+                created_at="2026-08-26T05:59:59+00:00",
+            ),
+            SimpleNamespace(
+                seq=11,
+                kind="DshChildLaunchReserved",
+                payload={"launch": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:stale-a",
+                    "reservation_id": "reservation-stale-a",
+                }},
+                created_at="2026-08-26T06:00:00+00:00",
+            ),
+            SimpleNamespace(
+                seq=12,
+                kind="GatewayRetryScheduled",
+                payload={"generation": 0},
+                created_at="2026-08-26T06:00:01+00:00",
+            ),
+            SimpleNamespace(
+                seq=13,
+                kind="DshChildLaunchReserved",
+                payload={"launch": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:current-b",
+                    "reservation_id": "reservation-current-b",
+                }},
+                created_at="2026-08-26T06:00:02+00:00",
+            ),
+        )
+        state = SimpleNamespace(
+            run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
+            task_manifest=SimpleNamespace(metadata={
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                "two_stage_evaluation_enabled": True,
+                "sample_reflection_policy": "candidate_aggregate_post_score@1",
+                "sample_concurrency": 64,
+            }),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            events=events,
+        )
+
+        progress = _screening_progress_projection(state)
+
+        self.assertEqual(progress["completed_samples"], 0)
+        self.assertEqual(progress["in_flight_batches"], 1)
+        self.assertEqual(progress["queued_batches"], 0)
+        self.assertEqual(progress["awaiting_submission_batches"], 255)
+
     def test_screening_progress_honors_concurrency_above_legacy_eight(
         self,
     ) -> None:

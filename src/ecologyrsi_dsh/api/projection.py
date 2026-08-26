@@ -1643,10 +1643,25 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     latest_launch_by_key: dict[str, tuple[Any, Mapping[str, Any]]] = {}
     launch_by_reservation_id: dict[str, tuple[Any, Mapping[str, Any]]] = {}
     accepted_reservations: set[str] = set()
-    completed_reflections: dict[str, Any] = {}
+    reflection_enabled = (
+        metadata.get("sample_reflection_policy")
+        != "candidate_aggregate_post_score@1"
+    )
+    terminal_stage = "sample.reflect" if reflection_enabled else "sample.plan"
+    completed_terminals: dict[str, Any] = {}
     launch_count = 0
     for event in state.events:
         if int(event.seq) <= batch_seq:
+            continue
+        if event.kind in {"RunPaused", "RunResumed"} or (
+            event.kind == "GatewayRetryScheduled"
+            and int(event.payload.get("generation", -1)) == generation
+        ):
+            # Every admitted worker from the preceding process/control attempt
+            # has settled before these durable boundaries.  Reservations that
+            # never produced a result are terminal failures, not live provider
+            # work in the new attempt.
+            latest_launch_by_key.clear()
             continue
         if event.kind == "DshChildLaunchReserved":
             launch = event.payload.get("launch")
@@ -1674,10 +1689,10 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
             ).strip()
             if reservation_id:
                 accepted_reservations.add(reservation_id)
-            if identity.get("stage") == "sample.reflect":
+            if identity.get("stage") == terminal_stage:
                 key = str(identity.get("idempotency_key") or "").strip()
                 if key:
-                    completed_reflections[key] = event
+                    completed_terminals[key] = event
             sample_events.append(event)
     if not sample_events:
         return None
@@ -1685,8 +1700,8 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     completed_launches: list[
         tuple[int, frozenset[str] | None, tuple[str, str] | None]
     ] = []
-    for reflection_event in completed_reflections.values():
-        identity = reflection_event.payload.get("identity")
+    for terminal_event in completed_terminals.values():
+        identity = terminal_event.payload.get("identity")
         if not isinstance(identity, Mapping):
             continue
         reflection_reservation = str(
@@ -1695,7 +1710,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         reflection_launch = launch_by_reservation_id.get(reflection_reservation)
         completed_launches.append(
             (
-                int(reflection_event.seq),
+                int(terminal_event.seq),
                 _sample_member_digest_set(
                     reflection_launch[1].get("sample_member_digests")
                     if reflection_launch is not None
@@ -1706,16 +1721,22 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         )
 
     total = len(candidates) * _TWO_STAGE_SCREENING_ORIGINS
-    completed = len(completed_reflections)
-    failed = sum(
-        event.payload.get("structured", {}).get("outcome_class") == "failed"
-        for event in completed_reflections.values()
-    )
-    succeeded = sum(
-        event.payload.get("structured", {}).get("outcome_class")
-        in {"improved", "degraded", "neutral"}
-        for event in completed_reflections.values()
-    )
+    completed = min(total, len(completed_terminals))
+    if reflection_enabled:
+        failed = sum(
+            event.payload.get("structured", {}).get("outcome_class") == "failed"
+            for event in completed_terminals.values()
+        )
+        succeeded = sum(
+            event.payload.get("structured", {}).get("outcome_class")
+            in {"improved", "degraded", "neutral"}
+            for event in completed_terminals.values()
+        )
+    else:
+        # Under aggregate post-score reflection, a durable Planner result is
+        # the terminal remote stage for one complete forecast origin.
+        succeeded = completed
+        failed = 0
     remaining = max(0, total - completed)
     configured_concurrency = metadata.get(
         "sample_concurrency",
@@ -1729,6 +1750,9 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         configured_concurrency = None
     outstanding = 0
     for launch_event, launch in latest_launch_by_key.values():
+        launch_key = str(launch.get("idempotency_key") or "").strip()
+        if launch_key in completed_terminals:
+            continue
         if (
             str(launch.get("reservation_id") or "").strip()
             in accepted_reservations
@@ -1766,17 +1790,17 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     )
     provider_queued = max(0, outstanding - in_flight)
     awaiting_submission = max(0, total - completed - outstanding)
-    reflection_events = sorted(
-        completed_reflections.values(), key=lambda event: int(event.seq)
+    terminal_events = sorted(
+        completed_terminals.values(), key=lambda event: int(event.seq)
     )
     samples_per_minute = None
-    if len(reflection_events) >= 2:
-        started = datetime.fromisoformat(reflection_events[0].created_at)
-        ended = datetime.fromisoformat(reflection_events[-1].created_at)
+    if len(terminal_events) >= 2:
+        started = datetime.fromisoformat(terminal_events[0].created_at)
+        ended = datetime.fromisoformat(terminal_events[-1].created_at)
         elapsed_minutes = max(0.0, (ended - started).total_seconds() / 60.0)
         if elapsed_minutes > 0:
             samples_per_minute = round(
-                (len(reflection_events) - 1) / elapsed_minutes, 3
+                (len(terminal_events) - 1) / elapsed_minutes, 3
             )
     estimated_remaining_seconds = (
         round(60.0 * remaining / samples_per_minute)
