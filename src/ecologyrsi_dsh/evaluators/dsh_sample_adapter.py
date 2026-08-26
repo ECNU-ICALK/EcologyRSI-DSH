@@ -426,13 +426,14 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
                     "succeeded_samples": succeeded,
                     "failed_samples": completed - succeeded,
                     "in_flight_batches": in_flight,
-                    "queued_batches": (
-                        0
-                        if progress_kind == "drained"
-                        else max(
-                            0,
-                            min(self._strict_max_in_flight, remaining) - in_flight,
-                        )
+                    # Capacity that has not been submitted is not a provider
+                    # queue.  Strict origin admission happens outside this
+                    # per-origin gateway heartbeat, so only durable provider
+                    # gate/launch evidence may raise `queued_batches`.
+                    "queued_batches": 0,
+                    "awaiting_submission_batches": max(
+                        0,
+                        remaining - in_flight,
                     ),
                 }
             )
@@ -474,6 +475,10 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
                 "failed_samples": completed - succeeded,
                 "in_flight_batches": min(self._strict_max_in_flight, remaining),
                 "queued_batches": 0,
+                "awaiting_submission_batches": max(
+                    0,
+                    remaining - min(self._strict_max_in_flight, remaining),
+                ),
             })
             self._strict_progress_callback(projected)
 

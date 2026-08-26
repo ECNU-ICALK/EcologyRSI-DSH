@@ -22,6 +22,7 @@ from ecologyrsi_dsh.api.generation_execution import _model_token_budget_state
 from ecologyrsi_dsh.api.projection import (
     _dsh_activity_projection,
     _dsh_runtime_projection,
+    _evaluation_progress_projection,
     _evaluation_progress_rates,
     _model_usage_summary,
     _public_evaluation_metrics,
@@ -64,6 +65,82 @@ def _skill_evidence(stage: str, skill_name: str) -> dict:
 
 
 class ExecutionProjectionTests(unittest.TestCase):
+    def test_screening_progress_honors_concurrency_above_legacy_eight(
+        self,
+    ) -> None:
+        events = [
+            SimpleNamespace(
+                seq=10,
+                kind="GenerationBatchStarted",
+                payload={"batch": {"generation": 0}},
+                created_at="2026-08-26T06:00:00+00:00",
+            )
+        ]
+        events.extend(
+            SimpleNamespace(
+                seq=11 + index,
+                kind="DshChildLaunchReserved",
+                payload={
+                    "launch": {
+                        "stage": "sample.plan",
+                        "idempotency_key": f"run:test:sample.plan:origin-{index}",
+                        "reservation_id": f"reservation-plan-{index}",
+                    }
+                },
+                created_at=f"2026-08-26T06:00:{index + 1:02d}+00:00",
+            )
+            for index in range(10)
+        )
+        state = SimpleNamespace(
+            run=SimpleNamespace(
+                generation=0,
+                status=SimpleNamespace(value="running"),
+            ),
+            task_manifest=SimpleNamespace(
+                metadata={
+                    "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                    "two_stage_evaluation_enabled": True,
+                    "sample_concurrency": 64,
+                }
+            ),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            events=tuple(events),
+        )
+
+        progress = _screening_progress_projection(state)
+
+        self.assertEqual(progress["configured_concurrency"], 64)
+        self.assertEqual(progress["in_flight_batches"], 10)
+        self.assertEqual(progress["queued_batches"], 0)
+        self.assertEqual(progress["awaiting_submission_batches"], 246)
+
+    def test_evaluation_progress_projects_configured_concurrency_up_to_128(
+        self,
+    ) -> None:
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(metadata={"sample_concurrency": 128}),
+            events=(
+                SimpleNamespace(
+                    seq=20,
+                    kind="EvaluationProgressRecorded",
+                    payload={
+                        "candidate_id": "candidate:projection-concurrency",
+                        "role": "planner",
+                        "completed_samples": 1,
+                        "total_samples": 10,
+                    },
+                    created_at="2026-08-26T06:00:00+00:00",
+                ),
+            ),
+        )
+
+        progress = _evaluation_progress_projection(
+            state,
+            "candidate:projection-concurrency",
+        )
+
+        self.assertEqual(progress["configured_concurrency"], 128)
+
     def test_screening_progress_projects_completed_active_and_awaiting_origins(self) -> None:
         events = (
             SimpleNamespace(

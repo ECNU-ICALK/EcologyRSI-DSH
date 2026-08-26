@@ -618,6 +618,48 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertEqual(len(runtime.activated), 1)
         self.assertEqual(runtime.activated[0]["run_id"], run_id)
 
+    def test_native_start_from_paused_resumes_instead_of_reactivating(self) -> None:
+        runtime = _FakeNativeRuntime()
+        self.server.dsh_native_runtime = runtime
+        run_id = "run:native-start-from-paused"
+        status, created = self._post(
+            {
+                "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                "run_id": run_id,
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "strategy_model_id": "dsh/strategy",
+                "review_model_id": "dsh/review",
+                "start": True,
+                "auto_advance": 0,
+                "idempotency_key": "native-start-from-paused-create",
+            }
+        )
+        self.assertEqual(status, 201, created)
+        status, paused = self._post_path(
+            f"/runs/{run_id}/action",
+            {
+                "action": "pause",
+                "idempotency_key": "native-start-from-paused-pause",
+            },
+        )
+        self.assertEqual(status, 200, paused)
+        self.assertEqual(paused["projection"]["status"], "paused")
+
+        status, started = self._post_path(
+            f"/runs/{run_id}/action",
+            {
+                "action": "start",
+                "idempotency_key": "native-start-from-paused-start",
+            },
+        )
+
+        self.assertEqual(status, 200, started)
+        self.assertEqual(started["projection"]["status"], "running")
+        self.assertEqual(runtime.activated, [])
+        self.assertEqual(len(runtime.resumed), 1)
+        self.assertEqual(runtime.resumed[0]["run_id"], run_id)
+
     def test_frozen_native_run_is_recreated_after_dsh_process_restart(self) -> None:
         runtime = _FakeNativeRuntime()
         self.server.dsh_native_runtime = runtime

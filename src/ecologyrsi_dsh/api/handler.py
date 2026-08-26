@@ -3129,7 +3129,15 @@ class EvolutionRequestHandler(
             self.server.dsh_native_runtime.resume(native_request)
         if action == "start":
             if native_protocol:
-                self.server.dsh_native_runtime.activate(native_request)
+                if state.run.status.value == "created":
+                    self.server.dsh_native_runtime.activate(native_request)
+                else:
+                    # The public control contract has historically accepted
+                    # `start` as an alias for resuming a paused run.  Native
+                    # activation is deliberately narrower (created/running),
+                    # so keep the DSH and Host state machines aligned by
+                    # resuming rather than reactivating this paused run.
+                    self.server.dsh_native_runtime.resume(native_request)
             director.start_run(run_id)
             if native_protocol:
                 self.server.dsh_tools.open_run_admissions(run_id)

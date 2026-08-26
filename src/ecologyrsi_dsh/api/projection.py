@@ -49,6 +49,10 @@ from .shared import (
     _expected_partition,
     _max_generations,
 )
+from .sample_admission import (
+    HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
+    MAX_SAMPLE_CONCURRENCY,
+)
 
 _TWO_STAGE_SCREENING_ORIGINS = 64
 
@@ -1113,11 +1117,14 @@ def _evaluation_progress_projection(
         else None
     )
     metadata = state.task_manifest.metadata
-    configured_concurrency = metadata.get("sample_concurrency", 4)
+    configured_concurrency = metadata.get(
+        "sample_concurrency",
+        HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
+    )
     if (
         isinstance(configured_concurrency, bool)
         or not isinstance(configured_concurrency, int)
-        or not 1 <= configured_concurrency <= 8
+        or not 1 <= configured_concurrency <= MAX_SAMPLE_CONCURRENCY
     ):
         configured_concurrency = None
     return {
@@ -1151,6 +1158,9 @@ def _evaluation_progress_projection(
         "causal_wave_sample_count": payload.get("batch_size"),
         "in_flight_batches": payload.get("in_flight_batches"),
         "queued_batches": payload.get("queued_batches"),
+        "awaiting_submission_batches": payload.get(
+            "awaiting_submission_batches"
+        ),
         "configured_concurrency": configured_concurrency,
         "samples_per_minute": samples_per_minute,
         "gateway_calls_per_minute": gateway_calls_per_minute,
@@ -1685,11 +1695,14 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         for event in completed_reflections.values()
     )
     remaining = max(0, total - completed)
-    configured_concurrency = metadata.get("sample_concurrency", 4)
+    configured_concurrency = metadata.get(
+        "sample_concurrency",
+        HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
+    )
     if (
         isinstance(configured_concurrency, bool)
         or not isinstance(configured_concurrency, int)
-        or not 1 <= configured_concurrency <= 8
+        or not 1 <= configured_concurrency <= MAX_SAMPLE_CONCURRENCY
     ):
         configured_concurrency = None
     outstanding = 0
@@ -1725,7 +1738,9 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         outstanding += 1
     in_flight = min(
         outstanding,
-        configured_concurrency if configured_concurrency is not None else 8,
+        configured_concurrency
+        if configured_concurrency is not None
+        else HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
     )
     provider_queued = max(0, outstanding - in_flight)
     awaiting_submission = max(0, total - completed - outstanding)

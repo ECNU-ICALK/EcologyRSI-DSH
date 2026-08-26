@@ -1185,6 +1185,9 @@ class DshSampleExecutionTests(unittest.TestCase):
         self.assertEqual(progress[-1]["adaptive_split_count"], 1)
         self.assertEqual(progress[-1]["adaptive_split_recovered_samples"], 0)
         self.assertEqual(progress[-1]["adaptive_split_failed_samples"], 0)
+        self.assertEqual(progress[-1]["in_flight_batches"], 0)
+        self.assertEqual(progress[-1]["queued_batches"], 0)
+        self.assertEqual(progress[-1]["awaiting_submission_batches"], 1)
 
         adapter.record_finalized_origin_progress(
             status="succeeded", prediction_cell_count=9
