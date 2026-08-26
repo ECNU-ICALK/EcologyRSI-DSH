@@ -81,7 +81,7 @@ export function registerRuntimeRoutes(ctx, controller, config) {
       }
       const create = req.method === "POST" && ["/runs", "/runs/start"].includes(relative);
       const mutation = req.method === "POST"
-        ? relative.match(/^\/runs\/([^/]+)\/(stages|pause|cancel|resume)$/)
+        ? relative.match(/^\/runs\/([^/]+)\/(stages|start|pause|cancel|resume)$/)
         : null;
       if (!create && !mutation) {
         safeJsonError(res, 404, "unknown_runtime_route");
@@ -114,6 +114,7 @@ export function registerRuntimeRoutes(ctx, controller, config) {
         let result;
         if (create) result = await controller.startRun(body);
         else if (mutation[2] === "stages") result = await controller.runStage(body);
+        else if (mutation[2] === "start") result = await controller.activate(body);
         else if (mutation[2] === "pause") result = await controller.pause(body);
         else if (mutation[2] === "cancel") result = await controller.cancel(body);
         else result = await controller.resume(body);

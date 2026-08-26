@@ -334,6 +334,7 @@ class _FakeNativeRuntime:
     def __init__(self, *, unavailable: bool = False) -> None:
         self.unavailable = unavailable
         self.created: list[dict] = []
+        self.activated: list[dict] = []
         self.paused: list[dict] = []
         self.resumed: list[dict] = []
         self.cancelled: list[dict] = []
@@ -399,6 +400,16 @@ class _FakeNativeRuntime:
 
     def cancel(self, request: dict) -> dict:
         self.cancelled.append(request)
+        return {"accepted": True, **request}
+
+    def activate(self, request: dict) -> dict:
+        if request["run_id"] not in self.run_ids:
+            raise DshNativeRuntimeUnavailableError(
+                "runtime run missing after restart",
+                error_code="dsh_native_runtime_http_error",
+                status_code=404,
+            )
+        self.activated.append(request)
         return {"accepted": True, **request}
 
     def pause(self, request: dict) -> dict:
@@ -577,6 +588,35 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertEqual(configuration["samples_per_update"], 1)
         self.assertEqual(configuration["sample_budget_class"], "diagnostic_smoke")
         self.assertEqual(configuration["minimum_selection_samples_per_update"], 169)
+
+    def test_native_start_activates_created_runtime_before_host_run(self) -> None:
+        runtime = _FakeNativeRuntime()
+        self.server.dsh_native_runtime = runtime
+        run_id = "run:native-explicit-start"
+        status, created = self._post(
+            {
+                "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                "run_id": run_id,
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "strategy_model_id": "dsh/strategy",
+                "review_model_id": "dsh/review",
+                "start": False,
+                "auto_advance": 0,
+                "idempotency_key": "native-explicit-start-create",
+            }
+        )
+        self.assertEqual(status, 201, created)
+
+        status, started = self._post_path(
+            f"/runs/{run_id}/action",
+            {"action": "start", "idempotency_key": "native-explicit-start-action"},
+        )
+
+        self.assertEqual(status, 200, started)
+        self.assertEqual(started["projection"]["status"], "running")
+        self.assertEqual(len(runtime.activated), 1)
+        self.assertEqual(runtime.activated[0]["run_id"], run_id)
 
     def test_frozen_native_run_is_recreated_after_dsh_process_restart(self) -> None:
         runtime = _FakeNativeRuntime()

@@ -188,6 +188,28 @@ test("ordinary created runs cannot enter the restored-paused resume path", async
   assert.equal(opens, 0);
 });
 
+test("explicit activation starts a ready created run without weakening resume", async () => {
+  let opens = 0;
+  const controller = new RuntimeController({}, {
+    stageRunner: {
+      closeLaunchFence: () => {},
+      openLaunchFence: () => { opens += 1; },
+    },
+  });
+  await startReadyRun(controller, binding({
+    idempotency_key: "created-run-1",
+    binding: { initial_run_status: "created" },
+  }));
+
+  const activated = await controller.activate(binding({
+    idempotency_key: "activate-created-1",
+  }));
+
+  assert.equal(activated.accepted, true);
+  assert.equal(controller.registry.get("run-1").status, "running");
+  assert.equal(opens, 1);
+});
+
 test("a second controller cannot resume registry-only paused hosts", async () => {
   const registry = new RuntimeRunRegistry();
   const ownerCalls = [];

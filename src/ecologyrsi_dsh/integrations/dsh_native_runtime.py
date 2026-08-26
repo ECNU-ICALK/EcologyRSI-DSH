@@ -218,6 +218,10 @@ class DshNativeAgentRuntimeClient:
         run_id = _nonempty_text(request.get("run_id"), "run_id")
         return self._mutation(f"/api/ecology-agent-runtime/v1/runs/{quote(run_id, safe='')}/cancel", request, cancelled)
 
+    def activate(self, request: Mapping[str, Any], *, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+        run_id = _nonempty_text(request.get("run_id"), "run_id")
+        return self._mutation(f"/api/ecology-agent-runtime/v1/runs/{quote(run_id, safe='')}/start", request, cancelled)
+
     def pause(self, request: Mapping[str, Any], *, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         run_id = _nonempty_text(request.get("run_id"), "run_id")
         return self._mutation(f"/api/ecology-agent-runtime/v1/runs/{quote(run_id, safe='')}/pause", request, cancelled)

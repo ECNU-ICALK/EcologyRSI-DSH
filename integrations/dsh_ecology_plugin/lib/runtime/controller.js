@@ -260,6 +260,26 @@ export class RuntimeController {
       first_call_verified: true,
     };
   }
+  activate(binding) {
+    const current = this.#current(binding.run_id);
+    const lifecycle = this.#lifecycle(binding.run_id);
+    const generation = this.registry.generationOf(current);
+    if (current.status === "running") {
+      return Promise.resolve(this.#response({ ...current, ...binding }));
+    }
+    if (current.status !== "created") {
+      return Promise.reject(this.#transitionError("start", current.status));
+    }
+    if (!this.#hostsReadyFor(lifecycle, current, generation)) {
+      this.stageRunner?.closeLaunchFence?.(binding.run_id);
+      return Promise.reject(this.#hostsIncompleteError());
+    }
+    const activated = this.registry.transition(binding.run_id, binding, "running");
+    if (!this.#openLaunchFenceFor(binding.run_id, lifecycle, generation)) {
+      throw this.#hostsIncompleteError();
+    }
+    return Promise.resolve(this.#response(activated));
+  }
   pause(binding) {
     const current = this.#current(binding.run_id);
     const lifecycle = this.#lifecycle(binding.run_id);

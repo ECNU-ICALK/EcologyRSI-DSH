@@ -3128,7 +3128,11 @@ class EvolutionRequestHandler(
         elif native_protocol and action == "resume":
             self.server.dsh_native_runtime.resume(native_request)
         if action == "start":
+            if native_protocol:
+                self.server.dsh_native_runtime.activate(native_request)
             director.start_run(run_id)
+            if native_protocol:
+                self.server.dsh_tools.open_run_admissions(run_id)
         elif action == "pause":
             if not native_protocol:
                 # Preserve an operator-supplied pause cause in the append-only
