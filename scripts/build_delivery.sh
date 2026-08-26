@@ -14,9 +14,8 @@ PLUGIN_DIST="$PLUGIN_ROOT/dist"
 
 cd "$ROOT_DIR"
 
-if [ "${ECOLOGYRSI_ALLOW_DIRTY_BUILD:-0}" != "1" ] && \
-  [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
-  echo "release builds require a clean worktree; set ECOLOGYRSI_ALLOW_DIRTY_BUILD=1 for a non-final candidate" >&2
+if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+  echo "release builds require a clean worktree" >&2
   exit 1
 fi
 

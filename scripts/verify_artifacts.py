@@ -64,7 +64,17 @@ def reject_internal_sources(names: set[str], label: str) -> None:
         raise RuntimeError(f"{label} contains internal source: {', '.join(leaked)}")
 
 
+def _reject_symlink_components(root: Path, path: Path, label: str) -> None:
+    current = root
+    for part in path.relative_to(root).parts:
+        current /= part
+        if current.is_symlink():
+            raise RuntimeError(f"{label} is a symlink: {current}")
+
+
 def _matching_member(archive: Any, member_name: str, source: Path, label: str) -> None:
+    if source.is_symlink():
+        raise RuntimeError(f"{label} source is a symlink: {source}")
     try:
         data = archive.read(member_name)
     except KeyError as exc:
@@ -397,7 +407,32 @@ def verify_build_info(path: Path, version: str, source_root: Path) -> None:
 
 
 def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
+    if plugin.is_symlink():
+        raise RuntimeError(f"npm plugin archive is a symlink: {plugin}")
+    integration_root = source_root / "integrations/dsh_ecology_plugin"
+    _reject_symlink_components(
+        source_root, integration_root, "npm plugin source directory"
+    )
+    package_json = integration_root / "package.json"
+    _reject_symlink_components(source_root, package_json, "npm package source")
+    for legal_name in ("LICENSE", "NOTICE"):
+        legal_source = source_root / legal_name
+        _reject_symlink_components(source_root, legal_source, "legal source")
+    selected_symlinks = [
+        path for path in integration_root.rglob("*") if path.is_symlink()
+    ]
+    if selected_symlinks:
+        raise RuntimeError(f"npm plugin source is a symlink: {selected_symlinks[0]}")
     with tarfile.open(plugin, "r:gz") as archive:
+        linked_members = [
+            member.name
+            for member in archive.getmembers()
+            if member.issym() or member.islnk()
+        ]
+        if linked_members:
+            raise RuntimeError(
+                "npm plugin contains linked member: " + ", ".join(linked_members)
+            )
         names = set(archive.getnames())
         file_names = {
             member.name for member in archive.getmembers() if member.isfile()
@@ -446,7 +481,6 @@ def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
         if any(any(token in name.casefold() for token in forbidden) for name in names):
             raise RuntimeError("npm plugin contains private runtime material")
 
-        integration_root = source_root / "integrations/dsh_ecology_plugin"
         expected_sources = {
             "package/package.json": integration_root / "package.json",
             "package/LICENSE": source_root / "LICENSE",
@@ -461,6 +495,8 @@ def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
             if pattern in {"LICENSE", "NOTICE"}:
                 continue
             for source in integration_root.glob(pattern):
+                if source.is_symlink():
+                    raise RuntimeError(f"npm plugin source is a symlink: {source}")
                 if source.is_file() and not source.is_symlink():
                     relative = source.relative_to(integration_root).as_posix()
                     expected_sources[f"package/{relative}"] = source

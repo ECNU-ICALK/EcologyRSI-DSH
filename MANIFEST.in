@@ -12,3 +12,6 @@ include integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3
 recursive-include scripts *.sh *.py *.mjs
 recursive-include tests *.py *.json
 global-exclude *.py[cod] __pycache__ .DS_Store *.sqlite3
+global-exclude .env .env.* .npmrc .pypirc *.pem *.key *.p12 *.pfx
+global-exclude *[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]*.yml
+global-exclude *[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]*.yaml

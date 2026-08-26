@@ -178,6 +178,20 @@ if manifest.get("metadata", {}).get("dataset_seed") != 0:
 print(f"source metadata and syntax: ok ({project_version})")
 PY
 
+PYTHONPATH="$ROOT_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}" \
+  "$PYTHON_BIN" -c '
+from pathlib import Path
+import sys
+
+from create_delivery_archive import packed_plugin, project_version
+from verify_artifacts import verify_npm_plugin
+
+root = Path(sys.argv[1])
+version = project_version(root)
+verify_npm_plugin(packed_plugin(root, version), version, root)
+print(f"source nested DSH plugin: ok ({version})")
+' "$ROOT_DIR"
+
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ecologyrsi-dsh-source-verify.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
 

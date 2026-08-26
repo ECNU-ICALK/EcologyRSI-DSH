@@ -39,6 +39,141 @@ INTENTIONAL_PATH_FIXTURES = {
 
 
 class DeliveryScriptTests(unittest.TestCase):
+    def test_ignored_credentials_cannot_enter_clean_delivery(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-credential-fixture-") as directory:
+            fixture = Path(directory)
+            version = "0.3.33"
+            self._write_minimal_source_fixture(fixture, version=version)
+            credential = (
+                fixture
+                / "integrations/dsh_ecology_plugin/release.credentials.yml"
+            )
+            credential.write_text(
+                "token: cornflower\npassword: field-not-secret\n",
+                encoding="utf-8",
+            )
+            self._commit_fixture(fixture)
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "check-ignore", "-q", str(credential.relative_to(fixture))],
+                    cwd=fixture,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            dist = fixture / "dist"
+            dist.mkdir()
+            (dist / f"ecologyrsi_dsh-{version}-py3-none-any.whl").write_bytes(
+                b"fake-wheel"
+            )
+            (dist / f"ecologyrsi_dsh-{version}.tar.gz").write_bytes(b"fake-sdist")
+
+            included = {
+                path.relative_to(fixture).as_posix()
+                for path in included_source_files(fixture)
+            }
+            delivery = create_archive(fixture, dist)
+
+            self.assertNotIn(
+                "integrations/dsh_ecology_plugin/release.credentials.yml", included
+            )
+            build_info = json.loads(
+                (dist / "BUILD-INFO.json").read_text(encoding="utf-8")
+            )
+            self.assertIs(build_info["dirty"], False)
+            with tarfile.open(delivery, "r:gz") as archive:
+                self.assertFalse(
+                    any(
+                        name.endswith("/release.credentials.yml")
+                        for name in archive.getnames()
+                    )
+                )
+
+    def test_ignored_credentials_cannot_enter_sdist(self) -> None:
+        credential = (
+            ROOT
+            / "integrations/dsh_ecology_plugin/review.credentials.yml"
+        )
+        credential.write_text(
+            "token: cornflower\npassword: field-not-secret\n", encoding="utf-8"
+        )
+        try:
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "check-ignore", "-q", str(credential.relative_to(ROOT))],
+                    cwd=ROOT,
+                    check=False,
+                ).returncode,
+                0,
+            )
+            with tempfile.TemporaryDirectory(
+                prefix="ecologyrsi-credential-sdist-"
+            ) as directory:
+                result = subprocess.run(
+                    [
+                        "uv",
+                        "build",
+                        "--sdist",
+                        "--out-dir",
+                        directory,
+                        str(ROOT),
+                    ],
+                    cwd=ROOT,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                sdist = next(Path(directory).glob("*.tar.gz"))
+                with tarfile.open(sdist, "r:gz") as archive:
+                    self.assertFalse(
+                        any(
+                            name.endswith("/review.credentials.yml")
+                            for name in archive.getnames()
+                        )
+                    )
+        finally:
+            credential.unlink(missing_ok=True)
+
+    def test_source_selection_rejects_explicit_root_symlink(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-root-symlink-") as directory:
+            fixture = Path(directory)
+            self._write_minimal_source_fixture(fixture, version="0.3.33")
+            external = fixture / "external-license"
+            external.write_text("must not be read\n", encoding="utf-8")
+            license_path = fixture / "LICENSE"
+            license_path.unlink()
+            license_path.symlink_to(external)
+
+            with self.assertRaisesRegex(RuntimeError, "symlink.*LICENSE"):
+                included_source_files(fixture)
+
+    def test_source_selection_rejects_nested_plugin_symlink(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-plugin-symlink-") as directory:
+            fixture = Path(directory)
+            plugin = self._write_minimal_source_fixture(fixture, version="0.3.33")
+            external = fixture / "external-plugin.tgz"
+            external.write_bytes(b"must not be read")
+            plugin.unlink()
+            plugin.symlink_to(external)
+
+            with self.assertRaisesRegex(RuntimeError, "symlink.*plugin"):
+                included_source_files(fixture)
+
+    def test_source_selection_rejects_selected_directory_symlink(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-directory-symlink-") as directory:
+            fixture = Path(directory)
+            self._write_minimal_source_fixture(fixture, version="0.3.33")
+            screenshots = fixture / "docs/screenshots"
+            shutil.rmtree(screenshots)
+            external = fixture / "external-screenshots"
+            external.mkdir()
+            (external / "secret.jpg").write_bytes(b"must not be read")
+            screenshots.symlink_to(external, target_is_directory=True)
+
+            with self.assertRaisesRegex(RuntimeError, "symlink.*docs/screenshots"):
+                included_source_files(fixture)
+
     def test_public_source_selection_is_versioned_and_excludes_internal_docs(self) -> None:
         version = project_version(ROOT)
         included = {
@@ -180,6 +315,147 @@ class DeliveryScriptTests(unittest.TestCase):
                 self.assertEqual(license_member.read(), (fixture / "LICENSE").read_bytes())
                 self.assertEqual(notice_member.read(), (fixture / "NOTICE").read_bytes())
 
+    def test_dsh_plugin_builder_rejects_selected_symlink(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-npm-symlink-") as directory:
+            fixture = Path(directory)
+            package_root = fixture / "integrations/dsh_ecology_plugin"
+            (package_root / "lib").mkdir(parents=True)
+            external = fixture / "external.js"
+            external.write_text("export const external = true;\n", encoding="utf-8")
+            (package_root / "lib/external.js").symlink_to(external)
+            (fixture / "LICENSE").write_text("license\n", encoding="utf-8")
+            (fixture / "NOTICE").write_text("notice\n", encoding="utf-8")
+            (package_root / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "@ecologyrsi/dsh-evolution-plugin",
+                        "version": "0.3.33",
+                        "files": ["lib/**/*.js", "LICENSE", "NOTICE"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python",
+                    str(ROOT / "scripts/build_dsh_plugin.py"),
+                    "--root",
+                    str(fixture),
+                    "--output-dir",
+                    str(fixture / "output"),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("symlink", (result.stdout + result.stderr).casefold())
+
+    def test_source_gate_rejects_stale_same_version_plugin(self) -> None:
+        plugin = next(
+            (ROOT / "integrations/dsh_ecology_plugin/dist").glob(
+                "ecologyrsi-dsh-evolution-plugin-*.tgz"
+            )
+        )
+        original_plugin = plugin.read_bytes()
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-source-stale-") as directory:
+            temporary = Path(directory)
+            fixture = temporary / "fixture"
+            package_root = fixture / "integrations/dsh_ecology_plugin"
+            shutil.copytree(ROOT / "integrations/dsh_ecology_plugin", package_root)
+            shutil.copy2(ROOT / "LICENSE", fixture / "LICENSE")
+            shutil.copy2(ROOT / "NOTICE", fixture / "NOTICE")
+            (package_root / "lib/config.js").write_text(
+                "export const staleFixture = true;\n", encoding="utf-8"
+            )
+            output = temporary / "output"
+            subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python",
+                    str(ROOT / "scripts/build_dsh_plugin.py"),
+                    "--root",
+                    str(fixture),
+                    "--output-dir",
+                    str(output),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            stale_plugin = next(output.glob("*.tgz"))
+            fake_python = temporary / "python"
+            fake_python.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *verify_npm_plugin*) exec \"$ECOLOGYRSI_REAL_PYTHON\" \"$@\" ;;\n"
+                "esac\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            fake_node = temporary / "node"
+            fake_node.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_node.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PYTHON"] = str(fake_python)
+            environment["ECOLOGYRSI_REAL_PYTHON"] = subprocess.check_output(
+                ["bash", "scripts/select_python.sh"], cwd=ROOT, text=True
+            ).strip()
+            environment["PATH"] = f"{temporary}{os.pathsep}{environment['PATH']}"
+            try:
+                plugin.write_bytes(stale_plugin.read_bytes())
+                result = subprocess.run(
+                    ["bash", "scripts/verify_delivery.sh", "--source-only"],
+                    cwd=ROOT,
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+            finally:
+                plugin.write_bytes(original_plugin)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("npm plugin is stale: package/lib/config.js", result.stderr)
+
+    def test_dirty_build_override_is_not_advertised_or_honored(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-dirty-release-") as directory:
+            temporary = Path(directory)
+            for name in ("python", "uv", "node", "find", "npm"):
+                command = temporary / name
+                command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                command.chmod(0o755)
+            fake_git = temporary / "git"
+            fake_git.write_text(
+                "#!/bin/sh\nprintf ' M fixture\\n'\n", encoding="utf-8"
+            )
+            fake_git.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PYTHON"] = str(temporary / "python")
+            environment["PATH"] = f"{temporary}{os.pathsep}{environment['PATH']}"
+            environment["ECOLOGYRSI_ALLOW_DIRTY_BUILD"] = "1"
+
+            result = subprocess.run(
+                ["bash", "scripts/build_delivery.sh"],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("clean worktree", result.stderr)
+            self.assertNotIn("ECOLOGYRSI_ALLOW_DIRTY_BUILD", result.stderr)
+
     def test_npm_verifier_rejects_any_stale_selected_source(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ecologyrsi-plugin-stale-") as directory:
             fixture = Path(directory)
@@ -236,6 +512,47 @@ class DeliveryScriptTests(unittest.TestCase):
 
             self.assertNotEqual(verified.returncode, 0)
             self.assertIn("package/lib/config.js", verified.stdout + verified.stderr)
+
+    def test_npm_verifier_rejects_legal_symlink_before_reading(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-legal-symlink-") as directory:
+            fixture = Path(directory)
+            shutil.copytree(
+                ROOT / "integrations/dsh_ecology_plugin",
+                fixture / "integrations/dsh_ecology_plugin",
+            )
+            (fixture / "LICENSE").symlink_to(fixture / "missing-external-license")
+            shutil.copy2(ROOT / "NOTICE", fixture / "NOTICE")
+            plugin = next(
+                (ROOT / "integrations/dsh_ecology_plugin/dist").glob("*.tgz")
+            )
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(ROOT / "scripts")
+
+            verified = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python",
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        "from verify_artifacts import verify_npm_plugin; "
+                        "verify_npm_plugin(Path(__import__('sys').argv[1]), "
+                        "__import__('sys').argv[2], Path(__import__('sys').argv[3]))"
+                    ),
+                    str(plugin),
+                    project_version(ROOT),
+                    str(fixture),
+                ],
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(verified.returncode, 0)
+            self.assertIn("legal source is a symlink", verified.stdout + verified.stderr)
 
     def test_artifacts_only_does_not_run_source_suites(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ecologyrsi-artifacts-only-") as directory:
@@ -436,7 +753,7 @@ class DeliveryScriptTests(unittest.TestCase):
                     encoding="utf-8",
                 )
             elif name == ".gitignore":
-                path.write_text("dist/\n", encoding="utf-8")
+                path.write_text("dist/\n*credentials*.yml\n", encoding="utf-8")
             else:
                 path.write_text(f"fixture {name}\n", encoding="utf-8")
         screenshot = root / "docs/screenshots/01-run-settings.jpg"

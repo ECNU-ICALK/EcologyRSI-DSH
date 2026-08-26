@@ -40,6 +40,9 @@ SOURCE_DIRS = (
 )
 IGNORED_PARTS = {"__pycache__", ".pytest_cache", ".DS_Store", "build", "dist"}
 IGNORED_SUFFIXES = {".pyc", ".pyo", ".sqlite3"}
+SENSITIVE_PARTS = {".dsh", ".ssh"}
+SENSITIVE_NAMES = {".env", ".npmrc", ".pypirc"}
+SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
 
 
 def sha256(path: Path) -> str:
@@ -48,6 +51,14 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _reject_symlink_components(root: Path, path: Path, label: str) -> None:
+    current = root
+    for part in path.relative_to(root).parts:
+        current /= part
+        if current.is_symlink():
+            raise RuntimeError(f"symlink is not allowed for {label}: {current}")
 
 
 def project_version(root: Path) -> str:
@@ -60,6 +71,7 @@ def project_version(root: Path) -> str:
 
 def packed_plugin(root: Path, version: str) -> Path:
     plugin_dist = root / "integrations/dsh_ecology_plugin/dist"
+    _reject_symlink_components(root, plugin_dist, "packed DSH plugin directory")
     candidates = sorted(plugin_dist.glob("ecologyrsi-dsh-evolution-plugin-*.tgz"))
     expected_name = f"ecologyrsi-dsh-evolution-plugin-{version}.tgz"
     if len(candidates) != 1 or candidates[0].name != expected_name:
@@ -68,24 +80,75 @@ def packed_plugin(root: Path, version: str) -> Path:
             f"exactly one packed DSH plugin is required for version {version}; "
             f"found: {names}"
         )
-    return candidates[0]
+    plugin = candidates[0]
+    _reject_symlink_components(root, plugin, "packed DSH plugin")
+    return plugin
+
+
+def _is_sensitive_source(relative: Path) -> bool:
+    folded_parts = tuple(part.casefold() for part in relative.parts)
+    name = relative.name.casefold()
+    return (
+        any(part in SENSITIVE_PARTS for part in folded_parts)
+        or name in SENSITIVE_NAMES
+        or name.startswith(".env.")
+        or "credential" in name
+        or relative.suffix.casefold() in SENSITIVE_SUFFIXES
+    )
+
+
+def _git_ignored_sources(root: Path, paths: list[Path]) -> set[str]:
+    repository = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if repository.returncode != 0:
+        return set()
+    names = [path.relative_to(root).as_posix() for path in paths]
+    if not names:
+        return set()
+    checked = subprocess.run(
+        ["git", "-C", str(root), "check-ignore", "--no-index", "-z", "--stdin"],
+        input="\0".join(names) + "\0",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if checked.returncode not in {0, 1}:
+        raise RuntimeError("cannot evaluate git-ignore rules for public source")
+    return {name for name in checked.stdout.split("\0") if name}
 
 
 def included_source_files(root: Path) -> list[Path]:
-    files = [root / name for name in ROOT_FILES]
-    files.append(packed_plugin(root, project_version(root)))
+    explicit_files = [root / name for name in ROOT_FILES]
+    explicit_files.append(packed_plugin(root, project_version(root)))
+    for path in explicit_files:
+        _reject_symlink_components(root, path, "delivery source")
+    files = list(explicit_files)
+    candidates: list[Path] = []
     for directory in SOURCE_DIRS:
-        for path in (root / directory).rglob("*"):
-            if not path.is_file() or path.is_symlink():
-                continue
+        source_directory = root / directory
+        _reject_symlink_components(root, source_directory, "delivery source directory")
+        for path in source_directory.rglob("*"):
             relative = path.relative_to(root)
             if any(
                 part in IGNORED_PARTS or part.endswith(".egg-info")
                 for part in relative.parts
             ):
                 continue
-            if path.suffix in IGNORED_SUFFIXES:
+            if path.suffix in IGNORED_SUFFIXES or _is_sensitive_source(relative):
                 continue
+            candidates.append(path)
+    ignored = _git_ignored_sources(root, candidates)
+    for path in candidates:
+        relative = path.relative_to(root).as_posix()
+        if relative in ignored:
+            continue
+        if path.is_symlink():
+            raise RuntimeError(f"symlink is not allowed for delivery source: {path}")
+        if path.is_file():
             files.append(path)
     missing = [str(path) for path in files if not path.is_file()]
     if missing:
