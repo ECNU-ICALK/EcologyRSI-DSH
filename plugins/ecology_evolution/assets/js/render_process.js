@@ -1127,6 +1127,25 @@
     var heartbeatTotal = executionDiagnosticNumber(heartbeat && heartbeat.total_samples);
     var durableCompleted = executionDiagnosticNumber(diagnostics.live_evaluation_completed_examples);
     var durableTotal = executionDiagnosticNumber(diagnostics.live_evaluation_total_examples);
+    var originBundleProtocol = String(run && run.sample_agent_protocol || "").indexOf("dsh-strict-origin-bundle@") === 0;
+    var cellsPerOrigin = Number(run && run.prediction_cells_per_origin);
+    var configuredCellBudget = Number(run && run.samples_per_update);
+    var durableUsesCellUnits = originBundleProtocol
+      && Number.isInteger(cellsPerOrigin) && cellsPerOrigin > 1
+      && durableTotal != null
+      && (
+        heartbeatTotal != null
+          ? durableTotal >= heartbeatTotal * cellsPerOrigin
+          : configuredCellBudget > 0 && durableTotal >= configuredCellBudget
+      );
+    if (durableUsesCellUnits) {
+      // Durable result batches contain one row per target/horizon cell, while
+      // strict DSH heartbeats contain one complete forecast origin. Normalize
+      // before taking maxima so the UI never reports mixed units such as
+      // 144 / 4,500 beside a 16 / 500 origin heartbeat.
+      durableCompleted = durableCompleted == null ? null : Math.floor(durableCompleted / cellsPerOrigin);
+      durableTotal = Math.ceil(durableTotal / cellsPerOrigin);
+    }
     if (!heartbeat && durableCompleted == null && durableTotal == null) { return null; }
 
     var snapshot = Object.assign({}, heartbeat || {});
@@ -1136,6 +1155,10 @@
     var total = Math.max(completed, totalValues.length ? Math.max.apply(Math, totalValues) : completed);
     var durableSucceeded = executionDiagnosticNumber(diagnostics.live_evaluation_succeeded_examples);
     var durableFailed = executionDiagnosticNumber(diagnostics.live_evaluation_failed_examples);
+    if (durableUsesCellUnits) {
+      durableSucceeded = durableSucceeded == null ? null : Math.floor(durableSucceeded / cellsPerOrigin);
+      durableFailed = durableFailed == null ? null : Math.floor(durableFailed / cellsPerOrigin);
+    }
     var heartbeatSucceeded = executionDiagnosticNumber(heartbeat && heartbeat.succeeded_samples);
     var heartbeatFailed = executionDiagnosticNumber(heartbeat && heartbeat.failed_samples);
     var durableAhead = durableCompleted != null && (heartbeatCompleted == null || durableCompleted > heartbeatCompleted);

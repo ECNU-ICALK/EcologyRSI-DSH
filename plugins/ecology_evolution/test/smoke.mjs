@@ -1408,6 +1408,23 @@ const completedHeartbeatSnapshot = modelSandbox.executionSampleProgressSnapshot(
 });
 assert.equal(completedHeartbeatSnapshot.succeeded_samples, 9);
 assert.equal(completedHeartbeatSnapshot.failed_samples, 0);
+const strictOriginSnapshot = modelSandbox.executionSampleProgressSnapshot({
+  status: "running",
+  sample_agent_protocol: "dsh-strict-origin-bundle@4",
+  prediction_cells_per_origin: 9,
+  execution_diagnostics: {
+    live_evaluation_completed_examples: 144,
+    live_evaluation_total_examples: 4500,
+  },
+}, {
+  progress_kind: "completed_batch",
+  completed_samples: 2,
+  total_samples: 500,
+  succeeded_samples: 2,
+  failed_samples: 0,
+});
+assert.equal(strictOriginSnapshot.completed_samples, 16);
+assert.equal(strictOriginSnapshot.total_samples, 500);
 modelSandbox.renderAutonomyProgress(pausedDrainedRun);
 assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "已暂停，请求已排空");
 assert.equal(monitorNodes["#autonomy-progress-status"].className, "pill pill-amber");
