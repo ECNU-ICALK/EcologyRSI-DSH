@@ -15,7 +15,7 @@
 - Final public version is exactly `0.3.33` in Python metadata, browser plugin metadata, DSH package metadata, documentation, artifacts, and verification scripts.
 - The browser default is 500 complete forecast origins; for the current 3-target × 3-horizon profile this freezes `samples_per_update=4500` scoring cells.
 - New strict-origin runs reject scoring-cell budgets that are not divisible by `prediction_cells_per_origin`; historical manifests are replayed without rewriting.
-- Per-run sample admission is exactly the frozen `sample_concurrency` value, default and maximum 8; the DSH provider gate remains the cross-run final physical cap of 8.
+- Per-run sample admission is exactly the frozen `sample_concurrency` value, default 64 and maximum 128; the DSH provider gate remains the cross-run final physical cap of 128.
 - `passed` in 64-origin screening remains diagnostic evidence and is not a hard finalist filter.
 - v3/v6 and v4/v7 presets, `dsh-strict-origin-bundle@3`, `dsh-strict-origin-bundle@4`, and `evaluators/uncertainty.py` remain supported.
 - Existing SQLite files, `.runtime` state, active run events, and `0.3.32` artifacts are never deleted during implementation.
@@ -370,7 +370,7 @@ def admit(self, run_id: str, limit: int) -> Iterator[None]:
 
 Create one controller on `EvolutionHTTPServer`. Pass a provider to `EvaluatorRegistry`, then pass `lambda: provider(run_id, raw_concurrency)` into each DSH-native `CollaborativeSampleExecutor`. Wrap `_prepare_strict_origin_bundle` in that context. The callback must not be copied into `context_data`, hashed, serialized, or sent to DSH.
 
-Retain the DSH `ProviderStageGate(maxInFlight=8)` unchanged. This yields a run-level exact limit before the provider-wide cross-run limit.
+Keep the DSH `ProviderStageGate` independent of the run-scoped limiter, but raise its default and maximum to 128. This yields a run-level exact limit before the provider-wide cross-run limit and lets a run configured at 128 achieve real concurrency.
 
 - [ ] **Step 5: Correct progress semantics and write GREEN tests**
 
@@ -673,7 +673,7 @@ git commit -m "build: make delivery artifacts self-contained"
 
 - [ ] **Step 1: Add/adjust executable documentation assertions**
 
-Update smoke tests to assert `0.3.33`, default 500 complete origins, 4,500 scoring cells, candidate concurrency 4, sample concurrency 8, provider queue versus awaiting-submission labels, and twelve installed preset ids. Update delivery tests so the HTML defaults and current plugin manifest are behavioral sources of truth; do not grep human prose as a substitute for runtime tests.
+Update smoke tests to assert `0.3.33`, default 500 complete origins, 4,500 scoring cells, candidate concurrency 4, sample concurrency 64 with maximum 128, provider queue versus awaiting-submission labels, and twelve installed preset ids. Update delivery tests so the HTML defaults and current plugin manifest are behavioral sources of truth; do not grep human prose as a substitute for runtime tests.
 
 - [ ] **Step 2: Run smoke/version tests and confirm RED**
 
@@ -701,7 +701,7 @@ Document exactly:
 正式评估：Top 2，各 500 个完整预测时点
 候选并发：4
 逐样本并发：8
-同 provider 的 DSH stage 全局在飞上限：8
+同 provider 的 DSH stage 全局在飞上限：128
 ```
 
 Remove active instructions claiming concurrency 2, 1,600 per round, six v2 presets, provider serialization, or a UI token cap. Historical changelog entries retain their original version facts.
@@ -798,7 +798,7 @@ GET http://127.0.0.1:8777/api/health -> ok=true, package_version=0.3.33
 GET http://127.0.0.1:8848/ -> HTTP 200
 current run remains selectable and has the same run id
 event sequence never decreases
-provider in-flight never exceeds 8
+provider in-flight never exceeds 128
 unsubmitted origins are displayed as 待提交, not provider 排队
 one complete origin reaches plan, critic, score, and reflect
 ```
@@ -826,3 +826,69 @@ make verify-artifacts
 ```
 
 Expected: all commands exit 0. Record test counts, skipped tests, artifact SHA-256 values, production replay result, live PIDs, URLs, current event sequence, and the observed origin-wave result in the final handoff.
+
+---
+
+### Task 8: Raise Sample Concurrency to Default 64 and Maximum 128
+
+**Requirement amendment:** This task supersedes every earlier default/max-8 statement. Execute it immediately after Task 4, before resuming Task 5. Historical manifests keep their frozen values.
+
+**Files:**
+- Modify: `src/ecologyrsi_dsh/api/handler.py`
+- Modify: `src/ecologyrsi_dsh/evaluators/registry.py`
+- Modify: `src/ecologyrsi_dsh/evaluators/gateway_sample_adapter.py`
+- Modify: `plugins/ecology_evolution/index.html`
+- Modify: `plugins/ecology_evolution/test/smoke.mjs`
+- Modify: `integrations/dsh_ecology_plugin/lib/config.js`
+- Modify: `integrations/dsh_ecology_plugin/lib/runtime/provider-stage-gate.js`
+- Modify: `integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js`
+- Modify: `integrations/dsh_ecology_plugin/test/config.test.mjs`
+- Modify: `integrations/dsh_ecology_plugin/test/provider_stage_gate.test.mjs`
+- Modify: `tests/test_runtime_integration.py`
+- Modify: `tests/test_sample_execution.py`
+- Modify: `tests/test_sample_admission.py`
+
+**Interfaces:**
+- New strict/autonomous runs that omit `sample_concurrency` freeze `64`.
+- Explicit integer values from `1` through `128` are accepted; booleans, zero, negative values, and `129+` are rejected with a `1 and 128` message.
+- Existing task manifests keep their stored value, including historical `8` or missing-field compatibility fallbacks.
+- `RunSampleAdmission` continues to enforce exactly the frozen per-run value; its generic implementation requires no special-case cap.
+- DSH `structuredStageMaxInFlight` defaults to and is bounded by `128`, so a run configured at 128 is not silently reduced to 8 at the final provider gate.
+
+- [ ] **Step 1: Write RED boundary and default tests**
+
+Add HTTP tests proving omitted new-run input freezes 64, explicit 128 succeeds, and 129 returns HTTP 400. Update browser smoke to assert `value="64"`, `max="128"`, and a submitted default of 64. Add registry/gateway tests accepting 128 while retaining historical stored 8. Add DSH config/gate tests proving default 128, explicit 128 accepted, and 129 rejected.
+
+Add a bounded admission regression using 65 callers at limit 64: before release exactly 64 are active and one waits; after release active/waiting return to zero. The existing limit-3 and limit-8 tests remain valid proof that historical manifests are not rewritten.
+
+- [ ] **Step 2: Run RED tests**
+
+```bash
+PYTHONPATH="$PWD/src" uv run --no-project python -m unittest \
+  tests.test_runtime_integration tests.test_sample_execution \
+  tests.test_sample_admission -v
+node --test integrations/dsh_ecology_plugin/test/config.test.mjs \
+  integrations/dsh_ecology_plugin/test/provider_stage_gate.test.mjs
+node plugins/ecology_evolution/test/smoke.mjs
+```
+
+Expected: old 8 defaults/maximums fail the new assertions.
+
+- [ ] **Step 3: Implement one shared Python contract and aligned Node bounds**
+
+Put the Python default/maximum in one small dependency-free module or export them from the existing admission contract, then consume them from handler, registry, and gateway adapter. Do not leave repeated `<= 128` literals in runtime code. Align DSH config, stage-runner fallback, and provider gate default/validation with 128. Update only user-facing default/max attributes and explanatory copy needed for this requirement.
+
+- [ ] **Step 4: Verify focused and full gates, then commit**
+
+```bash
+PYTHONPATH="$PWD/src" uv run --no-project python -m unittest \
+  tests.test_runtime_integration tests.test_sample_execution \
+  tests.test_sample_admission -v
+node --test integrations/dsh_ecology_plugin/test/config.test.mjs \
+  integrations/dsh_ecology_plugin/test/provider_stage_gate.test.mjs
+node plugins/ecology_evolution/test/smoke.mjs
+PYTHONPATH="$PWD/src" uv run --no-project python -m unittest discover -s tests -v
+git diff --check
+```
+
+Commit message: `fix: raise sample concurrency capacity`

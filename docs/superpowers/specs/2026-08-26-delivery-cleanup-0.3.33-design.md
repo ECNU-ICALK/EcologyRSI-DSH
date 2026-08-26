@@ -33,7 +33,7 @@
 
 ### 3.2 Python 调度使用向上取整
 
-每个候选的 worker 数当前按 `ceil(sample_concurrency / candidate_concurrency)` 计算。候选并行后，本地 worker 总数会成为 `C × ceil(S/C)`。当 `S=8,C=3` 时会提交 9 个；当 `S=8,C=5` 时会提交 10 个。DSH 的共享 `ProviderStageGate` 会把相同 provider 的真实在飞 stage 请求压到 8，但多出的请求先进入宿主队列，造成“排队很多”以及进度估算失真。
+修复前，每个候选的 worker 数按 `ceil(sample_concurrency / candidate_concurrency)` 计算。候选并行后，本地 worker 总数会成为 `C × ceil(S/C)`。当 `S=8,C=3` 时会提交 9 个；当 `S=8,C=5` 时会提交 10 个。当时 DSH 的共享 `ProviderStageGate` 会把相同 provider 的真实在飞 stage 请求压到 8，但多出的请求先进入宿主队列，造成“排队很多”以及进度估算失真。
 
 ### 3.3 预算被整除截断
 
@@ -64,8 +64,8 @@ API 目前只验证 `samples_per_update` 是范围内整数。v4 phase manifest 
 - 正常完成、异常、超时和取消路径都在 `finally` 语义下释放许可。
 - 同一个 run 的筛选阶段和正式阶段复用相同上限语义，但不同阶段不会共享已失效许可。
 - `sample_concurrency < candidate_concurrency` 时仍不超过样本并发上限。
-- 当前默认 `sample_concurrency=8,candidate_concurrency=4` 的吞吐不下降。
-- DSH 的共享 `ProviderStageGate(maxInFlight=8)` 保留，继续作为跨 run、按 provider 的最终物理上限；Python 许可器负责每个 run 的精确准入和减少无效宿主排队。
+- 新建运行默认 `sample_concurrency=64,candidate_concurrency=4`，`sample_concurrency` 允许 1–128；旧 manifest 仍按已冻结值回放。
+- DSH 的共享 `ProviderStageGate(maxInFlight=128)` 作为跨 run、按 provider 的最终物理上限；Python 许可器负责每个 run 的精确准入和减少无效宿主排队。
 
 公开状态中分别展示：
 
@@ -258,7 +258,7 @@ README、插件 README、发布清单和页面文案统一使用以下术语：
 - 筛选：每候选 64 个完整预测时点；
 - 正式评估：Top 2，各 500 个完整预测时点；
 - 默认候选并发：4；
-- 默认逐样本并发：8；
+- 默认逐样本并发：64，可配置范围 1–128；
 - DSH 相同 provider 全局最多 8 个在飞 stage 请求，FIFO 排队；
 - Python run 级许可器保证单 run 不超过配置值。
 
