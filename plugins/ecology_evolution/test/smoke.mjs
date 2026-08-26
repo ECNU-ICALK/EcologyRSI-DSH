@@ -1227,6 +1227,47 @@ assert.equal(monitorNodes["#implementation-status"].textContent, "已暂停");
 assert.equal(monitorNodes["#implementation-status"].className, "pill pill-amber");
 assert.ok(monitorNodes["#execution-stage-strip"].innerHTML.includes("execution-stage-chip is-paused"));
 
+const dshCircuitPausedRun = {
+  ...pausedDrainedRun,
+  id: "run:dsh-circuit-paused",
+  pause_code: "dsh_runtime_retry_circuit_open",
+  pause_reason: "DSH 智能体运行时连续重试已达到安全上限。",
+  retry_circuit: {
+    open: true,
+    code: "dsh_runtime_retry_circuit_open",
+    retry_class: "dsh_native_runtime",
+    generation: 0,
+    stage: "research",
+    breaker_epoch: 2,
+    consecutive_failures: 6,
+    retry_limit: 6,
+    first_failure_at: "2026-08-20T10:00:00Z",
+    last_failure_at: "2026-08-20T10:05:00Z",
+    last_error_code: "dsh_native_runtime_http_error",
+    suggested_action: "check_dsh_runtime_then_resume",
+  },
+  candidates: [],
+  rounds: [],
+  execution_progress: {
+    phase: "research",
+    current_stage: "research",
+    current_generation: 1,
+    completed_generations: 0,
+    progress_percent: 0,
+  },
+};
+assert.equal(modelSandbox.runHasRetryCircuitPause(dshCircuitPausedRun), true);
+assert.equal(modelSandbox.displayRunStatusText(dshCircuitPausedRun, []), "DSH 运行时重试已暂停");
+modelSandbox.state.events = [];
+modelSandbox.renderExecutionMonitor(dshCircuitPausedRun);
+assert.equal(monitorNodes["#execution-monitor-status"].textContent, "DSH 运行时重试已暂停");
+for (const circuitText of ["6 / 6", "自主调研", "检查 DSH 运行时", "重试当前检查点"]) {
+  assert.ok(
+    monitorNodes["#execution-progress-detail"].textContent.includes(circuitText),
+    `missing circuit detail: ${circuitText}`,
+  );
+}
+
 const activeDshRetryRun = {
   ...pausedDrainedRun,
   id: "run:active-dsh-retry",
@@ -1949,6 +1990,35 @@ assert.equal(modelSandbox.state.activeRun.generation, 2);
 assert.deepEqual(
   Array.from(modelSandbox.state.events.map((event) => event.type)),
   ["generation.advanced", "run.resumed"],
+);
+
+modelSandbox.state.activeRun = modelSandbox.normalizeRun({
+  ...waitingBetweenRounds,
+  run_id: "run:circuit-resume-only",
+  status: "paused",
+  generation: 1,
+  pause_code: "gateway_retry_circuit_open",
+  retry_circuit: {
+    open: true,
+    code: "gateway_retry_circuit_open",
+    retry_class: "model_gateway",
+    generation: 1,
+    stage: "research",
+    breaker_epoch: 1,
+    consecutive_failures: 6,
+    retry_limit: 6,
+    suggested_action: "check_gateway_then_resume",
+  },
+});
+modelSandbox.state.runs = [modelSandbox.state.activeRun];
+modelSandbox.state.events = [];
+modelSandbox.state.busy = false;
+assert.equal(await modelSandbox.advanceRun(), true);
+assert.equal(modelSandbox.state.activeRun.status, "running");
+assert.equal(modelSandbox.state.activeRun.generation, 1);
+assert.deepEqual(
+  Array.from(modelSandbox.state.events.map((event) => event.type)),
+  ["run.resumed"],
 );
 
 const cleanupRequests = [];

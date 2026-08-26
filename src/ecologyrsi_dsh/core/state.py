@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+import math
 from typing import Any
 
 from ..evolution.analysis import (
@@ -494,6 +496,88 @@ _EVOLUTION_STAGE_PAYLOAD_FIELDS = frozenset(
         "public_error",
     }
 )
+_GATEWAY_RETRY_SCHEMA_VERSION = "ecologyrsi-dsh.gateway-retry-scheduled/2"
+_GATEWAY_RETRY_CLASSES = frozenset(
+    {
+        "model_gateway",
+        "dsh_native_runtime",
+        "research_timeout",
+        "sample_result_persistence",
+    }
+)
+_GATEWAY_RETRY_POLICIES = {
+    "model_gateway": (
+        "gateway_retry_circuit_open",
+        "check_gateway_then_resume",
+        "模型网关暂时不可用，已安排有界延迟重试。",
+    ),
+    "dsh_native_runtime": (
+        "dsh_runtime_retry_circuit_open",
+        "check_dsh_runtime_then_resume",
+        "DSH 智能体运行时暂时不可用，已安排有界延迟重试。",
+    ),
+    "research_timeout": (
+        "research_timeout_retry_circuit_open",
+        "check_gateway_then_resume",
+        "研究阶段模型请求超时，已安排有界延迟重试。",
+    ),
+    "sample_result_persistence": (
+        "sample_persistence_retry_circuit_open",
+        "check_persistence_then_resume",
+        "样本结果持久化暂时不可用，已安排有界延迟重试。",
+    ),
+}
+_GATEWAY_CIRCUIT_CODES = frozenset(
+    policy[0] for policy in _GATEWAY_RETRY_POLICIES.values()
+)
+_GATEWAY_RETRY_V2_FIELDS = frozenset(
+    {
+        "schema_version",
+        "run_incarnation",
+        "generation",
+        "stage",
+        "retry_class",
+        "breaker_epoch",
+        "failure_id",
+        "attempt_anchor_seq",
+        "consecutive_failures",
+        "retry_limit",
+        "first_failure_at",
+        "last_failure_at",
+        "last_error_code",
+        "retry_at",
+        "delay_seconds",
+        "attempt",
+        "error_code",
+        "reason",
+    }
+)
+_GATEWAY_CIRCUIT_PAUSE_FIELDS = frozenset(
+    {
+        "code",
+        "retry_class",
+        "generation",
+        "stage",
+        "breaker_epoch",
+        "consecutive_failures",
+        "retry_limit",
+        "first_failure_at",
+        "last_failure_at",
+        "last_error_code",
+        "suggested_action",
+    }
+)
+_GATEWAY_CIRCUIT_RESUME_FIELDS = frozenset(
+    {
+        "resume_origin",
+        "origin_pause_event_id",
+        "origin_breaker_epoch",
+        "retry_class",
+        "generation",
+        "stage",
+        "breaker_epoch",
+    }
+)
 _EVALUATION_PROGRESS_SCHEMA_VERSION_V1 = "ecologyrsi-dsh.evaluation-progress/1"
 _EVALUATION_PROGRESS_SCHEMA_VERSION_V2 = "ecologyrsi-dsh.evaluation-progress/2"
 _EVALUATION_PROGRESS_SCHEMA_VERSION_V3 = "ecologyrsi-dsh.evaluation-progress/3"
@@ -579,6 +663,157 @@ _MODEL_USAGE_PAYLOAD_FIELDS_V2 = frozenset(
     }
 )
 _MAX_MODEL_USAGE_TOKENS = 1_000_000_000_000
+
+
+def _bounded_machine_code(value: Any) -> bool:
+    return bool(
+        isinstance(value, str)
+        and value
+        and value == value.strip()
+        and len(value) <= 80
+        and value.replace("_", "").replace("-", "").isalnum()
+    )
+
+
+def _aware_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _validate_gateway_retry_v2_payload(payload: Mapping[str, Any]) -> None:
+    if set(payload) != _GATEWAY_RETRY_V2_FIELDS:
+        raise ValueError("GatewayRetryScheduled v2 payload is invalid")
+    run_incarnation = payload.get("run_incarnation")
+    generation = payload.get("generation")
+    breaker_epoch = payload.get("breaker_epoch")
+    anchor = payload.get("attempt_anchor_seq")
+    consecutive = payload.get("consecutive_failures")
+    retry_limit = payload.get("retry_limit")
+    delay = payload.get("delay_seconds")
+    failure_id = payload.get("failure_id")
+    if (
+        payload.get("schema_version") != _GATEWAY_RETRY_SCHEMA_VERSION
+        or isinstance(run_incarnation, bool)
+        or not isinstance(run_incarnation, int)
+        or run_incarnation < 1
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+        or not _bounded_machine_code(payload.get("stage"))
+        or payload.get("retry_class") not in _GATEWAY_RETRY_CLASSES
+        or isinstance(breaker_epoch, bool)
+        or not isinstance(breaker_epoch, int)
+        or breaker_epoch < 1
+        or not isinstance(failure_id, str)
+        or len(failure_id) != 64
+        or any(character not in "0123456789abcdef" for character in failure_id)
+        or isinstance(anchor, bool)
+        or not isinstance(anchor, int)
+        or anchor < run_incarnation
+        or isinstance(consecutive, bool)
+        or not isinstance(consecutive, int)
+        or consecutive < 1
+        or isinstance(retry_limit, bool)
+        or not isinstance(retry_limit, int)
+        or not 3 <= retry_limit <= 12
+        or consecutive >= retry_limit
+        or payload.get("attempt") != consecutive
+        or not _bounded_machine_code(payload.get("last_error_code"))
+        or payload.get("error_code") != payload.get("last_error_code")
+        or isinstance(delay, bool)
+        or not isinstance(delay, (int, float))
+        or not math.isfinite(float(delay))
+        or float(delay) < 0
+        or payload.get("reason")
+        != _GATEWAY_RETRY_POLICIES[payload.get("retry_class")][2]
+    ):
+        raise ValueError("GatewayRetryScheduled v2 payload is invalid")
+    first = _aware_timestamp(payload.get("first_failure_at"))
+    last = _aware_timestamp(payload.get("last_failure_at"))
+    retry_at = _aware_timestamp(payload.get("retry_at"))
+    if (
+        first is None
+        or last is None
+        or retry_at is None
+        or last < first
+        or retry_at < last
+        or abs((retry_at - last).total_seconds() - float(delay)) > 0.0015
+        or (retry_at - first).total_seconds() >= 30 * 60
+    ):
+        raise ValueError("GatewayRetryScheduled v2 payload is invalid")
+
+
+def _validate_gateway_circuit_pause_payload(payload: Mapping[str, Any]) -> None:
+    if set(payload) != _GATEWAY_CIRCUIT_PAUSE_FIELDS:
+        raise ValueError("gateway circuit pause payload is invalid")
+    generation = payload.get("generation")
+    breaker_epoch = payload.get("breaker_epoch")
+    consecutive = payload.get("consecutive_failures")
+    retry_limit = payload.get("retry_limit")
+    policy = _GATEWAY_RETRY_POLICIES.get(payload.get("retry_class"))
+    if (
+        policy is None
+        or payload.get("code") != policy[0]
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+        or not _bounded_machine_code(payload.get("stage"))
+        or isinstance(breaker_epoch, bool)
+        or not isinstance(breaker_epoch, int)
+        or breaker_epoch < 1
+        or isinstance(consecutive, bool)
+        or not isinstance(consecutive, int)
+        or consecutive < 1
+        or isinstance(retry_limit, bool)
+        or not isinstance(retry_limit, int)
+        or not 3 <= retry_limit <= 12
+        or consecutive > retry_limit
+        or not _bounded_machine_code(payload.get("last_error_code"))
+        or payload.get("suggested_action") != policy[1]
+    ):
+        raise ValueError("gateway circuit pause payload is invalid")
+    first = _aware_timestamp(payload.get("first_failure_at"))
+    last = _aware_timestamp(payload.get("last_failure_at"))
+    if first is None or last is None or last < first:
+        raise ValueError("gateway circuit pause payload is invalid")
+
+
+def _validate_gateway_circuit_resume_payload(payload: Mapping[str, Any]) -> None:
+    if set(payload) != _GATEWAY_CIRCUIT_RESUME_FIELDS:
+        raise ValueError("gateway circuit resume payload is invalid")
+    generation = payload.get("generation")
+    breaker_epoch = payload.get("breaker_epoch")
+    origin_epoch = payload.get("origin_breaker_epoch")
+    policy = _GATEWAY_RETRY_POLICIES.get(payload.get("retry_class"))
+    if (
+        policy is None
+        or payload.get("resume_origin") != policy[0]
+        or not isinstance(payload.get("origin_pause_event_id"), str)
+        or not payload["origin_pause_event_id"].strip()
+        or payload.get("retry_class") not in _GATEWAY_RETRY_CLASSES
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+        or not _bounded_machine_code(payload.get("stage"))
+        or isinstance(breaker_epoch, bool)
+        or not isinstance(breaker_epoch, int)
+        or breaker_epoch < 2
+        or isinstance(origin_epoch, bool)
+        or not isinstance(origin_epoch, int)
+        or origin_epoch < 1
+        or breaker_epoch != origin_epoch + 1
+    ):
+        raise ValueError("gateway circuit resume payload is invalid")
 
 
 def validate_evolution_stage_payload(payload: Mapping[str, Any]) -> None:
@@ -1075,6 +1310,55 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
     formal_stage_seals: dict[str, dict[str, Any]] = {}
     dsh_prediction_tool_events: dict[str, tuple[int, dict[str, Any]]] = {}
     formal_stage_started = False
+    active_gateway_circuit_pause: Event | None = None
+    gateway_retry_last_by_scope: dict[tuple[int, int, str, str], Event] = {}
+    gateway_retry_max_epoch: dict[tuple[int, int, str, str], int] = {}
+    gateway_retry_failure_ids: set[str] = set()
+    gateway_retry_stage_success_seq: dict[tuple[int, str], int] = {}
+    latest_run_resumed: Event | None = None
+    events_by_seq = {event.seq: event for event in events}
+
+    def gateway_retry_scope(payload: Mapping[str, Any]) -> tuple[int, int, str, str]:
+        return (
+            int(created.seq),
+            int(payload["generation"]),
+            str(payload["stage"]),
+            str(payload["retry_class"]),
+        )
+
+    def gateway_retry_reset_seq(scope: tuple[int, int, str, str]) -> int:
+        _incarnation, generation, stage, _retry_class = scope
+        return max(
+            int(created.seq),
+            int(latest_run_resumed.seq) if latest_run_resumed is not None else 0,
+            gateway_retry_stage_success_seq.get((generation, stage), 0),
+        )
+
+    def gateway_retry_expected_epoch(
+        scope: tuple[int, int, str, str],
+        *,
+        reset_seq: int,
+    ) -> int:
+        _incarnation, generation, stage, retry_class = scope
+        if (
+            latest_run_resumed is not None
+            and latest_run_resumed.seq == reset_seq
+            and latest_run_resumed.payload.get("retry_class") == retry_class
+            and latest_run_resumed.payload.get("generation") == generation
+            and latest_run_resumed.payload.get("stage") == stage
+            and latest_run_resumed.payload.get("resume_origin")
+            == _GATEWAY_RETRY_POLICIES[retry_class][0]
+        ):
+            return int(latest_run_resumed.payload["breaker_epoch"])
+        return gateway_retry_max_epoch.get(scope, 0) + 1
+
+    def active_gateway_retry(
+        scope: tuple[int, int, str, str],
+        *,
+        reset_seq: int,
+    ) -> Event | None:
+        latest = gateway_retry_last_by_scope.get(scope)
+        return latest if latest is not None and latest.seq > reset_seq else None
 
     for event in events[1:]:
         payload = event.payload
@@ -1121,6 +1405,10 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             ):
                 raise ValueError("DshRuntimeBound contract is invalid")
         elif event.kind == "RunStarted":
+            if active_gateway_circuit_pause is not None:
+                raise ValueError(
+                    "gateway circuit requires an exact RunResumed origin"
+                )
             if expected_seed_canonical is not None and materialized_seed_canonical is None:
                 raise ValueError("DSH-native run started before seed initialization")
             if run.status not in _TERMINAL_RUN_STATUSES:
@@ -1128,11 +1416,85 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     run, status=RunStatus.RUNNING, session_id=payload["session_id"]
                 )
         elif event.kind == "RunPaused":
+            if payload.get("code") in _GATEWAY_CIRCUIT_CODES:
+                _validate_gateway_circuit_pause_payload(payload)
+                if (
+                    run.status is not RunStatus.RUNNING
+                    or int(payload["generation"]) != int(run.generation)
+                ):
+                    raise ValueError(
+                        "gateway circuit pause requires a running current generation"
+                    )
+                scope = gateway_retry_scope(payload)
+                reset_seq = gateway_retry_reset_seq(scope)
+                prior_retry = active_gateway_retry(scope, reset_seq=reset_seq)
+                if prior_retry is None:
+                    chain_valid = (
+                        payload["consecutive_failures"] == 1
+                        and payload["breaker_epoch"]
+                        == gateway_retry_expected_epoch(scope, reset_seq=reset_seq)
+                        and payload["first_failure_at"]
+                        == payload["last_failure_at"]
+                    )
+                else:
+                    chain_valid = (
+                        payload["consecutive_failures"]
+                        == prior_retry.payload["consecutive_failures"] + 1
+                        and payload["breaker_epoch"]
+                        == prior_retry.payload["breaker_epoch"]
+                        and payload["retry_limit"]
+                        == prior_retry.payload["retry_limit"]
+                        and payload["first_failure_at"]
+                        == prior_retry.payload["first_failure_at"]
+                        and _aware_timestamp(payload["last_failure_at"])
+                        >= _aware_timestamp(prior_retry.payload["last_failure_at"])
+                    )
+                if not chain_valid:
+                    raise ValueError(
+                        "gateway circuit pause does not match the retry chain"
+                    )
+                gateway_retry_max_epoch[scope] = max(
+                    gateway_retry_max_epoch.get(scope, 0),
+                    int(payload["breaker_epoch"]),
+                )
+                active_gateway_circuit_pause = event
+            else:
+                if active_gateway_circuit_pause is not None:
+                    raise ValueError(
+                        "gateway circuit requires an exact RunResumed origin"
+                    )
             if run.status not in _TERMINAL_RUN_STATUSES:
                 run = replace(run, status=RunStatus.PAUSED)
         elif event.kind == "RunResumed":
+            if active_gateway_circuit_pause is not None:
+                if payload.get("resume_origin") not in _GATEWAY_CIRCUIT_CODES:
+                    raise ValueError(
+                        "gateway circuit requires an exact RunResumed origin"
+                    )
+                _validate_gateway_circuit_resume_payload(payload)
+                origin = active_gateway_circuit_pause
+                if (
+                    run.status is not RunStatus.PAUSED
+                    or origin is None
+                    or payload["origin_pause_event_id"] != origin.event_id
+                    or payload["origin_breaker_epoch"]
+                    != origin.payload.get("breaker_epoch")
+                    or payload["retry_class"] != origin.payload.get("retry_class")
+                    or payload["generation"] != origin.payload.get("generation")
+                    or payload["stage"] != origin.payload.get("stage")
+                ):
+                    raise ValueError(
+                        "gateway circuit resume does not match the active pause"
+                    )
+            elif payload.get("resume_origin") in _GATEWAY_CIRCUIT_CODES:
+                _validate_gateway_circuit_resume_payload(payload)
+                raise ValueError(
+                    "gateway circuit resume does not match the active pause"
+                )
+            active_gateway_circuit_pause = None
             if run.status not in _TERMINAL_RUN_STATUSES:
                 run = replace(run, status=RunStatus.RUNNING)
+            latest_run_resumed = event
         elif event.kind == "RunCancelled":
             if run.status not in _TERMINAL_RUN_STATUSES:
                 run = replace(run, status=RunStatus.CANCELLED)
@@ -1594,6 +1956,10 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             )
         elif event.kind == "EvolutionStageRecorded":
             validate_evolution_stage_payload(payload)
+            if payload.get("status") == "completed":
+                gateway_retry_stage_success_seq[
+                    (int(payload["generation"]), str(payload["stage"]))
+                ] = event.seq
         elif event.kind == "DshStructuredResultAccepted":
             required_fields = {
                 "schema_version",
@@ -1789,6 +2155,62 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             # A gateway cooldown is an operational heartbeat only.  It must
             # survive replay so a browser refresh can distinguish a live run
             # waiting on a busy provider from a stalled/failed run.
+            if payload.get("schema_version") == _GATEWAY_RETRY_SCHEMA_VERSION:
+                _validate_gateway_retry_v2_payload(payload)
+                if (
+                    run.status is not RunStatus.RUNNING
+                    or int(payload["run_incarnation"]) != int(created.seq)
+                    or int(payload["generation"]) != int(run.generation)
+                ):
+                    raise ValueError(
+                        "GatewayRetryScheduled scope does not match the running run"
+                    )
+                scope = gateway_retry_scope(payload)
+                reset_seq = gateway_retry_reset_seq(scope)
+                prior_retry = active_gateway_retry(scope, reset_seq=reset_seq)
+                anchor = int(payload["attempt_anchor_seq"])
+                anchor_event = events_by_seq.get(anchor)
+                if (
+                    anchor_event is None
+                    or anchor >= event.seq
+                    or anchor < reset_seq
+                    or payload["failure_id"] in gateway_retry_failure_ids
+                ):
+                    if payload["failure_id"] in gateway_retry_failure_ids:
+                        raise ValueError(
+                            "GatewayRetryScheduled failure_id is not unique"
+                        )
+                    raise ValueError("GatewayRetryScheduled retry chain is invalid")
+                if prior_retry is None:
+                    chain_valid = (
+                        payload["consecutive_failures"] == 1
+                        and payload["breaker_epoch"]
+                        == gateway_retry_expected_epoch(scope, reset_seq=reset_seq)
+                        and payload["first_failure_at"]
+                        == payload["last_failure_at"]
+                    )
+                else:
+                    chain_valid = (
+                        anchor == prior_retry.seq
+                        and payload["consecutive_failures"]
+                        == prior_retry.payload["consecutive_failures"] + 1
+                        and payload["breaker_epoch"]
+                        == prior_retry.payload["breaker_epoch"]
+                        and payload["retry_limit"]
+                        == prior_retry.payload["retry_limit"]
+                        and payload["first_failure_at"]
+                        == prior_retry.payload["first_failure_at"]
+                        and _aware_timestamp(payload["last_failure_at"])
+                        >= _aware_timestamp(prior_retry.payload["last_failure_at"])
+                    )
+                if not chain_valid:
+                    raise ValueError("GatewayRetryScheduled retry chain is invalid")
+                gateway_retry_last_by_scope[scope] = event
+                gateway_retry_max_epoch[scope] = max(
+                    gateway_retry_max_epoch.get(scope, 0),
+                    int(payload["breaker_epoch"]),
+                )
+                gateway_retry_failure_ids.add(str(payload["failure_id"]))
             if not isinstance(payload.get("generation"), int) or payload["generation"] < 0:
                 raise ValueError("GatewayRetryScheduled generation must be non-negative")
             if not isinstance(payload.get("retry_at"), str) or not payload["retry_at"].strip():

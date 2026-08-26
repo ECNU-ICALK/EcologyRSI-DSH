@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import math
 import json
-from collections.abc import Mapping, Sequence
-from dataclasses import replace
+import math
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -114,6 +115,43 @@ _SAMPLE_RESULTS_START_SCHEMA_VERSION = (
 _SAMPLE_RESULTS_RESUME_SCHEMA_VERSION = (
     "ecologyrsi-dsh.evaluation-sample-results-resume/1"
 )
+_GATEWAY_RETRY_SCHEMA_VERSION = "ecologyrsi-dsh.gateway-retry-scheduled/2"
+_GATEWAY_RETRY_LIMIT = 6
+_GATEWAY_RETRY_EPOCH_SECONDS = 30 * 60
+_GATEWAY_RETRY_MAX_DELAY_SECONDS = 60 * 60
+_GATEWAY_RETRY_CLASSES = frozenset(
+    {
+        "model_gateway",
+        "dsh_native_runtime",
+        "research_timeout",
+        "sample_result_persistence",
+    }
+)
+_GATEWAY_RETRY_POLICIES = {
+    "model_gateway": (
+        "gateway_retry_circuit_open",
+        "check_gateway_then_resume",
+        "模型网关暂时不可用，已安排有界延迟重试。",
+    ),
+    "dsh_native_runtime": (
+        "dsh_runtime_retry_circuit_open",
+        "check_dsh_runtime_then_resume",
+        "DSH 智能体运行时暂时不可用，已安排有界延迟重试。",
+    ),
+    "research_timeout": (
+        "research_timeout_retry_circuit_open",
+        "check_gateway_then_resume",
+        "研究阶段模型请求超时，已安排有界延迟重试。",
+    ),
+    "sample_result_persistence": (
+        "sample_persistence_retry_circuit_open",
+        "check_persistence_then_resume",
+        "样本结果持久化暂时不可用，已安排有界延迟重试。",
+    ),
+}
+_GATEWAY_CIRCUIT_CODES = frozenset(
+    policy[0] for policy in _GATEWAY_RETRY_POLICIES.values()
+)
 _TARGET_EVALUATION_METRICS = frozenset(
     {
         "baseline_mae",
@@ -130,6 +168,43 @@ _TARGET_EVALUATION_METRICS = frozenset(
         "unit",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class GatewayRetryDecision:
+    """One durable result of reporting an orchestration-level failure."""
+
+    outcome: str
+    event: Event | None
+    replayed: bool = False
+
+
+def _gateway_retry_machine_code(value: Any, *, fallback: str) -> str:
+    """Return a bounded public machine code without retaining provider text."""
+
+    normalized = str(value or "").strip().lower()
+    if (
+        normalized
+        and len(normalized) <= 80
+        and normalized.replace("_", "").replace("-", "").isalnum()
+    ):
+        return normalized
+    return fallback
+
+
+def _gateway_retry_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _frozen_runtime_binding(state: RunState) -> dict[str, Any] | None:
@@ -326,9 +401,24 @@ class EvolutionDirector:
     behind the same methods later without changing the event contract.
     """
 
-    def __init__(self, ledger: EventLedger, dsh: DSHAdapter | None = None) -> None:
+    def __init__(
+        self,
+        ledger: EventLedger,
+        dsh: DSHAdapter | None = None,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.ledger = ledger
         self.dsh: DSHAdapter = dsh or FakeDSHAdapter()
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def _gateway_retry_now(self) -> datetime:
+        value = self._clock()
+        if not isinstance(value, datetime):
+            raise TypeError("director clock must return a datetime")
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     def _append_run_transition(
         self,
@@ -498,6 +588,22 @@ class EvolutionDirector:
 
         def payload(state: RunState) -> dict[str, Any]:
             nonlocal opened_session_id
+            if state.run.status is RunStatus.PAUSED:
+                paused = next(
+                    (
+                        event
+                        for event in reversed(state.events)
+                        if event.kind == "RunPaused"
+                    ),
+                    None,
+                )
+                if (
+                    paused is not None
+                    and paused.payload.get("code") in _GATEWAY_CIRCUIT_CODES
+                ):
+                    raise RuntimeError(
+                        "gateway circuit requires an explicit resume"
+                    )
             if is_dsh_native_protocol(state.task_manifest):
                 try:
                     state.materialized_seed_genome()
@@ -548,10 +654,315 @@ class EvolutionDirector:
         return self.state(run_id).run
 
     def resume_run(self, run_id: str) -> Run:
+        def payload(state: RunState) -> dict[str, Any]:
+            paused = next(
+                (
+                    event
+                    for event in reversed(state.events)
+                    if event.kind == "RunPaused"
+                ),
+                None,
+            )
+            if (
+                paused is None
+                or paused.payload.get("code") not in _GATEWAY_CIRCUIT_CODES
+            ):
+                return {}
+            epoch = paused.payload.get("breaker_epoch")
+            if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
+                raise ValueError("gateway circuit pause has an invalid breaker epoch")
+            return {
+                "resume_origin": paused.payload["code"],
+                "origin_pause_event_id": paused.event_id,
+                "origin_breaker_epoch": epoch,
+                "retry_class": paused.payload.get("retry_class"),
+                "generation": paused.payload.get("generation"),
+                "stage": paused.payload.get("stage"),
+                "breaker_epoch": epoch + 1,
+            }
+
         self._append_run_transition(
-            run_id, "RunResumed", lambda _state: {}, RunStatus.PAUSED
+            run_id, "RunResumed", payload, RunStatus.PAUSED
         )
         return self.state(run_id).run
+
+    def schedule_gateway_retry_or_pause(
+        self,
+        run_id: str,
+        *,
+        run_incarnation: int,
+        generation: int,
+        stage: str,
+        retry_class: str,
+        failure_id: str,
+        attempt_anchor_seq: int,
+        delay_seconds: float,
+        last_error_code: str,
+    ) -> GatewayRetryDecision:
+        """Durably schedule one retry or open its checkpoint-preserving circuit.
+
+        Replay and the per-run sequence compare-and-swap form one decision
+        boundary.  A caller may install an in-memory wakeup only after this
+        method returns a newly scheduled event.
+        """
+
+        if (
+            isinstance(run_incarnation, bool)
+            or not isinstance(run_incarnation, int)
+            or run_incarnation < 1
+        ):
+            raise ValueError("run_incarnation must be a positive integer")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+            raise ValueError("generation must be a non-negative integer")
+        normalized_stage = _gateway_retry_machine_code(stage, fallback="")
+        if not normalized_stage:
+            raise ValueError("stage must be a bounded machine code")
+        normalized_retry_class = _gateway_retry_machine_code(
+            retry_class,
+            fallback="",
+        )
+        if normalized_retry_class not in _GATEWAY_RETRY_CLASSES:
+            raise ValueError("unknown gateway retry class")
+        circuit_code, suggested_action, retry_reason = _GATEWAY_RETRY_POLICIES[
+            normalized_retry_class
+        ]
+        normalized_failure_id = str(failure_id or "").strip().lower()
+        if (
+            len(normalized_failure_id) != 64
+            or any(character not in "0123456789abcdef" for character in normalized_failure_id)
+        ):
+            raise ValueError("failure_id must be a sha256 digest")
+        if (
+            isinstance(attempt_anchor_seq, bool)
+            or not isinstance(attempt_anchor_seq, int)
+            or attempt_anchor_seq < run_incarnation
+        ):
+            raise ValueError("attempt_anchor_seq is outside the run incarnation")
+        if (
+            isinstance(delay_seconds, bool)
+            or not isinstance(delay_seconds, (int, float))
+            or not math.isfinite(float(delay_seconds))
+            or float(delay_seconds) < 0
+        ):
+            raise ValueError("delay_seconds must be a finite non-negative number")
+        normalized_error_code = _gateway_retry_machine_code(
+            last_error_code,
+            fallback=f"{normalized_retry_class}_unavailable",
+        )
+        retry_event_id = f"{run_id}:gateway-retry:{normalized_failure_id}"
+        pause_event_id = f"{run_id}:gateway-circuit:{normalized_failure_id}"
+        failure_at = self._gateway_retry_now()
+
+        last_conflict: ConcurrentRunMutationError | None = None
+        for _ in range(_STATE_TRANSITION_RETRY_LIMIT):
+            state = self.state(run_id)
+            if int(state.events[0].seq) != run_incarnation:
+                return GatewayRetryDecision("superseded", None)
+
+            existing = next(
+                (
+                    event
+                    for event in state.events
+                    if event.event_id in {retry_event_id, pause_event_id}
+                ),
+                None,
+            )
+            if existing is not None:
+                return GatewayRetryDecision(
+                    "scheduled"
+                    if existing.kind == "GatewayRetryScheduled"
+                    else "paused",
+                    existing,
+                    replayed=True,
+                )
+            if (
+                state.run.status is not RunStatus.RUNNING
+                or int(state.run.generation) != generation
+                or attempt_anchor_seq > state.events[-1].seq
+            ):
+                return GatewayRetryDecision("superseded", None)
+            if any(
+                event.seq > attempt_anchor_seq
+                and (
+                    event.kind == "RunResumed"
+                    or (
+                        event.kind == "EvolutionStageRecorded"
+                        and int(event.payload.get("generation", -1)) == generation
+                        and event.payload.get("stage") == normalized_stage
+                        and event.payload.get("status") == "completed"
+                    )
+                )
+                for event in state.events
+            ):
+                return GatewayRetryDecision("superseded", None)
+
+            reset_events = [
+                event
+                for event in state.events
+                if event.kind == "RunResumed"
+                or (
+                    event.kind == "EvolutionStageRecorded"
+                    and int(event.payload.get("generation", -1)) == generation
+                    and event.payload.get("stage") == normalized_stage
+                    and event.payload.get("status") == "completed"
+                )
+            ]
+            reset_event = reset_events[-1] if reset_events else None
+            reset_seq = reset_event.seq if reset_event is not None else run_incarnation
+            scoped_events = [
+                event
+                for event in state.events
+                if event.kind == "GatewayRetryScheduled"
+                and event.payload.get("schema_version") == _GATEWAY_RETRY_SCHEMA_VERSION
+                and int(event.payload.get("run_incarnation", -1)) == run_incarnation
+                and int(event.payload.get("generation", -1)) == generation
+                and event.payload.get("stage") == normalized_stage
+                and event.payload.get("retry_class") == normalized_retry_class
+            ]
+            active_events = [event for event in scoped_events if event.seq > reset_seq]
+            if active_events and attempt_anchor_seq != active_events[-1].seq:
+                return GatewayRetryDecision("superseded", None)
+            if not active_events and (
+                attempt_anchor_seq < reset_seq
+                or not any(event.seq == attempt_anchor_seq for event in state.events)
+            ):
+                return GatewayRetryDecision("superseded", None)
+            scoped_pause_events = [
+                event
+                for event in state.events
+                if event.kind == "RunPaused"
+                and event.payload.get("code") == circuit_code
+                and int(event.payload.get("generation", -1)) == generation
+                and event.payload.get("stage") == normalized_stage
+                and event.payload.get("retry_class") == normalized_retry_class
+            ]
+            maximum_epoch = max(
+                (
+                    int(event.payload.get("breaker_epoch", 0))
+                    for event in (*scoped_events, *scoped_pause_events)
+                    if isinstance(event.payload.get("breaker_epoch"), int)
+                    and not isinstance(event.payload.get("breaker_epoch"), bool)
+                ),
+                default=0,
+            )
+            if active_events:
+                breaker_epoch = int(active_events[-1].payload["breaker_epoch"])
+            elif (
+                reset_event is not None
+                and reset_event.kind == "RunResumed"
+                and reset_event.payload.get("resume_origin") == circuit_code
+                and reset_event.payload.get("retry_class") == normalized_retry_class
+                and int(reset_event.payload.get("generation", -1)) == generation
+                and reset_event.payload.get("stage") == normalized_stage
+            ):
+                breaker_epoch = int(reset_event.payload["breaker_epoch"])
+            else:
+                breaker_epoch = maximum_epoch + 1
+            first_failure_at = (
+                _gateway_retry_timestamp(active_events[0].payload.get("first_failure_at"))
+                if active_events
+                else None
+            )
+            now = failure_at
+            if first_failure_at is None:
+                first_failure_at = now
+            prior_last_failure_at = (
+                _gateway_retry_timestamp(active_events[-1].payload.get("last_failure_at"))
+                if active_events
+                else None
+            )
+            last_failure_at = max(
+                item for item in (now, first_failure_at, prior_last_failure_at) if item is not None
+            )
+            consecutive_failures = len(
+                {
+                    event.payload.get("failure_id")
+                    for event in active_events
+                    if isinstance(event.payload.get("failure_id"), str)
+                }
+            ) + 1
+            elapsed_seconds = max(
+                0.0,
+                (last_failure_at - first_failure_at).total_seconds(),
+            )
+            remaining_epoch_seconds = max(
+                0.0,
+                _GATEWAY_RETRY_EPOCH_SECONDS - elapsed_seconds,
+            )
+            bounded_delay = min(
+                float(delay_seconds),
+                _GATEWAY_RETRY_MAX_DELAY_SECONDS,
+            )
+            first_failure_text = first_failure_at.isoformat()
+            last_failure_text = last_failure_at.isoformat()
+            should_pause = (
+                consecutive_failures >= _GATEWAY_RETRY_LIMIT
+                or elapsed_seconds >= _GATEWAY_RETRY_EPOCH_SECONDS
+                or bounded_delay >= remaining_epoch_seconds
+            )
+            if should_pause:
+                kind = "RunPaused"
+                event_id = pause_event_id
+                payload = {
+                    "code": circuit_code,
+                    "retry_class": normalized_retry_class,
+                    "generation": generation,
+                    "stage": normalized_stage,
+                    "breaker_epoch": breaker_epoch,
+                    "consecutive_failures": min(
+                        consecutive_failures,
+                        _GATEWAY_RETRY_LIMIT,
+                    ),
+                    "retry_limit": _GATEWAY_RETRY_LIMIT,
+                    "first_failure_at": first_failure_text,
+                    "last_failure_at": last_failure_text,
+                    "last_error_code": normalized_error_code,
+                    "suggested_action": suggested_action,
+                }
+                outcome = "paused"
+            else:
+                effective_delay = bounded_delay
+                retry_at = last_failure_at + timedelta(seconds=effective_delay)
+                kind = "GatewayRetryScheduled"
+                event_id = retry_event_id
+                payload = {
+                    "schema_version": _GATEWAY_RETRY_SCHEMA_VERSION,
+                    "run_incarnation": run_incarnation,
+                    "generation": generation,
+                    "stage": normalized_stage,
+                    "retry_class": normalized_retry_class,
+                    "breaker_epoch": breaker_epoch,
+                    "failure_id": normalized_failure_id,
+                    "attempt_anchor_seq": attempt_anchor_seq,
+                    "consecutive_failures": consecutive_failures,
+                    "retry_limit": _GATEWAY_RETRY_LIMIT,
+                    "first_failure_at": first_failure_text,
+                    "last_failure_at": last_failure_text,
+                    "last_error_code": normalized_error_code,
+                    "retry_at": retry_at.isoformat(),
+                    "delay_seconds": round(effective_delay, 3),
+                    # Legacy aliases keep existing event consumers compatible.
+                    "attempt": consecutive_failures,
+                    "error_code": normalized_error_code,
+                    "reason": retry_reason,
+                }
+                outcome = "scheduled"
+            try:
+                event = self.ledger.append(
+                    run_id,
+                    kind,
+                    payload,
+                    event_id=event_id,
+                    created_at=last_failure_text,
+                    expected_run_seq=state.events[-1].seq,
+                )
+            except ConcurrentRunMutationError as exc:
+                last_conflict = exc
+                continue
+            return GatewayRetryDecision(outcome, event)
+        if last_conflict is not None:
+            raise last_conflict
+        raise RuntimeError(f"run {run_id} gateway retry decision could not be persisted")
 
     def cancel_run(self, run_id: str, reason: str = "cancelled by user") -> Run:
         state = self._append_run_transition(

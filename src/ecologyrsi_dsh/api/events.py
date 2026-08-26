@@ -528,6 +528,25 @@ class EventEndpointsMixin:
                     "reason": redact_sensitive_text(str(payload.get("reason") or "网关暂时繁忙，等待后重试"), limit=240),
                 }
             )
+            if (
+                payload.get("schema_version")
+                == "ecologyrsi-dsh.gateway-retry-scheduled/2"
+            ):
+                public_payload.update(
+                    {
+                        "retry_class": payload.get("retry_class"),
+                        "stage": payload.get("stage"),
+                        "breaker_epoch": payload.get("breaker_epoch"),
+                        "consecutive_failures": payload.get(
+                            "consecutive_failures"
+                        ),
+                        "retry_limit": payload.get("retry_limit"),
+                        "first_failure_at": payload.get("first_failure_at"),
+                        "last_failure_at": payload.get("last_failure_at"),
+                        "last_error_code": payload.get("last_error_code"),
+                        "suggested_action": "wait_for_scheduled_retry",
+                    }
+                )
         elif event.kind == "RunPaused":
             public_payload.update(
                 {
@@ -539,6 +558,28 @@ class EventEndpointsMixin:
                     ),
                 }
             )
+            if payload.get("code") in {
+                "gateway_retry_circuit_open",
+                "dsh_runtime_retry_circuit_open",
+                "research_timeout_retry_circuit_open",
+                "sample_persistence_retry_circuit_open",
+            }:
+                public_payload.update(
+                    {
+                        "retry_class": payload.get("retry_class"),
+                        "generation": payload.get("generation"),
+                        "stage": payload.get("stage"),
+                        "breaker_epoch": payload.get("breaker_epoch"),
+                        "consecutive_failures": payload.get(
+                            "consecutive_failures"
+                        ),
+                        "retry_limit": payload.get("retry_limit"),
+                        "first_failure_at": payload.get("first_failure_at"),
+                        "last_failure_at": payload.get("last_failure_at"),
+                        "last_error_code": payload.get("last_error_code"),
+                        "suggested_action": payload.get("suggested_action"),
+                    }
+                )
         elif event.kind == "ModelUsageRecorded":
             public_payload.update(
                 {

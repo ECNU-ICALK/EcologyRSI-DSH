@@ -520,6 +520,71 @@
   function runHasHardTokenPause(run) {
     return Boolean(run && run.status === "paused" && run.pause_code === "model_token_budget_exhausted");
   }
+  var retryCircuitPolicies = {
+    gateway_retry_circuit_open: {
+      retryClass: "model_gateway", action: "check_gateway_then_resume",
+      status: "模型网关重试已暂停", subject: "模型网关"
+    },
+    dsh_runtime_retry_circuit_open: {
+      retryClass: "dsh_native_runtime", action: "check_dsh_runtime_then_resume",
+      status: "DSH 运行时重试已暂停", subject: "DSH 运行时"
+    },
+    research_timeout_retry_circuit_open: {
+      retryClass: "research_timeout", action: "check_gateway_then_resume",
+      status: "研究请求重试已暂停", subject: "模型网关"
+    },
+    sample_persistence_retry_circuit_open: {
+      retryClass: "sample_result_persistence", action: "check_persistence_then_resume",
+      status: "样本持久化重试已暂停", subject: "样本持久化服务"
+    }
+  };
+  function runRetryCircuit(run) {
+    var circuit = run && run.retry_circuit && typeof run.retry_circuit === "object" ? run.retry_circuit : null;
+    var code = String(run && run.pause_code || circuit && circuit.code || "");
+    var policy = retryCircuitPolicies[code];
+    if (!run || run.status !== "paused" || !circuit || circuit.open !== true || !policy) { return null; }
+    if (circuit.code !== code || circuit.retry_class !== policy.retryClass || circuit.suggested_action !== policy.action) { return null; }
+    return {circuit: circuit, policy: policy};
+  }
+  function runHasRetryCircuitPause(run) { return Boolean(runRetryCircuit(run)); }
+  function retryCircuitStatusText(run) {
+    var active = runRetryCircuit(run);
+    return active ? active.policy.status : "";
+  }
+  function retryCircuitDetailText(run) {
+    var active = runRetryCircuit(run);
+    if (!active) { return ""; }
+    var circuit = active.circuit;
+    var count = Number(circuit.consecutive_failures);
+    var limit = Number(circuit.retry_limit);
+    var attempts = Number.isFinite(count) && Number.isFinite(limit)
+      ? formatNumber(count) + " / " + formatNumber(limit)
+      : "已达安全上限";
+    var stage = evolutionStageLabels[circuit.stage] || circuit.stage || "当前阶段";
+    return "连续失败 " + attempts + " · 阶段：" + stage
+      + "；请检查 " + active.policy.subject + " 后恢复并重试当前检查点。";
+  }
+  function retryWaitStatusText(retryWait) {
+    var retryClass = String(retryWait && retryWait.retry_class || "");
+    if (retryClass === "dsh_native_runtime") { return "等待 DSH 运行时重试"; }
+    if (retryClass === "research_timeout") { return "等待研究请求重试"; }
+    if (retryClass === "sample_result_persistence") { return "等待样本持久化重试"; }
+    return "等待模型网关重试";
+  }
+  function retryWaitDetailText(retryWait) {
+    if (!retryWait || typeof retryWait !== "object") { return ""; }
+    var detail = retryWait.reason || "已安排有界延迟重试";
+    var count = Number(retryWait.consecutive_failures);
+    var limit = Number(retryWait.retry_limit);
+    if (Number.isFinite(count) && Number.isFinite(limit)) {
+      detail += " · 连续失败 " + formatNumber(count) + " / " + formatNumber(limit);
+    }
+    if (retryWait.stage) {
+      detail += " · 阶段：" + (evolutionStageLabels[retryWait.stage] || retryWait.stage);
+    }
+    if (retryWait.retry_at) { detail += " · 下次重试 " + formatTime(retryWait.retry_at); }
+    return detail;
+  }
   function runPauseReason(run) {
     return run && typeof run.pause_reason === "string" && run.pause_reason.trim()
       ? run.pause_reason.trim()
@@ -537,6 +602,7 @@
   }
   function displayRunStatusText(run, events) {
     if (runHasHardTokenPause(run)) { return "逐样本智能体 Token 预算已暂停"; }
+    if (runHasRetryCircuitPause(run)) { return retryCircuitStatusText(run); }
     return runNeedsAdvanceAction(run, events) ? "等待推进" : runOutcomeText(run) || statusText(run && run.status);
   }
   function displayRunStatusClass(run, events) {

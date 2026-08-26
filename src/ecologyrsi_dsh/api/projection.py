@@ -67,6 +67,24 @@ _SENSITIVE_PLAN_KEYS = frozenset(
         "私密推理",
     }
 )
+_RETRY_CIRCUIT_PUBLIC_REASONS = {
+    "gateway_retry_circuit_open": (
+        "模型网关连续重试已达到安全上限；"
+        "请检查模型网关后恢复，以重试当前检查点。"
+    ),
+    "dsh_runtime_retry_circuit_open": (
+        "DSH 智能体运行时连续重试已达到安全上限；"
+        "请检查 DSH 运行时后恢复，以重试当前检查点。"
+    ),
+    "research_timeout_retry_circuit_open": (
+        "研究阶段请求连续超时已达到安全上限；"
+        "请检查模型网关后恢复，以重试当前检查点。"
+    ),
+    "sample_persistence_retry_circuit_open": (
+        "样本结果持久化连续失败已达到安全上限；"
+        "请检查持久化服务后恢复，以重试当前检查点。"
+    ),
+}
 
 
 def _run_failure_code(state: Any) -> str | None:
@@ -137,17 +155,19 @@ def _run_failure_projection(state: Any) -> tuple[str | None, dict[str, Any] | No
     }
 
 
-def _run_pause_projection(state: Any) -> tuple[str | None, str | None]:
+def _run_pause_projection(
+    state: Any,
+) -> tuple[str | None, str | None, dict[str, Any] | None]:
     """Return the active pause cause without reviving an older pause event."""
 
     if state.run.status.value != "paused":
-        return None, None
+        return None, None, None
     paused_event = next(
         (event for event in reversed(state.events) if event.kind == "RunPaused"),
         None,
     )
     if paused_event is None:
-        return None, None
+        return None, None, None
     raw_reason = paused_event.payload.get("reason")
     reason = (
         public_error_summary(raw_reason)
@@ -156,7 +176,27 @@ def _run_pause_projection(state: Any) -> tuple[str | None, str | None]:
     )
     raw_code = paused_event.payload.get("code")
     code = str(raw_code) if isinstance(raw_code, str) and raw_code else None
-    return reason, code
+    circuit = None
+    if code in _RETRY_CIRCUIT_PUBLIC_REASONS:
+        reason = _RETRY_CIRCUIT_PUBLIC_REASONS[code]
+        payload = paused_event.payload
+        circuit = {
+            "open": True,
+            "code": code,
+            "retry_class": payload.get("retry_class"),
+            "generation": payload.get("generation"),
+            "stage": payload.get("stage"),
+            "breaker_epoch": payload.get("breaker_epoch"),
+            "consecutive_failures": payload.get("consecutive_failures"),
+            "retry_limit": payload.get("retry_limit"),
+            "first_failure_at": payload.get("first_failure_at"),
+            "last_failure_at": payload.get("last_failure_at"),
+            "last_error_code": payload.get("last_error_code"),
+            "suggested_action": payload.get("suggested_action"),
+            "pause_event_id": paused_event.event_id,
+            "updated_at": paused_event.created_at,
+        }
+    return reason, code, circuit
 
 
 def _safe_plan_value(value: Any, *, depth: int = 0) -> Any:
@@ -1269,20 +1309,21 @@ def _gateway_retry_projection(state: Any) -> dict[str, Any] | None:
     )
     if event is None or state.run.status.value != "running":
         return None
-    newer_stage = next(
-        (
-            item
-            for item in reversed(state.events)
-            if item.kind == "EvolutionStageRecorded"
-            and int(item.payload.get("generation", -1)) == int(state.run.generation)
-            and item.seq > event.seq
-        ),
-        None,
-    )
-    if newer_stage is not None:
-        return None
+    for newer in state.events:
+        if newer.seq <= event.seq:
+            continue
+        if newer.kind in {"RunPaused", "RunResumed", "RunStarted"}:
+            return None
+        if (
+            newer.kind == "EvolutionStageRecorded"
+            and newer.payload.get("status") == "completed"
+            and int(newer.payload.get("generation", -1))
+            == int(event.payload.get("generation", -2))
+            and newer.payload.get("stage") == event.payload.get("stage")
+        ):
+            return None
     payload = event.payload
-    return {
+    projected = {
         "waiting": True,
         "generation": payload.get("generation"),
         "retry_at": payload.get("retry_at"),
@@ -1293,6 +1334,21 @@ def _gateway_retry_projection(state: Any) -> dict[str, Any] | None:
         "event_seq": event.seq,
         "updated_at": event.created_at,
     }
+    if payload.get("schema_version") == "ecologyrsi-dsh.gateway-retry-scheduled/2":
+        projected.update(
+            {
+                "retry_class": payload.get("retry_class"),
+                "stage": payload.get("stage"),
+                "breaker_epoch": payload.get("breaker_epoch"),
+                "consecutive_failures": payload.get("consecutive_failures"),
+                "retry_limit": payload.get("retry_limit"),
+                "first_failure_at": payload.get("first_failure_at"),
+                "last_failure_at": payload.get("last_failure_at"),
+                "last_error_code": payload.get("last_error_code"),
+                "suggested_action": "wait_for_scheduled_retry",
+            }
+        )
+    return projected
 
 
 def _algorithm_execution_projection(state: Any, candidate: Any) -> dict[str, Any]:
@@ -2738,7 +2794,7 @@ def _projection_json(state: Any) -> dict[str, Any]:
     execution_diagnostics = _execution_diagnostics(state)
     model_usage = _model_usage_summary(state)
     dsh_runtime = _dsh_runtime_projection(state)
-    pause_reason, pause_code = _run_pause_projection(state)
+    pause_reason, pause_code, retry_circuit = _run_pause_projection(state)
     return {
         "id": run.run_id,
         "run_id": run.run_id,
@@ -2750,6 +2806,7 @@ def _projection_json(state: Any) -> dict[str, Any]:
         "failed_stage": failed_stage,
         "pause_reason": pause_reason,
         "pause_code": pause_code,
+        "retry_circuit": retry_circuit,
         "created_at": run.created_at,
         "updated_at": latest_event,
         "generation": run.generation,
@@ -2900,7 +2957,7 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
     latest_event = state.events[-1].created_at if state.events else run.created_at
     outcome, termination_reason = run_completion_outcome(state)
     failure_reason, failed_stage = _run_failure_projection(state)
-    pause_reason, pause_code = _run_pause_projection(state)
+    pause_reason, pause_code, retry_circuit = _run_pause_projection(state)
     observed = best_observed_evaluation(state)
     acceptable = (
         state.evaluation_for(run.best_candidate_id)
@@ -2956,6 +3013,7 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
         "failed_stage": failed_stage,
         "pause_reason": pause_reason,
         "pause_code": pause_code,
+        "retry_circuit": retry_circuit,
         "created_at": run.created_at,
         "updated_at": latest_event,
         "projection_revision": state.events[-1].seq if state.events else 0,

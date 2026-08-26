@@ -19,7 +19,8 @@ import math
 import os
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from queue import Empty, Queue
 from types import SimpleNamespace
 from typing import Any
@@ -41,6 +42,7 @@ _DEFAULT_RETRY_LIMIT = 3
 _DEFAULT_WORKER_COUNT = 4
 _MAX_WORKER_COUNT = 8
 _FAILURE_PERSISTENCE_RETRY_SECONDS = 1.0
+_RETRY_TIMER_START_RETRY_SECONDS = 1.0
 _GATEWAY_RETRY_BASE_SECONDS = 15.0
 _GATEWAY_RETRY_MAX_SECONDS = 300.0
 _GATEWAY_RETRY_DEADLINE_MAX_SECONDS = 3600.0
@@ -58,6 +60,18 @@ _WorkItem = tuple[str, int]
 
 class _RunIncarnationChanged(KeyError):
     """Raised when queued work no longer names the current RunCreated event."""
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingGatewayRetry:
+    run_incarnation: int
+    generation: int
+    stage: str
+    retry_class: str
+    failure_id: str
+    attempt_anchor_seq: int
+    delay_seconds: float
+    last_error_code: str
 
 
 def _run_incarnation(state: Any) -> int:
@@ -103,6 +117,10 @@ class AutoProgressManager:
         # the run alive and delay its next generation attempt instead of
         # converting this recoverable boundary into RunFailed.
         self._retry_not_before: dict[_WorkItem, float] = {}
+        self._retry_authority: dict[_WorkItem, tuple[int, int]] = {}
+        # If the durable retry decision cannot commit, retry that exact report
+        # before another gateway invocation.  No cooldown exists until commit.
+        self._pending_gateway_retries: dict[_WorkItem, _PendingGatewayRetry] = {}
         # Cooldowns are timer-backed rather than worker sleeps.  A busy
         # provider must not occupy the only worker and block unrelated runs.
         self._retry_timers: dict[_WorkItem, threading.Timer] = {}
@@ -276,7 +294,14 @@ class AutoProgressManager:
             or not auto_progress_enabled(state)
         ):
             return False
-        return self._schedule_work_item((run_id, _run_incarnation(state)))
+        work_item = (run_id, _run_incarnation(state))
+        if state.events[-1].kind == "RunResumed":
+            # Explicit resume begins a new breaker epoch.  An old timer must
+            # never wake a prior epoch after the operator authorizes recovery.
+            with self._state_lock:
+                self._clear_retry_cooldown_locked(work_item)
+                self._pending_gateway_retries.pop(work_item, None)
+        return self._schedule_work_item(work_item)
 
     def forget(self, state: Any) -> None:
         """Discard in-memory bookkeeping for one successfully purged incarnation."""
@@ -288,6 +313,7 @@ class AutoProgressManager:
             self._running.discard(work_item)
             self._reschedule_requested.discard(work_item)
             self._deferred_failures.pop(work_item, None)
+            self._pending_gateway_retries.pop(work_item, None)
 
     def _clear_retry_cooldown_locked(
         self,
@@ -302,6 +328,7 @@ class AutoProgressManager:
             timer.cancel()
         if clear_deadline:
             self._retry_not_before.pop(work_item, None)
+            self._retry_authority.pop(work_item, None)
 
     def _clear_terminal_retry_cooldown(self, work_item: _WorkItem) -> None:
         """Drop retry state once the durable incarnation reaches a terminal state."""
@@ -313,6 +340,7 @@ class AutoProgressManager:
                 self._clear_retry_cooldown_locked(work_item)
                 self._reschedule_requested.discard(work_item)
                 self._deferred_failures.pop(work_item, None)
+                self._pending_gateway_retries.pop(work_item, None)
             return
         except Exception:  # noqa: BLE001 - diagnostics must remain best effort
             return
@@ -322,6 +350,7 @@ class AutoProgressManager:
             self._clear_retry_cooldown_locked(work_item)
             self._reschedule_requested.discard(work_item)
             self._deferred_failures.pop(work_item, None)
+            self._pending_gateway_retries.pop(work_item, None)
 
     def _reconcile_retry_cooldowns(self) -> None:
         """Repair stale cooldown bookkeeping without blocking scheduler locks on I/O."""
@@ -449,6 +478,8 @@ class AutoProgressManager:
             self._reschedule_requested.clear()
             self._deferred_failures.clear()
             self._retry_not_before.clear()
+            self._retry_authority.clear()
+            self._pending_gateway_retries.clear()
         return not any(worker.is_alive() for worker in self._threads)
 
     def _schedule_retry_wakeup(self, work_item: _WorkItem, delay: float) -> bool:
@@ -458,13 +489,18 @@ class AutoProgressManager:
             0.0,
             min(float(delay), _GATEWAY_RETRY_DEADLINE_MAX_SECONDS),
         )
+        with self._state_lock:
+            authority = self._retry_authority.get(work_item)
 
         def wake() -> None:
             with self._state_lock:
+                if self._retry_authority.get(work_item) != authority:
+                    return
                 self._retry_timers.pop(work_item, None)
                 if self._stop.is_set():
                     return
                 self._retry_not_before.pop(work_item, None)
+                self._retry_authority.pop(work_item, None)
             try:
                 state = self.server.director.state(work_item[0])
                 if (
@@ -473,6 +509,22 @@ class AutoProgressManager:
                     or not auto_progress_enabled(state)
                 ):
                     return
+                if authority is not None:
+                    event = next(
+                        (
+                            item
+                            for item in state.events
+                            if item.seq == authority[0]
+                            and int(item.payload.get("breaker_epoch", -1))
+                            == authority[1]
+                        ),
+                        None,
+                    )
+                    if event is None or not self._retry_event_is_authoritative(
+                        state,
+                        event,
+                    ):
+                        return
             except (KeyError, ValueError):
                 return
             self._schedule_work_item(work_item)
@@ -491,7 +543,7 @@ class AutoProgressManager:
         except Exception:
             with self._state_lock:
                 if self._retry_timers.get(work_item) is timer:
-                    self._clear_retry_cooldown_locked(work_item)
+                    self._retry_timers.pop(work_item, None)
             return False
         return True
 
@@ -506,6 +558,7 @@ class AutoProgressManager:
             dispatch = False
             retry_wait = 0.0
             retry_wakeup_scheduled = False
+            retry_wakeup_failed = False
             try:
                 if work_item is None:
                     return
@@ -538,13 +591,21 @@ class AutoProgressManager:
                             work_item, retry_wait
                         )
                         if not retry_wakeup_scheduled and not self._stop.is_set():
-                            # Timer.start() can fail under resource pressure.
-                            # The current worker still owns this item, so execute
-                            # it now instead of leaving a running run orphaned.
-                            self._running.add(work_item)
-                            dispatch = True
+                            retry_wakeup_failed = True
                     if retry_wakeup_scheduled or self._stop.is_set():
                         continue
+                    if retry_wakeup_failed:
+                        # Resource pressure must not authorize an early remote
+                        # call. Retry installing the wakeup from the FIFO while
+                        # retaining the durable deadline and authority.
+                        if self._stop.wait(
+                            min(
+                                retry_wait,
+                                _RETRY_TIMER_START_RETRY_SECONDS,
+                            )
+                        ):
+                            continue
+                        continue_running = True
                 else:
                     with self._state_lock:
                         # ``_scheduled`` spans both queueing and execution.  That
@@ -552,11 +613,12 @@ class AutoProgressManager:
                         # its current generation still holds the shared lease.
                         self._running.add(work_item)
                         dispatch = True
-                continue_running = self._run_one_generation(
-                    work_item[0], expected_incarnation=work_item[1]
-                )
-                if not continue_running:
-                    self._clear_terminal_retry_cooldown(work_item)
+                if not retry_wakeup_failed:
+                    continue_running = self._run_one_generation(
+                        work_item[0], expected_incarnation=work_item[1]
+                    )
+                    if not continue_running:
+                        self._clear_terminal_retry_cooldown(work_item)
             except Exception as exc:  # noqa: BLE001 - isolate one queue item
                 if work_item is not None:
                     self._defer_failure(
@@ -631,6 +693,21 @@ class AutoProgressManager:
         # namespace keeps that code path identical without constructing a fake
         # BaseHTTPRequestHandler instance.
         endpoint = SimpleNamespace(server=self.server)
+        with self._state_lock:
+            pending_gateway_retry = self._pending_gateway_retries.get(work_item)
+        if pending_gateway_retry is not None:
+            try:
+                keep_running = self._persist_gateway_retry_report(
+                    work_item,
+                    pending_gateway_retry,
+                )
+            except Exception:
+                if self._stop.wait(_FAILURE_PERSISTENCE_RETRY_SECONDS):
+                    return False
+                return True
+            with self._state_lock:
+                self._pending_gateway_retries.pop(work_item, None)
+            return keep_running
         deferred_reason = self._deferred_failure(work_item)
         if deferred_reason is not None:
             with self.server.mutation_lock:
@@ -661,6 +738,7 @@ class AutoProgressManager:
                     return False
                 if not auto_progress_enabled(state):
                     return False
+                attempt_anchor_seq = self._attempt_authority_seq(state)
                 try:
                     state = complete_if_budget_exhausted(endpoint, run_id, state)
                     if state.run.status is not RunStatus.RUNNING:
@@ -681,14 +759,18 @@ class AutoProgressManager:
                     gateway_error = gateway_error_in_chain(exc)
                     deferred_error = _retry_later_error(exc)
                     if deferred_error is not None:
-                        self._defer_retry(
+                        return self._defer_retry(
                             work_item,
                             self._gateway_retry_delay(
-                                work_item, failures, deferred_error
+                                work_item,
+                                failures,
+                                deferred_error,
+                                stage="preflight",
                             ),
                             deferred_error,
+                            stage="preflight",
+                            attempt_anchor_seq=attempt_anchor_seq,
                         )
-                        return True
                     if retryable and failures < self._retry_limit:
                         # The generation executor is event-idempotent and can
                         # reconcile a partially written batch on the next
@@ -802,15 +884,18 @@ class AutoProgressManager:
                 )
                 if deferred_error is not None:
                     retry_delay = self._gateway_retry_delay(
-                        work_item, failures, deferred_error
+                        work_item,
+                        failures,
+                        deferred_error,
+                        stage=recovery_stage,
                     )
-                    self._defer_retry(
+                    return self._defer_retry(
                         work_item,
                         retry_delay,
                         deferred_error,
                         stage=recovery_stage,
+                        attempt_anchor_seq=attempt_anchor_seq,
                     )
-                    return True
                 terminal_failure = not retryable or failures >= self._retry_limit
                 retry_terminal_write = False
                 failure_reason: str | None = None
@@ -893,110 +978,186 @@ class AutoProgressManager:
         exc: BaseException | None = None,
         *,
         stage: str | None = None,
-    ) -> None:
-        """Schedule a recoverable gateway retry without busy-spinning."""
+        attempt_anchor_seq: int,
+    ) -> bool:
+        """Commit a retry decision before installing process-local scheduling."""
 
-        delay = max(
-            0.0,
-            min(float(delay_seconds), _GATEWAY_RETRY_DEADLINE_MAX_SECONDS),
-        )
-        retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
-        with self._state_lock:
-            self._retry_not_before[work_item] = time.monotonic() + delay
-        # Keep the cooldown visible in the append-only public projection.  The
-        # in-memory deadline still owns scheduling; this event is deliberately
-        # observational and does not alter the run state.
+        retry_class, last_error_code = _retry_class_and_error_code(exc, stage=stage)
         try:
             state = self._state_for_work_item(work_item)
-            attempt = int(self._retry_attempt(work_item))
-            callback_failure = (
-                exc is not None
-                and _contains_exception_type(exc, SampleResultCallbackError)
-            )
-            gateway_error = (
-                gateway_error_in_chain(exc) if exc is not None else None
-            )
-            dsh_error = (
-                dsh_native_runtime_error_in_chain(exc)
-                if exc is not None
-                else None
-            )
-            timeout_failure = (
-                exc is not None
-                and gateway_error is None
-                and _contains_exception_type(exc, TimeoutError)
-            )
-            error_code = (
-                getattr(gateway_error, "error_code", None)
-                or (getattr(exc, "error_code", None) if exc is not None else None)
-            )
-            research_contract_retry = error_code in {
-                "research_algorithm_contract_invalid",
-                "research_response_contract_invalid",
-            }
-            payload = {
-                "generation": int(state.run.generation),
-                "retry_at": retry_at.isoformat(),
-                "delay_seconds": round(delay, 3),
-                "attempt": attempt,
-                "error_code": error_code
-                or ("sample_result_callback_error" if callback_failure else None)
-                or ("timeout" if timeout_failure else None),
-                **({"stage": stage} if stage is not None else {}),
-                "reason": (
-                    "DSH 智能体运行时暂时不可用，"
-                    "任务保持运行并将在服务恢复后自动重试"
-                    if dsh_error is not None
-                    else "样本结果写入暂时不可用，等待持久化边界恢复后再次调用"
-                    if callback_failure
-                    else (
-                        "研究方案响应未通过宿主算法合同，"
-                        "等待后重新请求本轮研究计划"
-                    )
-                    if research_contract_retry
-                    else (
-                        "研究计划输出被截断，"
-                        "等待冷却后重新请求本轮研究计划"
-                    )
-                    if stage == "research" and error_code == "output_truncated"
-                    else (
-                        "研究阶段模型请求暂时不可用，"
-                        "等待冷却后重新请求本轮研究计划"
-                    )
-                    if stage == "research"
-                    else (
-                        "网关请求已完成本地重试，"
-                        "等待服务端队列恢复后再次调用"
-                    )
-                ),
-            }
-            # Keep the heartbeat idempotent and bounded.  A millisecond clock
-            # is not sufficient when several worker/control paths report the
-            # same generation in quick succession.
-            event_id = (
-                f"{work_item[0]}:gateway-retry:{state.run.generation}:"
-                f"{attempt}:{digest(payload)[:16]}"
-            )
-            lock = getattr(self.server, "mutation_lock", None)
-            if lock is None:
-                self.server.ledger.append(
-                    work_item[0],
-                    "GatewayRetryScheduled",
-                    payload,
-                    event_id=event_id,
-                )
-            else:
-                with lock:
-                    self.server.ledger.append(
-                        work_item[0],
-                        "GatewayRetryScheduled",
-                        payload,
-                        event_id=event_id,
-                    )
+        except (KeyError, ValueError):
+            return False
+        normalized_stage = str(stage or "generation").strip().lower()
+        report = _PendingGatewayRetry(
+            run_incarnation=work_item[1],
+            generation=int(state.run.generation),
+            stage=normalized_stage,
+            retry_class=retry_class,
+            failure_id=digest(
+                {
+                    "schema_version": "ecologyrsi-dsh.gateway-failure-id/1",
+                    "run_id": work_item[0],
+                    "run_incarnation": work_item[1],
+                    "generation": int(state.run.generation),
+                    "stage": normalized_stage,
+                    "retry_class": retry_class,
+                    "attempt_anchor_seq": int(attempt_anchor_seq),
+                }
+            ),
+            attempt_anchor_seq=int(attempt_anchor_seq),
+            delay_seconds=max(
+                0.0,
+                min(float(delay_seconds), _GATEWAY_RETRY_DEADLINE_MAX_SECONDS),
+            ),
+            last_error_code=last_error_code,
+        )
+        try:
+            keep_running = self._persist_gateway_retry_report(work_item, report)
         except Exception:
-            # Progress reporting must never turn a recoverable gateway error
-            # into a terminal run failure (or mask the original exception).
-            return
+            # The report, not the remote generation call, is now pending.  A
+            # later worker turn retries this exact immutable failure identity.
+            with self._state_lock:
+                self._pending_gateway_retries[work_item] = report
+                self._clear_retry_cooldown_locked(work_item)
+            return True
+        with self._state_lock:
+            self._pending_gateway_retries.pop(work_item, None)
+        return keep_running
+
+    def _persist_gateway_retry_report(
+        self,
+        work_item: _WorkItem,
+        report: _PendingGatewayRetry,
+    ) -> bool:
+        decision = self.server.director.schedule_gateway_retry_or_pause(
+            work_item[0],
+            run_incarnation=report.run_incarnation,
+            generation=report.generation,
+            stage=report.stage,
+            retry_class=report.retry_class,
+            failure_id=report.failure_id,
+            attempt_anchor_seq=report.attempt_anchor_seq,
+            delay_seconds=report.delay_seconds,
+            last_error_code=report.last_error_code,
+        )
+        event = decision.event
+        if decision.outcome != "scheduled" or event is None:
+            with self._state_lock:
+                self._clear_retry_cooldown_locked(work_item)
+            return False
+        try:
+            state = self._state_for_work_item(work_item)
+        except (KeyError, ValueError):
+            return False
+        if not self._retry_event_is_authoritative(state, event):
+            with self._state_lock:
+                self._clear_retry_cooldown_locked(work_item)
+            return False
+        retry_at = _parse_retry_at(event.payload.get("retry_at"))
+        if retry_at is None:
+            raise ValueError("durable gateway retry has an invalid retry_at")
+        delay = max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        delay = min(delay, _GATEWAY_RETRY_DEADLINE_MAX_SECONDS)
+        with self._state_lock:
+            self._retry_not_before[work_item] = time.monotonic() + delay
+            self._retry_authority[work_item] = (
+                int(event.seq),
+                int(event.payload["breaker_epoch"]),
+            )
+        return True
+
+    @staticmethod
+    def _retry_event_is_authoritative(state: Any, event: Any) -> bool:
+        if (
+            getattr(getattr(state, "run", None), "status", None)
+            is not RunStatus.RUNNING
+            or int(getattr(state.run, "generation", -1))
+            != int(event.payload.get("generation", -2))
+            or _run_incarnation(state)
+            != int(event.payload.get("run_incarnation", -1))
+            or not any(item.seq == event.seq for item in state.events)
+        ):
+            return False
+        for later in state.events:
+            if later.seq <= event.seq:
+                continue
+            if later.kind in {
+                "RunPaused",
+                "RunResumed",
+                "RunCancelled",
+                "RunFailed",
+                "RunCompleted",
+                "GenerationAdvanced",
+            }:
+                return False
+            if (
+                later.kind == "GatewayRetryScheduled"
+                and later.payload.get("schema_version")
+                == "ecologyrsi-dsh.gateway-retry-scheduled/2"
+                and later.payload.get("retry_class")
+                == event.payload.get("retry_class")
+                and later.payload.get("stage") == event.payload.get("stage")
+            ):
+                return False
+            if (
+                later.kind == "EvolutionStageRecorded"
+                and int(later.payload.get("generation", -1))
+                == int(event.payload.get("generation", -2))
+                and later.payload.get("stage") == event.payload.get("stage")
+                and later.payload.get("status") in {"started", "completed"}
+            ):
+                return False
+        return True
+
+    @staticmethod
+    def _attempt_authority_seq(state: Any) -> int:
+        """Recover the durable authority for one restarted logical attempt.
+
+        A stage ``started`` or ``failed`` observation after a retry heartbeat
+        proves the scheduled attempt began; it does not mint a second failure
+        slot.  Reusing the heartbeat sequence keeps a post-crash failure on
+        the same count chain.  Success and lifecycle transitions consume that
+        authority and fall back to the latest event.
+        """
+
+        events = tuple(getattr(state, "events", ()) or ())
+        if not events:
+            raise ValueError("run has no durable attempt authority")
+        generation = int(getattr(getattr(state, "run", None), "generation", -1))
+        retry = next(
+            (
+                event
+                for event in reversed(events)
+                if event.kind == "GatewayRetryScheduled"
+                and event.payload.get("schema_version")
+                == "ecologyrsi-dsh.gateway-retry-scheduled/2"
+                and int(event.payload.get("generation", -2)) == generation
+            ),
+            None,
+        )
+        if retry is None:
+            return int(events[-1].seq)
+        for later in events:
+            if later.seq <= retry.seq:
+                continue
+            if later.kind in {
+                "RunPaused",
+                "RunResumed",
+                "RunStarted",
+                "RunCancelled",
+                "RunFailed",
+                "RunCompleted",
+                "GenerationAdvanced",
+            }:
+                return int(events[-1].seq)
+            if (
+                later.kind == "EvolutionStageRecorded"
+                and int(later.payload.get("generation", -1)) == generation
+                and later.payload.get("stage") == retry.payload.get("stage")
+                and later.payload.get("status") == "completed"
+            ):
+                return int(events[-1].seq)
+        return int(retry.seq)
 
     def _restore_retry_deadline(self, work_item: _WorkItem, state: Any) -> None:
         """Restore a future retry deadline from the append-only heartbeat.
@@ -1019,51 +1180,90 @@ class AutoProgressManager:
         )
         if latest is None:
             return
+        is_v2 = (
+            latest.payload.get("schema_version")
+            == "ecologyrsi-dsh.gateway-retry-scheduled/2"
+        )
+        if is_v2 and not self._retry_event_is_authoritative(state, latest):
+            return
         # A later stage event proves that the worker already resumed the
         # generation after this heartbeat (the process may have crashed before
         # the next durable boundary).  In that case restoring the old cooldown
         # would add an unnecessary multi-minute pause after restart.
-        if any(
-            event.kind == "EvolutionStageRecorded"
-            and event.seq > latest.seq
-            and int(event.payload.get("generation", -1))
-            == int(state.run.generation)
+        if not is_v2 and any(
+            event.seq > latest.seq
+            and (
+                event.kind
+                in {
+                    "RunPaused",
+                    "RunResumed",
+                    "RunCancelled",
+                    "RunFailed",
+                    "RunCompleted",
+                    "GenerationAdvanced",
+                }
+                or (
+                    event.kind == "EvolutionStageRecorded"
+                    and int(event.payload.get("generation", -1))
+                    == int(state.run.generation)
+                )
+            )
             for event in getattr(state, "events", ())
         ):
             return
-        raw_retry_at = latest.payload.get("retry_at")
-        if not isinstance(raw_retry_at, str) or not raw_retry_at.strip():
+        retry_at = _parse_retry_at(latest.payload.get("retry_at"))
+        if retry_at is None:
             return
-        try:
-            retry_at = datetime.fromisoformat(raw_retry_at)
-            if retry_at.tzinfo is None:
-                retry_at = retry_at.replace(tzinfo=timezone.utc)
-            delay = max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
-        except (TypeError, ValueError, OverflowError):
-            return
+        delay = max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
         with self._state_lock:
             self._retry_not_before[work_item] = time.monotonic() + min(
                 delay, _GATEWAY_RETRY_DEADLINE_MAX_SECONDS
             )
+            if is_v2:
+                self._retry_authority[work_item] = (
+                    int(latest.seq),
+                    int(latest.payload["breaker_epoch"]),
+                )
 
-    def _retry_attempt(self, work_item: _WorkItem) -> int:
-        """Return a bounded, best-effort retry count for public diagnostics."""
+    def _retry_attempt(
+        self,
+        work_item: _WorkItem,
+        *,
+        retry_class: str | None = None,
+        stage: str | None = None,
+    ) -> int:
+        """Return a bounded, scoped attempt for backoff only."""
 
         # The manager stores deadlines rather than counters.  Counting recent
         # durable heartbeats gives a restart-safe approximation and is enough
         # for the UI; exact transport attempts remain gateway diagnostics.
         try:
             state = self._state_for_work_item(work_item)
-            return max(
-                1,
-                sum(
-                    1
-                    for event in state.events
-                    if event.kind == "GatewayRetryScheduled"
-                    and int(event.payload.get("generation", -1)) == int(state.run.generation)
+            current_generation = int(state.run.generation)
+            scoped_v2 = [
+                event
+                for event in state.events
+                if event.kind == "GatewayRetryScheduled"
+                and event.payload.get("schema_version")
+                == "ecologyrsi-dsh.gateway-retry-scheduled/2"
+                and int(event.payload.get("generation", -1)) == current_generation
+                and (retry_class is None or event.payload.get("retry_class") == retry_class)
+                and (stage is None or event.payload.get("stage") == stage)
+            ]
+            if scoped_v2:
+                return min(
+                    12,
+                    max(1, int(scoped_v2[-1].payload["consecutive_failures"]) + 1),
                 )
-                + 1,
+            legacy_count = sum(
+                1
+                for event in state.events
+                if event.kind == "GatewayRetryScheduled"
+                and event.payload.get("schema_version")
+                != "ecologyrsi-dsh.gateway-retry-scheduled/2"
+                and int(event.payload.get("generation", -1)) == current_generation
             )
+            return min(12, max(1, legacy_count + 1))
         except Exception:
             return 1
 
@@ -1072,10 +1272,20 @@ class AutoProgressManager:
         work_item: _WorkItem,
         failures: int,
         exc: BaseException | None = None,
+        *,
+        stage: str | None = None,
     ) -> float:
         """Combine durable backoff with a bounded provider retry deadline."""
 
-        durable_attempt = max(1, self._retry_attempt(work_item))
+        retry_class, _error_code = _retry_class_and_error_code(exc, stage=stage)
+        durable_attempt = max(
+            1,
+            self._retry_attempt(
+                work_item,
+                retry_class=retry_class,
+                stage=str(stage or "generation").strip().lower(),
+            ),
+        )
         local_attempt = max(1, int(failures))
         exponent = max(0, durable_attempt + local_attempt - 2)
         retry_base = max(0.0, float(_GATEWAY_RETRY_BASE_SECONDS))
@@ -1094,7 +1304,14 @@ class AutoProgressManager:
                 retry_max,
                 math.ldexp(retry_base, bounded_exponent),
             )
-        gateway_error = gateway_error_in_chain(exc) if exc is not None else None
+        dsh_error = (
+            dsh_native_runtime_error_in_chain(exc) if exc is not None else None
+        )
+        gateway_error = (
+            gateway_error_in_chain(exc)
+            if exc is not None and dsh_error is None
+            else None
+        )
         retry_after = (
             getattr(gateway_error, "retry_after_seconds", None)
             if gateway_error is not None
@@ -1160,6 +1377,72 @@ class AutoProgressManager:
         return False
 
 
+def _parse_retry_at(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _safe_retry_error_code(value: Any, *, fallback: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if (
+        normalized
+        and len(normalized) <= 80
+        and normalized.replace("_", "").replace("-", "").isalnum()
+    ):
+        return normalized
+    return fallback
+
+
+def _retry_class_and_error_code(
+    exc: BaseException | None,
+    *,
+    stage: str | None,
+) -> tuple[str, str]:
+    """Classify one public retry scope without retaining exception text."""
+
+    dsh_error = (
+        dsh_native_runtime_error_in_chain(exc) if exc is not None else None
+    )
+    if dsh_error is not None:
+        return (
+            "dsh_native_runtime",
+            _safe_retry_error_code(
+                getattr(dsh_error, "error_code", None),
+                fallback="dsh_native_runtime_unavailable",
+            ),
+        )
+    gateway_error = gateway_error_in_chain(exc) if exc is not None else None
+    if gateway_error is not None:
+        return (
+            "model_gateway",
+            _safe_retry_error_code(
+                getattr(gateway_error, "error_code", None),
+                fallback="gateway_response_error",
+            ),
+        )
+    if (
+        exc is not None
+        and stage == "research"
+        and _contains_exception_type(exc, TimeoutError)
+    ):
+        # Keep the established public error code while separating timeout
+        # failures into their own finite breaker scope.
+        return "research_timeout", "timeout"
+    if exc is not None and _contains_exception_type(exc, SampleResultCallbackError):
+        return "sample_result_persistence", "sample_result_callback_error"
+    return "model_gateway", "gateway_unavailable"
+
+
 def _latest_failed_stage(state: Any | None) -> str | None:
     """Return the current generation's latest explicitly failed stage."""
 
@@ -1211,6 +1494,9 @@ def _progress_failure_retryable(
 ) -> bool:
     """Retry only local recoverable boundaries at the orchestration layer."""
 
+    dsh_error = dsh_native_runtime_error_in_chain(exc)
+    if dsh_error is not None:
+        return dsh_native_runtime_retryable(dsh_error)
     gateway_error = gateway_error_in_chain(exc)
     if gateway_error is not None:
         # ModelGateway owns request-local retries, but a provider can remain
@@ -1223,9 +1509,6 @@ def _progress_failure_retryable(
                 stage=stage,
             )
         )
-    dsh_error = dsh_native_runtime_error_in_chain(exc)
-    if dsh_error is not None:
-        return dsh_native_runtime_retryable(dsh_error)
     if _contains_exception_type(exc, SampleResultCallbackError):
         # Sample-result writes are part of the durable evaluation boundary.
         # A transient ledger/IPC failure must be retried after a cooldown, not
@@ -1241,6 +1524,9 @@ def _retry_later_error(
 ) -> BaseException | None:
     """Return a boundary that should keep the run alive for a later retry."""
 
+    dsh_error = dsh_native_runtime_error_in_chain(exc)
+    if dsh_error is not None:
+        return dsh_error if dsh_native_runtime_retryable(dsh_error) else None
     gateway_error = gateway_error_in_chain(exc)
     if gateway_error is not None:
         if gateway_error.retryable or _research_gateway_failure_retryable_later(
@@ -1249,9 +1535,6 @@ def _retry_later_error(
         ):
             return gateway_error
         return None
-    dsh_error = dsh_native_runtime_error_in_chain(exc)
-    if dsh_error is not None:
-        return dsh_error if dsh_native_runtime_retryable(dsh_error) else None
     if stage == "research" and _contains_exception_type(exc, TimeoutError):
         return exc
     if _contains_exception_type(exc, SampleResultCallbackError):

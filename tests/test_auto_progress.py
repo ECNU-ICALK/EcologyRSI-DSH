@@ -19,6 +19,7 @@ from ecologyrsi_dsh.api import generation_execution as generation_execution_modu
 from ecologyrsi_dsh.evaluators.sample_execution import SampleResultCallbackError
 from ecologyrsi_dsh.evolution.batches import ResearchResponseContractError
 from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
+from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.integrations.model_gateway import GatewayResponseError
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 
@@ -197,6 +198,86 @@ class AutoProgressHTTPTests(unittest.TestCase):
             auto_progress_module._retry_later_error(contract_failure)
         )
 
+    def test_dsh_runtime_boundary_owns_classification_over_nested_gateway(self) -> None:
+        inner = GatewayResponseError(
+            "provider unavailable",
+            retryable=True,
+            status_code=503,
+            error_code="gateway_unavailable",
+        )
+        outer = DshNativeRuntimeUnavailableError(
+            "DSH proxy unavailable",
+            error_code="dsh_native_runtime_http_error",
+            status_code=502,
+        )
+        outer.__cause__ = inner
+
+        deferred = auto_progress_module._retry_later_error(
+            outer,
+            stage="research",
+        )
+        retry_class, error_code = auto_progress_module._retry_class_and_error_code(
+            deferred,
+            stage="research",
+        )
+
+        self.assertIs(deferred, outer)
+        self.assertEqual(retry_class, "dsh_native_runtime")
+        self.assertEqual(error_code, "dsh_native_runtime_http_error")
+
+    def test_retry_backoff_does_not_mix_durable_failure_classes(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "retry-backoff-class-scope",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        self.server.director.start_run(run_id)
+        for attempt in range(1, 6):
+            state = self.server.director.state(run_id)
+            self.server.director.schedule_gateway_retry_or_pause(
+                run_id,
+                run_incarnation=state.events[0].seq,
+                generation=0,
+                stage="research",
+                retry_class="model_gateway",
+                failure_id=digest({"model-backoff-attempt": attempt}),
+                attempt_anchor_seq=state.events[-1].seq,
+                delay_seconds=0.0,
+                last_error_code="gateway_unavailable",
+            )
+        state = self.server.director.state(run_id)
+        work_item = (run_id, auto_progress_module._run_incarnation(state))
+        dsh_error = DshNativeRuntimeUnavailableError(
+            "DSH unavailable",
+            error_code="dsh_native_runtime_http_error",
+            status_code=502,
+        )
+
+        with (
+            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 15.0),
+            patch.object(auto_progress_module, "_GATEWAY_RETRY_MAX_SECONDS", 300.0),
+        ):
+            delay = self.server.auto_progress._gateway_retry_delay(
+                work_item,
+                1,
+                dsh_error,
+                stage="research",
+            )
+
+        self.assertEqual(delay, 15.0)
+
     def test_exhausted_research_contract_pauses_without_outer_retry(self) -> None:
         status, created = self.request(
             "/runs",
@@ -313,6 +394,181 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         self.assertIn(work_item, self.server.auto_progress._retry_not_before)
 
+    def test_v2_retry_recovery_restores_decision_authority(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "restore-v2-retry-authority",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        with self.server.mutation_lock:
+            self.server.director.start_run(run_id)
+        unavailable = GatewayResponseError(
+            "provider queue unavailable",
+            retryable=True,
+            status_code=503,
+            attempts=4,
+        )
+        with (
+            patch.object(
+                auto_progress_module,
+                "execute_generation",
+                side_effect=unavailable,
+            ),
+            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 60.0),
+        ):
+            self.assertTrue(self.server.auto_progress._run_one_generation(run_id))
+        state = self.server.director.state(run_id)
+        retry = next(
+            event
+            for event in reversed(state.events)
+            if event.kind == "GatewayRetryScheduled"
+        )
+        work_item = (run_id, auto_progress_module._run_incarnation(state))
+        with self.server.auto_progress._state_lock:
+            self.server.auto_progress._retry_not_before.pop(work_item, None)
+            self.server.auto_progress._retry_authority.pop(work_item, None)
+
+        self.server.auto_progress._restore_retry_deadline(work_item, state)
+
+        with self.server.auto_progress._state_lock:
+            self.assertEqual(
+                self.server.auto_progress._retry_authority[work_item],
+                (retry.seq, retry.payload["breaker_epoch"]),
+            )
+
+    def test_restart_after_stage_failure_reuses_durable_retry_authority(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "restart-after-stage-failure-authority",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        self.server.director.start_run(run_id)
+        state = self.server.director.state(run_id)
+        first = self.server.director.schedule_gateway_retry_or_pause(
+            run_id,
+            run_incarnation=state.events[0].seq,
+            generation=0,
+            stage="research",
+            retry_class="model_gateway",
+            failure_id=digest("restart-first-retry-authority"),
+            attempt_anchor_seq=state.events[-1].seq,
+            delay_seconds=0.0,
+            last_error_code="gateway_unavailable",
+        ).event
+        self.server.director.record_evolution_stage(
+            run_id,
+            generation=0,
+            stage="research",
+            status="started",
+            attempt=2,
+        )
+        self.server.director.record_evolution_stage(
+            run_id,
+            generation=0,
+            stage="research",
+            status="failed",
+            attempt=2,
+            public_error="研究请求暂时失败。",
+        )
+        unavailable = GatewayResponseError(
+            "provider unavailable",
+            retryable=True,
+            status_code=503,
+            attempts=4,
+        )
+
+        with (
+            patch.object(
+                auto_progress_module,
+                "execute_generation",
+                side_effect=unavailable,
+            ),
+            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
+        ):
+            keep_running = self.server.auto_progress._run_one_generation(run_id)
+
+        self.assertTrue(keep_running)
+        retries = [
+            event
+            for event in self.server.director.state(run_id).events
+            if event.kind == "GatewayRetryScheduled"
+        ]
+        self.assertEqual(len(retries), 2)
+        self.assertEqual(retries[-1].payload["consecutive_failures"], 2)
+        self.assertEqual(retries[-1].payload["attempt_anchor_seq"], first.seq)
+
+    def test_restart_after_resume_ignores_prior_epoch_retry(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "restart-after-resume-old-epoch",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        with self.server.mutation_lock:
+            self.server.director.start_run(run_id)
+        unavailable = GatewayResponseError(
+            "provider queue unavailable",
+            retryable=True,
+            status_code=503,
+            attempts=4,
+        )
+        with (
+            patch.object(
+                auto_progress_module,
+                "execute_generation",
+                side_effect=unavailable,
+            ),
+            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 60.0),
+        ):
+            self.assertTrue(self.server.auto_progress._run_one_generation(run_id))
+        self.server.director.pause_run(run_id, code="operator_backpressure")
+        self.server.director.resume_run(run_id)
+        state = self.server.director.state(run_id)
+        work_item = (run_id, auto_progress_module._run_incarnation(state))
+        with self.server.auto_progress._state_lock:
+            self.server.auto_progress._clear_retry_cooldown_locked(work_item)
+
+        self.server.auto_progress._restore_retry_deadline(work_item, state)
+
+        with self.server.auto_progress._state_lock:
+            self.assertNotIn(work_item, self.server.auto_progress._retry_not_before)
+            self.assertNotIn(work_item, self.server.auto_progress._retry_authority)
+
     def test_exhausted_gateway_request_keeps_run_running_for_delayed_retry(self) -> None:
         status, created = self.request(
             "/runs",
@@ -366,6 +622,390 @@ class AutoProgressHTTPTests(unittest.TestCase):
         )
         self.assertEqual(retry_event.payload["delay_seconds"], 900.0)
 
+    def test_six_logical_gateway_failures_open_durable_circuit(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "bounded-six-gateway-failures",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        with self.server.mutation_lock:
+            self.server.director.start_run(run_id)
+        unavailable = GatewayResponseError(
+            "provider unavailable; Bearer must-not-persist",
+            retryable=True,
+            attempts=4,
+            status_code=503,
+            error_code="gateway_unavailable",
+        )
+
+        with (
+            patch.object(
+                auto_progress_module,
+                "execute_generation",
+                side_effect=unavailable,
+            ) as execute_generation,
+            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
+        ):
+            outcomes = [
+                self.server.auto_progress._run_one_generation(run_id)
+                for _ in range(6)
+            ]
+
+        self.assertEqual(outcomes, [True, True, True, True, True, False])
+        self.assertEqual(execute_generation.call_count, 6)
+        state = self.server.director.state(run_id)
+        self.assertEqual(state.run.status.value, "paused")
+        retries = [
+            event for event in state.events if event.kind == "GatewayRetryScheduled"
+        ]
+        self.assertEqual(len(retries), 5)
+        self.assertEqual(
+            [event.payload["consecutive_failures"] for event in retries],
+            [1, 2, 3, 4, 5],
+        )
+        paused = next(event for event in reversed(state.events) if event.kind == "RunPaused")
+        self.assertEqual(paused.payload["code"], "gateway_retry_circuit_open")
+        self.assertNotIn("must-not-persist", str(state.events))
+        self.assertFalse(any(event.kind == "RunFailed" for event in state.events))
+
+    def test_resume_after_bounded_outage_completes_without_duplicate_candidates(
+        self,
+    ) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "resume-outage-no-duplicate-candidate",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        self.server.director.start_run(run_id)
+        unavailable = GatewayResponseError(
+            "provider unavailable",
+            retryable=True,
+            attempts=4,
+            status_code=503,
+            error_code="gateway_unavailable",
+        )
+        with (
+            patch.object(
+                auto_progress_module,
+                "execute_generation",
+                side_effect=unavailable,
+            ) as failed_generation,
+            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
+        ):
+            outcomes = [
+                self.server.auto_progress._run_one_generation(run_id)
+                for _ in range(6)
+            ]
+        self.assertEqual(outcomes, [True, True, True, True, True, False])
+        self.assertEqual(failed_generation.call_count, 6)
+        self.server.director.resume_run(run_id)
+
+        keep_running = self.server.auto_progress._run_one_generation(run_id)
+
+        self.assertFalse(keep_running)
+        state = self.server.director.state(run_id)
+        self.assertEqual(state.run.status.value, "completed")
+        self.assertEqual(len(state.candidates), 1)
+        self.assertEqual(len({item.candidate_id for item in state.candidates}), 1)
+        self.assertFalse(any(event.kind == "CandidateFailed" for event in state.events))
+
+    def test_retry_commit_failure_retries_only_decision_before_gateway(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "retry-decision-commit-failure",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        with self.server.mutation_lock:
+            self.server.director.start_run(run_id)
+        work_item = (
+            run_id,
+            auto_progress_module._run_incarnation(
+                self.server.director.state(run_id)
+            ),
+        )
+        unavailable = GatewayResponseError(
+            "provider queue unavailable",
+            retryable=True,
+            attempts=4,
+            status_code=503,
+        )
+        with (
+            patch.object(
+                auto_progress_module,
+                "execute_generation",
+                side_effect=unavailable,
+            ) as first_gateway_call,
+            patch.object(
+                self.server.director,
+                "schedule_gateway_retry_or_pause",
+                side_effect=sqlite3.OperationalError("ledger temporarily busy"),
+            ) as decision_write,
+            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 60.0),
+        ):
+            keep_running = self.server.auto_progress._run_one_generation(run_id)
+
+        self.assertTrue(keep_running)
+        first_gateway_call.assert_called_once()
+        decision_write.assert_called_once()
+        state = self.server.director.state(run_id)
+        self.assertFalse(
+            any(event.kind == "GatewayRetryScheduled" for event in state.events)
+        )
+        with self.server.auto_progress._state_lock:
+            self.assertNotIn(work_item, self.server.auto_progress._retry_not_before)
+
+        with patch.object(auto_progress_module, "execute_generation") as gateway_call:
+            keep_running = self.server.auto_progress._run_one_generation(run_id)
+
+        self.assertTrue(keep_running)
+        gateway_call.assert_not_called()
+        state = self.server.director.state(run_id)
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in state.events
+                    if event.kind == "GatewayRetryScheduled"
+                ]
+            ),
+            1,
+        )
+        self.assertFalse(any(event.kind == "RunFailed" for event in state.events))
+        with self.server.auto_progress._state_lock:
+            self.assertIn(work_item, self.server.auto_progress._retry_not_before)
+
+    def test_circuit_resume_clears_old_retry_timer_before_scheduling(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "circuit-resume-clears-old-timer",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        with self.server.mutation_lock:
+            self.server.director.start_run(run_id)
+        for attempt in range(1, 7):
+            state = self.server.director.state(run_id)
+            self.server.director.schedule_gateway_retry_or_pause(
+                run_id,
+                run_incarnation=state.events[0].seq,
+                generation=0,
+                stage="research",
+                retry_class="model_gateway",
+                failure_id=digest({"resume-timer-attempt": attempt}),
+                attempt_anchor_seq=state.events[-1].seq,
+                delay_seconds=0.0,
+                last_error_code="gateway_unavailable",
+            )
+        paused = self.server.director.state(run_id)
+        self.assertEqual(paused.run.status.value, "paused")
+        work_item = (run_id, auto_progress_module._run_incarnation(paused))
+        stale_timer = threading.Timer(60.0, lambda: None)
+        stale_timer.daemon = True
+        stale_timer.start()
+        with self.server.auto_progress._state_lock:
+            self.server.auto_progress._retry_not_before[work_item] = (
+                time.monotonic() + 60.0
+            )
+            self.server.auto_progress._retry_timers[work_item] = stale_timer
+        self.server.director.resume_run(run_id)
+
+        with patch.object(
+            self.server.auto_progress,
+            "_schedule_work_item",
+            return_value=True,
+        ) as schedule_work_item:
+            scheduled = self.server.auto_progress.schedule_if_enabled(run_id)
+
+        self.assertTrue(scheduled)
+        schedule_work_item.assert_called_once_with(work_item)
+        with self.server.auto_progress._state_lock:
+            self.assertNotIn(work_item, self.server.auto_progress._retry_not_before)
+            self.assertNotIn(work_item, self.server.auto_progress._retry_timers)
+        self.assertTrue(stale_timer.finished.is_set())
+
+    def test_http_start_cannot_bypass_circuit_resume_transition(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "circuit-start-api-bypass",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        self.server.director.start_run(run_id)
+        for attempt in range(1, 7):
+            state = self.server.director.state(run_id)
+            self.server.director.schedule_gateway_retry_or_pause(
+                run_id,
+                run_incarnation=state.events[0].seq,
+                generation=0,
+                stage="research",
+                retry_class="model_gateway",
+                failure_id=digest({"circuit-start-api-attempt": attempt}),
+                attempt_anchor_seq=state.events[-1].seq,
+                delay_seconds=0.0,
+                last_error_code="gateway_unavailable",
+            )
+        self.assertEqual(
+            self.server.director.state(run_id).run.status.value,
+            "paused",
+        )
+
+        with patch.object(
+            self.server.director,
+            "start_run",
+            wraps=self.server.director.start_run,
+        ) as start_run:
+            status, rejected = self.request(
+                f"/runs/{run_id}/action",
+                "POST",
+                {
+                    "action": "start",
+                    "idempotency_key": "circuit-start-api-must-reject",
+                },
+            )
+
+        self.assertEqual(status, 400, rejected)
+        self.assertIn("explicit resume", rejected["error"])
+        start_run.assert_not_called()
+        state = self.server.director.state(run_id)
+        self.assertEqual(state.run.status.value, "paused")
+        self.assertEqual(state.events[-1].kind, "RunPaused")
+        with patch.object(
+            self.server.auto_progress,
+            "_schedule_work_item",
+            return_value=True,
+        ) as schedule_work_item:
+            self.assertEqual(self.server.auto_progress.recover_running(), 0)
+        schedule_work_item.assert_not_called()
+
+    def test_old_epoch_timer_callback_cannot_schedule_after_resume(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "old-epoch-timer-after-resume",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        with self.server.mutation_lock:
+            self.server.director.start_run(run_id)
+        unavailable = GatewayResponseError(
+            "provider queue unavailable",
+            retryable=True,
+            status_code=503,
+            attempts=4,
+        )
+        with (
+            patch.object(
+                auto_progress_module,
+                "execute_generation",
+                side_effect=unavailable,
+            ),
+            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 60.0),
+        ):
+            self.assertTrue(self.server.auto_progress._run_one_generation(run_id))
+        state = self.server.director.state(run_id)
+        work_item = (run_id, auto_progress_module._run_incarnation(state))
+        self.assertTrue(
+            self.server.auto_progress._schedule_retry_wakeup(work_item, 60.0)
+        )
+        with self.server.auto_progress._state_lock:
+            old_timer = self.server.auto_progress._retry_timers[work_item]
+        old_timer.cancel()
+
+        for attempt in range(2, 7):
+            state = self.server.director.state(run_id)
+            self.server.director.schedule_gateway_retry_or_pause(
+                run_id,
+                run_incarnation=state.events[0].seq,
+                generation=0,
+                stage="generation",
+                retry_class="model_gateway",
+                failure_id=digest({"old-timer-attempt": attempt}),
+                attempt_anchor_seq=state.events[-1].seq,
+                delay_seconds=0.0,
+                last_error_code="gateway_unavailable",
+            )
+        self.assertEqual(
+            self.server.director.state(run_id).run.status.value,
+            "paused",
+        )
+        self.server.director.resume_run(run_id)
+
+        with patch.object(
+            self.server.auto_progress,
+            "_schedule_work_item",
+        ) as schedule_work_item:
+            old_timer.function()
+
+        schedule_work_item.assert_not_called()
+
     def test_transient_dsh_outage_keeps_run_running_for_delayed_retry(self) -> None:
         status, created = self.request(
             "/runs",
@@ -416,6 +1056,64 @@ class AutoProgressHTTPTests(unittest.TestCase):
             "dsh_native_runtime_transport_error",
         )
         self.assertIn("DSH 智能体运行时暂时不可用", retry_event.payload["reason"])
+
+    def test_six_dsh_runtime_failures_open_independent_durable_circuit(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "bounded-six-dsh-runtime-failures",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        with self.server.mutation_lock:
+            self.server.director.start_run(run_id)
+        outage = DshNativeRuntimeUnavailableError(
+            "DSH proxy failed; token=must-not-persist",
+            error_code="dsh_native_runtime_http_error",
+            status_code=502,
+        )
+        with (
+            patch.object(
+                auto_progress_module,
+                "execute_generation",
+                side_effect=outage,
+            ) as execute_generation,
+            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
+        ):
+            outcomes = [
+                self.server.auto_progress._run_one_generation(run_id)
+                for _ in range(6)
+            ]
+
+        self.assertEqual(outcomes, [True, True, True, True, True, False])
+        self.assertEqual(execute_generation.call_count, 6)
+        state = self.server.director.state(run_id)
+        self.assertEqual(state.run.status.value, "paused")
+        retries = [
+            event for event in state.events if event.kind == "GatewayRetryScheduled"
+        ]
+        self.assertEqual(len(retries), 5)
+        self.assertTrue(
+            all(event.payload["retry_class"] == "dsh_native_runtime" for event in retries)
+        )
+        paused = next(event for event in reversed(state.events) if event.kind == "RunPaused")
+        self.assertEqual(paused.payload["code"], "dsh_runtime_retry_circuit_open")
+        self.assertEqual(
+            paused.payload["suggested_action"],
+            "check_dsh_runtime_then_resume",
+        )
+        self.assertNotIn("must-not-persist", str(state.events))
+        self.assertFalse(any(event.kind == "RunFailed" for event in state.events))
 
     def test_dsh_proposal_timeout_is_not_converted_to_terminal_batch_failure(
         self,
@@ -1438,7 +2136,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         with self.server.auto_progress._state_lock:
             self.assertIn(work_item, self.server.auto_progress._retry_not_before)
 
-    def test_timer_start_failure_does_not_orphan_run(self) -> None:
+    def test_timer_start_failure_does_not_cross_durable_retry_deadline(self) -> None:
         status, created = self.request(
             "/runs",
             "POST",
@@ -1482,8 +2180,22 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 "start",
                 side_effect=RuntimeError("thread limit reached"),
             ) as timer_start,
+            patch.object(
+                auto_progress_module,
+                "_RETRY_TIMER_START_RETRY_SECONDS",
+                0.02,
+            ),
         ):
             self.assertTrue(self.server.auto_progress.schedule(run_id))
+            self.assertFalse(executed.wait(timeout=0.15))
+            self.assertGreaterEqual(timer_start.call_count, 1)
+            self.assertEqual(
+                self.server.director.state(run_id).run.status.value,
+                "running",
+            )
+            with self.server.auto_progress._state_lock:
+                self.assertIn(work_item, self.server.auto_progress._retry_not_before)
+                self.server.auto_progress._retry_not_before[work_item] = 0.0
             self.assertTrue(executed.wait(timeout=2))
 
         deadline = time.monotonic() + 3.0
@@ -1495,7 +2207,6 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 break
             time.sleep(0.01)
 
-        timer_start.assert_called_once()
         self.assertEqual(
             self.server.director.state(run_id).run.status.value,
             "completed",

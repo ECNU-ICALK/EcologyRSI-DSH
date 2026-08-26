@@ -507,6 +507,12 @@
   function advanceRun(options) {
     var automatic = Boolean(options && options.automatic === true);
     if (!state.activeRun || state.busy) { return Promise.resolve(false); }
+    if (runHasRetryCircuitPause(state.activeRun)) {
+      if (!hasCapability("run.control")) { showToast("当前 DSH 会话未授予恢复运行的能力。"); return Promise.resolve(false); }
+      // The resume endpoint re-queues the preserved checkpoint.  Issuing a
+      // second /advance here would race that worker and could duplicate work.
+      return controlRun("resume");
+    }
     if (!hasCapability("evolution.run.advance")) { showToast("当前 DSH 会话未授予推进进化轮次的能力。"); return Promise.resolve(false); }
     if (state.activeRun.status === "paused") {
       if (!hasCapability("run.control")) { showToast("当前 DSH 会话未授予恢复运行的能力。"); return Promise.resolve(false); }

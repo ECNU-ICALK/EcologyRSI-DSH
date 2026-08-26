@@ -17,6 +17,16 @@ from .shared import (
 )
 
 
+_RETRY_CIRCUIT_PAUSE_CODES = frozenset(
+    {
+        "gateway_retry_circuit_open",
+        "dsh_runtime_retry_circuit_open",
+        "research_timeout_retry_circuit_open",
+        "sample_persistence_retry_circuit_open",
+    }
+)
+
+
 class ExecutionEndpointsMixin:
     def _advance_run(
         self,
@@ -97,6 +107,22 @@ class ExecutionEndpointsMixin:
     def _validate_control_request(self, run_id: str, action: str) -> Any:
         state = self.server.director.state(run_id)
         _assert_http_scope(state)
+        if action == "start" and state.run.status.value == "paused":
+            paused = next(
+                (
+                    event
+                    for event in reversed(state.events)
+                    if event.kind == "RunPaused"
+                ),
+                None,
+            )
+            if (
+                paused is not None
+                and paused.payload.get("code") in _RETRY_CIRCUIT_PAUSE_CODES
+            ):
+                raise RuntimeError(
+                    "retry circuit requires an explicit resume"
+                )
         allowed = {
             "start": ("created", "paused"),
             "pause": ("running",),
