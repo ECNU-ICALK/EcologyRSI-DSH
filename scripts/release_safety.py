@@ -27,6 +27,9 @@ def checked_lstat(
 ) -> os.stat_result | None:
     """Return the final lstat without following any component symlink."""
 
+    for candidate in (root, path):
+        if os.pardir in candidate.parts:
+            raise RuntimeError(f"{label} contains parent traversal: {candidate}")
     lexical_root = _lexical_absolute(root)
     lexical_path = _lexical_absolute(path)
     try:

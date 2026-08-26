@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -199,6 +200,31 @@ class DeliveryScriptTests(unittest.TestCase):
             self.assertNotEqual(verified.returncode, 0)
             self.assertIn("unexpected member", verified.stdout + verified.stderr)
 
+    def test_sdist_verifier_rejects_file_at_expected_directory_name(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-sdist-type-") as directory:
+            temporary = Path(directory)
+            built = subprocess.run(
+                ["uv", "build", "--sdist", "--out-dir", str(temporary), str(ROOT)],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            sdist = next(temporary.glob("*.tar.gz"))
+            modified = temporary / "directory-as-file.tar.gz"
+            self._copy_tar_with_extra_file(
+                sdist,
+                modified,
+                f"ecologyrsi_dsh-{project_version(ROOT)}/src",
+                b"not a directory\n",
+            )
+
+            verified = self._verify_sdist(modified)
+
+            self.assertNotEqual(verified.returncode, 0)
+            self.assertIn("unexpected member type", verified.stdout + verified.stderr)
+
     def test_plugin_builder_cli_rejects_symlinked_root(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ecologyrsi-plugin-root-link-") as directory:
             temporary = Path(directory)
@@ -262,6 +288,83 @@ class DeliveryScriptTests(unittest.TestCase):
                 result.stdout + result.stderr,
             )
             self.assertEqual(list(real_output.iterdir()), [])
+
+    def test_plugin_builder_cli_rejects_parent_traversal_in_root(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="ecologyrsi-plugin-root-parent-"
+        ) as directory:
+            temporary = Path(directory)
+            pivot = temporary / "pivot"
+            (pivot / "child").mkdir(parents=True)
+            actual_root = pivot / "source"
+            self._write_plugin_build_fixture(actual_root)
+            (temporary / "source").mkdir()
+            link = temporary / "link"
+            link.symlink_to(pivot / "child", target_is_directory=True)
+            traversal_root = link / ".." / "source"
+            output = temporary / "output"
+
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python",
+                    str(ROOT / "scripts/build_dsh_plugin.py"),
+                    "--root",
+                    str(traversal_root),
+                    "--output-dir",
+                    str(output),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "build root contains parent traversal",
+                result.stdout + result.stderr,
+            )
+            self.assertFalse(output.exists())
+
+    def test_plugin_builder_cli_rejects_parent_traversal_in_output(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="ecologyrsi-plugin-output-parent-"
+        ) as directory:
+            temporary = Path(directory)
+            root = temporary / "source"
+            self._write_plugin_build_fixture(root)
+            pivot = temporary / "pivot"
+            (pivot / "child").mkdir(parents=True)
+            link = temporary / "link"
+            link.symlink_to(pivot / "child", target_is_directory=True)
+            traversal_output = link / ".." / "output"
+
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python",
+                    str(ROOT / "scripts/build_dsh_plugin.py"),
+                    "--root",
+                    str(root),
+                    "--output-dir",
+                    str(traversal_output),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "plugin output directory contains parent traversal",
+                result.stdout + result.stderr,
+            )
+            self.assertFalse((temporary / "output").exists())
+            self.assertFalse((pivot / "output").exists())
 
     def test_delivery_archive_cli_rejects_symlinked_root(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ecologyrsi-delivery-root-link-") as directory:
@@ -332,9 +435,100 @@ class DeliveryScriptTests(unittest.TestCase):
             )
             self.assertFalse((real_dist / "BUILD-INFO.json").exists())
 
-    def test_delivery_archive_cli_accepts_lexical_temp_paths(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ecologyrsi-delivery-cli-") as directory:
+    def test_delivery_archive_cli_rejects_parent_traversal_in_root(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="ecologyrsi-delivery-root-parent-"
+        ) as directory:
             temporary = Path(directory)
+            version = "0.3.33"
+            pivot = temporary / "pivot"
+            (pivot / "child").mkdir(parents=True)
+            actual_root = pivot / "source"
+            self._write_minimal_source_fixture(actual_root, version=version)
+            self._commit_fixture(actual_root)
+            (temporary / "source").mkdir()
+            link = temporary / "link"
+            link.symlink_to(pivot / "child", target_is_directory=True)
+            traversal_root = link / ".." / "source"
+            dist = temporary / "dist"
+            self._write_fake_python_artifacts(dist, version)
+
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python",
+                    str(ROOT / "scripts/create_delivery_archive.py"),
+                    "--root",
+                    str(traversal_root),
+                    "--dist",
+                    str(dist),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "delivery root contains parent traversal",
+                result.stdout + result.stderr,
+            )
+            self.assertFalse((dist / "BUILD-INFO.json").exists())
+
+    def test_delivery_archive_cli_rejects_parent_traversal_in_dist(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="ecologyrsi-delivery-dist-parent-"
+        ) as directory:
+            temporary = Path(directory)
+            version = "0.3.33"
+            root = temporary / "source"
+            self._write_minimal_source_fixture(root, version=version)
+            self._commit_fixture(root)
+            pivot = temporary / "pivot"
+            (pivot / "child").mkdir(parents=True)
+            actual_dist = pivot / "dist"
+            actual_dist.mkdir()
+            (temporary / "dist").mkdir()
+            link = temporary / "link"
+            link.symlink_to(pivot / "child", target_is_directory=True)
+            traversal_dist = link / ".." / "dist"
+
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python",
+                    str(ROOT / "scripts/create_delivery_archive.py"),
+                    "--root",
+                    str(root),
+                    "--dist",
+                    str(traversal_dist),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "delivery output directory contains parent traversal",
+                result.stdout + result.stderr,
+            )
+            self.assertEqual(list(actual_dist.iterdir()), [])
+            self.assertEqual(list((temporary / "dist").iterdir()), [])
+
+    def test_delivery_archive_cli_accepts_lexical_temp_paths(self) -> None:
+        parent = "/var/tmp" if sys.platform == "darwin" else None
+        with tempfile.TemporaryDirectory(
+            prefix="ecologyrsi-delivery-cli-", dir=parent
+        ) as directory:
+            temporary = Path(directory)
+            if sys.platform == "darwin":
+                self.assertEqual(temporary.parts[1], "var")
+                self.assertTrue(Path("/var").samefile("/private/var"))
             root = temporary / "source"
             version = "0.3.33"
             self._write_minimal_source_fixture(root, version=version)
@@ -709,8 +903,14 @@ class DeliveryScriptTests(unittest.TestCase):
                 )
 
     def test_dsh_plugin_builder_stages_root_legal_files(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ecologyrsi-plugin-fixture-") as directory:
+        parent = "/var/tmp" if sys.platform == "darwin" else None
+        with tempfile.TemporaryDirectory(
+            prefix="ecologyrsi-plugin-fixture-", dir=parent
+        ) as directory:
             fixture = Path(directory)
+            if sys.platform == "darwin":
+                self.assertEqual(fixture.parts[1], "var")
+                self.assertTrue(Path("/var").samefile("/private/var"))
             package_root = fixture / "integrations/dsh_ecology_plugin"
             (package_root / "lib").mkdir(parents=True)
             (package_root / "lib/index.js").write_text(

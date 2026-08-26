@@ -262,6 +262,27 @@ def verify_sdist(sdist: Path, source_root: Path, version: str) -> None:
             }
         )
         expected_directories = _archive_parent_directories(expected_files)
+        overlap = expected_files & expected_directories
+        if overlap:
+            raise RuntimeError(
+                "sdist expected member types overlap: " + ", ".join(sorted(overlap))
+            )
+        wrong_type = sorted(
+            member.name
+            for member in members
+            if (
+                (member.name in expected_files and not member.isfile())
+                or (
+                    member.name in expected_directories
+                    and not member.isdir()
+                )
+            )
+        )
+        if wrong_type:
+            raise RuntimeError(
+                "sdist contains unexpected member type: "
+                + ", ".join(wrong_type)
+            )
         unexpected = sorted(names - expected_files - expected_directories)
         if unexpected:
             raise RuntimeError(
