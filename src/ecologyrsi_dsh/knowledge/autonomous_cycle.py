@@ -304,6 +304,12 @@ class CandidateDirection:
     expected_tradeoff: str
     success_criterion: str
     mutation_direction: str
+    _legacy_mutation_direction_omitted: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         direction_id = _text(self.direction_id, "direction_id", maximum=80).casefold()
@@ -360,7 +366,7 @@ class CandidateDirection:
         return digest(self.identity_dict())
 
     def identity_dict(self) -> JsonObject:
-        return {
+        identity = {
             "direction_id": self.direction_id,
             "title": self.title,
             "hypothesis": self.hypothesis,
@@ -368,11 +374,13 @@ class CandidateDirection:
             "capability_focus": self.capability_focus,
             "mutation_axis": self.mutation_axis,
             "mutation_target": self.mutation_target,
-            "mutation_direction": self.mutation_direction,
             "evidence_refs": list(self.evidence_refs),
             "expected_tradeoff": self.expected_tradeoff,
             "success_criterion": self.success_criterion,
         }
+        if not self._legacy_mutation_direction_omitted:
+            identity["mutation_direction"] = self.mutation_direction
+        return identity
 
     def to_dict(self) -> JsonObject:
         return {**self.identity_dict(), "direction_digest": self.direction_digest}
@@ -401,6 +409,42 @@ class CandidateDirection:
         item = cls(**data)
         if supplied_digest is not None and supplied_digest != item.direction_digest:
             raise ValueError("candidate direction digest mismatch")
+        return item
+
+    @classmethod
+    def from_legacy_dict(cls, value: Mapping[str, Any]) -> CandidateDirection:
+        """Replay a pre-directionality candidate hypothesis by its old digest."""
+
+        if not isinstance(value, Mapping):
+            raise TypeError("candidate direction must be an object")
+        data = dict(value)
+        supplied_digest = data.pop("direction_digest", None)
+        required = {
+            "direction_id",
+            "title",
+            "hypothesis",
+            "target_weakness",
+            "capability_focus",
+            "mutation_axis",
+            "mutation_target",
+            "evidence_refs",
+            "expected_tradeoff",
+            "success_criterion",
+        }
+        if set(data) != required:
+            raise ValueError("legacy candidate direction fields do not match the contract")
+        if supplied_digest != digest(data):
+            raise ValueError("legacy candidate direction digest mismatch")
+        placeholder = (
+            "select"
+            if data.get("mutation_axis") in {"registered_predictor", "instruction_profile"}
+            else "increase"
+        )
+        item = cls(mutation_direction=placeholder, **data)
+        object.__setattr__(item, "_legacy_mutation_direction_omitted", True)
+        object.__setattr__(item, "mutation_direction", "legacy_unspecified")
+        if item.direction_digest != supplied_digest:
+            raise ValueError("legacy candidate direction normalization mismatch")
         return item
 
 
@@ -566,6 +610,12 @@ class GenerationReflection:
     created_at: str = field(default_factory=utc_now)
     schema_version: str = GENERATION_REFLECTION_SCHEMA_VERSION
     reflection_digest: str = ""
+    _legacy_candidate_outcomes_omitted: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "run_id", _text(self.run_id, "run_id", maximum=500))
@@ -632,7 +682,7 @@ class GenerationReflection:
         object.__setattr__(self, "reflection_digest", expected)
 
     def identity_dict(self) -> JsonObject:
-        return {
+        identity = {
             "schema_version": self.schema_version,
             "run_id": self.run_id,
             "generation": self.generation,
@@ -644,12 +694,14 @@ class GenerationReflection:
                 item.to_dict() for item in self.candidate_directions
             ],
             "stop_recommendation": self.stop_recommendation,
-            "canonical_candidate_outcomes": _candidate_outcomes_to_json(
-                self.canonical_candidate_outcomes
-            ),
             "model_id": self.model_id,
             "created_at": self.created_at,
         }
+        if not self._legacy_candidate_outcomes_omitted:
+            identity["canonical_candidate_outcomes"] = _candidate_outcomes_to_json(
+                self.canonical_candidate_outcomes
+            )
+        return identity
 
     def to_dict(self) -> JsonObject:
         return {**self.identity_dict(), "reflection_digest": self.reflection_digest}
@@ -676,6 +728,48 @@ class GenerationReflection:
         if set(value) != required:
             raise ValueError("generation reflection fields do not match the contract")
         return cls(**dict(value))
+
+    @classmethod
+    def from_legacy_dict(cls, value: Mapping[str, Any]) -> GenerationReflection:
+        """Replay the exact pre-outcome reflection shape without weakening writes."""
+
+        if not isinstance(value, Mapping):
+            raise TypeError("generation reflection must be an object")
+        required = {
+            "schema_version",
+            "run_id",
+            "generation",
+            "analysis_digest",
+            "summary",
+            "lessons",
+            "recommended_search_queries",
+            "candidate_directions",
+            "stop_recommendation",
+            "model_id",
+            "created_at",
+            "reflection_digest",
+        }
+        if set(value) != required:
+            raise ValueError("legacy generation reflection fields do not match the contract")
+        supplied_digest = value.get("reflection_digest")
+        if supplied_digest != digest(
+            {key: item for key, item in value.items() if key != "reflection_digest"}
+        ):
+            raise ValueError("legacy generation reflection digest mismatch")
+        arguments = dict(value)
+        arguments["reflection_digest"] = ""
+        arguments["candidate_directions"] = tuple(
+            CandidateDirection.from_dict(direction)
+            if "mutation_direction" in direction
+            else CandidateDirection.from_legacy_dict(direction)
+            for direction in arguments["candidate_directions"]
+        )
+        item = cls(canonical_candidate_outcomes=(), **arguments)
+        object.__setattr__(item, "_legacy_candidate_outcomes_omitted", True)
+        if digest(item.identity_dict()) != supplied_digest:
+            raise ValueError("legacy generation reflection normalization mismatch")
+        object.__setattr__(item, "reflection_digest", supplied_digest)
+        return item
 
 
 def validate_research_synthesis(

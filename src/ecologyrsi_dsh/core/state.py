@@ -1903,7 +1903,11 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             item = GenerationAnalysis.from_dict(payload["analysis"])
             generation_analyses[item.generation] = item
         elif event.kind == "GenerationReflected":
-            item = GenerationReflection.from_dict(payload["reflection"])
+            reflection_payload = payload["reflection"]
+            if "canonical_candidate_outcomes" in reflection_payload:
+                item = GenerationReflection.from_dict(reflection_payload)
+            else:
+                item = GenerationReflection.from_legacy_dict(reflection_payload)
             if item.run_id != run.run_id:
                 raise ValueError("generation reflection belongs to another run")
             analysis = generation_analyses.get(item.generation)

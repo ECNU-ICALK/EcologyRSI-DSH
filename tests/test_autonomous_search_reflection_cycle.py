@@ -874,6 +874,35 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fields do not match"):
             GenerationReflection.from_dict(missing_mapping)
 
+        legacy_mapping = dict(missing_mapping)
+        legacy_mapping["candidate_directions"] = [
+            {
+                **{
+                    key: value
+                    for key, value in direction.items()
+                    if key not in {"direction_digest", "mutation_direction"}
+                },
+                "direction_digest": digest(
+                    {
+                        key: value
+                        for key, value in direction.items()
+                        if key not in {"direction_digest", "mutation_direction"}
+                    }
+                ),
+            }
+            for direction in legacy_mapping["candidate_directions"]
+        ]
+        legacy_mapping["reflection_digest"] = digest(
+            {
+                key: value
+                for key, value in legacy_mapping.items()
+                if key != "reflection_digest"
+            }
+        )
+        legacy_replayed = GenerationReflection.from_legacy_dict(legacy_mapping)
+        self.assertEqual(legacy_replayed.to_dict(), legacy_mapping)
+        self.assertEqual(legacy_replayed.canonical_candidate_outcomes, ())
+
     def test_research_synthesis_repairs_once_from_host_validation_detail(self) -> None:
         runtime = _RepairCycleRuntime("generation.research-synthesis")
         adapter = StrategyRouterDSHAdapter(
