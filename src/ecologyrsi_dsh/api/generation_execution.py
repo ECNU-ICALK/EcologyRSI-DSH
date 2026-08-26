@@ -73,6 +73,7 @@ from ..knowledge.algorithms import (
     compile_algorithm_spec,
     debug_algorithm_spec,
 )
+from .dsh_tools import DshToolAdmissionClosedError
 from .candidate_scheduler import (
     CandidateEvaluationTask,
     run_candidate_evaluations,
@@ -660,7 +661,11 @@ def _recoverable_evaluation_error(exc: BaseException) -> bool:
     for current in walk_exception_graph(exc):
         if isinstance(
             current,
-            (SampleResultCallbackError, SampleExecutionControlError),
+            (
+                DshToolAdmissionClosedError,
+                SampleResultCallbackError,
+                SampleExecutionControlError,
+            ),
         ):
             return True
     return False

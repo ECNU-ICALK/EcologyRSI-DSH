@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ecologyrsi_dsh.api import generation_execution
+from ecologyrsi_dsh.api.dsh_tools import DshToolAdmissionClosedError
 from ecologyrsi_dsh.api.generation_execution import _candidate_signature
 from ecologyrsi_dsh.core.models import RunStatus
 
@@ -29,6 +30,13 @@ class _Director:
 
 
 class CandidateParallelEvaluationTests(unittest.TestCase):
+    def test_pause_admission_closure_keeps_candidate_evaluation_recoverable(
+        self,
+    ) -> None:
+        error = DshToolAdmissionClosedError("run admission is closed")
+
+        self.assertTrue(generation_execution._recoverable_evaluation_error(error))
+
     def test_screening_freezes_deterministic_top_two_by_evidence(self) -> None:
         candidates = tuple(
             SimpleNamespace(slot_index=index, candidate_id=f"candidate-{index}")
