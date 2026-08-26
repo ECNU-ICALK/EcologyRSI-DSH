@@ -149,6 +149,117 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["awaiting_submission_batches"], 253)
         self.assertEqual(progress["queue_semantics"], "provider_admission_only")
 
+    def test_screening_progress_retires_terminal_launch_before_reflection(
+        self,
+    ) -> None:
+        origin_a_members = sorted((digest("cell-a-1"), digest("cell-a-2")))
+        origin_b_members = sorted((digest("cell-b-1"), digest("cell-b-2")))
+        events = (
+            SimpleNamespace(
+                seq=10,
+                kind="GenerationBatchStarted",
+                payload={"batch": {"generation": 0}},
+                created_at="2026-08-26T07:00:00+00:00",
+            ),
+            SimpleNamespace(
+                seq=11,
+                kind="DshChildLaunchReserved",
+                # No accepted plan event: this child failed terminally before
+                # the Host produced the durable origin reflection below.
+                payload={"launch": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:plan-wave-a",
+                    "reservation_id": "reservation-plan-a",
+                    "sample_member_digests": origin_a_members,
+                }},
+                created_at="2026-08-26T07:00:01+00:00",
+            ),
+            SimpleNamespace(
+                seq=12,
+                kind="DshChildLaunchReserved",
+                payload={"launch": {
+                    "stage": "sample.critic",
+                    "idempotency_key": "run:test:sample.critic:origin-c",
+                    "reservation_id": "reservation-critic-c",
+                }},
+                created_at="2026-08-26T07:00:02+00:00",
+            ),
+            SimpleNamespace(
+                seq=13,
+                kind="DshChildLaunchReserved",
+                payload={"launch": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:plan-wave-b",
+                    "reservation_id": "reservation-plan-b",
+                    "sample_member_digests": origin_b_members,
+                }},
+                created_at="2026-08-26T07:00:03+00:00",
+            ),
+            SimpleNamespace(
+                seq=14,
+                kind="DshChildLaunchReserved",
+                payload={"launch": {
+                    "stage": "sample.reflect",
+                    "idempotency_key": "run:test:sample.reflect:reflection-wave-a",
+                    "reservation_id": "reservation-reflect-a",
+                    "sample_member_digests": origin_a_members,
+                }},
+                created_at="2026-08-26T07:00:04+00:00",
+            ),
+            SimpleNamespace(
+                seq=15,
+                kind="DshStructuredResultAccepted",
+                payload={
+                    "identity": {
+                        "stage": "sample.reflect",
+                        "idempotency_key": "run:test:sample.reflect:reflection-wave-a",
+                        "child_reservation_id": "reservation-reflect-a",
+                    },
+                    "structured": {"outcome_class": "failed"},
+                },
+                created_at="2026-08-26T07:01:00+00:00",
+            ),
+            SimpleNamespace(
+                seq=16,
+                kind="DshStructuredResultAccepted",
+                payload={
+                    "identity": {
+                        "stage": "sample.reflect",
+                        "idempotency_key": "run:test:sample.reflect:origin-c",
+                        "child_reservation_id": "reservation-legacy-reflect-c",
+                    },
+                    "structured": {"outcome_class": "failed"},
+                },
+                created_at="2026-08-26T07:01:01+00:00",
+            ),
+        )
+        state = SimpleNamespace(
+            run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
+            task_manifest=SimpleNamespace(metadata={
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                "two_stage_evaluation_enabled": True,
+                "sample_concurrency": 8,
+            }),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            events=events,
+        )
+
+        progress = _screening_progress_projection(state)
+
+        self.assertEqual(progress["completed_samples"], 2)
+        self.assertEqual(progress["succeeded_samples"], 0)
+        self.assertEqual(progress["failed_samples"], 2)
+        self.assertEqual(progress["in_flight_batches"], 1)
+        self.assertEqual(progress["queued_batches"], 0)
+        self.assertEqual(progress["awaiting_submission_batches"], 253)
+        self.assertEqual(
+            progress["completed_samples"]
+            + progress["in_flight_batches"]
+            + progress["queued_batches"]
+            + progress["awaiting_submission_batches"],
+            progress["total_samples"],
+        )
+
     def test_completed_run_hides_recovered_failed_stage(self) -> None:
         failed_stage = SimpleNamespace(
             seq=10,

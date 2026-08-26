@@ -248,6 +248,21 @@ function validSampleId(value) {
     && value.length <= 240;
 }
 
+function sampleMemberDigests(stage, context) {
+  if (!["sample.plan", "sample.critic", "sample.reflect"].includes(stage)) {
+    return null;
+  }
+  const samples = stage === "sample.reflect"
+    ? context?.sample?.prediction_cells
+    : context?.samples;
+  if (!Array.isArray(samples) || samples.length < 1 || samples.length > 128) {
+    return null;
+  }
+  const sampleIds = samples.map((sample) => sample?.sample_id);
+  if (!sampleIds.every(validSampleId)) return null;
+  return [...new Set(sampleIds.map((sampleId) => jsonDigest(sampleId)))].sort();
+}
+
 function specializeSampleOutputSchema(stage, schema, context) {
   if (!["sample.plan", "sample.critic", "sample.reflect"].includes(stage)) return schema;
   const waveDigest = context?.wave_digest;
@@ -716,6 +731,7 @@ export class NativeStageRunner {
         Math.max(1, remainingStructuredDeadlineMs(lifecycle.deadline)),
         MAX_REQUEST_TIMEOUT_MS,
       );
+    const memberDigests = sampleMemberDigests(binding.stage, request.context);
     const allocation = await this.sidecar.request(
       "/api/ecology-agent-sidecar/v1/child-reservations",
       {
@@ -731,6 +747,7 @@ export class NativeStageRunner {
           timeout_ms: lifecycle.timeoutMs,
           item_digest: request.context_digest,
           idempotency_key: binding.idempotency_key,
+          ...(memberDigests ? { sample_member_digests: memberDigests } : {}),
         },
         timeoutMs: reservationTimeoutMs,
       },

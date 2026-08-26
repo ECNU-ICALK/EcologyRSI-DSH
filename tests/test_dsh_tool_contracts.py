@@ -98,8 +98,9 @@ def _reservation_request(
     *,
     request_id: str = "deadline-reservation-1",
     timeout_ms: int = 1_000,
+    sample_member_digests: list[str] | None = None,
 ) -> dict:
-    return {
+    request = {
         "request_id": request_id,
         "run_id": "run:tool-test",
         "parent_session_id": "session:research-host",
@@ -112,6 +113,9 @@ def _reservation_request(
         "item_digest": "d" * 64,
         "idempotency_key": "deadline-result",
     }
+    if sample_member_digests is not None:
+        request["sample_member_digests"] = list(sample_member_digests)
+    return request
 
 
 def _admitted_research_envelope(
@@ -1175,6 +1179,41 @@ class DshToolServiceTests(unittest.TestCase):
             "structured_role_operational_timeout",
         )
         self.assertEqual(fence.deadline_monotonic_ms, frozen_deadline)
+
+    def test_sample_child_reservation_persists_member_correlation(self) -> None:
+        fence = self.service.open_admission(
+            "run:tool-test",
+            3,
+            2,
+            role="sample-planner",
+            stage="sample.plan",
+            idempotency_key="sample-plan-members",
+        )
+        members = sorted((digest("cell-a-1"), digest("cell-a-2")))
+        request = _reservation_request(
+            fence.admission_id,
+            request_id="sample-member-reservation-1",
+            sample_member_digests=members,
+        )
+        request.update({
+            "role": "sample-planner",
+            "stage": "sample.plan",
+            "idempotency_key": "sample-plan-members",
+        })
+
+        allocated = self.service.allocate_child_reservation(request)
+
+        self.assertEqual(allocated["launch"]["sample_member_digests"], members)
+        launch_event = next(
+            event
+            for event in self.ledger.events("run:tool-test")
+            if event.kind == "DshChildLaunchReserved"
+            and event.payload["request_id"] == "sample-member-reservation-1"
+        )
+        self.assertEqual(
+            launch_event.payload["launch"]["sample_member_digests"],
+            members,
+        )
 
     def test_armed_deadline_uses_only_monotonic_time_after_wall_rollback(self) -> None:
         monotonic_ms = [100]

@@ -1358,6 +1358,39 @@ assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("�
 modelSandbox.renderAutonomyProgress(screeningRun);
 assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "模型执行中");
 
+const legacyPausedQueueRun = {
+  ...pausedDrainedRun,
+  id: "run:legacy-paused-queue",
+  execution_progress: {
+    ...pausedDrainedRun.execution_progress,
+    stage_progress: {
+      ...pausedDrainedRun.execution_progress.stage_progress,
+      progress_kind: "waiting",
+      queued_batches: 17,
+      queue_semantics: "awaiting_origin_submission",
+    },
+  },
+};
+modelSandbox.renderExecutionMonitor(legacyPausedQueueRun);
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("待提交 17"));
+assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("暂停快照排队 17"), false);
+
+const legacyDrainedQueueRun = {
+  ...pausedDrainedRun,
+  id: "run:legacy-drained-queue",
+  execution_progress: {
+    ...pausedDrainedRun.execution_progress,
+    stage_progress: {
+      ...pausedDrainedRun.execution_progress.stage_progress,
+      queued_batches: 23,
+      queue_semantics: "awaiting_origin_submission",
+    },
+  },
+};
+modelSandbox.renderExecutionMonitor(legacyDrainedQueueRun);
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("待提交 23"));
+assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("暂停后排队 23"), false);
+
 const completedHeartbeatSnapshot = modelSandbox.executionSampleProgressSnapshot({
   status: "completed",
   execution_diagnostics: {

@@ -1481,6 +1481,7 @@
     candidateNode.textContent = "候选版本：" + formatNumber(Array.isArray(run.candidates) ? run.candidates.length : 0);
     var showLiveProgressDetail = Boolean(stageProgress && stageProgress.live);
     var showDrainedProgressDetail = Boolean(pausedDrained);
+    var showPausedProgressDetail = Boolean(paused && stageProgress);
     var originBundleProtocol = String(run.sample_agent_protocol || "").indexOf("dsh-strict-origin-bundle@") === 0;
     var progressUnitLabel = originBundleProtocol ? "预测时点" : "样本";
     var sampleRate = showLiveProgressDetail && Number(stageProgress.samples_per_minute);
@@ -1489,8 +1490,9 @@
     var progressKind = stageProgress && stageProgress.progress_kind;
     var inFlightLabel = progressKind === "drained" ? "已排空" : runStatus === "paused" ? "暂停快照在飞" : "实际在飞";
     var inFlightText = Number.isInteger(inFlight) && inFlight >= 0 ? " · " + inFlightLabel + " " + formatNumber(inFlight) + " wave" : "";
-    var queued = (showLiveProgressDetail || showDrainedProgressDetail) && Number(stageProgress.queued_batches);
-    var queuedLabel = progressKind === "drained" ? "暂停后排队" : runStatus === "paused" ? "暂停快照排队" : stageProgress && stageProgress.queue_semantics === "awaiting_origin_submission" ? "待提交" : "排队";
+    var queued = (showLiveProgressDetail || showDrainedProgressDetail || showPausedProgressDetail) && Number(stageProgress.queued_batches);
+    var legacyAwaitingSubmission = stageProgress && stageProgress.queue_semantics === "awaiting_origin_submission";
+    var queuedLabel = legacyAwaitingSubmission ? "待提交" : progressKind === "drained" ? "暂停后排队" : runStatus === "paused" ? "暂停快照排队" : "排队";
     var queuedText = Number.isInteger(queued) && queued >= 0 ? " · " + queuedLabel + " " + formatNumber(queued) : "";
     var awaitingSubmission = (showLiveProgressDetail || showDrainedProgressDetail) && Number(stageProgress.awaiting_submission_batches);
     var awaitingSubmissionText = Number.isInteger(awaitingSubmission) && awaitingSubmission >= 0 ? " · 待提交 " + formatNumber(awaitingSubmission) : "";

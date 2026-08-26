@@ -1535,6 +1535,33 @@ def _dsh_evolution_stage(stage: str | None) -> str | None:
     return None
 
 
+def _sample_member_digest_set(value: Any) -> frozenset[str] | None:
+    if not isinstance(value, (list, tuple)) or not 1 <= len(value) <= 128:
+        return None
+    members = tuple(value)
+    if any(
+        not isinstance(member, str)
+        or len(member) != 64
+        or any(character not in "0123456789abcdef" for character in member)
+        for member in members
+    ) or len(members) != len(set(members)):
+        return None
+    return frozenset(members)
+
+
+def _legacy_sample_launch_key(value: Any) -> tuple[str, str] | None:
+    if not isinstance(value, str):
+        return None
+    for stage in ("plan", "critic", "reflect"):
+        marker = f"sample.{stage}:"
+        if marker not in value:
+            continue
+        prefix, suffix = value.rsplit(marker, 1)
+        if suffix:
+            return prefix.rstrip(":"), suffix
+    return None
+
+
 def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     """Project live two-stage screening from durable DSH child events.
 
@@ -1582,6 +1609,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
 
     sample_events: list[Any] = []
     latest_launch_by_key: dict[str, tuple[Any, Mapping[str, Any]]] = {}
+    launch_by_reservation_id: dict[str, tuple[Any, Mapping[str, Any]]] = {}
     accepted_reservations: set[str] = set()
     completed_reflections: dict[str, Any] = {}
     launch_count = 0
@@ -1599,6 +1627,9 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
                 continue
             launch_count += 1
             latest_launch_by_key[key] = (event, launch)
+            reservation_id = str(launch.get("reservation_id") or "").strip()
+            if reservation_id:
+                launch_by_reservation_id[reservation_id] = (event, launch)
             sample_events.append(event)
         elif event.kind == "DshStructuredResultAccepted":
             identity = event.payload.get("identity")
@@ -1619,6 +1650,29 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     if not sample_events:
         return None
 
+    completed_launches: list[
+        tuple[int, frozenset[str] | None, tuple[str, str] | None]
+    ] = []
+    for reflection_event in completed_reflections.values():
+        identity = reflection_event.payload.get("identity")
+        if not isinstance(identity, Mapping):
+            continue
+        reflection_reservation = str(
+            identity.get("child_reservation_id") or ""
+        ).strip()
+        reflection_launch = launch_by_reservation_id.get(reflection_reservation)
+        completed_launches.append(
+            (
+                int(reflection_event.seq),
+                _sample_member_digest_set(
+                    reflection_launch[1].get("sample_member_digests")
+                    if reflection_launch is not None
+                    else None
+                ),
+                _legacy_sample_launch_key(identity.get("idempotency_key")),
+            )
+        )
+
     total = len(candidates) * _TWO_STAGE_SCREENING_ORIGINS
     completed = len(completed_reflections)
     failed = sum(
@@ -1638,12 +1692,37 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         or not 1 <= configured_concurrency <= 8
     ):
         configured_concurrency = None
-    outstanding = sum(
-        1
-        for _event, launch in latest_launch_by_key.values()
-        if str(launch.get("reservation_id") or "").strip()
-        not in accepted_reservations
-    )
+    outstanding = 0
+    for launch_event, launch in latest_launch_by_key.values():
+        if (
+            str(launch.get("reservation_id") or "").strip()
+            in accepted_reservations
+        ):
+            continue
+        member_digests = _sample_member_digest_set(
+            launch.get("sample_member_digests")
+        )
+        legacy_key = _legacy_sample_launch_key(launch.get("idempotency_key"))
+        if any(
+            int(launch_event.seq) < completed_seq
+            and (
+                (
+                    member_digests is not None
+                    and completed_members is not None
+                    and member_digests <= completed_members
+                )
+                or (
+                    legacy_key is not None
+                    and completed_legacy_key is not None
+                    and legacy_key == completed_legacy_key
+                )
+            )
+            for completed_seq, completed_members, completed_legacy_key in (
+                completed_launches
+            )
+        ):
+            continue
+        outstanding += 1
     in_flight = min(
         outstanding,
         configured_concurrency if configured_concurrency is not None else 8,

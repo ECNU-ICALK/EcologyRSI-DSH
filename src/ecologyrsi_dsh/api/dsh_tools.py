@@ -683,7 +683,11 @@ class DshToolService:
             "item_digest",
             "idempotency_key",
         }
-        if not isinstance(request, Mapping) or set(request) != expected_fields:
+        optional_fields = {"sample_member_digests"}
+        if not isinstance(request, Mapping) or set(request) not in (
+            expected_fields,
+            expected_fields | optional_fields,
+        ):
             raise ValueError("child reservation request has an invalid shape")
         for name in (
             "request_id",
@@ -720,6 +724,30 @@ class DshToolService:
             or any(character not in "0123456789abcdef" for character in item_digest)
         ):
             raise ValueError("child reservation item_digest must be a SHA-256 digest")
+        sample_member_digests = request.get("sample_member_digests")
+        if sample_member_digests is not None:
+            if not str(request["stage"]).startswith("sample."):
+                raise ValueError(
+                    "sample member correlation is valid only for sample stages"
+                )
+            if (
+                not isinstance(sample_member_digests, list)
+                or not 1 <= len(sample_member_digests) <= 128
+                or any(
+                    not isinstance(member, str)
+                    or len(member) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in member
+                    )
+                    for member in sample_member_digests
+                )
+                or sample_member_digests != sorted(set(sample_member_digests))
+            ):
+                raise ValueError(
+                    "child reservation sample_member_digests must be sorted "
+                    "unique SHA-256 digests"
+                )
         run_id = str(request["run_id"])
         fence_key = (
             run_id,
@@ -827,6 +855,10 @@ class DshToolService:
                     "idempotency_key": request["idempotency_key"],
                     "launch_attempt": launch_attempt,
                 }
+                if sample_member_digests is not None:
+                    launch["sample_member_digests"] = list(
+                        sample_member_digests
+                    )
                 try:
                     @contextmanager
                     def commit_guard(inserted: bool) -> Iterator[None]:

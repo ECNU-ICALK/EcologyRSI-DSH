@@ -375,6 +375,7 @@ function directSampleHarness({
 }) {
   const starts = [];
   const reservations = [];
+  const reservationRequests = [];
   const persisted = [];
   const sessions = new Map();
   const roleHost = {
@@ -426,6 +427,7 @@ function directSampleHarness({
     sidecar: {
       request: async (path, options) => {
         if (path.endsWith("/child-reservations")) {
+          reservationRequests.push(structuredClone(options.body));
           const attempt = reservations.length + 1;
           reservations.push({
             reservation_id: `${stage}-reservation-${attempt}`,
@@ -454,7 +456,7 @@ function directSampleHarness({
       penalize: () => {},
     },
   });
-  return { runner, starts, reservations, persisted };
+  return { runner, starts, reservations, reservationRequests, persisted };
 }
 
 test("post-score sample reflection is a registered structured DSH stage", () => {
@@ -1169,6 +1171,13 @@ test("sample reflection binds the outer Host identity and retries one missing re
     { reservation_id: "sample.reflect-reservation-1", launch_attempt: 1 },
     { reservation_id: "sample.reflect-reservation-2", launch_attempt: 2 },
   ]);
+  assert.deepEqual(
+    harness.reservationRequests.map((request) => request.sample_member_digests),
+    [
+      [jsonDigest("prediction-cell-that-must-not-bind")],
+      [jsonDigest("prediction-cell-that-must-not-bind")],
+    ],
+  );
   assert.deepEqual(harness.starts.map(({ id }) => id), [
     "sample.reflect-child-1",
     "sample.reflect-child-2",
@@ -2193,6 +2202,10 @@ test("sample planner waves execute through the retained DSH Workflow Engine", as
   assert.deepEqual(
     workflowRequest.args.items[0].schema.properties.decisions.items.properties.sample_id,
     { type: "string", enum: ["origin-a", "origin-b"] },
+  );
+  assert.deepEqual(
+    persisted[0].body.sample_member_digests,
+    [jsonDigest("origin-a"), jsonDigest("origin-b")].sort(),
   );
   const plannerPrompt = JSON.parse(workflowRequest.args.items[0].prompt);
   assert.match(
