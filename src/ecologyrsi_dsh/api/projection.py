@@ -1127,6 +1127,30 @@ def _evaluation_progress_projection(
         or not 1 <= configured_concurrency <= MAX_SAMPLE_CONCURRENCY
     ):
         configured_concurrency = None
+    in_flight_batches = payload.get("in_flight_batches")
+    queued_batches = payload.get("queued_batches")
+    awaiting_submission_batches = payload.get("awaiting_submission_batches")
+    if not (
+        isinstance(awaiting_submission_batches, int)
+        and not isinstance(awaiting_submission_batches, bool)
+        and awaiting_submission_batches >= 0
+    ):
+        awaiting_submission_batches = (
+            max(
+                0,
+                total
+                - completed
+                - in_flight_batches
+                - queued_batches,
+            )
+            if all(
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and value >= 0
+                for value in (in_flight_batches, queued_batches)
+            )
+            else None
+        )
     return {
         "schema_version": payload.get("schema_version"),
         "revision": payload.get("revision"),
@@ -1156,11 +1180,9 @@ def _evaluation_progress_projection(
             "adaptive_split_failed_samples", 0
         ),
         "causal_wave_sample_count": payload.get("batch_size"),
-        "in_flight_batches": payload.get("in_flight_batches"),
-        "queued_batches": payload.get("queued_batches"),
-        "awaiting_submission_batches": payload.get(
-            "awaiting_submission_batches"
-        ),
+        "in_flight_batches": in_flight_batches,
+        "queued_batches": queued_batches,
+        "awaiting_submission_batches": awaiting_submission_batches,
         "configured_concurrency": configured_concurrency,
         "samples_per_minute": samples_per_minute,
         "gateway_calls_per_minute": gateway_calls_per_minute,

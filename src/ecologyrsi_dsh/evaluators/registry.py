@@ -800,6 +800,10 @@ class EvaluatorRegistry:
         | None = None,
         dsh_prediction_tool_binder: Callable[..., Any] | None = None,
         origin_admission_provider: Callable[[str, int], Any] | None = None,
+        origin_admission_snapshot_provider: Callable[
+            [str], Mapping[str, int]
+        ]
+        | None = None,
     ) -> None:
         self.datasets = datasets
         self.model_gateway = model_gateway or ModelGateway.from_env()
@@ -810,6 +814,9 @@ class EvaluatorRegistry:
         self.dsh_identity_provider = dsh_identity_provider
         self.dsh_prediction_tool_binder = dsh_prediction_tool_binder
         self.origin_admission_provider = origin_admission_provider
+        self.origin_admission_snapshot_provider = (
+            origin_admission_snapshot_provider
+        )
 
     def _sample_executor_for_task(
         self,
@@ -920,6 +927,13 @@ class EvaluatorRegistry:
                 ),
                 sample_concurrency=int(raw_concurrency),
                 progress_callback=progress_callback,
+                admission_snapshot_provider=(
+                    (
+                        lambda: self.origin_admission_snapshot_provider(run_id)
+                    )
+                    if self.origin_admission_snapshot_provider is not None
+                    else None
+                ),
                 run_control_callback=on_sample_control,
                 remote_critic_policy=task.metadata.get("sample_remote_critic_policy"),
                 sample_planner_prompt_profile=task.metadata.get(

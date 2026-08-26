@@ -414,6 +414,7 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
                 ),
                 dsh_prediction_tool_binder=self.dsh_tools.bind_prediction_tool,
                 origin_admission_provider=self.sample_admission.admit,
+                origin_admission_snapshot_provider=self.sample_admission.snapshot,
             )
             self.director = EvolutionDirector(self.ledger, self.strategy_router)
             # A mutation spans several append-only events.  Serial execution keeps

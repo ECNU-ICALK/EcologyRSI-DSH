@@ -231,6 +231,7 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
         microbatch_size: int = 128,
         sample_concurrency: int = 4,
         progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
+        admission_snapshot_provider: Callable[[], Mapping[str, int]] | None = None,
         run_control_callback: Callable[[], str] | None = None,
         remote_critic_policy: Mapping[str, Any] | None = None,
         sample_planner_prompt_profile: Mapping[str, Any] | None = None,
@@ -239,6 +240,10 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
             raise TypeError("strict DSH execution requires a vector prediction tool")
         if not callable(prediction_tool_binder):
             raise TypeError("strict DSH execution requires an agent prediction-tool binder")
+        if admission_snapshot_provider is not None and not callable(
+            admission_snapshot_provider
+        ):
+            raise TypeError("admission_snapshot_provider must be callable")
         self._strict_progress_callback = progress_callback
         self._prediction_tool_binder = prediction_tool_binder
         self._strict_progress_state: dict[str, int] | None = None
@@ -246,6 +251,7 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
         self._strict_latest_gateway_progress: dict[str, Any] | None = None
         self._strict_progress_lock = RLock()
         self._strict_max_in_flight = sample_concurrency
+        self._admission_snapshot_provider = admission_snapshot_provider
         client = _DshSampleDecisionClient(
             run_id=run_id,
             runtime_provider=runtime_provider,
@@ -387,6 +393,19 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
             self._strict_progress_id = int(checkpoint.get("progress_id", 0))
             self._strict_latest_gateway_progress = None
 
+    def _strict_active_origins(self) -> int:
+        """Return run-level admitted origin chains without guessing capacity."""
+
+        if self._admission_snapshot_provider is None:
+            return 0
+        snapshot = self._admission_snapshot_provider()
+        active = snapshot.get("active", 0)
+        if isinstance(active, bool) or not isinstance(active, int) or active < 0:
+            raise SampleExecutionContractError(
+                "strict admission snapshot active count is invalid"
+            )
+        return min(self._strict_max_in_flight, active)
+
     def _handle_strict_gateway_progress(self, progress: Mapping[str, Any]) -> None:
         """Expose gateway activity without counting a pre-reflection sample."""
 
@@ -410,10 +429,7 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
             progress_kind = str(projected.get("progress_kind") or "waiting")
             if progress_kind == "completed_batch":
                 progress_kind = "waiting"
-            in_flight = min(
-                remaining,
-                max(0, int(projected.get("in_flight_batches", 0))),
-            )
+            in_flight = min(remaining, self._strict_active_origins())
             projected.update(
                 {
                     "progress_id": self._strict_progress_id,
@@ -460,6 +476,10 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
             succeeded = int(state["succeeded_samples"])
             remaining = max(0, int(state["total_samples"]) - completed)
             projected = dict(self._strict_latest_gateway_progress or {})
+            in_flight = min(
+                remaining,
+                self._strict_active_origins(),
+            )
             projected.update({
                 "schema_version": "ecologyrsi-dsh.sample-microbatch-progress/3",
                 "role": "planner",
@@ -473,11 +493,11 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
                 "total_samples": int(state["total_samples"]),
                 "succeeded_samples": succeeded,
                 "failed_samples": completed - succeeded,
-                "in_flight_batches": min(self._strict_max_in_flight, remaining),
+                "in_flight_batches": in_flight,
                 "queued_batches": 0,
                 "awaiting_submission_batches": max(
                     0,
-                    remaining - min(self._strict_max_in_flight, remaining),
+                    remaining - in_flight,
                 ),
             })
             self._strict_progress_callback(projected)

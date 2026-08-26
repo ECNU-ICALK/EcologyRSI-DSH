@@ -1133,7 +1133,7 @@ class DshSampleExecutionTests(unittest.TestCase):
                 "completed_origin_samples": 0,
                 "succeeded_origin_samples": 0,
                 "failed_origin_samples": 0,
-                "total_origin_samples": 1,
+                "total_origin_samples": 2,
                 "batch_index": 0,
                 "batch_count": 9,
                 "progress_id": 0,
@@ -1180,14 +1180,14 @@ class DshSampleExecutionTests(unittest.TestCase):
         )
 
         self.assertEqual(progress[-1]["completed_samples"], 0)
-        self.assertEqual(progress[-1]["total_samples"], 1)
+        self.assertEqual(progress[-1]["total_samples"], 2)
         self.assertEqual(progress[-1]["adaptive_split_trigger_count"], 1)
         self.assertEqual(progress[-1]["adaptive_split_count"], 1)
         self.assertEqual(progress[-1]["adaptive_split_recovered_samples"], 0)
         self.assertEqual(progress[-1]["adaptive_split_failed_samples"], 0)
         self.assertEqual(progress[-1]["in_flight_batches"], 0)
         self.assertEqual(progress[-1]["queued_batches"], 0)
-        self.assertEqual(progress[-1]["awaiting_submission_batches"], 1)
+        self.assertEqual(progress[-1]["awaiting_submission_batches"], 2)
 
         adapter.record_finalized_origin_progress(
             status="succeeded", prediction_cell_count=9
@@ -1196,6 +1196,87 @@ class DshSampleExecutionTests(unittest.TestCase):
         self.assertEqual(progress[-1]["succeeded_samples"], 1)
         self.assertEqual(progress[-1]["adaptive_split_recovered_samples"], 0)
         self.assertEqual(progress[-1]["adaptive_split_failed_samples"], 0)
+        self.assertEqual(progress[-1]["in_flight_batches"], 0)
+        self.assertEqual(progress[-1]["queued_batches"], 0)
+        self.assertEqual(progress[-1]["awaiting_submission_batches"], 1)
+
+    def test_strict_progress_uses_run_admission_snapshot_for_actual_in_flight(
+        self,
+    ) -> None:
+        progress: list[dict] = []
+        adapter = DshSampleCollaborationAdapter(
+            run_id="run-origin-admission-progress",
+            runtime_provider=lambda: _SampleRuntime(),
+            revision_provider=lambda _run_id: {
+                "run_state_revision": 1,
+                "ledger_expected_revision": 1,
+            },
+            identity_digests={
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            strategy_model_id="dsh/strategy",
+            review_model_id="dsh/review",
+            forecast_bundle_tool=_constant_forecast_bundle(21.5),
+            prediction_tool_binder=_fake_agent_prediction_binder,
+            progress_callback=progress.append,
+            admission_snapshot_provider=lambda: {
+                "limit": 64,
+                "active": 3,
+                "waiting": 4,
+            },
+        )
+        adapter.set_resume_checkpoint(
+            {
+                "completed_samples": 0,
+                "succeeded_samples": 0,
+                "failed_samples": 0,
+                "total_samples": 90,
+                "completed_origin_samples": 0,
+                "succeeded_origin_samples": 0,
+                "failed_origin_samples": 0,
+                "total_origin_samples": 10,
+                "batch_index": 0,
+                "batch_count": 90,
+                "progress_id": 0,
+                "gateway_request_count": 0,
+                "adaptive_split_trigger_count": 0,
+                "adaptive_split_count": 0,
+                "adaptive_split_max_depth": 0,
+                "adaptive_split_recovered_samples": 0,
+                "adaptive_split_failed_samples": 0,
+                "tasks": [
+                    {
+                        "target": "origin-vector",
+                        "horizon_hours": 1,
+                        "total_samples": 90,
+                        "resumed_failed_samples": 0,
+                    }
+                ],
+            }
+        )
+
+        adapter._handle_strict_gateway_progress(
+            {
+                "progress_kind": "waiting",
+                "in_flight_batches": 1,
+            }
+        )
+
+        self.assertEqual(progress[-1]["in_flight_batches"], 3)
+        self.assertEqual(progress[-1]["queued_batches"], 0)
+        self.assertEqual(progress[-1]["awaiting_submission_batches"], 7)
+
+        adapter.record_finalized_origin_progress(
+            status="succeeded",
+            prediction_cell_count=9,
+        )
+
+        self.assertEqual(progress[-1]["completed_samples"], 1)
+        self.assertEqual(progress[-1]["in_flight_batches"], 3)
+        self.assertEqual(progress[-1]["queued_batches"], 0)
+        self.assertEqual(progress[-1]["awaiting_submission_batches"], 6)
 
     def test_strict_executor_streams_and_checkpoints_each_complete_chain(
         self,
@@ -1314,10 +1395,11 @@ class DshSampleExecutionTests(unittest.TestCase):
                     item["total_samples"],
                     item["in_flight_batches"],
                     item["queued_batches"],
+                    item["awaiting_submission_batches"],
                 )
                 for item in completed
             ],
-            [(1, 1, 2, 1, 0), (2, 2, 2, 0, 0)],
+            [(1, 1, 2, 0, 0, 1), (2, 2, 2, 0, 0, 0)],
         )
         self.assertEqual(batch.summary["complete_agent_chains"], 2)
         self.assertTrue(batch.summary["strict_agent_chain_pass"])

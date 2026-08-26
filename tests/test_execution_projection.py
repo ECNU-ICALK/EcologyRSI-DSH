@@ -128,6 +128,8 @@ class ExecutionProjectionTests(unittest.TestCase):
                         "role": "planner",
                         "completed_samples": 1,
                         "total_samples": 10,
+                        "in_flight_batches": 3,
+                        "queued_batches": 0,
                     },
                     created_at="2026-08-26T06:00:00+00:00",
                 ),
@@ -140,6 +142,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         )
 
         self.assertEqual(progress["configured_concurrency"], 128)
+        self.assertEqual(progress["awaiting_submission_batches"], 6)
 
     def test_screening_progress_projects_completed_active_and_awaiting_origins(self) -> None:
         events = (
