@@ -1155,6 +1155,125 @@ class DshSampleExecutionTests(unittest.TestCase):
         self.assertEqual(runtime.maximum_planners, 2)
         self.assertEqual(batch.summary["attempted_origin_samples"], 2)
 
+    def test_v4_origin_protocol_publishes_completed_origin_without_waiting_for_slow_predecessor(
+        self,
+    ) -> None:
+        class OutOfOrderRuntime(_SampleRuntime):
+            def __init__(self) -> None:
+                super().__init__()
+                self.first_started = threading.Event()
+                self.release_first = threading.Event()
+
+            def run_stage(self, request: dict) -> dict:
+                sample = request["request"]["context"].get("samples", [{}])[0]
+                target_timestamp = sample.get("target_timestamp")
+                if target_timestamp is None and isinstance(
+                    sample.get("sample"), dict
+                ):
+                    target_timestamp = sample["sample"].get("target_timestamp")
+                if (
+                    request["stage"] == "sample.plan"
+                    and target_timestamp == 101
+                ):
+                    self.first_started.set()
+                    self.release_first.wait(timeout=2.0)
+                return super().run_stage(request)
+
+        runtime = OutOfOrderRuntime()
+        adapter = DshSampleCollaborationAdapter(
+            run_id="run-origin-completion-order",
+            runtime_provider=lambda: runtime,
+            revision_provider=lambda _run_id: {
+                "run_state_revision": 1,
+                "ledger_expected_revision": 1,
+            },
+            identity_digests={
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            strategy_model_id="dsh/strategy",
+            review_model_id="dsh/review",
+            forecast_bundle_tool=_constant_forecast_bundle(21.5),
+            prediction_tool_binder=_fake_agent_prediction_binder,
+            sample_concurrency=2,
+            microbatch_size=9,
+        )
+        rows = [
+            {
+                "partition": "training_feedback",
+                "target": "air_temperature",
+                "unit": "degC",
+                "horizon_hours": 1,
+                "origin_timestamp": origin,
+                "target_timestamp": origin + 1,
+                "baseline": 20.0,
+                "observed": 21.0,
+                "label_free_context": {
+                    "schema_version": "ecologyrsi-dsh.label-free-sample-context/1",
+                    "history_window": [20.0],
+                    "causal_provenance": {
+                        "schema_version": "ecologyrsi-dsh.causal-sample-provenance/1",
+                        "origin_cutoff_timestamp": origin,
+                        "latest_context_timestamp": origin,
+                        "history_timestamps": [origin],
+                    },
+                },
+            }
+            for origin in (100, 200)
+        ]
+        completed_origin_published = threading.Event()
+        publications: list[int] = []
+        execution_errors: list[BaseException] = []
+
+        def publish(finalized_rows) -> None:
+            origin = int(finalized_rows[0]["origin_timestamp"])
+            publications.append(origin)
+            completed_origin_published.set()
+
+        def execute() -> None:
+            try:
+                CollaborativeSampleExecutor(adapter).execute(
+                    rows,
+                    context={
+                        "run_id": "run-origin-completion-order",
+                        "candidate_id": "candidate-1",
+                        "dataset_digest": "d" * 64,
+                        "partition": "training_feedback",
+                        "algorithm_id": "registered-predictor",
+                        "algorithm_version": "1",
+                        "sample_concurrency": 2,
+                        "candidate_concurrency": 1,
+                    },
+                    target_bounds={
+                        "air_temperature": {
+                            "unit": "degC",
+                            "minimum": -20.0,
+                            "maximum": 80.0,
+                        }
+                    },
+                    algorithm_id="registered-predictor",
+                    algorithm_version="1",
+                    result_callback=publish,
+                )
+            except Exception as exc:  # pragma: no cover - asserted below
+                execution_errors.append(exc)
+
+        worker = threading.Thread(target=execute)
+        worker.start()
+        first_started = runtime.first_started.wait(timeout=1.0)
+        published_before_release = (
+            completed_origin_published.wait(timeout=0.5) if first_started else False
+        )
+        runtime.release_first.set()
+        worker.join(timeout=3.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(execution_errors, [])
+        self.assertTrue(first_started, runtime.requests)
+        self.assertTrue(published_before_release)
+        self.assertEqual(sorted(publications), [100, 200])
+
     def test_origin_bundle_progress_does_not_mix_cell_split_counts_with_origins(
         self,
     ) -> None:

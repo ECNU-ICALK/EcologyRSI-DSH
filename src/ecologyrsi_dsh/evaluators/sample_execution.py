@@ -15,7 +15,7 @@ import socket
 import time
 import zlib
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -1085,6 +1085,9 @@ class CollaborativeSampleExecutor:
                 ]
             ],
         ] = {}
+        origin_bundle_by_id = {
+            bundle.origin_sample_id: bundle for bundle in origin_bundles
+        }
         remaining_origin_bundles: Any = iter(())
 
         def submit_next_origin_bundle() -> bool:
@@ -1221,7 +1224,66 @@ class CollaborativeSampleExecutor:
                         )
                     )
 
-        for raw_row in rows:
+        def execution_rows() -> Any:
+            """Yield concurrent origins when their complete chains finish.
+
+            Result callbacks are the durable progress boundary.  Waiting for
+            futures in cohort order lets one slow origin hide and delay every
+            later completed origin, so concurrent strict origins are consumed
+            in completion order.  Aggregate outputs are restored to cohort
+            order below before their deterministic digests are calculated.
+            """
+
+            nonlocal origin_executor, terminal_reason
+            if not concurrent_origin_contract:
+                yield from rows
+                return
+
+            for bundle in origin_bundles:
+                if all(
+                    request.sample_id in resumed_rows
+                    for request in bundle.requests
+                ):
+                    yield from bundle.rows
+
+            while origin_futures:
+                completed, _pending = wait(
+                    tuple(origin_futures.values()),
+                    return_when=FIRST_COMPLETED,
+                )
+                completed_ids = [
+                    origin_sample_id
+                    for origin_sample_id, future in origin_futures.items()
+                    if future in completed
+                ]
+                for origin_sample_id in completed_ids:
+                    future = origin_futures.pop(origin_sample_id)
+                    try:
+                        (
+                            origin_outcomes,
+                            origin_reflections,
+                            origin_terminal_reason,
+                        ) = future.result()
+                    except BaseException:
+                        if origin_executor is not None:
+                            origin_executor.shutdown(
+                                wait=True, cancel_futures=True
+                            )
+                            origin_executor = None
+                        raise
+                    prefetched_attempt_outcomes.update(origin_outcomes)
+                    prepared_origin_reflections.update(origin_reflections)
+                    prepared_origin_ids.add(origin_sample_id)
+                    if origin_terminal_reason is not None:
+                        terminal_reason = origin_terminal_reason
+                    bundle = origin_bundle_by_id.get(origin_sample_id)
+                    if bundle is None:
+                        raise SampleExecutionContractError(
+                            "strict origin scheduler completed an unknown origin"
+                        )
+                    yield from bundle.rows
+
+        for raw_row in execution_rows():
             row = dict(raw_row)
             try:
                 request, observed = _request_from_row(
@@ -1387,26 +1449,9 @@ class CollaborativeSampleExecutor:
                     )
                 if bundle.origin_sample_id not in prepared_origin_ids:
                     if concurrent_origin_contract:
-                        future = origin_futures.pop(
-                            bundle.origin_sample_id, None
+                        raise SampleExecutionContractError(
+                            "strict origin scheduler yielded an unprepared origin"
                         )
-                        if future is None:
-                            raise SampleExecutionContractError(
-                                "strict origin scheduler lost a frozen origin"
-                            )
-                        try:
-                            (
-                                origin_outcomes,
-                                origin_reflections,
-                                origin_terminal_reason,
-                            ) = future.result()
-                        except BaseException:
-                            if origin_executor is not None:
-                                origin_executor.shutdown(
-                                    wait=True, cancel_futures=True
-                                )
-                                origin_executor = None
-                            raise
                     else:
                         (
                             origin_outcomes,
@@ -1800,6 +1845,25 @@ class CollaborativeSampleExecutor:
             result_callback(tuple(finalized_result_rows))
             finalized_result_rows.clear()
 
+        if concurrent_origin_contract:
+            sample_order = {
+                request.sample_id: index
+                for index, request in enumerate(
+                    request
+                    for bundle in origin_bundles
+                    for request in bundle.requests
+                )
+            }
+
+            def cohort_order(item: Mapping[str, Any]) -> int:
+                return sample_order.get(
+                    str(item.get("sample_id") or ""), len(sample_order)
+                )
+
+            successful_rows.sort(key=cohort_order)
+            scoring_rows.sort(key=cohort_order)
+            records.sort(key=cohort_order)
+
         attempted = len(rows)
         succeeded = len(successful_rows)
         failed = attempted - succeeded
@@ -2064,7 +2128,10 @@ class CollaborativeSampleExecutor:
             ),
             "batch_plan": public_plan,
             "batch_plan_digest": plan_digest,
-            "action_catalog": list(action_catalog.values()),
+            "action_catalog": [
+                action_catalog[action_digest]
+                for action_digest in sorted(action_catalog)
+            ],
             "trace_digest": trace_digest,
         }
         if strict_agent_contract:
