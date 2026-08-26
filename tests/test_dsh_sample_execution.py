@@ -574,11 +574,11 @@ class DshSampleExecutionTests(unittest.TestCase):
         self.assertEqual(outcome.result["predicted"], 21.5)
         self.assertEqual(
             [item["stage"] for item in runtime.requests],
-            ["sample.plan", "sample.critic"],
+            ["sample.plan"],
         )
         self.assertEqual(
             [item["role"] for item in outcome.result["agent_decisions"]],
-            ["remote_planner_agent", "remote_critic_agent"],
+            ["remote_planner_agent"],
         )
 
     def test_planner_exposes_only_the_frozen_candidate_tool(self) -> None:
@@ -622,7 +622,7 @@ class DshSampleExecutionTests(unittest.TestCase):
         self.assertEqual(outcome.result["predicted"], 21.5)
         self.assertEqual(
             [item["stage"] for item in runtime.requests],
-            ["sample.plan", "sample.critic"],
+            ["sample.plan"],
         )
         planner_tools = runtime.requests[0]["request"]["context"][
             "available_tools"
@@ -843,6 +843,60 @@ class DshSampleExecutionTests(unittest.TestCase):
         self.assertEqual(
             reflection_context["outcome"]["cells"][0]["predicted"], 21.5
         )
+
+    def test_normal_origin_uses_planner_only_under_sparse_review_policy(self) -> None:
+        runtime = _SampleRuntime()
+        adapter = DshSampleCollaborationAdapter(
+            run_id="run-planner-only",
+            runtime_provider=lambda: runtime,
+            revision_provider=lambda _run_id: {
+                "run_state_revision": 7,
+                "ledger_expected_revision": 11,
+            },
+            identity_digests={
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            strategy_model_id="dsh/strategy",
+            review_model_id="dsh/review",
+            forecast_bundle_tool=_constant_forecast_bundle(21.5),
+            prediction_tool_binder=_fake_agent_prediction_binder,
+            remote_critic_policy={
+                "version": "uncertain_or_failure@1",
+                "min_planner_confidence": 0.5,
+            },
+            sample_reflection_policy="candidate_aggregate_post_score@1",
+        )
+        request = _request("sample-planner-only")
+        row = request.to_dict()
+        row["observed"] = 21.0
+
+        batch = CollaborativeSampleExecutor(adapter).execute(
+            (row,),
+            context={
+                "run_id": "run-planner-only",
+                "candidate_id": "candidate-1",
+                "dataset_digest": "d" * 64,
+                "partition": "training_feedback",
+                "algorithm_id": "registered-predictor",
+                "algorithm_version": "1",
+            },
+            target_bounds={
+                "air_temperature": {"minimum": -20.0, "maximum": 80.0}
+            },
+            algorithm_id="registered-predictor",
+            algorithm_version="1",
+        )
+
+        self.assertEqual(
+            [item["stage"] for item in runtime.requests],
+            ["sample.plan"],
+        )
+        self.assertEqual(batch.summary["remote_planner_invocations"], 1)
+        self.assertEqual(batch.summary["remote_critic_invocations"], 0)
+        self.assertEqual(batch.summary["remote_reflection_invocations"], 0)
+        self.assertTrue(batch.summary["strict_agent_chain_pass"])
 
     def test_origin_bundle_predicts_all_nine_cells_in_one_agent_chain(self) -> None:
         runtime = _SampleRuntime()

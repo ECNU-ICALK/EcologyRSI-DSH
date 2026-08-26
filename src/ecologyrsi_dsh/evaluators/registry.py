@@ -936,6 +936,9 @@ class EvaluatorRegistry:
                 ),
                 run_control_callback=on_sample_control,
                 remote_critic_policy=task.metadata.get("sample_remote_critic_policy"),
+                sample_reflection_policy=task.metadata.get(
+                    "sample_reflection_policy"
+                ),
                 sample_planner_prompt_profile=task.metadata.get(
                     "sample_planner_prompt_profile"
                 ),

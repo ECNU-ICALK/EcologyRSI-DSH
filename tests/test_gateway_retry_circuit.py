@@ -1198,7 +1198,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
         self.assertEqual(decision.event.payload["consecutive_failures"], 1)
         self.assertEqual(decision.event.payload["breaker_epoch"], 1)
 
-    def test_running_projection_keeps_bounded_retry_details_across_stage_start(
+    def test_running_projection_clears_retry_details_after_stage_start(
         self,
     ) -> None:
         retry = self._report_failure(1).event
@@ -1244,11 +1244,10 @@ class GatewayRetryCircuitTests(unittest.TestCase):
         )
 
         after_start = _projection_json(self.director.state(self.run_id))
-        self.assertEqual(
-            after_start["execution_progress"]["retry_wait"][
-                "consecutive_failures"
-            ],
-            1,
+        self.assertIsNone(after_start["execution_progress"].get("retry_wait"))
+        self.assertNotEqual(
+            after_start["execution_progress"]["phase"],
+            "gateway_retry",
         )
 
     def test_paused_projection_and_events_expose_only_actionable_circuit_fields(

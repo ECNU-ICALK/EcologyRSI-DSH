@@ -128,8 +128,11 @@ _DEFAULT_SAMPLE_REMOTE_CRITIC_POLICY = {
     "min_planner_confidence": 0.9,
 }
 _STRICT_SAMPLE_AGENT_PROTOCOL = "dsh-strict-origin-bundle@4"
-_STRICT_SAMPLE_REMOTE_CRITIC_POLICY = {"version": "always@1"}
-_STRICT_SAMPLE_REFLECTION_POLICY = "always_remote_post_score@1"
+_STRICT_SAMPLE_REMOTE_CRITIC_POLICY = {
+    "version": "uncertain_or_failure@1",
+    "min_planner_confidence": 0.5,
+}
+_STRICT_SAMPLE_REFLECTION_POLICY = "candidate_aggregate_post_score@1"
 _DSH_NATIVE_PRESET_IDS = (
     "ecology-coordinator-v4",
     "ecology-researcher-v7",
@@ -2462,8 +2465,9 @@ class EvolutionRequestHandler(
                     if autonomous_mode and not toy_domain
                     else "host_feedback_state_machine"
                 ),
-                # Every DSH-native origin requires a real model-backed planner,
-                # critic, and post-score reflector.
+                # Every DSH-native origin keeps a real model-backed Planner.
+                # Critic is reserved for uncertain/failing routes and the
+                # existing candidate/generation review owns post-score reflection.
                 "sample_agent_protocol": (
                     _STRICT_SAMPLE_AGENT_PROTOCOL if native_protocol else None
                 ),
@@ -2506,9 +2510,10 @@ class EvolutionRequestHandler(
                     if autonomous_mode and not toy_domain and not native_protocol
                     else None
                 ),
-                # Every new real sample receives independent remote review in
-                # addition to the host constraint critic. Persisting the policy
-                # prevents restart-time drift; older runs retain their freeze.
+                # Sparse remote review preserves Host scoring while avoiding
+                # one advisory model call for every successful origin. Persisting
+                # the policy prevents restart-time drift; older runs retain their
+                # frozen always-review policy.
                 "sample_remote_critic_policy": (
                     dict(
                         _STRICT_SAMPLE_REMOTE_CRITIC_POLICY

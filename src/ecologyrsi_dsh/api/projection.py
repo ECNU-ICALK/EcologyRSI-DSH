@@ -1351,7 +1351,7 @@ def _gateway_retry_projection(state: Any) -> dict[str, Any] | None:
             return None
         if (
             newer.kind == "EvolutionStageRecorded"
-            and newer.payload.get("status") == "completed"
+            and newer.payload.get("status") in {"started", "completed"}
             and int(newer.payload.get("generation", -1))
             == int(event.payload.get("generation", -2))
             and newer.payload.get("stage") == event.payload.get("stage")

@@ -525,7 +525,10 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         )
         self.assertEqual(
             state.task_manifest.metadata["sample_remote_critic_policy"],
-            {"version": "always@1"},
+            {
+                "version": "uncertain_or_failure@1",
+                "min_planner_confidence": 0.5,
+            },
         )
         self.assertEqual(
             state.task_manifest.metadata["sample_agent_protocol"],
@@ -534,7 +537,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertEqual(state.task_manifest.metadata["sample_prompt_batch_size"], 1)
         self.assertEqual(
             state.task_manifest.metadata["sample_reflection_policy"],
-            "always_remote_post_score@1",
+            "candidate_aggregate_post_score@1",
         )
         self.assertFalse(state.task_manifest.metadata["allow_host_route_bypass"])
         self.assertFalse(

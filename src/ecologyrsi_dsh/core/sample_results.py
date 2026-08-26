@@ -20,8 +20,11 @@ SAMPLE_RESULT_BATCH_SCHEMA_VERSION = (
 )
 SAMPLE_RESULTS_ARCHIVE_VERSION = "ecologyrsi-dsh.evaluation-sample-results-archive/1"
 SAMPLE_RESULTS_ENCODING = "zlib+base64+canonical-json"
-SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION = (
+SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION_V2 = (
     "ecologyrsi-dsh.sample-agent-chain-attestation/2"
+)
+SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION = (
+    "ecologyrsi-dsh.sample-agent-chain-attestation/3"
 )
 SAMPLE_REWARD_DEFINITION_V1 = "absolute_error_improvement_vs_persistence@1"
 SAMPLE_REWARD_DEFINITION_V2 = (
@@ -61,11 +64,16 @@ def _sample_agent_chain_attestation(
         "complete",
         "attestation_digest",
     }
-    if not isinstance(value, Mapping) or set(value) != required:
+    if not isinstance(value, Mapping):
+        raise ValueError("sample_agent_chain must be an object")
+    schema_version = value.get("schema_version")
+    if schema_version == SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION:
+        required = required | {"required_remote_roles"}
+    elif schema_version != SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION_V2:
+        raise ValueError("sample_agent_chain schema version is unsupported")
+    if set(value) != required:
         raise ValueError("sample_agent_chain fields do not match its schema")
     projected = dict(value)
-    if projected["schema_version"] != SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION:
-        raise ValueError("sample_agent_chain schema version is unsupported")
     if projected["sample_id"] != sample_id:
         raise ValueError("sample_agent_chain belongs to a different sample")
     for name in (
@@ -98,20 +106,42 @@ def _sample_agent_chain_attestation(
             raise ValueError(f"sample_agent_chain.{name} must be a SHA-256 digest")
     if not isinstance(projected["complete"], bool):
         raise ValueError("sample_agent_chain.complete must be a boolean")
+    if schema_version == SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION:
+        required_remote_roles = projected["required_remote_roles"]
+        if (
+            not isinstance(required_remote_roles, list)
+            or not required_remote_roles
+            or required_remote_roles[0] != "planner"
+            or any(
+                role not in {"planner", "critic", "reflector"}
+                for role in required_remote_roles
+            )
+            or len(set(required_remote_roles)) != len(required_remote_roles)
+        ):
+            raise ValueError("sample_agent_chain required remote roles are invalid")
+    else:
+        required_remote_roles = ["planner", "critic", "reflector"]
+    role_counts = {
+        "planner": projected["planner_invocations"],
+        "critic": projected["critic_invocations"],
+        "reflector": projected["reflector_invocations"],
+    }
+    reflection_required = "reflector" in required_remote_roles
     if projected["complete"] and not (
-        projected["planner_invocations"] >= 1
+        all(role_counts[role] >= 1 for role in required_remote_roles)
         and projected["registered_tool_invocations"] >= 1
         and projected["dsh_agent_tool_invocations"] >= 1
-        and projected["critic_invocations"] >= 1
-        and projected["reflector_invocations"] >= 1
         and projected["host_route_bypass_count"] == 0
-        and all(
+        and projected["agent_trace_digest"] is not None
+        and projected["tool_trace_digest"] is not None
+        and (
+            not reflection_required
+            or all(
             projected[name] is not None
             for name in (
-                "agent_trace_digest",
-                "tool_trace_digest",
                 "reflection_response_digest",
                 "reflection_wave_digest",
+            )
             )
         )
     ):

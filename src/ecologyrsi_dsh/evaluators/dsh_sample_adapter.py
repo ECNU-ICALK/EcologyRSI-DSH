@@ -234,6 +234,7 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
         admission_snapshot_provider: Callable[[], Mapping[str, int]] | None = None,
         run_control_callback: Callable[[], str] | None = None,
         remote_critic_policy: Mapping[str, Any] | None = None,
+        sample_reflection_policy: str | None = None,
         sample_planner_prompt_profile: Mapping[str, Any] | None = None,
     ) -> None:
         if not callable(forecast_bundle_tool):
@@ -252,6 +253,25 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
         self._strict_progress_lock = RLock()
         self._strict_max_in_flight = sample_concurrency
         self._admission_snapshot_provider = admission_snapshot_provider
+        if sample_reflection_policy not in {
+            None,
+            "always_remote_post_score@1",
+            "candidate_aggregate_post_score@1",
+        }:
+            raise ValueError("unsupported DSH sample reflection policy")
+        # A missing policy belongs to historical manifests and preserves the
+        # original Planner/Critic/Reflector chain on replay.
+        self.sample_reflection_enabled = sample_reflection_policy in {
+            None,
+            "always_remote_post_score@1",
+        }
+        require_success_critic = bool(
+            remote_critic_policy is None
+            or (
+                isinstance(remote_critic_policy, Mapping)
+                and remote_critic_policy.get("version") == "always@1"
+            )
+        )
         client = _DshSampleDecisionClient(
             run_id=run_id,
             runtime_provider=runtime_provider,
@@ -278,7 +298,7 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
             remote_critic_policy=remote_critic_policy,
             sample_planner_prompt_profile=sample_planner_prompt_profile,
             require_remote_planner=True,
-            require_remote_critic=True,
+            require_remote_critic=require_success_critic,
             operation_max_tokens=None,
             token_limit=0,
             token_reservation_per_wave=0,
@@ -287,7 +307,11 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
         # single explicit protocol identity instead.
         self.adapter_id = "dsh-native-sample-collaboration"
         self._decision_client = client
-        self.adapter_version = "4-concurrent-origin-bundle"
+        self.adapter_version = (
+            "4-concurrent-origin-bundle"
+            if require_success_critic and self.sample_reflection_enabled
+            else "5-adaptive-sparse-origin-review"
+        )
 
     def _prediction_tool_context(
         self,
@@ -522,6 +546,16 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
 
     def plan_batch(self, context: Mapping[str, Any]) -> Mapping[str, Any]:
         plan = dict(super().plan_batch(context))
+        require_success_critic = bool(
+            self.require_remote_critic
+            or self.remote_critic_policy is None
+            or self.remote_critic_policy["version"] == "always@1"
+        )
+        required_remote_roles = ["planner"]
+        if require_success_critic:
+            required_remote_roles.append("critic")
+        if self.sample_reflection_enabled:
+            required_remote_roles.append("reflector")
         plan.update(
             {
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
@@ -530,8 +564,16 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
                 "execution_mode": "per_origin_remote_agent_vector_tool_loop",
                 "host_route_bypass_allowed": False,
                 "host_prediction_fallback_allowed": False,
-                "post_score_reflection_required": True,
+                "post_score_reflection_required": self.sample_reflection_enabled,
+                "required_success_remote_roles": required_remote_roles,
+                "remote_roles": required_remote_roles,
                 "routing_policy": (
+                    "remote_planner_per_origin_then_agent_invoked_registered_vector_"
+                    "tool_then_sparse_remote_critic_on_uncertainty_or_failure_then_"
+                    "host_cell_scoring_then_candidate_aggregate_reflection;"
+                    "no_host_route_bypass;no_prediction_fallback"
+                    if required_remote_roles == ["planner"]
+                    else
                     "remote_planner_per_origin_then_agent_invoked_registered_vector_"
                     "tool_then_remote_critic_per_origin_then_host_cell_scoring_"
                     "then_remote_reflector_per_origin;no_host_route_bypass;"

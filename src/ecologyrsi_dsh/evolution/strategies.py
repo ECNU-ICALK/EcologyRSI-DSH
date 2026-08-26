@@ -3435,6 +3435,43 @@ _EXACT_PARAMETER_VALUE_PATTERN = (
     rf"(?:{_NUMBER_PATTERN}(?:[eE][-+]?\d+)?|"
     rf"{_ENGLISH_NUMBER_WORD_PATTERN}|{_CHINESE_NUMBER_PATTERN})"
 )
+_HISTORICAL_PARAMETER_CONTEXT_RE = re.compile(
+    r"(?:\b(?:prior|previous|earlier|historical|baseline|incumbent|parent|"
+    r"current|observed|reported|generation(?:s)?)\b|"
+    r"此前|之前|历史|上一轮|前一轮|当前基线|当前父代|父代|已使用|曾经|观察到|报告)",
+    re.IGNORECASE,
+)
+_PROSPECTIVE_PARAMETER_CONTEXT_RE = re.compile(
+    r"(?:\b(?:set|use|choose|assign|adjust|change|make|should|must|will|"
+    r"recommend|propose)\b|"
+    r"设置|设为|设成|调整|改为|改成|应当|应该|必须|建议|"
+    r"采用(?!的|了|过)|使用(?!的|了|过))",
+    re.IGNORECASE,
+)
+_PARAMETER_CONTEXT_BOUNDARY_RE = re.compile(r"[.;。；!?！？\n]")
+
+
+def _parameter_assignment_is_historical(
+    text: str,
+    match: re.Match[str],
+) -> bool:
+    """Allow a measured prior value without treating it as a new command."""
+
+    prefix = text[: match.start()]
+    suffix = text[match.end() :]
+    prior_boundaries = tuple(_PARAMETER_CONTEXT_BOUNDARY_RE.finditer(prefix))
+    clause_start = prior_boundaries[-1].end() if prior_boundaries else 0
+    next_boundary = _PARAMETER_CONTEXT_BOUNDARY_RE.search(suffix)
+    clause_end = (
+        match.end() + next_boundary.start()
+        if next_boundary is not None
+        else len(text)
+    )
+    clause = text[clause_start:clause_end]
+    if _HISTORICAL_PARAMETER_CONTEXT_RE.search(clause) is None:
+        return False
+    command_scope = text[clause_start : match.end()]
+    return _PROSPECTIVE_PARAMETER_CONTEXT_RE.search(command_scope) is None
 
 
 def _task_parameter_boundary(
@@ -3973,7 +4010,11 @@ def _direction_explicit_parameter_assignments(
             re.IGNORECASE,
         )
         if any(
-            assignment_after.search(field) or assignment_before.search(field)
+            any(
+                not _parameter_assignment_is_historical(field, match)
+                for pattern in (assignment_after, assignment_before)
+                for match in pattern.finditer(field)
+            )
             for field in claim_fields
         ):
             assignments.append(name)

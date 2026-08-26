@@ -7,10 +7,16 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator
 
+from ..core.errors import (
+    dsh_native_runtime_error_in_chain,
+    dsh_native_runtime_retryable,
+)
+
 
 DEFAULT_SAMPLE_CONCURRENCY = 64
 MAX_SAMPLE_CONCURRENCY = 128
 HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK = 4
+_INITIAL_ADAPTIVE_CONCURRENCY = 8
 
 
 def validate_sample_concurrency(value: object) -> int:
@@ -29,16 +35,21 @@ def validate_sample_concurrency(value: object) -> int:
 @dataclass
 class _RunAdmissionState:
     limit: int
-    semaphore: threading.BoundedSemaphore
+    adaptive_limit: int
     active: int = 0
     waiting: int = 0
+    successful_since_adjustment: int = 0
+    congestion_events: int = 0
+    epoch: int = 0
+    slow_start: bool = True
 
 
 class RunSampleAdmission:
-    """Enforce one immutable sample-chain concurrency limit per run."""
+    """Enforce one immutable logical limit with adaptive physical admission."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
         self._states: dict[str, _RunAdmissionState] = {}
 
     def _state_for(self, run_id: str, limit: int) -> _RunAdmissionState:
@@ -51,7 +62,7 @@ class RunSampleAdmission:
             if state is None:
                 state = _RunAdmissionState(
                     limit=limit,
-                    semaphore=threading.BoundedSemaphore(limit),
+                    adaptive_limit=min(limit, _INITIAL_ADAPTIVE_CONCURRENCY),
                 )
                 self._states[run_id] = state
             elif state.limit != limit:
@@ -64,33 +75,74 @@ class RunSampleAdmission:
     @contextmanager
     def admit(self, run_id: str, limit: int) -> Iterator[None]:
         state = self._state_for(run_id, limit)
-        with self._lock:
+        with self._condition:
             state.waiting += 1
-        try:
-            state.semaphore.acquire()
-        except BaseException:
-            with self._lock:
+            try:
+                while state.active >= state.adaptive_limit:
+                    self._condition.wait()
+            except BaseException:
                 state.waiting -= 1
-            raise
-        with self._lock:
+                raise
             state.waiting -= 1
             state.active += 1
+            admission_epoch = state.epoch
         try:
             yield
-        finally:
-            with self._lock:
+        except BaseException as exc:
+            with self._condition:
                 state.active -= 1
-            state.semaphore.release()
+                dsh_error = dsh_native_runtime_error_in_chain(exc)
+                if (
+                    dsh_error is not None
+                    and dsh_native_runtime_retryable(dsh_error)
+                    and admission_epoch == state.epoch
+                ):
+                    state.adaptive_limit = max(1, state.adaptive_limit // 2)
+                    state.successful_since_adjustment = 0
+                    state.congestion_events += 1
+                    state.slow_start = False
+                    state.epoch += 1
+                self._condition.notify_all()
+            raise
+        else:
+            with self._condition:
+                state.active -= 1
+                if admission_epoch == state.epoch:
+                    state.successful_since_adjustment += 1
+                    if (
+                        state.adaptive_limit < state.limit
+                        and state.successful_since_adjustment
+                        >= state.adaptive_limit
+                    ):
+                        state.adaptive_limit = min(
+                            state.limit,
+                            (
+                                state.adaptive_limit * 2
+                                if state.slow_start
+                                else state.adaptive_limit + 1
+                            ),
+                        )
+                        state.successful_since_adjustment = 0
+                        state.epoch += 1
+                self._condition.notify_all()
 
     def snapshot(self, run_id: str) -> dict[str, int]:
         with self._lock:
             state = self._states.get(run_id)
             if state is None:
-                return {"limit": 0, "active": 0, "waiting": 0}
+                return {
+                    "limit": 0,
+                    "adaptive_limit": 0,
+                    "active": 0,
+                    "waiting": 0,
+                    "congestion_events": 0,
+                }
             return {
                 "limit": state.limit,
+                "adaptive_limit": state.adaptive_limit,
                 "active": state.active,
                 "waiting": state.waiting,
+                "congestion_events": state.congestion_events,
             }
 
 

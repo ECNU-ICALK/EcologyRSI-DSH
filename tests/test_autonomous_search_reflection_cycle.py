@@ -1286,6 +1286,11 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
             "Use history_steps to improve 8-hour forecast stability.",
             "history_steps may become more robust across 8 horizons.",
             "使用历史步数改善八小时预测。",
+            "Prior generations used ridge_alpha 0.1 and later 0.3981.",
+            "With residual_scale at 0.5, the previous candidate had a large residual.",
+            "With ridge_alpha at 0.1, the previous candidate had a large residual.",
+            "The current baseline has history_steps=8.",
+            "上一轮使用的历史步数为 8。",
         ):
             direction = _direction(1, [])
             direction["hypothesis"] = claim

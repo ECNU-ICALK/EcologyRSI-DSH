@@ -418,6 +418,37 @@ class EvolutionStageProjectionTests(unittest.TestCase):
             self.assertTrue(progress["retry_wait"]["waiting"])
             self.assertEqual(progress["retry_wait"]["attempt"], 2)
 
+    def test_gateway_retry_wait_clears_when_the_same_stage_restarts(self) -> None:
+        with EventLedger() as ledger:
+            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            run_id = "run:gateway-retry-restarted"
+            director.start_evolution(task(), run_id=run_id)
+            ledger.append(
+                run_id,
+                "GatewayRetryScheduled",
+                {
+                    "generation": 0,
+                    "stage": "research",
+                    "retry_at": "2026-08-19T12:00:15+00:00",
+                    "delay_seconds": 15.0,
+                    "attempt": 2,
+                    "error_code": "gateway_response_error",
+                    "reason": "provider cooldown",
+                },
+            )
+            director.record_evolution_stage(
+                run_id,
+                generation=0,
+                stage="research",
+                status="started",
+                attempt=2,
+            )
+
+            progress = _projection_json(director.replay(run_id))["execution_progress"]
+
+            self.assertNotEqual(progress["phase"], "gateway_retry")
+            self.assertIsNone(progress.get("retry_wait"))
+
     def test_unscoped_stage_does_not_override_a_completed_candidate_stage(self) -> None:
         with EventLedger() as ledger:
             director = EvolutionDirector(ledger, FakeDSHAdapter())

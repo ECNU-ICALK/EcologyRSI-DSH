@@ -69,7 +69,7 @@ _FORBIDDEN_SAMPLE_CONTEXT_TOKENS = frozenset(
 )
 _SAMPLE_CHECKPOINT_SCHEMA_VERSION = "ecologyrsi-dsh.sample-checkpoint/1"
 SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION = (
-    "ecologyrsi-dsh.sample-agent-chain-attestation/2"
+    "ecologyrsi-dsh.sample-agent-chain-attestation/3"
 )
 
 
@@ -776,6 +776,31 @@ class CollaborativeSampleExecutor:
         )
         strict_origin_contract = is_strict_origin_protocol(sample_agent_protocol)
         strict_agent_contract = strict_origin_contract
+        required_success_remote_roles: tuple[str, ...] = ()
+        if strict_agent_contract:
+            raw_required_roles = plan.get("required_success_remote_roles")
+            if raw_required_roles is None:
+                # Historical strict adapters predate the explicit role list.
+                required_success_remote_roles = (
+                    "planner",
+                    "critic",
+                    "reflector",
+                )
+            elif (
+                not isinstance(raw_required_roles, (list, tuple))
+                or not raw_required_roles
+                or any(
+                    role not in {"planner", "critic", "reflector"}
+                    for role in raw_required_roles
+                )
+                or len(set(raw_required_roles)) != len(raw_required_roles)
+                or "planner" not in raw_required_roles
+            ):
+                raise SampleExecutionContractError(
+                    "strict origin required remote roles are invalid"
+                )
+            else:
+                required_success_remote_roles = tuple(raw_required_roles)
         concurrent_origin_contract = supports_concurrent_origins(
             sample_agent_protocol
         )
@@ -1431,14 +1456,19 @@ class CollaborativeSampleExecutor:
                     record["sample_reflection"] = reflection
                 if reflection_decision is not None:
                     _attach_execution_trace(record, [reflection_decision], [])
+                if strict_agent_contract:
+                    record["sample_agent_chain"] = _sample_agent_chain_attestation(
+                        record,
+                        required_remote_roles=required_success_remote_roles,
+                    )
                 records.append(record)
                 fallback_row = _fallback_scoring_row(row, request, record)
                 if reflection is not None:
                     fallback_row["sample_reflection"] = reflection
                 if strict_agent_contract:
-                    fallback_row["sample_agent_chain"] = (
-                        _sample_agent_chain_attestation(record)
-                    )
+                    fallback_row["sample_agent_chain"] = record[
+                        "sample_agent_chain"
+                    ]
                 append_scoring_row(fallback_row)
                 scoring_fallback_examples += 1
                 task_count["failed_examples"] += 1
@@ -1624,14 +1654,19 @@ class CollaborativeSampleExecutor:
                     record["attempt_trace"] = attempt_trace
                 if reflection is not None:
                     record["sample_reflection"] = reflection
+                if strict_agent_contract:
+                    record["sample_agent_chain"] = _sample_agent_chain_attestation(
+                        record,
+                        required_remote_roles=required_success_remote_roles,
+                    )
                 records.append(record)
                 fallback_row = _fallback_scoring_row(row, request, record)
                 if reflection is not None:
                     fallback_row["sample_reflection"] = reflection
                 if strict_agent_contract:
-                    fallback_row["sample_agent_chain"] = (
-                        _sample_agent_chain_attestation(record)
-                    )
+                    fallback_row["sample_agent_chain"] = record[
+                        "sample_agent_chain"
+                    ]
                 append_scoring_row(fallback_row)
                 scoring_fallback_examples += 1
                 task_count["failed_examples"] += 1
@@ -1727,6 +1762,11 @@ class CollaborativeSampleExecutor:
                 record["attempt_trace"] = attempt_trace
             if reflection is not None:
                 record["sample_reflection"] = reflection
+            if strict_agent_contract:
+                record["sample_agent_chain"] = _sample_agent_chain_attestation(
+                    record,
+                    required_remote_roles=required_success_remote_roles,
+                )
             records.append(record)
             if failure_history:
                 record["failure_history"] = [dict(item) for item in failure_history]
@@ -1743,9 +1783,9 @@ class CollaborativeSampleExecutor:
             if reflection is not None:
                 executed_row["sample_reflection"] = reflection
             if strict_agent_contract:
-                executed_row["sample_agent_chain"] = (
-                    _sample_agent_chain_attestation(record)
-                )
+                executed_row["sample_agent_chain"] = record[
+                    "sample_agent_chain"
+                ]
             successful_rows.append(executed_row)
             append_scoring_row(executed_row)
 
@@ -2198,10 +2238,14 @@ class CollaborativeSampleExecutor:
                 policy=policy,
                 first_attempt_outcomes=first_attempt_outcomes,
             )
-            origin_reflections = self._prepare_origin_reflection(
-                bundle,
-                prefetched_attempt_outcomes=origin_outcomes,
-                policy=policy,
+            origin_reflections = (
+                self._prepare_origin_reflection(
+                    bundle,
+                    prefetched_attempt_outcomes=origin_outcomes,
+                    policy=policy,
+                )
+                if getattr(self.adapter, "sample_reflection_enabled", True)
+                else {}
             )
             return (
                 origin_outcomes,
@@ -3510,6 +3554,8 @@ def _run_sample_reflection(
     """Run an optional post-score reflector and return its public evidence."""
 
     if prepared_reflection is None:
+        if getattr(adapter, "sample_reflection_enabled", True) is False:
+            return None, None
         reflector = getattr(adapter, "reflect_sample", None)
         if not callable(reflector):
             return None, None
@@ -3919,6 +3965,8 @@ def _attach_execution_trace(
 
 def _sample_agent_chain_attestation(
     record: Mapping[str, Any],
+    *,
+    required_remote_roles: Sequence[str],
 ) -> dict[str, Any]:
     """Bind the minimal proof needed to resume a strict completed sample."""
 
@@ -3954,6 +4002,16 @@ def _sample_agent_chain_attestation(
     )
     response_digest = reflection.get("response_digest")
     wave_digest = reflection.get("wave_digest")
+    required_roles = tuple(required_remote_roles)
+    role_counts = {
+        "planner": planner_invocations,
+        "critic": critic_invocations,
+        "reflector": reflector_invocations,
+    }
+    required_roles_complete = all(
+        role_counts.get(role, 0) >= 1 for role in required_roles
+    )
+    reflection_required = "reflector" in required_roles
     body = {
         "schema_version": SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION,
         "sample_id": str(record.get("sample_id") or ""),
@@ -3971,17 +4029,14 @@ def _sample_agent_chain_attestation(
         "reflection_wave_digest": (
             wave_digest if isinstance(wave_digest, str) else None
         ),
+        "required_remote_roles": list(required_roles),
         "complete": bool(
-            planner_invocations >= 1
+            required_roles_complete
             and registered_tool_invocations >= 1
             and dsh_agent_tool_invocations >= 1
-            and critic_invocations >= 1
-            and reflector_invocations >= 1
             and host_route_bypass_count == 0
-            and isinstance(response_digest, str)
-            and bool(response_digest)
-            and isinstance(wave_digest, str)
-            and bool(wave_digest)
+            and (not reflection_required or bool(response_digest))
+            and (not reflection_required or bool(wave_digest))
         ),
     }
     return {**body, "attestation_digest": digest(body)}
