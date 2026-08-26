@@ -1168,6 +1168,14 @@
 
     snapshot.completed_samples = completed;
     snapshot.total_samples = total;
+    if (durableUsesCellUnits && heartbeatTotal != null && durableTotal > heartbeatTotal) {
+      var aggregateInFlight = executionDiagnosticNumber(snapshot.in_flight_batches) || 0;
+      var aggregateQueued = executionDiagnosticNumber(snapshot.queued_batches) || 0;
+      snapshot.awaiting_submission_batches = Math.max(
+        0,
+        total - completed - aggregateInFlight - aggregateQueued,
+      );
+    }
     if (heartbeatOutcomesCurrent) {
       snapshot.succeeded_samples = heartbeatSucceeded;
       snapshot.failed_samples = heartbeatFailed;
