@@ -36,6 +36,8 @@ from ..core.models import (
     digest,
     utc_now,
 )
+from ..core.protocols import is_strict_origin_protocol
+from ..core.sample_budget import complete_origin_count, scoring_cell_budget
 from ..core.sample_results import MAX_SAMPLE_RESULTS_UNCOMPRESSED_BYTES
 from ..data.registry import DatasetRegistry
 from ..evaluators.registry import (
@@ -2379,11 +2381,10 @@ class EvolutionRequestHandler(
                     f"{_MAX_REAL_SAMPLE_CONCURRENCY}"
                 )
             if samples_per_update is None:
-                samples_per_update = max(
-                    _DEFAULT_SAMPLES_PER_UPDATE,
-                    minimum_selection_samples_per_update
+                samples_per_update = (
+                    scoring_cell_budget(500, prediction_cells_per_origin)
                     if native_protocol
-                    else 0,
+                    else _DEFAULT_SAMPLES_PER_UPDATE
                 )
             # A strict native run may deliberately use one complete balanced
             # origin as a diagnostic smoke.  It still executes every required
@@ -2407,6 +2408,10 @@ class EvolutionRequestHandler(
                     "samples_per_update must be an integer between "
                     f"{minimum_samples_per_update} and {_MAX_SAMPLES_PER_UPDATE} "
                     "so every evaluator target and horizon can be represented"
+                )
+            if native_protocol:
+                complete_origin_count(
+                    samples_per_update, prediction_cells_per_origin
                 )
             if sample_agent_batch_size is None:
                 sample_agent_batch_size = _DEFAULT_SAMPLE_AGENT_BATCH_SIZE
@@ -2863,10 +2868,9 @@ class EvolutionRequestHandler(
                 expected_profile.minimum_balanced_samples_per_update()
             ):
                 raise FrozenRuntimeBindingDriftError("selection sample threshold")
-            if metadata.get("sample_agent_protocol") in {
-                "dsh-strict-origin-bundle@3",
-                "dsh-strict-origin-bundle@4",
-            } and (
+            if is_strict_origin_protocol(
+                metadata.get("sample_agent_protocol")
+            ) and (
                 metadata.get("minimum_selection_origin_samples_per_update")
                 != expected_profile.minimum_balanced_origins_per_update()
                 or metadata.get("prediction_cells_per_origin")

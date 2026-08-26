@@ -15,6 +15,7 @@ from copy import deepcopy
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from ..core.models import Proposal, Run, TaskManifest, canonical_json, digest
+from ..core.protocols import is_strict_origin_protocol
 from ..core.redaction import public_error_summary, public_exception_summary
 from ..evaluators.greenhouse_prediction import (
     EXOGENOUS_RIDGE_MODEL_ID,
@@ -176,9 +177,8 @@ def _forecast_objective_context(task: TaskManifest) -> dict[str, Any]:
         "matrix_cell_count": len(cells),
         "prediction_cells_per_origin": configured_cell_count,
         "complete_matrix_required": bool(cells),
-        "joint_prediction_call_per_origin": (
+        "joint_prediction_call_per_origin": is_strict_origin_protocol(
             task.metadata.get("sample_agent_protocol")
-            in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
         ),
     }
     dataset_display_name = task.metadata.get("dataset_display_name")

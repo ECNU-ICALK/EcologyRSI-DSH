@@ -19,6 +19,10 @@ from ..core.models import (
     canonical_json,
     digest,
 )
+from ..core.protocols import (
+    is_strict_origin_protocol,
+    supports_two_stage_screening,
+)
 from ..core.redaction import (
     public_error_summary,
     public_exception_summary,
@@ -29,6 +33,7 @@ from ..core.sample_results import (
     sample_result_batch_event_payload,
     sample_results_event_payload,
 )
+from ..core.sample_budget import complete_origin_count
 from ..evaluators.registry import RULE_JUDGE_ID, EvaluationBundle, EvaluatorRegistry
 from ..evaluators.gateway_sample_adapter import ModelTokenBudgetExhaustedError
 from ..evaluators.sample_execution import (
@@ -135,8 +140,7 @@ def _two_stage_screening_enabled(state: Any, candidates: Any) -> bool:
     metadata = state.task_manifest.metadata
     return bool(
         len(tuple(candidates)) > _FORMAL_FINALIST_COUNT
-        and metadata.get("sample_agent_protocol")
-        == "dsh-strict-origin-bundle@4"
+        and supports_two_stage_screening(metadata.get("sample_agent_protocol"))
         and metadata.get("sample_budget_class") == "selection_eligible"
         and metadata.get("two_stage_evaluation_enabled", True) is True
     )
@@ -145,7 +149,7 @@ def _two_stage_screening_enabled(state: Any, candidates: Any) -> bool:
 def _phase_task_manifest(task: Any, generation: int, phase: str) -> Any:
     cells_per_origin = int(task.metadata.get("prediction_cells_per_origin", 1))
     formal_cells = int(task.metadata.get("samples_per_update", cells_per_origin))
-    formal_origins = max(1, formal_cells // cells_per_origin)
+    formal_origins = complete_origin_count(formal_cells, cells_per_origin)
     generation_stride = _SCREENING_ORIGIN_COUNT + formal_origins
     if phase == "screening":
         origin_count = _SCREENING_ORIGIN_COUNT
@@ -440,8 +444,9 @@ def _evaluate_generation_controls(
             else candidate.slot_index != 0
         )
         or candidate.generation <= 0
-        or state.task_manifest.metadata.get("sample_agent_protocol")
-        not in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
+        or not is_strict_origin_protocol(
+            state.task_manifest.metadata.get("sample_agent_protocol")
+        )
         or state.task_manifest.metadata.get("sample_budget_class")
         != "selection_eligible"
         or not isinstance(endpoint.server.evaluators, EvaluatorRegistry)
@@ -2068,8 +2073,9 @@ def complete_if_budget_exhausted(
     if generation_exhausted:
         reasons.append("generation_budget_exhausted")
     diagnostic_smoke = (
-        state.task_manifest.metadata.get("sample_agent_protocol")
-        in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
+        is_strict_origin_protocol(
+            state.task_manifest.metadata.get("sample_agent_protocol")
+        )
         and state.task_manifest.metadata.get("sample_budget_class")
         == "diagnostic_smoke"
     )
@@ -2112,8 +2118,9 @@ def _generation_evidence_failure(state: Any, generation: int) -> str | None:
             "已停止连续进化，未推进到下一轮。"
         )
     if strict_generation_controls_required(state.task_manifest, generation) or (
-        state.task_manifest.metadata.get("sample_agent_protocol")
-        in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
+        is_strict_origin_protocol(
+            state.task_manifest.metadata.get("sample_agent_protocol")
+        )
     ):
         metadata = state.task_manifest.metadata
         sample_budget_class = metadata.get("sample_budget_class")
@@ -2155,8 +2162,17 @@ def _generation_evidence_failure(state: Any, generation: int) -> str | None:
                     "诊断运行不能覆盖一个完整预测向量；"
                     "已停止连续进化，未推进到下一轮。"
                 )
-            minimum_origins = max(1, configured_samples // cells_per_origin)
-            minimum_samples = minimum_origins * cells_per_origin
+            try:
+                minimum_origins = complete_origin_count(
+                    configured_samples, cells_per_origin
+                )
+            except ValueError:
+                return (
+                    "本轮证据门禁失败（generation_selection_evidence_ineligible）："
+                    "诊断运行不能覆盖完整预测向量；"
+                    "已停止连续进化，未推进到下一轮。"
+                )
+            minimum_samples = configured_samples
         if (
             isinstance(minimum_samples, bool)
             or not isinstance(minimum_samples, int)

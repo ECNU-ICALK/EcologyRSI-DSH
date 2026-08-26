@@ -18,6 +18,7 @@ from ..core.models import (
     digest,
     utc_now,
 )
+from ..core.protocols import is_strict_origin_protocol
 from .promotion import assess_promotion_improvement
 from ..evaluators.fitness import (
     EXPLORATORY_EVIDENCE_CLASS,
@@ -31,9 +32,6 @@ GENERATION_CONTROL_EVALUATION_SCHEMA = (
     "ecologyrsi-dsh.generation-control-evaluation/1"
 )
 GENERATION_CONTROL_POLICY = "same_cohort_search_parent_and_formal_elite@1"
-STRICT_SAMPLE_AGENT_PROTOCOLS = frozenset(
-    {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
-)
 _EXPERIENCE_MAX_GENERATIONS = 6
 _EXPERIENCE_SCAN_GENERATIONS = 24
 _EXPERIENCE_MAX_ACTIVE_ISSUES = 16
@@ -261,8 +259,7 @@ def strict_generation_controls_required(task: Any, generation: int) -> bool:
     return bool(
         generation > 0
         and isinstance(metadata, Mapping)
-        and metadata.get("sample_agent_protocol")
-        in STRICT_SAMPLE_AGENT_PROTOCOLS
+        and is_strict_origin_protocol(metadata.get("sample_agent_protocol"))
         and metadata.get("sample_budget_class") == "selection_eligible"
     )
 

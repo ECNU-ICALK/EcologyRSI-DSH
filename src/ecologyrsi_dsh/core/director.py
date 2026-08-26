@@ -66,6 +66,8 @@ from .models import (
     canonical_json,
     digest,
 )
+from .protocols import is_strict_origin_protocol
+from .sample_budget import complete_origin_count
 from .sample_results import (
     MAX_SAMPLE_RESULTS_RECORDS,
     decode_sample_result_batch,
@@ -2228,9 +2230,8 @@ class EvolutionDirector:
                 and event.payload.get("role") == "planner"
             ]
             expected_progress_count = expected_count
-            if (
+            if is_strict_origin_protocol(
                 state.task_manifest.metadata.get("sample_agent_protocol")
-                in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
             ):
                 cells_per_origin = state.task_manifest.metadata.get(
                     "prediction_cells_per_origin"
@@ -2239,12 +2240,18 @@ class EvolutionDirector:
                     isinstance(cells_per_origin, bool)
                     or not isinstance(cells_per_origin, int)
                     or cells_per_origin < 1
-                    or expected_count % cells_per_origin != 0
                 ):
                     raise ValueError(
                         "origin-bundle checkpoint has an invalid prediction-cell count"
                     )
-                expected_progress_count = expected_count // cells_per_origin
+                try:
+                    expected_progress_count = complete_origin_count(
+                        expected_count, cells_per_origin
+                    )
+                except ValueError as exc:
+                    raise ValueError(
+                        "origin-bundle checkpoint has an invalid prediction-cell count"
+                    ) from exc
             if (
                 planner_progress
                 and int(planner_progress[-1].payload["total_samples"])

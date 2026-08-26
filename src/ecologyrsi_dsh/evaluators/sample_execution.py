@@ -26,6 +26,10 @@ from ..core.errors import (
     dsh_native_runtime_retryable,
 )
 from ..core.models import canonical_json, digest
+from ..core.protocols import (
+    is_strict_origin_protocol,
+    supports_concurrent_origins,
+)
 from ..core.redaction import safe_remote_reason_code
 from ..evolution.execution_plan import DerivedExecutionPlan
 from ..integrations.model_gateway import gateway_error_in_chain
@@ -765,13 +769,10 @@ class CollaborativeSampleExecutor:
         sample_agent_protocol = (
             str(plan.get("sample_agent_protocol")) if plan is not None else ""
         )
-        strict_origin_contract = sample_agent_protocol in {
-            "dsh-strict-origin-bundle@3",
-            "dsh-strict-origin-bundle@4",
-        }
+        strict_origin_contract = is_strict_origin_protocol(sample_agent_protocol)
         strict_agent_contract = strict_origin_contract
-        concurrent_origin_contract = (
-            sample_agent_protocol == "dsh-strict-origin-bundle@4"
+        concurrent_origin_contract = supports_concurrent_origins(
+            sample_agent_protocol
         )
         origin_bundles: tuple[_StrictOriginBundle, ...] = ()
         origin_bundle_by_sample_id: dict[str, _StrictOriginBundle] = {}

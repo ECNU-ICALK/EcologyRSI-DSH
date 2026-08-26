@@ -12,6 +12,7 @@ from ..core.errors import (
     FROZEN_RUNTIME_BINDING_DRIFT_PUBLIC_MESSAGE,
 )
 from ..core.models import Evaluation, HumanIntervention, InterventionKind
+from ..core.protocols import supports_two_stage_screening
 from ..core.redaction import (
     public_error_summary,
     safe_error_code,
@@ -1545,8 +1546,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
 
     metadata = state.task_manifest.metadata
     if (
-        metadata.get("sample_agent_protocol")
-        != "dsh-strict-origin-bundle@4"
+        not supports_two_stage_screening(metadata.get("sample_agent_protocol"))
         or metadata.get("two_stage_evaluation_enabled", True) is not True
         or state.run.status.value != "running"
     ):

@@ -9,12 +9,14 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from ecologyrsi_dsh.core.models import digest
+from ecologyrsi_dsh.core.sample_budget import complete_origin_count
+from ecologyrsi_dsh.integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 from ecologyrsi_dsh.integrations.model_gateway import GatewayResponseError
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 
@@ -635,12 +637,49 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
         }
         series = SimpleNamespace(
             digest="d" * 64,
-            split_manifest_digest_sha256="s" * 64,
+            split_manifest_digest_sha256="b" * 64,
             episode_id="agc_cucumber_2018:test",
         )
+        selection_view = SimpleNamespace(
+            data_protocol_digest="c" * 64,
+            selection_view_digest="e" * 64,
+        )
+        native_runtime = Mock()
+        native_runtime.capabilities.return_value = {
+            "schema_version": "ecology-agent-runtime-capabilities/1",
+            "ready": True,
+            "root_services": {"required": ["agents"], "missing": [], "declared": True},
+            "presets": [
+                {
+                    "preset_id": preset_id,
+                    "declared": True,
+                    "preset_mountable": True,
+                    "tool_surface_verified": True,
+                    "route_resolvable": True,
+                    "live_agent_service_ready": True,
+                    "first_call_verified": False,
+                }
+                for preset_id in (
+                    "ecology-coordinator-v4",
+                    "ecology-researcher-v7",
+                    "ecology-candidate-proposer-v4",
+                    "ecology-sample-planner-v4",
+                    "ecology-sample-critic-v4",
+                    "ecology-generation-judge-v7",
+                )
+            ],
+            "live_agent_service_ready": True,
+            "first_call_verified": False,
+        }
+        self.server.dsh_native_runtime = native_runtime
         with (
             patch.object(self.server.datasets, "describe", return_value=description),
             patch.object(self.server.datasets, "series", return_value=series),
+            patch.object(
+                self.server.datasets,
+                "selection_view",
+                return_value=selection_view,
+            ),
         ):
             status, created = self.request(
                 "/runs",
@@ -662,23 +701,45 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     "idempotency_key": "autonomous-runtime-context",
                 },
             )
-            explicit_status, explicit_created = self.request(
+            strict_status, strict_created = self.request(
                 "/runs",
                 "POST",
                 {
+                    "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                     "domain_pack_id": "greenhouse_environment@1",
                     "dataset_id": "agc_cucumber_2018",
                     "strategy_model_id": "dsh-policy",
                     "review_model_id": "dsh-judge",
                     "autonomous_mode": True,
                     "prediction_model_id": "greenhouse-exogenous-ridge@1",
-                    "evaluator_id": "greenhouse_multihorizon_time_forward@1",
+                    "evaluator_id": "greenhouse_multihorizon_time_forward@2",
                     "budget": {
                         "max_generations": 1,
                         "candidates_per_generation": 1,
                         "max_candidates": 1,
                     },
-                    "samples_per_update": 321,
+                    "auto_advance": 0,
+                    "idempotency_key": "autonomous-runtime-strict-default-sampling",
+                },
+            )
+            explicit_status, explicit_created = self.request(
+                "/runs",
+                "POST",
+                {
+                    "domain_pack_id": "greenhouse_environment@1",
+                    "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                    "dataset_id": "agc_cucumber_2018",
+                    "strategy_model_id": "dsh-policy",
+                    "review_model_id": "dsh-judge",
+                    "autonomous_mode": True,
+                    "prediction_model_id": "greenhouse-exogenous-ridge@1",
+                    "evaluator_id": "greenhouse_multihorizon_time_forward@2",
+                    "budget": {
+                        "max_generations": 1,
+                        "candidates_per_generation": 1,
+                        "max_candidates": 1,
+                    },
+                    "samples_per_update": 450,
                     "candidate_concurrency": 3,
                     "sample_concurrency": 3,
                     "sample_agent_batch_size": 16,
@@ -686,10 +747,33 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     "idempotency_key": "autonomous-runtime-explicit-sampling",
                 },
             )
+            explicit_formal_status, explicit_formal_created = self.request(
+                "/runs",
+                "POST",
+                {
+                    "domain_pack_id": "greenhouse_environment@1",
+                    "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                    "dataset_id": "agc_cucumber_2018",
+                    "strategy_model_id": "dsh-policy",
+                    "review_model_id": "dsh-judge",
+                    "autonomous_mode": True,
+                    "prediction_model_id": "greenhouse-exogenous-ridge@1",
+                    "evaluator_id": "greenhouse_multihorizon_time_forward@2",
+                    "budget": {
+                        "max_generations": 1,
+                        "candidates_per_generation": 1,
+                        "max_candidates": 1,
+                    },
+                    "samples_per_update": 4_500,
+                    "auto_advance": 0,
+                    "idempotency_key": "autonomous-runtime-explicit-formal-sampling",
+                },
+            )
             rejected_sampling_controls = []
             for index, (name, value) in enumerate(
                 (
                     ("samples_per_update", 8),
+                    ("samples_per_update", 4_501),
                     ("samples_per_update", 100_001),
                     ("candidate_concurrency", 9),
                     ("sample_concurrency", 9),
@@ -702,12 +786,13 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                         "POST",
                         {
                             "domain_pack_id": "greenhouse_environment@1",
+                            "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                             "dataset_id": "agc_cucumber_2018",
                             "strategy_model_id": "dsh-policy",
                             "review_model_id": "dsh-judge",
                             "autonomous_mode": True,
                             "prediction_model_id": "greenhouse-exogenous-ridge@1",
-                            "evaluator_id": "greenhouse_multihorizon_time_forward@1",
+                            "evaluator_id": "greenhouse_multihorizon_time_forward@2",
                             "budget": {"max_generations": 1, "max_candidates": 1},
                             name: value,
                             "auto_advance": 0,
@@ -716,7 +801,11 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     )
                 )
         self.assertEqual(status, 201, created)
+        self.assertEqual(strict_status, 201, strict_created)
         self.assertEqual(explicit_status, 201, explicit_created)
+        self.assertEqual(
+            explicit_formal_status, 201, explicit_formal_created
+        )
         self.assertTrue(
             all(status == 400 for status, _payload in rejected_sampling_controls),
             rejected_sampling_controls,
@@ -730,14 +819,32 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
             created["projection"]["configuration"]["samples_per_update"], 1_600
         )
         self.assertEqual(
+            complete_origin_count(
+                strict_created["projection"]["configuration"]["samples_per_update"],
+                strict_created["projection"]["configuration"]["prediction_cells_per_origin"],
+            ),
+            500,
+        )
+        self.assertEqual(
             created["projection"]["configuration"]["sample_concurrency"], 8
         )
         self.assertEqual(
             created["projection"]["configuration"]["candidate_concurrency"], 4
         )
         explicit_configuration = explicit_created["projection"]["configuration"]
-        self.assertEqual(explicit_configuration["samples_per_update"], 321)
+        self.assertEqual(explicit_configuration["samples_per_update"], 450)
         self.assertEqual(explicit_configuration["sample_budget_class"], "diagnostic_smoke")
+        self.assertEqual(
+            complete_origin_count(
+                explicit_configuration["samples_per_update"],
+                explicit_configuration["prediction_cells_per_origin"],
+            ),
+            50,
+        )
+        self.assertEqual(
+            explicit_formal_created["projection"]["configuration"]["samples_per_update"],
+            4_500,
+        )
         self.assertEqual(
             explicit_configuration["minimum_selection_samples_per_update"],
             1_521,

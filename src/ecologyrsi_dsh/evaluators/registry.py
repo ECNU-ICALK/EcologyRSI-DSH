@@ -21,6 +21,7 @@ from ..core.models import (
     TaskManifest,
     digest,
 )
+from ..core.protocols import is_strict_origin_protocol
 from ..core.sample_results import SAMPLE_REWARD_DEFINITION, build_sample_results
 from ..data.registry import DatasetRegistry, DatasetSeries
 from ..data.toy import ToyCropSoilWater
@@ -856,8 +857,9 @@ class EvaluatorRegistry:
             if not strategy_model_id or not review_model_id:
                 raise ValueError("DSH-native sample roles require frozen model routes")
             if (
-                task.metadata.get("sample_agent_protocol")
-                not in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
+                not is_strict_origin_protocol(
+                    task.metadata.get("sample_agent_protocol")
+                )
             ):
                 raise ValueError(
                     "DSH-native sample execution requires the strict origin-bundle protocol"
@@ -2119,8 +2121,9 @@ class EvaluatorRegistry:
                     dataset_digest=series.digest,
                     split_manifest_digest=series.split_manifest_digest_sha256,
                     bundle_complete_origins=(
-                        task.metadata.get("sample_agent_protocol")
-                        in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
+                        is_strict_origin_protocol(
+                            task.metadata.get("sample_agent_protocol")
+                        )
                     ),
                     origin_window_offset=task.metadata.get(
                         "evaluation_origin_window_offset"
@@ -2860,8 +2863,9 @@ class EvaluatorRegistry:
                     dataset_digest=series.digest,
                     split_manifest_digest=series.split_manifest_digest_sha256,
                     bundle_complete_origins=(
-                        task.metadata.get("sample_agent_protocol")
-                        in {"dsh-strict-origin-bundle@3", "dsh-strict-origin-bundle@4"}
+                        is_strict_origin_protocol(
+                            task.metadata.get("sample_agent_protocol")
+                        )
                     ),
                     origin_window_offset=task.metadata.get(
                         "evaluation_origin_window_offset"
