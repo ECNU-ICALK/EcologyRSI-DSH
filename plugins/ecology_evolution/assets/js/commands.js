@@ -209,10 +209,13 @@
     };
   }
 
-  function normalizedSamplesPerUpdate(value) {
+  function normalizedPredictionOriginsPerUpdate(value) {
     var parsed = Math.floor(Number(value));
-    if (!Number.isFinite(parsed) || parsed < 1) { return 1600; }
-    return Math.min(parsed, 100000);
+    var fallback = 500;
+    var cellsPerOrigin = typeof predictionCellsPerOrigin === "function" ? predictionCellsPerOrigin() : 1;
+    var maximum = Math.max(1, Math.floor(100000 / Math.max(1, cellsPerOrigin)));
+    if (!Number.isFinite(parsed) || parsed < 1) { parsed = fallback; }
+    return Math.min(parsed, maximum);
   }
 
   function normalizedSampleAgentBatchSize(value) {
@@ -223,7 +226,7 @@
 
   function normalizedSampleConcurrency(value) {
     var parsed = Math.floor(Number(value));
-    if (!Number.isFinite(parsed) || parsed < 1) { return 2; }
+    if (!Number.isFinite(parsed) || parsed < 1) { return 8; }
     return Math.min(parsed, 8);
   }
 
@@ -265,17 +268,17 @@
 
   function createRun(payload) {
     if (!hasCapability("evolution.run.create")) { showToast("当前 DSH 会话未授予创建进化运行的能力。"); return Promise.resolve(null); }
-    var requestedSamplesPerUpdate = normalizedSamplesPerUpdate(payload.samples_per_update);
+    var cellsPerOrigin = predictionCellsPerOrigin();
+    var requestedPredictionOrigins = normalizedPredictionOriginsPerUpdate(payload.prediction_origins_per_update);
+    var minimumPredictionOrigins = predictionOriginsPerUpdateSelectionMinimum();
     var minimumSamplesPerUpdate = samplesPerUpdateSelectionMinimum();
-    if (requestedSamplesPerUpdate < minimumSamplesPerUpdate) {
-      var evaluator = selectedCatalogItem("evaluators", "#evaluator-id");
-      var cellsPerOrigin = Math.max(1, Number(evaluator && evaluator.prediction_task_count) || 1);
-      var minimumOrigins = Number(evaluator && evaluator.minimum_selection_origin_samples_per_update) || Math.ceil(minimumSamplesPerUpdate / cellsPerOrigin);
-      showToast("每次更新预测单元不足：严格 DSH 评测至少需要 " + formatNumber(minimumOrigins) + " 个完整预测时点（" + formatNumber(minimumSamplesPerUpdate) + " 个评分单元）。");
+    if (requestedPredictionOrigins < minimumPredictionOrigins) {
+      showToast("每次更新完整预测次数不足：严格 DSH 评测至少需要 " + formatNumber(minimumPredictionOrigins) + " 次完整预测（" + formatNumber(minimumSamplesPerUpdate) + " 个内部评分单元）。");
       var samplesPerUpdateField = $("#samples-per-update");
       if (samplesPerUpdateField && typeof samplesPerUpdateField.focus === "function") { samplesPerUpdateField.focus(); }
       return Promise.resolve(null);
     }
+    var requestedSamplesPerUpdate = requestedPredictionOrigins * cellsPerOrigin;
     var effectiveBudget = normalizedEvolutionBudget(
       payload.rounds || payload.max_generations,
       payload.candidates_per_generation,

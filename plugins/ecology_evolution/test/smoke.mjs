@@ -1667,12 +1667,13 @@ assert.match(reuseToasts.at(-1), /候选总预算不足/);
 const createRunQuerySelector = modelSandbox.document.querySelector;
 const originalEvaluators = modelSandbox.state.catalog.evaluators;
 const multiHorizonEvaluatorNode = {value: "greenhouse-multi-horizon@1"};
+const samplesPerUpdateNode = {min: "", max: "", focus() { samplesPerUpdateFocused = true; }};
+const samplesPerUpdateHelpNode = {textContent: ""};
 let samplesPerUpdateFocused = false;
 modelSandbox.document.querySelector = (selector) => {
   if (selector === "#evaluator-id") { return multiHorizonEvaluatorNode; }
-  if (selector === "#samples-per-update") {
-    return {focus() { samplesPerUpdateFocused = true; }};
-  }
+  if (selector === "#samples-per-update") { return samplesPerUpdateNode; }
+  if (selector === "#samples-per-update-help") { return samplesPerUpdateHelpNode; }
   return createRunQuerySelector(selector);
 };
 modelSandbox.state.catalog.evaluators = [{
@@ -1682,6 +1683,10 @@ modelSandbox.state.catalog.evaluators = [{
   minimum_selection_samples_per_update: 1521,
   minimum_selection_origin_samples_per_update: 169,
 }];
+modelSandbox.updateSamplesPerUpdateBoundary();
+assert.equal(samplesPerUpdateNode.min, "169");
+assert.equal(samplesPerUpdateNode.max, "11111");
+assert.match(samplesPerUpdateHelpNode.textContent, /169 次完整预测（1,521 个评分单元）/);
 const requestBeforeSampleBoundaryTest = modelSandbox.request;
 let rejectedSampleBoundaryRequestCount = 0;
 modelSandbox.request = async () => { rejectedSampleBoundaryRequestCount += 1; return {}; };
@@ -1689,15 +1694,13 @@ const insufficientSamplesRun = await modelSandbox.createRun({
   dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a", review_model_id: "judge-a",
   autonomous_mode: true, model_workflow: "research_compile_evolve@1", knowledge_online_enabled: true,
   rounds: 2, candidates_per_generation: 3, max_candidates: 6,
-  samples_per_update: 8, fixed_seed: true, auto_advance: 0,
+  prediction_origins_per_update: 168, fixed_seed: true, auto_advance: 0,
 });
 assert.equal(insufficientSamplesRun, null);
 assert.equal(rejectedSampleBoundaryRequestCount, 0);
 assert.equal(samplesPerUpdateFocused, true);
-assert.equal(reuseToasts.at(-1), "每次更新预测单元不足：严格 DSH 评测至少需要 169 个完整预测时点（1,521 个评分单元）。");
+assert.equal(reuseToasts.at(-1), "每次更新完整预测次数不足：严格 DSH 评测至少需要 169 次完整预测（1,521 个内部评分单元）。");
 modelSandbox.request = requestBeforeSampleBoundaryTest;
-modelSandbox.state.catalog.evaluators = originalEvaluators;
-modelSandbox.document.querySelector = createRunQuerySelector;
 
 // A continuous create returns immediately at generation 0.  The UI must say
 // that work is queued instead of claiming the first generation already ran.
@@ -1735,10 +1738,10 @@ modelSandbox.request = async (path, options) => {
   queuedCreateRequests += 1;
   queuedCreateBody = options.body;
   assert.equal(Object.hasOwn(options.body.budget, "token_limit"), false);
-  assert.equal(options.body.samples_per_update, 1600);
+  assert.equal(options.body.samples_per_update, 4500);
   assert.equal(options.body.candidate_concurrency, 4);
   assert.equal(options.body.sample_agent_batch_size, 64);
-  assert.equal(options.body.sample_concurrency, 2);
+  assert.equal(options.body.sample_concurrency, 8);
   return {
     projection: {
       run_id: "run:new-queued", status: "running", generation: 0, candidates_count: 0,
@@ -1746,7 +1749,7 @@ modelSandbox.request = async (path, options) => {
       budget: {max_generations: 2, candidates_per_generation: 3, max_candidates: 6},
       configuration: {
         dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a", review_model_id: "judge-a",
-        samples_per_update: 1600, candidate_concurrency: 4, sample_agent_batch_size: 64, sample_concurrency: 2,
+        samples_per_update: 4500, candidate_concurrency: 4, sample_agent_batch_size: 64, sample_concurrency: 8,
       },
     },
   };
@@ -1763,10 +1766,10 @@ assert.deepEqual(
   Array.from(modelSandbox.state.runs.map((run) => run.id)),
   ["run:new-queued", "run:existing-identical"],
 );
-assert.equal(newlyQueuedRun.samples_per_update, 1600);
+assert.equal(newlyQueuedRun.samples_per_update, 4500);
 assert.equal(newlyQueuedRun.candidate_concurrency, 4);
 assert.equal(newlyQueuedRun.sample_agent_batch_size, 64);
-assert.equal(newlyQueuedRun.sample_concurrency, 2);
+assert.equal(newlyQueuedRun.sample_concurrency, 8);
 assert.equal(modelSandbox.state.createStatus.state, "queued");
 assert.equal(modelSandbox.state.candidateSelectionPinned, false);
 assert.match(createToasts.at(-1), /已排队/);
@@ -1786,7 +1789,7 @@ modelSandbox.request = async (path, options) => {
       budget: {max_generations: 3, candidates_per_generation: 5, max_candidates: 15, token_limit: 60000000},
       configuration: {
         dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a", review_model_id: "judge-a",
-        samples_per_update: 321, candidate_concurrency: 3, sample_agent_batch_size: 16, sample_concurrency: 3,
+        samples_per_update: 2889, candidate_concurrency: 3, sample_agent_batch_size: 16, sample_concurrency: 3,
       },
     },
   };
@@ -1795,18 +1798,18 @@ const nonDefaultRun = await modelSandbox.createRun({
   dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a", review_model_id: "judge-a",
   autonomous_mode: true, model_workflow: "research_compile_evolve@1", knowledge_online_enabled: true,
   rounds: 3, candidates_per_generation: 5, max_candidates: 15,
-  samples_per_update: 321, candidate_concurrency: 3, sample_agent_batch_size: 16, sample_concurrency: 3,
+  prediction_origins_per_update: 321, candidate_concurrency: 3, sample_agent_batch_size: 16, sample_concurrency: 3,
   fixed_seed: true,
 });
 assert.equal(nonDefaultCreateBody.budget.max_generations, 3);
 assert.equal(nonDefaultCreateBody.budget.candidates_per_generation, 5);
-assert.equal(nonDefaultCreateBody.samples_per_update, 321);
+assert.equal(nonDefaultCreateBody.samples_per_update, 2889);
 assert.equal(nonDefaultCreateBody.candidate_concurrency, 3);
 assert.equal(nonDefaultCreateBody.sample_agent_batch_size, 16);
 assert.equal(nonDefaultCreateBody.sample_concurrency, 3);
 assert.equal(nonDefaultRun.total_generations, 3);
 assert.equal(nonDefaultRun.candidates_per_generation, 5);
-assert.equal(nonDefaultRun.samples_per_update, 321);
+assert.equal(nonDefaultRun.samples_per_update, 2889);
 assert.equal(nonDefaultRun.candidate_concurrency, 3);
 assert.equal(nonDefaultRun.sample_agent_batch_size, 16);
 assert.equal(nonDefaultRun.sample_concurrency, 3);
@@ -1814,12 +1817,14 @@ assert.equal(nonDefaultRun.sample_concurrency, 3);
 modelSandbox.document.querySelector = (selector) => selector === "#process-summary" ? processSummaryNode : modelQuerySelector(selector);
 modelSandbox.renderProcessSummary(nonDefaultRun);
 for (const nonDefaultExecutionParameter of [
-  "每轮候选", "5 个版本", "每轮预测预算", "321 个评分单元",
+  "每轮候选", "5 个版本", "每轮预测预算", "2,889 个评分单元",
   "候选并发", "3 个候选", "请求微批", "16 个样本", "逐样本并发", "3 个在飞请求",
 ]) {
   assert.ok(processSummaryNode.innerHTML.includes(nonDefaultExecutionParameter));
 }
 modelSandbox.document.querySelector = modelQuerySelector;
+modelSandbox.state.catalog.evaluators = originalEvaluators;
+modelSandbox.document.querySelector = createRunQuerySelector;
 modelSandbox.selectRun = selectRunCommand;
 modelSandbox.refreshEventsForRun = refreshEventsForRunCommand;
 
@@ -2403,7 +2408,7 @@ const makeControlNode = (value = "") => ({
 const budgetNodes = {
   "#max-generations": makeControlNode("5"),
   "#candidates-per-generation": makeControlNode("4"),
-  "#samples-per-update": makeControlNode("1600"),
+  "#samples-per-update": makeControlNode("500"),
   "#sample-agent-batch-size": makeControlNode("64"),
   "#sample-concurrency": makeControlNode("8"),
   "#max-candidates": makeControlNode("20"),
@@ -2414,6 +2419,7 @@ const budgetSandbox = {
   window: {location: {search: ""}, setTimeout, clearTimeout},
   document: {querySelector: (selector) => budgetNodes[selector] || makeControlNode(), querySelectorAll: () => []},
   EcologyDSHHost: {getPublicContext: () => ({apiBase: "/api"}), request: () => Promise.resolve({})},
+  predictionCellsPerOrigin: () => 9,
 };
 vm.createContext(budgetSandbox);
 vm.runInContext(read("assets/js/core.js"), budgetSandbox);
@@ -2428,12 +2434,46 @@ budgetSandbox.syncCandidateBudget();
 assert.equal(budgetNodes["#max-candidates"].value, "30");
 assert.match(budgetNodes["#max-candidates"].validationMessage, /至少 36/);
 assert.equal(budgetSandbox.candidateBudgetStatus().budget_sufficient, false);
-assert.equal(budgetSandbox.normalizedSamplesPerUpdate("500"), 500);
-assert.equal(budgetSandbox.normalizedSamplesPerUpdate("invalid"), 1600);
+assert.equal(budgetSandbox.normalizedPredictionOriginsPerUpdate("500"), 500);
+assert.equal(budgetSandbox.normalizedPredictionOriginsPerUpdate("invalid"), 500);
+assert.equal(budgetSandbox.normalizedPredictionOriginsPerUpdate("99999"), 11111);
 assert.equal(budgetSandbox.normalizedSampleAgentBatchSize("64"), 64);
 assert.equal(budgetSandbox.normalizedSampleAgentBatchSize("invalid"), 64);
 assert.equal(budgetSandbox.normalizedSampleConcurrency("8"), 8);
 assert.equal(budgetSandbox.normalizedSampleConcurrency("99"), 8);
+assert.equal(budgetSandbox.normalizedSampleConcurrency("invalid"), 8);
+
+const parameterNodes = {
+  "#max-generations": makeControlNode("5"),
+  "#candidates-per-generation": makeControlNode("4"),
+  "#max-candidates": makeControlNode("20"),
+  "#samples-per-update": makeControlNode("500"),
+  "#sample-agent-batch-size": makeControlNode("64"),
+  "#candidate-concurrency": makeControlNode("4"),
+  "#sample-concurrency": makeControlNode("8"),
+  "#parameter-summary-pill": makeControlNode(),
+  "#agent-update-scope": makeControlNode(),
+  "#parameter-budget-state": makeControlNode(),
+  "#parameter-summary": makeControlNode(),
+  "#fixed-seed": {...makeControlNode(), checked: true},
+  "#knowledge-online-enabled": {...makeControlNode(), checked: true},
+};
+const parameterSandbox = {
+  console, URL, URLSearchParams, AbortController, setTimeout, clearTimeout,
+  window: {location: {search: ""}, setTimeout, clearTimeout},
+  document: {querySelector: (selector) => parameterNodes[selector] || makeControlNode(), querySelectorAll: () => []},
+  EcologyDSHHost: {getPublicContext: () => ({apiBase: "/api"}), request: () => Promise.resolve({})},
+  predictionCellsPerOrigin: () => 9,
+};
+vm.createContext(parameterSandbox);
+vm.runInContext(read("assets/js/core.js"), parameterSandbox);
+vm.runInContext(read("assets/js/commands.js"), parameterSandbox);
+vm.runInContext(read("assets/js/render_shell.js"), parameterSandbox);
+parameterSandbox.renderParameters();
+assert.equal(parameterNodes["#parameter-summary-pill"].textContent, "500 次完整预测 / 4,500 个评分单元");
+assert.equal(parameterNodes["#agent-update-scope"].textContent, "每轮固定 500 次完整预测");
+assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("500 次完整预测 / 4,500 个内部评分单元"));
+assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("10,000 个候选-完整预测交互 / 90,000 个内部评分单元"));
 
 const diagnosticNodes = {
   "#execution-diagnostics-summary": makeControlNode(),
@@ -2507,7 +2547,7 @@ assert.match(html, /id="show-archived-runs"/);
 assert.match(html, /id="archive-button"/);
 assert.match(html, /id="delete-button"/);
 assert.equal(manifest.display_name, "生态模型进化工作台");
-assert.equal(manifest.version, "0.3.27");
+assert.equal(manifest.version, "0.3.28");
 assert.equal(manifest.entrypoint.file, "index.html");
 assert.equal(manifest.entrypoint.route, "/plugins/ecology/evolution/");
 assert.equal(manifest.development_only, false);
@@ -2564,7 +2604,7 @@ assert.match(html, /name="review_model_id"/);
 assert.match(html, /name="autonomous_mode" type="hidden" value="true"/);
 assert.doesNotMatch(html, /advanced-settings/);
 assert.match(html, /id="workspace-parameters"[\s\S]*name="candidates_per_generation"/);
-assert.match(html, /id="workspace-parameters"[\s\S]*name="samples_per_update"/);
+assert.match(html, /id="workspace-parameters"[\s\S]*name="prediction_origins_per_update"/);
 assert.match(html, /id="workspace-parameters"[\s\S]*name="candidate_concurrency"/);
 assert.match(html, /id="workspace-parameters"[\s\S]*name="sample_agent_batch_size"/);
 assert.match(html, /id="workspace-parameters"[\s\S]*name="sample_concurrency"/);
@@ -2576,7 +2616,7 @@ assert.doesNotMatch(html, /id="workspace-settings"[\s\S]*id="workspace-parameter
 assert.ok(html.includes("DSH 上下文：等待 Session 计量"));
 assert.doesNotMatch(html, /name="token_limit"/);
 assert.ok(html.includes("全量 training_fit"));
-assert.ok(html.includes("每轮固定 1600 个样本"));
+assert.ok(html.includes("每轮固定 500 次完整预测"));
 assert.match(html, /<label><span>训练数据集<\/span><select id="dataset-id" name="dataset_id" required>/);
 assert.match(html, /<label hidden><span>研究领域（自动推导）/);
 assert.match(html, /<label hidden><span>预测模型/);
@@ -2635,25 +2675,27 @@ for (const contractField of ["descriptor", "readiness", "profile", "features", "
 }
 assert.match(app, /request\("\/runs"/);
 assert.match(html, /id="candidates-per-generation"[^>]*value="4"/);
-assert.match(html, /id="samples-per-update"[^>]*value="1600"/);
+assert.match(html, /<span>每次更新完整预测次数<\/span><input id="samples-per-update"[^>]*name="prediction_origins_per_update"[^>]*value="500"/);
 assert.match(html, /id="candidate-concurrency"[^>]*value="4"/);
 assert.match(html, /id="sample-agent-batch-size"[^>]*value="64"/);
-assert.match(html, /id="sample-concurrency"[^>]*value="2"/);
+assert.match(html, /id="sample-concurrency"[^>]*value="8"/);
 assert.match(html, /id="max-candidates"[^>]*value="20"/);
 assert.doesNotMatch(html, /id="token-limit"/);
 assert.ok(html.includes("样本先按因果预测起点组成 origin wave"));
 assert.ok(html.includes("实际请求数以运行进度为准"));
 assert.doesNotMatch(app, /wavesPerCandidate|每候选约/);
-for (const field of ["rounds", "candidates_per_generation", "samples_per_update", "candidate_concurrency", "sample_agent_batch_size", "sample_concurrency", "max_candidates", "fixed_seed", "knowledge_online_enabled"]) {
+for (const field of ["rounds", "candidates_per_generation", "prediction_origins_per_update", "candidate_concurrency", "sample_agent_batch_size", "sample_concurrency", "max_candidates", "fixed_seed", "knowledge_online_enabled"]) {
   assert.match(html, new RegExp(`name="${field}"[^>]*form="start-form"|form="start-form"[^>]*name="${field}"`));
 }
 assert.match(app, /function syncCandidateBudget\(options\)/);
 assert.match(app, /\$\("#start-button"\)\.disabled = state\.busy;/);
 assert.ok(app.includes("暂时不能创建："));
 assert.ok(app.includes("候选并发、请求微批与逐样本并发参数有效"));
-assert.match(app, /var requestedSamplesPerUpdate = normalizedSamplesPerUpdate\(payload\.samples_per_update\)/);
-assert.match(app, /requestedSamplesPerUpdate < minimumSamplesPerUpdate/);
+assert.match(app, /var requestedPredictionOrigins = normalizedPredictionOriginsPerUpdate\(payload\.prediction_origins_per_update\)/);
+assert.match(app, /requestedPredictionOrigins < minimumPredictionOrigins/);
+assert.match(app, /var requestedSamplesPerUpdate = requestedPredictionOrigins \* cellsPerOrigin/);
 assert.match(app, /samples_per_update: requestedSamplesPerUpdate/);
+assert.match(app, /prediction_origins_per_update: Number\(form\.get\("prediction_origins_per_update"\)\)/);
 assert.match(app, /candidate_concurrency: normalizedCandidateConcurrency\(payload\.candidate_concurrency\)/);
 assert.match(app, /sample_agent_batch_size: normalizedSampleAgentBatchSize\(payload\.sample_agent_batch_size\)/);
 assert.match(app, /sample_concurrency: normalizedSampleConcurrency\(payload\.sample_concurrency\)/);

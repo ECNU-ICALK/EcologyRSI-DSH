@@ -118,7 +118,7 @@
           </section>
 
           <section id="workspace-parameters" class="workspace-panel" data-panel="parameters" role="tabpanel" aria-labelledby="tab-parameters" tabindex="0" hidden>
-            <header class="page-heading"><div><span>02</span><h1>参数设计</h1><p>统一冻结下一次运行的进化规模、样本更新边界、网关吞吐和可复现策略；已启动运行不会被页面参数追溯修改。</p></div><span id="parameter-summary-pill" class="pill pill-blue">1600 样本 / 更新</span></header>
+            <header class="page-heading"><div><span>02</span><h1>参数设计</h1><p>统一冻结下一次运行的进化规模、样本更新边界、网关吞吐和可复现策略；已启动运行不会被页面参数追溯修改。</p></div><span id="parameter-summary-pill" class="pill pill-blue">500 次完整预测 / 4,500 个评分单元</span></header>
             <div class="parameters-layout">
               <section class="panel parameter-form-panel" aria-labelledby="parameter-form-title">
                 <div class="panel-heading"><div><span>运行超参数</span><h2 id="parameter-form-title">更新与执行预算</h2></div><strong>应用于下次创建</strong></div>
@@ -126,9 +126,9 @@
                   <label><span>最大进化轮数</span><input id="max-generations" name="rounds" form="start-form" type="number" min="1" max="50" value="5" required><small>每轮完成检索、候选生成、固定样本评测和轮末决策，达到上限后停止。</small></label>
                   <label><span>每轮生成方案数</span><input id="candidates-per-generation" name="candidates_per_generation" form="start-form" type="number" min="1" max="8" value="4" required><small>同一轮的候选共享父方案和冻结样本集合，用于横向比较；不是样本 batch 大小。</small></label>
                   <label><span>候选并发数</span><input id="candidate-concurrency" name="candidate_concurrency" form="start-form" type="number" min="1" max="8" step="1" value="4" required><small>同一轮最多同时评测的候选数；每个候选仍使用独立 DSH 子会话和相同反馈样本集合。</small></label>
-                  <label><span>每次更新预测单元数</span><input id="samples-per-update" name="samples_per_update" form="start-form" type="number" min="1" max="100000" step="1" value="1600" aria-describedby="samples-per-update-help" required><small id="samples-per-update-help">每个预测时点由一次智能体链同时输出全部目标与时距。</small></label>
+                  <label><span>每次更新完整预测次数</span><input id="samples-per-update" name="prediction_origins_per_update" form="start-form" type="number" min="169" max="11111" step="1" value="500" aria-describedby="samples-per-update-help" required><small id="samples-per-update-help">一次完整预测同时返回全部目标与时距；当前每次包含 9 个内部评分单元。</small></label>
                   <label><span>请求微批样本数</span><input id="sample-agent-batch-size" name="sample_agent_batch_size" form="start-form" type="number" min="1" max="128" step="1" value="64" required><small>样本先按因果预测起点组成 origin wave，同组超过该上限时才继续切分；实际请求数以运行进度为准。</small></label>
-                  <label><span>逐样本并发请求数</span><input id="sample-concurrency" name="sample_concurrency" form="start-form" type="number" min="1" max="8" step="1" value="2" required><small>同时在飞的独立样本请求上限。多运行并行时默认 2，避免压满上游队列；不改变评测样本集合。</small></label>
+                  <label><span>逐样本并发请求数</span><input id="sample-concurrency" name="sample_concurrency" form="start-form" type="number" min="1" max="8" step="1" value="8" required><small>同时在飞的独立样本请求上限，默认 8；不改变评测样本集合。</small></label>
                   <label><span>候选总预算</span><input id="max-candidates" name="max_candidates" form="start-form" type="number" min="1" max="256" value="20" aria-describedby="max-candidates-help" required><small id="max-candidates-help">默认随轮数和每轮候选数同步；当前完整预算需要 20 个候选。</small></label>
                 </div>
                 <div class="parameter-switches">
@@ -141,7 +141,7 @@
                   <div class="panel-heading"><div><span>数据使用边界</span><h2 id="parameter-scope-title">拟合与更新分离</h2></div><span class="pill pill-green">同轮公平比较</span></div>
                   <div class="parameter-scope-list">
                     <div><span>预测器拟合</span><strong>全量 training_fit</strong><small>岭回归等已登记数值预测器可使用完整训练拟合分区训练参数。</small></div>
-                    <div><span>智能体更新</span><strong id="agent-update-scope">每轮固定 1600 个样本</strong><small>本轮冻结反馈样本用于计算 RMSE 技能主适应度、辅助 MAE 改善和下一轮优化经验。</small></div>
+                    <div><span>智能体更新</span><strong id="agent-update-scope">每轮固定 500 次完整预测</strong><small>本轮冻结的完整预测用于计算 RMSE 技能主适应度、辅助 MAE 改善和下一轮优化经验。</small></div>
                   </div>
                 </section>
                 <section class="panel parameter-summary-panel" aria-labelledby="parameter-summary-title">
@@ -286,7 +286,7 @@
             </section>
           </section>
 
-          <footer class="footer-note"><span>插件版本 0.3.27 · 可交付候选版（未签名）</span><span id="last-updated">尚未同步</span></footer>
+          <footer class="footer-note"><span>插件版本 0.3.28 · 可交付候选版（未签名）</span><span id="last-updated">尚未同步</span></footer>
         </main>
       </div>
     </div>

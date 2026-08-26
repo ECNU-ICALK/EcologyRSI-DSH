@@ -170,7 +170,7 @@
         review_model_id: form.get("review_model_id") || form.get("judge_model_id"),
         rounds: Number(form.get("rounds") || form.get("max_generations")),
         candidates_per_generation: Number(form.get("candidates_per_generation")),
-        samples_per_update: Number(form.get("samples_per_update")),
+        prediction_origins_per_update: Number(form.get("prediction_origins_per_update")),
         candidate_concurrency: Number(form.get("candidate_concurrency")),
         sample_agent_batch_size: Number(form.get("sample_agent_batch_size")),
         sample_concurrency: Number(form.get("sample_concurrency")),

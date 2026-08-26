@@ -467,17 +467,33 @@
     var value = Number(evaluator && evaluator.minimum_selection_samples_per_update);
     return Number.isInteger(value) && value > 0 ? value : samplesPerUpdateMinimum();
   }
-  function updateSamplesPerUpdateBoundary() {
+
+  function predictionCellsPerOrigin() {
     var evaluator = selectedCatalogItem("evaluators", "#evaluator-id");
-    var evaluatorMinimum = samplesPerUpdateMinimum();
+    var value = Number(evaluator && (evaluator.prediction_cells_per_origin || evaluator.prediction_task_count));
+    return Number.isInteger(value) && value > 0 ? value : 1;
+  }
+
+  function predictionOriginsPerUpdateSelectionMinimum() {
+    var evaluator = selectedCatalogItem("evaluators", "#evaluator-id");
+    var value = Number(evaluator && evaluator.minimum_selection_origin_samples_per_update);
+    return Number.isInteger(value) && value > 0
+      ? value
+      : Math.ceil(samplesPerUpdateSelectionMinimum() / predictionCellsPerOrigin());
+  }
+
+  function predictionOriginsPerUpdateMaximum() {
+    return Math.max(1, Math.floor(100000 / predictionCellsPerOrigin()));
+  }
+
+  function updateSamplesPerUpdateBoundary() {
     var selectionMinimum = samplesPerUpdateSelectionMinimum();
-    var taskCount = Number(evaluator && evaluator.prediction_task_count);
-    if (!Number.isInteger(taskCount) || taskCount < 1) { taskCount = evaluatorMinimum; }
-    var originMinimum = Number(evaluator && evaluator.minimum_selection_origin_samples_per_update);
-    if (!Number.isInteger(originMinimum) || originMinimum < 1) { originMinimum = Math.ceil(selectionMinimum / taskCount); }
+    var taskCount = predictionCellsPerOrigin();
+    var originMinimum = predictionOriginsPerUpdateSelectionMinimum();
     var input = $("#samples-per-update");
-    input.min = String(selectionMinimum);
-    $("#samples-per-update-help").textContent = "每轮冻结的预测单元预算；每个预测时点由一次智能体链同时产生 " + formatNumber(taskCount) + " 个目标—时距结果。晋级至少需要 " + formatNumber(originMinimum) + " 个时点，即 " + formatNumber(selectionMinimum) + " 个评分单元。";
+    input.min = String(originMinimum);
+    input.max = String(predictionOriginsPerUpdateMaximum());
+    $("#samples-per-update-help").textContent = "一次完整预测同时返回全部目标与时距；当前每次包含 " + formatNumber(taskCount) + " 个内部评分单元。正式晋级至少需要 " + formatNumber(originMinimum) + " 次完整预测（" + formatNumber(selectionMinimum) + " 个评分单元）。";
   }
   function updateSelectionHelp() {
     setHelp("#domain-pack-help", selectedCatalogItem("domain_packs", "#domain-pack"), "由所选训练数据集自动推导知识检索范围、科学约束和数据适配器。");
@@ -501,12 +517,15 @@
     // The visible data boundary and two configured API roles are user
     // inputs.  The research domain and internal components are derived.
     var selections = ["#dataset-id", "#policy-model-id", "#judge-model-id", "#max-generations", "#candidates-per-generation", "#max-candidates"].every(function (selector) { return Boolean($(selector).value); });
-    var samplesPerUpdate = Number($("#samples-per-update").value);
+    var predictionOriginsPerUpdate = Number($("#samples-per-update").value);
     var minimumSamplesPerUpdate = samplesPerUpdateSelectionMinimum();
+    var minimumPredictionOrigins = predictionOriginsPerUpdateSelectionMinimum();
     var sampleAgentBatchSize = Number($("#sample-agent-batch-size").value);
     var candidateConcurrency = Number($("#candidate-concurrency").value);
     var sampleConcurrency = Number($("#sample-concurrency").value);
-    var sampleCoverageReady = Number.isInteger(samplesPerUpdate) && samplesPerUpdate >= minimumSamplesPerUpdate && samplesPerUpdate <= 100000;
+    var sampleCoverageReady = Number.isInteger(predictionOriginsPerUpdate)
+      && predictionOriginsPerUpdate >= minimumPredictionOrigins
+      && predictionOriginsPerUpdate <= predictionOriginsPerUpdateMaximum();
     var executionParametersReady = Number.isInteger(candidateConcurrency) && candidateConcurrency >= 1 && candidateConcurrency <= 8
       && Number.isInteger(sampleAgentBatchSize) && sampleAgentBatchSize >= 1 && sampleAgentBatchSize <= 128
       && Number.isInteger(sampleConcurrency) && sampleConcurrency >= 1 && sampleConcurrency <= 8;
@@ -531,7 +550,7 @@
     return [
       { label: "配置目录已加载", ready: Boolean(catalogReady) },
       { label: "运行配置已完整选择", ready: selections },
-      { label: "每轮覆盖完整预测向量（至少 " + formatNumber(Math.ceil(minimumSamplesPerUpdate / Math.max(1, Number(selectedCatalogItem("evaluators", "#evaluator-id") && selectedCatalogItem("evaluators", "#evaluator-id").prediction_task_count) || 1))) + " 个时点 / " + formatNumber(minimumSamplesPerUpdate) + " 个评分单元）", ready: sampleCoverageReady },
+      { label: "每轮覆盖完整预测向量（至少 " + formatNumber(minimumPredictionOrigins) + " 次完整预测 / " + formatNumber(minimumSamplesPerUpdate) + " 个评分单元）", ready: sampleCoverageReady },
       { label: "候选并发、请求微批与逐样本并发参数有效", ready: executionParametersReady },
       { label: "候选总预算可完整覆盖全部轮次（至少 " + formatNumber(budget.required_candidates) + " 个）", ready: budget.budget_sufficient },
       { label: "所选训练数据集可运行", ready: datasetReady },

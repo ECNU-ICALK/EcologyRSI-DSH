@@ -389,7 +389,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --samples-per-task 1 \
   --minimum-coverage 0.8 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.27-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.28-real-api-agent-tool-acceptance.json
 ```
 
 验收无论通过或失败都会原子写入 JSON 报告；省略 `--output` 时默认写到系统临时目录下的
@@ -508,7 +508,7 @@ API 请求使用 `Authorization: Bearer ...`。当前后端只比较进程级 `E
 
 默认界面使用 5 轮、每轮 4 个候选和 20 个候选总预算。首轮 `K=1` 时由远程策略模型提出全部候选；`K=2` 时保留 1 个宿主诊断锚点并调用 1 次远程策略；`K>=3` 时最多保留 2 个宿主种子，其余槽位调用远程策略。每个提案都记录 `proposal_source`，投影分别统计远程成功、宿主保留种子和显式宿主回退，不再把“未调用 API”显示成“调用完成”。
 
-新建真实自主运行默认以 1600 个预测单元作为一次进化更新预算。默认 3 个目标 × 3 个预测时距至少需要 169 个完整预测时点，即 1521 个平衡评分单元，才能同时满足每单元 8 个 24 小时区块和连续 3 日重采样起点门禁。也可显式使用 9、18 等完整 9 单元倍数执行诊断 smoke；它会完整调用 Planner、登记向量工具、Critic、评分和 Reflector，并可按配置连续执行多个诊断代，用于验证前代分析、反思和检索结果是否进入后代。诊断代始终标记为 `diagnostic_smoke`，不会生成冠军、不会改变正式最优方案，也不能被解释为正式晋级。每轮按预测起点构造候选无关的确定性窗口，并只选择包含完整 9 单元向量的时点；同轮候选使用完全相同的时点身份。`candidate_concurrency` 控制候选并发。`samples_per_update` 表示评分单元预算，实际智能体进度按完整预测时点计数。每个时点只调用一次 Planner，由 Planner 在其 DSH 子会话内调用一次登记的联合向量预测工具，随后各调用一次 Critic 和评分后 Reflector，并把 9 条评分记录原子持久化。岭回归可以完整扫描 `training_fit` 拟合参数，但只能作为 Planner 主动调用的注册工具，不能替代任何智能体阶段。
+工作台新建真实自主运行默认使用 500 次完整预测；在默认 3 个目标 × 3 个预测时距任务中，一次完整预测包含 9 个评分单元，因此提交给后端的是 `samples_per_update=4500`。工作台同时显示“500 次完整预测 / 4500 个内部评分单元”，逐样本并发默认 8。原始 API 的 `samples_per_update` 仍表示评分单元，省略字段时仍使用兼容默认 1600，历史运行也不改写。正式晋级至少需要 169 次完整预测，即 1521 个平衡评分单元，才能同时满足每单元 8 个 24 小时区块和连续 3 日重采样起点门禁。也可通过原始 API 显式使用 9、18 等完整 9 单元倍数执行诊断 smoke；它会完整调用 Planner、登记向量工具、Critic、评分和 Reflector，并可按配置连续执行多个诊断代，用于验证前代分析、反思和检索结果是否进入后代。诊断代始终标记为 `diagnostic_smoke`，不会生成冠军、不会改变正式最优方案，也不能被解释为正式晋级。每轮按预测起点构造候选无关的确定性窗口，并只选择包含完整 9 单元向量的时点；同轮候选使用完全相同的时点身份。`candidate_concurrency` 控制候选并发。每个时点只调用一次 Planner，由 Planner 在其 DSH 子会话内调用一次登记的联合向量预测工具，随后各调用一次 Critic 和评分后 Reflector，并把 9 条评分记录原子持久化。岭回归可以完整扫描 `training_fit` 拟合参数，但只能作为 Planner 主动调用的注册工具，不能替代任何智能体阶段。
 
 每个可评分预测时点都经过“Planner 选择已登记算法工具 → 宿主执行一次完整向量预测 → Critic 审查 9 个结果 → 宿主逐单元评分 → Reflector 反思完整向量”的反馈驱动循环，只有失败后才进入下一次尝试，不是无条件把固定流程走一遍。单个时点耗尽重试预算不会终止整个候选，但评分后处理会保证失败行相对冻结强基线的 reward 不大于 0，不能通过失败或丢样本提高分数；上一轮聚合失败会生成版本化的下一轮重试、退避和修复计划。同轮候选按同窗分数和稳健性排序；若下一轮窗口不同，则不把两个窗口的原始分数直接比较，本轮最佳只作为下一轮搜索父方案且不替换搜索 incumbent。DSH-native 使用同轮 centered max-T 选择门禁，其他当前评测路径使用配对区块 bootstrap；两条路径都要求 0.005 实用差异和一致的评分合同，且生产结论还必须经过独立 holdout 正式验证。跨代反思只按完整 `behavior_digest` 禁止失败行为的精确重放；相同科学参数但不同 agent 程序仍可继续探索。闭式岭回归负责一次计算同一时点的 9 个数值，但它只作为 Planner 可选择的注册工具，不能替代 Planner、Critic 或评分后 Reflector 的大模型调用。`execution_diagnostics` 会分别给出物理分区行数、本轮 selected/deferred 评分单元和预测时点、eligible/used/skipped 目标样本、累计候选工作量、拟合 pass、提案来源和轮次耗时，用于确认没有跳过训练或评测。最终产物尚未封存时，诊断优先使用当前 revision 的 `EvaluationProgressRecorded`；若新的 heartbeat 写入失败，则在校验连续批次、运行归属和 checkpoint 上限后，从已持久化的 `EvaluationSampleResultBatchRecorded` 回退聚合；两者取已完成数的较大值而不相加，正式 `EvaluationRecorded` 到达后由正式指标覆盖。`partial_live` 仅表示正在执行的部分证据，`retained_partial` 表示暂停后保留的证据，`aborted_partial` 表示候选失败或运行终止前的证据，`mixed_partial` 表示同一运行内同时存在进行中和已保留／中止的候选证据；后三类不得在页面上称为“实时”。
 
@@ -566,7 +566,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --db /tmp/ecologyrsi-dsh-dsh-adapter.sqlite3 \
   --samples-per-task 1 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.27-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.28-real-api-agent-tool-acceptance.json
 ```
 
 构建 wheel、sdist 和完整交付包需要 `uv`：

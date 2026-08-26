@@ -2,6 +2,20 @@
 
 All notable changes to EcologyRSI-DSH are recorded in this file.
 
+## 0.3.28 - 2026-08-26
+
+### Changed
+
+- Make the workbench update budget count complete prediction calls instead of
+  internal target-by-horizon scoring cells. The default 500 complete
+  predictions are converted to 4500 scoring cells for the registered
+  nine-cell greenhouse evaluator before the existing backend request is sent.
+- Show both complete-prediction and internal-cell counts in parameter previews,
+  and express the formal-selection boundary as 169 complete predictions / 1521
+  scoring cells.
+- Raise the workbench default and invalid-value fallback for per-sample request
+  concurrency to 8. Existing runs and the raw backend API defaults are unchanged.
+
 ## 0.3.27 - 2026-08-25
 
 ### Changed
