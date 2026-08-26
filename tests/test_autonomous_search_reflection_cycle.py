@@ -16,6 +16,7 @@ from ecologyrsi_dsh.evolution.batches import (
 )
 from ecologyrsi_dsh.evolution.strategies import (
     StrategyRouterDSHAdapter,
+    _candidate_direction_execution_view,
     _mutation_contract_catalog,
     _parameter_preflight_values,
     _validate_candidate_direction_realizability,
@@ -23,6 +24,7 @@ from ecologyrsi_dsh.evolution.strategies import (
 from ecologyrsi_dsh.evolution.genome import EcologyEvolutionPluginGenome
 from ecologyrsi_dsh.knowledge.autonomous_cycle import (
     AUTONOMOUS_RESEARCH_PROTOCOL,
+    CandidateDirection,
     GenerationReflection,
     validate_research_synthesis,
 )
@@ -125,7 +127,7 @@ class _CycleRuntime:
             count = context["required_candidate_direction_count"]
             structured = {
                 "schema_version": "ecologyrsi-dsh.research-synthesis/1",
-                "summary": "Compare independent registered parameter axes.",
+                "summary": "For history_steps, use 5 in the next candidate.",
                 "evidence": (
                     [
                         {
@@ -468,12 +470,32 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         self.assertEqual(
             [
                 request["request"]["context"]["assigned_candidate_direction"][
-                    "direction_id"
+                    "mutation_target"
                 ]
                 for request in proposal_requests
             ],
-            ["direction-1", "direction-2"],
+            ["ridge_alpha", "history_steps"],
         )
+        for request in proposal_requests:
+            context = request["request"]["context"]
+            execution_direction = context["assigned_candidate_direction"]
+            self.assertNotIn("direction_id", execution_direction)
+            self.assertNotIn("title", execution_direction)
+            self.assertNotIn("hypothesis", execution_direction)
+            self.assertEqual(
+                execution_direction["research_prose"],
+                "audit_only_not_executable",
+            )
+            reflection = context["evolution_reflection"]
+            self.assertNotIn("research_summary", reflection)
+            self.assertNotIn("use 5", repr(reflection))
+            self.assertTrue(
+                reflection["research_signals"]["has_research_summary"]
+            )
+            self.assertEqual(
+                set(context["research_iteration"]),
+                {"schema_version", "source_digest", "has_research_plan"},
+            )
 
     def test_candidate_repair_must_implement_its_assigned_direction(self) -> None:
         runtime = _DirectionRepairRuntime()
@@ -1263,6 +1285,88 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
             "history_steps -> 5",
             "history_steps → 5",
             "把历史步数改为5",
+            "The current baseline has history_steps=8, keep history_steps at 5.",
+            "The parent used history_steps=8, fix history_steps at 5.",
+            "The previous candidate had history_steps=8, lower history_steps to 5.",
+            (
+                "The previous candidate had history_steps=8, history_steps "
+                "adjusted to 5 for the next candidate."
+            ),
+            (
+                "The current baseline has history_steps=8, history_steps "
+                "fixed at 5 for this proposal."
+            ),
+            "上一轮历史步数为8，把历史步数修改为5。",
+            "上一轮历史步数为8，下一轮历史步数变为5。",
+            "上一轮历史步数为8，下一轮选用5步历史步数。",
+            "上一轮历史步数为8，下一轮将设定历史步数为5。",
+            (
+                "The current baseline has history_steps=8, the upcoming "
+                "candidate has history_steps=5."
+            ),
+            (
+                "The current baseline has history_steps=8, let "
+                "history_steps=5 for the candidate."
+            ),
+            "The current baseline has history_steps=8, desired history_steps=5.",
+            "上一轮历史步数为8，本轮历史步数为5。",
+            "上一轮历史步数为8，新候选的历史步数为5。",
+            "历史窗口为5。",
+            (
+                "The previous candidate performed poorly and the next "
+                "candidate has history_steps=5."
+            ),
+            "上一轮表现不佳且本轮历史步数为5。",
+            (
+                "With history_steps at 5, the previous failure should "
+                "disappear in the next candidate."
+            ),
+            "history_steps=5 for the next candidate because the previous candidate failed.",
+            (
+                "The next candidate has history_steps=5 although the previous "
+                "candidate failed."
+            ),
+            (
+                "The previous candidate failed or the next candidate has "
+                "history_steps=5."
+            ),
+            "本轮历史步数为5因为上一轮失败。",
+            "上一轮失败所以本轮历史步数为5。",
+            "We should ensure the current candidate has history_steps=5.",
+            "We recommend the current model uses history_steps=5.",
+            "建议当前父代的历史步数为5。",
+            "建议让当前基线使用的历史步数为5。",
+            (
+                "history_steps=5 was observed in the previous candidate and "
+                "should be used next."
+            ),
+            "历史步数为5是上一轮记录的，建议本轮继续使用。",
+            (
+                "The previous candidate had history_steps=5, keep it for "
+                "the next candidate."
+            ),
+            "We should ensure history_steps=5 was observed in the previous candidate.",
+            (
+                "With history_steps at 5, the previous candidate had low "
+                "error, keep it for the next candidate."
+            ),
+            "上一轮的历史步数为5，建议本轮继续使用。",
+            "This candidate has history_steps=5.",
+            "The current candidate has history_steps=5.",
+            "This model uses history_steps=5.",
+            (
+                "The previous candidate had history_steps=5; keep it for "
+                "the next candidate."
+            ),
+            (
+                "The previous candidate had history_steps=five. Keep it for "
+                "the next candidate."
+            ),
+            (
+                "history_steps=5 was observed in the previous candidate. "
+                "Use that value next."
+            ),
+            "上一轮的历史步数为5。本轮继续沿用。",
             "历史步数设置成五",
             "历史步数设为十二",
             "Set blend=0.7 while decreasing history_steps.",
@@ -1291,6 +1395,10 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
             "With ridge_alpha at 0.1, the previous candidate had a large residual.",
             "The current baseline has history_steps=8.",
             "上一轮使用的历史步数为 8。",
+            "This generation observed history_steps=8.",
+            "This candidate reported history_steps=8.",
+            "history_steps=8 was observed in the previous candidate.",
+            "历史步数为8是上一轮记录的。",
         ):
             direction = _direction(1, [])
             direction["hypothesis"] = claim
@@ -1302,6 +1410,52 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                     parent=state.materialized_seed_genome(),
                     avoid_behaviors=[],
                 )
+
+    def test_historical_parameter_prose_is_audit_only_at_execution(self) -> None:
+        state = self.director.state(self.run_id)
+        for title, hypothesis in (
+            (
+                "The previous candidate had history_steps=5.",
+                "Maintain it for the next candidate.",
+            ),
+            (
+                "history_steps=5 was observed in the previous candidate.",
+                "Repeat it in this proposal.",
+            ),
+            (
+                "The previous candidate had history_steps=5.",
+                "Copy it into the next candidate.",
+            ),
+            ("上一轮的历史步数为5。", "本轮维持不变。"),
+            ("上一轮的历史步数为5。", "下一轮仍然不变。"),
+        ):
+            raw_direction = _direction(1, [])
+            raw_direction.update(
+                {
+                    "direction_id": "use-history-steps-5",
+                    "title": title,
+                    "hypothesis": hypothesis,
+                }
+            )
+            direction = CandidateDirection.from_dict(raw_direction)
+            with self.subTest(title=title):
+                _validate_candidate_direction_realizability(
+                    [raw_direction],
+                    run=state.run,
+                    task=state.task_manifest,
+                    parent=state.materialized_seed_genome(),
+                    avoid_behaviors=[],
+                )
+                execution_view = _candidate_direction_execution_view(direction)
+                self.assertEqual(
+                    execution_view["research_prose"],
+                    "audit_only_not_executable",
+                )
+                self.assertNotIn("title", execution_view)
+                self.assertNotIn("hypothesis", execution_view)
+                self.assertNotIn("direction_id", execution_view)
+                self.assertNotIn("history_steps=5", repr(execution_view))
+                self.assertNotIn("use-history-steps-5", repr(execution_view))
 
     def test_generation_reflection_repairs_an_exact_parameter_assignment(
         self,

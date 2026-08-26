@@ -40,7 +40,8 @@ class _RunAdmissionState:
     waiting: int = 0
     successful_since_adjustment: int = 0
     congestion_events: int = 0
-    epoch: int = 0
+    adjustment_epoch: int = 0
+    congestion_epoch: int = 0
     slow_start: bool = True
 
 
@@ -85,7 +86,8 @@ class RunSampleAdmission:
                 raise
             state.waiting -= 1
             state.active += 1
-            admission_epoch = state.epoch
+            admission_adjustment_epoch = state.adjustment_epoch
+            admission_congestion_epoch = state.congestion_epoch
         try:
             yield
         except BaseException as exc:
@@ -95,19 +97,20 @@ class RunSampleAdmission:
                 if (
                     dsh_error is not None
                     and dsh_native_runtime_retryable(dsh_error)
-                    and admission_epoch == state.epoch
+                    and admission_congestion_epoch == state.congestion_epoch
                 ):
                     state.adaptive_limit = max(1, state.adaptive_limit // 2)
                     state.successful_since_adjustment = 0
                     state.congestion_events += 1
                     state.slow_start = False
-                    state.epoch += 1
+                    state.adjustment_epoch += 1
+                    state.congestion_epoch += 1
                 self._condition.notify_all()
             raise
         else:
             with self._condition:
                 state.active -= 1
-                if admission_epoch == state.epoch:
+                if admission_adjustment_epoch == state.adjustment_epoch:
                     state.successful_since_adjustment += 1
                     if (
                         state.adaptive_limit < state.limit
@@ -123,7 +126,7 @@ class RunSampleAdmission:
                             ),
                         )
                         state.successful_since_adjustment = 0
-                        state.epoch += 1
+                        state.adjustment_epoch += 1
                 self._condition.notify_all()
 
     def snapshot(self, run_id: str) -> dict[str, int]:

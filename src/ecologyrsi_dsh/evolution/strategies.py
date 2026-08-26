@@ -2559,6 +2559,11 @@ class StrategyRouterDSHAdapter:
                 allowed_mutation_targets=allowed_mutation_targets,
             )
             assigned_direction = directions[slot_index]
+        assigned_direction_execution = (
+            _candidate_direction_execution_view(assigned_direction)
+            if assigned_direction is not None
+            else None
+        )
         slot_seed = int(
             digest(
                 {
@@ -2628,35 +2633,64 @@ class StrategyRouterDSHAdapter:
             **deepcopy(mutation_catalog),
             "policy": "single_axis_reject_out_of_bounds_without_clamping",
         }
+        analysis_feedback = (
+            previous_analysis if isinstance(previous_analysis, Mapping) else {}
+        )
+        common_failures = analysis_feedback.get("common_failures")
+        if not isinstance(common_failures, list):
+            common_failures = []
         base_reflection = {
-            "schema_version": "ecologyrsi-dsh.evolution-reflection/2",
-            "previous_generation_analysis": previous_analysis,
-            "research_summary": research_plan.get("dsh_research_summary"),
-            "research_evidence": research_plan.get(
-                "dsh_research_evidence",
-                [],
+            "schema_version": "ecologyrsi-dsh.evolution-execution-signals/1",
+            "previous_generation_signals": {
+                "has_analysis": bool(analysis_feedback),
+                "no_eligible_candidate": (
+                    analysis_feedback.get("outcome") == "no_eligible_candidate"
+                ),
+                "scientific_gate_failed": (
+                    "scientific_gate_failed" in common_failures
+                ),
+                "execution_failed": "execution_failed" in common_failures,
+            },
+            "research_signals": {
+                "has_research_summary": bool(
+                    research_plan.get("dsh_research_summary")
+                ),
+                "has_research_evidence": bool(
+                    research_plan.get("dsh_research_evidence")
+                ),
+                "has_previous_action": bool(
+                    research_iteration.get("previous_next_action")
+                    if isinstance(research_iteration, Mapping)
+                    else None
+                ),
+                "has_previous_generation_reflection": bool(
+                    research_plan.get("previous_generation_reflection")
+                ),
+            },
+            "assigned_candidate_direction": assigned_direction_execution,
+            "avoid_behavior_digests": [
+                str(item["behavior_digest"])
+                for item in avoid_behaviors
+                if isinstance(item, Mapping)
+                and re.fullmatch(
+                    r"[0-9a-f]{64}", str(item.get("behavior_digest") or "")
+                )
+            ],
+            "sibling_behavior_digests": [
+                str(item["behavior_digest"])
+                for item in sibling_candidate_behaviors
+                if isinstance(item, Mapping)
+                and re.fullmatch(
+                    r"[0-9a-f]{64}", str(item.get("behavior_digest") or "")
+                )
+            ],
+        }
+        proposal_research_iteration = {
+            "schema_version": "ecologyrsi-dsh.research-iteration-execution/1",
+            "source_digest": str(
+                stage_digests["research_iteration_digest"]
             ),
-            "previous_next_action": (
-                research_iteration.get("previous_next_action")
-                if isinstance(research_iteration, Mapping)
-                else None
-            ),
-            "historical_provenance": (
-                research_iteration.get("historical_provenance")
-                if isinstance(research_iteration, Mapping)
-                else None
-            ),
-            "research_directives": dict(research_directives),
-            "previous_generation_reflection": research_plan.get(
-                "previous_generation_reflection"
-            ),
-            "assigned_candidate_direction": (
-                assigned_direction.to_dict()
-                if assigned_direction is not None
-                else None
-            ),
-            "avoid_behaviors": list(avoid_behaviors),
-            "sibling_candidate_behaviors": deepcopy(sibling_candidate_behaviors),
+            "has_research_plan": bool(research_plan),
         }
         host_rejections: list[dict[str, Any]] = []
         child: EcologyEvolutionPluginGenome | None = None
@@ -2678,13 +2712,9 @@ class StrategyRouterDSHAdapter:
                 "parent_genome": parent.to_dict(),
                 "mutation_context": context.to_dict(),
                 "mutation_contract": deepcopy(mutation_contract),
-                "assigned_candidate_direction": (
-                    assigned_direction.to_dict()
-                    if assigned_direction is not None
-                    else None
-                ),
+                "assigned_candidate_direction": assigned_direction_execution,
                 "generation_context_digest": batch["context_digest"],
-                "research_iteration": research_iteration,
+                "research_iteration": deepcopy(proposal_research_iteration),
                 "evolution_reflection": {
                     **deepcopy(base_reflection),
                     "host_rejections": deepcopy(host_rejections),
@@ -3435,17 +3465,54 @@ _EXACT_PARAMETER_VALUE_PATTERN = (
     rf"(?:{_NUMBER_PATTERN}(?:[eE][-+]?\d+)?|"
     rf"{_ENGLISH_NUMBER_WORD_PATTERN}|{_CHINESE_NUMBER_PATTERN})"
 )
-_HISTORICAL_PARAMETER_CONTEXT_RE = re.compile(
-    r"(?:\b(?:prior|previous|earlier|historical|baseline|incumbent|parent|"
-    r"current|observed|reported|generation(?:s)?)\b|"
-    r"此前|之前|历史|上一轮|前一轮|当前基线|当前父代|父代|已使用|曾经|观察到|报告)",
+_HISTORICAL_PARAMETER_STATE_SUBJECT_PATTERN = (
+    r"(?:the\s+)?(?:parent|incumbent|baseline|"
+    r"(?:prior|previous|earlier|historical)\s+"
+    r"(?:candidates?|generations?|baselines?|parents?|models?|runs?)|"
+    r"current\s+(?:baselines?|parents?))"
+)
+_HISTORICAL_PARAMETER_OBSERVED_SUBJECT_PATTERN = (
+    r"(?:"
+    + _HISTORICAL_PARAMETER_STATE_SUBJECT_PATTERN
+    + r"|(?:the\s+)?(?:this|current)\s+(?:candidates?|generations?|models?|runs?))"
+)
+_CHINESE_HISTORICAL_PARAMETER_SUBJECT_PATTERN = (
+    r"(?:上一轮|前一轮|当前基线|当前父代|父代|此前|之前)"
+)
+_HISTORICAL_PARAMETER_PREFIX_RE = re.compile(
+    r"(?:"
+    + _HISTORICAL_PARAMETER_STATE_SUBJECT_PATTERN
+    + r"\s+(?:has|had|used|uses|observed|reported|recorded|kept|shows?|showed)|"
+    + _HISTORICAL_PARAMETER_OBSERVED_SUBJECT_PATTERN
+    + r"\s+(?:observed|reported|recorded))\s*$",
     re.IGNORECASE,
 )
-_PROSPECTIVE_PARAMETER_CONTEXT_RE = re.compile(
-    r"(?:\b(?:set|use|choose|assign|adjust|change|make|should|must|will|"
-    r"recommend|propose)\b|"
-    r"设置|设为|设成|调整|改为|改成|应当|应该|必须|建议|"
-    r"采用(?!的|了|过)|使用(?!的|了|过))",
+_CHINESE_HISTORICAL_PARAMETER_PREFIX_RE = re.compile(
+    _CHINESE_HISTORICAL_PARAMETER_SUBJECT_PATTERN
+    + r"(?:的)?(?:\s*(?:使用的?|采用的?|记录的?|观察到的?|报告的?|有|是))?\s*$",
+    re.IGNORECASE,
+)
+_HISTORICAL_PARAMETER_SUFFIX_RE = re.compile(
+    r"^\s*(?:was|were)\s+(?:observed|reported|recorded|used)\s+"
+    r"(?:in|by|for)\s+"
+    + _HISTORICAL_PARAMETER_STATE_SUBJECT_PATTERN
+    + r"\s*$",
+    re.IGNORECASE,
+)
+_CHINESE_HISTORICAL_PARAMETER_SUFFIX_RE = re.compile(
+    r"^\s*(?:是|为)?\s*"
+    + _CHINESE_HISTORICAL_PARAMETER_SUBJECT_PATTERN
+    + r"(?:中|里)?(?:观察到|报告|记录|使用)的?\s*$",
+    re.IGNORECASE,
+)
+_HISTORICAL_PARAMETER_INVERSION_RE = re.compile(
+    r"^\s*,\s*"
+    + _HISTORICAL_PARAMETER_STATE_SUBJECT_PATTERN
+    + (
+        r"\s+(?:has|had|shows?|showed)\s+(?:an?|the)?\s*"
+        r"(?:large|small|high|low|poor|strong|weak|stable|unstable)?\s*"
+        r"(?:residual|error|score|value|observation|result|performance)\s*$"
+    ),
     re.IGNORECASE,
 )
 _PARAMETER_CONTEXT_BOUNDARY_RE = re.compile(r"[.;。；!?！？\n]")
@@ -3454,9 +3521,13 @@ _PARAMETER_CONTEXT_BOUNDARY_RE = re.compile(r"[.;。；!?！？\n]")
 def _parameter_assignment_is_historical(
     text: str,
     match: re.Match[str],
+    *,
+    historical_assignment: re.Pattern[str],
 ) -> bool:
-    """Allow a measured prior value without treating it as a new command."""
+    """Recognize one audit-only historical fact, never a mixed instruction."""
 
+    if historical_assignment.fullmatch(match.group()) is None:
+        return False
     prefix = text[: match.start()]
     suffix = text[match.end() :]
     prior_boundaries = tuple(_PARAMETER_CONTEXT_BOUNDARY_RE.finditer(prefix))
@@ -3467,11 +3538,38 @@ def _parameter_assignment_is_historical(
         if next_boundary is not None
         else len(text)
     )
-    clause = text[clause_start:clause_end]
-    if _HISTORICAL_PARAMETER_CONTEXT_RE.search(clause) is None:
+    edge_chars = " \t\r\n.;。；!?！？"
+    if (
+        text[:clause_start].strip(edge_chars)
+        or text[clause_end:].strip(edge_chars)
+    ):
         return False
-    command_scope = text[clause_start : match.end()]
-    return _PROSPECTIVE_PARAMETER_CONTEXT_RE.search(command_scope) is None
+    clause_prefix = text[clause_start : match.start()]
+    clause_suffix = text[match.end() : clause_end]
+    if (
+        _HISTORICAL_PARAMETER_PREFIX_RE.fullmatch(clause_prefix.strip())
+        or _CHINESE_HISTORICAL_PARAMETER_PREFIX_RE.fullmatch(
+            clause_prefix.strip()
+        )
+    ):
+        trailing = clause_suffix.strip()
+        return not trailing or re.fullmatch(
+            rf"(?:and\s+later|followed\s+by)\s+{_EXACT_PARAMETER_VALUE_PATTERN}",
+            trailing,
+            re.IGNORECASE,
+        ) is not None
+    if (
+        _HISTORICAL_PARAMETER_SUFFIX_RE.fullmatch(clause_suffix.strip())
+        or _CHINESE_HISTORICAL_PARAMETER_SUFFIX_RE.fullmatch(
+            clause_suffix.strip()
+        )
+    ):
+        return not clause_prefix.strip()
+    return (
+        re.fullmatch(r"\s*with\s*", clause_prefix, re.IGNORECASE) is not None
+        and _HISTORICAL_PARAMETER_INVERSION_RE.fullmatch(clause_suffix)
+        is not None
+    )
 
 
 def _task_parameter_boundary(
@@ -3983,6 +4081,7 @@ def _direction_explicit_parameter_assignments(
             + (
                 rf"(?:\s*(?:=|:=|:)\s*{number}"
                 rf"|\s*(?:->|=>|→|⇒)\s*{number}"
+                rf"|\s+{number}"
                 rf"|\s+(?:is|becomes?|equals?|to|at|of|by)\s+(?:the\s+)?{number}"
                 rf"|\s+(?:should|must|will)\s+(?:be|equal|become)"
                 rf"\s+(?:to\s+)?{number}"
@@ -3990,7 +4089,7 @@ def _direction_explicit_parameter_assignments(
                 rf"increased|decreased|reduced)\s+(?:to|at|by)\s+{number}"
                 rf"|\s+from\s+{number}\s+to\s+{number}"
                 rf"|\s*(?:设为|设成|设置为|设置成|改为|改成|"
-                rf"变为|变成|取|调(?:整)?至|调(?:整)?为|"
+                rf"变为|变成|修改(?:为|成|至|到)|取|调(?:整)?至|调(?:整)?为|"
                 rf"升至|增(?:加)?到|提高到|降至|降到|"
                 rf"降低到|减至|减少到|为)\s*{number})"
             ),
@@ -4009,12 +4108,33 @@ def _direction_explicit_parameter_assignments(
             ),
             re.IGNORECASE,
         )
+        historical_assignment = re.compile(
+            bounded_alias
+            + (
+                rf"(?:\s*(?:=|:=|:)\s*{number}"
+                rf"|\s+{number}"
+                rf"|\s+(?:is|equals?|at|of)\s+(?:the\s+)?{number}"
+                rf"|\s*为\s*{number})"
+            ),
+            re.IGNORECASE,
+        )
+        historical_sequence = re.compile(
+            rf"\s*(?:prior|previous|earlier|historical)\s+generations?\s+"
+            rf"(?:used|observed|reported|recorded)\s+{bounded_alias}\s+"
+            rf"{number}\s+(?:and\s+later|followed\s+by)\s+{number}\s*[.]?\s*",
+            re.IGNORECASE,
+        )
         if any(
-            any(
-                not _parameter_assignment_is_historical(field, match)
-                for pattern in (assignment_after, assignment_before)
-                for match in pattern.finditer(field)
-            )
+            historical_sequence.fullmatch(field) is None
+            and any(
+                    not _parameter_assignment_is_historical(
+                        field,
+                        match,
+                        historical_assignment=historical_assignment,
+                    )
+                    for pattern in (assignment_after, assignment_before)
+                    for match in pattern.finditer(field)
+                )
             for field in claim_fields
         ):
             assignments.append(name)
@@ -4038,6 +4158,28 @@ def _reject_direction_explicit_parameter_assignments(
             "only mutation_target and mutation_direction so the bounded "
             "candidate proposer remains the sole value authority"
         )
+
+
+def _candidate_direction_execution_view(
+    direction: CandidateDirection,
+) -> dict[str, Any]:
+    """Expose only Host-validated mutation coordinates to the proposer.
+
+    Research prose remains persisted on the direction for audit and display,
+    but it is not executable candidate-proposer context.  In particular, a
+    historical exact value plus a cross-field pronoun cannot become a second
+    source of mutation values.
+    """
+
+    return {
+        "schema_version": "ecologyrsi-dsh.candidate-direction-execution/1",
+        "direction_digest": direction.direction_digest,
+        "mutation_axis": direction.mutation_axis,
+        "mutation_target": direction.mutation_target,
+        "mutation_direction": direction.mutation_direction,
+        "evidence_refs": list(direction.evidence_refs),
+        "research_prose": "audit_only_not_executable",
+    }
 
 
 def _parameter_preflight_values(

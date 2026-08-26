@@ -878,22 +878,17 @@ class DshStructuredRoleTests(unittest.TestCase):
 
         context = runtime.requests[0]["request"]["context"]
         self.assertEqual(
-            context["research_iteration"]["iteration_digest"],
+            context["research_iteration"]["source_digest"],
             iteration.iteration_digest,
         )
         reflection = context["evolution_reflection"]
-        self.assertEqual(
-            reflection["previous_generation_analysis"]["common_failures"],
-            ["scientific_gate_failed"],
+        self.assertTrue(
+            reflection["previous_generation_signals"]["scientific_gate_failed"]
         )
-        self.assertEqual(
-            reflection["research_summary"],
-            plan["dsh_research_summary"],
-        )
-        self.assertEqual(
-            reflection["previous_next_action"],
-            iteration.previous_next_action,
-        )
+        self.assertTrue(reflection["research_signals"]["has_research_summary"])
+        self.assertTrue(reflection["research_signals"]["has_previous_action"])
+        self.assertNotIn("research_summary", reflection)
+        self.assertNotIn("previous_next_action", reflection)
 
     def test_native_proposer_retries_then_rejects_an_exact_failed_behavior(self) -> None:
         repeated_mutation = {

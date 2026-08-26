@@ -152,6 +152,38 @@ class RunSampleAdmissionTests(unittest.TestCase):
         self.assertEqual(snapshot["adaptive_limit"], 8)
         self.assertEqual(snapshot["congestion_events"], 1)
 
+    def test_overlapping_failure_reduces_after_success_grows_window(self) -> None:
+        admission = RunSampleAdmission()
+        for _ in range(8):
+            with admission.admit("run:mixed", 64):
+                pass
+        for _ in range(15):
+            with admission.admit("run:mixed", 64):
+                pass
+
+        successful = admission.admit("run:mixed", 64)
+        failing = admission.admit("run:mixed", 64)
+        successful.__enter__()
+        failing.__enter__()
+        successful.__exit__(None, None, None)
+        self.assertEqual(
+            admission.snapshot("run:mixed")["adaptive_limit"],
+            32,
+        )
+
+        error = DshNativeRuntimeUnavailableError(
+            "provider unavailable",
+            error_code="dsh_native_runtime_http_error",
+            status_code=502,
+        )
+        self.assertFalse(
+            failing.__exit__(type(error), error, error.__traceback__)
+        )
+
+        snapshot = admission.snapshot("run:mixed")
+        self.assertEqual(snapshot["adaptive_limit"], 16)
+        self.assertEqual(snapshot["congestion_events"], 1)
+
     def test_exact_non_divisible_limit_three_with_eight_callers(self) -> None:
         _admission, maximum_active, errors = self._exercise_limit(
             limit=3,
