@@ -2476,9 +2476,10 @@ class EvolutionRequestHandler(
                 ),
                 "sample_agent_batch_size": sample_agent_batch_size,
                 # Causal origin waves are independent schedules. New real
-                # runs use up to eight provider-wide sample requests by
-                # default; an explicit value remains part of the immutable
-                # manifest. Candidate-level parallelism is frozen separately.
+                # runs default to 64 sample requests, bounded to 1–128; the
+                # DSH host separately enforces a provider-wide physical cap of
+                # 128. An explicit value remains immutable in the manifest.
+                # Candidate-level parallelism is frozen separately.
                 "sample_concurrency": sample_concurrency,
                 # Sibling candidates share one frozen cohort but execute in
                 # independent DSH child sessions. Historical manifests omit

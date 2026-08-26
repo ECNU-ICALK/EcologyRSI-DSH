@@ -8,6 +8,12 @@ export PYTHONUTF8=1
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="$("$SCRIPT_DIR/select_python.sh")"
+
+if [ "$#" -gt 1 ]; then
+  echo "usage: $0 [--source-only|--artifacts|--artifacts-only]" >&2
+  exit 2
+fi
+
 MODE="${1:---source-only}"
 
 case "$MODE" in
@@ -242,9 +248,16 @@ if ! command -v node >/dev/null 2>&1; then
   echo "node is required to validate the browser plugin" >&2
   exit 1
 fi
-find plugins/ecology_evolution -name '*.js' -exec node --check {} \;
+check_javascript_tree() {
+  local tree="$1"
+  local file
+  while IFS= read -r file; do
+    node --check "$file" || return $?
+  done < <(find "$tree" -type f -name '*.js' -print)
+}
+check_javascript_tree plugins/ecology_evolution
 node plugins/ecology_evolution/test/smoke.mjs
-find integrations/dsh_ecology_plugin -name '*.js' -exec node --check {} \;
+check_javascript_tree integrations/dsh_ecology_plugin
 node --test integrations/dsh_ecology_plugin/test/*.test.mjs \
   integrations/dsh_ecology_plugin/test/proxy_security.mjs
 

@@ -17,10 +17,7 @@
 source activate py310
 python --version
 PYTHONPATH=src python -m unittest discover -s tests -v
-find plugins/ecology_evolution -name '*.js' -exec node --check {} \;
-node plugins/ecology_evolution/test/smoke.mjs
-find integrations/dsh_ecology_plugin -name '*.js' -exec node --check {} \;
-make verify
+bash scripts/verify_delivery.sh --source-only
 ```
 
 - [ ] Python 版本不低于 3.10，测试使用 `py310` 环境执行。
@@ -95,7 +92,7 @@ ECOLOGYRSI_TEST_REAL_DATA=1 PYTHONPATH=src \
 ## 6. 运行、产物与人工干预
 
 - [ ] 创建运行时冻结数据、分区、领域包、预测模型、策略、评测器、policy、judge、预算、seed、`candidates_per_generation`、`samples_per_update`、`sample_agent_batch_size`、`sample_concurrency`、在线知识设置及全部配置 digest；推进前检测实现或远程配置漂移。
-- [ ] 工作台默认 5 轮、每轮 4 个候选、总预算 20、每轮 1600 个反馈样本、同一 causal origin wave 内微批上限 64、样本并发 2、逐样本智能体 Token 预算 100,000,000，并提交 `auto_progress=true`；参数页不以样本数除以微批上限伪造请求次数，实际请求数以运行进度为准；服务端自动逐轮推进，浏览器只轮询，不出现要求点击“下一轮”的 `waiting` 状态。
+- [ ] 工作台默认 5 轮、每轮 4 个候选、总预算 20；默认每次更新 500 个完整预测时点／4,500 个评分单元；筛选阶段每候选 64 个完整预测时点，正式评估为 Top 2 各 500 个完整预测时点；候选并发 4，逐样本并发默认 64、可配置 1–128，同一 provider 的 DSH stage 全局物理在飞上限 128，并提交 `auto_progress=true`。参数页不提供 Token 上限，不以样本数除以微批上限伪造请求次数；实际请求数以运行进度为准，浏览器区分 provider 排队与尚未提交；服务端自动逐轮推进，浏览器只轮询，不出现要求点击“下一轮”的 `waiting` 状态。
 - [ ] 用户调整轮数或每轮候选数时，未手工覆盖的总预算同步为两者乘积；总预算不足时创建被明确阻止，不能提前耗尽却仍声称完成配置轮数。
 - [ ] 暂停在当前轮次边界生效，恢复后重新入队；多个连续运行按轮公平交替，重启只恢复未归档运行。
 - [ ] 服务重启后，冻结远程 policy/judge 的角色、凭据、目录可用性、执行可用性和配置 digest 仍逐项检查；任一项不匹配时 fail closed。
@@ -134,7 +131,7 @@ ECOLOGYRSI_TEST_REAL_DATA=1 PYTHONPATH=src \
 - [ ] 六个工作区名称为“运行设置、参数设计、训练数据、进化过程、候选评测、人工协作与治理”。
 - [ ] 除技术 ID、协议字段和单位外，业务标签、按钮、状态、错误和空状态均为中文。
 - [ ] 运行设置以训练数据集为唯一数据边界输入；领域包、episode、预测模型、评测器和进化策略由数据集目录与模型研究结果自动绑定，策略模型 API 与独立评审模型 API 分离，并在不满足条件时禁止启动。
-- [ ] 参数设计工作区可控制 `candidates_per_generation`、`samples_per_update`、`sample_agent_batch_size`、`sample_concurrency`、轮数、总候选预算、Token 上限、seed 和在线知识等冻结参数；默认值、范围、联动预算和创建后不可修改状态均清楚显示。
+- [ ] 参数设计工作区可控制 `candidates_per_generation`、完整预测更新预算（提交时换算为 `samples_per_update`）、`sample_agent_batch_size`、`sample_concurrency`、轮数、总候选预算、seed 和在线知识等冻结参数；不显示或提交 Token 上限，默认值、范围、联动预算和创建后不可修改状态均清楚显示。
 - [ ] 训练数据工作区提供“查看分区”选择器，可在 `training_fit` 与 `training_feedback` 间切换分页样本；开发、门禁、外部留出及其他受限原始数据仍不可选择且 API 拒绝访问。
 - [ ] 训练数据工作区展示真实字段、单位、digest、来源归档校验、未就绪数据资产和进化训练资产。
 - [ ] 训练资产表明确显示候选、轮次、准入标签、评测得分、judge 和“需治理审核”，页面同时声明其不是正式 SFT/DPO 数据。

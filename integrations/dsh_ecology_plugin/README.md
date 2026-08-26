@@ -20,7 +20,7 @@ Generation Judge preset 内部使用两个职责隔离的 Skill：`candidate-sci
 只审查单个候选的冻结科学证据，`batch-scientific-reflection` 只读取 Host 生成的
 rank→candidate→direction 聚合映射并提出建议；后者不能替代下一代 Host 预检，也不拥有选择或晋级权限。
 
-所有六个角色 preset 都暴露同一个 `web_search`。Agent 在必需 Skill 之后、阶段终端工具之前按需提交查询，不指定 provider；工具默认使用 DSH `ctx.web.search`，技术失败或定量证据不足时由 Python sidecar 自动切到 OpenAlex 元数据检索。结果和路由进入追加式事件账本并可重放。插件不挂载 `dsh-tool-web`、不开放 `web_fetch`，动态结果也不能替代冻结证据、登记预测工具或科学门禁。
+当前六个活动角色 preset 都暴露同一个 `web_search`；安装包还保留六个前版不可变 ID，共十二个已安装 preset ID，用于升级和历史回放。Agent 在必需 Skill 之后、阶段终端工具之前按需提交查询，不指定 provider；工具默认使用 DSH `ctx.web.search`，技术失败或定量证据不足时由 Python sidecar 自动切到 OpenAlex 元数据检索。结果和路由进入追加式事件账本并可重放。插件不挂载 `dsh-tool-web`、不开放 `web_fetch`，动态结果也不能替代冻结证据、登记预测工具或科学门禁。
 
 安装已打包的运行时：
 
@@ -28,8 +28,13 @@ rank→candidate→direction 聚合映射并提出建议；后者不能替代下
 ecologyrsi-dsh install-dsh-runtime --profile web
 ```
 
-安装器使用 `dsh plugin --profile web add --save-exact file:<tgz>`，安装六个固定
-preset，并写入受管 `cordis.patch.yml` 区块。
+安装器使用 `dsh plugin --profile web add --save-exact file:<tgz>`，安装十二个
+不可变 preset ID，并写入受管 `cordis.patch.yml` 区块。
+
+新建严格运行默认每次更新 500 个完整预测时点（4,500 个评分单元）；每候选先用
+64 个完整预测时点筛选，再让 Top 2 各用 500 个完整预测时点正式评估。候选并发
+默认 4；逐样本并发默认 64、可配置 1–128；同一 provider 的 DSH stage 全局物理
+在飞上限为 128。
 
 Node 宿主插件的 API 代理支持以下配置：
 

@@ -1256,6 +1256,52 @@ class DeliveryScriptTests(unittest.TestCase):
             self.assertIn("agent_lifecycle.test.mjs", commands)
             self.assertIn("proxy_security.mjs", commands)
 
+    def test_source_verification_rejects_extra_cli_arguments(self) -> None:
+        result = subprocess.run(
+            [
+                "bash",
+                "scripts/verify_delivery.sh",
+                "--artifacts-only",
+                "unexpected",
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("usage:", result.stderr)
+
+    def test_source_verification_propagates_node_syntax_failures(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ecologyrsi-node-check-") as directory:
+            temporary = Path(directory)
+            fake_python = temporary / "python"
+            fake_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_python.chmod(0o755)
+            fake_node = temporary / "node"
+            fake_node.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = \"--check\" ]; then exit 19; fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_node.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PYTHON"] = str(fake_python)
+            environment["PATH"] = f"{temporary}{os.pathsep}{environment['PATH']}"
+
+            result = subprocess.run(
+                ["bash", "scripts/verify_delivery.sh", "--source-only"],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 19, result.stdout + result.stderr)
+
     def test_internal_planning_documents_stay_local_only(self) -> None:
         internal_documents = (
             "EcologyRSI-DSH-完整框架与详细实施方案.md",

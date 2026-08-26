@@ -2635,7 +2635,7 @@ assert.match(html, /id="show-archived-runs"/);
 assert.match(html, /id="archive-button"/);
 assert.match(html, /id="delete-button"/);
 assert.equal(manifest.display_name, "生态模型进化工作台");
-assert.equal(manifest.version, "0.3.32");
+assert.equal(manifest.version, "0.3.33");
 assert.equal(manifest.entrypoint.file, "index.html");
 assert.equal(manifest.entrypoint.route, "/plugins/ecology/evolution/");
 assert.equal(manifest.development_only, false);
@@ -2767,11 +2767,27 @@ assert.match(html, /<span>每次更新完整预测次数<\/span><input id="sampl
 assert.match(html, /id="candidate-concurrency"[^>]*value="4"/);
 assert.match(html, /id="sample-agent-batch-size"[^>]*value="64"/);
 assert.match(html, /id="sample-concurrency"[^>]*max="128"[^>]*value="64"/);
+assert.ok(html.includes("500 次完整预测 / 4,500 个评分单元"));
+assert.ok(html.includes("每轮固定 500 次完整预测"));
 assert.match(html, /id="max-candidates"[^>]*value="20"/);
 assert.doesNotMatch(html, /id="token-limit"/);
 assert.ok(html.includes("样本先按因果预测起点组成 origin wave"));
 assert.ok(html.includes("实际请求数以运行进度为准"));
 assert.doesNotMatch(app, /wavesPerCandidate|每候选约/);
+assert.deepEqual(
+  fs.readdirSync(path.resolve(root, "../../integrations/dsh_ecology_plugin/presets"), {withFileTypes: true})
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort(),
+  [
+    "ecology-candidate-proposer-v3", "ecology-candidate-proposer-v4",
+    "ecology-coordinator-v3", "ecology-coordinator-v4",
+    "ecology-generation-judge-v6", "ecology-generation-judge-v7",
+    "ecology-researcher-v6", "ecology-researcher-v7",
+    "ecology-sample-critic-v3", "ecology-sample-critic-v4",
+    "ecology-sample-planner-v3", "ecology-sample-planner-v4",
+  ],
+);
 for (const field of ["rounds", "candidates_per_generation", "prediction_origins_per_update", "candidate_concurrency", "sample_agent_batch_size", "sample_concurrency", "max_candidates", "fixed_seed", "knowledge_online_enabled"]) {
   assert.match(html, new RegExp(`name="${field}"[^>]*form="start-form"|form="start-form"[^>]*name="${field}"`));
 }

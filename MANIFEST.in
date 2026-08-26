@@ -11,7 +11,7 @@ recursive-include integrations/dsh_ecology_plugin *.js *.mjs *.json *.md *.yml
 prune integrations/dsh_ecology_plugin/.runtime
 prune integrations/dsh_ecology_plugin/.dsh
 prune integrations/dsh_ecology_plugin/.ssh
-include integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.32.tgz
+include integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.33.tgz
 recursive-include scripts *.sh *.py *.mjs
 recursive-include tests *.py *.json
 global-exclude *.py[cod] __pycache__ .DS_Store *.sqlite3

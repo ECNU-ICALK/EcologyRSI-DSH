@@ -2,6 +2,47 @@
 
 All notable changes to EcologyRSI-DSH are recorded in this file.
 
+## 0.3.33 - 2026-08-27
+
+### Runtime correctness
+
+- Bound each run to one immutable sample-admission limit: new strict runs default
+  to 64 concurrent origin chains, accept 1–128, and share a provider-wide FIFO
+  cap of 128 physical DSH stage requests.
+- Project the two-stage evaluation accurately: every candidate receives a
+  disjoint 64-origin screen, Top 2 are frozen deterministically, and each
+  finalist receives the configured 500-origin formal window.
+
+### Replay safety
+
+- Centralize exception classification and retry policy, retire completed screen
+  launches, and preserve durable sibling-settlement anchors before requeueing a
+  recoverable parallel evaluation.
+- Re-admit running-but-idle auto-progress work from replayed scheduler state
+  without discarding its existing evaluation checkpoint.
+
+### Cleanup
+
+- Remove duplicate runtime contract logic while retaining explicit compatibility
+  behavior for historical manifests and immutable prior preset IDs.
+- Separate provider-admission queue counts from origins that have not yet been
+  submitted, preventing the browser from presenting both states as one queue.
+
+### Delivery
+
+- Make the packed DSH plugin a self-contained, versioned source artifact and
+  verify byte-for-byte agreement with the selected package sources.
+- Fail closed on symlinked, traversing, sensitive, special-file, stale, or
+  ambiguous release inputs; propagate JavaScript syntax failures and reject
+  unexpected delivery-verifier arguments.
+
+### Deployment
+
+- Align Python, browser, manifest, npm-host, lockfile, NOTICE, release paths, and
+  the tracked DSH plugin artifact at version 0.3.33.
+- Document the twelve installed immutable preset IDs, the six current runtime
+  roles, the 64/128 concurrency boundaries, and the 500-origin formal workflow.
+
 ## 0.3.32 - 2026-08-26
 
 ### Fixed
