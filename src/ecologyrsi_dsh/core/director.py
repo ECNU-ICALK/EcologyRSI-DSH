@@ -1949,8 +1949,6 @@ class EvolutionDirector:
         candidate = state.candidate(candidate_id)
         if candidate.generation != generation:
             raise ValueError("screening generation does not match candidate")
-        if candidate.status is not CandidateStatus.SPAWNED:
-            raise ValueError("only a new candidate can be screened")
         if (
             isinstance(score, bool)
             or not isinstance(score, (int, float))
@@ -2005,6 +2003,9 @@ class EvolutionDirector:
             "cohort_digest": cohort_digest,
         }
         payload["record_digest"] = screening_record_digest(payload)
+        existing = state.screening_for(generation, candidate_id)
+        if existing is None and candidate.status is not CandidateStatus.SPAWNED:
+            raise ValueError("only a new candidate can be screened")
         return self.ledger.append(
             run_id,
             "CandidateScreeningRecorded",
@@ -2092,6 +2093,8 @@ class EvolutionDirector:
             raise ValueError("screened-out candidate formal selection is missing")
         if candidate_id in formal.payload["selected_candidate_ids"]:
             raise ValueError("selected candidate cannot be screened out")
+        if state.screening_for(generation, candidate_id) is None:
+            raise ValueError("screened-out candidate is missing screening evidence")
         self.ledger.append(
             run_id,
             "CandidateScreenedOut",

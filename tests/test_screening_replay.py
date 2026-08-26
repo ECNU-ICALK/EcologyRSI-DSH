@@ -257,6 +257,26 @@ class ScreeningReplayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "screening generation"):
             project_run_state(events_with_wrong_generation)
 
+    def test_replay_rejects_candidate_ownership_forgery(self) -> None:
+        candidate_id = self.selected_ids[0]
+        spawned = next(
+            event
+            for event in self.events
+            if event.kind == "CandidateSpawned"
+            and event.payload["candidate"]["candidate_id"] == candidate_id
+        )
+        payload = {
+            **spawned.payload,
+            "candidate": {
+                **spawned.payload["candidate"],
+                "run_id": "run:forged-owner",
+            },
+        }
+        events_with_wrong_owner = self._replace_event(self.events, spawned, payload)
+
+        with self.assertRaisesRegex(ValueError, "candidate ownership"):
+            project_run_state(events_with_wrong_owner)
+
     def test_replay_rejects_malformed_cohort_digest(self) -> None:
         event = self.screening_events[0]
         payload = {**event.payload, "cohort_digest": "not-a-digest"}
@@ -333,6 +353,25 @@ class ScreeningReplayTests(unittest.TestCase):
         )
         self.assertEqual(formal_retry, self.formal_event)
         screened_out_id = self.candidates[2].candidate_id
+        screened_out_screening = self.screening_events[2]
+        screening_retry_after_status_change = (
+            self.director.record_candidate_screening(
+                self.run_id,
+                candidate_id=screened_out_id,
+                generation=0,
+                score=float(screened_out_screening.payload["score"]),
+                passed=bool(screened_out_screening.payload["passed"]),
+                constraint_violations=int(
+                    screened_out_screening.payload["constraint_violations"]
+                ),
+                origin_count=int(screened_out_screening.payload["origin_count"]),
+                prediction_cell_count=int(
+                    screened_out_screening.payload["prediction_cell_count"]
+                ),
+                cohort_digest=str(screened_out_screening.payload["cohort_digest"]),
+            )
+        )
+        self.assertEqual(screening_retry_after_status_change, screened_out_screening)
         screened_out_retry = self.director.screen_out_candidate(
             self.run_id,
             screened_out_id,
@@ -367,6 +406,66 @@ class ScreeningReplayTests(unittest.TestCase):
                 generation=0,
                 formal_selection_event_id="forged-formal-event",
             )
+
+    def test_screen_out_without_screening_evidence_commits_no_event(self) -> None:
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        director = EvolutionDirector(ledger, FakeDSHAdapter(max_proposals=3))
+        task = TaskManifest(
+            task_id="screened-out-precommit-validation",
+            objective="reject missing screening before append",
+            domain_pack="crop-soil-water@toy",
+            budget={"max_candidates": 3, "candidates_per_generation": 3},
+            metadata={
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                "sample_budget_class": "selection_eligible",
+                "prediction_cells_per_origin": 1,
+            },
+        )
+        run_id = "run:screened-out-precommit-validation"
+        director.start_evolution(task, run_id=run_id)
+        candidates = tuple(director.propose_and_spawn(run_id) for _ in range(3))
+        screening = tuple(
+            director.record_candidate_screening(
+                run_id,
+                candidate_id=candidate.candidate_id,
+                generation=0,
+                score=0.9 - index * 0.1,
+                passed=True,
+                constraint_violations=0,
+                origin_count=64,
+                prediction_cell_count=64,
+                cohort_digest=digest({"candidate_id": candidate.candidate_id}),
+            )
+            for index, candidate in enumerate(candidates[:2])
+        )
+        formal = director.freeze_formal_selection_cohort(
+            run_id,
+            generation=0,
+            selected_candidate_ids=tuple(
+                candidate.candidate_id for candidate in candidates[:2]
+            ),
+            screening_digest=digest(
+                [
+                    event.payload
+                    for event in sorted(
+                        screening,
+                        key=lambda event: str(event.payload["candidate_id"]),
+                    )
+                ]
+            ),
+        )
+        event_count = ledger.count(run_id)
+
+        with self.assertRaisesRegex(ValueError, "missing screening"):
+            director.screen_out_candidate(
+                run_id,
+                candidates[2].candidate_id,
+                generation=0,
+                formal_selection_event_id=formal.event_id,
+            )
+
+        self.assertEqual(ledger.count(run_id), event_count)
 
     def test_historical_v1_stream_still_replays(self) -> None:
         v1_screening_payloads: dict[str, dict[str, object]] = {}

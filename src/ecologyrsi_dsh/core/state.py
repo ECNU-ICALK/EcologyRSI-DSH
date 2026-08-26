@@ -1759,6 +1759,8 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             proposals[item.proposal_id] = item
         elif event.kind == "CandidateSpawned":
             item = Candidate.from_dict(payload["candidate"])
+            if item.run_id != run.run_id:
+                raise ValueError("candidate ownership does not match run")
             if is_dsh_native_protocol(task):
                 proposal = proposals.get(item.proposal_id)
                 if proposal is None:
