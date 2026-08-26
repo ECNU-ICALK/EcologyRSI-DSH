@@ -531,6 +531,7 @@ _GATEWAY_CIRCUIT_CODES = frozenset(
     policy[0] for policy in _GATEWAY_RETRY_POLICIES.values()
 )
 _GATEWAY_RETRY_EPOCH_SECONDS = 30 * 60
+_GATEWAY_RETRY_MAX_DELAY_SECONDS = 60 * 60
 _GATEWAY_RETRY_ERROR_CODE_POLICIES = {
     "model_gateway": (
         frozenset(
@@ -605,6 +606,7 @@ _GATEWAY_CIRCUIT_PAUSE_FIELDS = frozenset(
         "epoch_seconds",
         "epoch_deadline_at",
         "proposed_retry_at",
+        "retry_delay_seconds",
     }
 )
 _GATEWAY_CIRCUIT_RESUME_FIELDS = frozenset(
@@ -818,6 +820,7 @@ def _validate_gateway_circuit_pause_payload(payload: Mapping[str, Any]) -> None:
     retry_limit = payload.get("retry_limit")
     pause_trigger = payload.get("pause_trigger")
     epoch_seconds = payload.get("epoch_seconds")
+    retry_delay = payload.get("retry_delay_seconds")
     policy = _GATEWAY_RETRY_POLICIES.get(payload.get("retry_class"))
     if (
         policy is None
@@ -851,21 +854,54 @@ def _validate_gateway_circuit_pause_payload(payload: Mapping[str, Any]) -> None:
         }
         or isinstance(epoch_seconds, bool)
         or not isinstance(epoch_seconds, int)
+        or isinstance(retry_delay, bool)
+        or not isinstance(retry_delay, (int, float))
+        or not math.isfinite(float(retry_delay))
+        or not 0 <= float(retry_delay) <= _GATEWAY_RETRY_MAX_DELAY_SECONDS
     ):
         raise ValueError("gateway circuit pause payload is invalid")
     first = _aware_timestamp(payload.get("first_failure_at"))
     last = _aware_timestamp(payload.get("last_failure_at"))
     epoch_deadline = _aware_timestamp(payload.get("epoch_deadline_at"))
     proposed_retry = _aware_timestamp(payload.get("proposed_retry_at"))
-    if first is None or last is None or last < first:
+    if (
+        first is None
+        or last is None
+        or epoch_deadline is None
+        or proposed_retry is None
+    ):
         raise ValueError("gateway circuit pause payload is invalid")
+
+
+def _validate_gateway_circuit_pause_trigger_evidence(
+    payload: Mapping[str, Any],
+    *,
+    first_failure_event: Event,
+    pause_event: Event,
+) -> None:
+    first = _aware_timestamp(first_failure_event.created_at)
+    last = _aware_timestamp(pause_event.created_at)
+    payload_first = _aware_timestamp(payload.get("first_failure_at"))
+    payload_last = _aware_timestamp(payload.get("last_failure_at"))
+    payload_epoch_deadline = _aware_timestamp(payload.get("epoch_deadline_at"))
+    payload_proposed_retry = _aware_timestamp(payload.get("proposed_retry_at"))
+    epoch_seconds = int(payload["epoch_seconds"])
+    retry_delay = float(payload["retry_delay_seconds"])
+    if first is None or last is None or last < first:
+        raise ValueError("gateway circuit pause trigger evidence is invalid")
+    epoch_deadline = first + timedelta(seconds=epoch_seconds)
+    proposed_retry = last + timedelta(seconds=retry_delay)
     elapsed_seconds = (last - first).total_seconds()
     evidence_valid = (
         epoch_seconds == _GATEWAY_RETRY_EPOCH_SECONDS
-        and epoch_deadline == first + timedelta(seconds=epoch_seconds)
-        and proposed_retry is not None
-        and proposed_retry >= last
+        and payload_first == first
+        and payload_last == last
+        and payload_epoch_deadline == epoch_deadline
+        and payload_proposed_retry == proposed_retry
     )
+    pause_trigger = payload["pause_trigger"]
+    consecutive = int(payload["consecutive_failures"])
+    retry_limit = int(payload["retry_limit"])
     if pause_trigger == "failure_limit":
         evidence_valid = evidence_valid and consecutive == retry_limit
     elif pause_trigger == "epoch_elapsed":
@@ -1409,6 +1445,7 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
     formal_stage_started = False
     active_gateway_circuit_pause: Event | None = None
     gateway_retry_last_by_scope: dict[tuple[int, int, str, str], Event] = {}
+    gateway_retry_first_by_scope: dict[tuple[int, int, str, str], Event] = {}
     gateway_retry_max_epoch: dict[tuple[int, int, str, str], int] = {}
     gateway_retry_failure_ids: set[str] = set()
     gateway_retry_stage_success_seq: dict[tuple[int, str], int] = {}
@@ -1525,6 +1562,17 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 scope = gateway_retry_scope(payload)
                 reset_seq = gateway_retry_reset_seq(scope)
                 prior_retry = active_gateway_retry(scope, reset_seq=reset_seq)
+                first_retry = gateway_retry_first_by_scope.get(scope)
+                first_failure_event = (
+                    first_retry
+                    if first_retry is not None and first_retry.seq > reset_seq
+                    else event
+                )
+                _validate_gateway_circuit_pause_trigger_evidence(
+                    payload,
+                    first_failure_event=first_failure_event,
+                    pause_event=event,
+                )
                 if prior_retry is None:
                     chain_valid = (
                         payload["consecutive_failures"] == 1
@@ -2302,6 +2350,9 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     )
                 if not chain_valid:
                     raise ValueError("GatewayRetryScheduled retry chain is invalid")
+                first_retry = gateway_retry_first_by_scope.get(scope)
+                if first_retry is None or first_retry.seq <= reset_seq:
+                    gateway_retry_first_by_scope[scope] = event
                 gateway_retry_last_by_scope[scope] = event
                 gateway_retry_max_epoch[scope] = max(
                     gateway_retry_max_epoch.get(scope, 0),

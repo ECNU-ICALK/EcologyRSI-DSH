@@ -150,6 +150,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                 "proposed_retry_at": decision.event.payload[
                     "proposed_retry_at"
                 ],
+                "retry_delay_seconds": 0.0,
             },
         )
         self.assertEqual(
@@ -649,11 +650,112 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                     first_failure_at + timedelta(minutes=30)
                 ).isoformat(),
                 "proposed_retry_at": first.payload["last_failure_at"],
+                "retry_delay_seconds": 0.0,
             },
             event_id=f"{self.run_id}:forged-trigger-evidence",
         )
 
         with self.assertRaisesRegex(ValueError, "trigger evidence"):
+            self.director.state(self.run_id)
+
+    def test_replay_rejects_payload_forged_elapsed_count_two_pause(self) -> None:
+        first = self._report_failure(1).event
+        first_created_at = datetime.fromisoformat(first.created_at)
+        forged_payload_last = first_created_at + timedelta(minutes=30)
+        self.ledger.append(
+            self.run_id,
+            "RunPaused",
+            {
+                "code": "gateway_retry_circuit_open",
+                "retry_class": "model_gateway",
+                "generation": 0,
+                "stage": "research",
+                "breaker_epoch": first.payload["breaker_epoch"],
+                "consecutive_failures": 2,
+                "retry_limit": 6,
+                "first_failure_at": first_created_at.isoformat(),
+                "last_failure_at": forged_payload_last.isoformat(),
+                "last_error_code": "gateway_unavailable",
+                "suggested_action": "check_gateway_then_resume",
+                "pause_trigger": "epoch_elapsed",
+                "epoch_seconds": 30 * 60,
+                "epoch_deadline_at": forged_payload_last.isoformat(),
+                "proposed_retry_at": forged_payload_last.isoformat(),
+                "retry_delay_seconds": 0.0,
+            },
+            event_id=f"{self.run_id}:payload-forged-elapsed-pause",
+            created_at=(first_created_at + timedelta(minutes=1)).isoformat(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "trigger evidence"):
+            self.director.state(self.run_id)
+
+    def test_replay_rejects_payload_forged_deadline_count_two_pause(self) -> None:
+        first = self._report_failure(1).event
+        first_created_at = datetime.fromisoformat(first.created_at)
+        pause_created_at = first_created_at + timedelta(minutes=1)
+        epoch_deadline = first_created_at + timedelta(minutes=30)
+        self.ledger.append(
+            self.run_id,
+            "RunPaused",
+            {
+                "code": "gateway_retry_circuit_open",
+                "retry_class": "model_gateway",
+                "generation": 0,
+                "stage": "research",
+                "breaker_epoch": first.payload["breaker_epoch"],
+                "consecutive_failures": 2,
+                "retry_limit": 6,
+                "first_failure_at": first_created_at.isoformat(),
+                "last_failure_at": pause_created_at.isoformat(),
+                "last_error_code": "gateway_unavailable",
+                "suggested_action": "check_gateway_then_resume",
+                "pause_trigger": "retry_deadline_reaches_epoch",
+                "epoch_seconds": 30 * 60,
+                "epoch_deadline_at": epoch_deadline.isoformat(),
+                "proposed_retry_at": epoch_deadline.isoformat(),
+                "retry_delay_seconds": 0.0,
+            },
+            event_id=f"{self.run_id}:payload-forged-deadline-pause",
+            created_at=pause_created_at.isoformat(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "trigger evidence"):
+            self.director.state(self.run_id)
+
+    def test_replay_rejects_out_of_range_pause_retry_delay(self) -> None:
+        first = self._report_failure(1).event
+        first_created_at = datetime.fromisoformat(first.created_at)
+        self.ledger.append(
+            self.run_id,
+            "RunPaused",
+            {
+                "code": "gateway_retry_circuit_open",
+                "retry_class": "model_gateway",
+                "generation": 0,
+                "stage": "research",
+                "breaker_epoch": first.payload["breaker_epoch"],
+                "consecutive_failures": 2,
+                "retry_limit": 6,
+                "first_failure_at": first_created_at.isoformat(),
+                "last_failure_at": first_created_at.isoformat(),
+                "last_error_code": "gateway_unavailable",
+                "suggested_action": "check_gateway_then_resume",
+                "pause_trigger": "retry_deadline_reaches_epoch",
+                "epoch_seconds": 30 * 60,
+                "epoch_deadline_at": (
+                    first_created_at + timedelta(minutes=30)
+                ).isoformat(),
+                "proposed_retry_at": (
+                    first_created_at + timedelta(seconds=3600.001)
+                ).isoformat(),
+                "retry_delay_seconds": 3600.001,
+            },
+            event_id=f"{self.run_id}:out-of-range-pause-delay",
+            created_at=first_created_at.isoformat(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "circuit pause"):
             self.director.state(self.run_id)
 
     def test_director_maps_untrusted_error_codes_per_retry_class(self) -> None:
@@ -772,6 +874,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                 "epoch_seconds": 30 * 60,
                 "epoch_deadline_at": "2026-08-26T08:30:00+00:00",
                 "proposed_retry_at": "2026-08-26T08:05:00+00:00",
+                "retry_delay_seconds": 0.0,
             },
             event_id=f"{created_run_id}:forged-circuit-pause",
         )
@@ -941,8 +1044,10 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                     + timedelta(minutes=30)
                 ).isoformat(),
                 "proposed_retry_at": first.payload["last_failure_at"],
+                "retry_delay_seconds": 0.0,
             },
             event_id=f"{self.run_id}:forged-threshold-pause",
+            created_at=first.payload["last_failure_at"],
         )
 
         with self.assertRaisesRegex(ValueError, "retry chain"):

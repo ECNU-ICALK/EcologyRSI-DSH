@@ -895,7 +895,10 @@ class EvolutionDirector:
             epoch_deadline_at = first_failure_at + timedelta(
                 seconds=_GATEWAY_RETRY_EPOCH_SECONDS
             )
-            proposed_retry_at = last_failure_at + timedelta(seconds=bounded_delay)
+            persisted_retry_delay = round(bounded_delay, 3)
+            proposed_retry_at = last_failure_at + timedelta(
+                seconds=persisted_retry_delay
+            )
             if consecutive_failures >= _GATEWAY_RETRY_LIMIT:
                 pause_trigger = "failure_limit"
             elif elapsed_seconds >= _GATEWAY_RETRY_EPOCH_SECONDS:
@@ -926,6 +929,7 @@ class EvolutionDirector:
                     "epoch_seconds": _GATEWAY_RETRY_EPOCH_SECONDS,
                     "epoch_deadline_at": epoch_deadline_at.isoformat(),
                     "proposed_retry_at": proposed_retry_at.isoformat(),
+                    "retry_delay_seconds": persisted_retry_delay,
                 }
                 outcome = "paused"
             else:

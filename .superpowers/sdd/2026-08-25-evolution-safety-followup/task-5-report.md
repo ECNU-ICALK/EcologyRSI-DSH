@@ -249,3 +249,22 @@ OK
 
 `node plugins/ecology_evolution/test/smoke.mjs`, Python `compileall`, and
 `git diff --check` also exited 0. No unrelated full-repository suite was run.
+
+## Fix Round 2/5 — ledger-time trigger evidence
+
+Base: `870fc1f7b485c10d6f23bec0ddaba479bf038844`
+
+Pause replay no longer trusts self-reported failure times. It derives the first
+failure from the first active retry event's `created_at` (or the pause event for
+a first-failure pause), the last failure from the pause event's `created_at`,
+and the proposed retry from that pause time plus a persisted finite delay
+bounded to 0..3600 seconds. Retained timestamp fields must exactly equal these
+derived values. The two count-2 forged elapsed/deadline tests were RED because
+the old replay accepted both; they and the out-of-range-delay control are now
+GREEN.
+
+```text
+Targeted trigger tests: 6/6 OK
+Task 5 focused suites: Ran 85 tests in 26.329s — OK
+Python compileall and git diff --check: exit 0
+```
