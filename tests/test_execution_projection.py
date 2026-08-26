@@ -2073,6 +2073,34 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(sample_rate, 60.0)
         self.assertEqual(gateway_rate, 60.0)
 
+    def test_evaluation_progress_rates_exclude_pre_resume_downtime(self) -> None:
+        events = [
+            SimpleNamespace(
+                seq=10,
+                payload={"completed_samples": 0, "gateway_request_count": 0},
+                created_at="2026-08-26T06:00:00+00:00",
+            ),
+            SimpleNamespace(
+                seq=30,
+                payload={"completed_samples": 10, "gateway_request_count": 10},
+                created_at="2026-08-26T06:10:00+00:00",
+            ),
+            SimpleNamespace(
+                seq=40,
+                payload={"completed_samples": 20, "gateway_request_count": 20},
+                created_at="2026-08-26T06:11:00+00:00",
+            ),
+        ]
+
+        sample_rate, gateway_rate = _evaluation_progress_rates(
+            events,
+            events[-1],
+            after_seq=20,
+        )
+
+        self.assertEqual(sample_rate, 10.0)
+        self.assertEqual(gateway_rate, 10.0)
+
     def test_progress_uses_latest_sample_result_revision_after_recovery(self) -> None:
         with EventLedger() as ledger:
             director = EvolutionDirector(ledger, FakeDSHAdapter())

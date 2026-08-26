@@ -1108,8 +1108,20 @@ def _evaluation_progress_projection(
     payload = event.payload
     completed = int(payload.get("completed_samples") or 0)
     total = max(1, int(payload.get("total_samples") or 0))
+    latest_resume = next(
+        (
+            item
+            for item in reversed(state.events)
+            if item.kind == "EvaluationSampleResultsResumed"
+            and item.payload.get("candidate_id") == candidate_id
+            and item.payload.get("revision") == active_revision
+        ),
+        None,
+    )
     samples_per_minute, gateway_calls_per_minute = _evaluation_progress_rates(
-        events, event
+        events,
+        event,
+        after_seq=int(latest_resume.seq) if latest_resume is not None else None,
     )
     estimated_remaining_seconds = (
         round(60.0 * max(0, total - completed) / samples_per_minute)
@@ -1272,7 +1284,7 @@ def _superseded_sample_revision_projection(
 
 
 def _evaluation_progress_rates(
-    events: list[Any], latest: Any
+    events: list[Any], latest: Any, *, after_seq: int | None = None
 ) -> tuple[float | None, float | None]:
     """Estimate recent durable throughput from at most ten heartbeat intervals."""
 
@@ -1290,6 +1302,7 @@ def _evaluation_progress_rates(
             item
             for item in events
             if item.seq < latest.seq
+            and (after_seq is None or item.seq > after_seq)
             and int(item.payload.get("completed_samples") or 0) < latest_completed
         ),
         key=lambda item: item.seq,
