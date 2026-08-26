@@ -353,6 +353,47 @@ class ExecutionProjectionTests(unittest.TestCase):
             "candidate-scientific-review",
         )
 
+    def test_legacy_generation_judge_reflection_evidence_replays(self) -> None:
+        with EventLedger() as ledger:
+            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            run_id = director.start_evolution(
+                _task(), run_id="run:projection-legacy-generation-judge"
+            ).run.run_id
+            structured = {
+                "schema_version": "ecology-generation-review@1",
+                "accepted": False,
+                "rationale": "The supplied candidate evidence is insufficient.",
+                "flags": ["insufficient_evidence"],
+            }
+            ledger.append(
+                run_id,
+                "DshStructuredResultAccepted",
+                {
+                    "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
+                    "identity": {
+                        "run_id": run_id,
+                        "role": "generation-judge",
+                        "stage": "generation.judge",
+                        "session_id": "dsh-child-legacy-generation-judge-1",
+                    },
+                    "output_schema_id": "ecology-generation-review@1",
+                    "result_digest": digest(structured),
+                    "structured": structured,
+                    "skill_invocation_evidence": _skill_evidence(
+                        "generation.judge",
+                        "batch-scientific-reflection",
+                    ),
+                },
+            )
+
+            state = director.state(run_id)
+
+        self.assertEqual(state.events[-1].kind, "DshStructuredResultAccepted")
+        self.assertEqual(
+            state.events[-1].payload["skill_invocation_evidence"]["skill_name"],
+            "batch-scientific-reflection",
+        )
+
     def test_dsh_runtime_projection_aggregates_real_session_usage(self) -> None:
         state = SimpleNamespace(
             run=SimpleNamespace(session_id="dsh-native:run:usage"),
