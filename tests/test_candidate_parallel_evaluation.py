@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -10,6 +12,17 @@ from ecologyrsi_dsh.api import generation_execution
 from ecologyrsi_dsh.api.dsh_tools import DshToolAdmissionClosedError
 from ecologyrsi_dsh.api.generation_execution import _candidate_signature
 from ecologyrsi_dsh.core.models import RunStatus
+
+
+_FIXTURE_DIR = Path(__file__).with_name("fixtures")
+
+
+def _load_top2_screening_golden() -> tuple[tuple[SimpleNamespace, ...], dict, list[str]]:
+    payload = json.loads(
+        (_FIXTURE_DIR / "top2_screening_golden.json").read_text(encoding="utf-8")
+    )
+    candidates = tuple(SimpleNamespace(**item) for item in payload["candidates"])
+    return candidates, payload["screening"], payload["expected_finalist_ids"]
 
 
 class _Director:
@@ -30,6 +43,20 @@ class _Director:
 
 
 class CandidateParallelEvaluationTests(unittest.TestCase):
+    def test_top2_screening_selection_is_a_locked_outer_contract(self) -> None:
+        candidates, records, expected_ids = _load_top2_screening_golden()
+
+        selected = generation_execution._select_screening_finalists(
+            candidates,
+            records,
+            top_k=2,
+        )
+
+        self.assertEqual(
+            [candidate.candidate_id for candidate in selected],
+            expected_ids,
+        )
+
     def test_pause_admission_closure_keeps_candidate_evaluation_recoverable(
         self,
     ) -> None:
