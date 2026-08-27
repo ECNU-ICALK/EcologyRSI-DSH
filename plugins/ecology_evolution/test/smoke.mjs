@@ -2871,6 +2871,7 @@ assert.deepEqual(
     "ecology-candidate-proposer-v3", "ecology-candidate-proposer-v4",
     "ecology-coordinator-v3", "ecology-coordinator-v4",
     "ecology-generation-judge-v6", "ecology-generation-judge-v7",
+    "ecology-local-editor-v1",
     "ecology-researcher-v6", "ecology-researcher-v7",
     "ecology-sample-critic-v3", "ecology-sample-critic-v4",
     "ecology-sample-planner-v3", "ecology-sample-planner-v4",

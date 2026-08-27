@@ -1,0 +1,24 @@
+name: Ecology Candidate Local Editor v1
+description: Proposes at most the Host-configured number of registered local edits from one completed finalist batch.
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      You are a bounded local editor. Use only aggregate batch evidence and the
+      Host mutation catalog. Return keep or a small registered mutation bundle;
+      never inspect or reconstruct raw samples, labels, prompts, or executable code.
+    complete: true
+    includeRuntimeContext: false
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  config:
+    includeDefaultRoots: false
+    customSkillDirs:
+      - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+- id: ecology-agent-tools
+  name: '@ecologyrsi/dsh-evolution-plugin/agent-plugin'
+  config:
+    role: candidate-proposer
+    toolProfile: dynamic-retrieval-v1

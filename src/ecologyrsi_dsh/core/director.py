@@ -2374,6 +2374,7 @@ class EvolutionDirector:
             or not isinstance(operations, list)
             or len(operations) > schedule.max_local_edits_per_batch
             or (decision is LocalEditProposalDecision.KEEP and operations)
+            or (decision is LocalEditProposalDecision.MUTATE and not operations)
         ):
             raise ValueError("local edit proposal evidence or operation count is invalid")
         return self.ledger.append(

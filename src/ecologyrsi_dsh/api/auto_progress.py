@@ -10,7 +10,10 @@ partially written generation.
 
 Only runs whose immutable task manifest contains ``auto_progress=true`` are
 scheduled.  Legacy runs and explicit bounded ``auto_advance`` requests retain
-their previous manual-step semantics.
+their previous manual-step semantics.  The Top-2 adaptive epoch protocol is
+scheduled as one durable work unit at a time (screening, one formal batch,
+one local edit, or epoch closeout), rather than holding the worker for an
+entire 500-origin finalist trajectory.
 """
 
 from __future__ import annotations
@@ -847,6 +850,30 @@ class AutoProgressManager:
                 continue
 
             try:
+                # Adaptive epochs deliberately yield at every durable batch or
+                # local-edit boundary.  This keeps pause/cancel responsive and
+                # makes progress visible even when a finalist needs ten 50-
+                # origin batches.  The explicit /advance path still uses the
+                # synchronous executor and is not changed here.
+                adaptive_protocol = (
+                    state.task_manifest.metadata.get("optimization_protocol")
+                    == "top2_adaptive_epoch@1"
+                )
+                if adaptive_protocol:
+                    from .work_units import execute_next_adaptive_work_unit
+
+                    progressed = execute_next_adaptive_work_unit(endpoint, run_id)
+                    latest = self._state_for_work_item(work_item)
+                    if _run_incarnation(latest) != work_item[1]:
+                        raise _RunIncarnationChanged(run_id)
+                    if latest.run.status is not RunStatus.RUNNING:
+                        return False
+                    if not progressed:
+                        raise RuntimeError(
+                            "adaptive work unit returned without durable progress"
+                        )
+                    return True
+
                 result = execute_generation(endpoint, run_id)
                 latest = (
                     result

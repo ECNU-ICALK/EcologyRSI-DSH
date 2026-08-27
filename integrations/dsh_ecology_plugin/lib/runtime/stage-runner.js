@@ -76,6 +76,18 @@ const STAGES = Object.freeze({
       "Do not reconstruct or repeat the parent genome.",
     ].join(" "),
   }),
+  "candidate.local_edit": Object.freeze({
+    role: "candidate-proposer",
+    schema: "ecology-local-edit@1",
+    file: "local-edit",
+    skillName: "bounded-plugin-experiment",
+    instruction: [
+      "Review only aggregate evidence and the Host mutation catalog for the completed batch.",
+      "Return exactly one local-edit object. Choose keep with an empty operations array or mutate with only registered operations.",
+      "Never include raw observations, predictions, timestamps, prompts, or executable code.",
+      "The Host enforces the per-batch maximum operation count and applies valid operations atomically.",
+    ].join(" "),
+  }),
   "generation.judge": Object.freeze({
     role: "generation-judge",
     schema: "ecology-generation-review@1",

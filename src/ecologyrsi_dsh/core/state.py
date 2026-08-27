@@ -1328,6 +1328,19 @@ class RunState:
             None,
         )
 
+    def local_edit_proposal_for(
+        self, candidate_id: str, batch_index: int
+    ) -> Mapping[str, Any] | None:
+        return next(
+            (
+                item
+                for item in reversed(self.local_edit_proposals)
+                if item.get("candidate_id") == candidate_id
+                and item.get("batch_index") == batch_index
+            ),
+            None,
+        )
+
     def revision_activation_for(
         self, candidate_id: str, batch_index: int
     ) -> TrajectoryRevisionActivation | None:
@@ -2554,7 +2567,15 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             if stage in formal_stage_seals:
                 raise ValueError("formal stage has multiple seals")
             formal_stage_seals[stage] = dict(payload)
-        elif event.kind == "GenerationChampionSelected":
+        # Legacy generations used the same event name for an aggregate
+        # analysis payload.  Adaptive generations use the new three-field
+        # revision binding below; only the legacy shape is ignored here so the
+        # authoritative binding is still validated and replayed.
+        elif event.kind == "GenerationChampionSelected" and set(payload) != {
+            "generation",
+            "selected_candidate_id",
+            "selected_revision_id",
+        }:
             continue
         elif event.kind == "HumanInterventionRecorded":
             item = HumanIntervention.from_dict(payload["intervention"])

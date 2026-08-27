@@ -1951,6 +1951,91 @@ def _dsh_activity_projection(
     }
 
 
+def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
+    """Project origin-level progress for the Top-2 adaptive protocol.
+
+    The legacy six-stage bar has no representation for ten 50-origin batches,
+    so it can sit at a misleading percentage while the formal lane is active.
+    This projection counts only durable cohort/batch boundaries and therefore
+    remains monotonic across a process restart.
+    """
+
+    metadata = state.task_manifest.metadata
+    if metadata.get("optimization_protocol") != "top2_adaptive_epoch@1":
+        return None
+    schedule = metadata.get("optimization_schedule")
+    if not isinstance(schedule, Mapping):
+        return None
+    try:
+        screening_total = 4 * int(schedule["screening_origin_count"])
+        formal_total = 2 * int(schedule["formal_origin_count_per_finalist"])
+        holdout_total = 3 * int(schedule["selection_holdout_origin_count"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    generation = state.run.generation
+    screening_completed = sum(
+        int(event.payload.get("origin_count") or 0)
+        for event in state.candidate_screening_events
+        if int(event.payload.get("generation", -1)) == generation
+    )
+    formal_completed = sum(
+        int(item.scope.origin_count)
+        for item in state.formal_batch_evaluations
+        if item.scope.generation == generation
+    )
+    holdout_completed = sum(
+        int(item.scope.origin_count)
+        for item in state.holdout_evaluations
+        if item.scope.generation == generation
+    )
+    total = screening_total + formal_total + holdout_total
+    completed = min(
+        total,
+        screening_completed + formal_completed + holdout_completed,
+    )
+    phase = "screening"
+    if screening_completed >= screening_total:
+        phase = "formal_batch"
+    if formal_completed >= formal_total:
+        phase = "holdout"
+    if holdout_completed >= holdout_total:
+        phase = "decision"
+    batch_count = max(1, int(schedule.get("formal_origin_count_per_finalist", 500))) // max(
+        1, int(schedule.get("local_batch_origin_count", 50))
+    )
+    active_batch = None
+    active_candidate = None
+    for batch in reversed(state.formal_batches):
+        if batch.generation != generation:
+            continue
+        active_batch = batch.batch_index + 1
+        active_candidate = batch.candidate_id
+        break
+    return {
+        "schema_version": "ecologyrsi-dsh.adaptive-progress/1",
+        "evaluation_phase": phase,
+        "completed_origins": completed,
+        "total_origins": total,
+        "completed_samples": completed,
+        "total_samples": total,
+        "progress_percent": round(100.0 * completed / max(1, total), 1),
+        "screening_completed_origins": min(screening_completed, screening_total),
+        "screening_total_origins": screening_total,
+        "formal_completed_origins": min(formal_completed, formal_total),
+        "formal_total_origins": formal_total,
+        "holdout_completed_origins": min(holdout_completed, holdout_total),
+        "holdout_total_origins": holdout_total,
+        # The existing browser progress renderer consumes the generic
+        # ``batch_index``/``batch_count`` pair.  Keep the human-facing index
+        # one-based here while durable FormalBatch state remains zero-based.
+        "batch_index": active_batch,
+        "current_batch": active_batch,
+        "batch_count": batch_count,
+        "current_candidate_id": active_candidate,
+        "evidence": "durable_adaptive_cohort_and_trajectory_events",
+    }
+
+
 def _run_execution_progress(state: Any) -> dict[str, Any]:
     """Summarize durable execution evidence for a compact progress bar."""
 
@@ -1980,6 +2065,7 @@ def _run_execution_progress(state: Any) -> dict[str, Any]:
             "rejected",
             "failed",
             "duplicate",
+            "screened_out",
         }:
             terminal_candidates += 1
         if candidate.generation == state.run.generation:
@@ -2073,6 +2159,20 @@ def _run_execution_progress(state: Any) -> dict[str, Any]:
             ),
             1,
         )
+
+    adaptive_progress = _adaptive_progress_projection(state)
+    if adaptive_progress is not None:
+        stage_progress = adaptive_progress
+        current_stage = (
+            "evaluation"
+            if adaptive_progress["evaluation_phase"]
+            in {"screening", "formal_batch", "holdout"}
+            else adaptive_progress["evaluation_phase"]
+        )
+        active_candidate_id = (
+            adaptive_progress.get("current_candidate_id") or active_candidate_id
+        )
+        progress_percent = adaptive_progress["progress_percent"]
 
     if status == "paused":
         # Preserve ``current_stage`` as historical context for the pause while
@@ -2502,6 +2602,7 @@ def _candidate_projection(state: Any, candidate: Any) -> dict[str, Any]:
                 ),
                 None,
             )
+
             if failed_algorithm is not None:
                 failed_stage = f"algorithm_{failed_algorithm.phase}"
         result["failure_reason"] = public_error_summary(

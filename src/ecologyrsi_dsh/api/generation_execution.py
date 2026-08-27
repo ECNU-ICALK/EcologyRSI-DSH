@@ -15,6 +15,8 @@ from ..core.models import (
     Candidate,
     CandidateStatus,
     Evaluation,
+    Promotion,
+    PromotionDecision,
     Proposal,
     RunStatus,
     canonical_json,
@@ -40,7 +42,11 @@ from ..core.trajectory import (
     CandidateRevision,
     EvaluationPhase,
     EvaluationScope,
+    GenerationComparison,
+    HoldoutArm,
+    HoldoutEvaluation,
     RevisionStatus,
+    TrajectoryStatus,
 )
 from ..evaluators.epoch_cohorts import (
     estimate_epoch_capacity,
@@ -48,6 +54,7 @@ from ..evaluators.epoch_cohorts import (
     plan_run_adaptation_cohort,
 )
 from ..evaluators.registry import RULE_JUDGE_ID, EvaluationBundle, EvaluatorRegistry
+from ..evaluators.generation_comparison import build_generation_comparison
 from ..evaluators.gateway_sample_adapter import ModelTokenBudgetExhaustedError
 from ..evaluators.sample_execution import (
     SampleExecutionCancelledError,
@@ -60,6 +67,7 @@ from ..evolution.batches import finalize_generation_batch, start_generation_batc
 from ..evolution.analysis import (
     GENERATION_CONTROL_EVALUATION_SCHEMA,
     GENERATION_CONTROL_POLICY,
+    GenerationAnalysis,
     generation_control_evaluations,
     strict_generation_controls_required,
 )
@@ -2414,6 +2422,8 @@ def _evaluate_generation_candidates(
         )
     frozen_candidates = tuple(candidates)
     if _two_stage_screening_enabled(state, frozen_candidates):
+        from .formal_trajectory import execute_formal_trajectory
+
         frozen_candidates = _prepare_formal_finalists(
             endpoint,
             run_id,
@@ -2422,6 +2432,24 @@ def _evaluate_generation_candidates(
         )
         if not frozen_candidates:
             return
+        run_candidate_evaluations(
+            tuple(
+                CandidateEvaluationTask(
+                    slot_index=int(candidate.slot_index),
+                    candidate_id=str(candidate.candidate_id),
+                )
+                for candidate in frozen_candidates
+            ),
+            max_concurrency=min(raw_concurrency, len(frozen_candidates)),
+            evaluate=lambda candidate_id: execute_formal_trajectory(
+                endpoint, run_id, candidate_id
+            ),
+            admission_open=lambda: (
+                endpoint.server.director.state(run_id).run.status
+                is RunStatus.RUNNING
+            ),
+        )
+        return
     tasks = tuple(
         CandidateEvaluationTask(
             slot_index=int(candidate.slot_index),
@@ -2442,6 +2470,348 @@ def _evaluate_generation_candidates(
             is RunStatus.RUNNING
         ),
     )
+
+
+def _holdout_replay_inputs(
+    state: Any,
+    candidate: Candidate,
+    generation: int,
+    revision_id: str,
+    task: TaskManifest,
+) -> tuple[Candidate, Proposal, AlgorithmSpec]:
+    """Rebind a historical incumbent to the current holdout generation."""
+
+    source = candidate
+    if source.generation != generation:
+        candidate = replace(
+            source,
+            generation=generation,
+            status=CandidateStatus.SPAWNED,
+            evaluation_id=None,
+            promotion_id=None,
+        )
+    from .formal_trajectory import _revision_evaluation_inputs
+
+    _revision, revised_proposal, spec = _revision_evaluation_inputs(
+        state, candidate, revision_id, task
+    )
+    return candidate, revised_proposal, spec
+
+
+def _execute_adaptive_holdout_arm(
+    endpoint: Any,
+    run_id: str,
+    generation: int,
+    arm: HoldoutArm,
+    binding: Mapping[str, str],
+    cohort: Any,
+) -> HoldoutEvaluation:
+    state = endpoint.server.director.state(run_id)
+    existing = state.holdout_evaluation_for(generation, arm)
+    if existing is not None:
+        return existing
+    source_candidate = state.candidate(binding["candidate_id"])
+    task = _phase_task_manifest(
+        state.task_manifest,
+        generation,
+        "holdout",
+    )
+    candidate, proposal, spec = _holdout_replay_inputs(
+        state,
+        source_candidate,
+        generation,
+        binding["candidate_revision_id"],
+        task,
+    )
+    scope = EvaluationScope(
+        run_id=run_id,
+        generation=generation,
+        candidate_id=binding["candidate_id"],
+        candidate_revision_id=binding["candidate_revision_id"],
+        phase=EvaluationPhase.HOLDOUT,
+        cohort_digest=cohort.cohort_digest,
+        origin_count=cohort.origin_count,
+        holdout_arm=arm,
+    )
+    def sample_run_control() -> str:
+        status = endpoint.server.director.state(run_id).run.status
+        if status is RunStatus.RUNNING:
+            return "running"
+        if status is RunStatus.PAUSED:
+            return "paused"
+        return "cancelled"
+
+    bundle = endpoint.server.evaluators.evaluate_scientific(
+        task,
+        candidate,
+        proposal,
+        scope=scope,
+        cohort=cohort,
+        algorithm_spec=spec,
+        on_sample_control=sample_run_control,
+    )
+    metrics = dict(bundle.evaluation.metrics)
+    summary = metrics.get("sample_execution")
+    if not isinstance(summary, Mapping) or int(summary.get("attempted_origin_samples", 0)) < cohort.origin_count:
+        raise RuntimeError("holdout did not complete the frozen 169-origin cohort")
+    evaluation = HoldoutEvaluation(
+        evaluation_id=f"holdout-evaluation:{generation}:{arm.value}",
+        scope=scope,
+        score=bundle.evaluation.score,
+        passed=bundle.evaluation.passed,
+        metrics=metrics,
+        evaluator_digest=digest({"evaluator": bundle.evaluation.evaluator_digest, "scope": scope.scope_key}),
+    )
+    _director_mutation(
+        endpoint,
+        "record_holdout_evaluation",
+        run_id,
+        evaluation,
+    )
+
+    # Finalist holdout evidence is also the canonical candidate outcome used by
+    # the existing parent/search pipeline.  The incumbent replay arm is never
+    # written as a new candidate evaluation.
+    if arm in {HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2}:
+        artifact = replace(
+            bundle.artifact,
+            candidate_revision_id=binding["candidate_revision_id"],
+            evaluation_scope_digest=scope.scope_key,
+        )
+        _director_mutation(endpoint, "record_artifact", artifact)
+        canonical = replace(
+            bundle.evaluation,
+            candidate_revision_id=binding["candidate_revision_id"],
+            evaluation_scope=scope.to_dict(),
+            artifact_digest=artifact.digest,
+        )
+        _director_mutation(endpoint, "record_evaluation", canonical)
+    return evaluation
+
+
+def _build_adaptive_analysis(
+    state: Any,
+    generation: int,
+    comparison: GenerationComparison,
+    finalists: tuple[Candidate, ...],
+    incumbent_candidate_id: str,
+) -> Any:
+    """Create the aggregate analysis consumed by legacy parent/search code."""
+
+    finalist_evaluations = {
+        item.scope.candidate_id: item
+        for item in comparison.holdout_evaluations
+        if item.scope.holdout_arm in {HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2}
+    }
+    selected = (
+        comparison.selected_candidate_id
+        if comparison.selected_candidate_id in finalist_evaluations
+        else None
+    )
+    ranking: list[dict[str, Any]] = []
+    screening = _screening_records(state, generation)
+    generation_candidates = sorted(
+        (item for item in state.candidates if item.generation == generation),
+        key=lambda item: (item.slot_index, item.candidate_id),
+    )
+    for rank, candidate in enumerate(generation_candidates, start=1):
+        holdout = finalist_evaluations.get(candidate.candidate_id)
+        if holdout is not None:
+            gate = bool(
+                holdout.passed
+                and int(holdout.metrics.get("constraint_violations", 0)) == 0
+                and holdout.metrics.get("sample_execution_coverage_pass") is not False
+            )
+            ranking.append(
+                {
+                    "rank": rank if gate else None,
+                    "candidate_id": candidate.candidate_id,
+                    "slot_index": candidate.slot_index,
+                    "score": holdout.score,
+                    "eligible": gate,
+                    "scientific_pass": holdout.passed,
+                    "constraint_violations": int(holdout.metrics.get("constraint_violations", 0)),
+                    "classification": "eligible" if gate else "scientific_gate_failed",
+                    "primary_selection_gate": gate and candidate.candidate_id == selected,
+                    "selection_status": "selected" if candidate.candidate_id == selected else "not_selected",
+                    "selection_reason": "generation_holdout_winner" if candidate.candidate_id == selected else "lower_holdout_score",
+                    "judge_available": True,
+                    "judge_accepted": holdout.passed,
+                }
+            )
+        else:
+            record = screening.get(candidate.candidate_id, {})
+            ranking.append(
+                {
+                    "rank": None,
+                    "candidate_id": candidate.candidate_id,
+                    "slot_index": candidate.slot_index,
+                    "score": record.get("score"),
+                    "eligible": False,
+                    "scientific_pass": False,
+                    "constraint_violations": int(record.get("constraint_violations", 0)),
+                    "classification": "screened_out",
+                    "primary_selection_gate": False,
+                    "selection_status": "screened_out",
+                    "selection_reason": "not_selected_by_screening_top_k",
+                    "judge_available": False,
+                    "judge_accepted": False,
+                }
+            )
+    outcome = "promoted" if selected is not None else "no_improvement"
+    return GenerationAnalysis(
+        run_id=state.run.run_id,
+        generation=generation,
+        candidate_count=len(generation_candidates),
+        eligible_count=sum(1 for row in ranking if row["eligible"]),
+        outcome=outcome,
+        selected_candidate_id=selected,
+        champion_candidate_id=selected,
+        incumbent_before_candidate_id=incumbent_candidate_id,
+        incumbent_after_candidate_id=selected or incumbent_candidate_id,
+        search_parent_candidate_id=selected or finalists[0].candidate_id,
+        ranking=tuple(ranking),
+        next_search_direction=("围绕留出集冠军继续有界局部搜索",),
+        next_generation_focus="保持 Top-2 结构，在同一评测协议下继续批次局部更新",
+        selection_reason=(
+            f"候选 {selected} 在冻结 169-origin 三臂留出比较中胜出。"
+            if selected
+            else "两个 finalist 均未通过留出集门禁，保留 incumbent。"
+        ),
+        insufficient_evidence=False,
+    )
+
+
+def _finalize_adaptive_generation(endpoint: Any, run_id: str, batch: Any) -> Any:
+    state = endpoint.server.director.state(run_id)
+    generation = batch.generation
+    formal = state.formal_selection_for(generation)
+    if formal is None:
+        raise RuntimeError("adaptive generation is missing Top-2 formal selection")
+    finalist_ids = tuple(formal.payload["selected_candidate_ids"])
+    finalists = tuple(state.candidate(item) for item in finalist_ids)
+    trajectories = tuple(state.trajectory_for(item) for item in finalist_ids)
+    if any(item is None or item.status is not TrajectoryStatus.COMPLETED for item in trajectories):
+        return None
+    cohorts = state.generation_cohort_for(generation)
+    if cohorts is None:
+        raise RuntimeError("adaptive generation is missing frozen holdout cohort")
+
+    incumbent_id = state.run.best_candidate_id
+    incumbent_revision_id = (
+        state.effective_revision_for(generation - 1)
+        if incumbent_id is not None and generation > 0
+        else None
+    )
+    if incumbent_id is None or incumbent_revision_id is None:
+        fallback = next(
+            (item for item in state.candidates if item.generation == generation and item.candidate_id not in finalist_ids),
+            None,
+        )
+        if fallback is None:
+            raise RuntimeError("adaptive holdout requires a distinct incumbent arm")
+        incumbent_id = fallback.candidate_id
+        incumbent_revision = state.initial_revision_for(incumbent_id)
+        if incumbent_revision is None:
+            raise RuntimeError("adaptive incumbent is missing R0")
+        incumbent_revision_id = incumbent_revision.revision_id
+    bindings = {
+        HoldoutArm.FINALIST_1.value: {
+            "candidate_id": finalist_ids[0],
+            "candidate_revision_id": trajectories[0].final_revision_id or trajectories[0].initial_revision_id,
+        },
+        HoldoutArm.FINALIST_2.value: {
+            "candidate_id": finalist_ids[1],
+            "candidate_revision_id": trajectories[1].final_revision_id or trajectories[1].initial_revision_id,
+        },
+        HoldoutArm.INCUMBENT.value: {
+            "candidate_id": incumbent_id,
+            "candidate_revision_id": incumbent_revision_id,
+        },
+    }
+    holdout = _director_mutation(
+        endpoint,
+        "freeze_generation_holdout",
+        run_id,
+        generation,
+        cohorts.holdout.cohort_digest,
+        bindings,
+    )
+    state = endpoint.server.director.state(run_id)
+    for arm in HoldoutArm:
+        _execute_adaptive_holdout_arm(
+            endpoint,
+            run_id,
+            generation,
+            arm,
+            holdout.arm_bindings[arm.value],
+            cohorts.holdout,
+        )
+    state = endpoint.server.director.state(run_id)
+    evaluations = tuple(
+        state.holdout_evaluation_for(generation, arm)
+        for arm in HoldoutArm
+    )
+    if any(item is None for item in evaluations):
+        return None
+    comparison = state.comparison_for(generation)
+    if comparison is None:
+        comparison = build_generation_comparison(
+            run_id=run_id,
+            generation=generation,
+            cohort_digest=holdout.cohort_digest,
+            holdout_evaluations=tuple(item for item in evaluations if item is not None),
+            incumbent_candidate_id=incumbent_id,
+        )
+        _director_mutation(endpoint, "record_generation_comparison", run_id, comparison)
+    _director_mutation(
+        endpoint,
+        "select_generation_champion",
+        run_id,
+        generation,
+        comparison.selected_revision_id,
+        comparison.comparison_digest,
+    )
+    state = endpoint.server.director.state(run_id)
+    analysis = state.analysis_for(generation)
+    if analysis is None:
+        analysis = _build_adaptive_analysis(
+            state, generation, comparison, finalists, incumbent_id
+        )
+        endpoint.server.ledger.append(
+            run_id,
+            "GenerationAnalyzed",
+            {"analysis": analysis.to_dict()},
+            event_id=f"{run_id}:generation:{generation}:analyzed",
+        )
+    state = endpoint.server.director.state(run_id)
+    for finalist in finalists:
+        if state.promotion_for(finalist.candidate_id) is not None:
+            continue
+        approved = finalist.candidate_id == comparison.selected_candidate_id
+        # ``record_evaluation`` above makes the finalists eligible for the
+        # existing DSH identity/artifact promotion fence.
+        _director_mutation(
+            endpoint,
+            "decide_promotion",
+            Promotion(
+                promotion_id=f"promotion:{run_id}:{generation}:{finalist.candidate_id}",
+                run_id=run_id,
+                candidate_id=finalist.candidate_id,
+                decision=(PromotionDecision.APPROVED if approved else PromotionDecision.REJECTED),
+                reason=analysis.selection_reason,
+            ),
+        )
+    if state.task_manifest.metadata.get("autonomous_research_protocol"):
+        from ..evolution.batches import _ensure_generation_reflection
+
+        _ensure_generation_reflection(
+            endpoint.server.director,
+            endpoint.server.director.state(run_id),
+            batch,
+            analysis,
+        )
+    return analysis
 
 
 def execute_generation(endpoint: Any, run_id: str) -> Any:
@@ -2509,6 +2879,17 @@ def execute_generation(endpoint: Any, run_id: str) -> Any:
     latest = endpoint.server.director.state(run_id)
     if latest.run.status is not RunStatus.RUNNING:
         return latest
+
+    # Adaptive Top-2 generations have their own final barrier: both finalists
+    # must finish all 10 prequential batches, then all three arms are scored on
+    # one fresh holdout cohort before any promotion or generation advance.
+    if _two_stage_screening_enabled(latest, current):
+        analysis = _finalize_adaptive_generation(endpoint, run_id, batch)
+        latest = endpoint.server.director.state(run_id)
+        if latest.run.status is not RunStatus.RUNNING or analysis is None:
+            return latest
+        endpoint.server.director.advance_generation(run_id)
+        return complete_if_budget_exhausted(endpoint, run_id)
 
     state = endpoint.server.director.state(run_id)
     if _generation_judges_should_retry(state, batch.generation):

@@ -77,6 +77,9 @@ integrations/dsh_ecology_plugin/lib/runtime/reconciliation.js
 integrations/dsh_ecology_plugin/lib/tools/agent-plugin.js
 integrations/dsh_ecology_plugin/lib/tools/retrieval.js
 integrations/dsh_ecology_plugin/schemas/genome-mutation.schema.json
+integrations/dsh_ecology_plugin/schemas/local-edit.schema.json
+integrations/dsh_ecology_plugin/presets/ecology-local-editor-v1/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-local-editor-v1/agent.cordis.yml
 integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v7/agent.cordis.yml

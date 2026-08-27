@@ -1,0 +1,34 @@
+{
+  "$id": "ecology-local-edit@1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "decision", "operations", "evidence_refs", "expected_effect_cells", "risk_cells"],
+  "properties": {
+    "schema_version": {"const": "ecology-local-edit@1"},
+    "decision": {"enum": ["keep", "mutate"]},
+    "operations": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 5,
+      "items": {
+        "oneOf": [
+          {"type":"object","additionalProperties":false,"required":["op","name","value"],"properties":{"op":{"const":"set_bounded_parameter"},"name":{"type":"string","minLength":1,"maxLength":120},"value":{"type":"number"}}},
+          {"type":"object","additionalProperties":false,"required":["op","predictor_id"],"properties":{"op":{"const":"select_registered_pipeline"},"predictor_id":{"type":"string","minLength":1,"maxLength":160}}},
+          {"type":"object","additionalProperties":false,"required":["op","program_id"],"properties":{"op":{"enum":["select_registered_feature_policy","select_registered_fit_policy","select_registered_uncertainty_policy"]},"program_id":{"type":"string","minLength":1,"maxLength":160}}},
+          {"type":"object","additionalProperties":false,"required":["op","workflow_template_id"],"properties":{"op":{"const":"select_registered_workflow_template"},"workflow_template_id":{"type":"string","minLength":1,"maxLength":160}}},
+          {"type":"object","additionalProperties":false,"required":["op","name","value"],"properties":{"op":{"const":"set_bounded_workflow_parameter"},"name":{"type":"string","minLength":1,"maxLength":120},"value":{"type":"number"}}},
+          {"type":"object","additionalProperties":false,"required":["op","role","instruction_template_id"],"properties":{"op":{"const":"select_instruction_template"},"role":{"enum":["sample-planner","sample-repair"]},"instruction_template_id":{"type":"string","minLength":1,"maxLength":160}}},
+          {"type":"object","additionalProperties":false,"required":["op","role","name","value"],"properties":{"op":{"const":"set_instruction_parameter"},"role":{"enum":["sample-planner","sample-repair"]},"name":{"type":"string","minLength":1,"maxLength":120},"value":{"type":["string","number","integer","boolean"]}}},
+          {"type":"object","additionalProperties":false,"required":["op","role","enabled_tool_ids"],"properties":{"op":{"const":"narrow_role_tool_policy"},"role":{"enum":["sample-planner","sample-repair"]},"enabled_tool_ids":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":160}}}}
+        ]
+      }
+    },
+    "evidence_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 160}},
+    "expected_effect_cells": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9_]+@[0-9]+h$"}},
+    "risk_cells": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9_]+@[0-9]+h$"}}
+  },
+  "allOf": [
+    {"if": {"properties": {"decision": {"const": "keep"}}}, "then": {"properties": {"operations": {"maxItems": 0}}}},
+    {"if": {"properties": {"decision": {"const": "mutate"}}}, "then": {"properties": {"operations": {"minItems": 1}}}}
+  ]
+}

@@ -22,6 +22,7 @@ SEED_TEMPLATE_SCHEMA_VERSION = "ecologyrsi-dsh.seed-genome-template/1"
 MUTATION_SCHEMA_VERSION = "ecologyrsi-dsh.genome-mutation/1"
 MATERIALIZER_VERSION = "seed-genome-materializer@2"
 TRUST_REGION_MUTATION_OPERATOR_ID = "bounded-trust-region-mutation@2"
+LOCAL_EDIT_MUTATION_OPERATOR_ID = "bounded-batch-local-edit@1"
 TRUST_REGION_MAX_NORMALIZED_STEP = 0.15
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -560,7 +561,11 @@ def _lineage(value: Any) -> dict[str, Any]:
     }
     raw = _exact_mapping(value, "lineage", fields)
     origin = _text(raw["origin_kind"], "lineage.origin_kind")
-    if origin not in {"seed_catalog", "bounded_mutation"}:
+    if origin not in {
+        "seed_catalog",
+        "bounded_mutation",
+        "batch_local_edit",
+    }:
         raise ValueError("unsupported lineage origin_kind")
     result: dict[str, Any] = {"origin_kind": origin}
     nullable_texts = {"parent_candidate_id"}
@@ -613,7 +618,7 @@ def _lineage(value: Any) -> dict[str, Any]:
             "source_knowledge_snapshot_digest",
         )
         if any(result[name] is None for name in required):
-            raise ValueError("bounded_mutation lineage is incomplete")
+            raise ValueError(f"{origin} lineage is incomplete")
         if result["generation"] == 0 and result["parent_candidate_id"] is not None:
             raise ValueError("first generation parent_candidate_id must be null")
         if result["generation"] > 0 and result["parent_candidate_id"] is None:
@@ -933,12 +938,24 @@ def apply_genome_mutation(
     operations = raw["operations"]
     if isinstance(operations, (str, bytes)) or not isinstance(operations, Sequence):
         raise TypeError("mutation operations must be an array")
-    if not 1 <= len(operations) <= 4:
-        raise ValueError("mutation operations must contain between 1 and 4 items")
-    strict_trust_region = (
-        context.mutation_operator_id == TRUST_REGION_MUTATION_OPERATOR_ID
+    operation_limit = (
+        5
+        if context.mutation_operator_id == LOCAL_EDIT_MUTATION_OPERATOR_ID
+        else 4
     )
-    if strict_trust_region and len(operations) != 1:
+    if not 1 <= len(operations) <= operation_limit:
+        raise ValueError(
+            "mutation operations must contain between 1 and "
+            f"{operation_limit} items"
+        )
+    strict_trust_region = (
+        context.mutation_operator_id
+        in {TRUST_REGION_MUTATION_OPERATOR_ID, LOCAL_EDIT_MUTATION_OPERATOR_ID}
+    )
+    if (
+        context.mutation_operator_id == TRUST_REGION_MUTATION_OPERATOR_ID
+        and len(operations) != 1
+    ):
         raise ValueError(
             "bounded trust-region mutation must contain exactly one operation"
         )
@@ -1142,7 +1159,11 @@ def apply_genome_mutation(
     result.pop("genome_digest", None)
     result.pop("behavior_digest", None)
     result["lineage"] = {
-        "origin_kind": "bounded_mutation",
+        "origin_kind": (
+            "batch_local_edit"
+            if context.mutation_operator_id == LOCAL_EDIT_MUTATION_OPERATOR_ID
+            else "bounded_mutation"
+        ),
         "parent_candidate_id": context.parent_candidate_id,
         "parent_genome_digest": context.parent_genome_digest,
         "generation": context.generation,
@@ -1168,6 +1189,7 @@ __all__ = [
     "FrozenRunInitialization",
     "GENOME_SCHEMA_VERSION",
     "MATERIALIZER_VERSION",
+    "LOCAL_EDIT_MUTATION_OPERATOR_ID",
     "TRUST_REGION_MAX_NORMALIZED_STEP",
     "TRUST_REGION_MUTATION_OPERATOR_ID",
     "GenomeBindingSubset",

@@ -63,6 +63,10 @@ _STRUCTURED_STAGE_CONTRACTS: dict[str, tuple[str, str]] = {
         "ecology-generation-reflection@1",
     ),
     "candidate.propose": ("candidate-proposer", "ecology-genome-mutation@1"),
+    "candidate.local_edit": (
+        "candidate-proposer",
+        "ecology-local-edit@1",
+    ),
     "generation.judge": ("generation-judge", "ecology-generation-review@1"),
     "sample.plan": ("sample-planner", "ecology-sample-decisions@1"),
     "sample.critic": ("sample-critic", "ecology-sample-review@1"),
@@ -82,6 +86,7 @@ _STRUCTURED_STAGE_SKILLS: dict[str, frozenset[str]] = {
     "generation.research-synthesis": frozenset({"autonomous-ecology-research"}),
     "generation.reflect": frozenset({"batch-scientific-reflection"}),
     "candidate.propose": frozenset({"bounded-plugin-experiment"}),
+    "candidate.local_edit": frozenset({"bounded-plugin-experiment"}),
     "generation.judge": frozenset({"candidate-scientific-review"}),
     "sample.plan": frozenset(
         {
