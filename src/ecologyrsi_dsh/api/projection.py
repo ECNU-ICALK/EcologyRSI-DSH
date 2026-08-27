@@ -1654,6 +1654,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
 
     sample_events: list[Any] = []
     latest_launch_by_key: dict[str, tuple[Any, Mapping[str, Any]]] = {}
+    launch_history_by_key: dict[str, tuple[Any, Mapping[str, Any]]] = {}
     launch_by_reservation_id: dict[str, tuple[Any, Mapping[str, Any]]] = {}
     accepted_reservations: set[str] = set()
     failed_reservations: set[str] = set()
@@ -1688,6 +1689,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
                 continue
             launch_count += 1
             latest_launch_by_key[key] = (event, launch)
+            launch_history_by_key[key] = (event, launch)
             reservation_id = str(launch.get("reservation_id") or "").strip()
             if reservation_id:
                 launch_by_reservation_id[reservation_id] = (event, launch)
@@ -1735,9 +1737,10 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     if not sample_events:
         return None
 
-    completed_launches: list[
-        tuple[int, frozenset[str] | None, tuple[str, str] | None]
-    ] = []
+    completed_origins: dict[
+        tuple[str, frozenset[str] | tuple[str, str] | str],
+        tuple[Any, frozenset[str] | None, tuple[str, str] | None],
+    ] = {}
     for terminal_key, terminal_event in completed_terminals.items():
         identity = terminal_event.payload.get("identity")
         reflection_reservation = str(
@@ -1746,36 +1749,52 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
             else ""
         ).strip()
         reflection_launch = launch_by_reservation_id.get(reflection_reservation)
-        terminal_launch = latest_launch_by_key.get(terminal_key)
+        terminal_launch = launch_history_by_key.get(terminal_key)
         correlated_launch = reflection_launch or terminal_launch
         terminal_idempotency_key = (
             identity.get("idempotency_key")
             if isinstance(identity, Mapping)
             else terminal_event.payload.get("idempotency_key")
         )
-        completed_launches.append(
-            (
-                int(terminal_event.seq),
-                _sample_member_digest_set(
-                    correlated_launch[1].get("sample_member_digests")
-                    if correlated_launch is not None
-                    else None
-                ),
-                _legacy_sample_launch_key(terminal_idempotency_key),
-            )
+        member_digests = _sample_member_digest_set(
+            correlated_launch[1].get("sample_member_digests")
+            if correlated_launch is not None
+            else None
         )
+        legacy_key = _legacy_sample_launch_key(terminal_idempotency_key)
+        if member_digests is not None:
+            origin_key = ("members", member_digests)
+        elif legacy_key is not None:
+            origin_key = ("legacy", legacy_key)
+        else:
+            origin_key = ("terminal", terminal_key)
+        previous = completed_origins.get(origin_key)
+        if previous is None or int(terminal_event.seq) > int(previous[0].seq):
+            completed_origins[origin_key] = (
+                terminal_event,
+                member_digests,
+                legacy_key,
+            )
+
+    completed_launches = [
+        (member_digests, legacy_key)
+        for _, member_digests, legacy_key in completed_origins.values()
+    ]
+    completed_terminal_events = [
+        event for event, _, _ in completed_origins.values()
+    ]
 
     total = len(candidates) * _TWO_STAGE_SCREENING_ORIGINS
-    completed = min(total, len(completed_terminals))
+    completed = min(total, len(completed_origins))
     if reflection_enabled:
         failed = sum(
             event.payload.get("structured", {}).get("outcome_class") == "failed"
-            for event in completed_terminals.values()
+            for event in completed_terminal_events
         )
         succeeded = sum(
             event.payload.get("structured", {}).get("outcome_class")
             in {"improved", "degraded", "neutral"}
-            for event in completed_terminals.values()
+            for event in completed_terminal_events
         )
     else:
         # Under aggregate post-score reflection, a durable Planner result is
@@ -1796,7 +1815,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     outstanding_origins: set[
         tuple[str, frozenset[str] | tuple[str, str] | str]
     ] = set()
-    for launch_event, launch in latest_launch_by_key.values():
+    for _, launch in latest_launch_by_key.values():
         if (
             not reflection_enabled
             and launch.get("stage") != terminal_stage
@@ -1819,8 +1838,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         )
         legacy_key = _legacy_sample_launch_key(launch.get("idempotency_key"))
         if any(
-            int(launch_event.seq) < completed_seq
-            and (
+            (
                 (
                     member_digests is not None
                     and completed_members is not None
@@ -1832,9 +1850,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
                     and legacy_key == completed_legacy_key
                 )
             )
-            for completed_seq, completed_members, completed_legacy_key in (
-                completed_launches
-            )
+            for completed_members, completed_legacy_key in completed_launches
         ):
             continue
         if member_digests is not None:
@@ -1844,7 +1860,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         else:
             origin_key = ("launch", reservation_id or launch_key)
         outstanding_origins.add(origin_key)
-    outstanding = len(outstanding_origins)
+    outstanding = min(remaining, len(outstanding_origins))
     in_flight = min(
         outstanding,
         configured_concurrency
@@ -1852,9 +1868,9 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         else HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
     )
     provider_queued = max(0, outstanding - in_flight)
-    awaiting_submission = max(0, total - completed - outstanding)
+    awaiting_submission = remaining - outstanding
     terminal_events = sorted(
-        completed_terminals.values(), key=lambda event: int(event.seq)
+        completed_terminal_events, key=lambda event: int(event.seq)
     )
     samples_per_minute = None
     if len(terminal_events) >= 2:
