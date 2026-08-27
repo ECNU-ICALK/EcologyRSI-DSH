@@ -105,6 +105,34 @@ class SampleExecutionControlUnavailableError(SampleExecutionControlError):
     """The run-control state could not be read safely."""
 
     run_status = "unavailable"
+
+
+def _strict_origin_worker_count(
+    *,
+    pending_origin_count: int,
+    sample_concurrency: int,
+    candidate_concurrency: int,
+) -> int:
+    """Return lane-local workers without dividing the shared run limit.
+
+    Candidate concurrency schedules lanes.  Every origin still acquires the
+    same server-owned run admission permit, so pre-dividing here needlessly
+    serializes work and makes a configured 64 behave like 8 or 16.
+    """
+
+    if (
+        isinstance(pending_origin_count, bool)
+        or not isinstance(pending_origin_count, int)
+        or pending_origin_count < 0
+    ):
+        raise ValueError("pending_origin_count must be a non-negative integer")
+    for name, value in (
+        ("sample_concurrency", sample_concurrency),
+        ("candidate_concurrency", candidate_concurrency),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    return min(pending_origin_count, sample_concurrency)
     retryable = False
 
 
@@ -1189,12 +1217,12 @@ class CollaborativeSampleExecutor:
                     getattr(self.adapter, "sample_concurrency", 1),
                 )
             )
-            candidate_concurrency = max(
-                1, int(context_data.get("candidate_concurrency", 1))
-            )
-            local_worker_count = min(
-                len(pending_origin_bundles),
-                max(1, math.ceil(configured_concurrency / candidate_concurrency)),
+            local_worker_count = _strict_origin_worker_count(
+                pending_origin_count=len(pending_origin_bundles),
+                sample_concurrency=configured_concurrency,
+                candidate_concurrency=max(
+                    1, int(context_data.get("candidate_concurrency", 1))
+                ),
             )
             if local_worker_count:
                 origin_executor = ThreadPoolExecutor(

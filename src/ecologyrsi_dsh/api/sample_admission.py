@@ -16,7 +16,6 @@ from ..core.errors import (
 DEFAULT_SAMPLE_CONCURRENCY = 64
 MAX_SAMPLE_CONCURRENCY = 128
 HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK = 4
-_INITIAL_ADAPTIVE_CONCURRENCY = 8
 
 
 def validate_sample_concurrency(value: object) -> int:
@@ -62,7 +61,10 @@ class RunSampleAdmission:
             if state is None:
                 state = _RunAdmissionState(
                     limit=limit,
-                    adaptive_limit=min(limit, _INITIAL_ADAPTIVE_CONCURRENCY),
+                    # The user's frozen run limit is effective immediately.
+                    # Retryable provider congestion may reduce this physical
+                    # window later, but candidate/lane count never pre-clamps it.
+                    adaptive_limit=limit,
                 )
                 self._states[run_id] = state
             elif state.limit != limit:
