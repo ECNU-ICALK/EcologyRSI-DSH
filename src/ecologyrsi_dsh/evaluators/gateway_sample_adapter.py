@@ -2286,12 +2286,16 @@ class GatewaySampleCollaborationAdapter:
         bundle_input_digest: str | None = None
         bundle_audit: dict[str, Any] = {}
         if (
-            role == "planner"
-            and (
-                prediction_tool_execution is not None
-                or self._forecast_bundle_tool is not None
+            (
+                role == "planner"
+                and (
+                    prediction_tool_execution is not None
+                    or self._forecast_bundle_tool is not None
+                )
             )
-            and len({attempts[index] for index in indices}) == 1
+            or (role == "repair" and prediction_tool_execution is not None)
+        ) and (
+            len({attempts[index] for index in indices}) == 1
             and all(
                 str(decisions[requests[index].sample_id]["next_tool"])
                 == requests[index].algorithm_id

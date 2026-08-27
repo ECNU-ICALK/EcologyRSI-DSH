@@ -533,6 +533,73 @@ class DshSampleExecutionTests(unittest.TestCase):
             1,
         )
 
+    def test_pre_tool_remote_retry_rebinds_the_registered_prediction_tool(self) -> None:
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        run_id = "run-pre-tool-retry-binding"
+        ledger.append(run_id, "RunCreated", {"test": True})
+        service = DshToolService(ledger)
+        native = _PersistingRetryRuntime(service, ledger)
+        native.fail_next_critic = False
+        forecast_calls = 0
+
+        def forecast_bundle(requests):
+            nonlocal forecast_calls
+            forecast_calls += 1
+            return _constant_forecast_bundle(21.5)(requests)
+
+        adapter = DshSampleCollaborationAdapter(
+            run_id=run_id,
+            runtime_provider=lambda: DshStructuredRoleRuntime(
+                native,
+                admission=service,
+            ),
+            revision_provider=lambda _run_id: {
+                "run_state_revision": ledger.latest_seq(),
+                "ledger_expected_revision": ledger.latest_seq(),
+            },
+            identity_digests={
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            strategy_model_id="dsh/strategy",
+            review_model_id="dsh/review",
+            forecast_bundle_tool=forecast_bundle,
+            prediction_tool_binder=service.bind_prediction_tool,
+        )
+        plan = adapter.plan_batch(
+            {
+                "run_id": run_id,
+                "candidate_id": "candidate-1",
+                "dataset_digest": "d" * 64,
+                "algorithm_id": "registered-predictor",
+                "algorithm_version": "1",
+            }
+        )
+
+        outcome = adapter.predict_samples(
+            (_request("sample-pre-tool-retry"),),
+            (plan,),
+            attempts=(2,),
+        )[0]
+
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.result["predicted"], 21.5)
+        self.assertEqual(forecast_calls, 1)
+        planner_context = native.requests[0]["request"]["context"]
+        self.assertEqual(planner_context["role"], "repair")
+        self.assertEqual(
+            [item["tool_id"] for item in planner_context["available_tools"]],
+            ["registered-predictor"],
+        )
+        self.assertEqual(
+            [event.kind for event in ledger.events(run_id)].count(
+                "DshPredictionToolExecuted"
+            ),
+            1,
+        )
+
     def test_single_registered_prediction_tool_still_uses_remote_agents(self) -> None:
         runtime = _SampleRuntime()
         adapter = DshSampleCollaborationAdapter(

@@ -323,7 +323,12 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
         context: Mapping[str, Any],
         available_tools: Sequence[Mapping[str, Any]],
     ) -> Any:
-        if role != "planner":
+        # A transport/model failure before the Host tool executes advances the
+        # sample attempt counter, so the generic adapter labels the next route
+        # as ``repair``.  There is no critic-selected repair tool in that case:
+        # it is still the same strict DSH Planner -> prediction-tool chain and
+        # therefore needs the same ephemeral Host binding as the first attempt.
+        if role not in {"planner", "repair"}:
             return super()._prediction_tool_context(
                 role=role,
                 model_id=model_id,
@@ -334,7 +339,7 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
             )
         if len(available_tools) != 1:
             raise SampleExecutionContractError(
-                "strict DSH Planner requires exactly one frozen prediction tool"
+                "strict DSH Planner retry requires exactly one frozen prediction tool"
             )
         tool_id = str(available_tools[0].get("tool_id") or "").strip()
         sample_ids = tuple(str(request.sample_id) for request in requests)
@@ -715,8 +720,18 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
     ) -> list[dict[str, str]]:
         """Keep the initial path bound to one registered candidate tool."""
 
-        if role != "planner":
+        if role not in {"planner", "repair"}:
             return super()._available_tool_catalog(request, plan, role=role)
+        if role == "repair":
+            retry_feedback = plan.get("sample_retry_feedback")
+            if isinstance(retry_feedback, (list, tuple)) and any(
+                isinstance(item, Mapping) and "requested_tool_id" in item
+                for item in retry_feedback
+            ):
+                # A critic-selected repair remains on the generic deterministic
+                # repair path.  Only pre-tool remote failures are replanned with
+                # the original registered predictor.
+                return super()._available_tool_catalog(request, plan, role=role)
         return [
             {
                 "tool_id": request.algorithm_id,
