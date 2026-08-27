@@ -1723,12 +1723,11 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
                 failed_reservations.add(reservation_id)
             sample_events.append(event)
         elif event.kind == "DshPredictionToolExecuted" and not reflection_enabled:
-            # Aggregate post-score runs use the planner's complete 9-cell
-            # vector as the terminal stage for one origin.  The tool receipt
-            # is durable before Host scoring, so count it immediately instead
-            # of waiting for the whole candidate screening record.  This keeps
-            # origin progress moving while the remaining candidates are still
-            # in flight and avoids the historical flat 0%/7% display.
+            # For aggregate post-score reflection this receipt proves that the
+            # registered predictor produced the complete origin vector. It can
+            # advance prediction progress, but the structured candidate result
+            # below remains the only boundary that advances the workflow from
+            # screening into formal evaluation.
             stage = str(event.payload.get("stage") or "")
             key = str(event.payload.get("idempotency_key") or "").strip()
             if stage == terminal_stage and key:
@@ -2039,15 +2038,16 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
     except (KeyError, TypeError, ValueError):
         return None
     generation = state.run.generation
-    screening_completed = sum(
+    settled_screening_completed = sum(
         int(event.payload.get("origin_count") or 0)
         for event in state.candidate_screening_events
         if int(event.payload.get("generation", -1)) == generation
     )
-    # Candidate screening events are emitted only after all four candidate
-    # records close. During live screening, use durable complete-origin tool
-    # receipts as the lower-latency source of truth. The helper also enforces
-    # the same generation cohort boundary and de-duplicates retries.
+    screening_completed = settled_screening_completed
+    # Candidate screening events are emitted only after a candidate record
+    # closes. During live screening, complete predictor receipts give a
+    # lower-latency prediction counter, but they cannot settle the screening
+    # phase or authorize formal evaluation.
     live_screening = _screening_progress_projection(state)
     if live_screening is not None:
         screening_completed = max(
@@ -2092,7 +2092,7 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
         screening_completed + formal_completed + holdout_completed,
     )
     phase = "screening"
-    if screening_completed >= screening_total:
+    if settled_screening_completed >= screening_total:
         phase = "formal_batch"
     if formal_completed >= formal_total:
         phase = "holdout"

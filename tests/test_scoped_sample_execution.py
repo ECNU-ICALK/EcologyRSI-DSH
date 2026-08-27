@@ -314,6 +314,17 @@ class FrozenOriginSelectionTests(unittest.TestCase):
         self.assertEqual(len(selected), planned.origin_count * 9)
         self.assertEqual(evidence["cohort_digest"], planned.cohort_digest)
         self.assertEqual(evidence["selected_origin_count"], planned.origin_count)
+        self.assertEqual(evidence["samples_per_update"], planned.origin_count)
+        self.assertEqual(evidence["prediction_cell_budget"], len(selected))
+        self.assertEqual(evidence["prediction_cells_per_origin"], 9)
+        self.assertEqual(evidence["population_origin_count"], planned.origin_count + 1)
+        self.assertEqual(evidence["population_count"], len(rows))
+        self.assertEqual(evidence["selected_count"], len(selected))
+        self.assertEqual(evidence["deferred_count"], 9)
+        self.assertEqual(len(evidence["population_digest"]), 64)
+        self.assertIsInstance(evidence["window_offset"], int)
+        self.assertIsInstance(evidence["window_cycle"], int)
+        self.assertIsInstance(evidence["window_wraps"], bool)
         self.assertEqual(
             tuple(dict.fromkeys(row["origin_timestamp"] for row in selected)),
             tuple(origin.origin_timestamp for origin in planned.origins),

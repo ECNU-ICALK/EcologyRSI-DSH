@@ -254,6 +254,7 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         progress = _adaptive_progress_projection(state)
 
+        self.assertEqual(progress["evaluation_phase"], "screening")
         self.assertEqual(progress["screening_completed_origins"], 1)
         self.assertEqual(progress["completed_origins"], 1)
         self.assertEqual(progress["succeeded_samples"], 1)

@@ -533,6 +533,31 @@ def _select_planned_evaluation_cohort(
             "evaluation population does not expose the complete prediction vector"
         )
     ordered_tasks = tuple(sorted(task_keys))
+    population_identities = sorted(
+        (_feedback_sample_identity(row) for row in rows),
+        key=lambda identity: (
+            str(identity["partition"]),
+            _feedback_timestamp_sort_key(identity["origin_timestamp"]),
+            str(identity["target"]),
+            int(identity["horizon_hours"]),
+            _feedback_timestamp_sort_key(identity["target_timestamp"]),
+        ),
+    )
+    population_count = len(population_identities)
+    population_origin_count = len(grouped)
+    population_digest = digest(
+        {
+            "schema_version": "ecologyrsi-dsh.frozen-evaluation-population/1",
+            "selection_policy": "label_free_complete_origin_population@1",
+            "rows": population_identities,
+        }
+    )
+    source_origin_positions = {
+        timestamp: position
+        for position, timestamp in enumerate(
+            sorted(grouped, key=_feedback_timestamp_sort_key)
+        )
+    }
     selected: list[dict[str, Any]] = []
     for origin_position, origin in enumerate(cohort.origins):
         origin_rows = grouped.get(origin.origin_timestamp)
@@ -551,15 +576,32 @@ def _select_planned_evaluation_cohort(
             )
             row["cohort_origin_occurrence"] = origin.reuse_index
             selected.append(row)
+    first_origin = cohort.origins[0]
+    first_cycle = int(first_origin.reuse_index)
+    source_window_offset = source_origin_positions[first_origin.origin_timestamp]
+    selected_count = len(selected)
     evidence = {
         "schema_version": "ecologyrsi-dsh.frozen-evaluation-cohort/1",
         "selection_policy": "planner_frozen_complete_origins@1",
         "cohort_role": cohort.role,
         "cohort_digest": cohort.cohort_digest,
+        # Public update sizes are complete forecast origins. Prediction-cell
+        # counts remain explicit so one 3-target x 3-horizon forecast is not
+        # presented as nine independent samples.
+        "samples_per_update": cohort.origin_count,
+        "prediction_cell_budget": selected_count,
         "selected_origin_count": cohort.origin_count,
         "prediction_cells_per_origin": len(ordered_tasks),
-        "selected_count": len(selected),
-        "deferred_count": max(0, len(rows) - len(selected)),
+        "population_origin_count": population_origin_count,
+        "population_count": population_count,
+        "population_digest": population_digest,
+        "selected_count": selected_count,
+        "deferred_count": max(0, population_count - selected_count),
+        "window_offset": source_window_offset,
+        "window_cycle": first_cycle,
+        "window_wraps": any(
+            origin.reuse_index != first_cycle for origin in cohort.origins
+        ),
         "tasks": [
             {
                 "target": target,
@@ -616,7 +658,7 @@ def _select_task_evaluation_cohort(
             cohort,
             expected_prediction_cells_per_origin=int(cells_per_origin),
         )
-        return selected, evidence, len(selected)
+        return selected, evidence, cohort.origin_count
     samples_per_update = _feedback_update_limit(task)
     if samples_per_update is None:
         return [dict(row) for row in rows], None, None
