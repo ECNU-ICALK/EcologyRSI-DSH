@@ -2268,10 +2268,23 @@ class EvolutionDirector:
         candidate_id: str,
         revision_id: str,
         batch_index: int,
-        cohort_digest: str,
     ) -> FormalBatch:
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
+        adaptation = state.run_adaptation_cohort
+        if adaptation is None:
+            raise ValueError("formal batch requires frozen adaptation cohorts")
+        if (
+            isinstance(batch_index, bool)
+            or not isinstance(batch_index, int)
+            or not 0 <= batch_index < len(adaptation.batches)
+        ):
+            raise ValueError("formal batch index is outside the frozen adaptation plan")
+        planned_batch = adaptation.batches[batch_index]
+        # A formal EvaluationScope identifies the exact frozen origin cohort,
+        # not the enclosing PlannedBatch record.  Derive this identity here so
+        # callers cannot accidentally substitute ``PlannedBatch.batch_digest``.
+        cohort_digest = planned_batch.cohort.cohort_digest
         existing = state.formal_batch_for(candidate_id, batch_index)
         if existing is not None:
             if (
@@ -2296,9 +2309,6 @@ class EvolutionDirector:
         if revision_id != active_revision_id:
             raise ValueError("formal batch must use active revision")
         revision = state.revision(revision_id)
-        schedule = OptimizationSchedule.from_dict(
-            state.task_manifest.metadata["optimization_schedule"]
-        )
         batch = FormalBatch(
             batch_id=f"batch:{candidate_id}:{batch_index}",
             trajectory_id=trajectory.trajectory_id,
@@ -2310,7 +2320,7 @@ class EvolutionDirector:
             batch_index=batch_index,
             batch_count=trajectory.batch_count,
             cohort_digest=cohort_digest,
-            origin_count=schedule.local_batch_origin_count,
+            origin_count=planned_batch.origin_count,
         )
         self.ledger.append(
             run_id,

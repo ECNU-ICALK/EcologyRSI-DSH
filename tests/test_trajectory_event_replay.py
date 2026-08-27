@@ -172,13 +172,14 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             self.schedule.batch_count,
         )
         for batch_index in range(self.schedule.batch_count):
-            cohort = _sha(f"batch:{batch_index}")
+            adaptation = self.director.state(self.run_id).run_adaptation_cohort
+            assert adaptation is not None
+            cohort = adaptation.batches[batch_index].cohort.cohort_digest
             batch = self.director.start_formal_batch(
                 self.run_id,
                 candidate.candidate_id,
                 revision.revision_id,
                 batch_index,
-                cohort,
             )
             scope = EvaluationScope(
                 run_id=self.run_id,
@@ -351,7 +352,6 @@ class TrajectoryEventReplayTests(unittest.TestCase):
                 candidate.candidate_id,
                 revision.revision_id,
                 1,
-                _sha("batch:1"),
             )
 
 

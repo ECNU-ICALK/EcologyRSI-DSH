@@ -157,20 +157,21 @@ class ScopedSampleExecutionTests(unittest.TestCase):
         assert adaptation is not None
 
         first_batch = adaptation.batches[0]
-        self.director.start_formal_batch(
+        started = self.director.start_formal_batch(
             self.run_id,
             candidate.candidate_id,
             revision.revision_id,
             0,
-            first_batch.batch_digest,
         )
+        self.assertEqual(started.cohort_digest, first_batch.cohort.cohort_digest)
+        self.assertNotEqual(started.cohort_digest, first_batch.batch_digest)
         first_scope = EvaluationScope(
             run_id=self.run_id,
             generation=0,
             candidate_id=candidate.candidate_id,
             candidate_revision_id=revision.revision_id,
             phase=EvaluationPhase.FORMAL_BATCH,
-            cohort_digest=first_batch.batch_digest,
+            cohort_digest=first_batch.cohort.cohort_digest,
             origin_count=first_batch.origin_count,
             batch_index=0,
         )
@@ -237,7 +238,6 @@ class ScopedSampleExecutionTests(unittest.TestCase):
             candidate.candidate_id,
             revision.revision_id,
             1,
-            second_batch.batch_digest,
         )
         second_scope = EvaluationScope(
             run_id=self.run_id,
@@ -245,7 +245,7 @@ class ScopedSampleExecutionTests(unittest.TestCase):
             candidate_id=candidate.candidate_id,
             candidate_revision_id=revision.revision_id,
             phase=EvaluationPhase.FORMAL_BATCH,
-            cohort_digest=second_batch.batch_digest,
+            cohort_digest=second_batch.cohort.cohort_digest,
             origin_count=second_batch.origin_count,
             batch_index=1,
         )

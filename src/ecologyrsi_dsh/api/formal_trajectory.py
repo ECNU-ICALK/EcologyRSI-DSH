@@ -168,7 +168,6 @@ def execute_next_formal_batch(endpoint: Any, run_id: str, candidate_id: str) -> 
         candidate_id,
         active_revision_id,
         batch_index,
-        planned_batch.batch_digest,
     )
     state = endpoint.server.director.state(run_id)
     if state.batch_evaluation_for(candidate_id, batch_index) is not None:
