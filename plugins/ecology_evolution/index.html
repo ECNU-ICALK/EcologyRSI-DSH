@@ -118,18 +118,28 @@
           </section>
 
           <section id="workspace-parameters" class="workspace-panel" data-panel="parameters" role="tabpanel" aria-labelledby="tab-parameters" tabindex="0" hidden>
-            <header class="page-heading"><div><span>02</span><h1>参数设计</h1><p>统一冻结下一次运行的进化规模、样本更新边界、网关吞吐和可复现策略；已启动运行不会被页面参数追溯修改。</p></div><span id="parameter-summary-pill" class="pill pill-blue">500 次完整预测 / 4,500 个评分单元</span></header>
+            <header class="page-heading"><div><span>02</span><h1>参数设计</h1><p>统一冻结下一次运行的外层搜索、入围候选持续优化、网关吞吐和科学比较策略；已启动运行不会被页面参数追溯修改。</p></div><span id="parameter-summary-pill" class="pill pill-blue">每个入围候选 10 × 50</span></header>
             <div class="parameters-layout">
               <section class="panel parameter-form-panel" aria-labelledby="parameter-form-title">
                 <div class="panel-heading"><div><span>运行超参数</span><h2 id="parameter-form-title">更新与执行预算</h2></div><strong>应用于下次创建</strong></div>
-                <div class="form-grid parameter-grid">
-                  <label><span>最大进化轮数</span><input id="max-generations" name="rounds" form="start-form" type="number" min="1" max="50" value="5" required><small>每轮完成检索、候选生成、固定样本评测和轮末决策，达到上限后停止。</small></label>
-                  <label><span>每轮生成方案数</span><input id="candidates-per-generation" name="candidates_per_generation" form="start-form" type="number" min="1" max="8" value="4" required><small>同一轮的候选共享父方案和冻结样本集合，用于横向比较；不是样本 batch 大小。</small></label>
-                  <label><span>候选并发数</span><input id="candidate-concurrency" name="candidate_concurrency" form="start-form" type="number" min="1" max="8" step="1" value="4" required><small>同一轮最多同时评测的候选数；每个候选仍使用独立 DSH 子会话和相同反馈样本集合。</small></label>
-                  <label><span>每次更新完整预测次数</span><input id="samples-per-update" name="prediction_origins_per_update" form="start-form" type="number" min="169" max="11111" step="1" value="500" aria-describedby="samples-per-update-help" required><small id="samples-per-update-help">一次完整预测同时返回全部目标与时距；当前每次包含 9 个内部评分单元。</small></label>
-                  <label><span>请求微批样本数</span><input id="sample-agent-batch-size" name="sample_agent_batch_size" form="start-form" type="number" min="1" max="128" step="1" value="64" required><small>样本先按因果预测起点组成 origin wave，同组超过该上限时才继续切分；实际请求数以运行进度为准。</small></label>
-                  <label><span>逐样本并发请求数</span><input id="sample-concurrency" name="sample_concurrency" form="start-form" type="number" min="1" max="128" step="1" value="64" required><small>同时在飞的独立样本请求上限，默认 64；不改变评测样本集合。</small></label>
-                  <label><span>候选总预算</span><input id="max-candidates" name="max_candidates" form="start-form" type="number" min="1" max="256" value="20" aria-describedby="max-candidates-help" required><small id="max-candidates-help">默认随轮数和每轮候选数同步；当前完整预算需要 20 个候选。</small></label>
+                <div class="parameter-groups">
+                  <section class="parameter-group" data-group="outer-search"><header><strong>外层搜索</strong><span>固定 4 → 同一 64 时点 → Top 2</span></header><div class="form-grid parameter-grid">
+                    <label><span>最大进化轮数</span><input id="max-generations" name="rounds" form="start-form" type="number" min="1" max="50" value="5" required><small>每轮完成 4 个候选初筛、两条持续优化轨迹和一次轮末冠军比较。</small></label>
+                    <label><span>每轮生成方案数</span><input id="candidates-per-generation" name="candidates_per_generation" form="start-form" type="number" value="4" readonly aria-readonly="true" required><small>固定为 4；Top 2 选择规则、排序和 tie-break 保持不变。</small></label>
+                    <label><span>候选总预算</span><input id="max-candidates" name="max_candidates" form="start-form" type="number" min="4" max="256" value="20" aria-describedby="max-candidates-help" required><small id="max-candidates-help">默认随轮数同步；当前完整预算需要 20 个候选。</small></label>
+                  </div></section>
+                  <section class="parameter-group" data-group="finalist-adaptation"><header><strong>入围候选持续优化</strong><span>每条 finalist lane 内部串行</span></header><div class="form-grid parameter-grid">
+                    <label><span>每个入围候选更新时点数</span><input id="formal-origin-count" name="formal_origin_count" form="start-form" type="number" min="1" step="1" value="500" required><small>一个 finalist 的完整 adaptive epoch；两个 Top 2 合计执行 1,000 candidate-origins。</small></label>
+                    <label><span>局部 batch 时点数</span><input id="local-batch-origin-count" name="local_batch_origin_count" form="start-form" type="number" min="1" step="1" value="50" required><small>必须整除每个入围候选更新时点数；每批修改只影响下一批。</small></label>
+                    <label><span>每批最大局部改动数</span><input id="max-local-edits-per-batch" name="max_local_edits_per_batch" form="start-form" type="number" min="1" max="5" step="1" value="2" required><small>可修改宿主登记的任意局部路径；模型选择 KEEP 时实际改动为 0。</small></label>
+                    <label><span>轮末比较时点数</span><input id="selection-holdout-origin-count" name="selection_holdout_origin_count" form="start-form" type="number" min="169" step="1" value="169" required><small>两个 finalist 最终 revision 与上一冠军在同一新鲜 holdout 上配对评测。</small></label>
+                  </div></section>
+                  <section class="parameter-group" data-group="throughput"><header><strong>吞吐</strong><span>两条 lane 共享同一 run 级限制</span></header><div class="form-grid parameter-grid">
+                    <label><span>候选并发数</span><input id="candidate-concurrency" name="candidate_concurrency" form="start-form" type="number" min="1" max="8" step="1" value="4" required><small>候选/lane 编排并发，不会乘大逐样本真实在飞上限。</small></label>
+                    <label><span>网关 origin wave 上限</span><input id="sample-agent-batch-size" name="sample_agent_batch_size" form="start-form" type="number" min="1" max="128" step="1" value="64" required><small>按因果预测起点组织请求；实际完成数以运行进度为准。</small></label>
+                    <label><span>逐样本并发请求数</span><input id="sample-concurrency" name="sample_concurrency" form="start-form" type="number" min="1" max="128" step="1" value="64" required><small>同一 run 同时在飞请求默认 64、最高 128；不改变 cohort。</small></label>
+                  </div></section>
+                  <section class="parameter-group parameter-policy" data-group="scientific-policy"><header><strong>科学策略（只读）</strong><span>完整 origin 原子提交</span></header><div class="parameter-policy-grid"><span>64 时点初筛</span><span>现有确定性 Top 2</span><span>完整 9 评分单元</span><span>轮末三臂同 cohort</span></div></section>
                 </div>
                 <div class="parameter-switches">
                   <label class="checkbox-row"><input id="fixed-seed" name="fixed_seed" form="start-form" type="checkbox" checked><span><strong>固定随机种子</strong><small>冻结样本抽取顺序与候选随机源，保证同配置可复现。</small></span></label>
@@ -141,7 +151,7 @@
                   <div class="panel-heading"><div><span>数据使用边界</span><h2 id="parameter-scope-title">拟合与更新分离</h2></div><span class="pill pill-green">同轮公平比较</span></div>
                   <div class="parameter-scope-list">
                     <div><span>预测器拟合</span><strong>全量 training_fit</strong><small>岭回归等已登记数值预测器可使用完整训练拟合分区训练参数。</small></div>
-                    <div><span>智能体更新</span><strong id="agent-update-scope">每轮固定 500 次完整预测</strong><small>本轮冻结的完整预测用于计算 RMSE 技能主适应度、辅助 MAE 改善和下一轮优化经验。</small></div>
+                    <div><span>智能体更新</span><strong id="agent-update-scope">每个入围候选 10 × 50</strong><small>每批形成局部反馈并生成供下一批使用的新 revision；轮末再统一比较。</small></div>
                   </div>
                 </section>
                 <section class="panel parameter-summary-panel" aria-labelledby="parameter-summary-title">

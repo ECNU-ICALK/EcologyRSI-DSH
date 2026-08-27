@@ -138,6 +138,15 @@ code, .technical-value { font-family: "SFMono-Regular", Consolas, "Liberation Mo
 .auto-binding-fields { display: none; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 14px; padding: 14px; }
 .parameter-form-panel { padding-bottom: 14px; }
+.parameter-groups { display: grid; gap: 12px; padding: 0 14px 14px; }
+.parameter-group { overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: #fff; }
+.parameter-group > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 9px 11px; border-bottom: 1px solid var(--line); background: var(--surface-muted); }
+.parameter-group > header strong { font-size: 11px; }
+.parameter-group > header span { color: var(--subtle); font-size: 9px; text-align: right; }
+.parameter-group .parameter-grid { padding: 11px; }
+.parameter-policy-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; padding: 11px; }
+.parameter-policy-grid span { padding: 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--primary-soft); color: var(--primary-dark); font-size: 9px; font-weight: 650; text-align: center; }
+.parameter-group input[readonly] { color: var(--muted); background: var(--surface-muted); cursor: not-allowed; }
 .parameter-switches { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 12px 14px 0; border-top: 1px solid var(--line); }
 .parameter-switches .checkbox-row { align-items: flex-start; margin: 0; padding: 10px; border: 1px solid var(--line); background: var(--surface-muted); }
 .parameter-switches .checkbox-row input { flex: 0 0 auto; margin-top: 2px; }

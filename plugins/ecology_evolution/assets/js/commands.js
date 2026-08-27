@@ -209,13 +209,42 @@
     };
   }
 
-  function normalizedPredictionOriginsPerUpdate(value) {
-    var parsed = Math.floor(Number(value));
-    var fallback = 500;
-    var cellsPerOrigin = typeof predictionCellsPerOrigin === "function" ? predictionCellsPerOrigin() : 1;
-    var maximum = Math.max(1, Math.floor(100000 / Math.max(1, cellsPerOrigin)));
-    if (!Number.isFinite(parsed) || parsed < 1) { parsed = fallback; }
-    return Math.min(parsed, maximum);
+  function strictInteger(value, label, minimum, maximum) {
+    if (typeof value === "boolean" || value === "" || value == null || !Number.isInteger(Number(value))) {
+      throw new Error(label + "必须是整数");
+    }
+    var parsed = Number(value);
+    if (minimum != null && parsed < minimum) { throw new Error(label + "不得小于 " + minimum); }
+    if (maximum != null && parsed > maximum) { throw new Error(label + "不得大于 " + maximum); }
+    return parsed;
+  }
+
+  function normalizedOptimizationSchedule(values) {
+    var input = values || {};
+    var formal = strictInteger(input.formal_origin_count == null ? 500 : input.formal_origin_count, "每个入围候选更新时点数", 1);
+    var batch = strictInteger(input.local_batch_origin_count == null ? 50 : input.local_batch_origin_count, "局部 batch 时点数", 1);
+    var edits = strictInteger(input.max_local_edits_per_batch == null ? 2 : input.max_local_edits_per_batch, "每批最大局部改动数", 1, 5);
+    var holdout = strictInteger(input.selection_holdout_origin_count == null ? 169 : input.selection_holdout_origin_count, "轮末比较时点数", 169);
+    if (formal % batch !== 0) { throw new Error("局部 batch 必须整除每个入围候选的更新时点数"); }
+    return {
+      schema_version: "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
+      screening_origin_count: 64,
+      finalist_count: 2,
+      formal_origin_count_per_finalist: formal,
+      local_batch_origin_count: batch,
+      max_local_edits_per_batch: edits,
+      selection_holdout_origin_count: holdout,
+      local_evaluation_mode: "prequential"
+    };
+  }
+
+  function optimizationScheduleFromControls() {
+    return normalizedOptimizationSchedule({
+      formal_origin_count: $("#formal-origin-count").value,
+      local_batch_origin_count: $("#local-batch-origin-count").value,
+      max_local_edits_per_batch: $("#max-local-edits-per-batch").value,
+      selection_holdout_origin_count: $("#selection-holdout-origin-count").value
+    });
   }
 
   function normalizedSampleAgentBatchSize(value) {
@@ -268,20 +297,22 @@
 
   function createRun(payload) {
     if (!hasCapability("evolution.run.create")) { showToast("当前 DSH 会话未授予创建进化运行的能力。"); return Promise.resolve(null); }
-    var cellsPerOrigin = predictionCellsPerOrigin();
-    var requestedPredictionOrigins = normalizedPredictionOriginsPerUpdate(payload.prediction_origins_per_update);
-    var minimumPredictionOrigins = predictionOriginsPerUpdateSelectionMinimum();
-    var minimumSamplesPerUpdate = samplesPerUpdateSelectionMinimum();
-    if (requestedPredictionOrigins < minimumPredictionOrigins) {
-      showToast("每次更新完整预测次数不足：严格 DSH 评测至少需要 " + formatNumber(minimumPredictionOrigins) + " 次完整预测（" + formatNumber(minimumSamplesPerUpdate) + " 个内部评分单元）。");
-      var samplesPerUpdateField = $("#samples-per-update");
-      if (samplesPerUpdateField && typeof samplesPerUpdateField.focus === "function") { samplesPerUpdateField.focus(); }
+    var optimizationSchedule;
+    var candidateConcurrency;
+    var sampleAgentBatchSize;
+    var sampleConcurrency;
+    try {
+      optimizationSchedule = normalizedOptimizationSchedule(payload);
+      candidateConcurrency = strictInteger(payload.candidate_concurrency == null ? 4 : payload.candidate_concurrency, "候选并发数", 1, 8);
+      sampleAgentBatchSize = strictInteger(payload.sample_agent_batch_size == null ? 64 : payload.sample_agent_batch_size, "网关 origin wave 上限", 1, 128);
+      sampleConcurrency = strictInteger(payload.sample_concurrency == null ? 64 : payload.sample_concurrency, "逐样本并发请求数", 1, 128);
+    } catch (error) {
+      showToast(error.message);
       return Promise.resolve(null);
     }
-    var requestedSamplesPerUpdate = requestedPredictionOrigins * cellsPerOrigin;
     var effectiveBudget = normalizedEvolutionBudget(
       payload.rounds || payload.max_generations,
-      payload.candidates_per_generation,
+      4,
       payload.max_candidates
     );
     if (!effectiveBudget.budget_sufficient) {
@@ -296,16 +327,17 @@
       dataset_id: payload.dataset_id || payload.datasetId,
       episode_id: payload.episode_id || payload.episodeId,
       execution_protocol: "dsh_native_plugin_evolution@1",
+      optimization_protocol: "top2_adaptive_epoch@1",
+      optimization_schedule: optimizationSchedule,
       strategy_model_id: payload.strategy_model_id || payload.policy_model_id,
       review_model_id: payload.review_model_id || payload.judge_model_id,
       autonomous_mode: payload.autonomous_mode === true,
       rounds: effectiveBudget.max_generations,
       model_workflow: payload.model_workflow || "research_compile_evolve@1",
       knowledge_online_enabled: payload.knowledge_online_enabled,
-      samples_per_update: requestedSamplesPerUpdate,
-      candidate_concurrency: normalizedCandidateConcurrency(payload.candidate_concurrency),
-      sample_agent_batch_size: normalizedSampleAgentBatchSize(payload.sample_agent_batch_size),
-      sample_concurrency: normalizedSampleConcurrency(payload.sample_concurrency),
+      candidate_concurrency: candidateConcurrency,
+      sample_agent_batch_size: sampleAgentBatchSize,
+      sample_concurrency: sampleConcurrency,
       budget: {
         max_generations: effectiveBudget.max_generations,
         candidates_per_generation: effectiveBudget.candidates_per_generation,

@@ -56,11 +56,11 @@
       $(selector).addEventListener("input", function () { syncCandidateBudget(); renderReadiness(); renderParameters(); });
     });
     $("#max-candidates").addEventListener("input", function () { syncCandidateBudget({ markManual: true }); renderReadiness(); renderParameters(); });
-    ["#samples-per-update", "#candidate-concurrency", "#sample-agent-batch-size", "#sample-concurrency", "#fixed-seed", "#knowledge-online-enabled"].forEach(function (selector) {
+    ["#formal-origin-count", "#local-batch-origin-count", "#max-local-edits-per-batch", "#selection-holdout-origin-count", "#candidate-concurrency", "#sample-agent-batch-size", "#sample-concurrency", "#fixed-seed", "#knowledge-online-enabled"].forEach(function (selector) {
       $(selector).addEventListener("input", function () { renderReadiness(); renderParameters(); });
       $(selector).addEventListener("change", function () { renderReadiness(); renderParameters(); });
     });
-    ["#max-generations", "#candidates-per-generation", "#samples-per-update", "#candidate-concurrency", "#sample-agent-batch-size", "#sample-concurrency", "#max-candidates"].forEach(function (selector) {
+    ["#max-generations", "#candidates-per-generation", "#formal-origin-count", "#local-batch-origin-count", "#max-local-edits-per-batch", "#selection-holdout-origin-count", "#candidate-concurrency", "#sample-agent-batch-size", "#sample-concurrency", "#max-candidates"].forEach(function (selector) {
       $(selector).addEventListener("invalid", function () { state.workspace = "parameters"; renderWorkspace(); });
     });
     $("#dataset-partition").addEventListener("change", function (event) { state.datasetPartition = event.target.value === "training_feedback" ? "training_feedback" : "training_fit"; loadSelectedDataset(0); });
@@ -146,7 +146,7 @@
       event.preventDefault();
       var unmetChecks = readiness().filter(function (item) { return !item.ready; });
       if (unmetChecks.length) {
-        var parameterLabels = ["每轮样本", "候选并发", "候选总预算"];
+        var parameterLabels = ["入围候选", "固定 4 候选", "候选总预算"];
         if (unmetChecks.some(function (item) {
           return parameterLabels.some(function (label) { return item.label.indexOf(label) === 0; });
         })) {
@@ -170,7 +170,10 @@
         review_model_id: form.get("review_model_id") || form.get("judge_model_id"),
         rounds: Number(form.get("rounds") || form.get("max_generations")),
         candidates_per_generation: Number(form.get("candidates_per_generation")),
-        prediction_origins_per_update: Number(form.get("prediction_origins_per_update")),
+        formal_origin_count: Number(form.get("formal_origin_count")),
+        local_batch_origin_count: Number(form.get("local_batch_origin_count")),
+        max_local_edits_per_batch: Number(form.get("max_local_edits_per_batch")),
+        selection_holdout_origin_count: Number(form.get("selection_holdout_origin_count")),
         candidate_concurrency: Number(form.get("candidate_concurrency")),
         sample_agent_batch_size: Number(form.get("sample_agent_batch_size")),
         sample_concurrency: Number(form.get("sample_concurrency")),

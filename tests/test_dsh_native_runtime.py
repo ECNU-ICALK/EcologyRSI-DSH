@@ -518,6 +518,14 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 201, payload)
+        self.assertEqual(
+            payload["projection"]["configuration"]["optimization_schedule"],
+            schedule,
+        )
+        self.assertEqual(
+            payload["projection"]["optimization_protocol"],
+            "top2_adaptive_epoch@1",
+        )
         state = self.server.director.state("run:native-adaptive-schedule")
         metadata = state.task_manifest.metadata
         self.assertEqual(metadata["optimization_protocol"], "top2_adaptive_epoch@1")

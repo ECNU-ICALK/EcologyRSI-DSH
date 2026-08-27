@@ -3019,6 +3019,12 @@ def _projection_json(state: Any) -> dict[str, Any]:
     token_budget_scope = _token_budget_scope(task, metadata)
     configuration = {
         "execution_protocol": metadata.get("execution_protocol", "legacy_read_only"),
+        "optimization_protocol": metadata.get("optimization_protocol"),
+        "optimization_schedule": metadata.get("optimization_schedule"),
+        "derived_execution_budget": metadata.get("derived_execution_budget"),
+        "derived_run_execution_budget": metadata.get(
+            "derived_run_execution_budget"
+        ),
         "domain_pack_id": task.domain_pack,
         "dataset_id": dataset_id,
         "episode_id": metadata.get("episode_id"),
@@ -3120,6 +3126,8 @@ def _projection_json(state: Any) -> dict[str, Any]:
         "judge_model_binding_source": metadata.get("judge_model_binding_source"),
         "slot": slot,
         "candidates_per_generation": task.candidates_per_generation,
+        "optimization_protocol": metadata.get("optimization_protocol"),
+        "optimization_schedule": metadata.get("optimization_schedule"),
         "candidates_per_round": task.candidates_per_generation,
         "variants_per_round": task.candidates_per_generation,
         "knowledge_online_enabled": bool(metadata.get("knowledge_online_enabled", False)),
@@ -3148,6 +3156,8 @@ def _projection_json(state: Any) -> dict[str, Any]:
         "candidates_count": len(state.candidates),
         "max_candidates": task.max_candidates,
         "candidates_per_generation": task.candidates_per_generation,
+        "optimization_protocol": metadata.get("optimization_protocol"),
+        "optimization_schedule": metadata.get("optimization_schedule"),
         "samples_per_update": metadata.get("samples_per_update"),
         "minimum_selection_samples_per_update": metadata.get(
             "minimum_selection_samples_per_update"
@@ -3304,6 +3314,12 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
     dataset_id = task.visible_datasets[0] if task.visible_datasets else None
     configuration = {
         "dataset_id": dataset_id,
+        "optimization_protocol": metadata.get("optimization_protocol"),
+        "optimization_schedule": metadata.get("optimization_schedule"),
+        "derived_execution_budget": metadata.get("derived_execution_budget"),
+        "derived_run_execution_budget": metadata.get(
+            "derived_run_execution_budget"
+        ),
         "episode_id": metadata.get("episode_id"),
         "strategy_model_id": metadata.get(
             "strategy_model_id",
@@ -3362,6 +3378,8 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
         "candidates_count": len(state.candidates),
         "max_candidates": task.max_candidates,
         "candidates_per_generation": task.candidates_per_generation,
+        "optimization_protocol": metadata.get("optimization_protocol"),
+        "optimization_schedule": metadata.get("optimization_schedule"),
         "samples_per_update": metadata.get("samples_per_update"),
         "minimum_selection_samples_per_update": metadata.get(
             "minimum_selection_samples_per_update"

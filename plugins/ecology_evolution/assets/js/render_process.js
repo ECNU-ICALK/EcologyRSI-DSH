@@ -1578,30 +1578,24 @@
     var outcomeText = runOutcomeText(run) || displayRunStatusText(run, state.events);
     var sampleAgentTokenBudget = runUsesSampleAgentTokenBudget(run);
     var nativeDshRuntime = run.dsh_runtime && run.dsh_runtime.native === true;
-    var sampleBudget = Number(run.samples_per_update);
-    var selectionCellMinimum = Number(run.minimum_selection_samples_per_update);
-    var selectionOriginMinimum = Number(run.minimum_selection_origin_samples_per_update);
-    var cellsPerOrigin = Number(run.prediction_cells_per_origin);
-    if (!(cellsPerOrigin > 0) && selectionCellMinimum > 0 && selectionOriginMinimum > 0) {
-      cellsPerOrigin = Math.round(selectionCellMinimum / selectionOriginMinimum);
-    }
-    var originBudget = sampleBudget > 0 && cellsPerOrigin > 0 ? Math.floor(sampleBudget / cellsPerOrigin) : 0;
-    var sampleBudgetText = sampleBudget > 0
-      ? formatNumber(sampleBudget) + " 个评分单元" + (originBudget > 0 ? "，可覆盖 " + formatNumber(originBudget) + " 个完整预测时点" : "")
-      : "历史运行未配置";
-    var selectionThresholdText = selectionCellMinimum > 0
-      ? (selectionOriginMinimum > 0 ? formatNumber(selectionOriginMinimum) + " 个完整预测时点 / " : "") + formatNumber(selectionCellMinimum) + " 个评分单元" + (sampleBudget > 0 && sampleBudget < selectionCellMinimum ? "（诊断运行，本轮不可晋级）" : "")
-      : "历史运行未记录";
+    var schedule = run.optimization_schedule || configuration.optimization_schedule || {};
+    var formalOrigins = Number(schedule.formal_origin_count_per_finalist || 0);
+    var batchOrigins = Number(schedule.local_batch_origin_count || 0);
+    var batchCount = formalOrigins > 0 && batchOrigins > 0 ? formalOrigins / batchOrigins : 0;
+    var holdoutOrigins = Number(schedule.selection_holdout_origin_count || 0);
+    var generationCandidateOrigins = formalOrigins > 0 && holdoutOrigins > 0
+      ? 4 * 64 + 2 * formalOrigins + 3 * holdoutOrigins
+      : 0;
     var values = [
       ["研究领域", catalogReferenceLabel("domain_packs", configuration.domain_pack_id, configuration.domain_pack_id || "未提供")],
       ["策略模型（API）", modelReferenceLabel(configuration.policy_model_id)],
       ["独立评审模型（API）", modelReferenceLabel(configuration.judge_model_id)],
       ["每轮候选", formatNumber(run.candidates_per_generation || 1) + " 个版本"],
       ["候选并发", Number(run.candidate_concurrency) > 0 ? formatNumber(run.candidate_concurrency) + " 个候选" : "历史运行按串行执行"],
-      ["每轮预测预算", sampleBudgetText],
-      ["候选评估阶段", run.two_stage_evaluation_enabled === false ? "单阶段正式评估" : "全部候选先筛选 64 个预测时点，Top 2 再正式评估 " + formatNumber(originBudget || 500) + " 个时点（窗口不重叠）"],
-      ["晋级证据门槛", selectionThresholdText],
-      ["请求微批", Number(run.sample_agent_batch_size) > 0 ? "先按因果预测起点组成 origin wave；每批最多 " + formatNumber(run.sample_agent_batch_size) + " 个样本，实际请求数以运行进度为准" : "历史运行未配置"],
+      ["入围候选轨迹", batchCount > 0 ? "Top 2 各 " + formatNumber(batchCount) + " × " + formatNumber(batchOrigins) + " origins；每批最多 " + formatNumber(schedule.max_local_edits_per_batch) + " 处改动" : "等待冻结 schedule"],
+      ["轮末同 cohort 比较", holdoutOrigins > 0 ? "F1 / F2 / 上一冠军各 " + formatNumber(holdoutOrigins) + " origins" : "等待冻结 holdout"],
+      ["单轮执行预算", generationCandidateOrigins > 0 ? formatNumber(generationCandidateOrigins) + " candidate-origins" : "等待冻结 schedule"],
+      ["网关 origin wave", Number(run.sample_agent_batch_size) > 0 ? "每 wave 最多 " + formatNumber(run.sample_agent_batch_size) + " 个 origins，实际完成数以运行进度为准" : "历史运行未配置"],
       ["逐样本并发", Number(run.sample_concurrency) > 0 ? formatNumber(run.sample_concurrency) + " 个在飞请求" : "历史运行未配置"],
       [nativeDshRuntime ? "DSH 上下文管理" : sampleAgentTokenBudget ? "逐样本智能体 Token 硬预算" : "Token 账本（历史口径）", nativeDshRuntime ? "Session 压缩与输出长度由 DSH 统一管理" : Number(run.token_limit) > 0 ? formatNumber(run.token_limit) : "仅计量"],
       [nativeDshRuntime ? "用量来源" : "Token 计量范围", nativeDshRuntime ? "当前压力来自 TokenMeter；累计用量仅采信 Session provider 回执" : tokenBudgetScopeText(run)],

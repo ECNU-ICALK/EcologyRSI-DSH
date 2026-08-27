@@ -964,6 +964,8 @@
       candidates_count: Number(item.candidates_count != null ? item.candidates_count : item.candidate_count != null ? item.candidate_count : candidates.length),
       max_candidates: Number(item.max_candidates || item.budget && item.budget.max_candidates || 0),
       candidates_per_generation: Number(item.candidates_per_generation || configuration.candidates_per_generation || item.budget && item.budget.candidates_per_generation || 1),
+      optimization_protocol: item.optimization_protocol || configuration.optimization_protocol || null,
+      optimization_schedule: item.optimization_schedule || configuration.optimization_schedule || null,
       samples_per_update: Number(item.samples_per_update || configuration.samples_per_update || 0),
       minimum_selection_origin_samples_per_update: Number(item.minimum_selection_origin_samples_per_update || configuration.minimum_selection_origin_samples_per_update || 0),
       prediction_cells_per_origin: Number(item.prediction_cells_per_origin || configuration.prediction_cells_per_origin || 0),

@@ -486,14 +486,9 @@
     return Math.max(1, Math.floor(100000 / predictionCellsPerOrigin()));
   }
 
-  function updateSamplesPerUpdateBoundary() {
-    var selectionMinimum = samplesPerUpdateSelectionMinimum();
-    var taskCount = predictionCellsPerOrigin();
-    var originMinimum = predictionOriginsPerUpdateSelectionMinimum();
-    var input = $("#samples-per-update");
-    input.min = String(originMinimum);
-    input.max = String(predictionOriginsPerUpdateMaximum());
-    $("#samples-per-update-help").textContent = "一次完整预测同时返回全部目标与时距；当前每次包含 " + formatNumber(taskCount) + " 个内部评分单元。正式晋级至少需要 " + formatNumber(originMinimum) + " 次完整预测（" + formatNumber(selectionMinimum) + " 个评分单元）。";
+  function updateOptimizationScheduleBoundary() {
+    var input = $("#selection-holdout-origin-count");
+    input.min = String(Math.max(169, predictionOriginsPerUpdateSelectionMinimum()));
   }
   function updateSelectionHelp() {
     setHelp("#domain-pack-help", selectedCatalogItem("domain_packs", "#domain-pack"), "由所选训练数据集自动推导知识检索范围、科学约束和数据适配器。");
@@ -505,7 +500,7 @@
     setModelHelp("#policy-model-help", selectedModelCatalogItem("#policy-model-id"), "负责检索公开元数据、形成结构化研究计划并生成有界候选参数；不会执行模型源码。");
     setModelHelp("#judge-model-help", selectedModelCatalogItem("#judge-model-id"), "独立检查预测效果、科学约束和搜索保留结论。");
     alignDomainDatasetBinding();
-    updateSamplesPerUpdateBoundary();
+    updateOptimizationScheduleBoundary();
     updateParameterOverrideHelp();
     renderReadiness();
   }
@@ -516,17 +511,14 @@
     var catalogReady = availableDatasets.length && state.catalog.domain_packs.length && configuredModels.length;
     // The visible data boundary and two configured API roles are user
     // inputs.  The research domain and internal components are derived.
-    var selections = ["#dataset-id", "#policy-model-id", "#judge-model-id", "#max-generations", "#candidates-per-generation", "#max-candidates"].every(function (selector) { return Boolean($(selector).value); });
-    var predictionOriginsPerUpdate = Number($("#samples-per-update").value);
-    var minimumSamplesPerUpdate = samplesPerUpdateSelectionMinimum();
-    var minimumPredictionOrigins = predictionOriginsPerUpdateSelectionMinimum();
+    var selections = ["#dataset-id", "#policy-model-id", "#judge-model-id", "#max-generations", "#candidates-per-generation", "#max-candidates", "#formal-origin-count", "#local-batch-origin-count", "#max-local-edits-per-batch", "#selection-holdout-origin-count"].every(function (selector) { return Boolean($(selector).value); });
     var sampleAgentBatchSize = Number($("#sample-agent-batch-size").value);
     var candidateConcurrency = Number($("#candidate-concurrency").value);
     var sampleConcurrency = Number($("#sample-concurrency").value);
-    var sampleCoverageReady = Number.isInteger(predictionOriginsPerUpdate)
-      && predictionOriginsPerUpdate >= minimumPredictionOrigins
-      && predictionOriginsPerUpdate <= predictionOriginsPerUpdateMaximum();
-    var executionParametersReady = Number.isInteger(candidateConcurrency) && candidateConcurrency >= 1 && candidateConcurrency <= 8
+    var scheduleReady = true;
+    try { optimizationScheduleFromControls(); } catch (_error) { scheduleReady = false; }
+    var executionParametersReady = Number($("#candidates-per-generation").value) === 4
+      && Number.isInteger(candidateConcurrency) && candidateConcurrency >= 1 && candidateConcurrency <= 8
       && Number.isInteger(sampleAgentBatchSize) && sampleAgentBatchSize >= 1 && sampleAgentBatchSize <= 128
       && Number.isInteger(sampleConcurrency) && sampleConcurrency >= 1 && sampleConcurrency <= sampleConcurrencyMaximum;
     var separated = $("#policy-model-id").value && $("#judge-model-id").value && $("#policy-model-id").value !== $("#judge-model-id").value;
@@ -550,8 +542,8 @@
     return [
       { label: "配置目录已加载", ready: Boolean(catalogReady) },
       { label: "运行配置已完整选择", ready: selections },
-      { label: "每轮覆盖完整预测向量（至少 " + formatNumber(minimumPredictionOrigins) + " 次完整预测 / " + formatNumber(minimumSamplesPerUpdate) + " 个评分单元）", ready: sampleCoverageReady },
-      { label: "候选并发、请求微批与逐样本并发参数有效", ready: executionParametersReady },
+      { label: "入围候选 500-origin schedule、局部 batch 与轮末 holdout 参数有效", ready: scheduleReady },
+      { label: "固定 4 候选、候选并发、origin wave 与逐样本并发参数有效", ready: executionParametersReady },
       { label: "候选总预算可完整覆盖全部轮次（至少 " + formatNumber(budget.required_candidates) + " 个）", ready: budget.budget_sufficient },
       { label: "所选训练数据集可运行", ready: datasetReady },
       { label: "训练序列已由数据集自动冻结", ready: episodeReady },

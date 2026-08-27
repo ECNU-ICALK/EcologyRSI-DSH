@@ -131,7 +131,7 @@
       ["策略模型（API）", itemLabel(selectedModelCatalogItem("#policy-model-id"))],
       ["独立评审模型（API）", itemLabel(selectedModelCatalogItem("#judge-model-id"))],
       ["进化预算", formatNumber(effectiveBudget.max_generations) + " 轮 · 每轮 " + formatNumber(effectiveBudget.candidates_per_generation) + " 个 · 总上限 " + formatNumber(effectiveBudget.requested_max_candidates) + " 个候选"],
-      ["完整预测更新", "每轮 " + formatNumber(normalizedPredictionOriginsPerUpdate($("#samples-per-update").value)) + " 次完整预测 / " + formatNumber(normalizedPredictionOriginsPerUpdate($("#samples-per-update").value) * predictionCellsPerOrigin()) + " 个评分单元 · 候选并发 " + formatNumber(normalizedCandidateConcurrency($("#candidate-concurrency").value)) + " · 样本并发 " + formatNumber(normalizedSampleConcurrency($("#sample-concurrency").value))],
+      ["入围候选持续优化", formatNumber(Number($("#formal-origin-count").value)) + " origins · batch " + formatNumber(Number($("#local-batch-origin-count").value)) + " · 每批最多 " + formatNumber(Number($("#max-local-edits-per-batch").value)) + " 处改动 · 样本并发 " + formatNumber(normalizedSampleConcurrency($("#sample-concurrency").value))],
       ["自动绑定", "预测模型、进化策略、评测器由模型提出并由宿主登记能力校验确定"],
       ["知识检索", $("#knowledge-online-enabled").checked ? "每轮在线检索并冻结知识快照" : "仅使用内置知识目录"],
       ["运行环境", state.usingDemo ? "浏览器演示" : environmentText(state.catalog.dsh.environment)]
@@ -154,27 +154,36 @@
   }
 
   function renderParameters() {
-    var predictionOrigins = normalizedPredictionOriginsPerUpdate($("#samples-per-update").value);
+    var schedule;
+    try { schedule = optimizationScheduleFromControls(); }
+    catch (_error) { schedule = normalizedOptimizationSchedule({}); }
     var cellsPerOrigin = predictionCellsPerOrigin();
-    var scoringCells = predictionOrigins * cellsPerOrigin;
     var microbatch = normalizedSampleAgentBatchSize($("#sample-agent-batch-size").value);
     var candidateConcurrency = normalizedCandidateConcurrency($("#candidate-concurrency").value);
     var concurrency = normalizedSampleConcurrency($("#sample-concurrency").value);
     var budget = candidateBudgetStatus();
-    var plannedCandidates = budget.required_candidates;
-    var plannedPredictionEvaluations = plannedCandidates * predictionOrigins;
-    var plannedScoringCells = plannedCandidates * scoringCells;
-    $("#parameter-summary-pill").textContent = formatNumber(predictionOrigins) + " 次完整预测 / " + formatNumber(scoringCells) + " 个评分单元";
-    $("#agent-update-scope").textContent = "每轮固定 " + formatNumber(predictionOrigins) + " 次完整预测";
+    var screeningCandidateOrigins = 4 * schedule.screening_origin_count;
+    var formalCandidateOrigins = schedule.finalist_count * schedule.formal_origin_count_per_finalist;
+    var holdoutCandidateOrigins = (schedule.finalist_count + 1) * schedule.selection_holdout_origin_count;
+    var generationCandidateOrigins = screeningCandidateOrigins + formalCandidateOrigins + holdoutCandidateOrigins;
+    var generationScoringCells = generationCandidateOrigins * cellsPerOrigin;
+    var runCandidateOrigins = generationCandidateOrigins * budget.max_generations;
+    var runScoringCells = generationScoringCells * budget.max_generations;
+    var uniqueOrigins = schedule.formal_origin_count_per_finalist + budget.max_generations * (schedule.screening_origin_count + schedule.selection_holdout_origin_count);
+    var batchCount = schedule.formal_origin_count_per_finalist / schedule.local_batch_origin_count;
+    var maximumEdits = batchCount * schedule.max_local_edits_per_batch;
+    $("#parameter-summary-pill").textContent = "每个入围候选 " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count);
+    $("#agent-update-scope").textContent = "每个入围候选 " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count);
     var budgetState = $("#parameter-budget-state");
     budgetState.textContent = budget.budget_sufficient ? "预算完整" : "预算不足";
     budgetState.className = budget.budget_sufficient ? "" : "is-insufficient";
     var values = [
-      ["迭代结构", formatNumber(budget.max_generations) + " 轮 × " + formatNumber(budget.candidates_per_generation) + " 个候选"],
-      ["更新边界", "每轮冻结 " + formatNumber(predictionOrigins) + " 次完整预测 / " + formatNumber(scoringCells) + " 个内部评分单元"],
-      ["请求组织", "先按因果预测起点组成 origin wave · 每批最多 " + formatNumber(microbatch) + " 个样本 · 实际请求数以运行进度为准"],
-      ["并发上限", formatNumber(candidateConcurrency) + " 个候选 × 每候选 " + formatNumber(concurrency) + " 个在飞请求"],
-      ["计划评测量", formatNumber(plannedPredictionEvaluations) + " 个候选-完整预测交互 / " + formatNumber(plannedScoringCells) + " 个内部评分单元"],
+      ["迭代结构", formatNumber(budget.max_generations) + " 轮 · 每轮固定 4 个候选 · 同一 64 时点初筛后 Top 2"],
+      ["局部持续优化", "每个入围候选 " + formatNumber(schedule.formal_origin_count_per_finalist) + " origins = " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count) + "；最多 " + formatNumber(maximumEdits) + " 处局部改动"],
+      ["单轮执行预算", formatNumber(screeningCandidateOrigins) + " + " + formatNumber(formalCandidateOrigins) + " + " + formatNumber(holdoutCandidateOrigins) + " = " + formatNumber(generationCandidateOrigins) + " candidate-origins = " + formatNumber(generationScoringCells) + " cells"],
+      ["全程执行预算", formatNumber(runCandidateOrigins) + " candidate-origins / " + formatNumber(runScoringCells) + " cells；需要 " + formatNumber(uniqueOrigins) + " 个不同数据时点"],
+      ["请求组织", "按因果预测起点组成 origin wave · wave 上限 " + formatNumber(microbatch) + " · 实际完成数以运行进度为准"],
+      ["并发上限", formatNumber(candidateConcurrency) + " 个编排候选；两条 lane 共享 " + formatNumber(concurrency) + " 个 run 级在飞请求"],
       ["候选总预算", formatNumber(budget.requested_max_candidates) + " 个（至少 " + formatNumber(budget.required_candidates) + " 个）"],
       ["上下文与输出", "由 DSH Session 压缩和模型路由统一管理，不设逐样本 Token 硬上限"],
       ["复现与检索", ($("#fixed-seed").checked ? "固定种子" : "记录生成种子") + " · " + ($("#knowledge-online-enabled").checked ? "在线检索" : "内置目录")]

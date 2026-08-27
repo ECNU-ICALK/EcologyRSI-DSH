@@ -32,6 +32,22 @@ const catalogSource = read("assets/js/catalog.js");
 const dataSource = read("assets/js/data.js");
 const commandsSource = read("assets/js/commands.js");
 
+// The parameter page is the public source of truth for the adaptive finalist
+// schedule. These defaults are complete forecast origins, never scoring cells.
+for (const [id, value] of [
+  ["formal-origin-count", "500"],
+  ["local-batch-origin-count", "50"],
+  ["max-local-edits-per-batch", "2"],
+  ["selection-holdout-origin-count", "169"],
+]) {
+  assert.match(html, new RegExp(`id="${id}"[^>]*value="${value}"`));
+}
+assert.doesNotMatch(html, /id="samples-per-update"/);
+assert.match(commandsSource, /function normalizedOptimizationSchedule\(values\)/);
+assert.match(commandsSource, /optimization_protocol: "top2_adaptive_epoch@1"/);
+assert.match(commandsSource, /optimization_schedule: optimizationSchedule/);
+assert.doesNotMatch(commandsSource, /samples_per_update:/);
+
 const hostMessages = [];
 const hostFetches = [];
 const parentWindow = {
@@ -844,15 +860,23 @@ assert.equal(archivedRun.archived, true);
 assert.equal(archivedRun.archived_at, "2026-08-17T00:00:00Z");
 const waitingRun = modelSandbox.normalizeRun({
   run_id: "run:waiting", status: "running", generation: 0, candidates_count: 0,
-  total_generations: 2, candidates_per_generation: 3, max_candidates: 6, seed_policy: "fixed",
-  samples_per_update: 1600, candidate_concurrency: 4, sample_agent_batch_size: 64, sample_concurrency: 2,
+  total_generations: 2, candidates_per_generation: 4, max_candidates: 8, seed_policy: "fixed",
+  candidate_concurrency: 4, sample_agent_batch_size: 64, sample_concurrency: 2,
   token_limit: 100000000, token_budget_scope: "sample_agent_gateway_calls_only@1",
   run_wide_accounting_complete: false,
-  budget: {max_generations: 2, candidates_per_generation: 3, max_candidates: 6, token_limit: 100000000},
+  budget: {max_generations: 2, candidates_per_generation: 4, max_candidates: 8, token_limit: 100000000},
   configuration: {
     dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a",
     review_model_id: "judge-a", autonomous_mode: true, model_workflow: "research_compile_evolve@1",
     knowledge_online_enabled: true,
+    optimization_protocol: "top2_adaptive_epoch@1",
+    optimization_schedule: {
+      schema_version: "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
+      screening_origin_count: 64, finalist_count: 2,
+      formal_origin_count_per_finalist: 500, local_batch_origin_count: 50,
+      max_local_edits_per_batch: 2, selection_holdout_origin_count: 169,
+      local_evaluation_mode: "prequential",
+    },
   },
 });
 assert.equal(modelSandbox.runUsesSampleAgentTokenBudget(waitingRun), true);
@@ -871,27 +895,14 @@ modelSandbox.document.querySelector = (selector) => selector === "#process-summa
 modelSandbox.renderProcessSummary(waitingRun);
 assert.ok(processSummaryNode.innerHTML.includes("逐样本智能体 Token 硬预算"));
 assert.ok(processSummaryNode.innerHTML.includes("仅计 planner / repair / critic；不含 research / proposal / judge"));
-for (const configuredExecutionParameter of ["每轮预测预算", "1,600 个评分单元", "候选并发", "4 个候选", "请求微批", "64 个样本", "逐样本并发", "2 个在飞请求"]) {
+for (const configuredExecutionParameter of ["入围候选轨迹", "Top 2 各 10 × 50 origins", "候选并发", "4 个候选", "网关 origin wave", "64 个 origins", "逐样本并发", "2 个在飞请求"]) {
   assert.ok(processSummaryNode.innerHTML.includes(configuredExecutionParameter));
 }
 assert.ok(processSummaryNode.innerHTML.includes("origin wave"));
-assert.ok(processSummaryNode.innerHTML.includes("实际请求数以运行进度为准"));
-const diagnosticRun = modelSandbox.normalizeRun({
-  ...waitingRun,
-  samples_per_update: 9,
-  prediction_cells_per_origin: 9,
-  minimum_selection_samples_per_update: 1521,
-  minimum_selection_origin_samples_per_update: 169,
-});
-modelSandbox.renderProcessSummary(diagnosticRun);
-for (const diagnosticBudgetDetail of [
-  "每轮预测预算", "9 个评分单元，可覆盖 1 个完整预测时点",
-  "晋级证据门槛", "169 个完整预测时点 / 1,521 个评分单元",
-  "诊断运行，本轮不可晋级",
-]) {
-  assert.ok(processSummaryNode.innerHTML.includes(diagnosticBudgetDetail));
+assert.ok(processSummaryNode.innerHTML.includes("实际完成数以运行进度为准"));
+for (const holdoutDetail of ["轮末同 cohort 比较", "F1 / F2 / 上一冠军各 169 origins", "单轮执行预算", "1,763 candidate-origins"]) {
+  assert.ok(processSummaryNode.innerHTML.includes(holdoutDetail));
 }
-assert.equal(processSummaryNode.innerHTML.includes("169 个最低时点 / 9 个评分单元"), false);
 modelSandbox.renderProcessSummary(crossCohortProjection);
 assert.ok(processSummaryNode.innerHTML.includes("当前保留得分"));
 assert.ok(processSummaryNode.innerHTML.includes("原始最高观测（跨窗口不可直接比较）"));
@@ -1791,13 +1802,10 @@ assert.match(reuseToasts.at(-1), /候选总预算不足/);
 const createRunQuerySelector = modelSandbox.document.querySelector;
 const originalEvaluators = modelSandbox.state.catalog.evaluators;
 const multiHorizonEvaluatorNode = {value: "greenhouse-multi-horizon@1"};
-const samplesPerUpdateNode = {min: "", max: "", focus() { samplesPerUpdateFocused = true; }};
-const samplesPerUpdateHelpNode = {textContent: ""};
-let samplesPerUpdateFocused = false;
+const selectionHoldoutNode = {min: "", value: "169", focus() {}};
 modelSandbox.document.querySelector = (selector) => {
   if (selector === "#evaluator-id") { return multiHorizonEvaluatorNode; }
-  if (selector === "#samples-per-update") { return samplesPerUpdateNode; }
-  if (selector === "#samples-per-update-help") { return samplesPerUpdateHelpNode; }
+  if (selector === "#selection-holdout-origin-count") { return selectionHoldoutNode; }
   return createRunQuerySelector(selector);
 };
 modelSandbox.state.catalog.evaluators = [{
@@ -1807,23 +1815,22 @@ modelSandbox.state.catalog.evaluators = [{
   minimum_selection_samples_per_update: 1521,
   minimum_selection_origin_samples_per_update: 169,
 }];
-modelSandbox.updateSamplesPerUpdateBoundary();
-assert.equal(samplesPerUpdateNode.min, "169");
-assert.equal(samplesPerUpdateNode.max, "11111");
-assert.match(samplesPerUpdateHelpNode.textContent, /169 次完整预测（1,521 个评分单元）/);
+modelSandbox.updateOptimizationScheduleBoundary();
+assert.equal(selectionHoldoutNode.min, "169");
 const requestBeforeSampleBoundaryTest = modelSandbox.request;
 let rejectedSampleBoundaryRequestCount = 0;
 modelSandbox.request = async () => { rejectedSampleBoundaryRequestCount += 1; return {}; };
 const insufficientSamplesRun = await modelSandbox.createRun({
   dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a", review_model_id: "judge-a",
   autonomous_mode: true, model_workflow: "research_compile_evolve@1", knowledge_online_enabled: true,
-  rounds: 2, candidates_per_generation: 3, max_candidates: 6,
-  prediction_origins_per_update: 168, fixed_seed: true, auto_advance: 0,
+  rounds: 2, candidates_per_generation: 4, max_candidates: 8,
+  formal_origin_count: 500, local_batch_origin_count: 64,
+  max_local_edits_per_batch: 2, selection_holdout_origin_count: 169,
+  fixed_seed: true, auto_advance: 0,
 });
 assert.equal(insufficientSamplesRun, null);
 assert.equal(rejectedSampleBoundaryRequestCount, 0);
-assert.equal(samplesPerUpdateFocused, true);
-assert.equal(reuseToasts.at(-1), "每次更新完整预测次数不足：严格 DSH 评测至少需要 169 次完整预测（1,521 个内部评分单元）。");
+assert.equal(reuseToasts.at(-1), "局部 batch 必须整除每个入围候选的更新时点数");
 modelSandbox.request = requestBeforeSampleBoundaryTest;
 
 // A continuous create returns immediately at generation 0.  The UI must say
@@ -1862,7 +1869,16 @@ modelSandbox.request = async (path, options) => {
   queuedCreateRequests += 1;
   queuedCreateBody = options.body;
   assert.equal(Object.hasOwn(options.body.budget, "token_limit"), false);
-  assert.equal(options.body.samples_per_update, 4500);
+  assert.equal(Object.hasOwn(options.body, "samples_per_update"), false);
+  assert.equal(options.body.optimization_protocol, "top2_adaptive_epoch@1");
+  assert.equal(options.body.optimization_schedule.schema_version, "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1");
+  assert.equal(options.body.optimization_schedule.screening_origin_count, 64);
+  assert.equal(options.body.optimization_schedule.finalist_count, 2);
+  assert.equal(options.body.optimization_schedule.formal_origin_count_per_finalist, 500);
+  assert.equal(options.body.optimization_schedule.local_batch_origin_count, 50);
+  assert.equal(options.body.optimization_schedule.max_local_edits_per_batch, 2);
+  assert.equal(options.body.optimization_schedule.selection_holdout_origin_count, 169);
+  assert.equal(options.body.optimization_schedule.local_evaluation_mode, "prequential");
   assert.equal(options.body.candidate_concurrency, 4);
   assert.equal(options.body.sample_agent_batch_size, 64);
   assert.equal(options.body.sample_concurrency, 64);
@@ -1870,10 +1886,12 @@ modelSandbox.request = async (path, options) => {
     projection: {
       run_id: "run:new-queued", status: "running", generation: 0, candidates_count: 0,
       auto_progress: true, execution_progress: {phase: "queued", auto_progress: true},
-      budget: {max_generations: 2, candidates_per_generation: 3, max_candidates: 6},
+      budget: {max_generations: 2, candidates_per_generation: 4, max_candidates: 8},
       configuration: {
         dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a", review_model_id: "judge-a",
-        samples_per_update: 4500, candidate_concurrency: 4, sample_agent_batch_size: 64, sample_concurrency: 64,
+        optimization_protocol: "top2_adaptive_epoch@1",
+        optimization_schedule: options.body.optimization_schedule,
+        candidate_concurrency: 4, sample_agent_batch_size: 64, sample_concurrency: 64,
       },
     },
   };
@@ -1881,7 +1899,10 @@ modelSandbox.request = async (path, options) => {
 const newlyQueuedRun = await modelSandbox.createRun({
   dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a", review_model_id: "judge-a",
   autonomous_mode: true, model_workflow: "research_compile_evolve@1", knowledge_online_enabled: true,
-  rounds: 2, candidates_per_generation: 3, max_candidates: 6, fixed_seed: true,
+  rounds: 2, candidates_per_generation: 4, max_candidates: 8,
+  formal_origin_count: 500, local_batch_origin_count: 50,
+  max_local_edits_per_batch: 2, selection_holdout_origin_count: 169,
+  fixed_seed: true,
 });
 assert.equal(queuedCreateBody.execution_protocol, "dsh_native_plugin_evolution@1");
 assert.equal(queuedCreateRequests, 1);
@@ -1890,7 +1911,7 @@ assert.deepEqual(
   Array.from(modelSandbox.state.runs.map((run) => run.id)),
   ["run:new-queued", "run:existing-identical"],
 );
-assert.equal(newlyQueuedRun.samples_per_update, 4500);
+assert.equal(newlyQueuedRun.optimization_schedule.formal_origin_count_per_finalist, 500);
 assert.equal(newlyQueuedRun.candidate_concurrency, 4);
 assert.equal(newlyQueuedRun.sample_agent_batch_size, 64);
 assert.equal(newlyQueuedRun.sample_concurrency, 64);
@@ -1910,10 +1931,12 @@ modelSandbox.request = async (path, options) => {
     projection: {
       run_id: "run:non-default-parameters", status: "running", generation: 0, candidates_count: 0,
       auto_progress: true, execution_progress: {phase: "queued", auto_progress: true},
-      budget: {max_generations: 3, candidates_per_generation: 5, max_candidates: 15, token_limit: 60000000},
+      budget: {max_generations: 3, candidates_per_generation: 4, max_candidates: 12, token_limit: 60000000},
       configuration: {
         dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a", review_model_id: "judge-a",
-        samples_per_update: 2889, candidate_concurrency: 3, sample_agent_batch_size: 16, sample_concurrency: 3,
+        optimization_protocol: "top2_adaptive_epoch@1",
+        optimization_schedule: options.body.optimization_schedule,
+        candidate_concurrency: 3, sample_agent_batch_size: 16, sample_concurrency: 3,
       },
     },
   };
@@ -1921,19 +1944,25 @@ modelSandbox.request = async (path, options) => {
 const nonDefaultRun = await modelSandbox.createRun({
   dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a", review_model_id: "judge-a",
   autonomous_mode: true, model_workflow: "research_compile_evolve@1", knowledge_online_enabled: true,
-  rounds: 3, candidates_per_generation: 5, max_candidates: 15,
-  prediction_origins_per_update: 321, candidate_concurrency: 3, sample_agent_batch_size: 16, sample_concurrency: 3,
+  rounds: 3, candidates_per_generation: 4, max_candidates: 12,
+  formal_origin_count: 600, local_batch_origin_count: 50,
+  max_local_edits_per_batch: 3, selection_holdout_origin_count: 200,
+  candidate_concurrency: 3, sample_agent_batch_size: 16, sample_concurrency: 3,
   fixed_seed: true,
 });
 assert.equal(nonDefaultCreateBody.budget.max_generations, 3);
-assert.equal(nonDefaultCreateBody.budget.candidates_per_generation, 5);
-assert.equal(nonDefaultCreateBody.samples_per_update, 2889);
+assert.equal(nonDefaultCreateBody.budget.candidates_per_generation, 4);
+assert.equal(nonDefaultCreateBody.optimization_schedule.formal_origin_count_per_finalist, 600);
+assert.equal(nonDefaultCreateBody.optimization_schedule.local_batch_origin_count, 50);
+assert.equal(nonDefaultCreateBody.optimization_schedule.max_local_edits_per_batch, 3);
+assert.equal(nonDefaultCreateBody.optimization_schedule.selection_holdout_origin_count, 200);
+assert.equal(Object.hasOwn(nonDefaultCreateBody, "samples_per_update"), false);
 assert.equal(nonDefaultCreateBody.candidate_concurrency, 3);
 assert.equal(nonDefaultCreateBody.sample_agent_batch_size, 16);
 assert.equal(nonDefaultCreateBody.sample_concurrency, 3);
 assert.equal(nonDefaultRun.total_generations, 3);
-assert.equal(nonDefaultRun.candidates_per_generation, 5);
-assert.equal(nonDefaultRun.samples_per_update, 2889);
+assert.equal(nonDefaultRun.candidates_per_generation, 4);
+assert.equal(nonDefaultRun.optimization_schedule.formal_origin_count_per_finalist, 600);
 assert.equal(nonDefaultRun.candidate_concurrency, 3);
 assert.equal(nonDefaultRun.sample_agent_batch_size, 16);
 assert.equal(nonDefaultRun.sample_concurrency, 3);
@@ -1941,10 +1970,10 @@ assert.equal(nonDefaultRun.sample_concurrency, 3);
 modelSandbox.document.querySelector = (selector) => selector === "#process-summary" ? processSummaryNode : modelQuerySelector(selector);
 modelSandbox.renderProcessSummary(nonDefaultRun);
 for (const nonDefaultExecutionParameter of [
-  "每轮候选", "5 个版本", "每轮预测预算", "2,889 个评分单元",
-  "候选并发", "3 个候选", "请求微批", "16 个样本", "逐样本并发", "3 个在飞请求",
+  "每轮候选", "4 个版本",
+  "候选并发", "3 个候选", "网关 origin wave", "16 个 origins", "逐样本并发", "3 个在飞请求",
 ]) {
-  assert.ok(processSummaryNode.innerHTML.includes(nonDefaultExecutionParameter));
+  assert.ok(processSummaryNode.innerHTML.includes(nonDefaultExecutionParameter), nonDefaultExecutionParameter);
 }
 modelSandbox.document.querySelector = modelQuerySelector;
 modelSandbox.state.catalog.evaluators = originalEvaluators;
@@ -2532,7 +2561,10 @@ const makeControlNode = (value = "") => ({
 const budgetNodes = {
   "#max-generations": makeControlNode("5"),
   "#candidates-per-generation": makeControlNode("4"),
-  "#samples-per-update": makeControlNode("500"),
+  "#formal-origin-count": makeControlNode("500"),
+  "#local-batch-origin-count": makeControlNode("50"),
+  "#max-local-edits-per-batch": makeControlNode("2"),
+  "#selection-holdout-origin-count": makeControlNode("169"),
   "#sample-agent-batch-size": makeControlNode("64"),
   "#sample-concurrency": makeControlNode("64"),
   "#max-candidates": makeControlNode("20"),
@@ -2558,9 +2590,21 @@ budgetSandbox.syncCandidateBudget();
 assert.equal(budgetNodes["#max-candidates"].value, "30");
 assert.match(budgetNodes["#max-candidates"].validationMessage, /至少 36/);
 assert.equal(budgetSandbox.candidateBudgetStatus().budget_sufficient, false);
-assert.equal(budgetSandbox.normalizedPredictionOriginsPerUpdate("500"), 500);
-assert.equal(budgetSandbox.normalizedPredictionOriginsPerUpdate("invalid"), 500);
-assert.equal(budgetSandbox.normalizedPredictionOriginsPerUpdate("99999"), 11111);
+const defaultSchedule = budgetSandbox.optimizationScheduleFromControls();
+assert.equal(defaultSchedule.formal_origin_count_per_finalist, 500);
+assert.equal(defaultSchedule.local_batch_origin_count, 50);
+assert.equal(defaultSchedule.max_local_edits_per_batch, 2);
+assert.equal(defaultSchedule.selection_holdout_origin_count, 169);
+for (const [patch, pattern] of [
+  [{formal_origin_count: 500, local_batch_origin_count: 64}, /必须整除/],
+  [{max_local_edits_per_batch: 0}, /不得小于 1/],
+  [{max_local_edits_per_batch: 6}, /不得大于 5/],
+  [{selection_holdout_origin_count: 168}, /不得小于 169/],
+  [{formal_origin_count: ""}, /必须是整数/],
+  [{formal_origin_count: true}, /必须是整数/],
+]) {
+  assert.throws(() => budgetSandbox.normalizedOptimizationSchedule(patch), pattern);
+}
 assert.equal(budgetSandbox.normalizedSampleAgentBatchSize("64"), 64);
 assert.equal(budgetSandbox.normalizedSampleAgentBatchSize("invalid"), 64);
 assert.equal(budgetSandbox.normalizedSampleConcurrency("8"), 8);
@@ -2572,7 +2616,10 @@ const parameterNodes = {
   "#max-generations": makeControlNode("5"),
   "#candidates-per-generation": makeControlNode("4"),
   "#max-candidates": makeControlNode("20"),
-  "#samples-per-update": makeControlNode("500"),
+  "#formal-origin-count": makeControlNode("500"),
+  "#local-batch-origin-count": makeControlNode("50"),
+  "#max-local-edits-per-batch": makeControlNode("2"),
+  "#selection-holdout-origin-count": makeControlNode("169"),
   "#sample-agent-batch-size": makeControlNode("64"),
   "#candidate-concurrency": makeControlNode("4"),
   "#sample-concurrency": makeControlNode("64"),
@@ -2595,10 +2642,10 @@ vm.runInContext(read("assets/js/core.js"), parameterSandbox);
 vm.runInContext(read("assets/js/commands.js"), parameterSandbox);
 vm.runInContext(read("assets/js/render_shell.js"), parameterSandbox);
 parameterSandbox.renderParameters();
-assert.equal(parameterNodes["#parameter-summary-pill"].textContent, "500 次完整预测 / 4,500 个评分单元");
-assert.equal(parameterNodes["#agent-update-scope"].textContent, "每轮固定 500 次完整预测");
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("500 次完整预测 / 4,500 个内部评分单元"));
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("10,000 个候选-完整预测交互 / 90,000 个内部评分单元"));
+assert.equal(parameterNodes["#parameter-summary-pill"].textContent, "每个入围候选 10 × 50");
+assert.equal(parameterNodes["#agent-update-scope"].textContent, "每个入围候选 10 × 50");
+assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("256 + 1,000 + 507 = 1,763 candidate-origins = 15,867 cells"));
+assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("8,815 candidate-origins / 79,335 cells；需要 1,665 个不同数据时点"));
 
 const diagnosticNodes = {
   "#execution-diagnostics-summary": makeControlNode(),
@@ -2729,7 +2776,9 @@ assert.match(html, /name="review_model_id"/);
 assert.match(html, /name="autonomous_mode" type="hidden" value="true"/);
 assert.doesNotMatch(html, /advanced-settings/);
 assert.match(html, /id="workspace-parameters"[\s\S]*name="candidates_per_generation"/);
-assert.match(html, /id="workspace-parameters"[\s\S]*name="prediction_origins_per_update"/);
+for (const field of ["formal_origin_count", "local_batch_origin_count", "max_local_edits_per_batch", "selection_holdout_origin_count"]) {
+  assert.match(html, new RegExp(`id="workspace-parameters"[\\s\\S]*name="${field}"`));
+}
 assert.match(html, /id="workspace-parameters"[\s\S]*name="candidate_concurrency"/);
 assert.match(html, /id="workspace-parameters"[\s\S]*name="sample_agent_batch_size"/);
 assert.match(html, /id="workspace-parameters"[\s\S]*name="sample_concurrency"/);
@@ -2741,7 +2790,7 @@ assert.doesNotMatch(html, /id="workspace-settings"[\s\S]*id="workspace-parameter
 assert.ok(html.includes("DSH 上下文：等待 Session 计量"));
 assert.doesNotMatch(html, /name="token_limit"/);
 assert.ok(html.includes("全量 training_fit"));
-assert.ok(html.includes("每轮固定 500 次完整预测"));
+assert.ok(html.includes("每个入围候选 10 × 50"));
 assert.match(html, /<label><span>训练数据集<\/span><select id="dataset-id" name="dataset_id" required>/);
 assert.match(html, /<label hidden><span>研究领域（自动推导）/);
 assert.match(html, /<label hidden><span>预测模型/);
@@ -2777,7 +2826,7 @@ for (const id of [
     "field-visibility-control", "target-candidate-field", "parameter-overrides-field",
     "model-connection-list", "dataset-context-note", "source-integrity", "dataset-error", "retry-dataset-button",
     "process-summary", "autonomy-progress", "autonomy-progress-status", "prediction-model-id", "prediction-model-help", "toggle-events-button",
-    "knowledge-online-enabled", "samples-per-update", "candidate-concurrency", "sample-agent-batch-size", "sample-concurrency", "parameter-summary", "agent-update-scope", "execution-monitor-status", "execution-progress-track", "execution-progress-fill", "execution-diagnostics-summary", "execution-diagnostics-grid", "show-archived-runs", "archived-count", "archive-button", "delete-button",
+    "knowledge-online-enabled", "formal-origin-count", "local-batch-origin-count", "max-local-edits-per-batch", "selection-holdout-origin-count", "candidate-concurrency", "sample-agent-batch-size", "sample-concurrency", "parameter-summary", "agent-update-scope", "execution-monitor-status", "execution-progress-track", "execution-progress-fill", "execution-diagnostics-summary", "execution-diagnostics-grid", "show-archived-runs", "archived-count", "archive-button", "delete-button",
     "execution-stage-strip", "active-candidate-summary", "sample-inference-list", "implementation-summary"
 ]) {
   assert.match(html, new RegExp(`id=\\"${id}\\"`), `missing interface element: ${id}`);
@@ -2800,16 +2849,18 @@ for (const contractField of ["descriptor", "readiness", "profile", "features", "
 }
 assert.match(app, /request\("\/runs"/);
 assert.match(html, /id="candidates-per-generation"[^>]*value="4"/);
-assert.match(html, /<span>每次更新完整预测次数<\/span><input id="samples-per-update"[^>]*name="prediction_origins_per_update"[^>]*value="500"/);
+assert.match(html, /id="formal-origin-count"[^>]*name="formal_origin_count"[^>]*value="500"/);
+assert.match(html, /id="local-batch-origin-count"[^>]*name="local_batch_origin_count"[^>]*value="50"/);
+assert.match(html, /id="max-local-edits-per-batch"[^>]*name="max_local_edits_per_batch"[^>]*value="2"/);
+assert.match(html, /id="selection-holdout-origin-count"[^>]*name="selection_holdout_origin_count"[^>]*value="169"/);
 assert.match(html, /id="candidate-concurrency"[^>]*value="4"/);
 assert.match(html, /id="sample-agent-batch-size"[^>]*value="64"/);
 assert.match(html, /id="sample-concurrency"[^>]*max="128"[^>]*value="64"/);
-assert.ok(html.includes("500 次完整预测 / 4,500 个评分单元"));
-assert.ok(html.includes("每轮固定 500 次完整预测"));
+assert.ok(html.includes("每个入围候选 10 × 50"));
 assert.match(html, /id="max-candidates"[^>]*value="20"/);
 assert.doesNotMatch(html, /id="token-limit"/);
-assert.ok(html.includes("样本先按因果预测起点组成 origin wave"));
-assert.ok(html.includes("实际请求数以运行进度为准"));
+assert.ok(html.includes("按因果预测起点组织请求"));
+assert.ok(html.includes("实际完成数以运行进度为准"));
 assert.doesNotMatch(app, /wavesPerCandidate|每候选约/);
 assert.deepEqual(
   fs.readdirSync(path.resolve(root, "../../integrations/dsh_ecology_plugin/presets"), {withFileTypes: true})
@@ -2825,21 +2876,21 @@ assert.deepEqual(
     "ecology-sample-planner-v3", "ecology-sample-planner-v4",
   ],
 );
-for (const field of ["rounds", "candidates_per_generation", "prediction_origins_per_update", "candidate_concurrency", "sample_agent_batch_size", "sample_concurrency", "max_candidates", "fixed_seed", "knowledge_online_enabled"]) {
+for (const field of ["rounds", "candidates_per_generation", "formal_origin_count", "local_batch_origin_count", "max_local_edits_per_batch", "selection_holdout_origin_count", "candidate_concurrency", "sample_agent_batch_size", "sample_concurrency", "max_candidates", "fixed_seed", "knowledge_online_enabled"]) {
   assert.match(html, new RegExp(`name="${field}"[^>]*form="start-form"|form="start-form"[^>]*name="${field}"`));
 }
 assert.match(app, /function syncCandidateBudget\(options\)/);
 assert.match(app, /\$\("#start-button"\)\.disabled = state\.busy;/);
 assert.ok(app.includes("暂时不能创建："));
-assert.ok(app.includes("候选并发、请求微批与逐样本并发参数有效"));
-assert.match(app, /var requestedPredictionOrigins = normalizedPredictionOriginsPerUpdate\(payload\.prediction_origins_per_update\)/);
-assert.match(app, /requestedPredictionOrigins < minimumPredictionOrigins/);
-assert.match(app, /var requestedSamplesPerUpdate = requestedPredictionOrigins \* cellsPerOrigin/);
-assert.match(app, /samples_per_update: requestedSamplesPerUpdate/);
-assert.match(app, /prediction_origins_per_update: Number\(form\.get\("prediction_origins_per_update"\)\)/);
-assert.match(app, /candidate_concurrency: normalizedCandidateConcurrency\(payload\.candidate_concurrency\)/);
-assert.match(app, /sample_agent_batch_size: normalizedSampleAgentBatchSize\(payload\.sample_agent_batch_size\)/);
-assert.match(app, /sample_concurrency: normalizedSampleConcurrency\(payload\.sample_concurrency\)/);
+assert.ok(app.includes("固定 4 候选、候选并发、origin wave 与逐样本并发参数有效"));
+assert.match(app, /function normalizedOptimizationSchedule\(values\)/);
+assert.match(app, /optimization_protocol: "top2_adaptive_epoch@1"/);
+assert.match(app, /optimization_schedule: optimizationSchedule/);
+assert.doesNotMatch(commandsSource, /samples_per_update:/);
+assert.match(app, /formal_origin_count: Number\(form\.get\("formal_origin_count"\)\)/);
+assert.match(app, /candidate_concurrency: candidateConcurrency/);
+assert.match(app, /sample_agent_batch_size: sampleAgentBatchSize/);
+assert.match(app, /sample_concurrency: sampleConcurrency/);
 assert.ok(app.includes("候选总预算不足"));
 assert.match(app, /auto_advance: payload\.auto_advance === 0 \? 0 : continuousAutoAdvance \? true : 1/);
 assert.ok(app.includes("已排队，后台将自动执行全部轮次"));
