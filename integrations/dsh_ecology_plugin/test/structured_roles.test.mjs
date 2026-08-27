@@ -456,7 +456,7 @@ test("structured role rechecks its deadline after reading the persistence receip
   );
 });
 
-test("structured role keeps normal bookkeeping pending until disposal completes", async () => {
+test("persisted structured role releases bookkeeping before disposal completes", async () => {
   for (const timeoutMs of [undefined, 500]) {
     let releaseDispose;
     let markDisposeStarted;
@@ -489,11 +489,11 @@ test("structured role keeps normal bookkeeping pending until disposal completes"
 
     await disposeStarted;
     await Promise.resolve();
-    assert.equal(settled, false);
-    assert.equal(pendingStarts.size, 1);
-    releaseDispose();
-    await running;
+    const result = await running;
+    assert.deepEqual(result.structured, { value: 1 });
+    assert.equal(settled, true);
     assert.equal(pendingStarts.size, 0);
+    releaseDispose();
   }
 });
 
@@ -575,7 +575,7 @@ test("normal cleanup rejections do not replace or disclose the primary phase err
   assert.equal(pendingStarts.size, 0);
 });
 
-test("structured role finishes bookkeeping when disposal crosses the deadline", async () => {
+test("persisted structured result does not wait for wedged private disposal", async () => {
   const pendingStarts = new PendingChildStarts({
     subagents: {
       start: async () => ({
@@ -586,20 +586,18 @@ test("structured role finishes bookkeeping when disposal crosses the deadline", 
     },
   });
 
-  await assert.rejects(
-    runStructuredRole(
-      { agent: { id: "judge-host" } },
-      { label: "cleanup-timeout-label" },
-      { prompt: "judge", outputSchema: { type: "object" } },
-      {
-        pendingStarts,
-        admission: { isOpen: async () => true },
-        persist: async () => ({ accepted: true }),
-        timeoutMs: 20,
-      },
-    ),
-    operationalTimeout,
+  const result = await runStructuredRole(
+    { agent: { id: "judge-host" } },
+    { label: "cleanup-timeout-label" },
+    { prompt: "judge", outputSchema: { type: "object" } },
+    {
+      pendingStarts,
+      admission: { isOpen: async () => true },
+      persist: async () => ({ accepted: true }),
+      timeoutMs: 20,
+    },
   );
+  assert.deepEqual(result.structured, { value: 1 });
   assert.equal(pendingStarts.size, 0);
 });
 

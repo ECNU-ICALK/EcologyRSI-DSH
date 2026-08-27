@@ -64,6 +64,7 @@ export async function runStructuredRole(
   let pending = null;
   let run;
   let timeout = null;
+  let resultPersisted = false;
   const hardDeadline = deadline === undefined
     ? (timeoutMs === undefined ? null : createStructuredDeadline(timeoutMs))
     : deadline;
@@ -226,6 +227,7 @@ export async function runStructuredRole(
     if (!accepted || receiptAccepted !== true) {
       throw structuredPhaseError("not_accepted");
     }
+    resultPersisted = true;
     const returnedStructured = structuredClone(structured);
     requireBeforeDeadline();
     const response = Object.freeze({
@@ -239,7 +241,18 @@ export async function runStructuredRole(
     try {
       if (pending !== null) {
         if (deadlineExpired()) expireDeadline();
-        if (timedOut) {
+        if (resultPersisted) {
+          // Persistence is the durable completion boundary. DSH child-session
+          // disposal is private resource cleanup and has been observed to
+          // remain pending after the accepted result was already committed.
+          // Never hold the HTTP response (and its Python worker) behind that
+          // cleanup; remove admission bookkeeping immediately and dispose in
+          // the background.
+          detachCleanup(() => typeof pendingStarts.dispose === "function"
+            ? pendingStarts.dispose(pending)
+            : run?.dispose?.());
+          detachCleanup(() => pendingStarts.finish?.(pending));
+        } else if (timedOut) {
           if (run === undefined) {
             pending.promise.then(
               (lateRun) => {

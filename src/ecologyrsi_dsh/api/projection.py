@@ -2043,17 +2043,12 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
         for event in state.candidate_screening_events
         if int(event.payload.get("generation", -1)) == generation
     )
+    # Completed progress is the host-settled candidate boundary. A predictor
+    # receipt can be followed by schema repair, optional critic work, or host
+    # scoring, so counting child receipts here can reach 256 while the
+    # screening workers are still active.
     screening_completed = settled_screening_completed
-    # Candidate screening events are emitted only after a candidate record
-    # closes. During live screening, complete predictor receipts give a
-    # lower-latency prediction counter, but they cannot settle the screening
-    # phase or authorize formal evaluation.
     live_screening = _screening_progress_projection(state)
-    if live_screening is not None:
-        screening_completed = max(
-            screening_completed,
-            int(live_screening.get("completed_samples") or 0),
-        )
     has_adaptive_boundary = (
         live_screening is not None
         or any(
@@ -2111,26 +2106,35 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
         break
     live_fields: dict[str, Any] = {}
     if live_screening is not None and phase == "screening":
-        # Preserve the real provider-boundary counters while adaptive cohort
-        # progress is still in the screening phase. Without these fields the
-        # browser can show a moving percentage but lose the actionable
-        # in-flight/queued/awaiting breakdown.
+        # Child events remain useful activity evidence, but cannot increase
+        # host-settled origin progress. Present the remaining origins as
+        # awaiting settlement and expose physical gateway attempts separately.
         for key in (
-            "progress_kind",
-            "succeeded_samples",
-            "failed_samples",
             "in_flight_batches",
             "queued_batches",
-            "awaiting_submission_batches",
             "configured_concurrency",
             "queue_semantics",
-            "samples_per_minute",
-            "estimated_remaining_seconds",
+            "gateway_request_count",
             "updated_at",
             "event_seq",
         ):
             if key in live_screening:
                 live_fields[key] = live_screening[key]
+        in_flight = max(0, int(live_fields.get("in_flight_batches") or 0))
+        queued = max(0, int(live_fields.get("queued_batches") or 0))
+        unsettled = max(0, screening_total - settled_screening_completed)
+        live_fields.update(
+            {
+                "progress_kind": "settling",
+                "succeeded_samples": settled_screening_completed,
+                "failed_samples": 0,
+                "awaiting_submission_batches": max(
+                    0, unsettled - in_flight - queued
+                ),
+                "samples_per_minute": None,
+                "estimated_remaining_seconds": None,
+            }
+        )
     return {
         "schema_version": "ecologyrsi-dsh.adaptive-progress/1",
         "evaluation_phase": phase,

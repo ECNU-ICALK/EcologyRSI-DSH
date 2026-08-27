@@ -1369,6 +1369,26 @@ assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("�
 modelSandbox.renderAutonomyProgress(screeningRun);
 assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "模型执行中");
 
+const settlingRun = {
+  ...screeningRun,
+  execution_progress: {
+    ...screeningRun.execution_progress,
+    stage_progress: {
+      ...screeningRun.execution_progress.stage_progress,
+      progress_kind: "settling",
+      completed_samples: 64,
+      succeeded_samples: 64,
+      awaiting_submission_batches: 192,
+      gateway_request_count: 375,
+    },
+  },
+};
+modelSandbox.renderExecutionMonitor(settlingRun);
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("预测时点进度：64 / 256"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("待结算 192"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("网关尝试 375"));
+assert.ok(monitorNodes["#execution-heartbeat"].textContent.includes("模型执行与宿主结算中"));
+
 const legacyPausedQueueRun = {
   ...pausedDrainedRun,
   id: "run:legacy-paused-queue",
