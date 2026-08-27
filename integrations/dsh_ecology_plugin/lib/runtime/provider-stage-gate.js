@@ -85,7 +85,7 @@ export class ProviderStageGate {
     minimumIntervalMs = 0,
     failureCooldownMs = 30_000,
     maxInFlight = MAX_STRUCTURED_STAGE_IN_FLIGHT,
-    adaptiveInitialInFlight = 8,
+    adaptiveInitialInFlight = maxInFlight,
     adaptiveFloor = 4,
     adaptiveRecoverySuccesses = 32,
     now = Date.now,

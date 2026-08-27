@@ -78,7 +78,7 @@ export function resolvePluginConfig(config = {}, { defaultStaticRoot, env = proc
     ),
     structuredStageMinIntervalMs: nonNegativeInteger(
       config.structuredStageMinIntervalMs,
-      1_000,
+      0,
       "structuredStageMinIntervalMs",
     ),
     structuredStageMaxInFlight: boundedConcurrency(
