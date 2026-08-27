@@ -2560,7 +2560,12 @@ def _execute_adaptive_holdout_arm(
         score=bundle.evaluation.score,
         passed=bundle.evaluation.passed,
         metrics=metrics,
-        evaluator_digest=digest({"evaluator": bundle.evaluation.evaluator_digest, "scope": scope.scope_key}),
+        # The evaluator identity is part of the causal comparison contract and
+        # must remain identical across incumbent and both finalist arms.  The
+        # arm/scope is already carried by ``EvaluationScope`` and the stable
+        # evaluation id; including it in this digest would make every arm look
+        # like it used a different evaluator and block promotion.
+        evaluator_digest=str(bundle.evaluation.evaluator_digest),
     )
     _director_mutation(
         endpoint,

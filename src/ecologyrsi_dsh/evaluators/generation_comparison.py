@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from types import SimpleNamespace
 from typing import Any
 
 from ..core.trajectory import (
@@ -10,6 +11,102 @@ from ..core.trajectory import (
     HoldoutArm,
     HoldoutEvaluation,
 )
+from ..evolution.promotion import assess_promotion_improvement
+
+
+PROMOTION_CELL_REGRESSION_FLOOR = -0.01
+PROMOTION_REQUIRED_COVERAGE = 0.95
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if number == number and abs(number) != float("inf") else None
+
+
+def _cell_map(evaluation: HoldoutEvaluation) -> dict[tuple[str, int], Mapping[str, Any]]:
+    rows = evaluation.metrics.get("targets")
+    if not isinstance(rows, (list, tuple)):
+        return {}
+    result: dict[tuple[str, int], Mapping[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        target = row.get("target")
+        horizon = row.get("horizon_hours")
+        if isinstance(target, str) and isinstance(horizon, int) and not isinstance(horizon, bool):
+            result[(target, horizon)] = row
+    return result
+
+
+def _plain_json(value: Any) -> Any:
+    """Thaw immutable MappingProxyType metrics for the legacy promotion helper."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json(item) for item in value]
+    return value
+
+
+def _promotion_view(evaluation: HoldoutEvaluation) -> Any:
+    return SimpleNamespace(
+        evaluation_id=evaluation.evaluation_id,
+        candidate_id=evaluation.scope.candidate_id,
+        score=evaluation.score,
+        evaluator_digest=evaluation.evaluator_digest,
+        metrics=_plain_json(evaluation.metrics),
+    )
+
+
+def _cell_gate(
+    evaluation: HoldoutEvaluation,
+    incumbent: HoldoutEvaluation,
+) -> dict[str, Any]:
+    current = _cell_map(evaluation)
+    baseline = _cell_map(incumbent)
+    expected = set(baseline)
+    deltas: dict[str, float] = {}
+    failures: list[str] = []
+    if not expected or set(current) != expected:
+        return {
+            "complete": False,
+            "coverage_pass": False,
+            "no_regression": False,
+            "worst_cell_delta": None,
+            "failures": ["objective_grid_incomplete"],
+        }
+    for key in sorted(expected):
+        candidate_row = current[key]
+        incumbent_row = baseline[key]
+        candidate_skill = _finite_number(candidate_row.get("skill_score"))
+        incumbent_skill = _finite_number(incumbent_row.get("skill_score"))
+        candidate_coverage = _finite_number(
+            candidate_row.get("sample_execution_coverage", candidate_row.get("coverage"))
+        )
+        incumbent_coverage = _finite_number(
+            incumbent_row.get("sample_execution_coverage", incumbent_row.get("coverage"))
+        )
+        if candidate_skill is None or incumbent_skill is None:
+            failures.append(f"cell_skill_missing:{key[0]}:{key[1]}")
+        else:
+            deltas[f"{key[0]}@{key[1]}h"] = candidate_skill - incumbent_skill
+        if candidate_coverage is None or candidate_coverage < PROMOTION_REQUIRED_COVERAGE:
+            failures.append(f"cell_coverage_insufficient:{key[0]}:{key[1]}")
+        if incumbent_coverage is None or incumbent_coverage < PROMOTION_REQUIRED_COVERAGE:
+            failures.append(f"incumbent_cell_coverage_insufficient:{key[0]}:{key[1]}")
+    worst = min(deltas.values()) if deltas else None
+    if worst is None or worst < PROMOTION_CELL_REGRESSION_FLOOR:
+        failures.append("cell_regression")
+    return {
+        "complete": True,
+        "coverage_pass": not any("coverage" in item for item in failures),
+        "no_regression": worst is not None and worst >= PROMOTION_CELL_REGRESSION_FLOOR,
+        "worst_cell_delta": worst,
+        "cell_deltas": deltas,
+        "failures": failures,
+    }
 
 
 def _constraint_violations(evaluation: HoldoutEvaluation) -> int:
@@ -33,10 +130,19 @@ def _coverage_pass(evaluation: HoldoutEvaluation) -> bool:
 def _gate(evaluation: HoldoutEvaluation) -> dict[str, Any]:
     constraints = _constraint_violations(evaluation)
     coverage_pass = _coverage_pass(evaluation)
+    overall_coverage = _finite_number(
+        evaluation.metrics.get(
+            "objective_weight_coverage",
+            evaluation.metrics.get("sample_execution_coverage"),
+        )
+    )
+    if overall_coverage is None or overall_coverage < PROMOTION_REQUIRED_COVERAGE:
+        coverage_pass = False
     passed = bool(evaluation.passed)
     return {
         "passed": passed,
         "constraint_violations": constraints,
+        "overall_coverage": overall_coverage,
         "coverage_pass": coverage_pass,
         "eligible": bool(passed and constraints == 0 and coverage_pass),
         "score": evaluation.score,
@@ -71,15 +177,60 @@ def build_generation_comparison(
         by_arm[HoldoutArm.FINALIST_1],
         by_arm[HoldoutArm.FINALIST_2],
     ]
-    eligible_finalists = [
-        item for item in finalist_evaluations if _gate(item)["eligible"]
-    ]
-    eligible_finalists.sort(
-        key=lambda item: (-item.score, item.scope.candidate_id, item.scope.candidate_revision_id)
-    )
     incumbent = by_arm[HoldoutArm.INCUMBENT]
+    if len({item.evaluator_digest for item in evaluations}) != 1:
+        raise ValueError("holdout evaluations must share one evaluator digest")
+    finalist_gates: dict[str, dict[str, Any]] = {}
+    eligible_finalists = []
+    for item in finalist_evaluations:
+        scientific_gate = _gate(item)
+        cell_gate = _cell_gate(item, incumbent)
+        improvement = assess_promotion_improvement(
+            _promotion_view(item), _promotion_view(incumbent)
+        )
+        interval = improvement.get("confidence_interval_95")
+        stability_floor = (
+            float(interval[0])
+            if isinstance(interval, (list, tuple)) and len(interval) == 2
+            else None
+        )
+        delta = item.score - incumbent.score
+        eligible = bool(
+            scientific_gate["eligible"]
+            and cell_gate["complete"]
+            and cell_gate["coverage_pass"]
+            and cell_gate["no_regression"]
+            and improvement.get("comparable") is True
+            and improvement.get("improved") is True
+            and delta > 0.005
+        )
+        gate = {
+            **scientific_gate,
+            "eligible": eligible,
+            "complete_objective_grid": cell_gate["complete"],
+            "coverage_pass": cell_gate["coverage_pass"],
+            "no_cell_regression": cell_gate["no_regression"],
+            "worst_cell_delta": cell_gate["worst_cell_delta"],
+            "cell_deltas": cell_gate.get("cell_deltas", {}),
+            "promotion_assessment": improvement,
+            "stability_lower_bound": stability_floor,
+            "failures": list(cell_gate.get("failures", ()))
+            + ([] if improvement.get("improved") else [str(improvement.get("reason_code") or "promotion_gate_failed")]),
+        }
+        finalist_gates[item.scope.holdout_arm.value] = gate
+        if eligible:
+            eligible_finalists.append((item, gate))
+    eligible_finalists.sort(
+        key=lambda pair: (
+            -(pair[1]["stability_lower_bound"] if pair[1]["stability_lower_bound"] is not None else float("-inf")),
+            -(pair[0].score - incumbent.score),
+            -(pair[1]["worst_cell_delta"] if pair[1]["worst_cell_delta"] is not None else float("-inf")),
+            pair[0].scope.candidate_id,
+            pair[0].scope.candidate_revision_id,
+        )
+    )
     incumbent_gate = _gate(incumbent)
-    selected = eligible_finalists[0] if eligible_finalists else incumbent
+    selected = eligible_finalists[0][0] if eligible_finalists else incumbent
     if incumbent_candidate_id is not None and incumbent.scope.candidate_id != incumbent_candidate_id:
         raise ValueError("incumbent holdout arm does not match incumbent candidate")
 
@@ -87,7 +238,12 @@ def build_generation_comparison(
     gate_results = {
         "schema_version": "ecologyrsi-dsh.generation-comparison/1",
         "arms": {
-            arm.value: _gate(by_arm[arm]) for arm in HoldoutArm
+            arm.value: (
+                finalist_gates[arm.value]
+                if arm in {HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2}
+                else incumbent_gate
+            )
+            for arm in HoldoutArm
         },
         "eligible_finalist_count": len(eligible_finalists),
         "selected_arm": selected.scope.holdout_arm.value if selected.scope.holdout_arm else None,
@@ -95,7 +251,7 @@ def build_generation_comparison(
         "incumbent_score": incumbent.score,
         "delta_to_incumbent": incumbent_delta,
         "incumbent_gate_pass": incumbent_gate["eligible"],
-        "selection_rule": "eligible_finalist_max_score_then_candidate_revision_id_else_incumbent",
+        "selection_rule": "promotion_gate_then_stability_lower_bound_delta_worst_cell_candidate_revision_else_incumbent",
     }
     return GenerationComparison(
         comparison_id=f"generation-comparison:{run_id}:{generation}",
