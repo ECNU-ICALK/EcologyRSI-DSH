@@ -1378,14 +1378,16 @@ const settlingRun = {
       progress_kind: "settling",
       completed_samples: 64,
       succeeded_samples: 64,
-      awaiting_submission_batches: 192,
+      awaiting_submission_batches: 128,
+      awaiting_settlement_batches: 64,
       gateway_request_count: 375,
     },
   },
 };
 modelSandbox.renderExecutionMonitor(settlingRun);
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("预测时点进度：64 / 256"));
-assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("待结算 192"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("待提交 128"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("待结算 64"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("网关尝试 375"));
 assert.ok(monitorNodes["#execution-heartbeat"].textContent.includes("模型执行与宿主结算中"));
 

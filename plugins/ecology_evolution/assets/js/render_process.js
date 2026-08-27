@@ -1526,8 +1526,9 @@
     var queuedLabel = legacyAwaitingSubmission ? "待提交" : progressKind === "drained" ? "暂停后排队" : runStatus === "paused" ? "暂停快照排队" : "排队";
     var queuedText = Number.isInteger(queued) && queued >= 0 ? " · " + queuedLabel + " " + formatNumber(queued) : "";
     var awaitingSubmission = (showLiveProgressDetail || showDrainedProgressDetail) && Number(stageProgress.awaiting_submission_batches);
-    var awaitingSubmissionLabel = progressKind === "settling" ? "待结算" : "待提交";
-    var awaitingSubmissionText = Number.isInteger(awaitingSubmission) && awaitingSubmission >= 0 ? " · " + awaitingSubmissionLabel + " " + formatNumber(awaitingSubmission) : "";
+    var awaitingSubmissionText = Number.isInteger(awaitingSubmission) && awaitingSubmission >= 0 ? " · 待提交 " + formatNumber(awaitingSubmission) : "";
+    var awaitingSettlement = (showLiveProgressDetail || showDrainedProgressDetail) && Number(stageProgress.awaiting_settlement_batches);
+    var awaitingSettlementText = Number.isInteger(awaitingSettlement) && awaitingSettlement > 0 ? " · 待结算 " + formatNumber(awaitingSettlement) : "";
     var gatewayAttempts = showLiveProgressDetail && Number(stageProgress.gateway_request_count);
     var gatewayAttemptsText = Number.isInteger(gatewayAttempts) && gatewayAttempts >= 0 ? " · 网关尝试 " + formatNumber(gatewayAttempts) : "";
     var causalWave = showLiveProgressDetail && Number(stageProgress.causal_wave_sample_count);
@@ -1536,14 +1537,14 @@
     var remainingText = Number.isFinite(remainingSeconds) && remainingSeconds > 0 ? compactDuration(remainingSeconds) : "";
     var sampleOutcomeText = stageProgress && stageProgress.succeeded_samples != null && stageProgress.failed_samples != null ? " · 成功 " + formatNumber(stageProgress.succeeded_samples) + " · 失败 " + formatNumber(stageProgress.failed_samples) : "";
     var evidenceQualifierText = stageProgress && !stageProgress.live && stageProgress.evidence_qualifier ? " · " + stageProgress.evidence_qualifier : "";
-    sampleNode.textContent = stageProgress ? progressUnitLabel + "进度：" + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + sampleOutcomeText + evidenceQualifierText + causalWaveText + inFlightText + queuedText + awaitingSubmissionText + gatewayAttemptsText + sampleRateText + (remainingText ? " · 预计剩余 " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测评分单元：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
+    sampleNode.textContent = stageProgress ? progressUnitLabel + "进度：" + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + sampleOutcomeText + evidenceQualifierText + causalWaveText + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText + gatewayAttemptsText + sampleRateText + (remainingText ? " · 预计剩余 " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测评分单元：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
     if (tokenNode) {
       tokenNode.title = tokenBudgetScopeText(run);
       tokenNode.textContent = modelUsageTokenProgressText(run, stageProgress, candidate);
     }
     if (heartbeatNode) {
       if (stageProgress && stageProgress.updated_at && stageProgress.live) {
-        heartbeatNode.textContent = "评测心跳：" + formatTime(stageProgress.updated_at) + (stageProgress.progress_kind === "settling" ? " · 模型执行与宿主结算中" + inFlightText + queuedText + awaitingSubmissionText + gatewayAttemptsText : stageProgress.progress_kind === "waiting" ? " · 网关执行中" + inFlightText + queuedText + awaitingSubmissionText : causalWaveText ? " · 已提交" + causalWaveText + inFlightText + queuedText + awaitingSubmissionText : inFlightText + queuedText + awaitingSubmissionText) + (dshActivity ? " · " + dshActivity.heartbeat : "");
+        heartbeatNode.textContent = "评测心跳：" + formatTime(stageProgress.updated_at) + (stageProgress.progress_kind === "settling" ? " · 模型执行与宿主结算中" + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText + gatewayAttemptsText : stageProgress.progress_kind === "waiting" ? " · 网关执行中" + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText : causalWaveText ? " · 已提交" + causalWaveText + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText : inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText) + (dshActivity ? " · " + dshActivity.heartbeat : "");
       } else if (stageProgress && stageProgress.updated_at) {
         heartbeatNode.textContent = (paused ? "最近评测记录：" : "评测证据：") + formatTime(stageProgress.updated_at) + (pausedDrained ? " · 暂停后请求已排空" + inFlightText + queuedText : stageProgress.evidence_qualifier ? " · " + stageProgress.evidence_qualifier : "");
       } else if (liveAllowed) {

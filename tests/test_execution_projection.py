@@ -261,7 +261,8 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["succeeded_samples"], 0)
         self.assertEqual(progress["failed_samples"], 0)
         self.assertEqual(progress["in_flight_batches"], 0)
-        self.assertEqual(progress["awaiting_submission_batches"], 256)
+        self.assertEqual(progress["awaiting_submission_batches"], 255)
+        self.assertEqual(progress["awaiting_settlement_batches"], 1)
         self.assertEqual(progress["gateway_request_count"], 1)
         self.assertEqual(progress["configured_concurrency"], 64)
 

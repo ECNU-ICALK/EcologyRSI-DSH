@@ -2107,8 +2107,9 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
     live_fields: dict[str, Any] = {}
     if live_screening is not None and phase == "screening":
         # Child events remain useful activity evidence, but cannot increase
-        # host-settled origin progress. Present the remaining origins as
-        # awaiting settlement and expose physical gateway attempts separately.
+        # host-settled origin progress. Keep submitted-but-unsettled origins
+        # separate from origins that have not reached the gateway yet; calling
+        # every remaining origin "awaiting settlement" hides real throughput.
         for key in (
             "in_flight_batches",
             "queued_batches",
@@ -2122,15 +2123,24 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
                 live_fields[key] = live_screening[key]
         in_flight = max(0, int(live_fields.get("in_flight_batches") or 0))
         queued = max(0, int(live_fields.get("queued_batches") or 0))
-        unsettled = max(0, screening_total - settled_screening_completed)
+        remotely_completed = max(
+            0, int(live_screening.get("completed_samples") or 0)
+        )
+        awaiting_settlement = max(
+            0, remotely_completed - settled_screening_completed
+        )
+        awaiting_submission = max(
+            0, int(live_screening.get("awaiting_submission_batches") or 0)
+        )
         live_fields.update(
             {
-                "progress_kind": "settling",
+                "progress_kind": (
+                    "settling" if awaiting_settlement else "waiting"
+                ),
                 "succeeded_samples": settled_screening_completed,
                 "failed_samples": 0,
-                "awaiting_submission_batches": max(
-                    0, unsettled - in_flight - queued
-                ),
+                "awaiting_settlement_batches": awaiting_settlement,
+                "awaiting_submission_batches": awaiting_submission,
                 "samples_per_minute": None,
                 "estimated_remaining_seconds": None,
             }
