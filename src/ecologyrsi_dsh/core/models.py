@@ -431,6 +431,8 @@ class ModelArtifact:
     parameters: Mapping[str, Any] = field(default_factory=dict)
     learned_parameters: Mapping[str, Any] = field(default_factory=dict)
     metrics: Mapping[str, Any] = field(default_factory=dict)
+    candidate_revision_id: str | None = None
+    evaluation_scope_digest: str | None = None
     created_at: str = field(default_factory=utc_now)
 
     def __post_init__(self) -> None:
@@ -455,12 +457,18 @@ class ModelArtifact:
             _mapping(self.learned_parameters, "learned_parameters"),
         )
         object.__setattr__(self, "metrics", _mapping(self.metrics, "metrics"))
+        for name in ("candidate_revision_id", "evaluation_scope_digest"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _text(value, name))
         object.__setattr__(self, "created_at", _text(self.created_at, "created_at"))
 
     def identity_dict(self) -> JsonObject:
         return {
             "run_id": self.run_id,
             "candidate_id": self.candidate_id,
+            "candidate_revision_id": self.candidate_revision_id,
+            "evaluation_scope_digest": self.evaluation_scope_digest,
             "model_id": self.model_id,
             "dataset_digest": self.dataset_digest,
             "training_partition": self.training_partition,
@@ -500,6 +508,8 @@ class Evaluation:
     partition: str = "development"
     evaluator_digest: str = "evaluator@local"
     artifact_digest: str | None = None
+    candidate_revision_id: str | None = None
+    evaluation_scope: Mapping[str, Any] | None = None
     created_at: str = field(default_factory=utc_now)
 
     def __post_init__(self) -> None:
@@ -519,13 +529,50 @@ class Evaluation:
                 "artifact_digest",
                 _text(self.artifact_digest, "artifact_digest"),
             )
+        if self.candidate_revision_id is not None:
+            object.__setattr__(
+                self,
+                "candidate_revision_id",
+                _text(self.candidate_revision_id, "candidate_revision_id"),
+            )
+        if self.evaluation_scope is not None:
+            if not isinstance(self.evaluation_scope, Mapping):
+                raise TypeError("evaluation_scope must be a mapping")
+            scope = json.loads(canonical_json(dict(self.evaluation_scope)))
+            if scope.get("run_id") != self.run_id:
+                raise ValueError("evaluation_scope run_id does not match evaluation")
+            if scope.get("candidate_id") != self.candidate_id:
+                raise ValueError(
+                    "evaluation_scope candidate_id does not match evaluation"
+                )
+            if (
+                self.candidate_revision_id is not None
+                and scope.get("candidate_revision_id")
+                != self.candidate_revision_id
+            ):
+                raise ValueError(
+                    "evaluation_scope candidate_revision_id does not match evaluation"
+                )
+            object.__setattr__(self, "evaluation_scope", scope)
         object.__setattr__(self, "created_at", _text(self.created_at, "created_at"))
+
+    @property
+    def evaluation_scope_digest(self) -> str | None:
+        if self.evaluation_scope is None:
+            return None
+        return digest(self.evaluation_scope)
 
     def to_dict(self) -> JsonObject:
         return {
             "evaluation_id": self.evaluation_id,
             "run_id": self.run_id,
             "candidate_id": self.candidate_id,
+            "candidate_revision_id": self.candidate_revision_id,
+            "evaluation_scope": (
+                dict(self.evaluation_scope)
+                if self.evaluation_scope is not None
+                else None
+            ),
             "score": self.score,
             "passed": self.passed,
             "metrics": dict(self.metrics),

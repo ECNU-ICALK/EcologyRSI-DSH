@@ -1,1 +1,39 @@
 """Domain entities, event ledger, and evolution orchestration."""
+
+from .trajectory import (
+    BatchEvaluation,
+    CandidateRevision,
+    EvaluationPhase,
+    EvaluationScope,
+    FormalBatch,
+    FormalTrajectory,
+    GenerationComparison,
+    GenerationHoldout,
+    HoldoutArm,
+    HoldoutEvaluation,
+    LocalEditOutcome,
+    LocalEditProposalDecision,
+    RevisionAdvanceReason,
+    RevisionStatus,
+    TrajectoryRevisionActivation,
+    TrajectoryStatus,
+)
+
+__all__ = [
+    "BatchEvaluation",
+    "CandidateRevision",
+    "EvaluationPhase",
+    "EvaluationScope",
+    "FormalBatch",
+    "FormalTrajectory",
+    "GenerationComparison",
+    "GenerationHoldout",
+    "HoldoutArm",
+    "HoldoutEvaluation",
+    "LocalEditOutcome",
+    "LocalEditProposalDecision",
+    "RevisionAdvanceReason",
+    "RevisionStatus",
+    "TrajectoryRevisionActivation",
+    "TrajectoryStatus",
+]
