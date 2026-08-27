@@ -44,6 +44,7 @@ from ..evaluators.registry import (
     TOY_DATASET_ID,
     EvaluatorRegistry,
 )
+from ..evaluators.epoch_cohorts import estimate_epoch_capacity
 from ..evolution.strategies import StrategyRouterDSHAdapter
 from ..evolution.schedule import OPTIMIZATION_PROTOCOL, OptimizationSchedule
 from ..integrations.model_bindings import (
@@ -906,6 +907,9 @@ class EvolutionRequestHandler(
             )
 
     def _dispatch_post(self, path: list[str], body: dict[str, Any]) -> None:
+        if path == ["evolution-capacity"]:
+            self._evolution_capacity(body)
+            return
         if path == ["runs"]:
             self._create_run(body)
             return
@@ -948,6 +952,46 @@ class EvolutionRequestHandler(
             self._answer_expert_consultation(path[1], path[3], body)
             return
         self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
+    def _evolution_capacity(self, body: dict[str, Any]) -> None:
+        fields = {
+            "dataset_id",
+            "episode_id",
+            "optimization_schedule",
+            "planned_generations",
+        }
+        if set(body) != fields:
+            raise ValueError(
+                "evolution-capacity requires exactly dataset_id, episode_id, "
+                "optimization_schedule, and planned_generations"
+            )
+        dataset_id = body["dataset_id"]
+        episode_id = body["episode_id"]
+        if not isinstance(dataset_id, str) or not dataset_id.strip():
+            raise ValueError("dataset_id must be non-empty")
+        if episode_id is not None and (
+            not isinstance(episode_id, str) or not episode_id.strip()
+        ):
+            raise ValueError("episode_id must be null or non-empty text")
+        schedule = OptimizationSchedule.from_dict(body["optimization_schedule"])
+        planned_generations = _request_integer(
+            body["planned_generations"], "planned_generations", minimum=1
+        )
+        if dataset_id == TOY_DATASET_ID:
+            dataset = self.server.datasets.series(dataset_id, episode_id)
+        else:
+            dataset = self.server.datasets.selection_view(dataset_id, episode_id)
+        report = estimate_epoch_capacity(
+            dataset,
+            schedule=schedule,
+            planned_generations=planned_generations,
+            seed=0,
+        )
+        payload = report.to_dict()
+        payload["capacity_enforced_for_run_creation"] = (
+            dataset_id != TOY_DATASET_ID
+        )
+        self._send(HTTPStatus.OK, payload)
 
     def _archive_run(self, run_id: str, body: dict[str, Any]) -> None:
         if body:
@@ -1922,6 +1966,7 @@ class EvolutionRequestHandler(
             manifest.metadata.get("execution_protocol")
             == DSH_NATIVE_EXECUTION_PROTOCOL
         )
+        selection_view = None
         normalized_domain_pack = manifest.domain_pack.casefold().replace("_", "-")
         toy_domain = normalized_domain_pack in {
             "crop-soil-water@toy",
@@ -2390,6 +2435,44 @@ class EvolutionRequestHandler(
             selection_fitness_profile.minimum_balanced_origins_per_update()
         )
         prediction_cells_per_origin = selection_fitness_profile.prediction_cell_count
+        cohort_capacity_report = None
+        if schedule is not None:
+            if not toy_domain:
+                if selection_view is None:
+                    selection_view = self.server.datasets.selection_view(
+                        dataset_id,
+                        metadata.get("episode_id"),
+                        expected_dataset_digest=metadata.get("dataset_digest"),
+                        expected_split_manifest_digest=metadata.get(
+                            "split_manifest_digest"
+                        ),
+                        expected_data_protocol_digest=metadata.get(
+                            "data_protocol_digest"
+                        ),
+                    )
+                cohort_capacity_report = estimate_epoch_capacity(
+                    selection_view,
+                    schedule=schedule,
+                    planned_generations=manifest.max_generations,
+                    seed=manifest.seed,
+                    scoring_cells_per_origin=prediction_cells_per_origin,
+                )
+                if not cohort_capacity_report.sufficient:
+                    raise ValueError(
+                        "insufficient causal cohort capacity: "
+                        f"required={cohort_capacity_report.required_unique_origins}, "
+                        f"available={cohort_capacity_report.available_eligible_origins}, "
+                        "max_generations="
+                        f"{cohort_capacity_report.max_feasible_generations}"
+                    )
+            else:
+                cohort_capacity_report = estimate_epoch_capacity(
+                    series,
+                    schedule=schedule,
+                    planned_generations=manifest.max_generations,
+                    seed=manifest.seed,
+                    scoring_cells_per_origin=prediction_cells_per_origin,
+                )
         sample_budget_class = None
         # DSH-native sample execution needs the same frozen scheduling values
         # for every dataset.  The synthetic fixture is small, but it still
@@ -2503,6 +2586,14 @@ class EvolutionRequestHandler(
                 ),
                 "optimization_schedule": (
                     schedule.to_dict() if schedule is not None else None
+                ),
+                "cohort_capacity_report": (
+                    cohort_capacity_report.to_dict()
+                    if cohort_capacity_report is not None
+                    else None
+                ),
+                "cohort_capacity_enforced": (
+                    schedule is not None and not toy_domain
                 ),
                 "derived_execution_budget": (
                     schedule.generation_execution_budget(

@@ -73,6 +73,8 @@ class EventEndpointsMixin:
             "HoldoutEvaluationRecorded": "本轮一个留出评测臂已完成。",
             "GenerationComparisonRecorded": "本轮三臂留出比较已完成。",
             "CandidateEffectiveRevisionFrozen": "本轮有效修订已冻结。",
+            "RunAdaptationCohortFrozen": "本次运行的 500 时点自适应队列已冻结。",
+            "GenerationCohortsFrozen": "本轮初筛与独立留出队列已冻结。",
             "ProposalSubmitted": "变更提案已提交。",
             "CandidateSpawned": "候选方案已生成。",
             "CandidateFailed": "候选方案训练或评测失败。",
@@ -412,6 +414,41 @@ class EventEndpointsMixin:
                     "selected_candidate_id": payload.get("selected_candidate_id"),
                     "selected_revision_id": payload.get("selected_revision_id"),
                     "comparison_digest": payload.get("comparison_digest"),
+                }
+            )
+        elif event.kind == "RunAdaptationCohortFrozen":
+            adaptation = payload.get("adaptation", {})
+            cohort = adaptation.get("cohort", {})
+            batches = adaptation.get("batches")
+            public_payload.update(
+                {
+                    "dataset_id": adaptation.get("dataset_id"),
+                    "episode_id": adaptation.get("episode_id"),
+                    "adaptation_digest": adaptation.get("adaptation_digest"),
+                    "cohort_digest": cohort.get("cohort_digest"),
+                    "origin_count": cohort.get("origin_count"),
+                    "batch_count": len(batches) if isinstance(batches, list) else 0,
+                }
+            )
+        elif event.kind == "GenerationCohortsFrozen":
+            planned = payload.get("generation_cohorts", {})
+            screening = planned.get("screening", {})
+            holdout = planned.get("holdout", {})
+            batch_digests = planned.get("adaptation_batch_digests")
+            public_payload.update(
+                {
+                    "generation": planned.get("generation"),
+                    "generation_cohorts_digest": planned.get(
+                        "generation_cohorts_digest"
+                    ),
+                    "adaptation_digest": planned.get("adaptation_digest"),
+                    "adaptation_batch_count": len(batch_digests)
+                    if isinstance(batch_digests, list)
+                    else 0,
+                    "screening_cohort_digest": screening.get("cohort_digest"),
+                    "screening_origin_count": screening.get("origin_count"),
+                    "holdout_cohort_digest": holdout.get("cohort_digest"),
+                    "holdout_origin_count": holdout.get("origin_count"),
                 }
             )
         elif event.kind == "ProposalSubmitted":

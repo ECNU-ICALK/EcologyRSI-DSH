@@ -18,6 +18,7 @@ from ecologyrsi_dsh.application.config import bind_toy_dataset
 from ecologyrsi_dsh.core.models import Evaluation, TaskManifest
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 from ecologyrsi_dsh.data.toy import ToyCropSoilWater
+from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
 from ecologyrsi_dsh.integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 
 
@@ -87,6 +88,27 @@ class HTTPContractTests(unittest.TestCase):
         except HTTPError as exc:
             raw = exc.read()
             return exc.code, json.loads(raw)
+
+    def test_evolution_capacity_uses_server_cohort_planner_truth(self) -> None:
+        status, payload = self.request(
+            "/api/evolution-capacity",
+            method="POST",
+            body={
+                "dataset_id": "generated-toy-series@1",
+                "episode_id": "generated-toy-series@1:seed-0",
+                "optimization_schedule": OptimizationSchedule.default().to_dict(),
+                "planned_generations": 5,
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["required_unique_origins"], 1665)
+        self.assertEqual(
+            payload["candidate_origin_executions_per_generation"], 1763
+        )
+        self.assertEqual(payload["scoring_cells_per_generation"], 15867)
+        self.assertFalse(payload["sufficient"])
+        self.assertFalse(payload["capacity_enforced_for_run_creation"])
 
     def _seed_test_partition_run(self, *, manifest_partition: str = "validation") -> str:
         """Write a deliberately out-of-scope run directly to the local ledger."""

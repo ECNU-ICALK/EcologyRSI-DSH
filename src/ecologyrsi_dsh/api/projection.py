@@ -3025,6 +3025,8 @@ def _projection_json(state: Any) -> dict[str, Any]:
         "derived_run_execution_budget": metadata.get(
             "derived_run_execution_budget"
         ),
+        "cohort_capacity_report": metadata.get("cohort_capacity_report"),
+        "cohort_capacity_enforced": metadata.get("cohort_capacity_enforced"),
         "domain_pack_id": task.domain_pack,
         "dataset_id": dataset_id,
         "episode_id": metadata.get("episode_id"),
@@ -3128,6 +3130,8 @@ def _projection_json(state: Any) -> dict[str, Any]:
         "candidates_per_generation": task.candidates_per_generation,
         "optimization_protocol": metadata.get("optimization_protocol"),
         "optimization_schedule": metadata.get("optimization_schedule"),
+        "cohort_capacity_report": metadata.get("cohort_capacity_report"),
+        "cohort_capacity_enforced": metadata.get("cohort_capacity_enforced"),
         "candidates_per_round": task.candidates_per_generation,
         "variants_per_round": task.candidates_per_generation,
         "knowledge_online_enabled": bool(metadata.get("knowledge_online_enabled", False)),
@@ -3320,6 +3324,8 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
         "derived_run_execution_budget": metadata.get(
             "derived_run_execution_budget"
         ),
+        "cohort_capacity_report": metadata.get("cohort_capacity_report"),
+        "cohort_capacity_enforced": metadata.get("cohort_capacity_enforced"),
         "episode_id": metadata.get("episode_id"),
         "strategy_model_id": metadata.get(
             "strategy_model_id",
@@ -3380,6 +3386,8 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
         "candidates_per_generation": task.candidates_per_generation,
         "optimization_protocol": metadata.get("optimization_protocol"),
         "optimization_schedule": metadata.get("optimization_schedule"),
+        "cohort_capacity_report": metadata.get("cohort_capacity_report"),
+        "cohort_capacity_enforced": metadata.get("cohort_capacity_enforced"),
         "samples_per_update": metadata.get("samples_per_update"),
         "minimum_selection_samples_per_update": metadata.get(
             "minimum_selection_samples_per_update"

@@ -14,6 +14,7 @@ from ..evolution.analysis import (
     sample_update_windows_enabled,
 )
 from ..evolution.schedule import OPTIMIZATION_PROTOCOL, OptimizationSchedule
+from ..evaluators.epoch_cohorts import GenerationCohorts, RunAdaptationCohort
 from ..knowledge.algorithms import AlgorithmAttempt
 from ..knowledge.autonomous_cycle import (
     GenerationReflection,
@@ -1228,6 +1229,8 @@ class RunState:
     holdout_evaluations: tuple[HoldoutEvaluation, ...] = ()
     generation_comparisons: tuple[GenerationComparison, ...] = ()
     effective_revision_bindings: tuple[Mapping[str, Any], ...] = ()
+    run_adaptation_cohort: RunAdaptationCohort | None = None
+    generation_selection_cohorts: tuple[GenerationCohorts, ...] = ()
 
     def proposal(self, proposal_id: str) -> Proposal:
         for item in self.proposals:
@@ -1248,6 +1251,16 @@ class RunState:
                 for event in reversed(self.candidate_screening_events)
                 if event.payload["generation"] == generation
                 and event.payload["candidate_id"] == candidate_id
+            ),
+            None,
+        )
+
+    def generation_cohort_for(self, generation: int) -> GenerationCohorts | None:
+        return next(
+            (
+                item
+                for item in reversed(self.generation_selection_cohorts)
+                if item.generation == generation
             ),
             None,
         )
@@ -1623,6 +1636,8 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
     generation_comparisons: dict[int, GenerationComparison] = {}
     effective_revision_bindings: dict[int, dict[str, Any]] = {}
     champion_generations: set[int] = set()
+    run_adaptation_cohort: RunAdaptationCohort | None = None
+    generation_selection_cohorts: dict[int, GenerationCohorts] = {}
     dsh_prediction_tool_events: dict[str, tuple[int, dict[str, Any]]] = {}
     formal_stage_started = False
     active_gateway_circuit_pause: Event | None = None
@@ -1907,6 +1922,86 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     "identity_binding": binding,
                 }
             candidates[item.candidate_id] = item
+        elif event.kind == "RunAdaptationCohortFrozen":
+            if set(payload) != {"adaptation"}:
+                raise ValueError("RunAdaptationCohortFrozen payload is invalid")
+            adaptation = RunAdaptationCohort.from_dict(payload["adaptation"])
+            schedule = OptimizationSchedule.from_dict(
+                task.metadata["optimization_schedule"]
+            )
+            if (
+                task.metadata.get("optimization_protocol") != OPTIMIZATION_PROTOCOL
+                or adaptation.dataset_id != task.visible_datasets[0]
+                or adaptation.episode_id != str(task.metadata.get("episode_id"))
+                or adaptation.seed != task.seed
+                or adaptation.origin_count
+                != schedule.formal_origin_count_per_finalist
+                or len(adaptation.batches) != schedule.batch_count
+                or any(
+                    batch.origin_count != schedule.local_batch_origin_count
+                    for batch in adaptation.batches
+                )
+            ):
+                raise ValueError("run adaptation cohort differs from frozen task")
+            if (
+                run_adaptation_cohort is not None
+                and run_adaptation_cohort.to_dict() != adaptation.to_dict()
+            ):
+                raise ValueError("conflicting run adaptation cohort")
+            run_adaptation_cohort = adaptation
+        elif event.kind == "GenerationCohortsFrozen":
+            if set(payload) != {"generation_cohorts"}:
+                raise ValueError("GenerationCohortsFrozen payload is invalid")
+            planned = GenerationCohorts.from_dict(payload["generation_cohorts"])
+            schedule = OptimizationSchedule.from_dict(
+                task.metadata["optimization_schedule"]
+            )
+            generation_candidates = [
+                item for item in candidates.values()
+                if item.generation == planned.generation
+            ]
+            if run_adaptation_cohort is None:
+                raise ValueError("generation cohorts require run adaptation cohort")
+            if len(generation_candidates) != 4:
+                raise ValueError("generation cohorts require exactly four candidates")
+            if any(
+                generation == planned.generation
+                for generation, _candidate_id in candidate_screening_events
+            ):
+                raise ValueError("generation cohorts must precede screening")
+            if (
+                planned.dataset_id != run_adaptation_cohort.dataset_id
+                or planned.episode_id != run_adaptation_cohort.episode_id
+                or planned.seed != task.seed
+                or planned.adaptation_digest
+                != run_adaptation_cohort.adaptation_digest
+                or planned.adaptation_batch_digests
+                != run_adaptation_cohort.batch_digests
+                or planned.screening.origin_count
+                != schedule.screening_origin_count
+                or planned.screening.shared_candidate_count != 4
+                or planned.holdout.origin_count
+                != schedule.selection_holdout_origin_count
+                or planned.holdout.shared_arm_count != 3
+                or set(planned.screening.origin_ids)
+                & set(run_adaptation_cohort.origin_ids)
+                or set(planned.holdout.origin_ids)
+                & set(run_adaptation_cohort.origin_ids)
+            ):
+                raise ValueError("generation cohorts differ from frozen task")
+            prior_origins = {
+                origin_id
+                for item in generation_selection_cohorts.values()
+                for origin_id in (*item.screening.origin_ids, *item.holdout.origin_ids)
+            }
+            if prior_origins & set(
+                (*planned.screening.origin_ids, *planned.holdout.origin_ids)
+            ):
+                raise ValueError("generation selection origins cannot be reused")
+            existing = generation_selection_cohorts.get(planned.generation)
+            if existing is not None and existing.to_dict() != planned.to_dict():
+                raise ValueError("conflicting generation cohorts")
+            generation_selection_cohorts.setdefault(planned.generation, planned)
         elif event.kind == "CandidateScreeningRecorded":
             schema_version = payload.get("schema_version")
             expected_fields = {
@@ -1953,6 +2048,16 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 raise ValueError(
                     "adaptive candidate screening requires frozen initial revision R0"
                 )
+            if task.metadata.get("optimization_protocol") == OPTIMIZATION_PROTOCOL:
+                planned = generation_selection_cohorts.get(generation)
+                if planned is None:
+                    raise ValueError(
+                        "adaptive candidate screening requires frozen generation cohorts"
+                    )
+                if payload.get("cohort_digest") != planned.screening.cohort_digest:
+                    raise ValueError(
+                        "candidate screening differs from frozen screening cohort"
+                    )
             score = payload["score"]
             constraint_violations = payload["constraint_violations"]
             origin_count = payload["origin_count"]
@@ -3249,6 +3354,10 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
         holdout_evaluations=tuple(holdout_evaluations.values()),
         generation_comparisons=tuple(generation_comparisons.values()),
         effective_revision_bindings=tuple(effective_revision_bindings.values()),
+        run_adaptation_cohort=run_adaptation_cohort,
+        generation_selection_cohorts=tuple(
+            generation_selection_cohorts.values()
+        ),
     )
 
 

@@ -175,13 +175,16 @@
     $("#parameter-summary-pill").textContent = "每个入围候选 " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count);
     $("#agent-update-scope").textContent = "每个入围候选 " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count);
     var budgetState = $("#parameter-budget-state");
-    budgetState.textContent = budget.budget_sufficient ? "预算完整" : "预算不足";
-    budgetState.className = budget.budget_sufficient ? "" : "is-insufficient";
+    var capacity = state.cohortCapacityReport;
+    var capacitySufficient = state.usingDemo || Boolean(capacity && capacity.sufficient === true);
+    budgetState.textContent = !budget.budget_sufficient ? "预算不足" : state.cohortCapacityLoading ? "正在核验数据容量" : capacitySufficient ? "预算与数据容量完整" : "数据容量不足";
+    budgetState.className = budget.budget_sufficient && capacitySufficient ? "" : "is-insufficient";
     var values = [
       ["迭代结构", formatNumber(budget.max_generations) + " 轮 · 每轮固定 4 个候选 · 同一 64 时点初筛后 Top 2"],
       ["局部持续优化", "每个入围候选 " + formatNumber(schedule.formal_origin_count_per_finalist) + " origins = " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count) + "；最多 " + formatNumber(maximumEdits) + " 处局部改动"],
       ["单轮执行预算", formatNumber(screeningCandidateOrigins) + " + " + formatNumber(formalCandidateOrigins) + " + " + formatNumber(holdoutCandidateOrigins) + " = " + formatNumber(generationCandidateOrigins) + " candidate-origins = " + formatNumber(generationScoringCells) + " cells"],
       ["全程执行预算", formatNumber(runCandidateOrigins) + " candidate-origins / " + formatNumber(runScoringCells) + " cells；需要 " + formatNumber(uniqueOrigins) + " 个不同数据时点"],
+      ["服务端因果容量", state.cohortCapacityLoading ? "正在核验" : capacity ? (capacity.sufficient ? "可执行" : "不足") + "：需要 " + formatNumber(capacity.required_unique_origins) + " / 可用 " + formatNumber(capacity.available_eligible_origins) + "，最多 " + formatNumber(capacity.max_feasible_generations) + " 轮" : state.cohortCapacityError || "等待核验"],
       ["请求组织", "按因果预测起点组成 origin wave · wave 上限 " + formatNumber(microbatch) + " · 实际完成数以运行进度为准"],
       ["并发上限", formatNumber(candidateConcurrency) + " 个编排候选；两条 lane 共享 " + formatNumber(concurrency) + " 个 run 级在飞请求"],
       ["候选总预算", formatNumber(budget.requested_max_candidates) + " 个（至少 " + formatNumber(budget.required_candidates) + " 个）"],

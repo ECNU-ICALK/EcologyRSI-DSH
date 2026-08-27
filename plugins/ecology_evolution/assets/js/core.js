@@ -175,7 +175,13 @@
     runMonitorLastPollAt: 0,
     autoAdvanceLastDurationMs: null,
     autoAdvanceRoundsCompleted: 0,
-    candidateBudgetManual: false
+    candidateBudgetManual: false,
+    cohortCapacityReport: null,
+    cohortCapacitySignature: null,
+    cohortCapacityLoading: false,
+    cohortCapacityError: null,
+    cohortCapacityRequest: 0,
+    cohortCapacityTimer: null
   };
 
   function emptyCatalog() {

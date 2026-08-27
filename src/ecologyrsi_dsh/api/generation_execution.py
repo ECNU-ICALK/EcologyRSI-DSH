@@ -36,6 +36,12 @@ from ..core.sample_results import (
 )
 from ..core.sample_budget import complete_origin_count
 from ..core.screening import screening_cohort_digest
+from ..core.trajectory import CandidateRevision, RevisionStatus
+from ..evaluators.epoch_cohorts import (
+    estimate_epoch_capacity,
+    plan_generation_selection_cohorts,
+    plan_run_adaptation_cohort,
+)
 from ..evaluators.registry import RULE_JUDGE_ID, EvaluationBundle, EvaluatorRegistry
 from ..evaluators.gateway_sample_adapter import ModelTokenBudgetExhaustedError
 from ..evaluators.sample_execution import (
@@ -53,6 +59,7 @@ from ..evolution.analysis import (
     strict_generation_controls_required,
 )
 from ..evolution.context import safe_aggregate_feedback
+from ..evolution.schedule import OPTIMIZATION_PROTOCOL, OptimizationSchedule
 from ..integrations.dsh_native_runtime import (
     DSH_NATIVE_EXECUTION_PROTOCOL,
     DshNativeRuntimeUnavailableError,
@@ -134,9 +141,116 @@ def _two_stage_screening_enabled(state: Any, candidates: Any) -> bool:
     metadata = state.task_manifest.metadata
     return bool(
         len(tuple(candidates)) > _FORMAL_FINALIST_COUNT
+        and metadata.get("optimization_protocol") == OPTIMIZATION_PROTOCOL
+        and metadata.get("cohort_capacity_enforced") is True
         and supports_two_stage_screening(metadata.get("sample_agent_protocol"))
         and metadata.get("sample_budget_class") == "selection_eligible"
         and metadata.get("two_stage_evaluation_enabled", True) is True
+    )
+
+
+def _freeze_adaptive_generation_inputs(
+    endpoint: Any,
+    run_id: str,
+    generation: int,
+) -> None:
+    """Freeze R0 and value-blind cohort identities before the first sample call."""
+
+    state = endpoint.server.director.state(run_id)
+    metadata = state.task_manifest.metadata
+    if (
+        metadata.get("optimization_protocol") != OPTIMIZATION_PROTOCOL
+        or metadata.get("cohort_capacity_enforced") is not True
+    ):
+        return
+    schedule = OptimizationSchedule.from_dict(metadata["optimization_schedule"])
+    candidates = sorted(
+        (
+            item
+            for item in state.candidates
+            if item.generation == generation
+        ),
+        key=lambda item: (item.slot_index, item.candidate_id),
+    )
+    if len(candidates) != 4:
+        raise RuntimeError(
+            "adaptive generation inputs require exactly four candidates"
+        )
+    for candidate in candidates:
+        state = endpoint.server.director.state(run_id)
+        if state.initial_revision_for(candidate.candidate_id) is not None:
+            continue
+        genome = state.persisted_genome_for(candidate.candidate_id)
+        lineage = dict(genome.lineage)
+        mutation_digest = lineage.get("mutation_digest")
+        if not isinstance(mutation_digest, str) or len(mutation_digest) != 64:
+            mutation_digest = digest(
+                {
+                    "kind": "candidate-initial-revision",
+                    "candidate_id": candidate.candidate_id,
+                    "genome_digest": genome.genome_digest,
+                }
+            )
+        revision = CandidateRevision(
+            revision_id=f"revision:{candidate.candidate_id}:r0",
+            run_id=run_id,
+            generation=generation,
+            candidate_id=candidate.candidate_id,
+            genome=genome.to_dict(),
+            genome_digest=genome.genome_digest,
+            behavior_digest=genome.behavior_digest,
+            mutation_digest=mutation_digest,
+            status=RevisionStatus.ACTIVE,
+        )
+        _director_mutation(
+            endpoint,
+            "create_candidate_revision",
+            run_id,
+            revision,
+        )
+
+    dataset = endpoint.server.datasets.selection_view(
+        state.task_manifest.visible_datasets[0],
+        metadata.get("episode_id"),
+        expected_dataset_digest=metadata.get("dataset_digest"),
+        expected_split_manifest_digest=metadata.get("split_manifest_digest"),
+        expected_data_protocol_digest=metadata.get("data_protocol_digest"),
+    )
+    report = estimate_epoch_capacity(
+        dataset,
+        schedule=schedule,
+        planned_generations=state.task_manifest.max_generations,
+        seed=state.task_manifest.seed,
+        scoring_cells_per_origin=int(metadata["prediction_cells_per_origin"]),
+    )
+    frozen_report = metadata.get("cohort_capacity_report")
+    if not isinstance(frozen_report, Mapping) or frozen_report.get(
+        "planner_digest"
+    ) != report.planner_digest:
+        raise RuntimeError("frozen cohort capacity report no longer matches dataset")
+    adaptation = plan_run_adaptation_cohort(
+        dataset,
+        schedule=schedule,
+        seed=state.task_manifest.seed,
+    )
+    planned = plan_generation_selection_cohorts(
+        dataset,
+        schedule=schedule,
+        generation=generation,
+        adaptation=adaptation,
+        seed=state.task_manifest.seed,
+    )
+    _director_mutation(
+        endpoint,
+        "freeze_run_adaptation_cohort",
+        run_id,
+        adaptation,
+    )
+    _director_mutation(
+        endpoint,
+        "freeze_generation_selection_cohorts",
+        run_id,
+        planned,
     )
 
 
@@ -2360,6 +2474,7 @@ def execute_generation(endpoint: Any, run_id: str) -> Any:
         (item for item in state.candidates if item.generation == batch.generation),
         key=lambda item: item.slot_index,
     )
+    _freeze_adaptive_generation_inputs(endpoint, run_id, batch.generation)
     _evaluate_generation_candidates(endpoint, run_id, current)
     latest = endpoint.server.director.state(run_id)
     if latest.run.status is not RunStatus.RUNNING:

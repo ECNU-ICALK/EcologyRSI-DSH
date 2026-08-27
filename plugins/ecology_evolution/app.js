@@ -50,15 +50,15 @@
     $("#prediction-model-id").addEventListener("change", function () { alignPredictionBinding(); updateSelectionHelp(); });
     $("#evaluator-id").addEventListener("change", function () { alignEvaluatorBinding(); updateSelectionHelp(); });
     $("#strategy-id").addEventListener("change", function () { alignStrategyModel(); updateSelectionHelp(); });
-    $("#dataset-id").addEventListener("change", function () { alignDatasetBinding(); updateSelectionHelp(); loadSelectionPreview(); });
-    $("#episode-id").addEventListener("change", function () { updateSelectionHelp(); loadSelectionPreview(); });
+    $("#dataset-id").addEventListener("change", function () { alignDatasetBinding(); updateSelectionHelp(); loadSelectionPreview(); scheduleEvolutionCapacityRefresh(); });
+    $("#episode-id").addEventListener("change", function () { updateSelectionHelp(); loadSelectionPreview(); scheduleEvolutionCapacityRefresh(); });
     ["#max-generations", "#candidates-per-generation"].forEach(function (selector) {
-      $(selector).addEventListener("input", function () { syncCandidateBudget(); renderReadiness(); renderParameters(); });
+      $(selector).addEventListener("input", function () { syncCandidateBudget(); renderReadiness(); renderParameters(); scheduleEvolutionCapacityRefresh(); });
     });
     $("#max-candidates").addEventListener("input", function () { syncCandidateBudget({ markManual: true }); renderReadiness(); renderParameters(); });
     ["#formal-origin-count", "#local-batch-origin-count", "#max-local-edits-per-batch", "#selection-holdout-origin-count", "#candidate-concurrency", "#sample-agent-batch-size", "#sample-concurrency", "#fixed-seed", "#knowledge-online-enabled"].forEach(function (selector) {
-      $(selector).addEventListener("input", function () { renderReadiness(); renderParameters(); });
-      $(selector).addEventListener("change", function () { renderReadiness(); renderParameters(); });
+      $(selector).addEventListener("input", function () { renderReadiness(); renderParameters(); if (["formal-origin-count", "local-batch-origin-count", "selection-holdout-origin-count"].indexOf(selector.slice(1)) >= 0) { scheduleEvolutionCapacityRefresh(); } });
+      $(selector).addEventListener("change", function () { renderReadiness(); renderParameters(); if (["formal-origin-count", "local-batch-origin-count", "selection-holdout-origin-count"].indexOf(selector.slice(1)) >= 0) { scheduleEvolutionCapacityRefresh(); } });
     });
     ["#max-generations", "#candidates-per-generation", "#formal-origin-count", "#local-batch-origin-count", "#max-local-edits-per-batch", "#selection-holdout-origin-count", "#candidate-concurrency", "#sample-agent-batch-size", "#sample-concurrency", "#max-candidates"].forEach(function (selector) {
       $(selector).addEventListener("invalid", function () { state.workspace = "parameters"; renderWorkspace(); });

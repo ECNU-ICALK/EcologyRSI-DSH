@@ -32,6 +32,7 @@
       var hostLabel = identity && (identity.displayName || identity.subjectId);
       setConnection("online", state.hostContextReceived ? "DSH 宿主已连接" + (hostLabel ? " · " + hostLabel : "") : "本地服务已连接");
       populateCatalogControls();
+      scheduleEvolutionCapacityRefresh();
       if (selectableRuns.length) {
         var preferredRun = selectableRuns.find(function (run) { return String(run.id) === String(preferredRunId || ""); });
         return selectRun((preferredRun || selectableRuns[0]).id, false);
@@ -539,12 +540,26 @@
     var derivedDomain = selectedDataset && (selectedDataset.domain_pack_id || selectedDataset.domain_id || selectedDataset.domain);
     var domainDataMatch = Boolean(derivedDomain) && derivedDomain === $("#domain-pack").value && derivedDomain === $("#research-domain-id").value;
     var budget = candidateBudgetStatus();
+    var capacity = state.cohortCapacityReport;
+    var capacityReady = state.usingDemo || Boolean(
+      capacity
+      && state.cohortCapacitySignature === evolutionCapacityRequest().signature
+      && capacity.sufficient === true
+    );
+    var capacityLabel = state.cohortCapacityLoading
+      ? "服务端正在核验因果 cohort 容量"
+      : state.cohortCapacityError
+        ? "服务端 cohort 容量核验失败：" + state.cohortCapacityError
+        : capacity
+          ? "因果 cohort 容量可覆盖全部轮次（需要 " + formatNumber(capacity.required_unique_origins) + " / 可用 " + formatNumber(capacity.available_eligible_origins) + "；最多 " + formatNumber(capacity.max_feasible_generations) + " 轮）"
+          : "等待服务端核验因果 cohort 容量";
     return [
       { label: "配置目录已加载", ready: Boolean(catalogReady) },
       { label: "运行配置已完整选择", ready: selections },
       { label: "入围候选 500-origin schedule、局部 batch 与轮末 holdout 参数有效", ready: scheduleReady },
       { label: "固定 4 候选、候选并发、origin wave 与逐样本并发参数有效", ready: executionParametersReady },
       { label: "候选总预算可完整覆盖全部轮次（至少 " + formatNumber(budget.required_candidates) + " 个）", ready: budget.budget_sufficient },
+      { label: capacityLabel, ready: capacityReady },
       { label: "所选训练数据集可运行", ready: datasetReady },
       { label: "训练序列已由数据集自动冻结", ready: episodeReady },
       { label: "研究领域已由数据集自动推导", ready: domainDataMatch },
@@ -557,6 +572,78 @@
       { label: "具备创建进化运行的授权能力", ready: hasCapability("evolution.run.create") },
       { label: "运行服务与脱敏状态读取能力可用", ready: dshReady }
     ];
+  }
+
+  function evolutionCapacityRequest() {
+    var schedule = null;
+    try { schedule = optimizationScheduleFromControls(); } catch (_error) {}
+    var body = {
+      dataset_id: $("#dataset-id").value || "",
+      episode_id: $("#episode-id").value || null,
+      optimization_schedule: schedule,
+      planned_generations: Number($("#max-generations").value)
+    };
+    return { body: body, signature: JSON.stringify(body) };
+  }
+
+  function renderEvolutionCapacityState() {
+    if (typeof renderReadiness === "function") { renderReadiness(); }
+    if (typeof renderParameters === "function") { renderParameters(); }
+  }
+
+  function refreshEvolutionCapacity() {
+    var planned = evolutionCapacityRequest();
+    var body = planned.body;
+    if (!body.dataset_id || !body.episode_id || !body.optimization_schedule || !Number.isInteger(body.planned_generations) || body.planned_generations < 1) {
+      state.cohortCapacityReport = null;
+      state.cohortCapacitySignature = null;
+      state.cohortCapacityLoading = false;
+      state.cohortCapacityError = null;
+      renderEvolutionCapacityState();
+      return Promise.resolve(null);
+    }
+    if (state.usingDemo) {
+      state.cohortCapacityReport = {
+        sufficient: true,
+        required_unique_origins: body.optimization_schedule.formal_origin_count_per_finalist + body.planned_generations * (body.optimization_schedule.screening_origin_count + body.optimization_schedule.selection_holdout_origin_count),
+        available_eligible_origins: 999999,
+        max_feasible_generations: body.planned_generations
+      };
+      state.cohortCapacitySignature = planned.signature;
+      state.cohortCapacityLoading = false;
+      state.cohortCapacityError = null;
+      renderEvolutionCapacityState();
+      return Promise.resolve(state.cohortCapacityReport);
+    }
+    var requestId = state.cohortCapacityRequest + 1;
+    state.cohortCapacityRequest = requestId;
+    state.cohortCapacityLoading = true;
+    state.cohortCapacityError = null;
+    renderEvolutionCapacityState();
+    return request("/evolution-capacity", { method: "POST", body: body, timeout: dataRequestTimeout }).then(function (report) {
+      if (requestId !== state.cohortCapacityRequest || evolutionCapacityRequest().signature !== planned.signature) { return null; }
+      state.cohortCapacityReport = report;
+      state.cohortCapacitySignature = planned.signature;
+      return report;
+    }).catch(function (error) {
+      if (requestId !== state.cohortCapacityRequest) { return null; }
+      state.cohortCapacityReport = null;
+      state.cohortCapacitySignature = null;
+      state.cohortCapacityError = errorMessage(error);
+      return null;
+    }).finally(function () {
+      if (requestId !== state.cohortCapacityRequest) { return; }
+      state.cohortCapacityLoading = false;
+      renderEvolutionCapacityState();
+    });
+  }
+
+  function scheduleEvolutionCapacityRefresh() {
+    if (state.cohortCapacityTimer != null) { window.clearTimeout(state.cohortCapacityTimer); }
+    state.cohortCapacityTimer = window.setTimeout(function () {
+      state.cohortCapacityTimer = null;
+      refreshEvolutionCapacity();
+    }, 250);
   }
 
   function activeRunDatasetContext() {

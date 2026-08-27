@@ -123,6 +123,7 @@ from .trajectory import (
     TrajectoryStatus,
 )
 from ..evolution.schedule import OPTIMIZATION_PROTOCOL, OptimizationSchedule
+from ..evaluators.epoch_cohorts import GenerationCohorts, RunAdaptationCohort
 
 _AGGREGATE_EVALUATION_METRICS = frozenset(
     {
@@ -1946,6 +1947,16 @@ class EvolutionDirector:
             raise ValueError(
                 "adaptive candidate screening requires frozen initial revision R0"
             )
+        if state.task_manifest.metadata.get("optimization_protocol") == OPTIMIZATION_PROTOCOL:
+            generation_cohorts = state.generation_cohort_for(generation)
+            if generation_cohorts is None:
+                raise ValueError(
+                    "adaptive candidate screening requires frozen generation cohorts"
+                )
+            if cohort_digest != generation_cohorts.screening.cohort_digest:
+                raise ValueError(
+                    "candidate screening differs from frozen screening cohort"
+                )
         if (
             isinstance(score, bool)
             or not isinstance(score, (int, float))
@@ -2009,6 +2020,110 @@ class EvolutionDirector:
             payload,
             event_id=f"{run_id}:generation:{generation}:screening:{candidate_id}",
         )
+
+    def freeze_run_adaptation_cohort(
+        self,
+        run_id: str,
+        planned: RunAdaptationCohort,
+    ) -> RunAdaptationCohort:
+        if not isinstance(planned, RunAdaptationCohort):
+            raise TypeError("planned must be a RunAdaptationCohort")
+        state = self.state(run_id)
+        self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
+        existing = state.run_adaptation_cohort
+        if existing is not None:
+            if existing.to_dict() != planned.to_dict():
+                raise ValueError("run already has a different adaptation cohort")
+            return existing
+        schedule = OptimizationSchedule.from_dict(
+            state.task_manifest.metadata["optimization_schedule"]
+        )
+        if (
+            state.task_manifest.metadata.get("optimization_protocol")
+            != OPTIMIZATION_PROTOCOL
+            or planned.dataset_id != state.task_manifest.visible_datasets[0]
+            or planned.episode_id
+            != str(state.task_manifest.metadata.get("episode_id"))
+            or planned.seed != state.task_manifest.seed
+            or planned.origin_count != schedule.formal_origin_count_per_finalist
+            or len(planned.batches) != schedule.batch_count
+            or any(
+                batch.origin_count != schedule.local_batch_origin_count
+                for batch in planned.batches
+            )
+        ):
+            raise ValueError("planned run adaptation cohort differs from frozen task")
+        self.ledger.append(
+            run_id,
+            "RunAdaptationCohortFrozen",
+            {"adaptation": planned.to_dict()},
+            event_id=f"{run_id}:adaptation-cohort:frozen",
+        )
+        return planned
+
+    def freeze_generation_selection_cohorts(
+        self,
+        run_id: str,
+        planned: GenerationCohorts,
+    ) -> GenerationCohorts:
+        if not isinstance(planned, GenerationCohorts):
+            raise TypeError("planned must be GenerationCohorts")
+        state = self.state(run_id)
+        self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
+        existing = state.generation_cohort_for(planned.generation)
+        if existing is not None:
+            if existing.to_dict() != planned.to_dict():
+                raise ValueError("generation already has different frozen cohorts")
+            return existing
+        adaptation = state.run_adaptation_cohort
+        if adaptation is None:
+            raise ValueError("run adaptation cohort must be frozen first")
+        schedule = OptimizationSchedule.from_dict(
+            state.task_manifest.metadata["optimization_schedule"]
+        )
+        generation_candidates = [
+            item for item in state.candidates if item.generation == planned.generation
+        ]
+        if len(generation_candidates) != 4:
+            raise ValueError(
+                "generation cohorts require exactly four spawned candidates"
+            )
+        if any(
+            event.payload["generation"] == planned.generation
+            for event in state.candidate_screening_events
+        ):
+            raise ValueError("generation cohorts must be frozen before screening")
+        if (
+            planned.dataset_id != adaptation.dataset_id
+            or planned.episode_id != adaptation.episode_id
+            or planned.seed != state.task_manifest.seed
+            or planned.adaptation_digest != adaptation.adaptation_digest
+            or planned.adaptation_batch_digests != adaptation.batch_digests
+            or planned.screening.origin_count != schedule.screening_origin_count
+            or planned.screening.shared_candidate_count != 4
+            or planned.holdout.origin_count
+            != schedule.selection_holdout_origin_count
+            or planned.holdout.shared_arm_count != 3
+            or set(planned.screening.origin_ids) & set(adaptation.origin_ids)
+            or set(planned.holdout.origin_ids) & set(adaptation.origin_ids)
+        ):
+            raise ValueError("planned generation cohorts differ from frozen task")
+        prior_origins = {
+            origin_id
+            for item in state.generation_selection_cohorts
+            for origin_id in (*item.screening.origin_ids, *item.holdout.origin_ids)
+        }
+        if prior_origins & set(
+            (*planned.screening.origin_ids, *planned.holdout.origin_ids)
+        ):
+            raise ValueError("generation selection origins cannot be reused")
+        self.ledger.append(
+            run_id,
+            "GenerationCohortsFrozen",
+            {"generation_cohorts": planned.to_dict()},
+            event_id=f"{run_id}:generation:{planned.generation}:cohorts:frozen",
+        )
+        return planned
 
     def freeze_formal_selection_cohort(
         self,

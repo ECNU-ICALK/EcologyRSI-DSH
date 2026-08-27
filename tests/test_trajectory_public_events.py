@@ -143,6 +143,58 @@ class TrajectoryPublicEventTests(unittest.TestCase):
         self.assertEqual(holdout["arm_count"], 3)
         self.assertEqual(champion["selected_revision_id"], "revision:1")
 
+    def test_cohort_freeze_events_hide_origin_members(self) -> None:
+        adaptation = self._project(
+            "RunAdaptationCohortFrozen",
+            {
+                "adaptation": {
+                    "adaptation_digest": "adaptation-digest",
+                    "dataset_id": "dataset:1",
+                    "episode_id": "episode:1",
+                    "cohort": {
+                        "origin_count": 500,
+                        "cohort_digest": "cohort-digest",
+                        "origins": [{"origin_timestamp": "SECRET-TIMESTAMP"}],
+                    },
+                    "batches": [
+                        {"batch_digest": f"batch:{index}"} for index in range(10)
+                    ],
+                }
+            },
+        )
+        generation = self._project(
+            "GenerationCohortsFrozen",
+            {
+                "generation_cohorts": {
+                    "generation": 0,
+                    "generation_cohorts_digest": "generation-digest",
+                    "adaptation_digest": "adaptation-digest",
+                    "adaptation_batch_digests": [
+                        f"batch:{index}" for index in range(10)
+                    ],
+                    "screening": {
+                        "origin_count": 64,
+                        "cohort_digest": "screening-digest",
+                        "origins": [{"origin_id": "SECRET-SCREENING"}],
+                    },
+                    "holdout": {
+                        "origin_count": 169,
+                        "cohort_digest": "holdout-digest",
+                        "origins": [{"origin_id": "SECRET-HOLDOUT-ORIGIN"}],
+                    },
+                }
+            },
+        )
+
+        serialized = json.dumps([adaptation, generation], sort_keys=True)
+        self.assertNotIn("SECRET-TIMESTAMP", serialized)
+        self.assertNotIn("SECRET-SCREENING", serialized)
+        self.assertNotIn("SECRET-HOLDOUT-ORIGIN", serialized)
+        self.assertEqual(adaptation["origin_count"], 500)
+        self.assertEqual(adaptation["batch_count"], 10)
+        self.assertEqual(generation["screening_origin_count"], 64)
+        self.assertEqual(generation["holdout_origin_count"], 169)
+
 
 if __name__ == "__main__":
     unittest.main()

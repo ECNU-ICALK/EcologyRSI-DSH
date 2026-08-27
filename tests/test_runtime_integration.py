@@ -15,6 +15,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from ecologyrsi_dsh.core.models import digest
+from ecologyrsi_dsh.data.splits import IndexRange
 from ecologyrsi_dsh.integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 from ecologyrsi_dsh.integrations.model_gateway import GatewayResponseError
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
@@ -678,6 +679,10 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
             episode_id="agc_cucumber_2018:test",
         )
         selection_view = SimpleNamespace(
+            dataset_id="agc_cucumber_2018",
+            episode_id="agc_cucumber_2018:test",
+            timestamps=tuple(range(2000)),
+            partitions={"model_selection": IndexRange(0, 2000)},
             data_protocol_digest="c" * 64,
             selection_view_digest="e" * 64,
         )

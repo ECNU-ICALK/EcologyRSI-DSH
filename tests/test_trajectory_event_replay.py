@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from ecologyrsi_dsh import EventLedger, EvolutionDirector, FakeDSHAdapter, TaskManifest
 from ecologyrsi_dsh.core.models import digest
@@ -15,6 +16,11 @@ from ecologyrsi_dsh.core.trajectory import (
     HoldoutEvaluation,
     RevisionAdvanceReason,
     RevisionStatus,
+)
+from ecologyrsi_dsh.data.splits import IndexRange
+from ecologyrsi_dsh.evaluators.epoch_cohorts import (
+    plan_generation_selection_cohorts,
+    plan_run_adaptation_cohort,
 )
 from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
 
@@ -49,6 +55,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             },
             seed=7,
             metadata={
+                "episode_id": "episode:trajectory-replay",
                 "optimization_protocol": "top2_adaptive_epoch@1",
                 "optimization_schedule": schedule.to_dict(),
             },
@@ -73,6 +80,26 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             )
             self.director.create_candidate_revision(self.run_id, revision)
             self.revisions[candidate.candidate_id] = revision
+        dataset = SimpleNamespace(
+            dataset_id="generated-toy-series@1",
+            episode_id="episode:trajectory-replay",
+            timestamps=tuple(range(3200)),
+            partitions={"model_selection": IndexRange(0, 3200)},
+        )
+        adaptation = plan_run_adaptation_cohort(
+            dataset, schedule=self.schedule, seed=7
+        )
+        self.generation_cohorts = plan_generation_selection_cohorts(
+            dataset,
+            schedule=self.schedule,
+            generation=0,
+            adaptation=adaptation,
+            seed=7,
+        )
+        self.director.freeze_run_adaptation_cohort(self.run_id, adaptation)
+        self.director.freeze_generation_selection_cohorts(
+            self.run_id, self.generation_cohorts
+        )
 
     def tearDown(self) -> None:
         self.ledger.close()
@@ -112,7 +139,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             )
 
     def _freeze_top2(self) -> tuple:
-        cohort = _sha("screening")
+        cohort = self.generation_cohorts.screening.cohort_digest
         for candidate in self.candidates:
             self.director.record_candidate_screening(
                 self.run_id,
