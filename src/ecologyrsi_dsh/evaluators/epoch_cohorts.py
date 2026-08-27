@@ -8,6 +8,7 @@ from typing import Any, Mapping, Protocol, Sequence
 from ..core.models import digest
 from ..data.splits import IndexRange
 from ..evolution.schedule import OptimizationSchedule
+from .greenhouse_prediction import MAX_EXOGENOUS_RIDGE_HISTORY_STEPS
 
 
 COHORT_PLANNER_SCHEMA = "ecologyrsi-dsh.epoch-cohort-planner/1"
@@ -16,7 +17,11 @@ GENERATION_COHORTS_SCHEMA = "ecologyrsi-dsh.generation-cohorts/1"
 CAPACITY_REPORT_SCHEMA = "ecologyrsi-dsh.epoch-capacity-report/1"
 COHORT_REUSE_POLICY = "cycle_after_exhaustion@1"
 DEFAULT_HORIZONS = (1, 6, 24)
-DEFAULT_HISTORY_STEPS = 3
+# Cohorts are shared by every candidate in a generation, including candidates
+# that request the predictor's largest legal history window.  Plan against that
+# common execution envelope so a frozen origin is materializable regardless of
+# the candidate selected for the formal trajectory.
+DEFAULT_HISTORY_STEPS = MAX_EXOGENOUS_RIDGE_HISTORY_STEPS
 DEFAULT_SCORING_CELLS_PER_ORIGIN = 9
 
 
@@ -539,15 +544,20 @@ def _eligible_origins(
     timestamp_gap_origins = 0
     for index in range(selected.start, selected.end):
         origin_timestamp = timestamps[index]
+        # ``_base_samples`` treats history_steps as the number of observations
+        # including the forecast origin (lags 0..N-1) and forbids history from
+        # crossing the evaluation partition.  Keep the value-blind planner's
+        # timestamp contract identical to that evaluator contract.
         history_indices = tuple(
             by_timestamp.get(origin_timestamp - lag)
-            for lag in range(1, history_steps + 1)
+            for lag in range(history_steps)
         )
         target_indices = tuple(
             by_timestamp.get(origin_timestamp + horizon) for horizon in horizons
         )
         history_valid = all(
-            item is not None and item < index for item in history_indices
+            item is not None and selected.start <= item <= index
+            for item in history_indices
         )
         horizon_valid = all(
             item is not None and selected.start <= item < selected.end
@@ -558,7 +568,11 @@ def _eligible_origins(
         if not horizon_valid:
             missing_horizon += 1
         if not history_valid or not horizon_valid:
-            if selected.start + history_steps <= index < selected.end - maximum_horizon:
+            if (
+                selected.start + history_steps - 1
+                <= index
+                < selected.end - maximum_horizon
+            ):
                 timestamp_gap_origins += 1
             continue
         maturity_identity = {
@@ -567,7 +581,7 @@ def _eligible_origins(
             "origin_index": index,
             "origin_timestamp": origin_timestamp,
             "history_timestamps": [
-                origin_timestamp - lag for lag in range(1, history_steps + 1)
+                origin_timestamp - lag for lag in range(history_steps)
             ],
             "target_timestamps": [origin_timestamp + item for item in horizons],
         }

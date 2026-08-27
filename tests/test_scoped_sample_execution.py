@@ -15,10 +15,17 @@ from ecologyrsi_dsh.core.trajectory import (
     RevisionAdvanceReason,
     RevisionStatus,
 )
+from ecologyrsi_dsh.data.greenhouse import FeatureSpec
+from ecologyrsi_dsh.data.registry import DatasetSeries
 from ecologyrsi_dsh.data.splits import IndexRange
 from ecologyrsi_dsh.evaluators.epoch_cohorts import (
     plan_generation_selection_cohorts,
     plan_run_adaptation_cohort,
+)
+from ecologyrsi_dsh.evaluators.greenhouse_prediction import (
+    ExogenousRidgeConfig,
+    MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
+    fit_predict_exogenous_ridge,
 )
 from ecologyrsi_dsh.evaluators.registry import _select_planned_evaluation_cohort
 from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
@@ -263,6 +270,72 @@ class ScopedSampleExecutionTests(unittest.TestCase):
 
 
 class FrozenOriginSelectionTests(unittest.TestCase):
+    def test_planner_origins_are_complete_for_maximum_ridge_history(self) -> None:
+        timestamps = tuple(range(180))
+        targets = (
+            "air_temperature",
+            "relative_humidity",
+            "co2_concentration",
+        )
+        series = DatasetSeries(
+            schema="ecologyrsi-dsh.dataset-series/1",
+            dataset_id="dataset:planner-evaluator-contract",
+            domain_id="greenhouse",
+            episode_id="episode:planner-evaluator-contract",
+            digest="d" * 64,
+            timestamps=timestamps,
+            values={
+                target: tuple(float(index) for index in timestamps)
+                for target in targets
+            },
+            partitions={
+                "training_fit": IndexRange(0, 70),
+                "training_feedback": IndexRange(80, 180),
+                "model_selection": IndexRange(80, 180),
+                "development": IndexRange(180, 180),
+            },
+            features={
+                target: FeatureSpec(target, target, "environment", "unit")
+                for target in targets
+            },
+            split_manifest_digest_sha256="s" * 64,
+        )
+        schedule = OptimizationSchedule.from_dict(
+            {
+                **OptimizationSchedule.default().to_dict(),
+                "formal_origin_count_per_finalist": 20,
+                "local_batch_origin_count": 10,
+            }
+        )
+        planned = plan_run_adaptation_cohort(
+            series, schedule=schedule, seed=3
+        ).batches[0].cohort
+        generated = fit_predict_exogenous_ridge(
+            series,
+            targets=targets,
+            horizons=(1, 6, 24),
+            config=ExogenousRidgeConfig(
+                history_steps=3,
+                ridge_alpha=0.1,
+                residual_scale=1.0,
+            ),
+            evaluation_history_steps=MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
+            defer_prediction_partitions=("training_feedback",),
+        )
+        feedback_rows = [
+            row
+            for row in generated["prediction_rows"]
+            if row["partition"] == "training_feedback"
+        ]
+
+        selected, evidence = _select_planned_evaluation_cohort(
+            feedback_rows, planned
+        )
+
+        self.assertEqual(planned.origins[0].origin_index, 91)
+        self.assertEqual(len(selected), planned.origin_count * 9)
+        self.assertEqual(evidence["prediction_cells_per_origin"], 9)
+
     def test_evaluator_executes_exact_frozen_origins_in_planner_order(self) -> None:
         schedule = OptimizationSchedule.from_dict(
             {
@@ -342,8 +415,8 @@ class FrozenOriginSelectionTests(unittest.TestCase):
         dataset = SimpleNamespace(
             dataset_id="dataset:wrapped-selection",
             episode_id="episode:wrapped-selection",
-            timestamps=tuple(range(40)),
-            partitions={"model_selection": IndexRange(0, 40)},
+            timestamps=tuple(range(50)),
+            partitions={"model_selection": IndexRange(0, 50)},
         )
         planned = plan_run_adaptation_cohort(
             dataset, schedule=schedule, seed=3
