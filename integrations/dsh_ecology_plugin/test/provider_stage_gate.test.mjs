@@ -7,39 +7,39 @@ test("provider stage gate cold-starts at eight, then grows beyond it toward 128"
   const gate = new ProviderStageGate({ minimumIntervalMs: 0 });
   let active = 0;
   let maximum = 0;
-  let release;
-  const hold = new Promise((resolve) => { release = resolve; });
-  const firstWave = Array.from({ length: 8 }, (_, index) => gate.run(
+  const releases = [];
+  const jobs = Array.from({ length: 17 }, (_, index) => gate.run(
     "pjlab",
     async () => {
       active += 1;
       maximum = Math.max(maximum, active);
-      await hold;
+      await new Promise((resolve) => { releases[index] = resolve; });
       active -= 1;
       return index;
     },
     { runId: "run-128" },
   ));
-  let overflowStarted = false;
-  const overflow = gate.run(
-    "pjlab",
-    async () => { overflowStarted = true; },
-    { runId: "run-128" },
-  );
 
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(maximum, 8);
-  assert.equal(overflowStarted, false);
+  assert.equal(releases.filter(Boolean).length, 8);
   assert.deepEqual(gate.snapshot("pjlab"), {
     maxInFlight: 128,
     effectiveMaxInFlight: 8,
     active: 8,
-    queued: 1,
+    queued: 9,
     cooldownRemainingMs: 0,
   });
-  release();
-  await Promise.all([...firstWave, overflow]);
+
+  // Keep the window full with queued demand for eight successful releases.
+  // Only those saturated successes are valid evidence for probing one slot up.
+  for (let index = 0; index < 8; index += 1) {
+    releases[index]();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
   assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 9);
+  for (let index = 8; index < releases.length; index += 1) releases[index]();
+  await Promise.all(jobs);
 
   assert.throws(
     () => new ProviderStageGate({ maxInFlight: 129 }),
@@ -49,6 +49,14 @@ test("provider stage gate cold-starts at eight, then grows beyond it toward 128"
     () => new ProviderStageGate({ adaptiveInitialInFlight: 129 }),
     /maxInFlight must be between 1 and 128/,
   );
+});
+
+test("provider stage gate does not learn burst capacity from idle successes", async () => {
+  const gate = new ProviderStageGate({ minimumIntervalMs: 0 });
+  for (let index = 0; index < 100; index += 1) {
+    await gate.run("pjlab", async () => index, { runId: "run-idle" });
+  }
+  assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 8);
 });
 
 test("provider stage gate enforces the configured provider-wide concurrency", async () => {
@@ -182,9 +190,21 @@ test("provider stage gate reduces burst concurrency once per cooldown and recove
   release();
   await Promise.all(active);
   now += 30;
-  await gate.run("pjlab", async () => {}, { runId: "run-adaptive" });
-  await gate.run("pjlab", async () => {}, { runId: "run-adaptive" });
+  const releases = [];
+  const recovery = Array.from({ length: 9 }, (_, index) => gate.run(
+    "pjlab",
+    () => new Promise((resolve) => { releases[index] = resolve; }),
+    { runId: "run-adaptive" },
+  ));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(releases.filter(Boolean).length, 4);
+  for (let index = 0; index < 4; index += 1) {
+    releases[index]();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
   assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 5);
+  for (let index = 4; index < releases.length; index += 1) releases[index]();
+  await Promise.all(recovery);
 });
 
 test("provider stage gate revokes a run waiting for its own interval", async () => {

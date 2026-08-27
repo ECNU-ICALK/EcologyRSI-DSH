@@ -2758,7 +2758,7 @@ assert.match(html, /id="show-archived-runs"/);
 assert.match(html, /id="archive-button"/);
 assert.match(html, /id="delete-button"/);
 assert.equal(manifest.display_name, "生态模型进化工作台");
-assert.equal(manifest.version, "0.3.39");
+assert.equal(manifest.version, "0.3.40");
 assert.equal(manifest.entrypoint.file, "index.html");
 assert.equal(manifest.entrypoint.route, "/plugins/ecology/evolution/");
 assert.equal(manifest.development_only, false);

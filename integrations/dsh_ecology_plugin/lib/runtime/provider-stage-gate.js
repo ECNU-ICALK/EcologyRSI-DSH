@@ -280,10 +280,16 @@ export class ProviderStageGate {
           if (record.deadlineTimer !== null) clearTimeout(record.deadlineTimer);
           record.status = "completed";
           this.records.delete(record);
+          const currentLimit = this.#effectiveLimit(providerKey);
+          const activeBeforeRelease = this.active.get(providerKey) || 0;
+          const queuedBeforeRelease = this.queues.get(providerKey)?.length || 0;
+          const saturatedWithDemand = (
+            activeBeforeRelease >= currentLimit && queuedBeforeRelease > 0
+          );
           const remaining = Math.max(0, (this.active.get(providerKey) || 1) - 1);
           if (remaining === 0) this.active.delete(providerKey);
           else this.active.set(providerKey, remaining);
-          if (succeeded) this.#reward(providerKey);
+          if (succeeded) this.#reward(providerKey, saturatedWithDemand);
           void this.pump(providerKey);
         };
         void operationPromise.then(
@@ -331,12 +337,20 @@ export class ProviderStageGate {
     return this.effectiveLimits.get(providerKey) || this.adaptiveInitialInFlight;
   }
 
-  #reward(providerKey) {
+  #reward(providerKey, saturatedWithDemand) {
+    // Success under an under-filled window proves nothing about the
+    // provider's burst capacity. Reset that evidence so quiet screening tails
+    // cannot inflate the next formal batch's cold-start window.
+    if (!saturatedWithDemand) {
+      this.successStreaks.set(providerKey, 0);
+      return;
+    }
     const current = this.#effectiveLimit(providerKey);
     if (current >= this.maxInFlight) return;
     if (this.now() < (this.nextAllowedAt.get(providerKey) || 0)) return;
     const successes = (this.successStreaks.get(providerKey) || 0) + 1;
-    if (successes < this.adaptiveRecoverySuccesses) {
+    const recoveryThreshold = Math.max(this.adaptiveRecoverySuccesses, current);
+    if (successes < recoveryThreshold) {
       this.successStreaks.set(providerKey, successes);
       return;
     }

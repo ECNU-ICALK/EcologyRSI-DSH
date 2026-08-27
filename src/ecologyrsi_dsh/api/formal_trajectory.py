@@ -16,7 +16,7 @@ from ..core.trajectory import (
     RevisionStatus,
     TrajectoryStatus,
 )
-from ..evolution.genome import EcologyEvolutionPluginGenome
+from ..evolution.genome import EcologyEvolutionPluginGenome, deep_thaw_json
 from ..evolution.local_edits import (
     LocalEditContext,
     LocalEditProposal,
@@ -476,9 +476,7 @@ def _local_edit_proposal(
     evaluation = state.batch_evaluation_for(candidate.candidate_id, batch.batch_index)
     if evaluation is None:
         raise RuntimeError("local editor requires completed batch evidence")
-    metrics = dict(evaluation.metrics)
-    for key in ("sample_execution_records", "sample_execution_trace_archive", "prediction_preview"):
-        metrics.pop(key, None)
+    metrics = _local_edit_evidence_metrics(evaluation.metrics)
     context_payload = {
         **context.to_dict(),
         "batch_evidence": {
@@ -519,6 +517,28 @@ def _local_edit_proposal(
             risk_cells=(),
         )
     return LocalEditProposal.from_dict(result)
+
+
+def _local_edit_evidence_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    """Return detached aggregate evidence safe for the native JSON boundary.
+
+    Trajectory models recursively freeze their metrics, so a shallow ``dict``
+    leaves nested ``MappingProxyType`` instances behind.  The native DSH
+    request encoder correctly rejects those non-JSON objects.  Thaw the whole
+    tree, then remove sample-level evidence that the bounded local editor is
+    neither allowed nor expected to inspect.
+    """
+
+    detached = deep_thaw_json(metrics)
+    if not isinstance(detached, dict):
+        raise TypeError("local edit metrics must be a JSON object")
+    for key in (
+        "sample_execution_records",
+        "sample_execution_trace_archive",
+        "prediction_preview",
+    ):
+        detached.pop(key, None)
+    return detached
 
 
 def execute_formal_trajectory(endpoint: Any, run_id: str, candidate_id: str) -> None:
