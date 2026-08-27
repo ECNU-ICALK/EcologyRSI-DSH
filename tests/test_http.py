@@ -121,6 +121,22 @@ class HTTPContractTests(unittest.TestCase):
             self.server.director.complete_run(run_id)
         return quote(state.run.run_id, safe="")
 
+    def test_new_run_contract_rejects_samples_per_update(self) -> None:
+        status, payload = self.request(
+            "/api/runs",
+            "POST",
+            {
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "samples_per_update": 4500,
+                "auto_advance": 0,
+                "idempotency_key": "samples-per-update-is-obsolete",
+            },
+        )
+
+        self.assertEqual(status, 400, payload)
+        self.assertIn("samples_per_update is not supported", payload["error"])
+
     def test_projection_cursor_and_generation_step(self) -> None:
         status, html = self.request("/plugins/ecology/evolution/")
         self.assertEqual(status, 200)

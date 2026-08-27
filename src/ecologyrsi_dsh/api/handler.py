@@ -37,7 +37,6 @@ from ..core.models import (
     utc_now,
 )
 from ..core.protocols import is_strict_origin_protocol
-from ..core.sample_budget import complete_origin_count, scoring_cell_budget
 from ..core.sample_results import MAX_SAMPLE_RESULTS_UNCOMPRESSED_BYTES
 from ..data.registry import DatasetRegistry
 from ..evaluators.registry import (
@@ -46,6 +45,7 @@ from ..evaluators.registry import (
     EvaluatorRegistry,
 )
 from ..evolution.strategies import StrategyRouterDSHAdapter
+from ..evolution.schedule import OPTIMIZATION_PROTOCOL, OptimizationSchedule
 from ..integrations.model_bindings import (
     HOST_PARAMETER_GENERATOR_ID,
     RULE_JUDGE_ID,
@@ -88,8 +88,6 @@ _SAMPLE_TOKEN_BUDGET_POLICY = "hard_gateway_call_reservation@1"
 _SAMPLE_TOKEN_BUDGET_SCOPE = "sample_agent_gateway_calls_only@1"
 _DEFAULT_REAL_CANDIDATE_CONCURRENCY = 4
 _MAX_REAL_CANDIDATE_CONCURRENCY = 8
-_DEFAULT_SAMPLES_PER_UPDATE = 1_600
-_MAX_SAMPLES_PER_UPDATE = 100_000
 _DEFAULT_SAMPLE_AGENT_BATCH_SIZE = 64
 _MAX_SAMPLE_AGENT_BATCH_SIZE = 128
 _DSH_SIDECAR_PUBLIC_ERROR_CODES = frozenset(
@@ -196,7 +194,8 @@ PLUGIN_MANIFEST = {
             "knowledge_online_enabled",
             "auto_progress",
             "allow_host_fallback",
-            "samples_per_update",
+            "optimization_protocol",
+            "optimization_schedule",
             "candidate_concurrency",
             "sample_concurrency",
             "sample_agent_batch_size",
@@ -1366,6 +1365,23 @@ class EvolutionRequestHandler(
     ) -> TaskManifest:
         """Accept a full manifest or the compact Chinese workbench payload."""
 
+        if "samples_per_update" in body:
+            raise ValueError(
+                "samples_per_update is not supported; use optimization_schedule "
+                "with complete forecast-origin counts"
+            )
+        supplied_manifest = body.get("task_manifest")
+        if isinstance(supplied_manifest, dict):
+            supplied_metadata = supplied_manifest.get("metadata")
+            if isinstance(supplied_metadata, dict) and "samples_per_update" in supplied_metadata:
+                raise ValueError(
+                    "samples_per_update is not supported; use optimization_schedule "
+                    "with complete forecast-origin counts"
+                )
+        native_protocol = (
+            body.get("execution_protocol") == DSH_NATIVE_EXECUTION_PROTOCOL
+        )
+
         if isinstance(body.get("task_manifest"), dict):
             raw = dict(body["task_manifest"])
             if "domain_pack" not in raw:
@@ -1405,7 +1421,8 @@ class EvolutionRequestHandler(
                     "candidates_per_round",
                     "variants_per_round",
                     "max_candidates",
-                    "samples_per_update",
+                    "optimization_protocol",
+                    "optimization_schedule",
                     "candidate_concurrency",
                     "sample_concurrency",
                     "sample_agent_batch_size",
@@ -1434,6 +1451,19 @@ class EvolutionRequestHandler(
                     )
                 if "execution_protocol" in body:
                     metadata["execution_protocol"] = str(body["execution_protocol"])
+                if "optimization_protocol" in body:
+                    protocol = str(body["optimization_protocol"])
+                    if protocol != OPTIMIZATION_PROTOCOL:
+                        raise ValueError(
+                            f"optimization_protocol must be {OPTIMIZATION_PROTOCOL}"
+                        )
+                    metadata["optimization_protocol"] = protocol
+                if "optimization_schedule" in body:
+                    metadata["optimization_schedule"] = (
+                        OptimizationSchedule.from_dict(
+                            body["optimization_schedule"]
+                        ).to_dict()
+                    )
                 if "model_workflow" in body or "workflow" in body:
                     metadata["model_workflow"] = str(
                         body.get("model_workflow", body.get("workflow"))
@@ -1471,16 +1501,6 @@ class EvolutionRequestHandler(
                             f"{_MAX_REAL_CANDIDATE_CONCURRENCY}"
                         )
                     metadata["candidate_concurrency"] = candidate_concurrency
-                if "samples_per_update" in body:
-                    samples_per_update = _request_integer(
-                        body["samples_per_update"], "samples_per_update", minimum=1
-                    )
-                    if samples_per_update > _MAX_SAMPLES_PER_UPDATE:
-                        raise ValueError(
-                            "samples_per_update must be between 1 and "
-                            f"{_MAX_SAMPLES_PER_UPDATE}"
-                        )
-                    metadata["samples_per_update"] = samples_per_update
                 if "sample_agent_batch_size" in body:
                     sample_agent_batch_size = _request_integer(
                         body["sample_agent_batch_size"],
@@ -1684,6 +1704,8 @@ class EvolutionRequestHandler(
                 "candidates_per_generation": 4,
                 "max_candidates": 20,
             }
+        if native_protocol and candidates_value is None:
+            budget["candidates_per_generation"] = 4
         if autonomous_requested and strategy_model_id is None:
             # ``policy_model_id`` is retained as a migration alias, but a new
             # request is expected to name it as the strategy model.
@@ -1767,9 +1789,10 @@ class EvolutionRequestHandler(
             ),
             "sample_concurrency": body.get("sample_concurrency"),
             "candidate_concurrency": body.get("candidate_concurrency"),
-            "samples_per_update": body.get("samples_per_update"),
             "sample_agent_batch_size": body.get("sample_agent_batch_size"),
             "execution_protocol": body.get("execution_protocol"),
+            "optimization_protocol": body.get("optimization_protocol"),
+            "optimization_schedule": body.get("optimization_schedule"),
         }
         metadata = {key: value for key, value in metadata.items() if value is not None}
         seed_policy = str(body.get("seed_policy", "fixed"))
@@ -2334,9 +2357,26 @@ class EvolutionRequestHandler(
                     "prediction_model_id"
                 )
             metadata["seed_genome_template_id"] = seed_template_id
+        schedule: OptimizationSchedule | None = None
+        requested_optimization_protocol = metadata.get("optimization_protocol")
+        requested_schedule = metadata.get("optimization_schedule")
+        if native_protocol or requested_optimization_protocol is not None or requested_schedule is not None:
+            if requested_optimization_protocol not in (None, OPTIMIZATION_PROTOCOL):
+                raise ValueError(
+                    f"optimization_protocol must be {OPTIMIZATION_PROTOCOL}"
+                )
+            schedule = (
+                OptimizationSchedule.default()
+                if requested_schedule is None
+                else OptimizationSchedule.from_dict(requested_schedule)
+            )
+            if manifest.candidates_per_generation != 4:
+                raise ValueError(
+                    "top2_adaptive_epoch@1 requires candidates_per_generation == 4"
+                )
+
         sample_concurrency = metadata.get("sample_concurrency")
         candidate_concurrency = metadata.get("candidate_concurrency")
-        samples_per_update = metadata.get("samples_per_update")
         sample_agent_batch_size = metadata.get("sample_agent_batch_size")
         minimum_selection_samples_per_update = (
             self.server.evaluators.minimum_selection_samples_per_update(
@@ -2375,39 +2415,6 @@ class EvolutionRequestHandler(
             if sample_concurrency is None:
                 sample_concurrency = DEFAULT_SAMPLE_CONCURRENCY
             sample_concurrency = validate_sample_concurrency(sample_concurrency)
-            if samples_per_update is None:
-                samples_per_update = (
-                    scoring_cell_budget(500, prediction_cells_per_origin)
-                    if native_protocol
-                    else _DEFAULT_SAMPLES_PER_UPDATE
-                )
-            # A strict native run may deliberately use one complete balanced
-            # origin as a diagnostic smoke.  It still executes every required
-            # Agent stage and may continue through multiple diagnostic
-            # generations, but remains ineligible for formal promotion. Full
-            # autonomous evolution keeps the larger selection threshold as its
-            # default above.
-            minimum_samples_per_update = (
-                self.server.evaluators.minimum_samples_per_update(evaluator_id)
-            )
-            if (
-                isinstance(samples_per_update, bool)
-                or not isinstance(samples_per_update, int)
-                or not (
-                    minimum_samples_per_update
-                    <= samples_per_update
-                    <= _MAX_SAMPLES_PER_UPDATE
-                )
-            ):
-                raise ValueError(
-                    "samples_per_update must be an integer between "
-                    f"{minimum_samples_per_update} and {_MAX_SAMPLES_PER_UPDATE} "
-                    "so every evaluator target and horizon can be represented"
-                )
-            if native_protocol:
-                complete_origin_count(
-                    samples_per_update, prediction_cells_per_origin
-                )
             if sample_agent_batch_size is None:
                 sample_agent_batch_size = _DEFAULT_SAMPLE_AGENT_BATCH_SIZE
             if (
@@ -2419,15 +2426,16 @@ class EvolutionRequestHandler(
                     "sample_agent_batch_size must be an integer between 1 and "
                     f"{_MAX_SAMPLE_AGENT_BATCH_SIZE}"
                 )
-            sample_budget_class = (
-                "selection_eligible"
-                if samples_per_update >= minimum_selection_samples_per_update
-                else "diagnostic_smoke"
-            )
+            if schedule is not None:
+                sample_budget_class = (
+                    "selection_eligible"
+                    if schedule.selection_holdout_origin_count
+                    >= minimum_selection_origin_samples_per_update
+                    else "insufficient_holdout"
+                )
         else:
             candidate_concurrency = None
             sample_concurrency = None
-            samples_per_update = None
             # Preserve the pre-existing host/toy manifest value. It is not
             # used by the host-only sample state machine.
             sample_agent_batch_size = 128
@@ -2490,10 +2498,27 @@ class EvolutionRequestHandler(
                 # independent DSH child sessions. Historical manifests omit
                 # this field and therefore remain serial on replay.
                 "candidate_concurrency": candidate_concurrency,
-                # The model fit still consumes all training_fit rows. This
-                # bounded, rotating window applies only to per-sample agent
-                # execution over training_feedback.
-                "samples_per_update": samples_per_update,
+                "optimization_protocol": (
+                    OPTIMIZATION_PROTOCOL if schedule is not None else None
+                ),
+                "optimization_schedule": (
+                    schedule.to_dict() if schedule is not None else None
+                ),
+                "derived_execution_budget": (
+                    schedule.generation_execution_budget(
+                        cells_per_origin=prediction_cells_per_origin
+                    )
+                    if schedule is not None
+                    else None
+                ),
+                "derived_run_execution_budget": (
+                    schedule.run_execution_budget(
+                        manifest.max_generations,
+                        cells_per_origin=prediction_cells_per_origin,
+                    )
+                    if schedule is not None
+                    else None
+                ),
                 "minimum_selection_samples_per_update": (
                     minimum_selection_samples_per_update
                 ),

@@ -11,6 +11,11 @@ from .genome import (
     deep_thaw_json,
     materialize_seed_genome,
 )
+from .schedule import (
+    OPTIMIZATION_PROTOCOL,
+    SCHEDULE_SCHEMA_VERSION,
+    OptimizationSchedule,
+)
 
 __all__ = [
     "EcologyEvolutionPluginGenome",
@@ -22,4 +27,7 @@ __all__ = [
     "deep_freeze_json",
     "deep_thaw_json",
     "materialize_seed_genome",
+    "OPTIMIZATION_PROTOCOL",
+    "SCHEDULE_SCHEMA_VERSION",
+    "OptimizationSchedule",
 ]

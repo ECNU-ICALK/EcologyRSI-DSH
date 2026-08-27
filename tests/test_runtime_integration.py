@@ -15,7 +15,6 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from ecologyrsi_dsh.core.models import digest
-from ecologyrsi_dsh.core.sample_budget import complete_origin_count
 from ecologyrsi_dsh.integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 from ecologyrsi_dsh.integrations.model_gateway import GatewayResponseError
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
@@ -777,7 +776,16 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                         "candidates_per_generation": 1,
                         "max_candidates": 1,
                     },
-                    "samples_per_update": 450,
+                    "optimization_schedule": {
+                        "schema_version": "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
+                        "screening_origin_count": 64,
+                        "finalist_count": 2,
+                        "formal_origin_count_per_finalist": 500,
+                        "local_batch_origin_count": 50,
+                        "max_local_edits_per_batch": 2,
+                        "selection_holdout_origin_count": 169,
+                        "local_evaluation_mode": "prequential",
+                    },
                     "candidate_concurrency": 3,
                     "sample_concurrency": 128,
                     "sample_agent_batch_size": 16,
@@ -802,7 +810,16 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                         "candidates_per_generation": 1,
                         "max_candidates": 1,
                     },
-                    "samples_per_update": 4_500,
+                    "optimization_schedule": {
+                        "schema_version": "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
+                        "screening_origin_count": 64,
+                        "finalist_count": 2,
+                        "formal_origin_count_per_finalist": 1000,
+                        "local_batch_origin_count": 50,
+                        "max_local_edits_per_batch": 2,
+                        "selection_holdout_origin_count": 169,
+                        "local_evaluation_mode": "prequential",
+                    },
                     "auto_advance": 0,
                     "idempotency_key": "autonomous-runtime-explicit-formal-sampling",
                 },
@@ -882,15 +899,8 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
             created["projection"]["configuration"]["sample_agent_batch_size"],
             64,
         )
-        self.assertEqual(
-            created["projection"]["configuration"]["samples_per_update"], 1_600
-        )
-        self.assertEqual(
-            complete_origin_count(
-                strict_created["projection"]["configuration"]["samples_per_update"],
-                strict_created["projection"]["configuration"]["prediction_cells_per_origin"],
-            ),
-            500,
+        self.assertIsNone(
+            created["projection"]["configuration"]["samples_per_update"]
         )
         self.assertEqual(
             created["projection"]["configuration"]["sample_concurrency"], 64
@@ -899,19 +909,8 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
             created["projection"]["configuration"]["candidate_concurrency"], 4
         )
         explicit_configuration = explicit_created["projection"]["configuration"]
-        self.assertEqual(explicit_configuration["samples_per_update"], 450)
-        self.assertEqual(explicit_configuration["sample_budget_class"], "diagnostic_smoke")
-        self.assertEqual(
-            complete_origin_count(
-                explicit_configuration["samples_per_update"],
-                explicit_configuration["prediction_cells_per_origin"],
-            ),
-            50,
-        )
-        self.assertEqual(
-            explicit_formal_created["projection"]["configuration"]["samples_per_update"],
-            4_500,
-        )
+        self.assertIsNone(explicit_configuration["samples_per_update"])
+        self.assertEqual(explicit_configuration["sample_budget_class"], "selection_eligible")
         self.assertEqual(
             explicit_configuration["minimum_selection_samples_per_update"],
             1_521,
@@ -962,11 +961,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
         )
 
         state = self.server.director.state(created["projection"]["run_id"])
-        self.assertEqual(state.task_manifest.metadata["samples_per_update"], 1_600)
-        self.assertEqual(
-            state.task_manifest.metadata["sample_budget_class"],
-            "selection_eligible",
-        )
+        self.assertNotIn("samples_per_update", state.task_manifest.metadata)
         self.assertEqual(
             state.task_manifest.metadata["fitness_profile_digest"],
             digest(state.task_manifest.metadata["fitness_profile"]),

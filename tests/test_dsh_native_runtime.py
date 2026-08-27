@@ -480,6 +480,60 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertEqual(payload["dsh"]["harness_execution"], "dsh_native_agent_runtime")
         self.assertTrue(payload["dsh"]["official_harness_agent_loop"])
 
+    def test_native_create_freezes_top2_adaptive_epoch_schedule(self) -> None:
+        runtime = _FakeNativeRuntime()
+        self.server.dsh_native_runtime = runtime
+        schedule = {
+            "schema_version": "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
+            "screening_origin_count": 64,
+            "finalist_count": 2,
+            "formal_origin_count_per_finalist": 500,
+            "local_batch_origin_count": 50,
+            "max_local_edits_per_batch": 2,
+            "selection_holdout_origin_count": 169,
+            "local_evaluation_mode": "prequential",
+        }
+
+        status, payload = self._post(
+            {
+                "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                "optimization_protocol": "top2_adaptive_epoch@1",
+                "optimization_schedule": schedule,
+                "run_id": "run:native-adaptive-schedule",
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "strategy_model_id": "dsh/strategy",
+                "review_model_id": "dsh/review",
+                "candidate_concurrency": 4,
+                "sample_concurrency": 64,
+                "start": False,
+                "auto_advance": 0,
+                "idempotency_key": "native-adaptive-schedule-1",
+                "budget": {
+                    "max_generations": 1,
+                    "candidates_per_generation": 4,
+                    "max_candidates": 4,
+                },
+            }
+        )
+
+        self.assertEqual(status, 201, payload)
+        state = self.server.director.state("run:native-adaptive-schedule")
+        metadata = state.task_manifest.metadata
+        self.assertEqual(metadata["optimization_protocol"], "top2_adaptive_epoch@1")
+        self.assertEqual(metadata["optimization_schedule"], schedule)
+        self.assertEqual(
+            metadata["derived_execution_budget"],
+            {
+                "screening_candidate_origins": 256,
+                "formal_candidate_origins": 1000,
+                "holdout_candidate_origins": 507,
+                "total_candidate_origins": 1763,
+                "total_scoring_cells": 1763,
+            },
+        )
+        self.assertNotIn("samples_per_update", metadata)
+
     def test_native_setup_precedes_run_created_and_emits_no_token_budget(self) -> None:
         runtime = _FakeNativeRuntime()
         self.server.dsh_native_runtime = runtime
@@ -494,7 +548,6 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                 "review_model_id": "dsh/review",
                 "candidate_concurrency": 1,
                 "sample_concurrency": 2,
-                "samples_per_update": 169,
                 "sample_agent_batch_size": 9,
                 "start": False,
                 "auto_advance": 0,
@@ -517,7 +570,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertFalse(state.task_manifest.metadata["dsh_first_call_verified"])
         self.assertEqual(state.task_manifest.metadata["candidate_concurrency"], 1)
         self.assertEqual(state.task_manifest.metadata["sample_concurrency"], 2)
-        self.assertEqual(state.task_manifest.metadata["samples_per_update"], 169)
+        self.assertNotIn("samples_per_update", state.task_manifest.metadata)
         self.assertEqual(state.task_manifest.metadata["sample_agent_batch_size"], 9)
         self.assertEqual(
             state.task_manifest.metadata["sample_budget_class"],
@@ -564,7 +617,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                 TaskManifest.from_dict(tampered_data)
             )
 
-    def test_native_diagnostic_smoke_accepts_one_complete_origin(self) -> None:
+    def test_native_schedule_replaces_diagnostic_sample_count(self) -> None:
         runtime = _FakeNativeRuntime()
         self.server.dsh_native_runtime = runtime
 
@@ -578,7 +631,6 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                 "review_model_id": "dsh/review",
                 "candidate_concurrency": 1,
                 "sample_concurrency": 1,
-                "samples_per_update": 1,
                 "sample_agent_batch_size": 1,
                 "start": False,
                 "auto_advance": 0,
@@ -587,10 +639,18 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 201, payload)
-        configuration = payload["projection"]["configuration"]
-        self.assertEqual(configuration["samples_per_update"], 1)
-        self.assertEqual(configuration["sample_budget_class"], "diagnostic_smoke")
-        self.assertEqual(configuration["minimum_selection_samples_per_update"], 169)
+        state = self.server.director.state("run:native-diagnostic")
+        self.assertNotIn("samples_per_update", state.task_manifest.metadata)
+        self.assertEqual(
+            state.task_manifest.metadata["optimization_schedule"][
+                "formal_origin_count_per_finalist"
+            ],
+            500,
+        )
+        self.assertEqual(
+            state.task_manifest.metadata["sample_budget_class"],
+            "selection_eligible",
+        )
 
     def test_native_start_activates_created_runtime_before_host_run(self) -> None:
         runtime = _FakeNativeRuntime()
