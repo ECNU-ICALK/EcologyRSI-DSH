@@ -92,6 +92,9 @@ export class ProviderStageGate {
     adaptiveInitialInFlight = Math.min(8, maxInFlight),
     adaptiveFloor = 4,
     adaptiveRecoverySuccesses = 8,
+    // Remember a demonstrated congestion point for long enough that a busy
+    // run cannot repeatedly ramp into the same provider failure burst.
+    adaptiveProbeCooldownMs = 30 * 60 * 1_000,
     now = Date.now,
     delay = sleep,
   } = {}) {
@@ -109,6 +112,10 @@ export class ProviderStageGate {
     this.adaptiveRecoverySuccesses = boundedConcurrency(
       adaptiveRecoverySuccesses,
     );
+    this.adaptiveProbeCooldownMs = boundedDelay(
+      adaptiveProbeCooldownMs,
+      "adaptive probe cooldown",
+    );
     this.now = now;
     this.delay = delay;
     this.queues = new Map();
@@ -117,6 +124,8 @@ export class ProviderStageGate {
     this.effectiveLimits = new Map();
     this.successStreaks = new Map();
     this.lastReductionAt = new Map();
+    this.congestionCeilings = new Map();
+    this.nextProbeAt = new Map();
     this.pumping = new Set();
     this.records = new Set();
     this.closedRuns = new Set();
@@ -330,6 +339,14 @@ export class ProviderStageGate {
       this.effectiveLimits.set(key, Math.min(current, reduced));
       this.successStreaks.set(key, 0);
       this.lastReductionAt.set(key, now);
+      // The failing window is not safe merely because a later quiet tail has
+      // enough successes to rebuild the additive-increase streak. Recover up
+      // to one slot below it, then hold before a single-slot probe.
+      this.congestionCeilings.set(
+        key,
+        Math.max(this.adaptiveFloor, current - 1),
+      );
+      this.nextProbeAt.set(key, now + this.adaptiveProbeCooldownMs);
     }
   }
 
@@ -348,6 +365,17 @@ export class ProviderStageGate {
     const current = this.#effectiveLimit(providerKey);
     if (current >= this.maxInFlight) return;
     if (this.now() < (this.nextAllowedAt.get(providerKey) || 0)) return;
+    const congestionCeiling = this.congestionCeilings.get(providerKey);
+    const atCongestionCeiling = (
+      congestionCeiling !== undefined && current >= congestionCeiling
+    );
+    if (
+      atCongestionCeiling
+      && this.now() < (this.nextProbeAt.get(providerKey) || 0)
+    ) {
+      this.successStreaks.set(providerKey, 0);
+      return;
+    }
     const successes = (this.successStreaks.get(providerKey) || 0) + 1;
     const recoveryThreshold = Math.max(this.adaptiveRecoverySuccesses, current);
     if (successes < recoveryThreshold) {
@@ -355,7 +383,17 @@ export class ProviderStageGate {
       return;
     }
     this.successStreaks.set(providerKey, 0);
-    this.effectiveLimits.set(providerKey, Math.min(this.maxInFlight, current + 1));
+    const increased = Math.min(this.maxInFlight, current + 1);
+    this.effectiveLimits.set(providerKey, increased);
+    if (atCongestionCeiling) {
+      // After the hold expires, probe only one additional slot per cooldown.
+      // A failed probe will immediately restore the prior safe ceiling.
+      this.congestionCeilings.set(providerKey, increased);
+      this.nextProbeAt.set(
+        providerKey,
+        this.now() + this.adaptiveProbeCooldownMs,
+      );
+    }
   }
 
   snapshot(provider) {

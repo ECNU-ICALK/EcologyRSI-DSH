@@ -207,6 +207,67 @@ test("provider stage gate reduces burst concurrency once per cooldown and recove
   await Promise.all(recovery);
 });
 
+test("provider stage gate remembers a failed congestion point before probing again", async () => {
+  let now = 1_000;
+  const gate = new ProviderStageGate({
+    minimumIntervalMs: 0,
+    failureCooldownMs: 0,
+    maxInFlight: 8,
+    adaptiveFloor: 2,
+    adaptiveRecoverySuccesses: 1,
+    adaptiveProbeCooldownMs: 30,
+    now: () => now,
+  });
+  let releaseInitial;
+  const initialHold = new Promise((resolve) => { releaseInitial = resolve; });
+  const initial = Array.from({ length: 8 }, () => gate.run(
+    "pjlab",
+    () => initialHold,
+    { runId: "run-congestion-memory" },
+  ));
+  await new Promise((resolve) => setImmediate(resolve));
+  gate.penalize("pjlab");
+  assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 4);
+  releaseInitial();
+  await Promise.all(initial);
+
+  const releases = [];
+  let draining = false;
+  const recovery = Array.from({ length: 50 }, (_, index) => gate.run(
+    "pjlab",
+    () => new Promise((resolve) => {
+      releases[index] = resolve;
+      if (draining) resolve();
+    }),
+    { runId: "run-congestion-memory" },
+  ));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // Four, five, then six saturated successes restore 4 -> 5 -> 6 -> 7.
+  for (let index = 0; index < 15; index += 1) {
+    releases[index]();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 7);
+
+  // More sustained success cannot immediately retry the failed limit of 8.
+  for (let index = 15; index < 29; index += 1) {
+    releases[index]();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 7);
+
+  now += 30;
+  for (let index = 29; index < 36; index += 1) {
+    releases[index]();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 8);
+  draining = true;
+  for (let index = 36; index < releases.length; index += 1) releases[index]();
+  await Promise.all(recovery);
+});
+
 test("provider stage gate revokes a run waiting for its own interval", async () => {
   let now = 1_000;
   const gate = new ProviderStageGate({
