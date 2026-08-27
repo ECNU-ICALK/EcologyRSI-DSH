@@ -2,6 +2,11 @@ import { validateLoopbackOrigin } from "../security.js";
 
 const SIDECAR_BASE = "/api/ecology-agent-sidecar/v1";
 const MAX_REQUEST_TIMEOUT_MS = 600_000;
+const PUBLIC_SIDECAR_ERROR_CODES = new Set([
+  "dsh_tool_admission_closed",
+  "dsh_tool_authorization_failed",
+  "structured_role_operational_timeout",
+]);
 
 export class SidecarError extends Error {
   constructor(code, message = code, { publicDetail = null } = {}) {
@@ -106,7 +111,7 @@ export class SidecarClient {
         throw new SidecarError("invalid_response");
       }
       if (!response.ok) {
-        const code = result?.error_code === "structured_role_operational_timeout"
+        const code = PUBLIC_SIDECAR_ERROR_CODES.has(result?.error_code)
           ? result.error_code
           : "sidecar_rejected";
         throw new SidecarError(code, code, {

@@ -94,7 +94,11 @@ _MAX_REAL_CANDIDATE_CONCURRENCY = 8
 _DEFAULT_SAMPLE_AGENT_BATCH_SIZE = 64
 _MAX_SAMPLE_AGENT_BATCH_SIZE = 128
 _DSH_SIDECAR_PUBLIC_ERROR_CODES = frozenset(
-    {"structured_role_operational_timeout"}
+    {
+        "dsh_tool_admission_closed",
+        "dsh_tool_authorization_failed",
+        "structured_role_operational_timeout",
+    }
 )
 
 
@@ -850,9 +854,9 @@ class EvolutionRequestHandler(
                 result = self.server.dsh_tools.execute(tool_name, self._body())
                 self._send(HTTPStatus.OK, result)
             except PermissionError as exc:
-                self._send(HTTPStatus.FORBIDDEN, {"error": _public_http_error(exc)})
+                self._send(HTTPStatus.FORBIDDEN, _dsh_sidecar_error(exc))
             except (RuntimeError, TypeError, ValueError) as exc:
-                self._send(HTTPStatus.CONFLICT, {"error": _public_http_error(exc)})
+                self._send(HTTPStatus.CONFLICT, _dsh_sidecar_error(exc))
             return
         if not self._authorize_api():
             return

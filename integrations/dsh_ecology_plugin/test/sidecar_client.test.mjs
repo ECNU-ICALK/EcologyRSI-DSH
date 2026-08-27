@@ -139,6 +139,36 @@ test("sidecar preserves the structured operational timeout machine code", async 
   } finally { await close(server); }
 });
 
+test("sidecar preserves public Host tool boundary machine codes", async () => {
+  for (const errorCode of [
+    "dsh_tool_admission_closed",
+    "dsh_tool_authorization_failed",
+  ]) {
+    const server = createServer((_req, res) => {
+      res.writeHead(409, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        error: "bounded Host tool rejection",
+        error_code: errorCode,
+      }));
+    });
+    const port = await listen(server);
+    try {
+      const client = new SidecarClient({
+        origin: `http://127.0.0.1:${port}`,
+        token: "top-secret-token",
+      });
+      await assert.rejects(
+        client.request("/api/ecology-agent-sidecar/v1/tools/test", {
+          body: { request: true },
+        }),
+        (error) => error instanceof SidecarError
+          && error.code === errorCode
+          && error.publicDetail === "bounded Host tool rejection",
+      );
+    } finally { await close(server); }
+  }
+});
+
 test("sidecar origin and paths are literal loopback allowlists", () => {
   assert.throws(() => new SidecarClient({ origin: "http://example.com", token: "x" }), /loopback/);
   const client = new SidecarClient({ origin: "http://127.0.0.1:8777", token: "x" });

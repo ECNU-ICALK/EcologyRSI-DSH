@@ -2236,6 +2236,21 @@ class DshToolHTTPAuthTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(payload["accepted"])
 
+    def test_tool_admission_failure_exposes_stable_machine_code(self) -> None:
+        original_execute = self.server.dsh_tools.execute
+
+        def reject_tool(_tool_name: str, _envelope: dict) -> dict:
+            raise DshToolAdmissionClosedError("prediction binding is closed")
+
+        self.server.dsh_tools.execute = reject_tool
+        try:
+            status, payload = self._request("tool-secret")
+        finally:
+            self.server.dsh_tools.execute = original_execute
+
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error_code"], "dsh_tool_admission_closed")
+
     def test_dynamic_retrieval_completion_and_replay_have_dedicated_endpoints(
         self,
     ) -> None:
