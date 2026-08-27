@@ -88,7 +88,7 @@ export function resolvePluginConfig(config = {}, { defaultStaticRoot, env = proc
     ),
     structuredStageFailureCooldownMs: positiveInteger(
       config.structuredStageFailureCooldownMs,
-      10_000,
+      15_000,
       "structuredStageFailureCooldownMs",
     ),
     structuredStageMaxAttempts: positiveInteger(
