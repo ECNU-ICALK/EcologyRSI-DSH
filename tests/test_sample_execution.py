@@ -2741,7 +2741,7 @@ class SampleExecutionTests(unittest.TestCase):
             ["planner", "critic", "repair", "critic"],
         )
 
-    def test_retryable_success_critic_gateway_failure_is_raised_for_resume(self):
+    def test_optional_retryable_critic_failure_keeps_scientific_prediction(self):
         gateway = _FailFirstCriticGatewayFake(
             GatewayResponseError(
                 "queued critic request exhausted",
@@ -2756,10 +2756,14 @@ class SampleExecutionTests(unittest.TestCase):
             remote_review_enabled=True,
         )
 
-        with self.assertRaises(GatewayResponseError) as captured:
-            self.execute(adapter, rows=[_rows()[0]], max_attempts=3)
+        batch = self.execute(adapter, rows=[_rows()[0]], max_attempts=3)
 
-        self.assertIs(captured.exception, gateway.error)
+        self.assertEqual(batch.summary["succeeded_examples"], 1)
+        self.assertEqual(batch.summary["failed_examples"], 0)
+        self.assertEqual(batch.records[0]["attempts"], 1)
+        critic = batch.records[0]["agent_trace"][-1]
+        self.assertEqual(critic["role"], "remote_critic_agent")
+        self.assertTrue(critic["reason_code"].startswith("critic_unavailable_"))
         self.assertEqual(
             [call["role"] for call in gateway.calls], ["planner", "critic"]
         )

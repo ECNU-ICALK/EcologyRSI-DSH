@@ -2904,10 +2904,17 @@ class GatewaySampleCollaborationAdapter:
             except SampleExecutionControlError:
                 raise
             except Exception as exc:  # noqa: BLE001 - isolate optional remote review
-                if isinstance(exc, GatewayResponseError) and exc.retryable:
-                    raise
                 dsh_error = dsh_native_runtime_error_in_chain(exc)
-                if dsh_error is not None and dsh_native_runtime_retryable(dsh_error):
+                retryable_gateway_failure = (
+                    isinstance(exc, GatewayResponseError) and exc.retryable
+                )
+                retryable_dsh_failure = (
+                    dsh_error is not None
+                    and dsh_native_runtime_retryable(dsh_error)
+                )
+                if self.require_remote_critic and (
+                    retryable_gateway_failure or retryable_dsh_failure
+                ):
                     raise
                 failure_class, _retryable, error_type = classify_sample_failure(exc)
                 split_eligible = _is_adaptive_split_failure(exc)
