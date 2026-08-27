@@ -1738,23 +1738,30 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     completed_launches: list[
         tuple[int, frozenset[str] | None, tuple[str, str] | None]
     ] = []
-    for terminal_event in completed_terminals.values():
+    for terminal_key, terminal_event in completed_terminals.items():
         identity = terminal_event.payload.get("identity")
-        if not isinstance(identity, Mapping):
-            continue
         reflection_reservation = str(
             identity.get("child_reservation_id") or ""
+            if isinstance(identity, Mapping)
+            else ""
         ).strip()
         reflection_launch = launch_by_reservation_id.get(reflection_reservation)
+        terminal_launch = latest_launch_by_key.get(terminal_key)
+        correlated_launch = reflection_launch or terminal_launch
+        terminal_idempotency_key = (
+            identity.get("idempotency_key")
+            if isinstance(identity, Mapping)
+            else terminal_event.payload.get("idempotency_key")
+        )
         completed_launches.append(
             (
                 int(terminal_event.seq),
                 _sample_member_digest_set(
-                    reflection_launch[1].get("sample_member_digests")
-                    if reflection_launch is not None
+                    correlated_launch[1].get("sample_member_digests")
+                    if correlated_launch is not None
                     else None
                 ),
-                _legacy_sample_launch_key(identity.get("idempotency_key")),
+                _legacy_sample_launch_key(terminal_idempotency_key),
             )
         )
 
@@ -1786,8 +1793,18 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         or not 1 <= configured_concurrency <= MAX_SAMPLE_CONCURRENCY
     ):
         configured_concurrency = None
-    outstanding = 0
+    outstanding_origins: set[
+        tuple[str, frozenset[str] | tuple[str, str] | str]
+    ] = set()
     for launch_event, launch in latest_launch_by_key.values():
+        if (
+            not reflection_enabled
+            and launch.get("stage") != terminal_stage
+        ):
+            # Aggregate post-score reflection declares sample.plan as the
+            # completed origin boundary. A later/parallel critic is remote
+            # activity for that same origin, not another forecast origin.
+            continue
         launch_key = str(launch.get("idempotency_key") or "").strip()
         if launch_key in completed_terminals:
             continue
@@ -1820,7 +1837,14 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
             )
         ):
             continue
-        outstanding += 1
+        if member_digests is not None:
+            origin_key = ("members", member_digests)
+        elif legacy_key is not None:
+            origin_key = ("legacy", legacy_key)
+        else:
+            origin_key = ("launch", reservation_id or launch_key)
+        outstanding_origins.add(origin_key)
+    outstanding = len(outstanding_origins)
     in_flight = min(
         outstanding,
         configured_concurrency
