@@ -1656,6 +1656,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     latest_launch_by_key: dict[str, tuple[Any, Mapping[str, Any]]] = {}
     launch_by_reservation_id: dict[str, tuple[Any, Mapping[str, Any]]] = {}
     accepted_reservations: set[str] = set()
+    failed_reservations: set[str] = set()
     reflection_enabled = (
         metadata.get("sample_reflection_policy")
         != "candidate_aggregate_post_score@1"
@@ -1706,6 +1707,18 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
                 key = str(identity.get("idempotency_key") or "").strip()
                 if key:
                     completed_terminals[key] = event
+            sample_events.append(event)
+        elif event.kind == "DshChildExecutionFailed":
+            identity = event.payload.get("identity")
+            if not isinstance(identity, Mapping) or not str(
+                identity.get("stage") or ""
+            ).startswith("sample."):
+                continue
+            reservation_id = str(
+                identity.get("child_reservation_id") or ""
+            ).strip()
+            if reservation_id:
+                failed_reservations.add(reservation_id)
             sample_events.append(event)
         elif event.kind == "DshPredictionToolExecuted" and not reflection_enabled:
             # Aggregate post-score runs use the planner's complete 9-cell
@@ -1778,9 +1791,10 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         launch_key = str(launch.get("idempotency_key") or "").strip()
         if launch_key in completed_terminals:
             continue
+        reservation_id = str(launch.get("reservation_id") or "").strip()
         if (
-            str(launch.get("reservation_id") or "").strip()
-            in accepted_reservations
+            reservation_id in accepted_reservations
+            or reservation_id in failed_reservations
         ):
             continue
         member_digests = _sample_member_digest_set(
@@ -2000,6 +2014,28 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
             screening_completed,
             int(live_screening.get("completed_samples") or 0),
         )
+    has_adaptive_boundary = (
+        live_screening is not None
+        or any(
+            int(event.payload.get("generation", -1)) == generation
+            for event in state.candidate_screening_events
+        )
+        or any(
+            item.scope.generation == generation
+            for item in state.formal_batch_evaluations
+        )
+        or any(
+            item.scope.generation == generation
+            for item in state.holdout_evaluations
+        )
+        or any(batch.generation == generation for batch in state.formal_batches)
+    )
+    if not has_adaptive_boundary:
+        # The schedule exists from run creation, but it is not progress
+        # evidence.  Before screening cohorts start, preserve the durable
+        # search/research/proposal stage instead of projecting a synthetic
+        # zero-percent evaluation phase.
+        return None
     formal_completed = sum(
         int(item.scope.origin_count)
         for item in state.formal_batch_evaluations
@@ -2041,6 +2077,8 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
         # in-flight/queued/awaiting breakdown.
         for key in (
             "progress_kind",
+            "succeeded_samples",
+            "failed_samples",
             "in_flight_batches",
             "queued_batches",
             "awaiting_submission_batches",

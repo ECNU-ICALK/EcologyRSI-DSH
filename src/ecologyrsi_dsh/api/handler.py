@@ -792,6 +792,17 @@ class EvolutionRequestHandler(
             except (RuntimeError, TypeError, ValueError) as exc:
                 self._send(HTTPStatus.CONFLICT, _dsh_sidecar_error(exc))
             return
+        if raw_path == "/api/ecology-agent-sidecar/v1/child-failures":
+            if not self._authorize_dsh_tool():
+                return
+            try:
+                result = self.server.dsh_tools.record_child_failure(self._body())
+                self._send(HTTPStatus.OK, result)
+            except PermissionError as exc:
+                self._send(HTTPStatus.FORBIDDEN, _dsh_sidecar_error(exc))
+            except (RuntimeError, TypeError, ValueError) as exc:
+                self._send(HTTPStatus.CONFLICT, _dsh_sidecar_error(exc))
+            return
         if raw_path == "/api/ecology-agent-sidecar/v1/structured-results":
             if not self._authorize_dsh_tool():
                 return

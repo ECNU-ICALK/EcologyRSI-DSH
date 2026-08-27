@@ -2152,6 +2152,24 @@ assert.deepEqual(
 
 modelSandbox.state.activeRun = modelSandbox.normalizeRun({
   ...waitingBetweenRounds,
+  run_id: "run:paused-server-auto",
+  status: "paused",
+  generation: 1,
+  auto_progress: true,
+});
+modelSandbox.state.runs = [modelSandbox.state.activeRun];
+modelSandbox.state.events = [];
+modelSandbox.state.busy = false;
+assert.equal(await modelSandbox.advanceRun(), true);
+assert.equal(modelSandbox.state.activeRun.status, "running");
+assert.equal(modelSandbox.state.activeRun.generation, 1);
+assert.deepEqual(
+  Array.from(modelSandbox.state.events.map((event) => event.type)),
+  ["run.resumed"],
+);
+
+modelSandbox.state.activeRun = modelSandbox.normalizeRun({
+  ...waitingBetweenRounds,
   run_id: "run:circuit-resume-only",
   status: "paused",
   generation: 1,

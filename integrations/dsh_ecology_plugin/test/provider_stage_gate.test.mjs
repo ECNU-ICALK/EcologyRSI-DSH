@@ -3,13 +3,13 @@ import test from "node:test";
 
 import { ProviderStageGate } from "../lib/runtime/provider-stage-gate.js";
 
-test("provider stage gate defaults to and accepts exactly 128 in flight", async () => {
+test("provider stage gate starts safely while retaining a 128-request ceiling", async () => {
   const gate = new ProviderStageGate({ minimumIntervalMs: 0 });
   let active = 0;
   let maximum = 0;
   let release;
   const hold = new Promise((resolve) => { release = resolve; });
-  const firstWave = Array.from({ length: 128 }, (_, index) => gate.run(
+  const firstWave = Array.from({ length: 8 }, (_, index) => gate.run(
     "pjlab",
     async () => {
       active += 1;
@@ -28,13 +28,30 @@ test("provider stage gate defaults to and accepts exactly 128 in flight", async 
   );
 
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(maximum, 128);
+  assert.equal(maximum, 8);
   assert.equal(overflowStarted, false);
+  assert.deepEqual(gate.snapshot("pjlab"), {
+    maxInFlight: 128,
+    effectiveMaxInFlight: 8,
+    active: 8,
+    queued: 1,
+    cooldownRemainingMs: 0,
+  });
   release();
   await Promise.all([...firstWave, overflow]);
 
+  const fullCeiling = new ProviderStageGate({
+    minimumIntervalMs: 0,
+    adaptiveInitialInFlight: 128,
+  });
+  assert.equal(fullCeiling.snapshot("pjlab").effectiveMaxInFlight, 128);
+
   assert.throws(
     () => new ProviderStageGate({ maxInFlight: 129 }),
+    /maxInFlight must be between 1 and 128/,
+  );
+  assert.throws(
+    () => new ProviderStageGate({ adaptiveInitialInFlight: 129 }),
     /maxInFlight must be between 1 and 128/,
   );
 });
@@ -140,6 +157,39 @@ test("provider stage gate applies a bounded cooldown after a failed turn", async
   await gate.run("pjlab", async () => {}, { runId: "run-two" });
 
   assert.deepEqual(waits, [30]);
+});
+
+test("provider stage gate reduces burst concurrency once per cooldown and recovers slowly", async () => {
+  let now = 1_000;
+  const gate = new ProviderStageGate({
+    minimumIntervalMs: 0,
+    failureCooldownMs: 30,
+    maxInFlight: 8,
+    adaptiveFloor: 2,
+    adaptiveRecoverySuccesses: 2,
+    now: () => now,
+    delay: async (milliseconds) => { now += milliseconds; },
+  });
+  let release;
+  const hold = new Promise((resolve) => { release = resolve; });
+  const active = Array.from({ length: 8 }, () => gate.run(
+    "pjlab",
+    async () => { await hold; },
+    { runId: "run-adaptive" },
+  ));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  gate.penalize("pjlab");
+  assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 4);
+  gate.penalize("pjlab");
+  assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 4);
+
+  release();
+  await Promise.all(active);
+  now += 30;
+  await gate.run("pjlab", async () => {}, { runId: "run-adaptive" });
+  await gate.run("pjlab", async () => {}, { runId: "run-adaptive" });
+  assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 5);
 });
 
 test("provider stage gate revokes a run waiting for its own interval", async () => {

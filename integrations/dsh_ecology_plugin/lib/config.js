@@ -78,7 +78,7 @@ export function resolvePluginConfig(config = {}, { defaultStaticRoot, env = proc
     ),
     structuredStageMinIntervalMs: nonNegativeInteger(
       config.structuredStageMinIntervalMs,
-      0,
+      1_000,
       "structuredStageMinIntervalMs",
     ),
     structuredStageMaxInFlight: boundedConcurrency(
@@ -88,7 +88,7 @@ export function resolvePluginConfig(config = {}, { defaultStaticRoot, env = proc
     ),
     structuredStageFailureCooldownMs: positiveInteger(
       config.structuredStageFailureCooldownMs,
-      60_000,
+      10_000,
       "structuredStageFailureCooldownMs",
     ),
     structuredStageMaxAttempts: positiveInteger(

@@ -666,6 +666,32 @@ export class NativeStageRunner {
     return structuredClone(await this.schemaCache.get(file));
   }
 
+  async #recordChildFailure(binding, error) {
+    const supplied = String(error?.code || "structured_stage_failed");
+    const errorCode = /^[a-z0-9_]{1,80}$/i.test(supplied)
+      ? supplied
+      : "structured_stage_failed";
+    try {
+      await this.sidecar.request(
+        "/api/ecology-agent-sidecar/v1/child-failures",
+        {
+          method: "POST",
+          timeoutMs: 5_000,
+          body: {
+            run_id: binding.run_id,
+            stage: binding.stage,
+            idempotency_key: binding.idempotency_key,
+            error_code: errorCode,
+          },
+        },
+      );
+    } catch {
+      // Failure accounting is best-effort and must never replace the original
+      // stage error. The corresponding launch remains a conservative upper
+      // bound in the projection if the local sidecar itself is unavailable.
+    }
+  }
+
   async run(binding) {
     const contract = STAGES[binding.stage];
     if (!contract) throw new Error("unsupported DSH structured stage");
@@ -708,15 +734,32 @@ export class NativeStageRunner {
     let lastError;
     for (let attempt = 1; attempt <= this.structuredStageMaxAttempts; attempt += 1) {
       try {
-        const runAttempt = () => this.providerStageGate.run(provider, (signal) => this.#runReservedStage({
-          binding,
-          contract,
-          request,
-          identityDigests,
-          roleHost,
-          lifecycle,
-          signal,
-        }), {
+        const executeReservedStage = async (signal) => {
+          try {
+            return await this.#runReservedStage({
+              binding,
+              contract,
+              request,
+              identityDigests,
+              roleHost,
+              lifecycle,
+              signal,
+            });
+          } catch (error) {
+            await this.#recordChildFailure(binding, error);
+            // Apply provider backpressure before the gate releases the failed
+            // slot. Otherwise one burst can refill every slot before the
+            // outer retry loop observes the rate-limit failure.
+            if (
+              retryableStructuredStageError(error, binding.stage)
+              || isTrustedStructuredPhase(error, "model_terminal")
+            ) {
+              this.providerStageGate.penalize(provider);
+            }
+            throw error;
+          }
+        };
+        const runAttempt = () => this.providerStageGate.run(provider, executeReservedStage, {
           runId: binding.run_id,
           deadline: lifecycle.deadline,
         });
@@ -728,9 +771,6 @@ export class NativeStageRunner {
       } catch (error) {
         lastError = error;
         const retryable = retryableStructuredStageError(error, binding.stage);
-        if (retryable) {
-          this.providerStageGate.penalize(provider);
-        }
         if (!retryable || attempt >= this.structuredStageMaxAttempts) {
           throw error;
         }

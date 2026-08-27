@@ -94,6 +94,7 @@ class EventEndpointsMixin:
             "ExpertConsultationApplied": "专家答复已纳入后续轮次的研究上下文。",
             "EvolutionStageRecorded": "进化阶段执行状态已记录。",
             "GatewayRetryScheduled": "网关暂时繁忙，已安排延迟重试。",
+            "DshChildExecutionFailed": "DSH 子任务失败预约已结算并等待重试。",
             "ModelUsageRecorded": "模型调用 token 用量已记录。",
             "AlgorithmAttemptRecorded": "候选算法编译或调试证据已记录。",
         }.get(event.kind, "运行记录已更新。")
@@ -759,6 +760,14 @@ class EventEndpointsMixin:
                         "suggested_action": "wait_for_scheduled_retry",
                     }
                 )
+        elif event.kind == "DshChildExecutionFailed":
+            identity = payload.get("identity", {})
+            public_payload.update(
+                {
+                    "stage": identity.get("stage"),
+                    "error_code": payload.get("error_code"),
+                }
+            )
         elif event.kind == "RunPaused":
             public_payload.update(
                 {

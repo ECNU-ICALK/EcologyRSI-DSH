@@ -268,6 +268,7 @@ function workflowDeadlineHarness({
 } = {}) {
   const listeners = new Map();
   let reservationCount = 0;
+  const failures = [];
   const sessions = new Map([[
     "workflow-deadline-child",
     {
@@ -311,6 +312,10 @@ function workflowDeadlineHarness({
             ledger_expected_revision: 12,
           };
         }
+        if (path.endsWith("/child-failures")) {
+          failures.push(structuredClone(options.body));
+          return { accepted: true };
+        }
         return persist(options);
       },
     },
@@ -321,7 +326,7 @@ function workflowDeadlineHarness({
       penalize: onPenalty,
     },
   });
-  return { runner, listeners, sessions };
+  return { runner, listeners, sessions, failures };
 }
 
 function publishWorkflowChild(
@@ -377,6 +382,7 @@ function directSampleHarness({
   const reservations = [];
   const reservationRequests = [];
   const persisted = [];
+  const failures = [];
   const sessions = new Map();
   const roleHost = {
     sessionId: `${stage}-parent`,
@@ -441,6 +447,10 @@ function directSampleHarness({
             ledger_expected_revision: 20 + attempt,
           };
         }
+        if (path.endsWith("/child-failures")) {
+          failures.push(structuredClone(options.body));
+          return { accepted: true };
+        }
         persisted.push(options.body);
         if (failurePhase === "persistence") {
           const error = new Error(`private ${failurePhase} failure`);
@@ -456,7 +466,7 @@ function directSampleHarness({
       penalize: () => {},
     },
   });
-  return { runner, starts, reservations, reservationRequests, persisted };
+  return { runner, starts, reservations, reservationRequests, persisted, failures };
 }
 
 test("post-score sample reflection is a registered structured DSH stage", () => {
@@ -926,6 +936,7 @@ test("native stage runner retries one transient child model failure with a fresh
   let starts = 0;
   let reservations = 0;
   let persisted = 0;
+  let failures = 0;
   let penalties = 0;
   const disposed = [];
   const judgeEvents = skillFirstEvents("candidate-scientific-review");
@@ -966,6 +977,10 @@ test("native stage runner retries one transient child model failure with a fresh
             ledger_expected_revision: 10 + reservations,
           };
         }
+        if (path.endsWith("/child-failures")) {
+          failures += 1;
+          return { accepted: true };
+        }
         persisted += 1;
         return { accepted: true, result_digest: options.body.result_digest };
       },
@@ -1004,6 +1019,7 @@ test("native stage runner retries one transient child model failure with a fresh
   assert.equal(starts, 2);
   assert.equal(reservations, 2);
   assert.equal(persisted, 1);
+  assert.equal(failures, 1);
   assert.equal(penalties, 1);
   assert.deepEqual(disposed, ["child-1", "child-2"]);
 });
@@ -1023,6 +1039,7 @@ test("sample critic retries a consumed completed turn with no capture in a fresh
   let starts = 0;
   let reservations = 0;
   let persisted = 0;
+  let failures = 0;
   let penalties = 0;
   const childRequests = [];
   const runner = new NativeStageRunner({
@@ -1070,6 +1087,10 @@ test("sample critic retries a consumed completed turn with no capture in a fresh
             ledger_expected_revision: 20 + reservations,
           };
         }
+        if (path.endsWith("/child-failures")) {
+          failures += 1;
+          return { accepted: true };
+        }
         persisted += 1;
         return { accepted: true, result_digest: options.body.result_digest };
       },
@@ -1115,6 +1136,7 @@ test("sample critic retries a consumed completed turn with no capture in a fresh
   assert.equal(starts, 2);
   assert.equal(reservations, 2);
   assert.equal(persisted, 1);
+  assert.equal(failures, 1);
   assert.equal(penalties, 1);
   for (const childRequest of childRequests) {
     assert.deepEqual(childRequest.outputSchema.properties.wave_digest, {
@@ -1326,12 +1348,15 @@ test("direct and Workflow provider terminal errors are non-retryable model failu
   assert.equal(direct.reservations.length, 1);
   assert.equal(direct.starts.length, 1);
   assert.equal(direct.persisted.length, 0);
+  assert.equal(direct.failures.length, 1);
 
   let workflowStarts = 0;
+  let workflowPenalties = 0;
   const workflowReservations = [];
   const workflow = workflowDeadlineHarness({
     timeoutMs: 1_000,
     maxAttempts: 2,
+    onPenalty: () => { workflowPenalties += 1; },
     onReservation: (_options, attempt) => workflowReservations.push(attempt),
     startWorkflow: ({ request, listeners, sessions }) => {
       workflowStarts += 1;
@@ -1357,6 +1382,8 @@ test("direct and Workflow provider terminal errors are non-retryable model failu
   );
   assert.deepEqual(workflowReservations, [1]);
   assert.equal(workflowStarts, 1);
+  assert.equal(workflowPenalties, 1);
+  assert.equal(workflow.failures.length, 1);
 });
 
 test("an unconsumed completed no-op turn cannot hide the prior consumed provider error", async () => {
@@ -1645,7 +1672,7 @@ test("Workflow cancelled, error, unknown, and legacy aborted stops are exact non
       code: expectedCode,
       reservations: [1],
       starts: 1,
-      penalties: 0,
+      penalties: expectedCode === "structured_child_model_error" ? 1 : 0,
       persistCalls: 0,
     }, stopReason);
   }

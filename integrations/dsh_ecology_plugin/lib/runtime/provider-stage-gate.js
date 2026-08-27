@@ -85,17 +85,34 @@ export class ProviderStageGate {
     minimumIntervalMs = 0,
     failureCooldownMs = 30_000,
     maxInFlight = MAX_STRUCTURED_STAGE_IN_FLIGHT,
+    adaptiveInitialInFlight = 8,
+    adaptiveFloor = 4,
+    adaptiveRecoverySuccesses = 32,
     now = Date.now,
     delay = sleep,
   } = {}) {
     this.minimumIntervalMs = boundedDelay(minimumIntervalMs, "minimumIntervalMs");
     this.failureCooldownMs = boundedDelay(failureCooldownMs, "failureCooldownMs");
     this.maxInFlight = boundedConcurrency(maxInFlight);
+    this.adaptiveInitialInFlight = Math.min(
+      this.maxInFlight,
+      boundedConcurrency(adaptiveInitialInFlight),
+    );
+    this.adaptiveFloor = Math.min(
+      this.maxInFlight,
+      boundedConcurrency(adaptiveFloor),
+    );
+    this.adaptiveRecoverySuccesses = boundedConcurrency(
+      adaptiveRecoverySuccesses,
+    );
     this.now = now;
     this.delay = delay;
     this.queues = new Map();
     this.active = new Map();
     this.nextAllowedAt = new Map();
+    this.effectiveLimits = new Map();
+    this.successStreaks = new Map();
+    this.lastReductionAt = new Map();
     this.pumping = new Set();
     this.records = new Set();
     this.closedRuns = new Set();
@@ -174,7 +191,9 @@ export class ProviderStageGate {
     if (this.pumping.has(providerKey)) return;
     this.pumping.add(providerKey);
     try {
-      while ((this.active.get(providerKey) || 0) < this.maxInFlight) {
+      while (
+        (this.active.get(providerKey) || 0) < this.#effectiveLimit(providerKey)
+      ) {
         const queue = this.queues.get(providerKey);
         if (!queue?.length) {
           this.queues.delete(providerKey);
@@ -253,22 +272,26 @@ export class ProviderStageGate {
           record.resolveCaller,
           record.rejectCaller,
         );
-        const release = () => {
+        const release = (succeeded) => {
           if (record.deadlineTimer !== null) clearTimeout(record.deadlineTimer);
           record.status = "completed";
           this.records.delete(record);
           const remaining = Math.max(0, (this.active.get(providerKey) || 1) - 1);
           if (remaining === 0) this.active.delete(providerKey);
           else this.active.set(providerKey, remaining);
+          if (succeeded) this.#reward(providerKey);
           void this.pump(providerKey);
         };
-        void operationPromise.then(release, release);
+        void operationPromise.then(
+          () => release(true),
+          () => release(false),
+        );
       }
     } finally {
       this.pumping.delete(providerKey);
       if (
         (this.queues.get(providerKey)?.length || 0) > 0
-        && (this.active.get(providerKey) || 0) < this.maxInFlight
+        && (this.active.get(providerKey) || 0) < this.#effectiveLimit(providerKey)
       ) {
         queueMicrotask(() => { void this.pump(providerKey); });
       }
@@ -278,10 +301,57 @@ export class ProviderStageGate {
   penalize(provider, milliseconds = this.failureCooldownMs) {
     const key = String(provider || "default");
     const cooldown = boundedDelay(milliseconds, "provider failure cooldown");
+    const now = this.now();
     this.nextAllowedAt.set(
       key,
-      Math.max(this.nextAllowedAt.get(key) || 0, this.now() + cooldown),
+      Math.max(this.nextAllowedAt.get(key) || 0, now + cooldown),
     );
+    const lastReduction = this.lastReductionAt.get(key);
+    if (lastReduction == null || now - lastReduction >= cooldown) {
+      const current = this.#effectiveLimit(key);
+      const observed = Math.max(
+        this.adaptiveFloor * 2,
+        this.active.get(key) || 0,
+      );
+      const reduced = Math.max(
+        this.adaptiveFloor,
+        Math.ceil(Math.min(current, observed) / 2),
+      );
+      this.effectiveLimits.set(key, Math.min(current, reduced));
+      this.successStreaks.set(key, 0);
+      this.lastReductionAt.set(key, now);
+    }
+  }
+
+  #effectiveLimit(providerKey) {
+    return this.effectiveLimits.get(providerKey) || this.adaptiveInitialInFlight;
+  }
+
+  #reward(providerKey) {
+    const current = this.#effectiveLimit(providerKey);
+    if (current >= this.maxInFlight) return;
+    if (this.now() < (this.nextAllowedAt.get(providerKey) || 0)) return;
+    const successes = (this.successStreaks.get(providerKey) || 0) + 1;
+    if (successes < this.adaptiveRecoverySuccesses) {
+      this.successStreaks.set(providerKey, successes);
+      return;
+    }
+    this.successStreaks.set(providerKey, 0);
+    this.effectiveLimits.set(providerKey, Math.min(this.maxInFlight, current + 1));
+  }
+
+  snapshot(provider) {
+    const key = String(provider || "default");
+    return Object.freeze({
+      maxInFlight: this.maxInFlight,
+      effectiveMaxInFlight: this.#effectiveLimit(key),
+      active: this.active.get(key) || 0,
+      queued: this.queues.get(key)?.length || 0,
+      cooldownRemainingMs: Math.max(
+        0,
+        (this.nextAllowedAt.get(key) || 0) - this.now(),
+      ),
+    });
   }
 
   cancelRun(runId) {

@@ -574,8 +574,13 @@
     if (state.activeRun.status === "paused") {
       if (!hasCapability("run.control")) { showToast("当前 DSH 会话未授予恢复运行的能力。"); return Promise.resolve(false); }
       var pausedRunId = state.activeRun.id;
+      var serverOwnedAutoProgress = runHasContinuousAutoProgress(state.activeRun);
       return controlRun("resume").then(function (resumed) {
         if (!resumed || !state.activeRun || state.activeRun.id !== pausedRunId || state.activeRun.status !== "running") { return false; }
+        // Resuming a durable continuous run re-queues its preserved checkpoint
+        // in the service. A second browser /advance races that worker and
+        // produces a misleading conflict toast even though recovery succeeded.
+        if (serverOwnedAutoProgress) { return true; }
         return advanceRun(options);
       });
     }

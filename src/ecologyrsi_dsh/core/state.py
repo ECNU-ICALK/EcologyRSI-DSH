@@ -2854,6 +2854,25 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 )
             ):
                 raise ValueError("DshChildLaunchReserved contract is invalid")
+        elif event.kind == "DshChildExecutionFailed":
+            identity = payload.get("identity")
+            if (
+                set(payload)
+                != {"schema_version", "identity", "error_code"}
+                or payload.get("schema_version")
+                != "ecologyrsi-dsh.child-execution-failed/1"
+                or not isinstance(identity, Mapping)
+                or set(identity)
+                != {"child_reservation_id", "stage", "idempotency_key"}
+                or any(
+                    not isinstance(identity.get(name), str)
+                    or not identity.get(name)
+                    for name in identity
+                )
+                or not isinstance(payload.get("error_code"), str)
+                or not payload.get("error_code")
+            ):
+                raise ValueError("DshChildExecutionFailed payload is invalid")
         elif event.kind == "GatewayRetryScheduled":
             # A gateway cooldown is an operational heartbeat only.  It must
             # survive replay so a browser refresh can distinguish a live run

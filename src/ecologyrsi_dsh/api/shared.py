@@ -48,6 +48,7 @@ _EVENT_TYPE_ALIASES = {
     "ExpertConsultationApplied": "expert_consultation.applied",
     "EvolutionStageRecorded": "stage.recorded",
     "GatewayRetryScheduled": "gateway.retry_scheduled",
+    "DshChildExecutionFailed": "dsh.child_execution_failed",
     "ModelUsageRecorded": "model.usage_recorded",
 }
 

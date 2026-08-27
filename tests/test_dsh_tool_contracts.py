@@ -1230,6 +1230,67 @@ class DshToolServiceTests(unittest.TestCase):
             members,
         )
 
+    def test_child_failure_settles_latest_reservation_idempotently(self) -> None:
+        fence = self.service.open_admission(
+            "run:tool-test",
+            3,
+            2,
+            role="sample-planner",
+            stage="sample.plan",
+            idempotency_key="sample-plan-failure",
+        )
+        request = _reservation_request(
+            fence.admission_id,
+            request_id="sample-failure-reservation-1",
+        )
+        request.update({
+            "role": "sample-planner",
+            "stage": "sample.plan",
+            "idempotency_key": "sample-plan-failure",
+        })
+        allocated = self.service.allocate_child_reservation(request)
+        failure = {
+            "run_id": "run:tool-test",
+            "stage": "sample.plan",
+            "idempotency_key": "sample-plan-failure",
+            "error_code": "rate_limit",
+        }
+
+        first = self.service.record_child_failure(failure)
+        second = self.service.record_child_failure(failure)
+
+        self.assertEqual(first, {"accepted": True, "already_settled": False})
+        self.assertEqual(second, {"accepted": True, "already_settled": True})
+        failed_events = [
+            event
+            for event in self.ledger.events("run:tool-test")
+            if event.kind == "DshChildExecutionFailed"
+        ]
+        self.assertEqual(len(failed_events), 1)
+        self.assertEqual(
+            failed_events[0].payload["identity"]["child_reservation_id"],
+            allocated["launch"]["reservation_id"],
+        )
+
+    def test_child_failure_rejects_unknown_or_invalid_request(self) -> None:
+        missing = self.service.record_child_failure({
+            "run_id": "run:tool-test",
+            "stage": "sample.plan",
+            "idempotency_key": "missing",
+            "error_code": "rate_limit",
+        })
+        self.assertEqual(
+            missing,
+            {"accepted": False, "reason": "launch_not_found"},
+        )
+        with self.assertRaisesRegex(ValueError, "normalized"):
+            self.service.record_child_failure({
+                "run_id": "run:tool-test",
+                "stage": "sample.plan",
+                "idempotency_key": "missing",
+                "error_code": "contains spaces",
+            })
+
     def test_armed_deadline_uses_only_monotonic_time_after_wall_rollback(self) -> None:
         monotonic_ms = [100]
         service = DshToolService(

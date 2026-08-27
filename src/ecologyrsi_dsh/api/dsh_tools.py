@@ -910,6 +910,82 @@ class DshToolService:
             "ledger_expected_revision": self.ledger.latest_seq(),
         }
 
+    def record_child_failure(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        expected_fields = {"run_id", "stage", "idempotency_key", "error_code"}
+        if not isinstance(request, Mapping) or set(request) != expected_fields:
+            raise ValueError("child failure request has an invalid shape")
+        for name in ("run_id", "stage", "idempotency_key", "error_code"):
+            if not isinstance(request[name], str) or not request[name].strip():
+                raise ValueError(f"child failure {name} must be non-empty text")
+        error_code = str(request["error_code"]).strip()
+        if len(error_code) > 80 or not error_code.replace("_", "").isalnum():
+            raise ValueError("child failure error_code must be normalized text")
+        run_id = str(request["run_id"])
+        with self._launch_lock:
+            while True:
+                events = self.ledger.events(run_id)
+                launch_event = next(
+                    (
+                        event
+                        for event in reversed(events)
+                        if event.kind == "DshChildLaunchReserved"
+                        and isinstance(event.payload.get("launch"), Mapping)
+                        and event.payload["launch"].get("stage") == request["stage"]
+                        and event.payload["launch"].get("idempotency_key")
+                        == request["idempotency_key"]
+                    ),
+                    None,
+                )
+                if launch_event is None:
+                    return {"accepted": False, "reason": "launch_not_found"}
+                launch = launch_event.payload["launch"]
+                reservation_id = str(launch.get("reservation_id") or "")
+                if any(
+                    (
+                        event.kind == "DshStructuredResultAccepted"
+                        and isinstance(event.payload.get("identity"), Mapping)
+                        and event.payload["identity"].get("child_reservation_id")
+                        == reservation_id
+                    )
+                    or (
+                        event.kind == "DshChildExecutionFailed"
+                        and isinstance(event.payload.get("identity"), Mapping)
+                        and event.payload["identity"].get("child_reservation_id")
+                        == reservation_id
+                    )
+                    for event in events
+                ):
+                    return {"accepted": True, "already_settled": True}
+                event_id = (
+                    f"{run_id}:dsh-child-failed:"
+                    f"{digest({'reservation_id': reservation_id})}"
+                )
+                try:
+                    self.ledger.append(
+                        run_id,
+                        "DshChildExecutionFailed",
+                        {
+                            "schema_version": (
+                                "ecologyrsi-dsh.child-execution-failed/1"
+                            ),
+                            "identity": {
+                                "child_reservation_id": reservation_id,
+                                "stage": request["stage"],
+                                "idempotency_key": request["idempotency_key"],
+                            },
+                            "error_code": error_code,
+                        },
+                        event_id=event_id,
+                        expected_run_seq=events[-1].seq,
+                    )
+                except ConcurrentRunMutationError:
+                    # Sample completions and sibling failures can append at
+                    # high frequency. Re-read so failure settlement is never
+                    # lost merely because another child won this CAS slot.
+                    continue
+                break
+        return {"accepted": True, "already_settled": False}
+
     def execute(self, tool_name: str, envelope: Mapping[str, Any]) -> dict[str, Any]:
         if set(envelope) != {"identity", "arguments"}:
             raise ValueError("DSH tool envelope must contain identity and arguments only")

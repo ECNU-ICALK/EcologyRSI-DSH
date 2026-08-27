@@ -88,7 +88,7 @@
     $("#pause-button").disabled = state.busy || !online || !canControl || !canPauseOrResume;
     $("#pause-button").textContent = state.pendingAction === "pause" ? "正在暂停" : state.pendingAction === "resume" ? "正在恢复" : hardTokenPause ? "预算已用尽" : retryCircuitPaused ? "恢复并重试检查点" : run && run.status === "paused" ? "恢复运行" : "暂停运行";
     $("#pause-button").title = hardTokenPause ? "冻结的逐样本智能体 Token 硬预算已耗尽，直接恢复不会产生新进展。" : retryCircuitPaused ? retryCircuitDetailText(run) : "";
-    $("#advance-button").textContent = autoAdvanceActive ? "自动推进中" : state.pendingAction === "resume" ? "正在恢复" : state.pendingAction === "advance" || state.pendingAction === "auto-advance" ? "正在执行" : retryCircuitPaused ? "检查后重试当前检查点" : pausedAdvance ? "恢复并执行下一轮" : waitingForAdvance && Number(run && run.generation || 0) === 0 ? "执行第一轮" : recoveringCurrentRound ? "继续当前轮次" : "执行下一轮";
+    $("#advance-button").textContent = autoAdvanceActive ? "自动推进中" : state.pendingAction === "resume" ? "正在恢复" : state.pendingAction === "advance" || state.pendingAction === "auto-advance" ? "正在执行" : retryCircuitPaused ? "检查后重试当前检查点" : pausedAdvance && runHasContinuousAutoProgress(run) ? "恢复并自动推进" : pausedAdvance ? "恢复并执行下一轮" : waitingForAdvance && Number(run && run.generation || 0) === 0 ? "执行第一轮" : recoveringCurrentRound ? "继续当前轮次" : "执行下一轮";
     $("#cancel-button").disabled = state.busy || !online || !canControl || !canCancel;
     $("#cancel-button").textContent = state.pendingAction === "cancel" ? "正在取消" : "取消运行";
     var terminal = runIsTerminal(run);
