@@ -107,6 +107,22 @@ from .state import (
     validate_evolution_stage_payload,
     validate_model_usage_payload,
 )
+from .trajectory import (
+    BatchEvaluation,
+    CandidateRevision,
+    FormalBatch,
+    FormalTrajectory,
+    GenerationComparison,
+    GenerationHoldout,
+    HoldoutArm,
+    HoldoutEvaluation,
+    LocalEditOutcome,
+    LocalEditProposalDecision,
+    RevisionAdvanceReason,
+    TrajectoryRevisionActivation,
+    TrajectoryStatus,
+)
+from ..evolution.schedule import OPTIMIZATION_PROTOCOL, OptimizationSchedule
 
 _AGGREGATE_EVALUATION_METRICS = frozenset(
     {
@@ -1923,6 +1939,14 @@ class EvolutionDirector:
         if candidate.generation != generation:
             raise ValueError("screening generation does not match candidate")
         if (
+            state.task_manifest.metadata.get("optimization_protocol")
+            == OPTIMIZATION_PROTOCOL
+            and state.initial_revision_for(candidate_id) is None
+        ):
+            raise ValueError(
+                "adaptive candidate screening requires frozen initial revision R0"
+            )
+        if (
             isinstance(score, bool)
             or not isinstance(score, (int, float))
             or not math.isfinite(float(score))
@@ -2029,6 +2053,496 @@ class EvolutionDirector:
             payload,
             event_id=f"{run_id}:generation:{generation}:formal-selection",
         )
+
+    def create_candidate_revision(
+        self, run_id: str, revision: CandidateRevision
+    ) -> CandidateRevision:
+        if not isinstance(revision, CandidateRevision):
+            raise TypeError("revision must be a CandidateRevision")
+        state = self.state(run_id)
+        self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
+        candidate = state.candidate(revision.candidate_id)
+        if (
+            revision.run_id != run_id
+            or revision.generation != candidate.generation
+        ):
+            raise ValueError("candidate revision ownership is invalid")
+        try:
+            existing = state.revision(revision.revision_id)
+        except KeyError:
+            existing = None
+        if existing is not None:
+            if existing.to_dict() != revision.to_dict():
+                raise ValueError("revision_id already belongs to another revision")
+            return existing
+        if revision.parent_revision_id is None:
+            if state.initial_revision_for(revision.candidate_id) is not None:
+                raise ValueError("candidate already has an initial revision")
+        else:
+            parent = state.revision(revision.parent_revision_id)
+            if parent.candidate_id != revision.candidate_id:
+                raise ValueError("revision parent belongs to another candidate")
+        self.ledger.append(
+            run_id,
+            "CandidateRevisionCreated",
+            {"revision": revision.to_dict()},
+            event_id=f"{run_id}:revision:{revision.revision_id}",
+        )
+        return revision
+
+    def start_formal_trajectory(
+        self,
+        run_id: str,
+        candidate_id: str,
+        initial_revision_id: str,
+        batch_count: int,
+    ) -> FormalTrajectory:
+        state = self.state(run_id)
+        self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
+        existing = state.trajectory_for(candidate_id)
+        if existing is not None:
+            if (
+                existing.initial_revision_id != initial_revision_id
+                or existing.batch_count != batch_count
+            ):
+                raise ValueError("candidate already has a different trajectory")
+            return existing
+        candidate = state.candidate(candidate_id)
+        formal = state.formal_selection_for(candidate.generation)
+        if formal is None or candidate_id not in formal.payload["selected_candidate_ids"]:
+            raise ValueError("formal trajectory requires frozen Top 2 selection")
+        revision = state.revision(initial_revision_id)
+        if revision.candidate_id != candidate_id:
+            raise ValueError("initial revision belongs to another candidate")
+        schedule = OptimizationSchedule.from_dict(
+            state.task_manifest.metadata["optimization_schedule"]
+        )
+        if batch_count != schedule.batch_count:
+            raise ValueError("trajectory batch_count differs from frozen schedule")
+        trajectory = FormalTrajectory(
+            trajectory_id=f"trajectory:{candidate_id}",
+            run_id=run_id,
+            generation=candidate.generation,
+            candidate_id=candidate_id,
+            initial_revision_id=initial_revision_id,
+            batch_count=batch_count,
+            status=TrajectoryStatus.RUNNING,
+        )
+        self.ledger.append(
+            run_id,
+            "FormalTrajectoryStarted",
+            {"trajectory": trajectory.to_dict()},
+            event_id=f"{run_id}:generation:{candidate.generation}:trajectory:{candidate_id}:started",
+        )
+        return trajectory
+
+    def start_formal_batch(
+        self,
+        run_id: str,
+        candidate_id: str,
+        revision_id: str,
+        batch_index: int,
+        cohort_digest: str,
+    ) -> FormalBatch:
+        state = self.state(run_id)
+        self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
+        existing = state.formal_batch_for(candidate_id, batch_index)
+        if existing is not None:
+            if (
+                existing.revision_id != revision_id
+                or existing.cohort_digest != cohort_digest
+            ):
+                raise ValueError("candidate batch already has different identity")
+            return existing
+        trajectory = state.trajectory_for(candidate_id)
+        if trajectory is None or trajectory.status is not TrajectoryStatus.RUNNING:
+            raise ValueError("formal trajectory is not running")
+        prior = [
+            item for item in state.formal_batches if item.candidate_id == candidate_id
+        ]
+        if isinstance(batch_index, bool) or batch_index != len(prior):
+            raise ValueError("formal batch must use the next batch index")
+        active_revision_id = (
+            trajectory.initial_revision_id
+            if batch_index == 0
+            else state.revision_activation_for(candidate_id, batch_index - 1).to_revision_id
+        )
+        if revision_id != active_revision_id:
+            raise ValueError("formal batch must use active revision")
+        revision = state.revision(revision_id)
+        schedule = OptimizationSchedule.from_dict(
+            state.task_manifest.metadata["optimization_schedule"]
+        )
+        batch = FormalBatch(
+            batch_id=f"batch:{candidate_id}:{batch_index}",
+            trajectory_id=trajectory.trajectory_id,
+            run_id=run_id,
+            generation=trajectory.generation,
+            candidate_id=candidate_id,
+            revision_id=revision_id,
+            revision_candidate_id=revision.candidate_id,
+            batch_index=batch_index,
+            batch_count=trajectory.batch_count,
+            cohort_digest=cohort_digest,
+            origin_count=schedule.local_batch_origin_count,
+        )
+        self.ledger.append(
+            run_id,
+            "FormalBatchStarted",
+            {"batch": batch.to_dict()},
+            event_id=f"{run_id}:generation:{trajectory.generation}:trajectory:{candidate_id}:batch:{batch_index}:started",
+        )
+        return batch
+
+    def record_formal_batch_evaluation(
+        self, run_id: str, evaluation: BatchEvaluation
+    ) -> BatchEvaluation:
+        if not isinstance(evaluation, BatchEvaluation):
+            raise TypeError("evaluation must be a BatchEvaluation")
+        state = self.state(run_id)
+        key_candidate = evaluation.scope.candidate_id
+        key_index = int(evaluation.scope.batch_index)
+        existing = state.batch_evaluation_for(key_candidate, key_index)
+        if existing is not None:
+            if existing.to_dict() != evaluation.to_dict():
+                raise ValueError("formal batch already has a different evaluation")
+            return existing
+        batch = state.formal_batch_for(key_candidate, key_index)
+        if batch is None:
+            raise ValueError("formal batch has not started")
+        if (
+            evaluation.scope.run_id != run_id
+            or evaluation.scope.candidate_revision_id != batch.revision_id
+            or evaluation.scope.cohort_digest != batch.cohort_digest
+            or evaluation.scope.origin_count != batch.origin_count
+        ):
+            raise ValueError("formal batch evaluation scope does not match batch")
+        self.ledger.append(
+            run_id,
+            "FormalBatchEvaluated",
+            {"evaluation": evaluation.to_dict()},
+            event_id=f"{run_id}:generation:{batch.generation}:trajectory:{key_candidate}:batch:{key_index}:evaluated",
+        )
+        return evaluation
+
+    def record_local_edit_proposal(
+        self, run_id: str, proposal_payload: Mapping[str, Any]
+    ) -> Event:
+        payload = dict(proposal_payload)
+        fields = {
+            "proposal_id",
+            "candidate_id",
+            "batch_index",
+            "evidence_scope_digest",
+            "decision",
+            "operations",
+        }
+        if set(payload) != fields:
+            raise ValueError("local edit proposal payload is invalid")
+        state = self.state(run_id)
+        candidate_id = str(payload["candidate_id"])
+        batch_index = payload["batch_index"]
+        if isinstance(batch_index, bool) or not isinstance(batch_index, int):
+            raise TypeError("batch_index must be an integer")
+        evaluation = state.batch_evaluation_for(candidate_id, batch_index)
+        decision = LocalEditProposalDecision(payload["decision"])
+        operations = payload["operations"]
+        schedule = OptimizationSchedule.from_dict(
+            state.task_manifest.metadata["optimization_schedule"]
+        )
+        if (
+            evaluation is None
+            or payload["evidence_scope_digest"] != evaluation.scope.scope_key
+            or not isinstance(operations, list)
+            or len(operations) > schedule.max_local_edits_per_batch
+            or (decision is LocalEditProposalDecision.KEEP and operations)
+        ):
+            raise ValueError("local edit proposal evidence or operation count is invalid")
+        return self.ledger.append(
+            run_id,
+            "LocalEditProposalRecorded",
+            payload,
+            event_id=f"{run_id}:generation:{evaluation.scope.generation}:trajectory:{candidate_id}:batch:{batch_index}:local-proposal",
+        )
+
+    def decide_local_edit(
+        self, run_id: str, decision_payload: Mapping[str, Any]
+    ) -> Event:
+        payload = dict(decision_payload)
+        fields = {
+            "proposal_id",
+            "candidate_id",
+            "batch_index",
+            "outcome",
+            "active_revision_id",
+        }
+        if set(payload) != fields:
+            raise ValueError("local edit decision payload is invalid")
+        state = self.state(run_id)
+        key = (payload["candidate_id"], payload["batch_index"])
+        proposal = next(
+            (
+                item
+                for item in state.local_edit_proposals
+                if (item["candidate_id"], item["batch_index"]) == key
+            ),
+            None,
+        )
+        outcome = LocalEditOutcome(payload["outcome"])
+        revision = state.revision(payload["active_revision_id"])
+        if (
+            proposal is None
+            or proposal["proposal_id"] != payload["proposal_id"]
+            or revision.candidate_id != payload["candidate_id"]
+            or (
+                proposal["decision"] == LocalEditProposalDecision.KEEP.value
+                and outcome is not LocalEditOutcome.KEPT
+            )
+        ):
+            raise ValueError("local edit decision is inconsistent")
+        return self.ledger.append(
+            run_id,
+            "LocalEditDecided",
+            payload,
+            event_id=f"{run_id}:generation:{revision.generation}:trajectory:{revision.candidate_id}:batch:{payload['batch_index']}:local-decision",
+        )
+
+    def advance_trajectory_revision(
+        self,
+        run_id: str,
+        candidate_id: str,
+        batch_index: int,
+        revision_id: str,
+        reason: RevisionAdvanceReason,
+    ) -> TrajectoryRevisionActivation:
+        state = self.state(run_id)
+        existing = state.revision_activation_for(candidate_id, batch_index)
+        if existing is not None:
+            if existing.to_revision_id != revision_id or existing.reason != reason:
+                raise ValueError("batch already has a different revision activation")
+            return existing
+        batch = state.formal_batch_for(candidate_id, batch_index)
+        evaluation = state.batch_evaluation_for(candidate_id, batch_index)
+        outcome = next(
+            (
+                item
+                for item in state.local_edit_outcomes
+                if item["candidate_id"] == candidate_id
+                and item["batch_index"] == batch_index
+            ),
+            None,
+        )
+        destination = state.revision(revision_id)
+        if batch is None or evaluation is None or outcome is None:
+            raise ValueError("batch must be evaluated and locally decided before advance")
+        if destination.candidate_id != candidate_id:
+            raise ValueError("active revision belongs to another candidate")
+        expected_reason = {
+            LocalEditOutcome.KEPT.value: RevisionAdvanceReason.KEPT,
+            LocalEditOutcome.APPLIED.value: RevisionAdvanceReason.LOCAL_EDIT_APPLIED,
+            LocalEditOutcome.REJECTED.value: RevisionAdvanceReason.LOCAL_EDIT_REJECTED,
+        }[outcome["outcome"]]
+        if reason != expected_reason or outcome["active_revision_id"] != revision_id:
+            raise ValueError("revision activation differs from local decision")
+        activation = TrajectoryRevisionActivation(
+            activation_id=f"activation:{candidate_id}:{batch_index}",
+            run_id=run_id,
+            generation=batch.generation,
+            candidate_id=candidate_id,
+            batch_index=batch_index,
+            from_revision_id=batch.revision_id,
+            to_revision_id=revision_id,
+            reason=reason,
+        )
+        self.ledger.append(
+            run_id,
+            "TrajectoryRevisionAdvanced",
+            {"activation": activation.to_dict()},
+            event_id=f"{run_id}:generation:{batch.generation}:trajectory:{candidate_id}:batch:{batch_index}:revision-advanced",
+        )
+        return activation
+
+    def complete_formal_trajectory(
+        self, run_id: str, candidate_id: str, final_revision_id: str
+    ) -> FormalTrajectory:
+        state = self.state(run_id)
+        trajectory = state.trajectory_for(candidate_id)
+        if trajectory is None:
+            raise ValueError("formal trajectory has not started")
+        if trajectory.status is TrajectoryStatus.COMPLETED:
+            if trajectory.final_revision_id != final_revision_id:
+                raise ValueError("trajectory already completed with another revision")
+            return trajectory
+        activations = [
+            item
+            for item in state.trajectory_revision_activations
+            if item.candidate_id == candidate_id
+        ]
+        if (
+            len(activations) != trajectory.batch_count
+            or state.revision_activation_for(
+                candidate_id, trajectory.batch_count - 1
+            ).to_revision_id
+            != final_revision_id
+        ):
+            raise ValueError("formal trajectory has incomplete batch activations")
+        self.ledger.append(
+            run_id,
+            "FormalTrajectoryCompleted",
+            {
+                "candidate_id": candidate_id,
+                "final_revision_id": final_revision_id,
+            },
+            event_id=f"{run_id}:generation:{trajectory.generation}:trajectory:{candidate_id}:completed",
+        )
+        return replace(
+            trajectory,
+            status=TrajectoryStatus.COMPLETED,
+            final_revision_id=final_revision_id,
+        )
+
+    def freeze_generation_holdout(
+        self,
+        run_id: str,
+        generation: int,
+        cohort_digest: str,
+        arm_bindings: Mapping[str, Mapping[str, str]],
+    ) -> GenerationHoldout:
+        state = self.state(run_id)
+        existing = state.generation_holdout_for(generation)
+        schedule = OptimizationSchedule.from_dict(
+            state.task_manifest.metadata["optimization_schedule"]
+        )
+        holdout = GenerationHoldout(
+            holdout_id=f"holdout:{generation}",
+            run_id=run_id,
+            generation=generation,
+            cohort_digest=cohort_digest,
+            origin_count=schedule.selection_holdout_origin_count,
+            arm_bindings=arm_bindings,
+        )
+        if existing is not None:
+            if existing.to_dict() != holdout.to_dict():
+                raise ValueError("generation already has a different holdout")
+            return existing
+        completed = [
+            item
+            for item in state.formal_trajectories
+            if item.generation == generation
+            and item.status is TrajectoryStatus.COMPLETED
+        ]
+        if len(completed) != 2:
+            raise ValueError("holdout requires two completed trajectories")
+        self.ledger.append(
+            run_id,
+            "GenerationHoldoutFrozen",
+            {"holdout": holdout.to_dict()},
+            event_id=f"{run_id}:generation:{generation}:holdout:frozen",
+        )
+        return holdout
+
+    def record_holdout_evaluation(
+        self, run_id: str, evaluation: HoldoutEvaluation
+    ) -> HoldoutEvaluation:
+        if not isinstance(evaluation, HoldoutEvaluation):
+            raise TypeError("evaluation must be a HoldoutEvaluation")
+        state = self.state(run_id)
+        arm = evaluation.scope.holdout_arm
+        assert arm is not None
+        existing = state.holdout_evaluation_for(evaluation.scope.generation, arm)
+        if existing is not None:
+            if existing.to_dict() != evaluation.to_dict():
+                raise ValueError("holdout arm already has a different evaluation")
+            return existing
+        holdout = state.generation_holdout_for(evaluation.scope.generation)
+        if holdout is None:
+            raise ValueError("generation holdout has not been frozen")
+        binding = holdout.arm_bindings[arm.value]
+        if (
+            evaluation.scope.cohort_digest != holdout.cohort_digest
+            or evaluation.scope.origin_count != holdout.origin_count
+            or evaluation.scope.candidate_id != binding["candidate_id"]
+            or evaluation.scope.candidate_revision_id
+            != binding["candidate_revision_id"]
+        ):
+            raise ValueError("holdout evaluation scope differs from frozen arm")
+        self.ledger.append(
+            run_id,
+            "HoldoutEvaluationRecorded",
+            {"evaluation": evaluation.to_dict()},
+            event_id=f"{run_id}:generation:{holdout.generation}:holdout:{arm.value}:evaluated",
+        )
+        return evaluation
+
+    def record_generation_comparison(
+        self, run_id: str, comparison: GenerationComparison
+    ) -> GenerationComparison:
+        if not isinstance(comparison, GenerationComparison):
+            raise TypeError("comparison must be a GenerationComparison")
+        state = self.state(run_id)
+        existing = state.comparison_for(comparison.generation)
+        if existing is not None:
+            if existing.to_dict() != comparison.to_dict():
+                raise ValueError("generation already has a different comparison")
+            return existing
+        for arm in HoldoutArm:
+            if state.holdout_evaluation_for(comparison.generation, arm) is None:
+                raise ValueError("generation comparison requires all three holdout arms")
+        self.ledger.append(
+            run_id,
+            "GenerationComparisonRecorded",
+            {"comparison": comparison.to_dict()},
+            event_id=f"{run_id}:generation:{comparison.generation}:comparison",
+        )
+        return comparison
+
+    def select_generation_champion(
+        self,
+        run_id: str,
+        generation: int,
+        selected_revision_id: str,
+        comparison_digest: str,
+    ) -> str:
+        state = self.state(run_id)
+        existing = state.effective_revision_for(generation)
+        if existing is not None:
+            if existing != selected_revision_id:
+                raise ValueError("generation already has another effective revision")
+            return existing
+        comparison = state.comparison_for(generation)
+        if (
+            comparison is None
+            or comparison.comparison_digest != comparison_digest
+            or comparison.selected_revision_id != selected_revision_id
+        ):
+            raise ValueError("champion must match deterministic Host comparison")
+        payload = {
+            "generation": generation,
+            "selected_candidate_id": comparison.selected_candidate_id,
+            "selected_revision_id": selected_revision_id,
+            "comparison_digest": comparison_digest,
+        }
+        champion = {
+            "generation": generation,
+            "selected_candidate_id": comparison.selected_candidate_id,
+            "selected_revision_id": selected_revision_id,
+        }
+        self.ledger.append_many(
+            run_id,
+            (
+                (
+                    "CandidateEffectiveRevisionFrozen",
+                    payload,
+                    f"{run_id}:generation:{generation}:effective-revision",
+                ),
+                (
+                    "GenerationChampionSelected",
+                    champion,
+                    f"{run_id}:generation:{generation}:champion",
+                ),
+            ),
+        )
+        return selected_revision_id
 
     def screen_out_candidate(
         self,

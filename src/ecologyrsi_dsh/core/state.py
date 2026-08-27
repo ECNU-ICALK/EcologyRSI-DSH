@@ -13,6 +13,7 @@ from ..evolution.analysis import (
     GenerationBatch,
     sample_update_windows_enabled,
 )
+from ..evolution.schedule import OPTIMIZATION_PROTOCOL, OptimizationSchedule
 from ..knowledge.algorithms import AlgorithmAttempt
 from ..knowledge.autonomous_cycle import (
     GenerationReflection,
@@ -56,6 +57,21 @@ from .screening import (
     SCREENING_SCHEMA_V2,
     screening_cohort_digest,
     screening_record_digest,
+)
+from .trajectory import (
+    BatchEvaluation,
+    CandidateRevision,
+    FormalBatch,
+    FormalTrajectory,
+    GenerationComparison,
+    GenerationHoldout,
+    HoldoutArm,
+    HoldoutEvaluation,
+    LocalEditOutcome,
+    LocalEditProposalDecision,
+    RevisionAdvanceReason,
+    TrajectoryRevisionActivation,
+    TrajectoryStatus,
 )
 
 DSH_NATIVE_EVOLUTION_PROTOCOL = "dsh_native_plugin_evolution@1"
@@ -1201,6 +1217,17 @@ class RunState:
     candidate_screening_events: tuple[Event, ...] = ()
     formal_selection_events: tuple[Event, ...] = ()
     screened_out_events: tuple[Event, ...] = ()
+    candidate_revisions: tuple[CandidateRevision, ...] = ()
+    formal_trajectories: tuple[FormalTrajectory, ...] = ()
+    formal_batches: tuple[FormalBatch, ...] = ()
+    formal_batch_evaluations: tuple[BatchEvaluation, ...] = ()
+    local_edit_proposals: tuple[Mapping[str, Any], ...] = ()
+    local_edit_outcomes: tuple[Mapping[str, Any], ...] = ()
+    trajectory_revision_activations: tuple[TrajectoryRevisionActivation, ...] = ()
+    generation_holdouts: tuple[GenerationHoldout, ...] = ()
+    holdout_evaluations: tuple[HoldoutEvaluation, ...] = ()
+    generation_comparisons: tuple[GenerationComparison, ...] = ()
+    effective_revision_bindings: tuple[Mapping[str, Any], ...] = ()
 
     def proposal(self, proposal_id: str) -> Proposal:
         for item in self.proposals:
@@ -1234,6 +1261,116 @@ class RunState:
             ),
             None,
         )
+
+    def revision(self, revision_id: str) -> CandidateRevision:
+        for item in self.candidate_revisions:
+            if item.revision_id == revision_id:
+                return item
+        raise KeyError(f"unknown candidate revision: {revision_id}")
+
+    def initial_revision_for(self, candidate_id: str) -> CandidateRevision | None:
+        return next(
+            (
+                item
+                for item in self.candidate_revisions
+                if item.candidate_id == candidate_id
+                and item.parent_revision_id is None
+            ),
+            None,
+        )
+
+    def trajectory_for(self, candidate_id: str) -> FormalTrajectory | None:
+        return next(
+            (
+                item
+                for item in reversed(self.formal_trajectories)
+                if item.candidate_id == candidate_id
+            ),
+            None,
+        )
+
+    def formal_batch_for(
+        self, candidate_id: str, batch_index: int
+    ) -> FormalBatch | None:
+        return next(
+            (
+                item
+                for item in reversed(self.formal_batches)
+                if item.candidate_id == candidate_id
+                and item.batch_index == batch_index
+            ),
+            None,
+        )
+
+    def batch_evaluation_for(
+        self, candidate_id: str, batch_index: int
+    ) -> BatchEvaluation | None:
+        return next(
+            (
+                item
+                for item in reversed(self.formal_batch_evaluations)
+                if item.scope.candidate_id == candidate_id
+                and item.scope.batch_index == batch_index
+            ),
+            None,
+        )
+
+    def revision_activation_for(
+        self, candidate_id: str, batch_index: int
+    ) -> TrajectoryRevisionActivation | None:
+        return next(
+            (
+                item
+                for item in reversed(self.trajectory_revision_activations)
+                if item.candidate_id == candidate_id
+                and item.batch_index == batch_index
+            ),
+            None,
+        )
+
+    def generation_holdout_for(self, generation: int) -> GenerationHoldout | None:
+        return next(
+            (
+                item
+                for item in reversed(self.generation_holdouts)
+                if item.generation == generation
+            ),
+            None,
+        )
+
+    def holdout_evaluation_for(
+        self, generation: int, arm: HoldoutArm
+    ) -> HoldoutEvaluation | None:
+        return next(
+            (
+                item
+                for item in reversed(self.holdout_evaluations)
+                if item.scope.generation == generation
+                and item.scope.holdout_arm == arm
+            ),
+            None,
+        )
+
+    def comparison_for(self, generation: int) -> GenerationComparison | None:
+        return next(
+            (
+                item
+                for item in reversed(self.generation_comparisons)
+                if item.generation == generation
+            ),
+            None,
+        )
+
+    def effective_revision_for(self, generation: int) -> str | None:
+        binding = next(
+            (
+                item
+                for item in reversed(self.effective_revision_bindings)
+                if item.get("generation") == generation
+            ),
+            None,
+        )
+        return str(binding["selected_revision_id"]) if binding is not None else None
 
     def evaluation_for(self, candidate_id: str) -> Evaluation | None:
         return next(
@@ -1472,6 +1609,20 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
     candidate_screening_events: dict[tuple[int, str], Event] = {}
     formal_selection_events: dict[int, Event] = {}
     screened_out_events: dict[tuple[int, str], Event] = {}
+    candidate_revisions: dict[str, CandidateRevision] = {}
+    formal_trajectories: dict[str, FormalTrajectory] = {}
+    formal_batches: dict[tuple[str, int], FormalBatch] = {}
+    formal_batch_evaluations: dict[tuple[str, int], BatchEvaluation] = {}
+    local_edit_proposals: dict[tuple[str, int], dict[str, Any]] = {}
+    local_edit_outcomes: dict[tuple[str, int], dict[str, Any]] = {}
+    trajectory_revision_activations: dict[
+        tuple[str, int], TrajectoryRevisionActivation
+    ] = {}
+    generation_holdouts: dict[int, GenerationHoldout] = {}
+    holdout_evaluations: dict[tuple[int, HoldoutArm], HoldoutEvaluation] = {}
+    generation_comparisons: dict[int, GenerationComparison] = {}
+    effective_revision_bindings: dict[int, dict[str, Any]] = {}
+    champion_generations: set[int] = set()
     dsh_prediction_tool_events: dict[str, tuple[int, dict[str, Any]]] = {}
     formal_stage_started = False
     active_gateway_circuit_pause: Event | None = None
@@ -1790,6 +1941,18 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 raise ValueError("screening candidate is missing")
             if candidate.generation != generation:
                 raise ValueError("screening generation does not match candidate")
+            if (
+                task.metadata.get("optimization_protocol")
+                == OPTIMIZATION_PROTOCOL
+                and not any(
+                    revision.candidate_id == candidate_id
+                    and revision.parent_revision_id is None
+                    for revision in candidate_revisions.values()
+                )
+            ):
+                raise ValueError(
+                    "adaptive candidate screening requires frozen initial revision R0"
+                )
             score = payload["score"]
             constraint_violations = payload["constraint_violations"]
             origin_count = payload["origin_count"]
@@ -2632,6 +2795,352 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 raise ValueError("GatewayRetryScheduled generation must be non-negative")
             if not isinstance(payload.get("retry_at"), str) or not payload["retry_at"].strip():
                 raise ValueError("GatewayRetryScheduled retry_at must be text")
+        elif event.kind == "CandidateRevisionCreated":
+            if set(payload) != {"revision"}:
+                raise ValueError("CandidateRevisionCreated payload is invalid")
+            revision = CandidateRevision.from_dict(payload["revision"])
+            candidate = candidates.get(revision.candidate_id)
+            if (
+                revision.run_id != run.run_id
+                or candidate is None
+                or candidate.generation != revision.generation
+            ):
+                raise ValueError("candidate revision ownership is invalid")
+            existing = candidate_revisions.get(revision.revision_id)
+            if existing is not None and existing.to_dict() != revision.to_dict():
+                raise ValueError("conflicting candidate revision")
+            if existing is None:
+                if revision.parent_revision_id is None:
+                    if any(
+                        item.candidate_id == revision.candidate_id
+                        and item.parent_revision_id is None
+                        for item in candidate_revisions.values()
+                    ):
+                        raise ValueError("candidate already has an initial revision")
+                else:
+                    parent = candidate_revisions.get(revision.parent_revision_id)
+                    if parent is None or parent.candidate_id != revision.candidate_id:
+                        raise ValueError("revision parent is missing or cross-candidate")
+                candidate_revisions[revision.revision_id] = revision
+        elif event.kind == "FormalTrajectoryStarted":
+            if set(payload) != {"trajectory"}:
+                raise ValueError("FormalTrajectoryStarted payload is invalid")
+            trajectory = FormalTrajectory.from_dict(payload["trajectory"])
+            if trajectory.status is not TrajectoryStatus.RUNNING:
+                raise ValueError("started formal trajectory must be running")
+            formal = formal_selection_events.get(trajectory.generation)
+            if (
+                formal is None
+                or trajectory.candidate_id
+                not in formal.payload["selected_candidate_ids"]
+            ):
+                raise ValueError("formal trajectory requires frozen Top 2 selection")
+            revision = candidate_revisions.get(trajectory.initial_revision_id)
+            if revision is None or revision.candidate_id != trajectory.candidate_id:
+                raise ValueError("formal trajectory initial revision is invalid")
+            schedule = OptimizationSchedule.from_dict(
+                task.metadata["optimization_schedule"]
+            )
+            if trajectory.batch_count != schedule.batch_count:
+                raise ValueError("formal trajectory batch_count differs from schedule")
+            existing = formal_trajectories.get(trajectory.candidate_id)
+            if existing is not None and existing.to_dict() != trajectory.to_dict():
+                raise ValueError("conflicting formal trajectory")
+            formal_trajectories.setdefault(trajectory.candidate_id, trajectory)
+        elif event.kind == "FormalBatchStarted":
+            if set(payload) != {"batch"}:
+                raise ValueError("FormalBatchStarted payload is invalid")
+            batch = FormalBatch.from_dict(payload["batch"])
+            trajectory = formal_trajectories.get(batch.candidate_id)
+            if (
+                trajectory is None
+                or trajectory.status is not TrajectoryStatus.RUNNING
+                or trajectory.trajectory_id != batch.trajectory_id
+                or trajectory.generation != batch.generation
+                or trajectory.batch_count != batch.batch_count
+            ):
+                raise ValueError("formal batch trajectory is invalid")
+            prior_batches = [
+                item
+                for (candidate_id, _index), item in formal_batches.items()
+                if candidate_id == batch.candidate_id
+            ]
+            expected_index = len(prior_batches)
+            if batch.batch_index != expected_index:
+                raise ValueError("formal batch must use the next batch index")
+            active_revision_id = (
+                trajectory.initial_revision_id
+                if batch.batch_index == 0
+                else trajectory_revision_activations[
+                    (batch.candidate_id, batch.batch_index - 1)
+                ].to_revision_id
+            )
+            if batch.revision_id != active_revision_id:
+                raise ValueError("formal batch revision is not the active revision")
+            formal_batches[(batch.candidate_id, batch.batch_index)] = batch
+        elif event.kind == "FormalBatchEvaluated":
+            if set(payload) != {"evaluation"}:
+                raise ValueError("FormalBatchEvaluated payload is invalid")
+            evaluation = BatchEvaluation.from_dict(payload["evaluation"])
+            key = (evaluation.scope.candidate_id, int(evaluation.scope.batch_index))
+            batch = formal_batches.get(key)
+            if (
+                batch is None
+                or evaluation.scope.run_id != batch.run_id
+                or evaluation.scope.generation != batch.generation
+                or evaluation.scope.candidate_revision_id != batch.revision_id
+                or evaluation.scope.cohort_digest != batch.cohort_digest
+                or evaluation.scope.origin_count != batch.origin_count
+            ):
+                raise ValueError("formal batch evaluation scope does not match batch")
+            existing = formal_batch_evaluations.get(key)
+            if existing is not None and existing.to_dict() != evaluation.to_dict():
+                raise ValueError("conflicting formal batch evaluation")
+            formal_batch_evaluations.setdefault(key, evaluation)
+        elif event.kind == "LocalEditProposalRecorded":
+            fields = {
+                "proposal_id",
+                "candidate_id",
+                "batch_index",
+                "evidence_scope_digest",
+                "decision",
+                "operations",
+            }
+            if set(payload) != fields:
+                raise ValueError("local edit proposal payload is invalid")
+            candidate_id = payload["candidate_id"]
+            batch_index = payload["batch_index"]
+            if (
+                not isinstance(candidate_id, str)
+                or not candidate_id
+                or isinstance(batch_index, bool)
+                or not isinstance(batch_index, int)
+                or batch_index < 0
+            ):
+                raise ValueError("local edit proposal scope is invalid")
+            key = (candidate_id, batch_index)
+            evaluation = formal_batch_evaluations.get(key)
+            decision = LocalEditProposalDecision(payload["decision"])
+            operations = payload["operations"]
+            if (
+                evaluation is None
+                or payload["evidence_scope_digest"] != evaluation.scope.scope_key
+                or not isinstance(operations, list)
+                or (decision is LocalEditProposalDecision.KEEP and operations)
+            ):
+                raise ValueError("local edit proposal evidence is invalid")
+            normalized = dict(payload)
+            existing = local_edit_proposals.get(key)
+            if existing is not None and canonical_json(existing) != canonical_json(normalized):
+                raise ValueError("conflicting local edit proposal")
+            local_edit_proposals.setdefault(key, normalized)
+        elif event.kind == "LocalEditDecided":
+            fields = {
+                "proposal_id",
+                "candidate_id",
+                "batch_index",
+                "outcome",
+                "active_revision_id",
+            }
+            if set(payload) != fields:
+                raise ValueError("local edit outcome payload is invalid")
+            key = (payload["candidate_id"], payload["batch_index"])
+            proposal = local_edit_proposals.get(key)
+            outcome = LocalEditOutcome(payload["outcome"])
+            revision = candidate_revisions.get(payload["active_revision_id"])
+            if (
+                proposal is None
+                or proposal["proposal_id"] != payload["proposal_id"]
+                or revision is None
+                or revision.candidate_id != payload["candidate_id"]
+                or (
+                    proposal["decision"] == LocalEditProposalDecision.KEEP.value
+                    and outcome is not LocalEditOutcome.KEPT
+                )
+            ):
+                raise ValueError("local edit outcome is inconsistent")
+            normalized = dict(payload)
+            existing = local_edit_outcomes.get(key)
+            if existing is not None and canonical_json(existing) != canonical_json(normalized):
+                raise ValueError("conflicting local edit outcome")
+            local_edit_outcomes.setdefault(key, normalized)
+        elif event.kind == "TrajectoryRevisionAdvanced":
+            if set(payload) != {"activation"}:
+                raise ValueError("TrajectoryRevisionAdvanced payload is invalid")
+            activation = TrajectoryRevisionActivation.from_dict(payload["activation"])
+            key = (activation.candidate_id, activation.batch_index)
+            batch = formal_batches.get(key)
+            outcome = local_edit_outcomes.get(key)
+            destination = candidate_revisions.get(activation.to_revision_id)
+            if (
+                batch is None
+                or outcome is None
+                or key not in formal_batch_evaluations
+                or activation.run_id != batch.run_id
+                or activation.generation != batch.generation
+                or activation.from_revision_id != batch.revision_id
+                or destination is None
+                or destination.candidate_id != activation.candidate_id
+                or outcome["active_revision_id"] != activation.to_revision_id
+            ):
+                raise ValueError("trajectory revision activation is invalid")
+            expected_reason = {
+                LocalEditOutcome.KEPT.value: RevisionAdvanceReason.KEPT,
+                LocalEditOutcome.APPLIED.value: RevisionAdvanceReason.LOCAL_EDIT_APPLIED,
+                LocalEditOutcome.REJECTED.value: RevisionAdvanceReason.LOCAL_EDIT_REJECTED,
+            }[outcome["outcome"]]
+            if activation.reason is not expected_reason:
+                raise ValueError("trajectory revision activation reason is inconsistent")
+            if activation.reason is RevisionAdvanceReason.LOCAL_EDIT_APPLIED:
+                if destination.source_batch_index != activation.batch_index:
+                    raise ValueError("new revision source batch is inconsistent")
+            elif activation.to_revision_id != activation.from_revision_id:
+                raise ValueError("kept/rejected edit cannot change active revision")
+            existing = trajectory_revision_activations.get(key)
+            if existing is not None and existing.to_dict() != activation.to_dict():
+                raise ValueError("conflicting trajectory revision activation")
+            trajectory_revision_activations.setdefault(key, activation)
+        elif event.kind == "FormalTrajectoryCompleted":
+            if set(payload) != {"candidate_id", "final_revision_id"}:
+                raise ValueError("FormalTrajectoryCompleted payload is invalid")
+            candidate_id = payload["candidate_id"]
+            trajectory = formal_trajectories.get(candidate_id)
+            if trajectory is None or trajectory.status is not TrajectoryStatus.RUNNING:
+                raise ValueError("formal trajectory is not running")
+            required = {
+                (candidate_id, index) for index in range(trajectory.batch_count)
+            }
+            if not (
+                required <= set(formal_batches)
+                and required <= set(formal_batch_evaluations)
+                and required <= set(local_edit_proposals)
+                and required <= set(local_edit_outcomes)
+                and required <= set(trajectory_revision_activations)
+            ):
+                raise ValueError("formal trajectory has incomplete batches")
+            final_revision_id = trajectory_revision_activations[
+                (candidate_id, trajectory.batch_count - 1)
+            ].to_revision_id
+            if payload["final_revision_id"] != final_revision_id:
+                raise ValueError("formal trajectory final revision is invalid")
+            formal_trajectories[candidate_id] = replace(
+                trajectory,
+                status=TrajectoryStatus.COMPLETED,
+                final_revision_id=final_revision_id,
+            )
+        elif event.kind == "GenerationHoldoutFrozen":
+            if set(payload) != {"holdout"}:
+                raise ValueError("GenerationHoldoutFrozen payload is invalid")
+            holdout = GenerationHoldout.from_dict(payload["holdout"])
+            completed = [
+                item
+                for item in formal_trajectories.values()
+                if item.generation == holdout.generation
+                and item.status is TrajectoryStatus.COMPLETED
+            ]
+            if len(completed) != 2:
+                raise ValueError("holdout requires two completed trajectories")
+            formal = formal_selection_events.get(holdout.generation)
+            finalist_candidates = {
+                holdout.arm_bindings[arm.value]["candidate_id"]
+                for arm in (HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2)
+            }
+            if formal is None or finalist_candidates != set(
+                formal.payload["selected_candidate_ids"]
+            ):
+                raise ValueError("holdout finalist arms do not match frozen Top 2")
+            for binding in holdout.arm_bindings.values():
+                revision = candidate_revisions.get(binding["candidate_revision_id"])
+                if revision is None or revision.candidate_id != binding["candidate_id"]:
+                    raise ValueError("holdout arm revision binding is invalid")
+            existing = generation_holdouts.get(holdout.generation)
+            if existing is not None and existing.to_dict() != holdout.to_dict():
+                raise ValueError("conflicting generation holdout")
+            generation_holdouts.setdefault(holdout.generation, holdout)
+        elif event.kind == "HoldoutEvaluationRecorded":
+            if set(payload) != {"evaluation"}:
+                raise ValueError("HoldoutEvaluationRecorded payload is invalid")
+            evaluation = HoldoutEvaluation.from_dict(payload["evaluation"])
+            arm = evaluation.scope.holdout_arm
+            assert arm is not None
+            holdout = generation_holdouts.get(evaluation.scope.generation)
+            binding = holdout.arm_bindings[arm.value] if holdout is not None else None
+            if (
+                holdout is None
+                or evaluation.scope.run_id != holdout.run_id
+                or evaluation.scope.cohort_digest != holdout.cohort_digest
+                or evaluation.scope.origin_count != holdout.origin_count
+                or binding is None
+                or evaluation.scope.candidate_id != binding["candidate_id"]
+                or evaluation.scope.candidate_revision_id
+                != binding["candidate_revision_id"]
+            ):
+                raise ValueError("holdout evaluation scope is invalid")
+            key = (holdout.generation, arm)
+            existing = holdout_evaluations.get(key)
+            if existing is not None and existing.to_dict() != evaluation.to_dict():
+                raise ValueError("conflicting holdout evaluation")
+            holdout_evaluations.setdefault(key, evaluation)
+        elif event.kind == "GenerationComparisonRecorded":
+            if set(payload) != {"comparison"}:
+                raise ValueError("GenerationComparisonRecorded payload is invalid")
+            comparison = GenerationComparison.from_dict(payload["comparison"])
+            holdout = generation_holdouts.get(comparison.generation)
+            if holdout is None or holdout.cohort_digest != comparison.cohort_digest:
+                raise ValueError("generation comparison holdout is missing")
+            persisted = {
+                holdout_evaluations.get((comparison.generation, arm)).evaluation_id
+                if holdout_evaluations.get((comparison.generation, arm)) is not None
+                else None
+                for arm in HoldoutArm
+            }
+            if persisted != {
+                item.evaluation_id for item in comparison.holdout_evaluations
+            }:
+                raise ValueError("generation comparison requires all three holdout arms")
+            existing = generation_comparisons.get(comparison.generation)
+            if existing is not None and existing.to_dict() != comparison.to_dict():
+                raise ValueError("conflicting generation comparison")
+            generation_comparisons.setdefault(comparison.generation, comparison)
+        elif event.kind == "CandidateEffectiveRevisionFrozen":
+            fields = {
+                "generation",
+                "selected_candidate_id",
+                "selected_revision_id",
+                "comparison_digest",
+            }
+            if set(payload) != fields:
+                raise ValueError("effective revision payload is invalid")
+            generation = payload["generation"]
+            comparison = generation_comparisons.get(generation)
+            if (
+                comparison is None
+                or payload["comparison_digest"] != comparison.comparison_digest
+                or payload["selected_candidate_id"]
+                != comparison.selected_candidate_id
+                or payload["selected_revision_id"]
+                != comparison.selected_revision_id
+            ):
+                raise ValueError("effective revision differs from Host comparison")
+            existing = effective_revision_bindings.get(generation)
+            if existing is not None and canonical_json(existing) != canonical_json(payload):
+                raise ValueError("conflicting effective revision")
+            effective_revision_bindings.setdefault(generation, dict(payload))
+        elif event.kind == "GenerationChampionSelected":
+            fields = {"generation", "selected_candidate_id", "selected_revision_id"}
+            if set(payload) != fields:
+                raise ValueError("generation champion payload is invalid")
+            binding = effective_revision_bindings.get(payload["generation"])
+            if (
+                binding is None
+                or payload["selected_candidate_id"]
+                != binding["selected_candidate_id"]
+                or payload["selected_revision_id"]
+                != binding["selected_revision_id"]
+                or payload["generation"] in champion_generations
+            ):
+                raise ValueError("generation champion requires effective revision")
+            champion_generations.add(payload["generation"])
         elif event.kind == "ModelUsageRecorded":
             validate_model_usage_payload(payload)
         elif event.kind == "EvaluationProgressRecorded":
@@ -2727,6 +3236,19 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
         candidate_screening_events=tuple(candidate_screening_events.values()),
         formal_selection_events=tuple(formal_selection_events.values()),
         screened_out_events=tuple(screened_out_events.values()),
+        candidate_revisions=tuple(candidate_revisions.values()),
+        formal_trajectories=tuple(formal_trajectories.values()),
+        formal_batches=tuple(formal_batches.values()),
+        formal_batch_evaluations=tuple(formal_batch_evaluations.values()),
+        local_edit_proposals=tuple(local_edit_proposals.values()),
+        local_edit_outcomes=tuple(local_edit_outcomes.values()),
+        trajectory_revision_activations=tuple(
+            trajectory_revision_activations.values()
+        ),
+        generation_holdouts=tuple(generation_holdouts.values()),
+        holdout_evaluations=tuple(holdout_evaluations.values()),
+        generation_comparisons=tuple(generation_comparisons.values()),
+        effective_revision_bindings=tuple(effective_revision_bindings.values()),
     )
 
 

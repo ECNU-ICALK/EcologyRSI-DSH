@@ -61,6 +61,18 @@ class EventEndpointsMixin:
             "GenerationAnalyzed": "本轮候选结果与弱点已统一分析。",
             "GenerationReflected": "反思模型已基于本轮聚合结果生成下一轮多套方向。",
             "GenerationChampionSelected": "本轮单一冠军选择已完成。",
+            "CandidateRevisionCreated": "候选方案修订已冻结。",
+            "FormalTrajectoryStarted": "Top 2 候选的正式轨迹已启动。",
+            "FormalBatchStarted": "正式轨迹的下一局部批次已启动。",
+            "FormalBatchEvaluated": "局部批次评测已完成。",
+            "LocalEditProposalRecorded": "局部小改动提案已记录。",
+            "LocalEditDecided": "局部小改动的宿主决策已记录。",
+            "TrajectoryRevisionAdvanced": "下一批次的有效修订已冻结。",
+            "FormalTrajectoryCompleted": "Top 2 候选的正式轨迹已完成。",
+            "GenerationHoldoutFrozen": "本轮独立留出评测队列已冻结。",
+            "HoldoutEvaluationRecorded": "本轮一个留出评测臂已完成。",
+            "GenerationComparisonRecorded": "本轮三臂留出比较已完成。",
+            "CandidateEffectiveRevisionFrozen": "本轮有效修订已冻结。",
             "ProposalSubmitted": "变更提案已提交。",
             "CandidateSpawned": "候选方案已生成。",
             "CandidateFailed": "候选方案训练或评测失败。",
@@ -232,11 +244,174 @@ class EventEndpointsMixin:
                 {
                     "generation": payload.get("generation"),
                     "outcome": payload.get("outcome"),
-                    "champion_candidate_id": payload.get("champion_candidate_id"),
+                    "champion_candidate_id": payload.get(
+                        "champion_candidate_id",
+                        payload.get("selected_candidate_id"),
+                    ),
+                    "selected_candidate_id": payload.get("selected_candidate_id"),
+                    "selected_revision_id": payload.get("selected_revision_id"),
                     "incumbent_after_candidate_id": payload.get("incumbent_after_candidate_id"),
                     "selection_reason": redact_sensitive_text(
                         str(payload.get("selection_reason", "")), limit=500
                     ),
+                }
+            )
+        elif event.kind == "CandidateRevisionCreated":
+            revision = payload.get("revision", {})
+            public_payload.update(
+                {
+                    "generation": revision.get("generation"),
+                    "candidate_id": revision.get("candidate_id"),
+                    "revision_id": revision.get("revision_id"),
+                    "parent_revision_id": revision.get("parent_revision_id"),
+                    "source_batch_index": revision.get("source_batch_index"),
+                    "status": revision.get("status"),
+                    "revision_digest": revision.get("revision_digest"),
+                    "genome_digest": revision.get("genome_digest"),
+                    "behavior_digest": revision.get("behavior_digest"),
+                    "mutation_digest": revision.get("mutation_digest"),
+                }
+            )
+        elif event.kind == "FormalTrajectoryStarted":
+            trajectory = payload.get("trajectory", {})
+            public_payload.update(
+                {
+                    "trajectory_id": trajectory.get("trajectory_id"),
+                    "generation": trajectory.get("generation"),
+                    "candidate_id": trajectory.get("candidate_id"),
+                    "initial_revision_id": trajectory.get("initial_revision_id"),
+                    "batch_count": trajectory.get("batch_count"),
+                    "status": trajectory.get("status"),
+                }
+            )
+        elif event.kind == "FormalBatchStarted":
+            batch = payload.get("batch", {})
+            public_payload.update(
+                {
+                    "batch_id": batch.get("batch_id"),
+                    "trajectory_id": batch.get("trajectory_id"),
+                    "generation": batch.get("generation"),
+                    "candidate_id": batch.get("candidate_id"),
+                    "revision_id": batch.get("revision_id"),
+                    "batch_index": batch.get("batch_index"),
+                    "batch_count": batch.get("batch_count"),
+                    "cohort_digest": batch.get("cohort_digest"),
+                    "origin_count": batch.get("origin_count"),
+                }
+            )
+        elif event.kind == "FormalBatchEvaluated":
+            evaluation = payload.get("evaluation", {})
+            scope = evaluation.get("scope", {})
+            public_payload.update(
+                {
+                    "evaluation_id": evaluation.get("evaluation_id"),
+                    "generation": scope.get("generation"),
+                    "candidate_id": scope.get("candidate_id"),
+                    "candidate_revision_id": scope.get("candidate_revision_id"),
+                    "batch_index": scope.get("batch_index"),
+                    "origin_count": scope.get("origin_count"),
+                    "cohort_digest": scope.get("cohort_digest"),
+                    "score": evaluation.get("score"),
+                    "passed": evaluation.get("passed"),
+                    "evaluator_digest": evaluation.get("evaluator_digest"),
+                }
+            )
+        elif event.kind == "LocalEditProposalRecorded":
+            operations = payload.get("operations")
+            public_payload.update(
+                {
+                    "proposal_id": payload.get("proposal_id"),
+                    "candidate_id": payload.get("candidate_id"),
+                    "batch_index": payload.get("batch_index"),
+                    "evidence_scope_digest": payload.get("evidence_scope_digest"),
+                    "decision": payload.get("decision"),
+                    "operation_count": len(operations)
+                    if isinstance(operations, list)
+                    else 0,
+                }
+            )
+        elif event.kind == "LocalEditDecided":
+            public_payload.update(
+                {
+                    "proposal_id": payload.get("proposal_id"),
+                    "candidate_id": payload.get("candidate_id"),
+                    "batch_index": payload.get("batch_index"),
+                    "outcome": payload.get("outcome"),
+                    "active_revision_id": payload.get("active_revision_id"),
+                }
+            )
+        elif event.kind == "TrajectoryRevisionAdvanced":
+            activation = payload.get("activation", {})
+            public_payload.update(
+                {
+                    "activation_id": activation.get("activation_id"),
+                    "generation": activation.get("generation"),
+                    "candidate_id": activation.get("candidate_id"),
+                    "batch_index": activation.get("batch_index"),
+                    "from_revision_id": activation.get("from_revision_id"),
+                    "to_revision_id": activation.get("to_revision_id"),
+                    "reason": activation.get("reason"),
+                }
+            )
+        elif event.kind == "FormalTrajectoryCompleted":
+            public_payload.update(
+                {
+                    "candidate_id": payload.get("candidate_id"),
+                    "final_revision_id": payload.get("final_revision_id"),
+                }
+            )
+        elif event.kind == "GenerationHoldoutFrozen":
+            holdout = payload.get("holdout", {})
+            arm_bindings = holdout.get("arm_bindings")
+            public_payload.update(
+                {
+                    "holdout_id": holdout.get("holdout_id"),
+                    "generation": holdout.get("generation"),
+                    "cohort_digest": holdout.get("cohort_digest"),
+                    "origin_count": holdout.get("origin_count"),
+                    "arm_count": len(arm_bindings)
+                    if isinstance(arm_bindings, dict)
+                    else 0,
+                }
+            )
+        elif event.kind == "HoldoutEvaluationRecorded":
+            evaluation = payload.get("evaluation", {})
+            scope = evaluation.get("scope", {})
+            public_payload.update(
+                {
+                    "evaluation_id": evaluation.get("evaluation_id"),
+                    "generation": scope.get("generation"),
+                    "holdout_arm": scope.get("holdout_arm"),
+                    "candidate_id": scope.get("candidate_id"),
+                    "candidate_revision_id": scope.get("candidate_revision_id"),
+                    "origin_count": scope.get("origin_count"),
+                    "cohort_digest": scope.get("cohort_digest"),
+                    "score": evaluation.get("score"),
+                    "passed": evaluation.get("passed"),
+                    "evaluator_digest": evaluation.get("evaluator_digest"),
+                }
+            )
+        elif event.kind == "GenerationComparisonRecorded":
+            comparison = payload.get("comparison", {})
+            public_payload.update(
+                {
+                    "comparison_id": comparison.get("comparison_id"),
+                    "comparison_digest": comparison.get("comparison_digest"),
+                    "generation": comparison.get("generation"),
+                    "cohort_digest": comparison.get("cohort_digest"),
+                    "selected_candidate_id": comparison.get(
+                        "selected_candidate_id"
+                    ),
+                    "selected_revision_id": comparison.get("selected_revision_id"),
+                }
+            )
+        elif event.kind == "CandidateEffectiveRevisionFrozen":
+            public_payload.update(
+                {
+                    "generation": payload.get("generation"),
+                    "selected_candidate_id": payload.get("selected_candidate_id"),
+                    "selected_revision_id": payload.get("selected_revision_id"),
+                    "comparison_digest": payload.get("comparison_digest"),
                 }
             )
         elif event.kind == "ProposalSubmitted":
