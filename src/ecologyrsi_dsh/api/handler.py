@@ -97,6 +97,7 @@ _DSH_SIDECAR_PUBLIC_ERROR_CODES = frozenset(
     {
         "dsh_tool_admission_closed",
         "dsh_tool_authorization_failed",
+        "dsh_prediction_binding_closed",
         "structured_role_operational_timeout",
     }
 )

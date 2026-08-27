@@ -143,6 +143,7 @@ test("sidecar preserves public Host tool boundary machine codes", async () => {
   for (const errorCode of [
     "dsh_tool_admission_closed",
     "dsh_tool_authorization_failed",
+    "dsh_prediction_binding_closed",
   ]) {
     const server = createServer((_req, res) => {
       res.writeHead(409, { "content-type": "application/json" });

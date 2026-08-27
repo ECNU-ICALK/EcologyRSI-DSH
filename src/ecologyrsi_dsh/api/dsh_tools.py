@@ -180,6 +180,10 @@ class DshToolAdmissionClosedError(RuntimeError):
     error_code = "dsh_tool_admission_closed"
 
 
+class DshPredictionBindingClosedError(DshToolAdmissionClosedError):
+    error_code = "dsh_prediction_binding_closed"
+
+
 class DshToolOperationalTimeoutError(RuntimeError):
     error_code = "structured_role_operational_timeout"
 
@@ -1015,7 +1019,7 @@ class DshToolService:
         with self._prediction_lock:
             binding = self._prediction_bindings.get(key)
         if binding is None:
-            raise DshToolAdmissionClosedError(
+            raise DshPredictionBindingClosedError(
                 "no active Host prediction tool is bound to this Planner wave"
             )
         result = binding.execute(arguments, session_id=str(identity["session_id"]))
@@ -1874,6 +1878,7 @@ class DshToolService:
 
 __all__ = [
     "AdmissionFence",
+    "DshPredictionBindingClosedError",
     "DshToolAdmissionClosedError",
     "DshToolAuthorizationError",
     "DshPredictionToolBinding",
