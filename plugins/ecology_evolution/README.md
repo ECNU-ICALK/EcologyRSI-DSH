@@ -41,6 +41,7 @@ GET  {base}/datasets/{dataset_id}/samples?partition=training_fit&offset=0&limit=
 GET  {base}/runs
 GET  {base}/runs?include_archived=true
 GET  {base}/runs/{run_id}
+GET  {base}/commands/{command_id}
 GET  {base}/runs/{run_id}/events?after={cursor}
 GET  {base}/runs/{run_id}/samples?candidate_id={candidate_id}&offset=0&limit=50
 POST {base}/runs

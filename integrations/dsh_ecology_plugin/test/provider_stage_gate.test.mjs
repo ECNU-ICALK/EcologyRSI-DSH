@@ -192,3 +192,61 @@ test("a closed provider launch fence rejects future work until explicitly reopen
   );
   assert.equal(operations, 1);
 });
+
+test("provider queue wait is bounded by the stage deadline", async () => {
+  const gate = new ProviderStageGate({ maxInFlight: 1, minimumIntervalMs: 0 });
+  let release;
+  const first = gate.run("pjlab", () => new Promise((resolve) => { release = resolve; }), {
+    runId: "run-timeout",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  let started = false;
+  const second = gate.run("pjlab", () => {
+    started = true;
+    return "unexpected";
+  }, {
+    runId: "run-timeout",
+    deadline: { deadlineAt: performance.now() + 20, timeoutMs: 20 },
+  });
+  const outcome = await Promise.race([
+    second.then(() => ({ status: "fulfilled" }), (error) => ({ status: "rejected", error })),
+    new Promise((resolve) => setTimeout(() => resolve({ status: "guard" }), 100)),
+  ]);
+  release();
+  await first;
+  assert.equal(outcome.status, "rejected");
+  assert.equal(outcome.error?.code, "provider_queue_timeout");
+  assert.equal(started, false);
+});
+
+test("active cancellation forwards AbortSignal and drain reports completion", async () => {
+  const gate = new ProviderStageGate({ maxInFlight: 1, minimumIntervalMs: 0 });
+  let resolveStarted;
+  let receivedSignal = false;
+  const started = new Promise((resolve) => { resolveStarted = resolve; });
+  const run = gate.run("pjlab", (signal) => new Promise((resolveOperation) => {
+    receivedSignal = signal instanceof AbortSignal;
+    resolveStarted();
+    signal?.addEventListener("abort", () => resolveOperation("aborted"), { once: true });
+  }), { runId: "run-cancel" });
+  run.catch(() => {});
+  await started;
+  gate.cancelRun("run-cancel");
+  const drain = await gate.drainRun("run-cancel", { timeoutMs: 100 });
+  assert.equal(receivedSignal, true);
+  assert.equal(drain.status, "drained");
+  assert.equal(drain.remaining, 0);
+});
+
+test("drainRun returns a bounded deadline status for non-interruptible work", async () => {
+  const gate = new ProviderStageGate({ maxInFlight: 1, minimumIntervalMs: 0 });
+  const never = gate.run("pjlab", () => new Promise((resolve) => setTimeout(resolve, 100)), {
+    runId: "run-draining",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const drain = await gate.drainRun("run-draining", { timeoutMs: 10 });
+  assert.equal(drain.status, "deadline_exceeded");
+  assert.equal(drain.remaining, 1);
+  gate.cancelRun("run-draining");
+  await never.catch(() => {});
+});

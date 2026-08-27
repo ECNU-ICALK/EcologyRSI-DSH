@@ -107,7 +107,12 @@ class HTTPContractTests(unittest.TestCase):
             payload["candidate_origin_executions_per_generation"], 1763
         )
         self.assertEqual(payload["scoring_cells_per_generation"], 15867)
+        # The synthetic toy series has no complete 1/6/24-hour origin
+        # population; it remains intentionally ineligible for the strict
+        # cohort planner even though toy run creation is not capacity-gated.
         self.assertFalse(payload["sufficient"])
+        self.assertEqual(payload["cohort_reuse_policy"], "cycle_after_exhaustion@1")
+        self.assertGreaterEqual(payload["reused_origin_occurrences"], 0)
         self.assertFalse(payload["capacity_enforced_for_run_creation"])
 
     def _seed_test_partition_run(self, *, manifest_partition: str = "validation") -> str:
@@ -748,10 +753,10 @@ class HTTPContractTests(unittest.TestCase):
                             )
                         )
                         resume_thread.start()
-                        resume_thread.join(0.1)
-                        self.assertTrue(
+                        resume_thread.join(0.5)
+                        self.assertFalse(
                             resume_thread.is_alive(),
-                            "resume overtook an in-flight native pause drain",
+                            "resume control should be rejected while pause is draining",
                         )
                         self.assertEqual(
                             self.server.director.state(run_id).run.status.value,
@@ -761,11 +766,11 @@ class HTTPContractTests(unittest.TestCase):
                     active_generation.release()
                 control_thread.join(2)
                 self.assertFalse(control_thread.is_alive())
-                self.assertEqual(control_response[0][0], 200, control_response)
+                self.assertEqual(control_response[0][0], 202, control_response)
                 if resume_thread is not None:
                     resume_thread.join(2)
                     self.assertFalse(resume_thread.is_alive())
-                    self.assertEqual(resume_response[0][0], 200, resume_response)
+                    self.assertEqual(resume_response[0][0], 409, resume_response)
 
     def test_pause_control_persists_operator_reason_and_code(self) -> None:
         run_id, _created = self._create_running_run_for_boundary(

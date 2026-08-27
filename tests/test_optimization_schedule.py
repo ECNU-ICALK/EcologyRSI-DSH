@@ -42,8 +42,7 @@ class OptimizationScheduleTests(unittest.TestCase):
     def test_schedule_rejects_invalid_values(self) -> None:
         cases = [
             ({"local_batch_origin_count": 64}, "must divide"),
-            ({"max_local_edits_per_batch": 0}, "between 1 and 5"),
-            ({"max_local_edits_per_batch": 6}, "between 1 and 5"),
+            ({"max_local_edits_per_batch": 6}, "between 0 and 5"),
             ({"selection_holdout_origin_count": 168}, "at least 169"),
             ({"formal_origin_count_per_finalist": True}, "must be an integer"),
         ]

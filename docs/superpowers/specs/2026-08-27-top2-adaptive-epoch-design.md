@@ -160,11 +160,14 @@ For generation `g`, freeze these identities before their first use:
 - `H_g`: 169 or more fresh selection-holdout origins shared by F1, F2, and the
   previous champion.
 
-Within a generation, `S_g`, `A`, and `H_g` are mutually disjoint. Neither
-screening nor holdout members are reused across generations. Batch order is
-deterministic and respects the evaluator's causal timestamp/maximum-horizon
-maturity rules. Cohort selection depends only on identity and timestamp
-metadata, never labels or predictions.
+Within a generation, `S_g`, `A`, and `H_g` are mutually disjoint by planned
+occurrence. The planner consumes eligible source origins in deterministic
+causal order; when the source population is exhausted it wraps to the first
+origin and increments that occurrence's `reuse_index`. Thus a repeated source
+timestamp is a new auditable occurrence, never an accidental duplicate within
+one cohort. Batch order still respects the evaluator's causal
+timestamp/maximum-horizon maturity rules, and cohort selection depends only on
+identity and timestamp metadata, never labels or predictions.
 
 `H_g` is a model-selection holdout because its aggregate result guides later
 generations. It is not presented as final validation. Raw holdout labels,
@@ -172,15 +175,15 @@ predictions, and timestamps never enter the local editor or global proposer.
 Only the post-decision aggregate comparison enters the next generation's
 reflection.
 
-Reusing `A` means reusing only its frozen origin identities and batch order.
-Predictions, sample-result events, model usage, and local-edit feedback are
-never reused across generations because `generation` is part of every
-evaluation scope and retry key. For a frozen planned generation count `G`,
-formal origins per finalist `F`, and selection holdout `H`, the exact formulas
-are:
+Reusing a source origin means reusing only its frozen input vector and batch
+order. Predictions, sample-result events, model usage, and local-edit feedback
+are never reused: each planned occurrence receives a fresh sample identity and
+remains scoped to its generation/revision. For a frozen planned generation
+count `G`, formal origins per finalist `F`, and selection holdout `H`, the exact
+planned-occurrence formulas are:
 
 ```text
-unique dataset origins needed       = F + G * (64 + H)
+planned origin occurrences           = F + G * (64 + H)
 candidate-origin executions / gen   = 4 * 64 + 2 * F + 3 * H
 candidate-origin executions / run   = G * (4 * 64 + 2 * F + 3 * H)
 scoring cells / run                 = executions / run * cells_per_origin
@@ -190,9 +193,11 @@ scoring cells / run                 = executions / run * cells_per_origin
 max-generation/candidate-budget policy; the new protocol never starts a
 partial four-candidate generation.
 
-If capacity is insufficient, run creation fails with the required/available
-origin counts and the maximum feasible generation count. The planner never
-wraps, silently truncates, or overlaps a holdout.
+Run creation requires at least one eligible causal origin. The capacity report
+shows planned occurrences, available source origins, the deterministic reuse
+policy, and the number of occurrences that will wrap. Only an empty eligible
+population blocks creation; the planner never silently truncates a cohort or
+overlaps screening and holdout occurrences.
 
 ## 8. Local edit contract
 
@@ -460,10 +465,10 @@ scoring cells           1,763 x 9 = 15,867
 ```
 
 For a five-generation run, planned execution is therefore 8,815
-candidate-origins and 79,335 scoring cells. The 733 identities in the first
-generation are not multiplied as “unique data”: later generations reuse the
-500 adaptation members and add only fresh screening/holdout members. The UI
-shows both current-generation progress and whole-run planned progress.
+candidate-origins and 79,335 scoring cells. Source identities are not
+multiplied as “unique data”: later generations reuse frozen source vectors with
+explicit occurrence indices, and the UI shows both current-generation progress
+and whole-run planned progress.
 
 The process page shows generation, screening, finalist lane A/B, batch index,
 active revision, origin completion, applied/kept/rejected edits, holdout arms,

@@ -41,11 +41,29 @@ function admissionClosedError() {
   return error;
 }
 
+function queueTimeoutError() {
+  const error = new Error("provider stage queue deadline exceeded");
+  error.code = "provider_queue_timeout";
+  return error;
+}
+
+function deadlineRemainingMs(deadline, now = Date.now) {
+  if (deadline == null) return Infinity;
+  if (Number.isSafeInteger(deadline)) return Math.max(0, deadline);
+  if (typeof deadline.remainingTimeoutMs === "function") {
+    return Math.max(0, Number(deadline.remainingTimeoutMs()) || 0);
+  }
+  if (typeof deadline !== "object" || !Number.isFinite(deadline.deadlineAt)) return Infinity;
+  // structured deadlines use performance.now(); wall-clock deadlines use now().
+  const clock = deadline.deadlineAt < 100_000_000_000 ? performance.now() : now();
+  return Math.max(0, Math.ceil(deadline.deadlineAt - clock));
+}
+
 async function abortable(operation, signal) {
-  if (signal.aborted) throw admissionClosedError();
+  if (signal.aborted) throw signal.reason || admissionClosedError();
   let onAbort;
   const aborted = new Promise((_resolve, reject) => {
-    onAbort = () => reject(admissionClosedError());
+    onAbort = () => reject(signal.reason || admissionClosedError());
     signal.addEventListener("abort", onAbort, { once: true });
   });
   try {
@@ -83,11 +101,20 @@ export class ProviderStageGate {
     this.closedRuns = new Set();
   }
 
-  async run(provider, operation, { runId = null } = {}) {
+  async run(provider, operation, {
+    runId = null,
+    deadline = null,
+    signal = null,
+  } = {}) {
     const providerKey = String(provider || "default");
     if (typeof operation !== "function") throw new Error("provider stage operation is required");
     this.assertRunOpen(runId);
     const controller = new AbortController();
+    const externalAbort = () => controller.abort(signal.reason || admissionClosedError());
+    if (signal) {
+      if (signal.aborted) externalAbort();
+      else signal.addEventListener("abort", externalAbort, { once: true });
+    }
     let resolveCaller;
     let rejectCaller;
     const caller = new Promise((resolve, reject) => {
@@ -104,13 +131,43 @@ export class ProviderStageGate {
       promise: caller,
       completion: null,
       status: "queued",
+      deadline,
+      queueTimer: null,
+      deadlineTimer: null,
     };
+    const remaining = deadlineRemainingMs(deadline, this.now);
+    if (remaining <= 0) {
+      record.status = "cancelled";
+      rejectCaller(queueTimeoutError());
+      if (signal) signal.removeEventListener("abort", externalAbort);
+      return await caller;
+    }
+    if (Number.isFinite(remaining)) {
+      record.queueTimer = setTimeout(() => this.#expireQueued(record), remaining);
+    }
     this.records.add(record);
     const queue = this.queues.get(providerKey) || [];
     queue.push(record);
     this.queues.set(providerKey, queue);
     void this.pump(providerKey);
-    return await caller;
+    try {
+      return await caller;
+    } finally {
+      if (signal) signal.removeEventListener("abort", externalAbort);
+    }
+  }
+
+  #expireQueued(record) {
+    if (record.status !== "queued") return;
+    const queue = this.queues.get(record.providerKey);
+    const index = queue?.indexOf(record) ?? -1;
+    if (index >= 0) queue.splice(index, 1);
+    record.status = "cancelled";
+    record.controller.abort(queueTimeoutError());
+    record.rejectCaller(queueTimeoutError());
+    this.records.delete(record);
+    if (queue && queue.length === 0) this.queues.delete(record.providerKey);
+    void this.pump(record.providerKey);
   }
 
   async pump(providerKey) {
@@ -125,10 +182,17 @@ export class ProviderStageGate {
         }
         const record = queue[0];
         if (record.controller.signal.aborted || this.closedRuns.has(record.runId)) {
-          queue.shift();
+          if (queue[0] === record) queue.shift();
+          if (record.queueTimer !== null) clearTimeout(record.queueTimer);
           record.status = "cancelled";
-          record.rejectCaller(admissionClosedError());
+          record.rejectCaller(record.controller.signal.reason || admissionClosedError());
           this.records.delete(record);
+          continue;
+        }
+        const remaining = deadlineRemainingMs(record.deadline, this.now);
+        if (remaining <= 0) {
+          if (queue[0] === record) queue.shift();
+          this.#expireQueued(record);
           continue;
         }
         const wait = Math.max(
@@ -138,11 +202,17 @@ export class ProviderStageGate {
         if (wait > 0) {
           try {
             await abortable(
-              Promise.resolve(this.delay(wait, record.controller.signal)),
+              Promise.race([
+                Promise.resolve(this.delay(wait, record.controller.signal)),
+                Number.isFinite(remaining)
+                  ? new Promise((resolve) => setTimeout(resolve, remaining))
+                  : new Promise(() => {}),
+              ]),
               record.controller.signal,
             );
           } catch (error) {
-            queue.shift();
+            if (queue[0] === record) queue.shift();
+            if (record.queueTimer !== null) clearTimeout(record.queueTimer);
             record.status = "cancelled";
             record.rejectCaller(error);
             this.records.delete(record);
@@ -150,6 +220,11 @@ export class ProviderStageGate {
           }
         }
         if (record.controller.signal.aborted || this.closedRuns.has(record.runId)) {
+          continue;
+        }
+        if (deadlineRemainingMs(record.deadline, this.now) <= 0) {
+          if (queue[0] === record) queue.shift();
+          this.#expireQueued(record);
           continue;
         }
         queue.shift();
@@ -162,13 +237,24 @@ export class ProviderStageGate {
             this.now() + this.minimumIntervalMs,
           ),
         );
-        const operationPromise = Promise.resolve().then(record.operation);
+        if (record.queueTimer !== null) clearTimeout(record.queueTimer);
+        const activeRemaining = deadlineRemainingMs(record.deadline, this.now);
+        if (Number.isFinite(activeRemaining)) {
+          record.deadlineTimer = setTimeout(() => {
+            if (record.status === "active") {
+              record.status = "draining";
+              record.controller.abort(queueTimeoutError());
+            }
+          }, activeRemaining);
+        }
+        const operationPromise = Promise.resolve().then(() => record.operation(record.controller.signal));
         record.completion = operationPromise;
         void abortable(operationPromise, record.controller.signal).then(
           record.resolveCaller,
           record.rejectCaller,
         );
         const release = () => {
+          if (record.deadlineTimer !== null) clearTimeout(record.deadlineTimer);
           record.status = "completed";
           this.records.delete(record);
           const remaining = Math.max(0, (this.active.get(providerKey) || 1) - 1);
@@ -200,7 +286,7 @@ export class ProviderStageGate {
 
   cancelRun(runId) {
     for (const record of this.records) {
-      if (record.runId === runId) record.controller.abort();
+      if (record.runId === runId) record.controller.abort(admissionClosedError());
     }
     for (const providerKey of this.queues.keys()) void this.pump(providerKey);
   }
@@ -218,13 +304,37 @@ export class ProviderStageGate {
     if (this.closedRuns.has(runId)) throw admissionClosedError();
   }
 
-  async drainRun(runId) {
+  async drainRun(runId, deadline = null) {
+    const timeoutMs = deadline == null
+      ? 30_000
+      : Number.isSafeInteger(deadline)
+        ? deadline
+        : Number.isSafeInteger(deadline?.timeoutMs)
+          ? deadline.timeoutMs
+          : deadlineRemainingMs(deadline, this.now);
+    const bounded = Math.max(0, Math.min(3_600_000, timeoutMs));
+    const startedAt = this.now();
     while (true) {
       const selected = [...this.records].filter((record) => record.runId === runId);
-      if (selected.length === 0) return;
-      await Promise.allSettled(
-        selected.map((record) => record.completion || record.promise),
-      );
+      if (selected.length === 0) return { status: "drained", remaining: 0 };
+      const remainingMs = Math.max(0, bounded - (this.now() - startedAt));
+      if (remainingMs <= 0) {
+        return { status: "deadline_exceeded", remaining: selected.length };
+      }
+      let timer;
+      const timeout = new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), remainingMs);
+      });
+      const settled = Promise.allSettled(selected.map((record) => record.completion || record.promise))
+        .then(() => true);
+      const done = await Promise.race([settled, timeout]);
+      clearTimeout(timer);
+      if (!done) {
+        return {
+          status: "deadline_exceeded",
+          remaining: [...this.records].filter((record) => record.runId === runId).length,
+        };
+      }
     }
   }
 }

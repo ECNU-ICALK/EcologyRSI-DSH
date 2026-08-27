@@ -203,7 +203,7 @@ class RunCleanupHTTPTests(unittest.TestCase):
             run_path, "DELETE", {"confirm_run_id": run_id}
         )
         self.assertEqual(status, 200)
-        self.assertEqual(deleted["deleted"]["command_receipts"], 1)
+        self.assertEqual(deleted["deleted"]["command_receipts"], 2)
         self.assertEqual(self.server.ledger.command_count(), 0)
 
     def test_purge_fences_active_worker_and_reused_run_id_incarnation(self) -> None:

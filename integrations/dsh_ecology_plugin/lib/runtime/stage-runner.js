@@ -698,22 +698,33 @@ export class NativeStageRunner {
       : binding.stage === "sample.critic"
         ? this.sampleCriticStageTimeoutMs
         : this.structuredStageTimeoutMs;
-    const lifecycle = { timeoutMs: stageTimeoutMs, deadline: null };
+    // Start the stage deadline before provider admission so FIFO queueing,
+    // reservation, model execution, and persistence share one budget.
+    const lifecycle = {
+      timeoutMs: stageTimeoutMs,
+      deadline: createStructuredDeadline(stageTimeoutMs),
+    };
     const provider = String(roleHost.binding?.model || "default").split("/", 1)[0] || "default";
     let lastError;
     for (let attempt = 1; attempt <= this.structuredStageMaxAttempts; attempt += 1) {
       try {
-        const runAttempt = () => this.providerStageGate.run(provider, () => this.#runReservedStage({
+        const runAttempt = () => this.providerStageGate.run(provider, (signal) => this.#runReservedStage({
           binding,
           contract,
           request,
           identityDigests,
           roleHost,
           lifecycle,
-        }), { runId: binding.run_id });
-        return lifecycle.deadline === null
-          ? await runAttempt()
-          : await withinStructuredDeadline(lifecycle.deadline, runAttempt);
+          signal,
+        }), {
+          runId: binding.run_id,
+          deadline: lifecycle.deadline,
+        });
+        // The gate enforces the same absolute deadline for FIFO admission, and
+        // the reserved-stage implementations enforce it again around every
+        // remote/persistence operation. Avoid a second outer race that could
+        // reject the caller before workflow cleanup has finished.
+        return await runAttempt();
       } catch (error) {
         lastError = error;
         const retryable = retryableStructuredStageError(error, binding.stage);
@@ -734,7 +745,8 @@ export class NativeStageRunner {
     request,
     identityDigests,
     roleHost,
-    lifecycle,
+  lifecycle,
+    signal = null,
   }) {
     const dynamicRetrieval = (
       roleHost.binding?.tool_profile === DYNAMIC_RETRIEVAL_TOOL_PROFILE
@@ -764,6 +776,7 @@ export class NativeStageRunner {
           idempotency_key: binding.idempotency_key,
           ...(memberDigests ? { sample_member_digests: memberDigests } : {}),
         },
+        signal,
         timeoutMs: reservationTimeoutMs,
       },
     );
@@ -775,11 +788,7 @@ export class NativeStageRunner {
     ) {
       throw new Error("durable child reservation was not accepted");
     }
-    if (lifecycle.deadline === null) {
-      lifecycle.deadline = createStructuredDeadline(lifecycle.timeoutMs);
-    } else {
-      requireStructuredDeadline(lifecycle.deadline);
-    }
+    requireStructuredDeadline(lifecycle.deadline);
     const launch = {
       ...allocation.launch,
       run_id: binding.run_id,
@@ -929,6 +938,7 @@ export class NativeStageRunner {
           admission,
           persist,
           deadline: lifecycle.deadline,
+          signal,
         })
         : await runStructuredRole(
           roleHost,
@@ -945,6 +955,7 @@ export class NativeStageRunner {
               persistenceDeadline,
             ),
             deadline: lifecycle.deadline,
+            signal,
             classifyMissingCapture: ({ run }) => structuredCaptureDisposition(
               this.ctx?.sessions?.get?.(String(run?.id || ""))?.events,
             ),
@@ -978,6 +989,7 @@ export class NativeStageRunner {
     admission,
     persist,
     deadline,
+    signal = null,
   }) {
     requireStructuredDeadline(deadline);
     const persistenceController = new AbortController();
@@ -987,6 +999,7 @@ export class NativeStageRunner {
     let active = null;
     let timeout = null;
     let timedOut = false;
+    let cancelRequested = false;
     let deadlinePromise;
     const detach = (operation) => {
       try {
@@ -999,17 +1012,30 @@ export class NativeStageRunner {
       if (!timedOut) {
         timedOut = true;
         persistenceController.abort();
-        if (pendingWorkflow !== null) {
-          detach(() => this.pendingStarts.cancel(
-            pendingWorkflow,
-            "structured role operational timeout",
-          ));
-        } else {
-          try { workflow?.cancel?.("structured role operational timeout"); } catch {}
-        }
+      }
+      // The deadline may fire before the workflow publication completes. In
+      // that case retry cancellation once the pending/active handle appears,
+      // but issue the underlying cancel at most once.
+      if (!cancelRequested && pendingWorkflow !== null && workflow === undefined) {
+        cancelRequested = true;
+        detach(() => this.pendingStarts.cancel(
+          pendingWorkflow,
+          "structured role operational timeout",
+        ));
+      } else if (
+        !cancelRequested
+        && workflow
+        // A concurrent quiesceRun() owns cancellation through the memoized
+        // PendingChildStarts lifecycle. Avoid issuing a second direct cancel.
+        && pendingWorkflow?.quiescence === null
+      ) {
+        cancelRequested = true;
+        try { workflow.cancel?.("structured role operational timeout"); } catch {}
       }
       return timeoutError;
     };
+    signal?.addEventListener("abort", expireDeadline, { once: true });
+    if (signal?.aborted) expireDeadline();
     const deadlineExpired = () => (
       timedOut || structuredDeadlineExpired(deadline)
     );
@@ -1221,6 +1247,7 @@ export class NativeStageRunner {
         }
       }
       if (timeout !== null) clearTimeout(timeout);
+      signal?.removeEventListener("abort", expireDeadline);
       if (pendingWorkflow !== null) this.pendingStarts.finish(pendingWorkflow);
       if (deadlineExpired()) throw expireDeadline();
     }
@@ -1256,10 +1283,10 @@ export class NativeStageRunner {
     }
   }
 
-  async quiesceRun(runId) {
+  async quiesceRun(runId, { timeoutMs = 30_000, deadline = null } = {}) {
     this.closeLaunchFence(runId);
     await this.#drainLaunchLifecycles(runId);
-    await this.providerStageGate.drainRun?.(runId);
+    await this.providerStageGate.drainRun?.(runId, deadline || { timeoutMs });
     await this.#drainLaunchLifecycles(runId);
     this.childBindings.revokeRun(runId);
   }

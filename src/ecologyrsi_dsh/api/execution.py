@@ -28,6 +28,41 @@ _RETRY_CIRCUIT_PAUSE_CODES = frozenset(
 
 
 class ExecutionEndpointsMixin:
+    def _command_status(self, command_key: str) -> dict[str, Any]:
+        """Return a redacted, pollable status for an idempotent command.
+
+        Long-running controls are allowed to acknowledge before the remote DSH
+        drain finishes.  The receipt is the durable source of truth; callers
+        must not infer completion from the HTTP connection that submitted it.
+        """
+
+        key = str(command_key or "").strip()
+        if not key or len(key) > 512:
+            raise ValueError("command id must be non-empty and at most 512 characters")
+        receipt = self.server.ledger.command_receipt(key)
+        if receipt is None:
+            raise KeyError(f"unknown command: {key}")
+        payload: dict[str, Any] = {
+            "command_id": receipt.command_key,
+            "status": receipt.status,
+            "command_kind": receipt.command_kind,
+            "run_id": receipt.resource_run_id or receipt.run_id,
+            "created_at": receipt.created_at,
+            "completed_at": receipt.completed_at,
+        }
+        if receipt.response is not None:
+            payload["response"] = dict(receipt.response)
+        else:
+            run_id = receipt.resource_run_id or (None if receipt.command_kind == "create_run" else receipt.run_id)
+            if run_id:
+                try:
+                    payload["response"] = self._run_payload(run_id)
+                except (KeyError, RuntimeError, TypeError, ValueError):
+                    # The command may be in the Host→DSH binding gap.  Keep the
+                    # receipt visible without leaking internal exception text.
+                    pass
+        return payload
+
     def _advance_run(
         self,
         run_id: str,

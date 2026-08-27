@@ -3138,6 +3138,12 @@ def _strict_origin_bundles(
             {
                 "partition": request.partition,
                 "origin_timestamp": request.origin_timestamp,
+                # Reused source origins are separate planned occurrences.
+                # The planner annotates them so complete target/horizon
+                # vectors do not collapse into one bundle on wrap-around.
+                "cohort_origin_occurrence": row.get(
+                    "cohort_origin_occurrence", 0
+                ),
             }
         )
         if origin_key not in grouped:

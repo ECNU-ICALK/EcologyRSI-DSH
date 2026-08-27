@@ -223,7 +223,7 @@
     var input = values || {};
     var formal = strictInteger(input.formal_origin_count == null ? 500 : input.formal_origin_count, "每个入围候选更新时点数", 1);
     var batch = strictInteger(input.local_batch_origin_count == null ? 50 : input.local_batch_origin_count, "局部 batch 时点数", 1);
-    var edits = strictInteger(input.max_local_edits_per_batch == null ? 2 : input.max_local_edits_per_batch, "每批最大局部改动数", 1, 5);
+    var edits = strictInteger(input.max_local_edits_per_batch == null ? 2 : input.max_local_edits_per_batch, "每批最大局部改动数", 0, 5);
     var holdout = strictInteger(input.selection_holdout_origin_count == null ? 169 : input.selection_holdout_origin_count, "轮末比较时点数", 169);
     if (formal % batch !== 0) { throw new Error("局部 batch 必须整除每个入围候选的更新时点数"); }
     return {
@@ -413,6 +413,16 @@
     return Boolean(value);
   }
 
+  function pollCommand(commandId, runId, attempts) {
+    if (!commandId || attempts <= 0) { return Promise.resolve(null); }
+    return request("/commands/" + encodeURIComponent(commandId), { timeout: 5000 }).then(function (receipt) {
+      if (receipt && receipt.status === "completed" && receipt.response) { return receipt.response; }
+      return new Promise(function (resolve) { window.setTimeout(resolve, 500); }).then(function () {
+        return pollCommand(commandId, runId, attempts - 1);
+      });
+    }).catch(function () { return null; });
+  }
+
   function controlRun(action) {
     if (!state.activeRun || state.busy) { return Promise.resolve(false); }
     if (!hasCapability("run.control")) { showToast("当前 DSH 会话未授予运行控制能力。"); return Promise.resolve(false); }
@@ -437,7 +447,7 @@
     state.pendingAction = action;
     state.commandError = null;
     renderAll();
-    var operation = state.usingDemo ? Promise.resolve(null) : request("/runs/" + encodeURIComponent(runId) + "/control", { method: "POST", body: body });
+    var operation = state.usingDemo ? Promise.resolve(null) : request("/runs/" + encodeURIComponent(runId) + "/control", { method: "POST", body: body, timeout: 30000 });
     return operation.then(function (data) {
       clearCommandKey("control");
       if (state.usingDemo) {
@@ -447,6 +457,18 @@
       } else {
         state.activeRun = normalizeRun(data);
         state.runs = state.runs.map(function (run) { return run.id === runId ? state.activeRun : run; });
+        if (data && data.command_status === "pending" && data.command_id) {
+          // The Host boundary is already durable; continue observing the
+          // remote DSH drain without keeping the button request open.
+          pollCommand(data.command_id, runId, 60).then(function (completed) {
+            if (!completed || !completed.projection) { return; }
+            var refreshed = normalizeRun(completed);
+            state.activeRun = refreshed;
+            state.runs = state.runs.map(function (run) { return run.id === runId ? refreshed : run; });
+            state.lastUpdated = new Date().toISOString();
+            renderAll();
+          });
+        }
       }
       state.lastUpdated = new Date().toISOString();
       showToast("运行状态已更新为“" + statusText(state.activeRun.status) + "”。");
@@ -486,7 +508,7 @@
     state.pendingAction = restoring ? "restore" : "archive";
     state.commandError = null;
     renderAll();
-    return request("/runs/" + encodeURIComponent(runId) + (restoring ? "/restore" : "/archive"), { method: "POST", body: {} }).then(function (data) {
+    return request("/runs/" + encodeURIComponent(runId) + (restoring ? "/restore" : "/archive"), { method: "POST", body: {}, timeout: 30000 }).then(function (data) {
       var updated = normalizeRun(data);
       if (restoring) {
         state.archivedRunCount = Math.max(0, state.archivedRunCount - 1);

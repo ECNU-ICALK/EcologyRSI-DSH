@@ -6,13 +6,20 @@ recursive-include datasets *.json
 recursive-include docs/screenshots *.jpg
 prune docs/superpowers
 exclude docs/项目整体Review与方案B优化报告.md
+# Internal planning/hand-off notes live at the repository root for local
+# collaboration only; never ship them in the public source distribution.
+exclude EcologyRSI-DSH-完整框架与详细实施方案.md
+exclude EcologyRSI-DSH-批次进化闭环实施方案.md
+exclude EcologyRSI-DSH-旧API迁移映射与验收附录.md
+exclude EcologyRSI-DSH-最终交付审查与运行说明.md
+exclude EcologyRSI-DSH-迁移清单模板.yaml
 recursive-include plugins/ecology_evolution *.html *.css *.js *.json *.md *.mjs
 recursive-include integrations/dsh_ecology_plugin *.js *.mjs *.json *.md *.yml
 prune integrations/dsh_ecology_plugin/.runtime
 prune integrations/dsh_ecology_plugin/.dsh
 prune integrations/dsh_ecology_plugin/.ssh
 include integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.33.tgz
-recursive-include scripts *.sh *.py *.mjs
+recursive-include scripts *.sh *.py *.mjs *.cjs
 recursive-include tests *.py *.json
 global-exclude *.py[cod] __pycache__ .DS_Store *.sqlite3
 global-exclude .env .env.* .npmrc .pypirc *.pem *.key *.p12 *.pfx

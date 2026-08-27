@@ -320,6 +320,55 @@ class FrozenOriginSelectionTests(unittest.TestCase):
         )
         self.assertNotIn(999_999, {row["origin_timestamp"] for row in selected})
 
+    def test_wrapped_origins_materialize_distinct_sample_occurrences(self) -> None:
+        schedule = OptimizationSchedule.from_dict(
+            {
+                **OptimizationSchedule.default().to_dict(),
+                "formal_origin_count_per_finalist": 20,
+                "local_batch_origin_count": 10,
+            }
+        )
+        dataset = SimpleNamespace(
+            dataset_id="dataset:wrapped-selection",
+            episode_id="episode:wrapped-selection",
+            timestamps=tuple(range(40)),
+            partitions={"model_selection": IndexRange(0, 40)},
+        )
+        planned = plan_run_adaptation_cohort(
+            dataset, schedule=schedule, seed=3
+        ).cohort
+        self.assertGreater(len({origin.origin_id for origin in planned.origins}), 0)
+        self.assertGreater(
+            len(planned.origins), len({origin.origin_id for origin in planned.origins})
+        )
+        tasks = tuple(
+            (target, horizon)
+            for target in ("air_temperature", "co2_concentration", "relative_humidity")
+            for horizon in (1, 6, 24)
+        )
+        rows = [
+            {
+                "partition": "training_feedback",
+                "target": target,
+                "horizon_hours": horizon,
+                "origin_timestamp": origin.origin_timestamp,
+                "target_timestamp": origin.origin_timestamp + horizon,
+                "timestamp": origin.origin_timestamp + horizon,
+            }
+            for origin in {item.origin_timestamp: item for item in planned.origins}.values()
+            for target, horizon in tasks
+        ]
+
+        selected, _evidence = _select_planned_evaluation_cohort(rows, planned)
+
+        self.assertEqual(len(selected), planned.origin_count * len(tasks))
+        self.assertEqual(
+            len({row["sample_index"] for row in selected}), len(selected)
+        )
+        self.assertEqual(
+            {row["cohort_origin_occurrence"] for row in selected}, {0, 1}
+        )
+
     def test_evaluator_rejects_partial_origin_vector(self) -> None:
         schedule = OptimizationSchedule.from_dict(
             {

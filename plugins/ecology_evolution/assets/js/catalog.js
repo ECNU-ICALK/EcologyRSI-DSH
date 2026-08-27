@@ -551,7 +551,7 @@
       : state.cohortCapacityError
         ? "服务端 cohort 容量核验失败：" + state.cohortCapacityError
         : capacity
-          ? "因果 cohort 容量可覆盖全部轮次（需要 " + formatNumber(capacity.required_unique_origins) + " / 可用 " + formatNumber(capacity.available_eligible_origins) + "；最多 " + formatNumber(capacity.max_feasible_generations) + " 轮）"
+          ? cohortCapacityLabel(capacity)
           : "等待服务端核验因果 cohort 容量";
     return [
       { label: "配置目录已加载", ready: Boolean(catalogReady) },
@@ -572,6 +572,21 @@
       { label: "具备创建进化运行的授权能力", ready: hasCapability("evolution.run.create") },
       { label: "运行服务与脱敏状态读取能力可用", ready: dshReady }
     ];
+  }
+
+  function cohortCapacityLabel(capacity) {
+    if (!capacity) { return "等待服务端核验因果 cohort 容量"; }
+    var required = formatNumber(capacity.planned_origin_occurrences == null ? capacity.required_unique_origins : capacity.planned_origin_occurrences);
+    var available = formatNumber(capacity.available_source_origins == null ? capacity.available_eligible_origins : capacity.available_source_origins);
+    var maximum = formatNumber(capacity.max_feasible_generations);
+    if (capacity.sufficient !== true) {
+      return "因果 cohort 容量不足（需要 " + required + " / 可用 " + available + "；最多 " + maximum + " 轮）";
+    }
+    var reused = Number(capacity.reused_origin_occurrences || 0);
+    var reuseNote = reused > 0
+      ? "；数据耗尽后循环复用 " + formatNumber(reused) + " 个起点"
+      : "；本次无需复用起点";
+    return "因果 cohort 可执行（计划 " + required + " / 可用 " + available + reuseNote + "；最多 " + maximum + " 轮）";
   }
 
   function evolutionCapacityRequest() {
@@ -607,7 +622,9 @@
         sufficient: true,
         required_unique_origins: body.optimization_schedule.formal_origin_count_per_finalist + body.planned_generations * (body.optimization_schedule.screening_origin_count + body.optimization_schedule.selection_holdout_origin_count),
         available_eligible_origins: 999999,
-        max_feasible_generations: body.planned_generations
+        max_feasible_generations: body.planned_generations,
+        cohort_reuse_policy: "cycle_after_exhaustion@1",
+        reused_origin_occurrences: 0
       };
       state.cohortCapacitySignature = planned.signature;
       state.cohortCapacityLoading = false;

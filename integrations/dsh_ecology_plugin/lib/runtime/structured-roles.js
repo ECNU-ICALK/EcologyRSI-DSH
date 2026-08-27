@@ -39,6 +39,7 @@ export async function runStructuredRole(
     timeoutMs,
     deadline,
     classifyMissingCapture,
+    signal = null,
   } = {},
 ) {
   if (!roleHost?.agent) throw new Error("structured role requires a retained role-host Agent");
@@ -70,6 +71,10 @@ export async function runStructuredRole(
   let deadlinePromise = null;
   let timedOut = false;
   const timeoutError = operationalTimeoutError();
+  const abortFromCaller = () => {
+    pending?.controller?.abort(signal?.reason);
+  };
+  signal?.addEventListener("abort", abortFromCaller, { once: true });
   const expireDeadline = () => {
     if (!timedOut) {
       timedOut = true;
@@ -278,6 +283,7 @@ export async function runStructuredRole(
       // not replace either a successful result or the primary phase outcome.
     } finally {
       if (timeout !== null) clearTimeout(timeout);
+      signal?.removeEventListener("abort", abortFromCaller);
     }
     if (deadlineExpired()) throw expireDeadline();
   }

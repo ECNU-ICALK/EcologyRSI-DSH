@@ -474,6 +474,7 @@ API 请求使用 `Authorization: Bearer ...`。当前后端只比较进程级 `E
 | GET | `/api/runs` | 未归档运行投影列表 |
 | GET | `/api/runs?include_archived=true` | 包含已归档运行的历史列表 |
 | GET | `/api/runs/{id}` | 单个运行的脱敏投影 |
+| GET | `/api/commands/{command_id}` | 查询异步 pause/cancel 等命令收据 |
 | GET | `/api/runs/{id}/events?after={seq}` | 游标式脱敏事件 |
 | GET | `/api/runs/{id}/samples?candidate_id={candidate_id}&offset=0&limit=50` | 候选逐样本结果分页（每页最多 200 条） |
 | POST | `/api/runs` | 创建并可选自动推进运行 |

@@ -8,6 +8,8 @@ subagents and workflows; Python owns durable scientific state.
 from __future__ import annotations
 
 import json
+import math
+import os
 import socket
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -24,6 +26,31 @@ _DEFAULT_REQUEST_TIMEOUT_SECONDS = 660.0
 # leave enough time for the DSH-owned deadline and cleanup to complete instead
 # of abandoning the HTTP request while the child Agent is still running.
 _DEFAULT_STAGE_TIMEOUT_SECONDS = 3_720.0
+
+
+def configured_stage_timeout() -> float:
+    """Return the deployment override for one DSH structured stage.
+
+    The client keeps the deliberately generous protocol default for callers
+    that do not configure a deployment policy.  Local launches can set a
+    shorter bound so a dead provider request is reclaimed instead of holding
+    an origin worker indefinitely.
+    """
+
+    raw = os.environ.get("ECOLOGYRSI_DSH_STAGE_TIMEOUT", "").strip()
+    if not raw:
+        return _DEFAULT_STAGE_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "ECOLOGYRSI_DSH_STAGE_TIMEOUT must be a positive number"
+        ) from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            "ECOLOGYRSI_DSH_STAGE_TIMEOUT must be a positive number"
+        )
+    return value
 _CAPABILITY_KEYS = frozenset(
     {
         "schema_version",

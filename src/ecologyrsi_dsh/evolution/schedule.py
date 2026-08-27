@@ -75,8 +75,8 @@ class OptimizationSchedule:
                 "local_batch_origin_count must divide "
                 "formal_origin_count_per_finalist"
             )
-        if not 1 <= edits <= 5:
-            raise ValueError("max_local_edits_per_batch must be between 1 and 5")
+        if not 0 <= edits <= 5:
+            raise ValueError("max_local_edits_per_batch must be between 0 and 5")
         if holdout < 169:
             raise ValueError("selection_holdout_origin_count must be at least 169")
 
@@ -177,3 +177,13 @@ class OptimizationSchedule:
         return self.formal_origin_count_per_finalist + generations * (
             self.screening_origin_count + self.selection_holdout_origin_count
         )
+
+    def planned_origin_occurrences(self, planned_generations: int) -> int:
+        """Return executable origin occurrences, including deterministic reuse.
+
+        The historical method name is retained internally for now, but the
+        public contract is occurrence-based: a reused source origin is a new
+        execution occurrence, not a new independent source.
+        """
+
+        return self.required_unique_origins(planned_generations)

@@ -28,6 +28,7 @@ from ecologyrsi_dsh.api.projection import (
     _public_evaluation_metrics,
     _run_failure_projection,
     _screening_progress_projection,
+    _adaptive_progress_projection,
 )
 from ecologyrsi_dsh.api.projection import _projection_json
 
@@ -115,6 +116,116 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["failed_samples"], 0)
         self.assertEqual(progress["in_flight_batches"], 0)
         self.assertEqual(progress["awaiting_submission_batches"], 255)
+
+    def test_screening_progress_counts_complete_prediction_tool_for_aggregate_reflection(
+        self,
+    ) -> None:
+        events = (
+            SimpleNamespace(
+                seq=10,
+                kind="GenerationBatchStarted",
+                payload={"batch": {"generation": 0}},
+                created_at="2026-08-26T05:59:59+00:00",
+            ),
+            SimpleNamespace(
+                seq=11,
+                kind="DshChildLaunchReserved",
+                payload={"launch": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:origin-a",
+                    "reservation_id": "reservation-plan-a",
+                }},
+                created_at="2026-08-26T06:00:00+00:00",
+            ),
+            SimpleNamespace(
+                seq=12,
+                kind="DshPredictionToolExecuted",
+                payload={
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:origin-a",
+                    "prediction_count": 9,
+                },
+                created_at="2026-08-26T06:00:01+00:00",
+            ),
+        )
+        state = SimpleNamespace(
+            run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
+            task_manifest=SimpleNamespace(metadata={
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                "two_stage_evaluation_enabled": True,
+                "sample_reflection_policy": "candidate_aggregate_post_score@1",
+                "sample_concurrency": 64,
+            }),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            events=events,
+        )
+
+        progress = _screening_progress_projection(state)
+
+        self.assertEqual(progress["completed_samples"], 1)
+        self.assertEqual(progress["succeeded_samples"], 1)
+        self.assertEqual(progress["in_flight_batches"], 0)
+
+    def test_adaptive_progress_includes_live_screening_tool_receipts(self) -> None:
+        schedule = {
+            "screening_origin_count": 64,
+            "formal_origin_count_per_finalist": 500,
+            "selection_holdout_origin_count": 169,
+            "local_batch_origin_count": 50,
+        }
+        events = (
+            SimpleNamespace(
+                seq=10,
+                kind="GenerationBatchStarted",
+                payload={"batch": {"generation": 0}},
+                created_at="2026-08-26T05:59:59+00:00",
+            ),
+            SimpleNamespace(
+                seq=11,
+                kind="DshChildLaunchReserved",
+                payload={"launch": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:origin-a",
+                    "reservation_id": "reservation-plan-a",
+                }},
+                created_at="2026-08-26T06:00:00+00:00",
+            ),
+            SimpleNamespace(
+                seq=12,
+                kind="DshPredictionToolExecuted",
+                payload={
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:origin-a",
+                    "prediction_count": 9,
+                },
+                created_at="2026-08-26T06:00:01+00:00",
+            ),
+        )
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(metadata={
+                "optimization_protocol": "top2_adaptive_epoch@1",
+                "optimization_schedule": schedule,
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                "two_stage_evaluation_enabled": True,
+                "sample_reflection_policy": "candidate_aggregate_post_score@1",
+                "sample_concurrency": 64,
+            }),
+            run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
+            candidate_screening_events=(),
+            formal_batch_evaluations=(),
+            holdout_evaluations=(),
+            formal_batches=(),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            events=events,
+        )
+
+        progress = _adaptive_progress_projection(state)
+
+        self.assertEqual(progress["screening_completed_origins"], 1)
+        self.assertEqual(progress["completed_origins"], 1)
+        self.assertEqual(progress["in_flight_batches"], 0)
+        self.assertEqual(progress["awaiting_submission_batches"], 255)
+        self.assertEqual(progress["configured_concurrency"], 64)
 
     def test_screening_progress_retires_launches_before_retry_boundary(self) -> None:
         events = (

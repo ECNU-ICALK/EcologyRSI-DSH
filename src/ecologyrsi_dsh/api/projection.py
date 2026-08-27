@@ -1707,6 +1707,18 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
                 if key:
                     completed_terminals[key] = event
             sample_events.append(event)
+        elif event.kind == "DshPredictionToolExecuted" and not reflection_enabled:
+            # Aggregate post-score runs use the planner's complete 9-cell
+            # vector as the terminal stage for one origin.  The tool receipt
+            # is durable before Host scoring, so count it immediately instead
+            # of waiting for the whole candidate screening record.  This keeps
+            # origin progress moving while the remaining candidates are still
+            # in flight and avoids the historical flat 0%/7% display.
+            stage = str(event.payload.get("stage") or "")
+            key = str(event.payload.get("idempotency_key") or "").strip()
+            if stage == terminal_stage and key:
+                completed_terminals[key] = event
+            sample_events.append(event)
     if not sample_events:
         return None
 
@@ -1978,6 +1990,16 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
         for event in state.candidate_screening_events
         if int(event.payload.get("generation", -1)) == generation
     )
+    # Candidate screening events are emitted only after all four candidate
+    # records close. During live screening, use durable complete-origin tool
+    # receipts as the lower-latency source of truth. The helper also enforces
+    # the same generation cohort boundary and de-duplicates retries.
+    live_screening = _screening_progress_projection(state)
+    if live_screening is not None:
+        screening_completed = max(
+            screening_completed,
+            int(live_screening.get("completed_samples") or 0),
+        )
     formal_completed = sum(
         int(item.scope.origin_count)
         for item in state.formal_batch_evaluations
@@ -2011,6 +2033,26 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
         active_batch = batch.batch_index + 1
         active_candidate = batch.candidate_id
         break
+    live_fields: dict[str, Any] = {}
+    if live_screening is not None and phase == "screening":
+        # Preserve the real provider-boundary counters while adaptive cohort
+        # progress is still in the screening phase. Without these fields the
+        # browser can show a moving percentage but lose the actionable
+        # in-flight/queued/awaiting breakdown.
+        for key in (
+            "progress_kind",
+            "in_flight_batches",
+            "queued_batches",
+            "awaiting_submission_batches",
+            "configured_concurrency",
+            "queue_semantics",
+            "samples_per_minute",
+            "estimated_remaining_seconds",
+            "updated_at",
+            "event_seq",
+        ):
+            if key in live_screening:
+                live_fields[key] = live_screening[key]
     return {
         "schema_version": "ecologyrsi-dsh.adaptive-progress/1",
         "evaluation_phase": phase,
@@ -2033,6 +2075,7 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
         "batch_count": batch_count,
         "current_candidate_id": active_candidate,
         "evidence": "durable_adaptive_cohort_and_trajectory_events",
+        **live_fields,
     }
 
 

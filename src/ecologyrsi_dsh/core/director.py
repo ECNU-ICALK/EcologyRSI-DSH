@@ -2107,17 +2107,25 @@ class EvolutionDirector:
             or planned.holdout.origin_count
             != schedule.selection_holdout_origin_count
             or planned.holdout.shared_arm_count != 3
-            or set(planned.screening.origin_ids) & set(adaptation.origin_ids)
-            or set(planned.holdout.origin_ids) & set(adaptation.origin_ids)
+            or set(planned.screening.origin_occurrence_keys)
+            & set(adaptation.origin_occurrence_keys)
+            or set(planned.holdout.origin_occurrence_keys)
+            & set(adaptation.origin_occurrence_keys)
         ):
             raise ValueError("planned generation cohorts differ from frozen task")
         prior_origins = {
             origin_id
             for item in state.generation_selection_cohorts
-            for origin_id in (*item.screening.origin_ids, *item.holdout.origin_ids)
+            for origin_id in (
+                *item.screening.origin_occurrence_keys,
+                *item.holdout.origin_occurrence_keys,
+            )
         }
         if prior_origins & set(
-            (*planned.screening.origin_ids, *planned.holdout.origin_ids)
+            (
+                *planned.screening.origin_occurrence_keys,
+                *planned.holdout.origin_occurrence_keys,
+            )
         ):
             raise ValueError("generation selection origins cannot be reused")
         self.ledger.append(

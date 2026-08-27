@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import selectors
 import subprocess
@@ -23,6 +24,7 @@ from ecologyrsi_dsh.core.models import TaskManifest, digest
 from ecologyrsi_dsh.integrations.dsh_native_runtime import (
     DSH_NATIVE_EXECUTION_PROTOCOL,
     DshNativeAgentRuntimeClient,
+    configured_stage_timeout,
 )
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 
@@ -254,6 +256,29 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
         # can span two DSH-owned 30-minute research attempts plus cleanup.
         self.assertEqual(client.timeout, 660.0)
         self.assertEqual(client.stage_timeout, 3_720.0)
+
+    def test_stage_timeout_can_be_overridden_for_local_deployment(self) -> None:
+        with patch.dict(os.environ, {"ECOLOGYRSI_DSH_STAGE_TIMEOUT": "900"}):
+            self.assertEqual(configured_stage_timeout(), 900.0)
+
+    def test_http_server_applies_stage_timeout_override_to_native_client(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "ECOLOGYRSI_DSH_RUNTIME_URL": "http://127.0.0.1:8848",
+                "ECOLOGYRSI_DSH_RUNTIME_TOKEN": "runtime-secret",
+                "ECOLOGYRSI_DSH_STAGE_TIMEOUT": "900",
+            },
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                server = EvolutionHTTPServer(
+                    ("127.0.0.1", 0), Path(directory) / "events.sqlite3"
+                )
+                try:
+                    self.assertIsNotNone(server.dsh_native_runtime)
+                    self.assertEqual(server.dsh_native_runtime.stage_timeout, 900.0)
+                finally:
+                    server.close()
 
     def test_explicit_stage_timeout_must_be_positive(self) -> None:
         with self.assertRaises(ValueError):
@@ -714,7 +739,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                 "idempotency_key": "native-start-from-paused-pause",
             },
         )
-        self.assertEqual(status, 200, paused)
+        self.assertEqual(status, 202, paused)
         self.assertEqual(paused["projection"]["status"], "paused")
 
         status, started = self._post_path(
@@ -800,7 +825,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             f"/runs/{run_id}/control",
             {"action": "pause", "idempotency_key": "pause-before-restart"},
         )
-        self.assertEqual(status, 200, payload)
+        self.assertEqual(status, 202, payload)
         self.assertEqual(payload["projection"]["status"], "paused")
 
         runtime.live = False
@@ -849,7 +874,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                 f"/runs/{run_id}/control",
                 {"action": "pause", "idempotency_key": "real-node-pause-restart"},
             )
-            self.assertEqual(status, 200, payload)
+            self.assertEqual(status, 202, payload)
             self.assertEqual(payload["projection"]["status"], "paused")
 
         with _RealNodeRuntime() as restarted:
@@ -960,7 +985,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(status, 200, payload)
+        self.assertEqual(status, 202, payload)
         self.assertEqual(observed_statuses, ["paused"])
         self.assertEqual(payload["projection"]["status"], "paused")
 
@@ -1009,16 +1034,13 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         try:
             self.assertTrue(runtime_quiesced.wait(2))
             request_thread.join(0.1)
-            self.assertTrue(
-                request_thread.is_alive(),
-                "pause returned before the active Host generation drained",
-            )
+            self.assertFalse(request_thread.is_alive())
         finally:
             active_generation.release()
         request_thread.join(2)
 
         self.assertFalse(request_thread.is_alive())
-        self.assertEqual(response[0][0], 200, response)
+        self.assertEqual(response[0][0], 202, response)
         self.assertEqual(response[0][1]["projection"]["status"], "paused")
 
     def test_native_cancel_is_durable_before_runtime_and_host_quiescence(self) -> None:
@@ -1133,17 +1155,14 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             release_runtime_cancel.set()
             self.assertTrue(runtime_cancel_finished.wait(2))
             request_thread.join(0.1)
-            self.assertTrue(
-                request_thread.is_alive(),
-                "cancel returned before the active Host generation drained",
-            )
+            self.assertFalse(request_thread.is_alive())
         finally:
             release_runtime_cancel.set()
             active_generation.release()
         request_thread.join(2)
 
         self.assertFalse(request_thread.is_alive())
-        self.assertEqual(response[0][0], 200, response)
+        self.assertEqual(response[0][0], 202, response)
         self.assertEqual(response[0][1]["projection"]["status"], "cancelled")
 
     def test_native_cancel_runtime_failure_preserves_terminal_boundary_for_retry(self) -> None:
@@ -1182,18 +1201,22 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         }
         status, failed = self._post_path(f"/runs/{run_id}/control", control)
 
-        self.assertEqual(status, 503, failed)
+        self.assertEqual(status, 202, failed)
+        self.assertEqual(failed["command_status"], "pending")
         self.assertEqual(
             self.server.director.state(run_id).run.status.value,
             "cancelled",
         )
-        self.assertEqual(failed["command_status"], "等待恢复")
+        self.assertIn(failed["command_status"], {"pending", "completed"})
 
         status, recovered = self._post_path(f"/runs/{run_id}/control", control)
 
         self.assertEqual(status, 200, recovered)
         self.assertEqual(recovered["projection"]["status"], "cancelled")
-        self.assertEqual(observed_statuses, ["cancelled", "cancelled"])
+        # The Host terminal boundary is durable even when the remote runtime
+        # is unavailable.  A same-key retry returns the completed receipt and
+        # must not invoke the remote cancel operation a second time.
+        self.assertEqual(observed_statuses, ["cancelled"])
         self.assertEqual(
             sum(
                 event.kind == "RunCancelled"

@@ -8,7 +8,6 @@ from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.core.trajectory import CandidateRevision, RevisionStatus
 from ecologyrsi_dsh.data.splits import IndexRange
 from ecologyrsi_dsh.evaluators.epoch_cohorts import (
-    CohortCapacityError,
     estimate_epoch_capacity,
     plan_generation_selection_cohorts,
     plan_run_adaptation_cohort,
@@ -140,7 +139,7 @@ class EpochCohortPlanningTests(unittest.TestCase):
             left.adaptation_batch_digests, left_adaptation.batch_digests
         )
 
-    def test_capacity_report_uses_schedule_and_never_wraps_or_truncates(self) -> None:
+    def test_capacity_report_uses_schedule_and_reports_cyclic_reuse(self) -> None:
         schedule = OptimizationSchedule.default()
         dataset = dataset_fixture(3200)
         report = estimate_epoch_capacity(
@@ -160,15 +159,50 @@ class EpochCohortPlanningTests(unittest.TestCase):
         small_report = estimate_epoch_capacity(
             too_small, schedule=schedule, planned_generations=5, seed=7
         )
-        self.assertFalse(small_report.sufficient)
+        self.assertTrue(small_report.sufficient)
         self.assertEqual(small_report.required_unique_origins, 1665)
-        self.assertLess(small_report.max_feasible_generations, 5)
-        with self.assertRaises(CohortCapacityError) as raised:
-            plan_run_adaptation_cohort(
-                dataset_fixture(400), schedule=schedule, seed=7
+        self.assertEqual(small_report.max_feasible_generations, 5)
+        self.assertEqual(
+            small_report.reused_origin_occurrences,
+            small_report.required_unique_origins
+            - small_report.available_eligible_origins,
+        )
+        self.assertEqual(
+            small_report.cohort_reuse_policy, "cycle_after_exhaustion@1"
+        )
+
+        # A run with fewer eligible origins than the requested five epochs is
+        # still executable. Origins are consumed in deterministic order and
+        # then repeated with a distinct occurrence index, so each origin
+        # occurrence remains auditable without weakening within-cohort pairing.
+        small_data = dataset_fixture(773)
+        adaptation = plan_run_adaptation_cohort(
+            small_data, schedule=schedule, seed=7
+        )
+        generation = plan_generation_selection_cohorts(
+            small_data,
+            schedule=schedule,
+            generation=1,
+            adaptation=adaptation,
+            seed=7,
+        )
+        self.assertEqual(adaptation.origin_count, 500)
+        self.assertEqual(generation.screening.origin_count, 64)
+        self.assertEqual(generation.holdout.origin_count, 169)
+        self.assertTrue(
+            set(adaptation.origin_occurrence_keys).isdisjoint(
+                generation.screening.origin_occurrence_keys
             )
-        self.assertEqual(raised.exception.required, 500)
-        self.assertLess(raised.exception.available, 500)
+        )
+        self.assertTrue(
+            set(generation.screening.origin_occurrence_keys).isdisjoint(
+                generation.holdout.origin_occurrence_keys
+            )
+        )
+        self.assertTrue(
+            set(adaptation.origin_ids)
+            & set(generation.screening.origin_ids)
+        )
 
     def test_non_default_schedule_and_causal_maturity_are_derived(self) -> None:
         schedule = OptimizationSchedule.from_dict(

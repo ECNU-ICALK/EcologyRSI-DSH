@@ -500,10 +500,12 @@ def _select_planned_evaluation_cohort(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Materialize one frozen origin cohort without inspecting label values.
 
-    The cohort planner owns origin identity and order.  The evaluator is only
+    The cohort planner owns origin identity and order. The evaluator is only
     allowed to attach the complete target/horizon prediction vector already
-    present in its causal evaluation population; it may not rotate, wrap, or
-    truncate the frozen origins.
+    present in its causal evaluation population; it may not substitute or
+    truncate a frozen occurrence. When the planner has explicitly wrapped the
+    source population, each occurrence is materialized with a fresh sample
+    identity while retaining the original causal timestamp.
     """
 
     if not isinstance(cohort, PlannedCohort):
@@ -532,13 +534,23 @@ def _select_planned_evaluation_cohort(
         )
     ordered_tasks = tuple(sorted(task_keys))
     selected: list[dict[str, Any]] = []
-    for origin in cohort.origins:
+    for origin_position, origin in enumerate(cohort.origins):
         origin_rows = grouped.get(origin.origin_timestamp)
         if origin_rows is None or set(origin_rows) != task_keys:
             raise ValueError(
                 "frozen evaluation origin does not expose a complete prediction vector"
             )
-        selected.extend(origin_rows[task_key] for task_key in ordered_tasks)
+        # Materialize a fresh row for every planned occurrence. This is
+        # essential when the cohort planner wraps: source timestamps may be
+        # reused, but sample identities and strict origin bundles must remain
+        # unique within this evaluation scope.
+        for task_offset, task_key in enumerate(ordered_tasks):
+            row = dict(origin_rows[task_key])
+            row["sample_index"] = (
+                origin_position * len(ordered_tasks) + task_offset + 1
+            )
+            row["cohort_origin_occurrence"] = origin.reuse_index
+            selected.append(row)
     evidence = {
         "schema_version": "ecologyrsi-dsh.frozen-evaluation-cohort/1",
         "selection_policy": "planner_frozen_complete_origins@1",

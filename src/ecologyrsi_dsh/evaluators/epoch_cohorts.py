@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, Protocol, Sequence
 
 from ..core.models import digest
@@ -14,6 +14,7 @@ COHORT_PLANNER_SCHEMA = "ecologyrsi-dsh.epoch-cohort-planner/1"
 RUN_ADAPTATION_COHORT_SCHEMA = "ecologyrsi-dsh.run-adaptation-cohort/1"
 GENERATION_COHORTS_SCHEMA = "ecologyrsi-dsh.generation-cohorts/1"
 CAPACITY_REPORT_SCHEMA = "ecologyrsi-dsh.epoch-capacity-report/1"
+COHORT_REUSE_POLICY = "cycle_after_exhaustion@1"
 DEFAULT_HORIZONS = (1, 6, 24)
 DEFAULT_HISTORY_STEPS = 3
 DEFAULT_SCORING_CELLS_PER_ORIGIN = 9
@@ -27,7 +28,7 @@ class DatasetIdentityView(Protocol):
 
 
 class CohortCapacityError(ValueError):
-    """Raised when a requested immutable cohort cannot be selected exactly."""
+    """Raised when no eligible causal origin exists for a requested cohort."""
 
     def __init__(
         self,
@@ -98,6 +99,10 @@ class PlannedOrigin:
     origin_timestamp: int
     maximum_target_timestamp: int
     maturity_digest: str
+    # A deterministic occurrence number distinguishes a reused source origin
+    # from its first pass. It is zero for the initial pass, then increments
+    # each time the planner wraps around the eligible-origin population.
+    reuse_index: int = 0
 
     def __post_init__(self) -> None:
         for name in ("origin_id", "maturity_digest"):
@@ -113,6 +118,7 @@ class PlannedOrigin:
             or self.maximum_target_timestamp <= self.origin_timestamp
         ):
             raise ValueError("maximum target timestamp must follow origin")
+        _strict_integer(self.reuse_index, "reuse_index", minimum=0)
 
     def identity_dict(self) -> dict[str, Any]:
         return {
@@ -123,6 +129,7 @@ class PlannedOrigin:
             "origin_timestamp": self.origin_timestamp,
             "maximum_target_timestamp": self.maximum_target_timestamp,
             "maturity_digest": self.maturity_digest,
+            "reuse_index": self.reuse_index,
         }
 
     @classmethod
@@ -152,10 +159,14 @@ class PlannedCohort:
         )
         if not origins or not all(isinstance(item, PlannedOrigin) for item in origins):
             raise ValueError("cohort requires planned origins")
-        if len({item.origin_id for item in origins}) != len(origins):
-            raise ValueError("cohort origin identities must be unique")
+        occurrence_keys = {
+            (item.origin_id, item.reuse_index) for item in origins
+        }
+        if len(occurrence_keys) != len(origins):
+            raise ValueError("cohort origin occurrences must be unique")
         if any(
-            right.origin_timestamp <= left.origin_timestamp
+            (right.reuse_index, right.origin_timestamp)
+            <= (left.reuse_index, left.origin_timestamp)
             for left, right in zip(origins, origins[1:])
         ):
             raise ValueError("cohort origins must be ordered causally")
@@ -169,6 +180,12 @@ class PlannedCohort:
     @property
     def origin_ids(self) -> tuple[str, ...]:
         return tuple(item.origin_id for item in self.origins)
+
+    @property
+    def origin_occurrence_keys(self) -> tuple[tuple[str, int], ...]:
+        """Stable identity for one planned source-origin occurrence."""
+
+        return tuple((item.origin_id, item.reuse_index) for item in self.origins)
 
     @property
     def origin_count(self) -> int:
@@ -221,6 +238,10 @@ class PlannedBatch:
         return self.cohort.origin_ids
 
     @property
+    def origin_occurrence_keys(self) -> tuple[tuple[str, int], ...]:
+        return self.cohort.origin_occurrence_keys
+
+    @property
     def origin_count(self) -> int:
         return self.cohort.origin_count
 
@@ -270,9 +291,11 @@ class RunAdaptationCohort:
         if [item.batch_index for item in batches] != list(range(len(batches))):
             raise ValueError("adaptation batch indices must be contiguous")
         flattened = tuple(
-            origin_id for batch in batches for origin_id in batch.origin_ids
+            occurrence
+            for batch in batches
+            for occurrence in batch.origin_occurrence_keys
         )
-        if flattened != self.cohort.origin_ids:
+        if flattened != self.cohort.origin_occurrence_keys:
             raise ValueError("adaptation batches must exactly partition the cohort")
         object.__setattr__(self, "batches", batches)
 
@@ -283,6 +306,10 @@ class RunAdaptationCohort:
     @property
     def origin_ids(self) -> tuple[str, ...]:
         return self.cohort.origin_ids
+
+    @property
+    def origin_occurrence_keys(self) -> tuple[tuple[str, int], ...]:
+        return self.cohort.origin_occurrence_keys
 
     @property
     def origin_count(self) -> int:
@@ -352,7 +379,9 @@ class GenerationCohorts:
                 object.__setattr__(self, name, value)
             if not isinstance(value, PlannedCohort) or value.role != name:
                 raise ValueError(f"generation {name} cohort role is invalid")
-        if set(self.screening.origin_ids) & set(self.holdout.origin_ids):
+        if set(self.screening.origin_occurrence_keys) & set(
+            self.holdout.origin_occurrence_keys
+        ):
             raise ValueError("generation screening and holdout must be disjoint")
 
     def identity_dict(self) -> dict[str, Any]:
@@ -407,6 +436,8 @@ class CohortCapacityReport:
     scoring_cells_for_run: int
     schedule_digest: str
     seed: int
+    cohort_reuse_policy: str = COHORT_REUSE_POLICY
+    reused_origin_occurrences: int = 0
     schema_version: str = CAPACITY_REPORT_SCHEMA
 
     def __post_init__(self) -> None:
@@ -421,8 +452,13 @@ class CohortCapacityReport:
             "candidate_origin_executions_for_run",
             "scoring_cells_for_run",
             "seed",
+            "reused_origin_occurrences",
         ):
             _strict_integer(getattr(self, name), name)
+        if self.cohort_reuse_policy != COHORT_REUSE_POLICY:
+            raise ValueError(
+                f"cohort_reuse_policy must be {COHORT_REUSE_POLICY!r}"
+            )
         if not isinstance(self.sufficient, bool):
             raise TypeError("sufficient must be a bool")
         _sha256(self.schedule_digest, "schedule_digest")
@@ -455,6 +491,8 @@ class CohortCapacityReport:
             "scoring_cells_for_run": self.scoring_cells_for_run,
             "schedule_digest": self.schedule_digest,
             "seed": self.seed,
+            "cohort_reuse_policy": self.cohort_reuse_policy,
+            "reused_origin_occurrences": self.reused_origin_occurrences,
         }
 
     @property
@@ -462,7 +500,27 @@ class CohortCapacityReport:
         return digest(self.identity_dict())
 
     def to_dict(self) -> dict[str, Any]:
-        return {**self.identity_dict(), "planner_digest": self.planner_digest}
+        payload = {**self.identity_dict(), "planner_digest": self.planner_digest}
+        # Explicit occurrence/source terminology prevents cyclic reuse from
+        # being mistaken for additional independent observations.  Keep the
+        # legacy keys in the frozen identity for existing ledgers, while all
+        # new UI/API consumers can use these unambiguous fields.
+        payload.update(
+            {
+                "planned_origin_occurrences": self.required_unique_origins,
+                "available_source_origins": self.available_eligible_origins,
+                "effective_source_count": min(
+                    self.required_unique_origins,
+                    self.available_eligible_origins,
+                ),
+                "reuse_fraction": (
+                    self.reused_origin_occurrences / self.required_unique_origins
+                    if self.required_unique_origins
+                    else 0.0
+                ),
+            }
+        )
+        return payload
 
 
 def _eligible_origins(
@@ -557,6 +615,38 @@ def _capacity_error(
     )
 
 
+def _cycled_origins(
+    eligible: Sequence[PlannedOrigin], *, start: int, count: int
+) -> tuple[PlannedOrigin, ...]:
+    """Return a deterministic contiguous window, wrapping after exhaustion.
+
+    The source origin identity remains unchanged when it is reused, while the
+    occurrence index records the cycle. This keeps every repeated forecast
+    vector independently addressable in checkpoints and audit events.
+    """
+
+    if not eligible:
+        raise CohortCapacityError(
+            required=max(1, count), available=0, max_generations=0
+        )
+    if isinstance(start, bool) or not isinstance(start, int) or start < 0:
+        raise ValueError("origin window start must be a non-negative integer")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise ValueError("origin window count must be a positive integer")
+    population = len(eligible)
+    selected: list[PlannedOrigin] = []
+    for offset in range(count):
+        absolute = start + offset
+        source = eligible[absolute % population]
+        cycle = absolute // population
+        selected.append(
+            source
+            if cycle == source.reuse_index
+            else replace(source, reuse_index=cycle)
+        )
+    return tuple(selected)
+
+
 def plan_run_adaptation_cohort(
     dataset: DatasetIdentityView,
     *,
@@ -568,9 +658,7 @@ def plan_run_adaptation_cohort(
     _strict_integer(seed, "seed")
     eligible, _gaps = _eligible_origins(dataset)
     required = schedule.formal_origin_count_per_finalist
-    if len(eligible) < required:
-        raise _capacity_error(required=required, available=len(eligible), schedule=schedule)
-    selected = eligible[:required]
+    selected = _cycled_origins(eligible, start=0, count=required)
     cohort = PlannedCohort(
         role="adaptation",
         origins=selected,
@@ -618,32 +706,31 @@ def plan_generation_selection_cohorts(
     eligible, _gaps = _eligible_origins(dataset)
     if not eligible:
         raise _capacity_error(required=1, available=0, schedule=schedule)
+    expected_adaptation = _cycled_origins(
+        eligible, start=0, count=adaptation.origin_count
+    )
     if (
         adaptation.dataset_id != eligible[0].dataset_id
         or adaptation.episode_id != eligible[0].episode_id
-        or adaptation.origin_ids
-        != tuple(item.origin_id for item in eligible[: adaptation.origin_count])
+        or adaptation.origin_occurrence_keys
+        != tuple((item.origin_id, item.reuse_index) for item in expected_adaptation)
     ):
         raise ValueError("adaptation cohort does not match dataset identity plan")
     per_generation = (
         schedule.screening_origin_count + schedule.selection_holdout_origin_count
     )
     start = adaptation.origin_count + generation * per_generation
-    required = start + per_generation
-    if len(eligible) < required:
-        raise _capacity_error(
-            required=required, available=len(eligible), schedule=schedule
-        )
-    screening_end = start + schedule.screening_origin_count
+    selected = _cycled_origins(eligible, start=start, count=per_generation)
+    screening_end = schedule.screening_origin_count
     screening = PlannedCohort(
         role="screening",
-        origins=eligible[start:screening_end],
+        origins=selected[:screening_end],
         maximum_horizon=max(DEFAULT_HORIZONS),
         shared_candidate_count=4,
     )
     holdout = PlannedCohort(
         role="holdout",
-        origins=eligible[screening_end:required],
+        origins=selected[screening_end:],
         maximum_horizon=max(DEFAULT_HORIZONS),
         shared_arm_count=3,
     )
@@ -678,14 +765,11 @@ def estimate_epoch_capacity(
     eligible, gaps = _eligible_origins(dataset)
     selected = _selection_partition(dataset)
     required = schedule.required_unique_origins(planned_generations)
-    per_generation_members = (
-        schedule.screening_origin_count + schedule.selection_holdout_origin_count
-    )
-    max_generations = max(
-        0,
-        (len(eligible) - schedule.formal_origin_count_per_finalist)
-        // per_generation_members,
-    )
+    # A non-empty eligible population can service any requested number of
+    # rounds. The planner consumes each source origin once, then wraps with a
+    # deterministic reuse index. Keep the requested budget as the executable
+    # maximum and expose the reuse count for operator/audit visibility.
+    max_generations = planned_generations if eligible else 0
     candidate_origins = schedule.generation_execution_budget(
         cells_per_origin=scoring_cells_per_origin
     )["total_candidate_origins"]
@@ -697,7 +781,7 @@ def estimate_epoch_capacity(
         available_eligible_origins=len(eligible),
         required_unique_origins=required,
         max_feasible_generations=max_generations,
-        sufficient=len(eligible) >= required,
+        sufficient=bool(eligible),
         maturity_gaps=gaps,
         candidate_origin_executions_per_generation=candidate_origins,
         scoring_cells_per_generation=(
@@ -711,11 +795,14 @@ def estimate_epoch_capacity(
         ),
         schedule_digest=digest(schedule.to_dict()),
         seed=seed,
+        cohort_reuse_policy=COHORT_REUSE_POLICY,
+        reused_origin_occurrences=max(0, required - len(eligible)),
     )
 
 
 __all__ = [
     "CAPACITY_REPORT_SCHEMA",
+    "COHORT_REUSE_POLICY",
     "COHORT_PLANNER_SCHEMA",
     "CohortCapacityError",
     "CohortCapacityReport",
