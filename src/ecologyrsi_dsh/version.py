@@ -1,3 +1,3 @@
 """Package version kept in one import-safe location."""
 
-__version__ = "0.3.36"
+__version__ = "0.3.37"

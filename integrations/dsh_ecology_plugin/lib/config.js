@@ -78,7 +78,10 @@ export function resolvePluginConfig(config = {}, { defaultStaticRoot, env = proc
     ),
     structuredStageMinIntervalMs: nonNegativeInteger(
       config.structuredStageMinIntervalMs,
-      0,
+      // The run-level 64/128 setting remains the true in-flight ceiling. A
+      // short launch interval prevents a recovered run from sending the whole
+      // cohort in one burst before provider feedback can reduce the gate.
+      500,
       "structuredStageMinIntervalMs",
     ),
     structuredStageMaxInFlight: boundedConcurrency(

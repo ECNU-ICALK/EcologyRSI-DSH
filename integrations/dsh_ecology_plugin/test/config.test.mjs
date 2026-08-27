@@ -12,7 +12,7 @@ test("research stages have an independent long-running timeout", () => {
   assert.equal(defaults.structuredStageTimeoutMs, 600_000);
   assert.equal(defaults.researchStageTimeoutMs, 1_800_000);
   assert.equal(defaults.sampleCriticStageTimeoutMs, 600_000);
-  assert.equal(defaults.structuredStageMinIntervalMs, 0);
+  assert.equal(defaults.structuredStageMinIntervalMs, 500);
   assert.equal(defaults.structuredStageMaxInFlight, 128);
   assert.equal(defaults.structuredStageFailureCooldownMs, 15_000);
 
