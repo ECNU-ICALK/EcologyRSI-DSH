@@ -36,7 +36,12 @@ from ..core.sample_results import (
 )
 from ..core.sample_budget import complete_origin_count
 from ..core.screening import screening_cohort_digest
-from ..core.trajectory import CandidateRevision, RevisionStatus
+from ..core.trajectory import (
+    CandidateRevision,
+    EvaluationPhase,
+    EvaluationScope,
+    RevisionStatus,
+)
 from ..evaluators.epoch_cohorts import (
     estimate_epoch_capacity,
     plan_generation_selection_cohorts,
@@ -255,6 +260,15 @@ def _freeze_adaptive_generation_inputs(
 
 
 def _phase_task_manifest(task: Any, generation: int, phase: str) -> Any:
+    if task.metadata.get("optimization_protocol") == OPTIMIZATION_PROTOCOL:
+        return replace(
+            task,
+            metadata={
+                **dict(task.metadata),
+                "evaluation_phase": phase,
+                "two_stage_evaluation_enabled": True,
+            },
+        )
     cells_per_origin = int(task.metadata.get("prediction_cells_per_origin", 1))
     formal_cells = int(task.metadata.get("samples_per_update", cells_per_origin))
     formal_origins = complete_origin_count(formal_cells, cells_per_origin)
@@ -302,6 +316,20 @@ def _screen_candidate(endpoint: Any, run_id: str, candidate_id: str) -> None:
     screening_task = _phase_task_manifest(
         state.task_manifest, candidate.generation, "screening"
     )
+    revision = state.initial_revision_for(candidate_id)
+    generation_cohorts = state.generation_cohort_for(candidate.generation)
+    if revision is None or generation_cohorts is None:
+        raise RuntimeError("screening requires frozen R0 and generation cohort")
+    screening_cohort = generation_cohorts.screening
+    screening_scope = EvaluationScope(
+        run_id=run_id,
+        generation=candidate.generation,
+        candidate_id=candidate_id,
+        candidate_revision_id=revision.revision_id,
+        phase=EvaluationPhase.SCREENING,
+        cohort_digest=screening_cohort.cohort_digest,
+        origin_count=screening_cohort.origin_count,
+    )
 
     def sample_run_control() -> str:
         status = endpoint.server.director.state(run_id).run.status
@@ -316,6 +344,8 @@ def _screen_candidate(endpoint: Any, run_id: str, candidate_id: str) -> None:
             screening_task,
             candidate,
             proposal,
+            scope=screening_scope,
+            cohort=screening_cohort,
             algorithm_spec=AlgorithmSpec.from_dict(compiled),
             on_training_complete=lambda: None,
             on_sample_control=sample_run_control,

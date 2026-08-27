@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from statistics import fmean
 from typing import Any
 
@@ -25,6 +25,7 @@ from ..core.models import (
     TaskManifest,
     digest,
 )
+from ..core.trajectory import EvaluationScope
 from ..core.protocols import is_strict_origin_protocol
 from ..core.sample_results import SAMPLE_REWARD_DEFINITION, build_sample_results
 from ..data.registry import DatasetRegistry, DatasetSeries
@@ -54,6 +55,7 @@ from .gateway_sample_adapter import (
 )
 from .dsh_sample_adapter import DshSampleCollaborationAdapter
 from .fitness import FitnessProfile
+from .epoch_cohorts import PlannedCohort
 from .shared_sample_context import sibling_stage_context_digest
 from .baselines import (
     BASELINE_PROFILE_VERSION,
@@ -490,6 +492,75 @@ def _select_origin_bundled_feedback_cohort(
     return [row for row, _identity in selected_pairs], evidence
 
 
+def _select_planned_evaluation_cohort(
+    rows: Sequence[Mapping[str, Any]],
+    cohort: PlannedCohort,
+    *,
+    expected_prediction_cells_per_origin: int = 9,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Materialize one frozen origin cohort without inspecting label values.
+
+    The cohort planner owns origin identity and order.  The evaluator is only
+    allowed to attach the complete target/horizon prediction vector already
+    present in its causal evaluation population; it may not rotate, wrap, or
+    truncate the frozen origins.
+    """
+
+    if not isinstance(cohort, PlannedCohort):
+        raise TypeError("cohort must be a PlannedCohort")
+    if (
+        isinstance(expected_prediction_cells_per_origin, bool)
+        or not isinstance(expected_prediction_cells_per_origin, int)
+        or expected_prediction_cells_per_origin < 1
+    ):
+        raise ValueError("expected prediction cells per origin must be positive")
+    grouped: dict[Any, dict[tuple[str, int], dict[str, Any]]] = {}
+    task_keys: set[tuple[str, int]] = set()
+    for raw_row in rows:
+        row = dict(raw_row)
+        identity = _feedback_sample_identity(row)
+        origin_timestamp = identity["origin_timestamp"]
+        task_key = (str(identity["target"]), int(identity["horizon_hours"]))
+        task_keys.add(task_key)
+        origin_rows = grouped.setdefault(origin_timestamp, {})
+        if task_key in origin_rows:
+            raise ValueError("evaluation origin contains duplicate prediction cells")
+        origin_rows[task_key] = row
+    if len(task_keys) != expected_prediction_cells_per_origin:
+        raise ValueError(
+            "evaluation population does not expose the complete prediction vector"
+        )
+    ordered_tasks = tuple(sorted(task_keys))
+    selected: list[dict[str, Any]] = []
+    for origin in cohort.origins:
+        origin_rows = grouped.get(origin.origin_timestamp)
+        if origin_rows is None or set(origin_rows) != task_keys:
+            raise ValueError(
+                "frozen evaluation origin does not expose a complete prediction vector"
+            )
+        selected.extend(origin_rows[task_key] for task_key in ordered_tasks)
+    evidence = {
+        "schema_version": "ecologyrsi-dsh.frozen-evaluation-cohort/1",
+        "selection_policy": "planner_frozen_complete_origins@1",
+        "cohort_role": cohort.role,
+        "cohort_digest": cohort.cohort_digest,
+        "selected_origin_count": cohort.origin_count,
+        "prediction_cells_per_origin": len(ordered_tasks),
+        "selected_count": len(selected),
+        "deferred_count": max(0, len(rows) - len(selected)),
+        "tasks": [
+            {
+                "target": target,
+                "horizon_hours": horizon,
+                "population_count": len(grouped),
+                "selected_count": cohort.origin_count,
+            }
+            for target, horizon in ordered_tasks
+        ],
+    }
+    return selected, evidence
+
+
 def _feedback_update_limit(task: TaskManifest) -> int | None:
     raw = task.metadata.get("samples_per_update")
     if raw is None:
@@ -500,6 +571,110 @@ def _feedback_update_limit(task: TaskManifest) -> int | None:
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
         raise ValueError("samples_per_update must be a positive integer")
     return raw
+
+
+def _select_task_evaluation_cohort(
+    task: TaskManifest,
+    candidate: Candidate,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    dataset_digest: str,
+    split_manifest_digest: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, int | None]:
+    raw_scope = task.metadata.get("_evaluation_scope")
+    raw_cohort = task.metadata.get("_planned_evaluation_cohort")
+    if raw_scope is not None or raw_cohort is not None:
+        if not isinstance(raw_scope, Mapping) or not isinstance(
+            raw_cohort, Mapping
+        ):
+            raise ValueError("scoped evaluation requires scope and planned cohort")
+        scope = EvaluationScope.from_dict(raw_scope)
+        cohort = PlannedCohort.from_dict(raw_cohort)
+        if (
+            scope.run_id != candidate.run_id
+            or scope.generation != candidate.generation
+            or scope.candidate_id != candidate.candidate_id
+            or scope.cohort_digest != cohort.cohort_digest
+            or scope.origin_count != cohort.origin_count
+        ):
+            raise ValueError("planned cohort does not match EvaluationScope")
+        cells_per_origin = task.metadata.get("prediction_cells_per_origin")
+        selected, evidence = _select_planned_evaluation_cohort(
+            rows,
+            cohort,
+            expected_prediction_cells_per_origin=int(cells_per_origin),
+        )
+        return selected, evidence, len(selected)
+    samples_per_update = _feedback_update_limit(task)
+    if samples_per_update is None:
+        return [dict(row) for row in rows], None, None
+    selected, evidence = _select_feedback_update_cohort(
+        rows,
+        generation=candidate.generation,
+        samples_per_update=samples_per_update,
+        dataset_digest=dataset_digest,
+        split_manifest_digest=split_manifest_digest,
+        bundle_complete_origins=is_strict_origin_protocol(
+            task.metadata.get("sample_agent_protocol")
+        ),
+        origin_window_offset=task.metadata.get("evaluation_origin_window_offset"),
+    )
+    return selected, evidence, samples_per_update
+
+
+def _bind_bundle_to_scope(
+    bundle: "EvaluationBundle", scope: EvaluationScope | None
+) -> "EvaluationBundle":
+    if scope is None:
+        return bundle
+    artifact_data = bundle.artifact.to_dict()
+    artifact_data.pop("artifact_digest", None)
+    artifact_metrics = dict(bundle.artifact.metrics)
+    artifact_metrics.update(
+        {
+            "candidate_revision_id": scope.candidate_revision_id,
+            "execution_scope_digest": scope.scope_key,
+            "evaluation_phase": scope.phase.value,
+        }
+    )
+    artifact_data.update(
+        {
+            "candidate_revision_id": scope.candidate_revision_id,
+            "evaluation_scope_digest": scope.scope_key,
+            "metrics": artifact_metrics,
+        }
+    )
+    artifact = ModelArtifact.from_dict(artifact_data)
+    evaluation_data = bundle.evaluation.to_dict()
+    metrics = dict(bundle.evaluation.metrics)
+    sample_summary = metrics.get("sample_execution")
+    prediction_cell_count = (
+        int(sample_summary.get("attempted_examples", 0))
+        if isinstance(sample_summary, Mapping)
+        else len(bundle.sample_results or ())
+    )
+    metrics.update(
+        {
+            "evaluation_origin_count": scope.origin_count,
+            "prediction_cell_count": prediction_cell_count,
+            "feedback_update_cohort_digest": scope.cohort_digest,
+            "execution_scope_digest": scope.scope_key,
+            "evaluation_phase": scope.phase.value,
+        }
+    )
+    evaluation_data.update(
+        {
+            "candidate_revision_id": scope.candidate_revision_id,
+            "evaluation_scope": scope.to_dict(),
+            "artifact_digest": artifact.digest,
+            "metrics": metrics,
+        }
+    )
+    return EvaluationBundle(
+        artifact=artifact,
+        evaluation=Evaluation.from_dict(evaluation_data),
+        sample_results=bundle.sample_results,
+    )
 
 
 def _cohort_task_counts(
@@ -1071,6 +1246,14 @@ class EvaluatorRegistry:
             "candidate_agent_profile": dict(agent_profile),
         }
 
+    @staticmethod
+    def _evaluation_scope_context(task: TaskManifest) -> dict[str, Any]:
+        raw = task.metadata.get("_evaluation_scope")
+        if raw is None:
+            return {}
+        scope = EvaluationScope.from_dict(raw)
+        return {"evaluation_scope": scope.to_dict()}
+
     def catalog(self) -> list[dict[str, Any]]:
         items = [
             {
@@ -1470,6 +1653,8 @@ class EvaluatorRegistry:
         candidate: Candidate,
         proposal: Proposal,
         *,
+        scope: EvaluationScope | Mapping[str, Any] | None = None,
+        cohort: PlannedCohort | Mapping[str, Any] | None = None,
         on_training_complete: Callable[[], None] | None = None,
         on_evaluation_progress: Callable[[Mapping[str, Any]], None] | None = None,
         on_sample_results: Callable[
@@ -1484,6 +1669,44 @@ class EvaluatorRegistry:
         on_sample_control: Callable[[], str] | None = None,
         algorithm_spec: AlgorithmSpec | Mapping[str, Any] | None = None,
     ) -> EvaluationBundle:
+        resolved_scope = (
+            scope
+            if isinstance(scope, EvaluationScope)
+            else EvaluationScope.from_dict(scope)
+            if isinstance(scope, Mapping)
+            else None
+        )
+        resolved_cohort = (
+            cohort
+            if isinstance(cohort, PlannedCohort)
+            else PlannedCohort.from_dict(cohort)
+            if isinstance(cohort, Mapping)
+            else None
+        )
+        adaptive = task.metadata.get("optimization_protocol") == "top2_adaptive_epoch@1"
+        if adaptive and (resolved_scope is None or resolved_cohort is None):
+            raise ValueError(
+                "adaptive scientific evaluation requires scope and frozen cohort"
+            )
+        if (resolved_scope is None) != (resolved_cohort is None):
+            raise ValueError("scope and frozen cohort must be supplied together")
+        if resolved_scope is not None and resolved_cohort is not None:
+            if (
+                resolved_scope.run_id != candidate.run_id
+                or resolved_scope.generation != candidate.generation
+                or resolved_scope.candidate_id != candidate.candidate_id
+                or resolved_scope.cohort_digest != resolved_cohort.cohort_digest
+                or resolved_scope.origin_count != resolved_cohort.origin_count
+            ):
+                raise ValueError("EvaluationScope does not match candidate/cohort")
+            task = replace(
+                task,
+                metadata={
+                    **dict(task.metadata),
+                    "_evaluation_scope": resolved_scope.to_dict(),
+                    "_planned_evaluation_cohort": resolved_cohort.to_dict(),
+                },
+            )
         dataset_id = task.dataset
         if dataset_id is None:
             raise ValueError("task has no visible dataset")
@@ -1532,7 +1755,7 @@ class EvaluatorRegistry:
             resolved_algorithm_spec,
         )
         if evaluator_id == TOY_EVALUATOR_ID:
-            return self._evaluate_toy(
+            bundle = self._evaluate_toy(
                 task,
                 candidate,
                 proposal,
@@ -1544,7 +1767,7 @@ class EvaluatorRegistry:
                 on_sample_control=on_sample_control,
                 execution_plan=execution_plan,
             )
-        if predictor_model_id in {
+        elif predictor_model_id in {
             EXOGENOUS_RIDGE_MODEL_ID,
             TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
             HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
@@ -1558,7 +1781,7 @@ class EvaluatorRegistry:
                 }
                 else (1,)
             )
-            return self._evaluate_greenhouse_ridge(
+            bundle = self._evaluate_greenhouse_ridge(
                 task,
                 candidate,
                 proposal,
@@ -1574,7 +1797,7 @@ class EvaluatorRegistry:
                 predictor_model_id=predictor_model_id,
             )
         else:
-            return self._evaluate_greenhouse(
+            bundle = self._evaluate_greenhouse(
                 task,
                 candidate,
                 proposal,
@@ -1587,6 +1810,7 @@ class EvaluatorRegistry:
                 on_sample_control=on_sample_control,
                 execution_plan=execution_plan,
             )
+        return _bind_bundle_to_scope(bundle, resolved_scope)
 
     @staticmethod
     def _validate_algorithm_data_boundary(
@@ -1792,34 +2016,18 @@ class EvaluatorRegistry:
             {**row, "partition": "validation"}
             for row in evaluation_metrics.get("prediction_preview", [])
         ]
-        feedback_update_cohort: dict[str, Any] | None = None
-        samples_per_update = _feedback_update_limit(task)
-        if samples_per_update is not None:
-            split_manifest_digest = task.metadata.get("split_manifest_digest")
-            if (
-                not isinstance(split_manifest_digest, str)
-                or not split_manifest_digest
-            ):
-                raise ValueError(
-                    "bounded toy evaluation requires a frozen split manifest digest"
-                )
-            raw_prediction_rows, feedback_update_cohort = (
-                _select_feedback_update_cohort(
-                    raw_prediction_rows,
-                    generation=candidate.generation,
-                    samples_per_update=samples_per_update,
-                    dataset_digest=toy.dataset_digest,
-                    split_manifest_digest=split_manifest_digest,
-                    bundle_complete_origins=(
-                        is_strict_origin_protocol(
-                            task.metadata.get("sample_agent_protocol")
-                        )
-                    ),
-                    origin_window_offset=task.metadata.get(
-                        "evaluation_origin_window_offset"
-                    ),
-                )
+        split_manifest_digest = str(
+            task.metadata.get("split_manifest_digest") or "unbounded-toy"
+        )
+        raw_prediction_rows, feedback_update_cohort, samples_per_update = (
+            _select_task_evaluation_cohort(
+                task,
+                candidate,
+                raw_prediction_rows,
+                dataset_digest=toy.dataset_digest,
+                split_manifest_digest=split_manifest_digest,
             )
+        )
         evaluation_eligible_examples = len(raw_prediction_rows)
 
         def toy_forecast_bundle_tool(
@@ -1865,6 +2073,7 @@ class EvaluatorRegistry:
             context={
                 "run_id": candidate.run_id,
                 "candidate_id": candidate.candidate_id,
+                **self._evaluation_scope_context(task),
                 **self._dsh_sample_stage_context(task, candidate, proposal),
                 "dataset_digest": toy.dataset_digest,
                 "partition": "validation",
@@ -1877,8 +2086,12 @@ class EvaluatorRegistry:
                 "derived_execution_plan": execution_plan.to_dict(),
                 **(
                     {
-                        "samples_per_update": samples_per_update,
                         "feedback_update_cohort": feedback_update_cohort,
+                        **(
+                            {"samples_per_update": samples_per_update}
+                            if task.metadata.get("_evaluation_scope") is None
+                            else {}
+                        ),
                     }
                     if feedback_update_cohort is not None
                     else {}
@@ -2237,26 +2450,16 @@ class EvaluatorRegistry:
             )
             generated_feedback_rows.extend(feedback_rows)
 
-        feedback_update_cohort: dict[str, Any] | None = None
-        samples_per_update = _feedback_update_limit(task)
-        if samples_per_update is not None:
-            generated_feedback_rows, feedback_update_cohort = (
-                _select_feedback_update_cohort(
-                    generated_feedback_rows,
-                    generation=candidate.generation,
-                    samples_per_update=samples_per_update,
-                    dataset_digest=series.digest,
-                    split_manifest_digest=series.split_manifest_digest_sha256,
-                    bundle_complete_origins=(
-                        is_strict_origin_protocol(
-                            task.metadata.get("sample_agent_protocol")
-                        )
-                    ),
-                    origin_window_offset=task.metadata.get(
-                        "evaluation_origin_window_offset"
-                    ),
-                )
+        generated_feedback_rows, feedback_update_cohort, samples_per_update = (
+            _select_task_evaluation_cohort(
+                task,
+                candidate,
+                generated_feedback_rows,
+                dataset_digest=series.digest,
+                split_manifest_digest=series.split_manifest_digest_sha256,
             )
+        )
+        if feedback_update_cohort is not None:
             selected_task_counts = _cohort_task_counts(
                 feedback_update_cohort, "selected_count"
             )
@@ -2349,6 +2552,7 @@ class EvaluatorRegistry:
             context={
                 "run_id": candidate.run_id,
                 "candidate_id": candidate.candidate_id,
+                **self._evaluation_scope_context(task),
                 **self._dsh_sample_stage_context(task, candidate, proposal),
                 "dataset_digest": series.digest,
                 "split_manifest_digest_sha256": series.split_manifest_digest_sha256,
@@ -2375,8 +2579,12 @@ class EvaluatorRegistry:
                 ),
                 **(
                     {
-                        "samples_per_update": samples_per_update,
                         "feedback_update_cohort": feedback_update_cohort,
+                        **(
+                            {"samples_per_update": samples_per_update}
+                            if task.metadata.get("_evaluation_scope") is None
+                            else {}
+                        ),
                     }
                     if feedback_update_cohort is not None
                     else {}
@@ -2980,26 +3188,15 @@ class EvaluatorRegistry:
             for row in generated_rows
             if row["partition"] == "training_feedback"
         ]
-        feedback_update_cohort: dict[str, Any] | None = None
-        samples_per_update = _feedback_update_limit(task)
-        if samples_per_update is not None:
-            generated_feedback_rows, feedback_update_cohort = (
-                _select_feedback_update_cohort(
-                    generated_feedback_rows,
-                    generation=candidate.generation,
-                    samples_per_update=samples_per_update,
-                    dataset_digest=series.digest,
-                    split_manifest_digest=series.split_manifest_digest_sha256,
-                    bundle_complete_origins=(
-                        is_strict_origin_protocol(
-                            task.metadata.get("sample_agent_protocol")
-                        )
-                    ),
-                    origin_window_offset=task.metadata.get(
-                        "evaluation_origin_window_offset"
-                    ),
-                )
+        generated_feedback_rows, feedback_update_cohort, samples_per_update = (
+            _select_task_evaluation_cohort(
+                task,
+                candidate,
+                generated_feedback_rows,
+                dataset_digest=series.digest,
+                split_manifest_digest=series.split_manifest_digest_sha256,
             )
+        )
         selected_task_counts = _cohort_task_counts(
             feedback_update_cohort, "selected_count"
         )
@@ -3127,6 +3324,7 @@ class EvaluatorRegistry:
             context={
                 "run_id": candidate.run_id,
                 "candidate_id": candidate.candidate_id,
+                **self._evaluation_scope_context(task),
                 **self._dsh_sample_stage_context(task, candidate, proposal),
                 "dataset_digest": series.digest,
                 "split_manifest_digest_sha256": series.split_manifest_digest_sha256,
@@ -3156,8 +3354,12 @@ class EvaluatorRegistry:
                 ),
                 **(
                     {
-                        "samples_per_update": samples_per_update,
                         "feedback_update_cohort": feedback_update_cohort,
+                        **(
+                            {"samples_per_update": samples_per_update}
+                            if task.metadata.get("_evaluation_scope") is None
+                            else {}
+                        ),
                     }
                     if feedback_update_cohort is not None
                     else {}

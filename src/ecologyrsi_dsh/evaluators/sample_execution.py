@@ -27,6 +27,7 @@ from ..core.errors import (
     dsh_native_runtime_retryable,
 )
 from ..core.models import canonical_json, digest
+from ..core.trajectory import EvaluationScope
 from ..core.protocols import (
     is_strict_origin_protocol,
     supports_concurrent_origins,
@@ -68,6 +69,7 @@ _FORBIDDEN_SAMPLE_CONTEXT_TOKENS = frozenset(
     for name in _FORBIDDEN_SAMPLE_CONTEXT_KEYS
 )
 _SAMPLE_CHECKPOINT_SCHEMA_VERSION = "ecologyrsi-dsh.sample-checkpoint/1"
+_SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION = "ecologyrsi-dsh.sample-checkpoint/2"
 SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION = (
     "ecologyrsi-dsh.sample-agent-chain-attestation/3"
 )
@@ -820,17 +822,63 @@ class CollaborativeSampleExecutor:
                 for bundle in origin_bundles
                 for request in bundle.requests
             }
+        sample_cohort_digest = digest(
+            _checkpoint_digest_value(
+                {"rows": rows, "target_bounds": dict(target_bounds)}
+            )
+        )
+        raw_evaluation_scope = context_data.get("evaluation_scope")
+        evaluation_scope = (
+            EvaluationScope.from_dict(raw_evaluation_scope)
+            if isinstance(raw_evaluation_scope, Mapping)
+            else None
+        )
+        if raw_evaluation_scope is not None and evaluation_scope is None:
+            raise SampleExecutionContractError("evaluation_scope must be an object")
+        if evaluation_scope is not None:
+            if (
+                context_data.get("run_id") != evaluation_scope.run_id
+                or context_data.get("candidate_id")
+                != evaluation_scope.candidate_id
+            ):
+                raise SampleExecutionContractError(
+                    "evaluation_scope does not match sample execution context"
+                )
+            feedback_cohort = context_data.get("feedback_update_cohort")
+            cells_per_origin = (
+                feedback_cohort.get("prediction_cells_per_origin")
+                if isinstance(feedback_cohort, Mapping)
+                else None
+            )
+            if (
+                isinstance(cells_per_origin, bool)
+                or not isinstance(cells_per_origin, int)
+                or cells_per_origin < 1
+                or len(rows) != evaluation_scope.origin_count * cells_per_origin
+                or feedback_cohort.get("cohort_digest")
+                != evaluation_scope.cohort_digest
+            ):
+                raise SampleExecutionContractError(
+                    "sample rows do not exactly cover the frozen EvaluationScope"
+                )
         checkpoint = {
-            "schema_version": _SAMPLE_CHECKPOINT_SCHEMA_VERSION,
-            "cohort_digest": digest(
-                _checkpoint_digest_value({
-                    "rows": rows,
-                    "target_bounds": dict(target_bounds),
-                })
+            "schema_version": (
+                _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION
+                if evaluation_scope is not None
+                else _SAMPLE_CHECKPOINT_SCHEMA_VERSION
+            ),
+            "cohort_digest": (
+                evaluation_scope.cohort_digest
+                if evaluation_scope is not None
+                else sample_cohort_digest
             ),
             "execution_context_digest": digest(
                 {
-                    "schema_version": _SAMPLE_CHECKPOINT_SCHEMA_VERSION,
+                    "schema_version": (
+                        _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION
+                        if evaluation_scope is not None
+                        else _SAMPLE_CHECKPOINT_SCHEMA_VERSION
+                    ),
                     "context": context_data,
                     "target_bounds": dict(target_bounds),
                     "algorithm_id": algorithm_id,
@@ -842,6 +890,23 @@ class CollaborativeSampleExecutor:
             ),
             "sample_count": len(rows),
         }
+        if evaluation_scope is not None:
+            checkpoint.update(
+                {
+                    "candidate_revision_id": (
+                        evaluation_scope.candidate_revision_id
+                    ),
+                    "evaluation_phase": evaluation_scope.phase.value,
+                    "formal_batch_index": evaluation_scope.batch_index,
+                    "holdout_arm": (
+                        evaluation_scope.holdout_arm.value
+                        if evaluation_scope.holdout_arm is not None
+                        else None
+                    ),
+                    "execution_scope_digest": evaluation_scope.scope_key,
+                    "sample_cohort_digest": sample_cohort_digest,
+                }
+            )
         checkpoint_response: Mapping[str, Any] = {}
         if checkpoint_callback is not None and rows:
             raw_checkpoint_response = checkpoint_callback(checkpoint)

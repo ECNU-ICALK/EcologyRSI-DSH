@@ -110,6 +110,8 @@ from .state import (
 from .trajectory import (
     BatchEvaluation,
     CandidateRevision,
+    EvaluationPhase,
+    EvaluationScope,
     FormalBatch,
     FormalTrajectory,
     GenerationComparison,
@@ -145,6 +147,7 @@ _AGGREGATE_EVALUATION_METRICS = frozenset(
 )
 
 _SAMPLE_CHECKPOINT_SCHEMA_VERSION = "ecologyrsi-dsh.sample-checkpoint/1"
+_SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION = "ecologyrsi-dsh.sample-checkpoint/2"
 _SAMPLE_RESULTS_START_SCHEMA_VERSION = (
     "ecologyrsi-dsh.evaluation-sample-results-start/2"
 )
@@ -3695,6 +3698,7 @@ class EvolutionDirector:
         candidate_id: str,
         revision: str,
         checkpoint: Mapping[str, Any] | None = None,
+        scope: EvaluationScope | None = None,
         supersedes_revision: str | None = None,
         resume_disposition: str | None = None,
     ) -> Event:
@@ -3716,6 +3720,15 @@ class EvolutionDirector:
             if checkpoint is not None
             else None
         )
+        if checkpoint_data is not None and (
+            checkpoint_data["schema_version"]
+            == _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION
+        ):
+            if scope is None:
+                raise ValueError("scoped sample checkpoint requires EvaluationScope")
+            self._validate_evaluation_scope(state, candidate, scope)
+            self._validate_checkpoint_scope(checkpoint_data, scope)
+            self._validate_checkpoint_sample_count(state, checkpoint_data, scope)
         if supersedes_revision is not None and (
             not isinstance(supersedes_revision, str)
             or not supersedes_revision.strip()
@@ -3766,6 +3779,7 @@ class EvolutionDirector:
         proposal_id: str,
         candidate_id: str,
         checkpoint: Mapping[str, Any],
+        scope: EvaluationScope | Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Resume the latest matching revision or append a fenced replacement.
 
@@ -3786,11 +3800,43 @@ class EvolutionDirector:
         ):
             raise ValueError("sample checkpoint does not match its candidate")
 
+        resolved_scope = (
+            scope
+            if isinstance(scope, EvaluationScope)
+            else EvaluationScope.from_dict(scope)
+            if isinstance(scope, Mapping)
+            else None
+        )
+        is_scoped = (
+            checkpoint_data["schema_version"]
+            == _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION
+        )
+        if is_scoped:
+            if resolved_scope is None:
+                raise ValueError("scoped sample checkpoint requires EvaluationScope")
+            self._validate_evaluation_scope(state, candidate, resolved_scope)
+            self._validate_checkpoint_scope(checkpoint_data, resolved_scope)
+            self._validate_checkpoint_sample_count(
+                state, checkpoint_data, resolved_scope
+            )
+        elif resolved_scope is not None:
+            raise ValueError("legacy sample checkpoint cannot claim EvaluationScope")
+
         starts = [
             event
             for event in state.events
             if event.kind == "EvaluationSampleResultsStarted"
             and event.payload.get("candidate_id") == candidate_id
+            and (
+                not is_scoped
+                or (
+                    isinstance(event.payload.get("checkpoint"), Mapping)
+                    and event.payload["checkpoint"].get(
+                        "execution_scope_digest"
+                    )
+                    == checkpoint_data["execution_scope_digest"]
+                )
+            )
         ]
         latest = starts[-1] if starts else None
         rejection = "no_previous_revision"
@@ -3904,6 +3950,7 @@ class EvolutionDirector:
             candidate_id=candidate_id,
             revision=revision,
             checkpoint=checkpoint_data,
+            scope=resolved_scope,
             supersedes_revision=(
                 str(latest.payload.get("revision")) if latest is not None else None
             ),
@@ -3923,22 +3970,48 @@ class EvolutionDirector:
     ) -> dict[str, Any]:
         if not isinstance(checkpoint, Mapping):
             raise TypeError("sample checkpoint must be an object")
-        allowed = {
+        schema_version = checkpoint.get("schema_version")
+        legacy_allowed = {
             "schema_version",
             "cohort_digest",
             "execution_context_digest",
             "sample_count",
         }
+        scoped_allowed = {
+            "schema_version",
+            "candidate_revision_id",
+            "evaluation_phase",
+            "formal_batch_index",
+            "holdout_arm",
+            "cohort_digest",
+            "execution_scope_digest",
+            "sample_cohort_digest",
+            "execution_context_digest",
+            "sample_count",
+        }
+        allowed = (
+            scoped_allowed
+            if schema_version == _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION
+            else legacy_allowed
+        )
         unknown = set(checkpoint) - allowed
         if unknown:
             raise ValueError(
                 "sample checkpoint contains unsupported fields: "
                 + ", ".join(sorted(str(item) for item in unknown))
             )
-        if checkpoint.get("schema_version") != _SAMPLE_CHECKPOINT_SCHEMA_VERSION:
+        if schema_version not in {
+            _SAMPLE_CHECKPOINT_SCHEMA_VERSION,
+            _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION,
+        }:
             raise ValueError("unsupported sample checkpoint schema version")
-        projected = {"schema_version": _SAMPLE_CHECKPOINT_SCHEMA_VERSION}
-        for name in ("cohort_digest", "execution_context_digest"):
+        projected = {"schema_version": schema_version}
+        digest_fields = ["cohort_digest", "execution_context_digest"]
+        if schema_version == _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION:
+            digest_fields.extend(
+                ("execution_scope_digest", "sample_cohort_digest")
+            )
+        for name in digest_fields:
             value = checkpoint.get(name)
             if (
                 not isinstance(value, str)
@@ -3955,7 +4028,155 @@ class EvolutionDirector:
         ):
             raise ValueError("sample checkpoint sample_count is outside the record limit")
         projected["sample_count"] = sample_count
+        if schema_version == _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION:
+            candidate_revision_id = checkpoint.get("candidate_revision_id")
+            if (
+                not isinstance(candidate_revision_id, str)
+                or not candidate_revision_id.strip()
+            ):
+                raise ValueError(
+                    "sample checkpoint candidate_revision_id must be non-empty text"
+                )
+            try:
+                phase = EvaluationPhase(checkpoint.get("evaluation_phase"))
+            except ValueError as exc:
+                raise ValueError(
+                    "sample checkpoint evaluation_phase is invalid"
+                ) from exc
+            formal_batch_index = checkpoint.get("formal_batch_index")
+            holdout_arm = checkpoint.get("holdout_arm")
+            if formal_batch_index is not None and (
+                isinstance(formal_batch_index, bool)
+                or not isinstance(formal_batch_index, int)
+                or formal_batch_index < 0
+            ):
+                raise ValueError(
+                    "sample checkpoint formal_batch_index is invalid"
+                )
+            if holdout_arm is not None:
+                try:
+                    HoldoutArm(holdout_arm)
+                except ValueError as exc:
+                    raise ValueError(
+                        "sample checkpoint holdout_arm is invalid"
+                    ) from exc
+            if phase is EvaluationPhase.SCREENING and (
+                formal_batch_index is not None or holdout_arm is not None
+            ):
+                raise ValueError("screening checkpoint has formal-only fields")
+            if phase is EvaluationPhase.FORMAL_BATCH and (
+                formal_batch_index is None or holdout_arm is not None
+            ):
+                raise ValueError("formal checkpoint fields are invalid")
+            if phase is EvaluationPhase.HOLDOUT and (
+                formal_batch_index is not None or holdout_arm is None
+            ):
+                raise ValueError("holdout checkpoint fields are invalid")
+            projected.update(
+                {
+                    "candidate_revision_id": candidate_revision_id.strip(),
+                    "evaluation_phase": phase.value,
+                    "formal_batch_index": formal_batch_index,
+                    "holdout_arm": holdout_arm,
+                }
+            )
         return projected
+
+    @staticmethod
+    def _validate_checkpoint_scope(
+        checkpoint: Mapping[str, Any], scope: EvaluationScope
+    ) -> None:
+        expected = {
+            "candidate_revision_id": scope.candidate_revision_id,
+            "evaluation_phase": scope.phase.value,
+            "formal_batch_index": scope.batch_index,
+            "holdout_arm": (
+                scope.holdout_arm.value if scope.holdout_arm is not None else None
+            ),
+            "cohort_digest": scope.cohort_digest,
+            "execution_scope_digest": scope.scope_key,
+        }
+        if any(checkpoint.get(name) != value for name, value in expected.items()):
+            raise ValueError("sample checkpoint does not match EvaluationScope")
+
+    @staticmethod
+    def _validate_evaluation_scope(
+        state: RunState,
+        candidate: Candidate,
+        scope: EvaluationScope,
+    ) -> None:
+        if (
+            scope.run_id != state.run.run_id
+            or scope.generation != candidate.generation
+            or scope.candidate_id != candidate.candidate_id
+        ):
+            raise ValueError("evaluation scope does not match candidate")
+        revision = state.revision(scope.candidate_revision_id)
+        if revision.candidate_id != candidate.candidate_id:
+            raise ValueError("evaluation scope revision belongs to another candidate")
+        if scope.phase is EvaluationPhase.SCREENING:
+            initial = state.initial_revision_for(candidate.candidate_id)
+            planned = state.generation_cohort_for(candidate.generation)
+            if (
+                initial is None
+                or initial.revision_id != scope.candidate_revision_id
+                or planned is None
+                or scope.cohort_digest != planned.screening.cohort_digest
+                or scope.origin_count != planned.screening.origin_count
+            ):
+                raise ValueError("screening EvaluationScope is not frozen R0 evidence")
+        elif scope.phase is EvaluationPhase.FORMAL_BATCH:
+            assert scope.batch_index is not None
+            batch = state.formal_batch_for(candidate.candidate_id, scope.batch_index)
+            if (
+                batch is None
+                or batch.revision_id != scope.candidate_revision_id
+                or batch.cohort_digest != scope.cohort_digest
+                or batch.origin_count != scope.origin_count
+            ):
+                raise ValueError("formal EvaluationScope differs from active batch")
+        else:
+            assert scope.holdout_arm is not None
+            holdout = state.generation_holdout_for(scope.generation)
+            binding = (
+                holdout.arm_bindings.get(scope.holdout_arm.value)
+                if holdout is not None
+                else None
+            )
+            if (
+                holdout is None
+                or binding is None
+                or binding.get("candidate_id") != candidate.candidate_id
+                or binding.get("candidate_revision_id")
+                != scope.candidate_revision_id
+                or holdout.cohort_digest != scope.cohort_digest
+                or holdout.origin_count != scope.origin_count
+            ):
+                raise ValueError("holdout EvaluationScope differs from frozen arm")
+        cells_per_origin = state.task_manifest.metadata.get(
+            "prediction_cells_per_origin"
+        )
+        if (
+            isinstance(cells_per_origin, bool)
+            or not isinstance(cells_per_origin, int)
+            or cells_per_origin < 1
+        ):
+            raise ValueError("evaluation scope requires prediction_cells_per_origin")
+
+    @staticmethod
+    def _validate_checkpoint_sample_count(
+        state: RunState,
+        checkpoint: Mapping[str, Any],
+        scope: EvaluationScope,
+    ) -> None:
+        cells_per_origin = int(
+            state.task_manifest.metadata["prediction_cells_per_origin"]
+        )
+        if checkpoint.get("sample_count") != scope.origin_count * cells_per_origin:
+            raise ValueError(
+                "sample checkpoint does not contain every prediction cell for "
+                "the frozen origins"
+            )
 
     def record_evaluation_sample_result_batch(
         self,
