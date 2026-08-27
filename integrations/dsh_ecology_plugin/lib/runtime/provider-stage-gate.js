@@ -85,11 +85,13 @@ export class ProviderStageGate {
     minimumIntervalMs = 0,
     failureCooldownMs = 30_000,
     maxInFlight = MAX_STRUCTURED_STAGE_IN_FLIGHT,
-    // Start above the retired eight-request cap, then use AIMD feedback to
-    // approach the configured 64/128 ceiling without a cold-start stampede.
-    adaptiveInitialInFlight = Math.min(16, maxInFlight),
+    // Eight is a conservative cold-start window, not a ceiling. Successful
+    // work quickly probes beyond it toward the configured 64/128 limit, while
+    // AIMD feedback can still retreat before a fresh process stampedes the
+    // provider with sixteen uncalibrated requests.
+    adaptiveInitialInFlight = Math.min(8, maxInFlight),
     adaptiveFloor = 4,
-    adaptiveRecoverySuccesses = 32,
+    adaptiveRecoverySuccesses = 8,
     now = Date.now,
     delay = sleep,
   } = {}) {

@@ -3,13 +3,13 @@ import test from "node:test";
 
 import { ProviderStageGate } from "../lib/runtime/provider-stage-gate.js";
 
-test("provider stage gate starts above eight and retains the 128-request ceiling", async () => {
+test("provider stage gate cold-starts at eight, then grows beyond it toward 128", async () => {
   const gate = new ProviderStageGate({ minimumIntervalMs: 0 });
   let active = 0;
   let maximum = 0;
   let release;
   const hold = new Promise((resolve) => { release = resolve; });
-  const firstWave = Array.from({ length: 16 }, (_, index) => gate.run(
+  const firstWave = Array.from({ length: 8 }, (_, index) => gate.run(
     "pjlab",
     async () => {
       active += 1;
@@ -28,17 +28,18 @@ test("provider stage gate starts above eight and retains the 128-request ceiling
   );
 
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(maximum, 16);
+  assert.equal(maximum, 8);
   assert.equal(overflowStarted, false);
   assert.deepEqual(gate.snapshot("pjlab"), {
     maxInFlight: 128,
-    effectiveMaxInFlight: 16,
-    active: 16,
+    effectiveMaxInFlight: 8,
+    active: 8,
     queued: 1,
     cooldownRemainingMs: 0,
   });
   release();
   await Promise.all([...firstWave, overflow]);
+  assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 9);
 
   assert.throws(
     () => new ProviderStageGate({ maxInFlight: 129 }),
