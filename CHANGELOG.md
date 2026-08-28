@@ -2,6 +2,45 @@
 
 All notable changes to EcologyRSI-DSH are recorded in this file.
 
+## 0.3.46 - 2026-08-28
+
+### Adaptive evolution
+
+- Keep the outer four-candidate, deterministic Top-2 selection contract while
+  giving each finalist a 500-origin epoch composed of configurable 50-origin
+  local batches and zero-to-five Host-bounded edits per batch.
+- Alternate complete batch/edit pairs between both finalists, recover an
+  interrupted half-pair before switching lanes, and retain a same-cohort
+  round-end comparison against both finalists and the incumbent.
+
+### Runtime reliability
+
+- Replace per-origin full run replays with indexed revision lookups and one
+  validated immutable candidate-identity cache per run.
+- Make health responses independent of the model gateway and event-ledger hot
+  path, and raise the sidecar listen backlog to cover the supported 128-request
+  sample-concurrency ceiling plus operator traffic.
+- Give repeated candidate-spawn attempts a stable event identity and reject a
+  second durable spawn source for the same candidate.
+
+### Observability and interface
+
+- Separate total-run progress from current-epoch progress; report settled,
+  in-flight, queued, unsubmitted, and settling origins without fabricating
+  success or failure counts.
+- Add the two-finalist microbatch/revision trajectory table, cohort-safe score
+  presentation, active DSH child-stage heartbeat, bounded incremental event
+  streaming, and explicit stall diagnostics.
+- Treat the health probe as advisory in the browser and retain the last valid
+  run view during a transient catalog or run refresh failure.
+
+### Cleanup and delivery
+
+- Remove obsolete managed preset trees and packaging compatibility branches;
+  install and verify exactly the six current DSH role presets.
+- Align the Python package, browser plugin, Host plugin, lockfile, legal
+  metadata, and packed Host artifact at version 0.3.46.
+
 ## 0.3.33 - 2026-08-27
 
 ### Runtime correctness

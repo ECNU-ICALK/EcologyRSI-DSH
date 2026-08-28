@@ -1,6 +1,0 @@
-name: ecology-local-editor-v1
-description: Candidate-local-editor role with bounded mutation output.
-agents:
-  - name: candidate-local-editor
-    role: candidate-proposer
-    preset: ecology-local-editor-v1

@@ -6,6 +6,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   realpath,
   symlink,
   writeFile,
@@ -15,6 +16,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  PRESET_IDS,
   installManagedPatch,
   installPresetTree,
   managedPatchText,
@@ -45,32 +47,40 @@ test("preset installation is exact, idempotent, and refuses drift", async () => 
   const tmp = await realpath(await mkdtemp(path.join(os.tmpdir(), "ecology-dsh-install-")));
   const dshHome = path.join(tmp, "dsh-home");
   await mkdir(dshHome);
-  const obsolete = [
-    "ecology-researcher-v1",
-    "ecology-researcher-v2",
-    "ecology-researcher-v3",
-    "ecology-generation-judge-v3",
-    "ecology-researcher-v4",
-    "ecology-generation-judge-v4",
-    "ecology-researcher-v5",
-    "ecology-generation-judge-v5",
+  const stale = [
+    "ecology-coordinator-v3",
+    "ecology-researcher-v6",
+    "ecology-candidate-proposer-v3",
+    "ecology-sample-planner-v3",
+    "ecology-sample-critic-v3",
+    "ecology-generation-judge-v6",
+    "ecology-local-editor-v1",
+    "ecology-researcher-v99",
   ].map(
     (id) => path.join(dshHome, ".agent-presets", id),
   );
-  for (const target of obsolete) {
+  for (const target of stale) {
     await mkdir(target, { recursive: true });
-    await writeFile(path.join(target, "preset.yml"), "obsolete\n");
+    await writeFile(path.join(target, "preset.yml"), "stale\n");
   }
+  const unmanagedId = "ecology-user-specialist-v1";
+  const unmanagedTarget = path.join(dshHome, ".agent-presets", unmanagedId);
+  await mkdir(unmanagedTarget, { recursive: true });
+  await writeFile(path.join(unmanagedTarget, "preset.yml"), "user managed\n");
+
   await installPresetTree({ sourceRoot: source, dshHome });
   await installPresetTree({ sourceRoot: source, dshHome });
-  for (const target of obsolete) {
+  for (const target of stale) {
     await assert.rejects(readFile(path.join(target, "preset.yml")), { code: "ENOENT" });
   }
-  const legacyTarget = path.join(
-    dshHome, ".agent-presets", "ecology-researcher-v6", "preset.yml",
-  );
+  assert.equal(await readFile(path.join(unmanagedTarget, "preset.yml"), "utf8"), "user managed\n");
+  const installedIds = (await readdir(path.join(dshHome, ".agent-presets"), { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  assert.deepEqual(installedIds, [...PRESET_IDS, unmanagedId].sort());
+
   const target = path.join(dshHome, ".agent-presets", "ecology-researcher-v7", "preset.yml");
-  assert.match(await readFile(legacyTarget, "utf8"), /Ecology Researcher v6/);
   assert.match(await readFile(target, "utf8"), /Ecology Researcher/);
   await writeFile(target, "drift\n");
   await assert.rejects(installPresetTree({ sourceRoot: source, dshHome }), /drift/);

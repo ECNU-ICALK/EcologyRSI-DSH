@@ -375,7 +375,7 @@
       state.showAllEvents = false;
       state.candidateSelectionPinned = false;
       syncCandidateSelection(run);
-      state.events = state.usingDemo ? clone(demoEvents) : [];
+      resetEventStream(run.id, state.usingDemo ? clone(demoEvents) : []);
       state.loadState = state.usingDemo ? "demo" : "ready";
       state.lastUpdated = new Date().toISOString();
       state.workspace = "process";
@@ -748,14 +748,14 @@
     state.runReadRequest = requestId;
     state.refreshing = true;
     renderAll();
-    return Promise.all([request("/catalog", { timeout: dataRequestTimeout }), request(runsListPath()), request("/runs/" + encodeURIComponent(runId)), request("/runs/" + encodeURIComponent(runId) + "/events")]).then(function (results) {
+    return Promise.all([request("/catalog", { timeout: dataRequestTimeout }), request(runsListPath()), request("/runs/" + encodeURIComponent(runId)), request(eventRequestPath(runId, false))]).then(function (results) {
       if (requestId !== state.runReadRequest || viewEpoch !== state.viewEpoch || !state.activeRun || state.activeRun.id !== runId) { return false; }
       state.catalog = normalizeCatalog(results[0]);
       var previousRun = state.activeRun;
       var incomingRun = normalizeRun(results[2]);
       if (!state.activeRun || incomingRun.projection_revision >= state.activeRun.projection_revision) {
         state.activeRun = incomingRun;
-        state.events = normalizeEvents(results[3]);
+        mergeEventStream(runId, results[3]);
       }
       state.runs = listFrom(results[1], "runs").map(normalizeRun).map(function (run) { return run.id === runId ? state.activeRun : run; }).sort(function (left, right) {
         var leftTime = Date.parse(left.updated_at || left.created_at || "") || 0;

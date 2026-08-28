@@ -68,9 +68,9 @@ class LocalEditContext:
         if (
             isinstance(self.maximum_operations, bool)
             or not isinstance(self.maximum_operations, int)
-            or not 1 <= self.maximum_operations <= LOCAL_EDIT_MAXIMUM_OPERATIONS
+            or not 0 <= self.maximum_operations <= LOCAL_EDIT_MAXIMUM_OPERATIONS
         ):
-            raise ValueError("maximum_operations must be between 1 and 5")
+            raise ValueError("maximum_operations must be between 0 and 5")
         if not isinstance(self.allowed_mutation_targets, Mapping):
             raise TypeError("allowed_mutation_targets must be an object")
         object.__setattr__(

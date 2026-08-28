@@ -367,7 +367,7 @@
     var run = state.activeRun;
     if (!run || run.id !== runId || String(run.status || "").toLowerCase() !== "running" || runIsTerminal(run)) {
       stopRunMonitor(runId);
-      renderAll();
+      renderProgressViews();
       return;
     }
     if (state.runMonitorInFlight) {
@@ -388,7 +388,7 @@
       state.runMonitorRetry = 0;
       if (!current || current.id !== runId || String(current.status || "").toLowerCase() !== "running" || runIsTerminal(current)) {
         stopRunMonitor(runId);
-        renderAll();
+        renderProgressViews();
         return;
       }
       queueRunMonitor(runId, runMonitorDelay(current));
@@ -531,12 +531,83 @@
     var contextEpoch = state.contextEpoch;
     var requestId = state.runReadRequest + 1;
     state.runReadRequest = requestId;
-    return request("/runs/" + encodeURIComponent(runId) + "/events").then(function (data) {
+    return request(eventRequestPath(runId, false)).then(function (data) {
       if (contextEpoch !== state.contextEpoch) { return false; }
       if (requestId !== state.runReadRequest) { return true; }
-      if (state.activeRun && state.activeRun.id === runId) { state.events = normalizeEvents(data); }
+      if (state.activeRun && state.activeRun.id === runId) { mergeEventStream(runId, data); }
       return true;
     }).catch(function () { return false; });
+  }
+
+  function captureProgressUiState() {
+    if (!document || typeof document.querySelector !== "function") { return null; }
+    var rootSelectors = ["#candidate-detail", "#training-assets-table", "#round-stage-list", "#pending-consultations", "#answered-consultations"];
+    var roots = rootSelectors.map(function (selector) {
+      var root = document.querySelector(selector);
+      if (!root || typeof root.querySelectorAll !== "function") { return null; }
+      return {
+        selector: selector,
+        openDetails: Array.prototype.map.call(root.querySelectorAll("details"), function (detail) { return detail.open === true; }),
+        scrollTop: Number(root.scrollTop || 0),
+        scrollLeft: Number(root.scrollLeft || 0)
+      };
+    }).filter(Boolean);
+    var active = document.activeElement;
+    var focus = null;
+    if (active && active !== document.body) {
+      if (active.id) {
+        focus = {id: active.id, selectionStart: active.selectionStart, selectionEnd: active.selectionEnd};
+      } else {
+        roots.some(function (entry) {
+          var root = document.querySelector(entry.selector);
+          if (!root || typeof root.contains !== "function" || !root.contains(active) || typeof root.querySelectorAll !== "function") { return false; }
+          var focusable = Array.prototype.slice.call(root.querySelectorAll("button, input, select, textarea, a[href], summary, [tabindex]"));
+          var index = focusable.indexOf(active);
+          if (index >= 0) { focus = {root: entry.selector, index: index, selectionStart: active.selectionStart, selectionEnd: active.selectionEnd}; }
+          return index >= 0;
+        });
+      }
+    }
+    return {roots: roots, focus: focus};
+  }
+
+  function restoreProgressUiState(snapshot) {
+    if (!snapshot || !document || typeof document.querySelector !== "function") { return; }
+    snapshot.roots.forEach(function (entry) {
+      var root = document.querySelector(entry.selector);
+      if (!root || typeof root.querySelectorAll !== "function") { return; }
+      Array.prototype.forEach.call(root.querySelectorAll("details"), function (detail, index) {
+        detail.open = entry.openDetails[index] === true;
+      });
+      root.scrollTop = entry.scrollTop;
+      root.scrollLeft = entry.scrollLeft;
+    });
+    var focus = snapshot.focus;
+    if (!focus) { return; }
+    var target = focus.id && typeof document.getElementById === "function" ? document.getElementById(focus.id) : null;
+    if (!target && focus.root) {
+      var root = document.querySelector(focus.root);
+      if (root && typeof root.querySelectorAll === "function") {
+        target = Array.prototype.slice.call(root.querySelectorAll("button, input, select, textarea, a[href], summary, [tabindex]"))[focus.index] || null;
+      }
+    }
+    if (!target || typeof target.focus !== "function") { return; }
+    target.focus({preventScroll: true});
+    if (typeof target.setSelectionRange === "function" && Number.isInteger(focus.selectionStart) && Number.isInteger(focus.selectionEnd)) {
+      target.setSelectionRange(focus.selectionStart, focus.selectionEnd);
+    }
+  }
+
+  function renderProgressViews() {
+    var uiState = captureProgressUiState();
+    if (typeof renderContext === "function") { renderContext(); }
+    if (typeof renderProcess === "function") { renderProcess(); }
+    if (typeof renderCandidates === "function") { renderCandidates(); }
+    if (typeof renderTrainingAssets === "function") { renderTrainingAssets(); }
+    if (typeof renderCollaboration === "function") { renderCollaboration(); }
+    var lastUpdated = $("#last-updated");
+    if (lastUpdated) { lastUpdated.textContent = state.lastUpdated ? "最近同步：" + formatDate(state.lastUpdated) : "尚未同步"; }
+    restoreProgressUiState(uiState);
   }
 
   function observeRunStatus(previousRun, incomingRun, events) {
@@ -560,7 +631,7 @@
     var contextEpoch = state.contextEpoch;
     var requestId = state.runReadRequest + 1;
     state.runReadRequest = requestId;
-    return Promise.all([request("/runs/" + encodeURIComponent(runId)), request("/runs/" + encodeURIComponent(runId) + "/events")]).then(function (results) {
+    return Promise.all([request("/runs/" + encodeURIComponent(runId)), request(eventRequestPath(runId, false))]).then(function (results) {
       if (requestId !== state.runReadRequest || contextEpoch !== state.contextEpoch) { return false; }
       if (!state.activeRun || state.activeRun.id !== runId) { return false; }
       var previousRun = state.activeRun;
@@ -568,7 +639,7 @@
       if (incomingRun.projection_revision < state.activeRun.projection_revision) { return false; }
       state.activeRun = incomingRun;
       state.runs = state.runs.map(function (run) { return run.id === runId ? incomingRun : run; });
-      state.events = normalizeEvents(results[1]);
+      mergeEventStream(runId, results[1]);
       observeRunStatus(previousRun, state.activeRun, state.events);
       state.lastUpdated = new Date().toISOString();
       // The active candidate is discovered asynchronously after RunCreated.
@@ -577,14 +648,10 @@
       var candidateSelectionChanged = syncCandidateSelection(state.activeRun);
       var selectionChanged = reconcileVisibleRunSelection();
       if (selectionChanged) {
-        renderAll();
+        renderProgressViews();
         return state.activeRun ? selectRun(state.activeRun.id, false) : true;
       }
-      renderContext();
-      renderProcess();
-      renderCandidates();
-      renderTrainingAssets();
-      renderCollaboration();
+      renderProgressViews();
       // Do not hold the run heartbeat on a potentially slow sample page.  The
       // sample loader is single-flight and renders its own completion/error;
       // progress and stage updates remain responsive while it is in flight.

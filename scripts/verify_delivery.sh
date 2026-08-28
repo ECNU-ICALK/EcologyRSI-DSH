@@ -78,10 +78,17 @@ integrations/dsh_ecology_plugin/lib/tools/agent-plugin.js
 integrations/dsh_ecology_plugin/lib/tools/retrieval.js
 integrations/dsh_ecology_plugin/schemas/genome-mutation.schema.json
 integrations/dsh_ecology_plugin/schemas/local-edit.schema.json
-integrations/dsh_ecology_plugin/presets/ecology-local-editor-v1/preset.yml
-integrations/dsh_ecology_plugin/presets/ecology-local-editor-v1/agent.cordis.yml
-integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-researcher-v7/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-researcher-v7/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v4/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v4/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v4/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v4/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v7/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v7/agent.cordis.yml
 integrations/dsh_ecology_plugin/test/proxy_security.mjs
 "
@@ -100,6 +107,30 @@ import re
 import sys
 
 root = Path.cwd()
+current_presets = {
+    "ecology-coordinator-v4",
+    "ecology-researcher-v7",
+    "ecology-candidate-proposer-v4",
+    "ecology-sample-planner-v4",
+    "ecology-sample-critic-v4",
+    "ecology-generation-judge-v7",
+}
+managed_preset = re.compile(
+    r"ecology-(?:coordinator|researcher|candidate-proposer|sample-planner|sample-critic|generation-judge|local-editor)-v[0-9]+"
+)
+preset_root = root / "integrations/dsh_ecology_plugin/presets"
+actual_presets = {
+    path.name
+    for path in preset_root.iterdir()
+    if path.is_dir() and managed_preset.fullmatch(path.name)
+}
+if actual_presets != current_presets:
+    missing = sorted(current_presets - actual_presets)
+    obsolete = sorted(actual_presets - current_presets)
+    raise SystemExit(
+        "DSH preset inventory differs; "
+        f"missing={missing or 'none'}, obsolete={obsolete or 'none'}"
+    )
 project_text = (root / "pyproject.toml").read_text(encoding="utf-8")
 match = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', project_text)
 if match is None:

@@ -105,7 +105,7 @@
     state.archivedRunCount = 0;
     state.activeRun = state.runs[0];
     state.lastSelectedRunId = state.activeRun.id;
-    state.events = clone(demoEvents);
+    resetEventStream(state.activeRun.id, clone(demoEvents));
     state.candidateSelectionPinned = false;
     syncCandidateSelection(state.activeRun);
     state.datasetContext = activeRunDatasetContext();

@@ -39,6 +39,20 @@ INTERNAL_SOURCE_MARKERS = (
     "/docs/项目整体Review与方案B优化报告.md",
 )
 
+CURRENT_DSH_PRESET_IDS = frozenset(
+    {
+        "ecology-coordinator-v4",
+        "ecology-researcher-v7",
+        "ecology-candidate-proposer-v4",
+        "ecology-sample-planner-v4",
+        "ecology-sample-critic-v4",
+        "ecology-generation-judge-v7",
+    }
+)
+_MANAGED_DSH_PRESET_ID = re.compile(
+    r"ecology-(?:coordinator|researcher|candidate-proposer|sample-planner|sample-critic|generation-judge|local-editor)-v[0-9]+"
+)
+
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -60,6 +74,27 @@ def assert_suffixes(names: set[str], suffixes: tuple[str, ...], label: str) -> N
     missing = [suffix for suffix in suffixes if not any(name.endswith(suffix) for name in names)]
     if missing:
         raise RuntimeError(f"{label} is missing: {', '.join(missing)}")
+
+
+def assert_current_dsh_presets(names: set[str], label: str) -> None:
+    found: set[str] = set()
+    for name in names:
+        parts = PurePosixPath(name).parts
+        for index, part in enumerate(parts[:-1]):
+            if part != "presets":
+                continue
+            candidate = parts[index + 1]
+            if _MANAGED_DSH_PRESET_ID.fullmatch(candidate):
+                found.add(candidate)
+    if found != CURRENT_DSH_PRESET_IDS:
+        missing = sorted(CURRENT_DSH_PRESET_IDS - found)
+        obsolete = sorted(found - CURRENT_DSH_PRESET_IDS)
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if obsolete:
+            details.append("obsolete: " + ", ".join(obsolete))
+        raise RuntimeError(f"{label} DSH preset inventory differs ({'; '.join(details)})")
 
 
 def reject_internal_sources(names: set[str], label: str) -> None:
@@ -125,6 +160,7 @@ def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
     require_regular_file(wheel.parent, wheel, "wheel archive")
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
+        assert_current_dsh_presets(names, "wheel")
         reject_internal_sources(names, "wheel")
         if any(name.endswith("/plugins/ecology_evolution/test/smoke.mjs") for name in names):
             raise RuntimeError("wheel must not include the browser smoke test")
@@ -179,7 +215,6 @@ def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
                 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js",
                 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib/tools/agent-plugin.js",
                 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/schemas/genome-mutation.schema.json",
-                "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3/preset.yml",
                 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4/preset.yml",
                 f"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-{version}.tgz",
                 "share/ecologyrsi-dsh/scripts/install_dsh_ecology_runtime.mjs",
@@ -241,6 +276,7 @@ def verify_sdist(sdist: Path, source_root: Path, version: str) -> None:
     with tarfile.open(sdist, "r:gz") as archive:
         members = _reject_tar_links(archive, "sdist")
         names = {member.name for member in members}
+        assert_current_dsh_presets(names, "sdist")
         reject_internal_sources(names, "sdist")
         _reject_sensitive_members(names, "sdist")
         prefix = f"ecologyrsi_dsh-{version}"
@@ -332,7 +368,6 @@ def verify_sdist(sdist: Path, source_root: Path, version: str) -> None:
             "/integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js",
             "/integrations/dsh_ecology_plugin/lib/tools/agent-plugin.js",
             "/integrations/dsh_ecology_plugin/schemas/genome-mutation.schema.json",
-            "/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3/preset.yml",
             "/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4/preset.yml",
             f"/integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-{version}.tgz",
             "/integrations/dsh_ecology_plugin/test/proxy_security.mjs",
@@ -388,6 +423,7 @@ def verify_delivery_archive(
     with tarfile.open(delivery, "r:gz") as archive:
         members = _reject_tar_links(archive, "delivery archive")
         names = {member.name for member in members}
+        assert_current_dsh_presets(names, "delivery archive")
         reject_internal_sources(names, "delivery archive")
         _reject_sensitive_members(names, "delivery archive")
         sources = included_source_files(source_root)
@@ -432,7 +468,6 @@ def verify_delivery_archive(
                 "/integrations/dsh_ecology_plugin/lib/client.js",
                 "/integrations/dsh_ecology_plugin/lib/tools/retrieval.js",
                 "/integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js",
-                "/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v3/preset.yml",
                 "/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4/preset.yml",
                 "/scripts/install_dsh_ecology_runtime.mjs",
                 "/integrations/dsh_ecology_plugin/test/proxy_security.mjs",
@@ -544,6 +579,7 @@ def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
     with tarfile.open(plugin, "r:gz") as archive:
         members = _reject_tar_links(archive, "npm plugin")
         names = {member.name for member in members}
+        assert_current_dsh_presets(names, "npm plugin")
         _reject_sensitive_members(names, "npm plugin")
         file_names = {
             member.name for member in members if member.isfile()
@@ -558,9 +594,7 @@ def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
             "package/lib/runtime/stage-runner.js",
             "package/lib/runtime/reconciliation.js",
             "package/schemas/genome-mutation.schema.json",
-            "package/presets/ecology-coordinator-v3/preset.yml",
             "package/presets/ecology-coordinator-v4/preset.yml",
-            "package/presets/ecology-generation-judge-v6/agent.cordis.yml",
             "package/presets/ecology-generation-judge-v7/agent.cordis.yml",
             "package/presets/ecology-generation-judge-v7/skills/batch-scientific-reflection/SKILL.md",
             "package/presets/ecology-generation-judge-v7/skills/candidate-scientific-review/SKILL.md",

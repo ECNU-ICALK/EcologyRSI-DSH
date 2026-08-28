@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from ecologyrsi_dsh import (
@@ -17,6 +17,7 @@ from ecologyrsi_dsh import (
     TaskManifest,
     ToyCropSoilWater,
 )
+from ecologyrsi_dsh.core.models import digest
 
 
 def manifest(max_candidates: int = 3) -> TaskManifest:
@@ -65,6 +66,61 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different event"):
             ledger.append("run:1", "Example", {"value": 2}, event_id="event:1")
         ledger.close()
+
+    def test_latest_run_seq_uses_the_run_tail_without_loading_events(self) -> None:
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        first = ledger.append("run:a", "Example", {"value": 1})
+        ledger.append("run:b", "Example", {"value": 2})
+        latest_a = ledger.append("run:a", "Example", {"value": 3})
+        latest_global = ledger.append("run:b", "Example", {"value": 4})
+
+        with patch.object(
+            ledger,
+            "events",
+            side_effect=AssertionError("run stream must not be loaded"),
+        ):
+            self.assertEqual(ledger.latest_run_seq("run:a"), latest_a.seq)
+            self.assertEqual(ledger.latest_run_seq("run:b"), latest_global.seq)
+            self.assertEqual(ledger.latest_run_seq("run:missing"), 0)
+
+        self.assertLess(first.seq, latest_a.seq)
+
+    def test_candidate_identity_source_has_one_durable_spawn_event(self) -> None:
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        director = EvolutionDirector(ledger, FakeDSHAdapter(max_proposals=1))
+        director.start_evolution(manifest(1), run_id="run:spawn-identity")
+        proposal = director.request_proposal("run:spawn-identity")
+        candidate = director.spawn_candidate(
+            "run:spawn-identity",
+            proposal,
+            candidate_id="candidate:stable",
+        )
+        spawned = next(
+            event
+            for event in ledger.events("run:spawn-identity")
+            if event.kind == "CandidateSpawned"
+        )
+        self.assertEqual(
+            spawned.event_id,
+            "candidate-spawned:"
+            + digest(
+                {
+                    "run_id": "run:spawn-identity",
+                    "candidate_id": candidate.candidate_id,
+                }
+            ),
+        )
+
+        ledger.append(
+            "run:spawn-identity",
+            "CandidateSpawned",
+            spawned.payload,
+            event_id="injected-second-spawn",
+        )
+        with self.assertRaisesRegex(ValueError, "multiple spawn events"):
+            director.state("run:spawn-identity")
 
     def test_ledger_compares_idempotency_after_json_normalization(self) -> None:
         ledger = EventLedger()

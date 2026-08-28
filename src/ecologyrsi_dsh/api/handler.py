@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
 import fcntl
 import os
 import sys
 import threading
+from collections import OrderedDict
+from collections.abc import Callable, Mapping
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -39,27 +40,28 @@ from ..core.models import (
 from ..core.protocols import is_strict_origin_protocol
 from ..core.redaction import safe_error_code
 from ..core.sample_results import MAX_SAMPLE_RESULTS_UNCOMPRESSED_BYTES
+from ..core.state import validate_identity_binding
 from ..data.registry import DatasetRegistry
+from ..evaluators.epoch_cohorts import estimate_epoch_capacity
 from ..evaluators.registry import (
     GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
     TOY_DATASET_ID,
     EvaluatorRegistry,
 )
-from ..evaluators.epoch_cohorts import estimate_epoch_capacity
-from ..evolution.strategies import StrategyRouterDSHAdapter
 from ..evolution.schedule import OPTIMIZATION_PROTOCOL, OptimizationSchedule
-from ..integrations.model_bindings import (
-    HOST_PARAMETER_GENERATOR_ID,
-    RULE_JUDGE_ID,
-    builtin_model_configuration_digest,
-)
-from ..integrations.model_gateway import ModelGateway
+from ..evolution.strategies import StrategyRouterDSHAdapter
 from ..integrations.dsh_native_runtime import (
     DSH_NATIVE_EXECUTION_PROTOCOL,
     DshNativeAgentRuntimeClient,
     configured_stage_timeout,
 )
 from ..integrations.dsh_structured_roles import DshStructuredRoleRuntime
+from ..integrations.model_bindings import (
+    HOST_PARAMETER_GENERATOR_ID,
+    RULE_JUDGE_ID,
+    builtin_model_configuration_digest,
+)
+from ..integrations.model_gateway import ModelGateway
 from ..knowledge.autonomous_cycle import AUTONOMOUS_RESEARCH_PROTOCOL
 from ..knowledge.program_registry import current_program_registry
 from ..version import __version__
@@ -363,8 +365,113 @@ class _GenerationLease:
         self.release()
 
 
+def _dsh_revision_snapshot(ledger: EventLedger, run_id: str) -> dict[str, int]:
+    """Read DSH cursors without materializing the run projection."""
+
+    run_state_revision = ledger.latest_run_seq(run_id)
+    if run_state_revision == 0:
+        raise KeyError(f"unknown run: {run_id}")
+    return {
+        "run_state_revision": run_state_revision,
+        "ledger_expected_revision": ledger.latest_seq(),
+    }
+
+
+class _ValidatedCandidateIdentityCache:
+    """Cache immutable candidate bindings after one trusted state replay.
+
+    Candidate identity is fixed by ``CandidateSpawned`` and every later event
+    can only repeat that exact binding.  The first miss for a run therefore
+    uses the full projector (retaining all genome, compiler, and tamper
+    checks), then serves defensive copies.  A miss after the run cursor moves
+    refreshes the snapshot so candidates spawned in later generations remain
+    discoverable after normal execution or process recovery.
+    """
+
+    def __init__(
+        self,
+        ledger: EventLedger,
+        state_provider: Callable[[str], Any],
+    ) -> None:
+        self._ledger = ledger
+        self._state_provider = state_provider
+        self._guard = threading.Lock()
+        self._run_locks: dict[str, threading.RLock] = {}
+        self._snapshots: dict[
+            str, tuple[int, dict[str, dict[str, str]]]
+        ] = {}
+
+    @staticmethod
+    def _key(value: str, name: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
+        return value.strip()
+
+    def _run_lock(self, run_id: str) -> threading.RLock:
+        with self._guard:
+            lock = self._run_locks.get(run_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._run_locks[run_id] = lock
+            return lock
+
+    def get(self, run_id: str, candidate_id: str) -> dict[str, str] | None:
+        run_id = self._key(run_id, "run_id")
+        candidate_id = self._key(candidate_id, "candidate_id")
+        with self._run_lock(run_id):
+            with self._guard:
+                snapshot = self._snapshots.get(run_id)
+                cached = None if snapshot is None else snapshot[1].get(candidate_id)
+            if cached is not None:
+                return dict(cached)
+
+            latest_run_seq = self._ledger.latest_run_seq(run_id)
+            if latest_run_seq == 0:
+                raise KeyError(f"unknown run: {run_id}")
+            if snapshot is not None and snapshot[0] == latest_run_seq:
+                return None
+
+            # Keep the per-run lock across replay: concurrent sample workers
+            # share one validation pass instead of replaying the same stream.
+            state = self._state_provider(run_id)
+            if state.run.run_id != run_id or not state.events:
+                raise ValueError("candidate identity projection belongs to another run")
+            projected_seq = int(state.events[-1].seq)
+            if projected_seq < latest_run_seq:
+                raise RuntimeError("candidate identity projection is behind the ledger")
+            bindings: dict[str, dict[str, str]] = {}
+            for item in state.candidate_identity_bindings:
+                if not isinstance(item, Mapping):
+                    raise ValueError("candidate identity cache entry is invalid")
+                item_candidate_id = self._key(
+                    item.get("candidate_id"), "candidate_id"
+                )
+                binding = validate_identity_binding(item.get("identity_binding"))
+                existing = bindings.get(item_candidate_id)
+                if existing is not None and existing != binding:
+                    raise ValueError("candidate has conflicting identity bindings")
+                bindings[item_candidate_id] = binding
+            with self._guard:
+                self._snapshots[run_id] = (projected_seq, bindings)
+            result = bindings.get(candidate_id)
+            return dict(result) if result is not None else None
+
+    def forget(self, run_id: str) -> bool:
+        run_id = self._key(run_id, "run_id")
+        with self._run_lock(run_id), self._guard:
+            return self._snapshots.pop(run_id, None) is not None
+
+    def clear(self) -> None:
+        with self._guard:
+            self._snapshots.clear()
+
+
 class EvolutionHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
+    # The runtime accepts up to 128 concurrent sample callbacks in addition to
+    # operator/UI requests.  TCPServer's tiny default listen backlog can drop
+    # otherwise healthy bursts before a worker thread is created.
+    request_queue_size = 256
 
     def handle_error(self, request: Any, client_address: tuple[Any, ...]) -> None:
         error = sys.exc_info()[1]
@@ -390,6 +497,26 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
         self._owner_lease = _SidecarOwnerLease(db_path)
         try:
             self.ledger = EventLedger(db_path)
+            # Health must remain available while workers contend on the event
+            # ledger. Freeze its static contract once during server startup.
+            self.health_payload = {
+                "ok": True,
+                "package": "ecologyrsi-dsh",
+                "package_version": __version__,
+                "api_version": "v0.2",
+                "plugin_version": PLUGIN_MANIFEST["version"],
+                "schema_version": self.ledger.schema_version,
+                "evaluation_partition": "visible/validation/demo",
+                "scientific_scope": "prediction_demo_non_causal",
+                "supported_evaluation_partitions": [
+                    "validation",
+                    "training_feedback",
+                ],
+                "scientific_scopes": [
+                    "prediction_demo_non_causal",
+                    "historical_replay_prediction_non_causal",
+                ],
+            }
             self.dsh_tools = DshToolService(self.ledger)
             self.sample_admission = RunSampleAdmission()
             self.datasets = DatasetRegistry()
@@ -412,6 +539,11 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
                     admission=self.dsh_tools,
                 ),
             )
+            self.director = EvolutionDirector(self.ledger, self.strategy_router)
+            self.dsh_identity_cache = _ValidatedCandidateIdentityCache(
+                self.ledger,
+                self.director.state,
+            )
             self.evaluators = EvaluatorRegistry(
                 self.datasets,
                 self.model_gateway,
@@ -419,18 +551,14 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
                     self.dsh_native_runtime,
                     admission=self.dsh_tools,
                 ),
-                dsh_revision_provider=lambda run_id: {
-                    "run_state_revision": self.director.state(run_id).events[-1].seq,
-                    "ledger_expected_revision": self.ledger.latest_seq(),
-                },
-                dsh_identity_provider=lambda run_id, candidate_id: (
-                    self.director.state(run_id).candidate_identity_binding(candidate_id)
+                dsh_revision_provider=lambda run_id: _dsh_revision_snapshot(
+                    self.ledger, run_id
                 ),
+                dsh_identity_provider=self.dsh_identity_cache.get,
                 dsh_prediction_tool_binder=self.dsh_tools.bind_prediction_tool,
                 origin_admission_provider=self.sample_admission.admit,
                 origin_admission_snapshot_provider=self.sample_admission.snapshot,
             )
-            self.director = EvolutionDirector(self.ledger, self.strategy_router)
             # A mutation spans several append-only events.  Serial execution keeps
             # that unit coherent without introducing a queue or transaction layer.
             self.mutation_lock = threading.RLock()
@@ -725,34 +853,7 @@ class EvolutionRequestHandler(
             return
         path = self._route()
         if path == ["health"]:
-            self._send(
-                HTTPStatus.OK,
-                {
-                    "ok": True,
-                    "package": "ecologyrsi-dsh",
-                    "package_version": __version__,
-                    "api_version": "v0.2",
-                    "plugin_version": PLUGIN_MANIFEST["version"],
-                    "schema_version": self.server.ledger.schema_version,
-                    # Kept for the v0.1 health contract; the explicit list is
-                    # authoritative for the expanded runtime.
-                    "evaluation_partition": "visible/validation/demo",
-                    "scientific_scope": "prediction_demo_non_causal",
-                    "supported_evaluation_partitions": [
-                        "validation",
-                        "training_feedback",
-                    ],
-                    "scientific_scopes": [
-                        "prediction_demo_non_causal",
-                        "historical_replay_prediction_non_causal",
-                    ],
-                    "dsh_authenticated_models": sum(
-                        1
-                        for item in self.server.model_gateway.catalog()
-                        if item.get("authenticated")
-                    ),
-                },
-            )
+            self._send(HTTPStatus.OK, self.server.health_payload)
             return
         if path == ["plugin", "ecology_evolution"]:
             self._send(HTTPStatus.OK, PLUGIN_MANIFEST)
@@ -1086,6 +1187,7 @@ class EvolutionRequestHandler(
                 confirmation=confirmation,
                 terminal_status=terminal_status,
             )
+            self.server.dsh_identity_cache.forget(run_id)
             purged = True
             # Queue entries cannot be physically removed. Withdraw their exact
             # incarnation while the retiring lease still prevents dequeue from

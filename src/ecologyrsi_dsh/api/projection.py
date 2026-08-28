@@ -295,6 +295,10 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
 
     artifacts = list(state.artifacts)
     evaluations = list(state.evaluations)
+    adaptive_evaluations = [
+        *state.formal_batch_evaluations,
+        *state.holdout_evaluations,
+    ]
     fallback_reasons: list[str] = []
     fallback_count = 0
     source_counts: dict[str, int] = {}
@@ -572,7 +576,7 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
         execution_evidence_status = "aborted_partial"
     elif partial_evaluation_retained_candidate_count:
         execution_evidence_status = "retained_partial"
-    elif artifacts or evaluations:
+    elif artifacts or evaluations or adaptive_evaluations:
         execution_evidence_status = "recorded"
     else:
         execution_evidence_status = "none"
@@ -602,6 +606,37 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
         if iterative_training_flags
         else bool(fit_methods)
         and not set(fit_methods).issubset(single_pass_methods)
+    )
+    adaptive_settled_origins = sum(
+        int(item.scope.origin_count) for item in adaptive_evaluations
+    )
+    adaptive_succeeded_origins = 0
+    adaptive_failed_origins = 0
+    adaptive_failed_scoring_cells = 0
+    adaptive_outcome_counts_known = True
+    for evaluation in adaptive_evaluations:
+        sample = (
+            evaluation.metrics.get("sample_execution")
+            if isinstance(evaluation.metrics, Mapping)
+            else None
+        )
+        if not isinstance(sample, Mapping):
+            adaptive_outcome_counts_known = False
+            continue
+        succeeded = metric_count(sample, "succeeded_origin_samples")
+        failed = metric_count(sample, "failed_origin_samples")
+        failed_cells = metric_count(sample, "failed_examples")
+        if succeeded is None or failed is None:
+            adaptive_outcome_counts_known = False
+        else:
+            adaptive_succeeded_origins += succeeded
+            adaptive_failed_origins += failed
+        adaptive_failed_scoring_cells += failed_cells or 0
+    adaptive_progress = _adaptive_progress_projection(state)
+    adaptive_live_completed_origins = (
+        metric_count(adaptive_progress, "completed_origins")
+        if adaptive_progress is not None
+        else None
     )
     return {
         "execution_mode": modes[0] if len(modes) == 1 else modes or "pending",
@@ -658,10 +693,21 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
         ),
         "partial_evaluation_sources": sorted(partial_evaluation_sources),
         "execution_evidence_status": execution_evidence_status,
+        "adaptive_settled_origins": adaptive_settled_origins,
+        "adaptive_live_completed_origins": adaptive_live_completed_origins,
+        "adaptive_succeeded_origins": (
+            adaptive_succeeded_origins if adaptive_outcome_counts_known else None
+        ),
+        "adaptive_failed_origins": (
+            adaptive_failed_origins if adaptive_outcome_counts_known else None
+        ),
+        "adaptive_failed_scoring_cells": adaptive_failed_scoring_cells,
+        "adaptive_evaluation_count": len(adaptive_evaluations),
         "candidate_work_items": (
             training_used_examples
             + evaluation_used_examples
             + live_evaluation_completed_examples
+            + adaptive_settled_origins
         ),
         "fit_passes_completed": fit_passes_completed,
         "fit_passes_per_candidate": max(per_artifact_fit_passes or [0]),
@@ -2367,8 +2413,7 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
                 "progress_kind": (
                     "settling" if awaiting_settlement else "waiting"
                 ),
-                "succeeded_samples": settled_screening_completed,
-                "failed_samples": 0,
+                "settled_origins": settled_screening_completed,
                 "awaiting_settlement_batches": awaiting_settlement,
                 "awaiting_submission_batches": awaiting_submission,
                 "samples_per_minute": None,
@@ -2383,20 +2428,25 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
             live_fields.update(live_formal)
             live_fields.update(
                 {
-                    "succeeded_samples": completed,
-                    "failed_samples": 0,
+                    "settled_origins": completed,
                     "samples_per_minute": None,
                     "estimated_remaining_seconds": None,
                 }
             )
+    if "in_flight_batches" in live_fields:
+        live_fields["in_flight_requests"] = live_fields["in_flight_batches"]
+    if "queued_batches" in live_fields:
+        live_fields["provider_queued_requests"] = live_fields["queued_batches"]
+    epoch_progress_percent = round(100.0 * completed / max(1, total), 1)
     return {
-        "schema_version": "ecologyrsi-dsh.adaptive-progress/1",
+        "schema_version": "ecologyrsi-dsh.adaptive-progress/2",
         "evaluation_phase": phase,
         "completed_origins": completed,
         "total_origins": total,
         "completed_samples": completed,
         "total_samples": total,
-        "progress_percent": round(100.0 * completed / max(1, total), 1),
+        "progress_percent": epoch_progress_percent,
+        "epoch_progress_percent": epoch_progress_percent,
         "screening_completed_origins": min(screening_completed, screening_total),
         "screening_total_origins": screening_total,
         "formal_completed_origins": min(formal_completed, formal_total),
@@ -2413,6 +2463,143 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
         "evidence": "durable_adaptive_cohort_and_trajectory_events",
         **live_fields,
     }
+
+
+def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
+    """Expose bounded, truthful formal-batch evidence for the process UI.
+
+    Each batch uses a different cohort window.  Scores are therefore retained
+    as diagnostics and explicitly marked non-comparable; promotion remains a
+    separate same-cohort holdout decision.
+    """
+
+    proposals = {
+        (str(item.get("candidate_id")), int(item.get("batch_index"))): item
+        for item in state.local_edit_proposals
+        if isinstance(item, Mapping)
+        and isinstance(item.get("candidate_id"), str)
+        and isinstance(item.get("batch_index"), int)
+    }
+    outcomes = {
+        (str(item.get("candidate_id")), int(item.get("batch_index"))): item
+        for item in state.local_edit_outcomes
+        if isinstance(item, Mapping)
+        and isinstance(item.get("candidate_id"), str)
+        and isinstance(item.get("batch_index"), int)
+    }
+    activations = {
+        (item.candidate_id, item.batch_index): item
+        for item in state.trajectory_revision_activations
+    }
+    batches_by_candidate: dict[str, list[Any]] = {}
+    for batch in state.formal_batches:
+        batches_by_candidate.setdefault(batch.candidate_id, []).append(batch)
+
+    lanes: list[dict[str, Any]] = []
+    for trajectory in sorted(
+        state.formal_trajectories,
+        key=lambda item: (item.generation, item.candidate_id),
+    ):
+        rows: list[dict[str, Any]] = []
+        batches = sorted(
+            batches_by_candidate.get(trajectory.candidate_id, ()),
+            key=lambda item: item.batch_index,
+        )
+        for batch in batches:
+            key = (batch.candidate_id, batch.batch_index)
+            evaluation = state.batch_evaluation_for(*key)
+            proposal = proposals.get(key)
+            outcome = outcomes.get(key)
+            activation = activations.get(key)
+            metrics = evaluation.metrics if evaluation is not None else {}
+            sample = metrics.get("sample_execution") if isinstance(metrics, Mapping) else None
+            if not isinstance(sample, Mapping):
+                sample = {}
+            operations: list[dict[str, Any]] = []
+            if proposal is not None and isinstance(proposal.get("operations"), (list, tuple)):
+                for operation in proposal["operations"][:5]:
+                    if not isinstance(operation, Mapping):
+                        continue
+                    operations.append(
+                        {
+                            name: sanitize_public_value(operation.get(name))
+                            for name in ("op", "name", "value", "target", "program_id")
+                            if name in operation
+                        }
+                    )
+            coverage = _finite_number(
+                sample.get("coverage", metrics.get("sample_execution_coverage"))
+            )
+            rows.append(
+                {
+                    "batch_index": batch.batch_index + 1,
+                    "batch_count": batch.batch_count,
+                    "origin_count": batch.origin_count,
+                    "candidate_revision_id": batch.revision_id,
+                    "cohort_digest": batch.cohort_digest,
+                    "status": (
+                        "edited"
+                        if activation is not None
+                        else "evaluated"
+                        if evaluation is not None
+                        else "running"
+                    ),
+                    "score": evaluation.score if evaluation is not None else None,
+                    "passed": evaluation.passed if evaluation is not None else None,
+                    "coverage": coverage,
+                    "coverage_pass": (
+                        metrics.get("sample_execution_coverage_pass")
+                        if isinstance(metrics, Mapping)
+                        else None
+                    ),
+                    "succeeded_origins": _finite_number(
+                        sample.get("succeeded_origin_samples")
+                    ),
+                    "failed_origins": _finite_number(
+                        sample.get("failed_origin_samples")
+                    ),
+                    "failed_scoring_cells": _finite_number(
+                        sample.get("failed_examples")
+                    ),
+                    "fallback_scoring_cells": _finite_number(
+                        sample.get("scoring_fallback_examples")
+                    ),
+                    "edit_decision": proposal.get("decision") if proposal else None,
+                    "edit_outcome": outcome.get("outcome") if outcome else None,
+                    "operations": operations,
+                    "active_revision_id": (
+                        activation.to_revision_id
+                        if activation is not None
+                        else outcome.get("active_revision_id")
+                        if outcome is not None
+                        else batch.revision_id
+                    ),
+                    "created_at": (
+                        activation.created_at
+                        if activation is not None
+                        else evaluation.created_at
+                        if evaluation is not None
+                        else batch.created_at
+                    ),
+                    "score_comparability": "different_batch_cohort_diagnostic_only",
+                }
+            )
+        lanes.append(
+            {
+                "candidate_id": trajectory.candidate_id,
+                "generation": trajectory.generation,
+                "status": trajectory.status.value,
+                "initial_revision_id": trajectory.initial_revision_id,
+                "final_revision_id": trajectory.final_revision_id,
+                "batch_count": trajectory.batch_count,
+                "completed_batch_count": sum(
+                    row["edit_outcome"] is not None for row in rows
+                ),
+                "batches": rows,
+                "score_comparability": "different_batch_cohort_diagnostic_only",
+            }
+        )
+    return lanes
 
 
 def _run_execution_progress(state: Any) -> dict[str, Any]:
@@ -2540,6 +2727,7 @@ def _run_execution_progress(state: Any) -> dict[str, Any]:
         )
 
     adaptive_progress = _adaptive_progress_projection(state)
+    epoch_progress_percent: float | None = None
     if adaptive_progress is not None:
         stage_progress = adaptive_progress
         current_stage = (
@@ -2551,7 +2739,19 @@ def _run_execution_progress(state: Any) -> dict[str, Any]:
         active_candidate_id = (
             adaptive_progress.get("current_candidate_id") or active_candidate_id
         )
-        progress_percent = adaptive_progress["progress_percent"]
+        epoch_progress_percent = float(adaptive_progress["epoch_progress_percent"])
+        progress_percent = round(
+            min(
+                100.0,
+                100.0
+                * (
+                    min(state.run.generation, total_generations)
+                    + epoch_progress_percent / 100.0
+                )
+                / total_generations,
+            ),
+            1,
+        )
 
     if status == "paused":
         # Preserve ``current_stage`` as historical context for the pause while
@@ -2584,10 +2784,12 @@ def _run_execution_progress(state: Any) -> dict[str, Any]:
     )
 
     return {
-        "schema_version": "ecologyrsi-dsh.execution-progress/1",
+        "schema_version": "ecologyrsi-dsh.execution-progress/2",
         "status": status,
         "phase": phase,
         "progress_percent": progress_percent,
+        "overall_progress_percent": progress_percent,
+        "epoch_progress_percent": epoch_progress_percent,
         "completed_steps": completed_steps,
         "total_steps": total_steps,
         "completed_candidates": terminal_candidates,
@@ -3733,6 +3935,7 @@ def _projection_json(state: Any) -> dict[str, Any]:
             "release": "待审批",
         },
         "trajectory": trajectory,
+        "adaptive_trajectories": _adaptive_trajectory_projection(state),
         "execution_progress": execution_progress,
         "execution_diagnostics": execution_diagnostics,
         "rounds": _rounds_projection(state),
@@ -3906,6 +4109,6 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
 def _state_payload(state: Any) -> dict[str, Any]:
     _assert_http_scope(state)
     return {
-        "schema_version": "ecologyrsi-dsh.browser-run/2",
+        "schema_version": "ecologyrsi-dsh.browser-run/3",
         "projection": _projection_json(state),
     }

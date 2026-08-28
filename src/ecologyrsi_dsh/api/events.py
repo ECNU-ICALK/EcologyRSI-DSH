@@ -865,11 +865,26 @@ class EventEndpointsMixin:
             raise ValueError("after must be a non-negative integer cursor") from exc
         if after < 0:
             raise ValueError("after must be a non-negative integer cursor")
+        raw_tail = query.get("tail", [None])[0]
+        tail: int | None = None
+        if raw_tail is not None:
+            try:
+                tail = int(raw_tail)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("tail must be an integer between 1 and 500") from exc
+            if not 1 <= tail <= 500:
+                raise ValueError("tail must be an integer between 1 and 500")
         events = self.server.ledger.events(run_id, after_seq=after)
         next_cursor = events[-1].seq if events else after
         public_events = [
             event for event in events if event.kind not in _PRIVATE_SAMPLE_EVENT_KINDS
         ]
+        total_public_events = sum(
+            event.kind not in _PRIVATE_SAMPLE_EVENT_KINDS for event in state.events
+        )
+        truncated = tail is not None and len(public_events) > tail
+        if tail is not None:
+            public_events = public_events[-tail:]
         intervention_kinds = {
             item.intervention_id: item.kind.value for item in state.interventions
         }
@@ -886,6 +901,8 @@ class EventEndpointsMixin:
             "cursor": str(next_cursor),
             "next_cursor": str(next_cursor),
             "has_more": False,
+            "total_public_events": total_public_events,
+            "truncated": truncated,
         }
 
     def _cached_sample_result_rows(

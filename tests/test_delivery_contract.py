@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import tempfile
 import threading
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -64,6 +65,23 @@ class DeliveryContractTests(unittest.TestCase):
         self.assertEqual(payload["evaluation_partition"], "visible/validation/demo")
         self.assertEqual(payload["scientific_scope"], "prediction_demo_non_causal")
         self.assertTrue(payload["package_version"])
+
+    def test_health_is_available_without_gateway_or_ledger_access(self) -> None:
+        with (
+            patch.object(
+                self.server.model_gateway,
+                "catalog",
+                side_effect=AssertionError("health must not load model catalog"),
+            ),
+            # Hold the ledger lock in this thread. The HTTP worker must still
+            # answer immediately from the startup-frozen health snapshot.
+            self.server.ledger._lock,
+        ):
+            status, payload = self.request("/api/health")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertNotIn("dsh_authenticated_models", payload)
 
     def test_create_and_advance_receipts_survive_server_restart(self) -> None:
         body = {

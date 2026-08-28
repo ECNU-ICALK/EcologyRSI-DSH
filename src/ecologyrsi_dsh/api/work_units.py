@@ -5,14 +5,47 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.models import RunStatus
+from ..core.trajectory import TrajectoryStatus
+
+
+def _formal_lane_priority(
+    state: Any,
+    candidate_id: str,
+    selection_index: int,
+) -> tuple[int, int, int] | None:
+    """Return a deterministic priority for one finalist lane.
+
+    A formal batch and its following local-edit/activation boundary form one
+    pair.  A half-finished pair is resumed first; otherwise the lane with the
+    fewest completed pairs advances.  The frozen Top-2 order is only the final
+    tie-breaker, so replay produces the same choice without new scheduler
+    state.
+    """
+
+    trajectory = state.trajectory_for(candidate_id)
+    if trajectory is not None and trajectory.status is TrajectoryStatus.COMPLETED:
+        return None
+    completed_pairs = 0
+    if trajectory is not None:
+        for batch_index in range(trajectory.batch_count):
+            if state.revision_activation_for(candidate_id, batch_index) is None:
+                break
+            completed_pairs += 1
+    in_flight = (
+        trajectory is not None
+        and completed_pairs < trajectory.batch_count
+        and state.formal_batch_for(candidate_id, completed_pairs) is not None
+    )
+    return (0 if in_flight else 1, completed_pairs, selection_index)
 
 
 def execute_next_adaptive_work_unit(endpoint: Any, run_id: str) -> bool:
     """Advance one durable boundary and return whether work was committed.
 
     Screening is kept as the existing four-candidate operation. Once Top-2 is
-    frozen, each invocation advances at most one 50-origin batch (or its local
-    edit) for each finalist, then yields to the auto-progress FIFO. This keeps
+    frozen, each invocation advances one durable boundary in the least-advanced
+    finalist lane. A started batch keeps the lane until its local-edit boundary
+    is activated, then the sibling lane gets the next pair. This keeps
     pause/cancel responsive and makes every scheduler turn observable.
     """
 
@@ -62,8 +95,22 @@ def execute_next_adaptive_work_unit(endpoint: Any, run_id: str) -> bool:
         )
         return bool(finalists)
 
+    selected_candidate_ids = tuple(formal.payload["selected_candidate_ids"])
+    ranked_lanes = sorted(
+        (
+            (priority, candidate_id)
+            for selection_index, candidate_id in enumerate(selected_candidate_ids)
+            if (
+                priority := _formal_lane_priority(
+                    state, candidate_id, selection_index
+                )
+            )
+            is not None
+        ),
+        key=lambda item: item[0],
+    )
     changed = False
-    for candidate_id in tuple(formal.payload["selected_candidate_ids"]):
+    for _priority, candidate_id in ranked_lanes:
         state = endpoint.server.director.state(run_id)
         trajectory = ensure_formal_trajectory(endpoint, run_id, candidate_id)
         if trajectory.status.value == "completed":

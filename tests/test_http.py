@@ -23,6 +23,9 @@ from ecologyrsi_dsh.integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_
 
 
 class HTTPServerErrorHandlingTests(unittest.TestCase):
+    def test_listen_backlog_covers_maximum_sample_concurrency(self) -> None:
+        self.assertGreaterEqual(EvolutionHTTPServer.request_queue_size, 128)
+
     def test_client_disconnect_errors_do_not_reach_default_traceback_handler(self) -> None:
         server = EvolutionHTTPServer.__new__(EvolutionHTTPServer)
         request = object()
@@ -199,6 +202,20 @@ class HTTPContractTests(unittest.TestCase):
         status, events = self.request(f"/api/runs/{run_path}/events")
         self.assertEqual(status, 200)
         self.assertTrue(events["events"])
+        self.assertEqual(events["total_public_events"], len(events["events"]))
+        self.assertIs(events["truncated"], False)
+        status, tail = self.request(f"/api/runs/{run_path}/events?tail=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(tail["events"]), 1)
+        self.assertGreaterEqual(tail["total_public_events"], 1)
+        self.assertEqual(
+            tail["next_cursor"],
+            events["next_cursor"],
+        )
+        self.assertEqual(
+            tail["truncated"],
+            tail["total_public_events"] > 1,
+        )
         cursor = events["next_cursor"]
         status, no_events = self.request(f"/api/runs/{run_path}/events?after={cursor}")
         self.assertEqual(status, 200)
@@ -518,6 +535,10 @@ class HTTPContractTests(unittest.TestCase):
         status, payload = self.request(f"{path}/events?after=-1")
         self.assertEqual(status, 400, payload)
         self.assertIn("non-negative", payload["error"])
+        for tail in (0, 501, "many"):
+            status, payload = self.request(f"{path}/events?tail={tail}")
+            self.assertEqual(status, 400, payload)
+            self.assertIn("tail", payload["error"])
 
         for value, key in ((1.5, "float-steps"), ("1", "string-steps")):
             status, payload = self.request(

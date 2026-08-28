@@ -685,6 +685,25 @@ class EventLedger:
             ).fetchone()
         return int(row["seq"])
 
+    def latest_run_seq(self, run_id: str) -> int:
+        """Return one run's latest event cursor without loading its stream.
+
+        ``idx_evolution_events_run_seq`` makes this a single indexed tail
+        lookup.  Zero denotes a run with no durable events, matching the
+        compare-and-swap convention used by :meth:`append`.
+        """
+
+        run_id = self._required_text(run_id, "run_id")
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT seq FROM evolution_events
+                WHERE run_id = ? ORDER BY seq DESC LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+        return int(row["seq"]) if row is not None else 0
+
     def run_ids(self, *, include_archived: bool = True) -> tuple[str, ...]:
         """Return distinct run IDs in first-seen order.
 

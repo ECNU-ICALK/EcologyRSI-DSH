@@ -6,9 +6,62 @@ from types import SimpleNamespace
 
 from ecologyrsi_dsh.api import work_units
 from ecologyrsi_dsh.api import formal_trajectory
+from ecologyrsi_dsh.api import generation_execution
 from ecologyrsi_dsh.api import projection
 from ecologyrsi_dsh.core.models import RunStatus
+from ecologyrsi_dsh.core.trajectory import TrajectoryStatus
 from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
+
+
+class _AdaptiveLaneState:
+    def __init__(self) -> None:
+        self.run = SimpleNamespace(status=RunStatus.RUNNING, generation=0)
+        self._generation_batch = SimpleNamespace(generation=0)
+        self.candidates = tuple(
+            SimpleNamespace(candidate_id=candidate_id, generation=0, slot_index=index)
+            for index, candidate_id in enumerate(("candidate:a", "candidate:b"))
+        )
+        self.task_manifest = SimpleNamespace(metadata={"candidate_concurrency": 2})
+        self._formal = SimpleNamespace(
+            payload={
+                "selected_candidate_ids": ["candidate:a", "candidate:b"]
+            }
+        )
+        self.trajectories = {
+            candidate_id: SimpleNamespace(
+                candidate_id=candidate_id,
+                batch_count=2,
+                status=TrajectoryStatus.RUNNING,
+            )
+            for candidate_id in self._formal.payload["selected_candidate_ids"]
+        }
+        self.batches: set[tuple[str, int]] = set()
+        self.evaluations: set[tuple[str, int]] = set()
+        self.activations: set[tuple[str, int]] = set()
+
+    def batch_for(self, _generation):
+        return self._generation_batch
+
+    def formal_selection_for(self, _generation):
+        return self._formal
+
+    def trajectory_for(self, candidate_id):
+        return self.trajectories[candidate_id]
+
+    def formal_batch_for(self, candidate_id, batch_index):
+        if (candidate_id, batch_index) in self.batches:
+            return SimpleNamespace(candidate_id=candidate_id, batch_index=batch_index)
+        return None
+
+    def batch_evaluation_for(self, candidate_id, batch_index):
+        if (candidate_id, batch_index) in self.evaluations:
+            return SimpleNamespace(candidate_id=candidate_id, batch_index=batch_index)
+        return None
+
+    def revision_activation_for(self, candidate_id, batch_index):
+        if (candidate_id, batch_index) in self.activations:
+            return SimpleNamespace(candidate_id=candidate_id, batch_index=batch_index)
+        return None
 
 
 class WorkUnitContractTests(unittest.TestCase):
@@ -40,6 +93,131 @@ class WorkUnitContractTests(unittest.TestCase):
             # The protocol gate is evaluated before any lane call; this fake
             # deliberately proves a paused/non-adaptive scheduler is a no-op.
             self.assertFalse(work_units.execute_next_adaptive_work_unit(endpoint, "run:x"))
+
+    def test_top_two_lanes_rotate_after_each_batch_edit_pair(self):
+        state = _AdaptiveLaneState()
+        endpoint = SimpleNamespace(
+            server=SimpleNamespace(
+                director=SimpleNamespace(state=lambda _run_id: state)
+            )
+        )
+        calls: list[str] = []
+
+        def execute_batch(_endpoint, _run_id, candidate_id):
+            batch_index = sum(
+                item_candidate == candidate_id
+                for item_candidate, _item_index in state.activations
+            )
+            key = (candidate_id, batch_index)
+            if key in state.evaluations:
+                return False
+            state.batches.add(key)
+            state.evaluations.add(key)
+            calls.append(f"{candidate_id}:batch:{batch_index}")
+            return True
+
+        def execute_edit(_endpoint, _run_id, candidate_id):
+            pending = sorted(
+                key
+                for key in state.evaluations
+                if key[0] == candidate_id and key not in state.activations
+            )
+            if not pending:
+                return False
+            state.activations.add(pending[0])
+            calls.append(f"{candidate_id}:edit:{pending[0][1]}")
+            return True
+
+        with (
+            patch.object(
+                generation_execution,
+                "_two_stage_screening_enabled",
+                return_value=True,
+            ),
+            patch.object(
+                formal_trajectory,
+                "ensure_formal_trajectory",
+                side_effect=lambda _endpoint, _run_id, candidate_id: (
+                    state.trajectories[candidate_id]
+                ),
+            ),
+            patch.object(
+                formal_trajectory,
+                "execute_next_formal_batch",
+                side_effect=execute_batch,
+            ),
+            patch.object(
+                formal_trajectory,
+                "execute_next_local_edit",
+                side_effect=execute_edit,
+            ),
+        ):
+            for _ in range(5):
+                self.assertTrue(
+                    work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+                )
+
+        self.assertEqual(
+            calls,
+            [
+                "candidate:a:batch:0",
+                "candidate:a:edit:0",
+                "candidate:b:batch:0",
+                "candidate:b:edit:0",
+                "candidate:a:batch:1",
+            ],
+        )
+
+    def test_half_finished_pair_is_recovered_before_switching_lanes(self):
+        state = _AdaptiveLaneState()
+        state.batches.add(("candidate:a", 0))
+        state.evaluations.add(("candidate:a", 0))
+        endpoint = SimpleNamespace(
+            server=SimpleNamespace(
+                director=SimpleNamespace(state=lambda _run_id: state)
+            )
+        )
+        calls: list[str] = []
+
+        def execute_batch(_endpoint, _run_id, candidate_id):
+            calls.append(f"{candidate_id}:batch")
+            return False
+
+        def execute_edit(_endpoint, _run_id, candidate_id):
+            calls.append(f"{candidate_id}:edit")
+            state.activations.add((candidate_id, 0))
+            return True
+
+        with (
+            patch.object(
+                generation_execution,
+                "_two_stage_screening_enabled",
+                return_value=True,
+            ),
+            patch.object(
+                formal_trajectory,
+                "ensure_formal_trajectory",
+                side_effect=lambda _endpoint, _run_id, candidate_id: (
+                    state.trajectories[candidate_id]
+                ),
+            ),
+            patch.object(
+                formal_trajectory,
+                "execute_next_formal_batch",
+                side_effect=execute_batch,
+            ),
+            patch.object(
+                formal_trajectory,
+                "execute_next_local_edit",
+                side_effect=execute_edit,
+            ),
+        ):
+            self.assertTrue(
+                work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+            )
+
+        self.assertEqual(calls, ["candidate:a:batch", "candidate:a:edit"])
+        self.assertNotIn(("candidate:b", 0), state.activations)
 
     def test_trajectory_initialization_derives_batch_count_from_schedule(self):
         """The manifest stores only canonical schedule fields, not derived counts."""

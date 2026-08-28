@@ -6,6 +6,8 @@
   var evolutionCommandTimeout = 120000;
   var sampleConcurrencyDefault = 64;
   var sampleConcurrencyMaximum = 128;
+  var eventInitialTail = 200;
+  var eventMemoryLimit = 500;
   var query = new URLSearchParams(window.location.search);
 
   var statusLabels = {
@@ -115,6 +117,10 @@
     activeRun: null,
     lastSelectedRunId: null,
     events: [],
+    eventRunId: null,
+    eventCursor: null,
+    eventTotal: 0,
+    eventHistoryTruncated: false,
     selectedCandidateId: null,
     candidateSelectionPinned: false,
     candidateSamplePage: null,
@@ -422,7 +428,7 @@
     nextEpoch();
     state.datasetRequest += 1;
     state.activeRun = runs[0] || null;
-    state.events = [];
+    resetEventStream(null);
     state.showAllEvents = false;
     state.candidateSelectionPinned = false;
     syncCandidateSelection(state.activeRun);
@@ -994,6 +1000,7 @@
       }, configuration),
       dataset: item.dataset && typeof item.dataset === "object" ? item.dataset : {},
       trajectory: trajectory,
+      adaptive_trajectories: Array.isArray(item.adaptive_trajectories) ? item.adaptive_trajectories : [],
       artifacts: Array.isArray(item.artifacts) ? item.artifacts : [],
       interventions: Array.isArray(item.interventions) ? item.interventions : [],
       expert_consultations: Array.isArray(item.expert_consultations) ? item.expert_consultations.map(normalizeExpertConsultation) : [],
@@ -1014,13 +1021,63 @@
   function payloadOf(event) { return event && (event.payload || event.data || event.detail) || {}; }
   function normalizeEvents(data) {
     return listFrom(data, "events").map(function (item, index) {
+      var sequence = Number(item.seq != null ? item.seq : item.sequence);
       return {
-        id: item.id || item.event_id || "event-" + index,
+        id: item.id || item.event_id || (Number.isInteger(sequence) ? "event-seq-" + sequence : "event-" + index),
+        seq: Number.isInteger(sequence) && sequence >= 0 ? sequence : null,
         type: item.type || item.event_type || "system.updated",
         occurred_at: item.occurred_at || item.created_at || item.timestamp,
         payload: payloadOf(item)
       };
-    }).sort(function (a, b) { return new Date(b.occurred_at) - new Date(a.occurred_at); });
+    }).sort(function (a, b) {
+      if (a.seq != null && b.seq != null && a.seq !== b.seq) { return b.seq - a.seq; }
+      return new Date(b.occurred_at) - new Date(a.occurred_at);
+    });
+  }
+  function eventCursorFrom(data, events, fallback) {
+    var raw = data && !Array.isArray(data) && (data.next_cursor != null ? data.next_cursor : data.cursor);
+    var explicit = Number(raw);
+    if (Number.isInteger(explicit) && explicit >= 0) { return explicit; }
+    var sequences = (events || []).map(function (event) { return Number(event.seq); }).filter(function (seq) { return Number.isInteger(seq) && seq >= 0; });
+    return sequences.length ? Math.max.apply(Math, sequences) : fallback;
+  }
+  function resetEventStream(runId, events, data) {
+    var normalized = events == null ? [] : normalizeEvents(events);
+    var total = Number(data && !Array.isArray(data) && data.total_public_events);
+    state.eventRunId = runId || null;
+    state.eventCursor = eventCursorFrom(data || events, normalized, null);
+    state.events = normalized.slice(0, eventMemoryLimit);
+    state.eventTotal = Number.isInteger(total) && total >= 0 ? total : state.events.length;
+    state.eventHistoryTruncated = Boolean(data && !Array.isArray(data) && data.truncated === true || state.eventTotal > state.events.length);
+    return state.events;
+  }
+  function mergeEventStream(runId, data) {
+    var incoming = normalizeEvents(data);
+    if (String(state.eventRunId || "") !== String(runId || "")) {
+      return resetEventStream(runId, incoming, data);
+    }
+    var seen = {};
+    state.events = incoming.concat(state.events || []).filter(function (event) {
+      var key = event.seq != null ? "seq:" + event.seq : "id:" + String(event.id || "");
+      if (seen[key]) { return false; }
+      seen[key] = true;
+      return true;
+    }).sort(function (a, b) {
+      if (a.seq != null && b.seq != null && a.seq !== b.seq) { return b.seq - a.seq; }
+      return new Date(b.occurred_at) - new Date(a.occurred_at);
+    }).slice(0, eventMemoryLimit);
+    state.eventCursor = eventCursorFrom(data, incoming, state.eventCursor);
+    var total = Number(data && !Array.isArray(data) && data.total_public_events);
+    state.eventTotal = Number.isInteger(total) && total >= 0 ? total : Math.max(state.eventTotal || 0, state.events.length);
+    state.eventHistoryTruncated = Boolean(state.eventHistoryTruncated || data && !Array.isArray(data) && data.truncated === true || state.eventTotal > state.events.length);
+    return state.events;
+  }
+  function eventRequestPath(runId, initial) {
+    var base = "/runs/" + encodeURIComponent(runId) + "/events";
+    if (initial === true || String(state.eventRunId || "") !== String(runId || "") || state.eventCursor == null) {
+      return base + "?tail=" + eventInitialTail;
+    }
+    return base + "?after=" + encodeURIComponent(String(state.eventCursor));
   }
 
   function localizeError(message, errorCode) {

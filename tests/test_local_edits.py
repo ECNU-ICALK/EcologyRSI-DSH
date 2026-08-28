@@ -89,6 +89,34 @@ class LocalEditTests(unittest.TestCase):
         self.assertIs(result.outcome, LocalEditOutcome.KEPT)
         self.assertIsNone(result.child)
 
+    def test_zero_maximum_allows_keep_and_rejects_mutation(self) -> None:
+        parent = _parent()
+        context = _context(parent, maximum=0)
+        keep = LocalEditProposal(
+            decision="keep",
+            operations=(),
+            evidence_refs=(),
+            expected_effect_cells=(),
+            risk_cells=(),
+        )
+
+        self.assertIs(validate_local_edit_proposal(keep, context), keep)
+        mutate = LocalEditProposal(
+            decision="mutate",
+            operations=(
+                {
+                    "op": "set_bounded_parameter",
+                    "name": "ridge_alpha",
+                    "value": 0.2,
+                },
+            ),
+            evidence_refs=(),
+            expected_effect_cells=(),
+            risk_cells=(),
+        )
+        with self.assertRaisesRegex(ValueError, "maximum_operations"):
+            validate_local_edit_proposal(mutate, context)
+
     def test_two_registered_edits_are_applied_atomically(self) -> None:
         parent = _parent()
         proposal = LocalEditProposal(

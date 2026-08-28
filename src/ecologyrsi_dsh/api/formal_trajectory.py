@@ -464,6 +464,17 @@ def _local_edit_proposal(
 ) -> LocalEditProposal:
     """Ask the native local editor when present, with a safe local fallback."""
 
+    # Zero is an explicit Host-owned switch that disables local mutation for
+    # this schedule.  Resolve it before inspecting native-runtime state so a
+    # disabled editor cannot reserve a DSH child request or consume tokens.
+    if context.maximum_operations == 0:
+        return LocalEditProposal(
+            decision="keep",
+            operations=(),
+            evidence_refs=("batch:score",),
+            expected_effect_cells=(),
+            risk_cells=(),
+        )
     runtime = getattr(endpoint.server, "dsh_native_runtime", None)
     admission = getattr(endpoint.server, "dsh_tools", None)
     identity = state.candidate_identity_binding(candidate.candidate_id)

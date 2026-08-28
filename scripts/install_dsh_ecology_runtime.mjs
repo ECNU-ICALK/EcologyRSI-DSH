@@ -10,12 +10,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
 export const PRESET_IDS = Object.freeze([
-  "ecology-coordinator-v3",
-  "ecology-researcher-v6",
-  "ecology-candidate-proposer-v3",
-  "ecology-sample-planner-v3",
-  "ecology-sample-critic-v3",
-  "ecology-generation-judge-v6",
   "ecology-coordinator-v4",
   "ecology-researcher-v7",
   "ecology-candidate-proposer-v4",
@@ -23,26 +17,7 @@ export const PRESET_IDS = Object.freeze([
   "ecology-sample-critic-v4",
   "ecology-generation-judge-v7",
 ]);
-const OBSOLETE_PRESET_IDS = Object.freeze([
-  "ecology-coordinator-v1",
-  "ecology-researcher-v1",
-  "ecology-candidate-proposer-v1",
-  "ecology-sample-planner-v1",
-  "ecology-sample-critic-v1",
-  "ecology-generation-judge-v1",
-  "ecology-coordinator-v2",
-  "ecology-researcher-v2",
-  "ecology-candidate-proposer-v2",
-  "ecology-sample-planner-v2",
-  "ecology-sample-critic-v2",
-  "ecology-generation-judge-v2",
-  "ecology-researcher-v3",
-  "ecology-generation-judge-v3",
-  "ecology-researcher-v4",
-  "ecology-generation-judge-v4",
-  "ecology-researcher-v5",
-  "ecology-generation-judge-v5",
-]);
+const MANAGED_PRESET_ID = /^ecology-(?:coordinator|researcher|candidate-proposer|sample-planner|sample-critic|generation-judge|local-editor)-v[0-9]+$/;
 
 const BEGIN = "# BEGIN ECOLOGYRSI DSH RUNTIME (managed)";
 const END = "# END ECOLOGYRSI DSH RUNTIME (managed)";
@@ -175,9 +150,11 @@ export async function installPresetTree({ sourceRoot, dshHome, dshBin = null }) 
   await assertNoSymlink(dshHome);
   await mkdir(destinationRoot, { recursive: true, mode: 0o700 });
   await assertNoSymlink(destinationRoot, dshHome);
-  for (const id of OBSOLETE_PRESET_IDS) {
+  const currentPresetIds = new Set(PRESET_IDS);
+  for (const entry of await readdir(destinationRoot, { withFileTypes: true })) {
+    const id = entry.name;
+    if (!MANAGED_PRESET_ID.test(id) || currentPresetIds.has(id)) continue;
     const target = path.join(destinationRoot, id);
-    if (!(await exists(target))) continue;
     await assertNoSymlink(target, dshHome);
     await rm(target, { recursive: true, force: false });
   }

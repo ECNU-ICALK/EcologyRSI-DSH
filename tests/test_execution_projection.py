@@ -30,6 +30,7 @@ from ecologyrsi_dsh.api.projection import (
     _run_failure_projection,
     _screening_progress_projection,
     _adaptive_progress_projection,
+    _adaptive_trajectory_projection,
 )
 from ecologyrsi_dsh.api.projection import _projection_json
 
@@ -259,9 +260,11 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["progress_kind"], "settling")
         self.assertEqual(progress["screening_completed_origins"], 0)
         self.assertEqual(progress["completed_origins"], 0)
-        self.assertEqual(progress["succeeded_samples"], 0)
-        self.assertEqual(progress["failed_samples"], 0)
+        self.assertEqual(progress["settled_origins"], 0)
+        self.assertNotIn("succeeded_samples", progress)
+        self.assertNotIn("failed_samples", progress)
         self.assertEqual(progress["in_flight_batches"], 1)
+        self.assertEqual(progress["in_flight_requests"], 1)
         self.assertEqual(progress["awaiting_submission_batches"], 255)
         self.assertEqual(progress["awaiting_settlement_batches"], 1)
         self.assertEqual(progress["gateway_request_count"], 1)
@@ -351,9 +354,11 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         self.assertEqual(progress["evaluation_phase"], "formal_batch")
         self.assertEqual(progress["completed_origins"], 307)
-        self.assertEqual(progress["succeeded_samples"], 307)
-        self.assertEqual(progress["failed_samples"], 0)
+        self.assertEqual(progress["settled_origins"], 307)
+        self.assertNotIn("succeeded_samples", progress)
+        self.assertNotIn("failed_samples", progress)
         self.assertEqual(progress["in_flight_batches"], 1)
+        self.assertEqual(progress["in_flight_requests"], 1)
         self.assertEqual(progress["awaiting_submission_batches"], 49)
         self.assertEqual(progress["awaiting_settlement_batches"], 1)
         self.assertEqual(progress["gateway_request_count"], 1)
@@ -381,6 +386,79 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(activity["state"], "model_running")
         self.assertEqual(activity["dsh_stage"], "candidate.local_edit")
         self.assertEqual(activity["role"], "candidate-proposer")
+
+    def test_adaptive_trajectory_exposes_bounded_batch_and_edit_evidence(self) -> None:
+        evaluation = SimpleNamespace(
+            score=-0.25,
+            passed=False,
+            created_at="2026-08-28T00:00:02+00:00",
+            metrics={
+                "sample_execution_coverage": 0.96,
+                "sample_execution_coverage_pass": True,
+                "sample_execution": {
+                    "succeeded_origin_samples": 48,
+                    "failed_origin_samples": 2,
+                    "failed_examples": 2,
+                    "scoring_fallback_examples": 2,
+                    # Large private evidence must never be copied into the row.
+                    "sample_execution_records": [{"private": "trace"}],
+                },
+            },
+        )
+        batch = SimpleNamespace(
+            generation=0,
+            candidate_id="candidate:a",
+            batch_index=0,
+            batch_count=10,
+            origin_count=50,
+            revision_id="revision:a:0",
+            cohort_digest="a" * 64,
+            created_at="2026-08-28T00:00:00+00:00",
+        )
+        activation = SimpleNamespace(
+            candidate_id="candidate:a",
+            batch_index=0,
+            to_revision_id="revision:a:1",
+            created_at="2026-08-28T00:00:03+00:00",
+        )
+        state = SimpleNamespace(
+            local_edit_proposals=({
+                "candidate_id": "candidate:a",
+                "batch_index": 0,
+                "decision": "mutate",
+                "operations": [{"op": "set_bounded_parameter", "name": "ridge_alpha", "value": 1.0}],
+            },),
+            local_edit_outcomes=({
+                "candidate_id": "candidate:a",
+                "batch_index": 0,
+                "outcome": "applied",
+                "active_revision_id": "revision:a:1",
+            },),
+            trajectory_revision_activations=(activation,),
+            formal_batches=(batch,),
+            formal_trajectories=(SimpleNamespace(
+                generation=0,
+                candidate_id="candidate:a",
+                status=SimpleNamespace(value="running"),
+                initial_revision_id="revision:a:0",
+                final_revision_id=None,
+                batch_count=10,
+            ),),
+            batch_evaluation_for=lambda candidate_id, batch_index: evaluation,
+        )
+
+        lanes = _adaptive_trajectory_projection(state)
+
+        self.assertEqual(len(lanes), 1)
+        self.assertEqual(lanes[0]["completed_batch_count"], 1)
+        row = lanes[0]["batches"][0]
+        self.assertEqual(row["batch_index"], 1)
+        self.assertEqual(row["succeeded_origins"], 48)
+        self.assertEqual(row["failed_origins"], 2)
+        self.assertEqual(row["edit_outcome"], "applied")
+        self.assertEqual(row["active_revision_id"], "revision:a:1")
+        self.assertEqual(row["score_comparability"], "different_batch_cohort_diagnostic_only")
+        self.assertNotIn("sample_execution_records", str(row))
 
     def test_dsh_activity_ignores_unresolved_child_before_resume_boundary(self) -> None:
         launch = SimpleNamespace(

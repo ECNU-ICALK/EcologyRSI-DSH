@@ -338,6 +338,7 @@ tbody tr:hover { background: #f8faf9; }
 .chart-legend .legend-best { background: var(--green); }
 .trajectory-chart { width: calc(100% - 28px); min-height: 280px; margin: 8px 14px 0; overflow: hidden; aspect-ratio: 4 / 1; }
 .trajectory-chart svg { display: block; width: 100%; min-width: 0; height: 100%; min-height: 280px; }
+.trajectory-comparability-note { margin: 8px 0 0; padding: 7px 10px; border-radius: 4px; background: var(--amber-soft); color: #835d08; font-size: 10px; line-height: 1.5; }
 .chart-grid { stroke: #e5e9eb; stroke-width: 1; }
 .chart-axis { fill: #6c777e; font-size: 10px; }
 .chart-candidate { fill: none; stroke: var(--blue); stroke-width: 2; }
@@ -367,6 +368,7 @@ tbody tr:hover { background: #f8faf9; }
 .execution-progress-fill { display: block; width: 0%; height: 100%; border-radius: 3px; background: var(--primary); transition: width 280ms ease, background 180ms ease; }
 .execution-progress-track.is-running .execution-progress-fill { background: var(--blue); animation: execution-progress-pulse 1.6s ease-in-out infinite; }
 .execution-progress-track.is-paused .execution-progress-fill { background: var(--amber); animation: none; }
+.execution-progress-track.is-stalled .execution-progress-fill { background: var(--amber); animation: none; }
 .execution-progress-track.is-failed .execution-progress-fill { background: var(--red); }
 @keyframes execution-progress-pulse { 0%, 100% { opacity: .72; } 50% { opacity: 1; } }
 .execution-progress-meta { display: flex; flex-wrap: wrap; gap: 5px 16px; margin-top: 7px; color: var(--subtle); font-size: 9px; }
@@ -385,6 +387,22 @@ tbody tr:hover { background: #f8faf9; }
 .execution-diagnostic > small { color: var(--muted); font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
 .execution-diagnostic.is-warning { background: var(--amber-soft); }
 .execution-diagnostic.is-muted > strong { color: var(--muted); }
+.adaptive-trajectory-panel { margin-top: 12px; }
+.adaptive-trajectory-note { margin: 0; padding: 9px 14px; border-bottom: 1px solid var(--line); color: var(--muted); background: var(--amber-soft); font-size: 10px; line-height: 1.5; }
+.adaptive-trajectory-note strong { color: var(--ink); }
+.adaptive-trajectory-table { min-width: 1020px; }
+.adaptive-trajectory-table th { white-space: nowrap; }
+.adaptive-trajectory-table td { min-width: 120px; vertical-align: top; font-size: 10px; line-height: 1.45; }
+.adaptive-trajectory-table td:nth-child(1), .adaptive-trajectory-table td:nth-child(2) { min-width: 130px; }
+.adaptive-trajectory-table td:nth-child(3) { min-width: 190px; }
+.adaptive-trajectory-table td:nth-child(4), .adaptive-trajectory-table td:nth-child(5) { min-width: 220px; }
+.adaptive-trajectory-cell { display: grid; gap: 3px; }
+.adaptive-trajectory-cell > strong { color: var(--ink); font-size: 10px; overflow-wrap: anywhere; }
+.adaptive-trajectory-cell > span, .adaptive-trajectory-cell > small { color: var(--muted); font-size: 9px; overflow-wrap: anywhere; }
+.adaptive-trajectory-cell code { color: var(--primary-dark); font-size: 9px; white-space: normal; overflow-wrap: anywhere; }
+.adaptive-trajectory-operation { display: block; padding: 2px 0; border-bottom: 1px dotted #d6dfdd; }
+.adaptive-trajectory-operation:last-child { border-bottom: 0; }
+.adaptive-trajectory-warning { color: #835d08 !important; }
 .execution-stage-strip { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
 .execution-stage-chip { display: grid; min-width: 0; gap: 3px; padding: 8px 10px 9px; border-right: 1px solid var(--line); border-bottom: 3px solid var(--line-strong); background: #fff; }
 .execution-stage-chip:last-child { border-right: 0; }

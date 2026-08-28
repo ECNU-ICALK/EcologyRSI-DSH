@@ -1913,6 +1913,8 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             item = Candidate.from_dict(payload["candidate"])
             if item.run_id != run.run_id:
                 raise ValueError("candidate ownership does not match run")
+            if item.candidate_id in candidates:
+                raise ValueError("candidate_id has multiple spawn events")
             if is_dsh_native_protocol(task):
                 proposal = proposals.get(item.proposal_id)
                 if proposal is None:

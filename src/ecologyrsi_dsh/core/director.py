@@ -1764,7 +1764,13 @@ class EvolutionDirector:
                 "runtime_execution_digest": bound.runtime_execution_digest,
                 "evaluation_cohort_digest": instance_context.evaluation_cohort_digest,
             }
-        self.ledger.append(run_id, "CandidateSpawned", payload)
+        self.ledger.append(
+            run_id,
+            "CandidateSpawned",
+            payload,
+            event_id="candidate-spawned:"
+            + digest({"run_id": run_id, "candidate_id": candidate.candidate_id}),
+        )
         return candidate
 
     def propose_and_spawn(self, run_id: str, *, parent_candidate_id: str | None = None) -> Candidate:

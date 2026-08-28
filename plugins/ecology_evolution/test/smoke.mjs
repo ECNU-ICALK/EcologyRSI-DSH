@@ -354,10 +354,19 @@ modelSandbox.document.querySelector = (selector) => selector === "#trajectory-ch
 modelSandbox.window.innerWidth = 1200;
 modelSandbox.state.activeRun = crossCohortProjection;
 modelSandbox.renderTrajectory();
-assert.ok(trajectoryChartNode.innerHTML.includes('class="chart-best"'));
+assert.equal(trajectoryChartNode.innerHTML.includes('class="chart-best"'), false);
 assert.ok(trajectoryChartNode.innerHTML.includes("候选原始得分与实际晋升序列"));
-assert.ok(trajectoryChartNode.innerHTML.includes("不同反馈窗口的原始得分不可直接比较"));
-assert.ok(trajectoryLegendNode.innerHTML.includes("实际晋升序列"));
+assert.ok(trajectoryChartNode.innerHTML.includes("原始得分不可直接纵向比较"));
+assert.ok(trajectoryLegendNode.innerHTML.includes("跨 cohort 不连线"));
+modelSandbox.state.activeRun = modelSandbox.normalizeRun({
+  run_id: "run:same-cohort-chart", status: "completed",
+  trajectory: [
+    {generation: 1, candidate_id: "candidate:same-a", evaluation_cohort_digest: "sha256:same", score: 0.5, incumbent_score: 0.5},
+    {generation: 2, candidate_id: "candidate:same-b", evaluation_cohort_digest: "sha256:same", score: 0.6, incumbent_score: 0.6},
+  ],
+});
+modelSandbox.renderTrajectory();
+assert.ok(trajectoryChartNode.innerHTML.includes('class="chart-best"'));
 
 const legacyCrossCohortProjection = modelSandbox.normalizeRun({
   run_id: "run:legacy-cross-cohort", status: "completed", best_observed_score: 0.95,
@@ -1174,12 +1183,14 @@ const pausedDrainedRun = {
   rounds: [pausedRound],
   execution_progress: {
     phase: "evaluation",
+    last_event_at: new Date().toISOString(),
     current_stage: "evaluation",
     current_generation: 1,
     completed_generations: 0,
     current_candidate_id: pausedCandidate.id,
     progress_percent: 8.3368421,
     stage_progress: {
+      evaluation_phase: "formal_batch",
       revision: "revision:paused-drained",
       progress_kind: "drained",
       completed_samples: 594,
@@ -1237,6 +1248,33 @@ assert.equal(monitorNodes["#active-candidate-status"].className, "pill pill-ambe
 assert.equal(monitorNodes["#implementation-status"].textContent, "已暂停");
 assert.equal(monitorNodes["#implementation-status"].className, "pill pill-amber");
 assert.ok(monitorNodes["#execution-stage-strip"].innerHTML.includes("execution-stage-chip is-paused"));
+assert.equal(modelSandbox.roundStageStatus(pausedRound.candidates[0], "training", pausedDrainedRun), "completed");
+assert.equal(modelSandbox.roundStageStatus(pausedRound.candidates[0], "evaluation", pausedDrainedRun), "paused");
+const queuedTrajectoryRun = {
+  ...pausedDrainedRun,
+  status: "running",
+  execution_progress: {...pausedDrainedRun.execution_progress, current_candidate_id: "candidate:other"},
+  adaptive_trajectories: [{
+    candidate_id: pausedCandidate.id,
+    status: "running",
+    completed_batch_count: 9,
+    batch_count: 10,
+  }],
+};
+assert.equal(modelSandbox.roundStageStatus(pausedRound.candidates[0], "training", queuedTrajectoryRun), "completed");
+assert.equal(modelSandbox.roundStageStatus(pausedRound.candidates[0], "evaluation", queuedTrajectoryRun), "running");
+modelSandbox.renderAutonomyProgress(pausedDrainedRun);
+assert.ok(monitorNodes["#autonomy-progress"].innerHTML.includes("已暂停"));
+
+const newestHeartbeat = modelSandbox.executionHeartbeatState({
+  status: "running",
+  execution_progress: {
+    last_event_at: "2026-01-01T00:00:00Z",
+    stage_progress: {updated_at: "2026-01-02T00:00:00Z"},
+    dsh_activity: {updated_at: "2026-01-03T00:00:00Z"},
+  },
+});
+assert.equal(newestHeartbeat.timestamp, "2026-01-03T00:00:00.000Z");
 
 const dshCircuitPausedRun = {
   ...pausedDrainedRun,
@@ -1340,6 +1378,7 @@ const screeningRun = {
   execution_progress: {
     phase: "evaluation",
     current_stage: "evaluation",
+    last_event_at: new Date().toISOString(),
     current_generation: 1,
     completed_generations: 0,
     current_candidate_id: screeningCandidate.id,
@@ -1361,11 +1400,20 @@ const screeningRun = {
 };
 modelSandbox.renderExecutionMonitor(screeningRun);
 assert.equal(monitorNodes["#execution-monitor-status"].textContent, "模型执行中");
+assert.ok(monitorNodes["#execution-progress-detail"].textContent.includes("独立评测"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("预测时点进度：1 / 256"));
-assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("实际在飞 2 wave"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("在飞预测请求 2"));
+assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("2 wave"), false);
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("排队 0"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("待提交 253"));
 assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("排队 253"), false);
+const staleCandidateStage = {
+  ...screeningCandidate,
+  execution: {...screeningCandidate.execution, current_stage: "training"},
+};
+modelSandbox.renderExecutionMonitor({...screeningRun, candidates: [staleCandidateStage]});
+assert.ok(monitorNodes["#execution-progress-detail"].textContent.includes("独立评测"));
+assert.equal(monitorNodes["#execution-progress-detail"].textContent.includes("候选训练"), false);
 modelSandbox.renderAutonomyProgress(screeningRun);
 assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "模型执行中");
 const formalLiveRun = {
@@ -2039,7 +2087,7 @@ modelSandbox.renderProcess = () => {};
 modelSandbox.renderCandidates = () => {};
 modelSandbox.renderTrainingAssets = () => {};
 modelSandbox.renderCollaboration = () => {};
-modelSandbox.request = async (path) => path.endsWith("/events") ? {
+modelSandbox.request = async (path) => path.includes("/events") ? {
   events: [{
     event_id: "event:failed-stage", type: "stage.recorded", occurred_at: "2026-08-18T06:00:00Z",
     payload: {status: "failed", public_error: "本轮证据门禁失败：未产生新的科学评测。"},
@@ -2063,7 +2111,7 @@ let resolveOldRun;
 let resolveOldEvents;
 const oldRunResponse = new Promise((resolve) => { resolveOldRun = resolve; });
 const oldEventResponse = new Promise((resolve) => { resolveOldEvents = resolve; });
-modelSandbox.request = (path) => path.endsWith("/events") ? oldEventResponse : oldRunResponse;
+modelSandbox.request = (path) => path.includes("/events") ? oldEventResponse : oldRunResponse;
 const oldPoll = modelSandbox.refreshProgressForRun(raceRun.id);
 modelSandbox.request = async () => ({
   events: [{event_id: "event:newer", type: "stage.recorded", occurred_at: "2026-08-18T07:00:00Z", payload: {status: "running"}}],
@@ -2076,7 +2124,7 @@ assert.equal(modelSandbox.state.activeRun.projection_revision, 2);
 assert.equal(modelSandbox.state.events[0].id, "event:newer");
 
 // A replica response behind the accepted projection must not replace its events.
-modelSandbox.request = async (path) => path.endsWith("/events")
+modelSandbox.request = async (path) => path.includes("/events")
   ? {events: [{event_id: "event:stale", type: "stage.recorded", occurred_at: "2026-08-18T04:00:00Z", payload: {}}]}
   : {projection: {...raceRun, projection_revision: 1}};
 assert.equal(await modelSandbox.refreshProgressForRun(raceRun.id), false);
@@ -2124,7 +2172,7 @@ modelSandbox.state.candidateSelectionPinned = true;
 modelSandbox.loadSelectedDataset = async () => true;
 modelSandbox.loadCandidateSamples = async () => true;
 modelSandbox.ensureAutoAdvanceForRun = () => false;
-modelSandbox.request = async (path) => path.endsWith("/events")
+modelSandbox.request = async (path) => path.includes("/events")
   ? {events: []}
   : {projection: targetRun};
 assert.equal(await modelSandbox.selectRun(targetRun.id, false), true);
@@ -2163,6 +2211,26 @@ reconnectSandbox.request = async (path) => {
 };
 assert.equal(await reconnectSandbox.connectAndLoad(), true);
 assert.equal(reconnectSelectedRunId, "run:preferred");
+
+// The health probe is advisory: a timeout under high sample concurrency must
+// not discard successful catalog and run projections.
+reconnectSelectedRunId = null;
+let timedOutHealthProbeCount = 0;
+reconnectSandbox.request = async (path) => {
+  if (path === "/health") {
+    timedOutHealthProbeCount += 1;
+    const error = new Error("health probe timed out");
+    error.name = "AbortError";
+    throw error;
+  }
+  if (path === "/catalog") { return {dsh: {capabilities: ["evolution.projection.read"]}}; }
+  return {runs: [{run_id: "run:health-timeout", status: "running", created_at: "2026-08-20T09:00:00Z"}]};
+};
+assert.equal(await reconnectSandbox.connectAndLoad(), true);
+assert.equal(timedOutHealthProbeCount, 1);
+assert.equal(reconnectSelectedRunId, "run:health-timeout");
+assert.equal(reconnectSandbox.state.loadState, "ready");
+assert.equal(reconnectSandbox.state.runs.length, 1);
 
 modelSandbox.state.usingDemo = true;
 modelSandbox.state.catalog.dsh.capabilities = ["run.control", "evolution.run.advance"];
@@ -2771,7 +2839,7 @@ assert.match(html, /id="show-archived-runs"/);
 assert.match(html, /id="archive-button"/);
 assert.match(html, /id="delete-button"/);
 assert.equal(manifest.display_name, "生态模型进化工作台");
-assert.equal(manifest.version, "0.3.45");
+assert.equal(manifest.version, "0.3.46");
 assert.equal(manifest.entrypoint.file, "index.html");
 assert.equal(manifest.entrypoint.route, "/plugins/ecology/evolution/");
 assert.equal(manifest.development_only, false);
@@ -2919,20 +2987,15 @@ const presetDirectories = fs.readdirSync(
   {withFileTypes: true},
 ).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
 // The runtime controller is authoritative for the active preset contract.
-// Additional historical preset directories may remain in the source tree
-// while the one-time protocol cutover is staged; smoke must verify required
-// capabilities without freezing an obsolete directory inventory.
-for (const requiredPreset of [
+const activePresetDirectories = [
   "ecology-coordinator-v4",
   "ecology-researcher-v7",
   "ecology-candidate-proposer-v4",
   "ecology-sample-planner-v4",
   "ecology-sample-critic-v4",
   "ecology-generation-judge-v7",
-  "ecology-local-editor-v1",
-]) {
-  assert.ok(presetDirectories.includes(requiredPreset), `missing active preset ${requiredPreset}`);
-}
+];
+assert.deepEqual(presetDirectories.sort(), activePresetDirectories.sort());
 for (const field of ["rounds", "candidates_per_generation", "formal_origin_count", "local_batch_origin_count", "max_local_edits_per_batch", "selection_holdout_origin_count", "candidate_concurrency", "sample_agent_batch_size", "sample_concurrency", "max_candidates", "fixed_seed", "knowledge_online_enabled"]) {
   assert.match(html, new RegExp(`name="${field}"[^>]*form="start-form"|form="start-form"[^>]*name="${field}"`));
 }

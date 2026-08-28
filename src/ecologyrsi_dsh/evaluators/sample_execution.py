@@ -133,7 +133,6 @@ def _strict_origin_worker_count(
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"{name} must be a positive integer")
     return min(pending_origin_count, sample_concurrency)
-    retryable = False
 
 
 class SampleRepairRequired(SampleExecutionContractError):

@@ -3,6 +3,7 @@
   function connectAndLoad() {
     if (state.allowDemo) { loadDemo(); return Promise.resolve(true); }
     var preferredRunId = state.activeRun && state.activeRun.id || state.lastSelectedRunId;
+    var hadRecoverableRunContext = Boolean(state.activeRun || state.runs.length);
     if (state.autoAdvanceRunId && typeof stopAutoAdvance === "function") {
       stopAutoAdvance(state.autoAdvanceRunId, { resetTiming: true });
     }
@@ -16,15 +17,19 @@
     state.lastError = null;
     setConnection("checking", "正在检查服务");
     renderAll();
-    return Promise.all([request("/health", { timeout: 4000 }), request("/catalog", { timeout: dataRequestTimeout }), request(runsListPath())]).then(function (results) {
+    // Health is a best-effort liveness hint, not the authority for the
+    // browser read model.  Under a busy 64-request run it may exceed four
+    // seconds even while catalog and projection reads remain healthy.
+    request("/health", { timeout: 4000 }).catch(function () { return null; });
+    return Promise.all([request("/catalog", { timeout: dataRequestTimeout }), request(runsListPath())]).then(function (results) {
       if (epoch !== state.viewEpoch) { return false; }
-      state.catalog = normalizeCatalog(results[1]);
-      state.runs = listFrom(results[2], "runs").map(normalizeRun).sort(function (left, right) {
+      state.catalog = normalizeCatalog(results[0]);
+      state.runs = listFrom(results[1], "runs").map(normalizeRun).sort(function (left, right) {
         var leftTime = Date.parse(left.updated_at || left.created_at || "") || 0;
         var rightTime = Date.parse(right.updated_at || right.created_at || "") || 0;
         return rightTime - leftTime;
       });
-      state.archivedRunCount = Math.max(0, Number(results[2] && results[2].archived_count || 0));
+      state.archivedRunCount = Math.max(0, Number(results[1] && results[1].archived_count || 0));
       var selectableRuns = visibleRuns();
       state.loadState = selectableRuns.length ? "ready" : "empty";
       state.lastError = null;
@@ -38,7 +43,7 @@
         return selectRun((preferredRun || selectableRuns[0]).id, false);
       }
       state.activeRun = null;
-      state.events = [];
+      resetEventStream(null);
       resetCandidateSamples(null, null);
       state.lastUpdated = new Date().toISOString();
       renderAll();
@@ -46,13 +51,22 @@
       return true;
     }).catch(function (error) {
       if (epoch !== state.viewEpoch) { return false; }
-      state.loadState = "error";
       state.lastError = errorMessage(error);
+      if (hadRecoverableRunContext && (state.activeRun || state.runs.length)) {
+        state.loadState = "stale";
+        setConnection("offline", "连接暂时中断 · 显示上次状态");
+        renderAll();
+        if (state.activeRun && String(state.activeRun.status || "").toLowerCase() === "running" && typeof startRunMonitor === "function") {
+          startRunMonitor(state.activeRun.id);
+        }
+        return false;
+      }
+      state.loadState = "error";
       state.catalog = emptyCatalog();
       state.runs = [];
       state.archivedRunCount = 0;
       state.activeRun = null;
-      state.events = [];
+      resetEventStream(null);
       setConnection("offline", "服务网关不可用");
       populateCatalogControls();
       renderAll();
@@ -95,7 +109,7 @@
     if (state.usingDemo) {
       commitRunSelection(runId, previousRunId);
       state.activeRun = state.runs.find(function (run) { return run.id === runId; }) || null;
-      state.events = clone(demoEvents);
+      resetEventStream(runId, clone(demoEvents));
       syncSelectedRunAlerts(state.activeRun, state.events);
       state.showAllEvents = false;
       syncCandidateSelection(state.activeRun);
@@ -123,13 +137,13 @@
     state.busy = true;
     state.pendingAction = "select";
     renderAll();
-    return Promise.all([request("/runs/" + encodeURIComponent(runId)), request("/runs/" + encodeURIComponent(runId) + "/events")]).then(function (results) {
+    return Promise.all([request("/runs/" + encodeURIComponent(runId)), request(eventRequestPath(runId, true))]).then(function (results) {
       if (requestId !== state.runReadRequest || epoch !== state.viewEpoch) { return false; }
       var selectedRun = normalizeRun(results[0]);
       var selectedEvents = normalizeEvents(results[1]);
       commitRunSelection(runId, previousRunId);
       state.activeRun = selectedRun;
-      state.events = selectedEvents;
+      resetEventStream(runId, selectedEvents, results[1]);
       syncSelectedRunAlerts(state.activeRun, state.events);
       state.showAllEvents = false;
       state.runs = state.runs.map(function (run) { return run.id === runId ? state.activeRun : run; });
