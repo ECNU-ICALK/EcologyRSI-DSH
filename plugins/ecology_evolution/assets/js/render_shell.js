@@ -206,7 +206,7 @@
       ["请求组织", "按因果预测起点组成 origin wave · wave 上限 " + formatNumber(microbatch) + " · 实际完成数以运行进度为准"],
       ["并发上限", formatNumber(candidateConcurrency) + " 个编排候选；两条 lane 共享 " + formatNumber(concurrency) + " 个 run 级在飞请求"],
       ["候选总预算", formatNumber(budget.requested_max_candidates) + " 个（至少 " + formatNumber(budget.required_candidates) + " 个）"],
-      ["上下文与输出", "由 DSH Session 压缩和模型路由统一管理，不设逐样本 Token 硬上限"],
+      ["上下文与输出", "不设跨调用的逐样本 Token 总预算；每次 sample 子模型输出最多 2,048 tokens"],
       ["复现与检索", ($("#fixed-seed").checked ? "固定种子" : "记录生成种子") + " · " + ($("#knowledge-online-enabled").checked ? "在线检索" : "内置目录")]
     ];
     $("#parameter-summary").innerHTML = values.map(function (item) {
