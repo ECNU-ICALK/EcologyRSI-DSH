@@ -20,8 +20,10 @@ import {
 } from "./structured-deadline.js";
 import { runStructuredRole } from "./structured-roles.js";
 import {
+  isStructuredProviderRateLimit,
   isTrustedStructuredPhase,
   structuredPhaseError,
+  structuredRetryAfterMs,
 } from "./structured-stage-errors.js";
 import { PendingChildStarts } from "./pending-child-starts.js";
 
@@ -131,6 +133,7 @@ const STAGES = Object.freeze({
       "Copy the exact Host wave_digest and every exact Host samples[].sample_id into the structured result.",
       "Then call structured_output exactly once, selecting that same tool for every sample_id.",
       "Do not invent, replace, or calculate predictions yourself.",
+      "If the prediction or structured_output call is rejected, terminate the child turn immediately: emit no prose and do not retry; the Host will start a fresh bounded child attempt.",
     ].join(" "),
   }),
   "sample.critic": Object.freeze({
@@ -469,9 +472,83 @@ function consumedTerminalEnd(events) {
 
 function structuredCaptureDisposition(rawEvents) {
   if (!Array.isArray(rawEvents)) return "non-missing";
+  // A provider can reject a burst after DSH has allocated the child Session
+  // but before the first model turn is durable.  Such Sessions contain only
+  // their identity record (no turn, step, or tool boundary) and consume zero
+  // model tokens.  Treat that exact shape as a transient model failure so the
+  // provider gate can back off and retry the same Host origin in a fresh child.
+  // Once any turn/tool lifecycle is visible, keep the stricter classifiers
+  // below: authorization and malformed-tool failures must never be hidden by
+  // a retry.
+  const modelTurnStarted = rawEvents.some((event) => [
+    "turn/start",
+    "step/start",
+    "agent/inbox/spliced",
+    "tool/call",
+    "tool/result",
+    "turn/end",
+  ].includes(event?.type));
+  if (!modelTurnStarted) return "retryable-model";
   const terminal = consumedTerminalEnd(rawEvents);
   const terminalData = eventData(terminal);
+  const terminalError = terminalData.reason?.error;
+  const retryFailures = rawEvents
+    .filter((event) => event?.type === "llm/retry")
+    .map((event) => eventData(event).failure)
+    .filter((failure) => failure && typeof failure === "object");
+  const isRateLimitFailure = (failure) => (
+    failure?.code === "RATE_LIMIT" || failure?.status === 429
+  );
+  if (
+    terminalData.reason?.kind === "error"
+    && (
+      isRateLimitFailure(terminalError)
+      || retryFailures.some(isRateLimitFailure)
+    )
+  ) {
+    // DSH rc.6 retries provider failures internally, but its sub-second retry
+    // delay does not honor pjlab's user-RPM retry_after window.  Extract only
+    // the bounded numeric cooldown from the trusted child event log; never
+    // surface or persist the provider message/request identity.
+    const structuredRetryAfterValues = [terminalError, ...retryFailures]
+      .flatMap((failure) => {
+        const value = failure?.providerRetryAfterMs;
+        return Number.isSafeInteger(value) && value > 0 && value <= 3_600_000
+          ? [value]
+          : [];
+      });
+    const messageRetryAfterValues = rawEvents.flatMap((event) => {
+      const data = eventData(event);
+      const message = event?.type === "llm/retry"
+        ? data.failure?.message
+        : event === terminal
+          ? terminalError?.message
+          : null;
+      if (typeof message !== "string") return [];
+      const match = message.match(/["']?retry_after["']?\s*[:=]\s*(\d{1,4})/i);
+      if (!match) return [];
+      const seconds = Number(match[1]);
+      return Number.isSafeInteger(seconds) && seconds > 0 && seconds <= 3_600
+        ? [seconds * 1_000]
+        : [];
+    });
+    const retryAfterValues = [
+      ...structuredRetryAfterValues,
+      ...messageRetryAfterValues,
+    ];
+    return {
+      kind: "retryable-provider",
+      retryAfterMs: retryAfterValues.length
+        ? Math.max(...retryAfterValues)
+        : null,
+    };
+  }
   if (terminalData.reason?.kind !== "completed") return "non-missing";
+  // A schema-tool rejection always invalidates the child attempt. DSH may let
+  // the model issue a second call and finish the turn, while SubagentRun has
+  // already published the first failure. Never accept that projection race as
+  // an exactly-once result; the Host retries one fresh bounded child instead.
+  if (exactInvalidStructuredArgsSeen(rawEvents)) return "missing";
   const turn = terminalData.turn;
   const events = rawEvents.map((event, index) => ({
     event,
@@ -528,6 +605,14 @@ function exactInvalidStructuredArgsSeen(rawEvents) {
   const events = rawEvents
     .map((event, index) => ({ event, seq: eventSequence(event, index) }))
     .sort((left, right) => left.seq - right.seq);
+  const structuredCallIds = events
+    .filter((item) => item.event?.type === "tool/call")
+    .filter((item) => eventData(item.event).name === "structured_output")
+    .map((item) => eventData(item.event).callId)
+    .filter((callId) => typeof callId === "string" && callId.length > 0);
+  // Reused call identities make source attribution ambiguous. Fail closed as
+  // a model-terminal contract error instead of authorizing a missing retry.
+  if (new Set(structuredCallIds).size !== structuredCallIds.length) return false;
   for (const call of events) {
     if (call.event?.type !== "tool/call") continue;
     const callData = eventData(call.event);
@@ -571,6 +656,48 @@ function waitForSessionProjection(milliseconds, signal) {
     }, milliseconds);
     signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+async function synchronizedStructuredCaptureDisposition(
+  ctx,
+  sessionId,
+  deadline,
+) {
+  let events = ctx?.sessions?.get?.(sessionId)?.events;
+  const initialDisposition = structuredCaptureDisposition(events);
+  // An allocated Session without a turn boundary is the exact zero-token
+  // provider-rejection shape. Retrying it immediately cannot race a tool call.
+  if (initialDisposition === "retryable-model") return initialDisposition;
+  if (Array.isArray(events) && consumedTerminalEnd(events)) {
+    return initialDisposition;
+  }
+  if (
+    !deadline
+    || typeof deadline.throwIfExpired !== "function"
+    || typeof deadline.remainingTimeoutMs !== "function"
+  ) {
+    return initialDisposition;
+  }
+  const graceMs = Math.min(
+    SESSION_PROJECTION_SYNC_GRACE_MS,
+    Math.max(1, deadline.remainingTimeoutMs()),
+  );
+  const expiresAt = Date.now() + graceMs;
+  while (true) {
+    deadline.throwIfExpired();
+    events = ctx?.sessions?.get?.(sessionId)?.events;
+    if (Array.isArray(events) && consumedTerminalEnd(events)) {
+      return structuredCaptureDisposition(events);
+    }
+    const remainingGraceMs = expiresAt - Date.now();
+    if (remainingGraceMs <= 0) {
+      return structuredCaptureDisposition(events);
+    }
+    await waitForSessionProjection(
+      Math.min(SESSION_PROJECTION_SYNC_POLL_MS, remainingGraceMs),
+      deadline.signal,
+    );
+  }
 }
 
 function verifiedSkillInvocationEvidence(events, options) {
@@ -870,11 +997,15 @@ export class NativeStageRunner {
             // Apply provider backpressure before the gate releases the failed
             // slot. Otherwise one burst can refill every slot before the
             // outer retry loop observes the rate-limit failure.
-            if (
-              retryableStructuredStageError(error, binding.stage)
-              || isTrustedStructuredPhase(error, "model_terminal")
-            ) {
-              this.providerStageGate.penalize(provider);
+            if (isTrustedStructuredPhase(error, "model")) {
+              const retryAfterMs = structuredRetryAfterMs(error);
+              this.providerStageGate.penalize(
+                provider,
+                retryAfterMs ?? undefined,
+                {
+                  reduceConcurrency: !isStructuredProviderRateLimit(error),
+                },
+              );
             }
             throw error;
           }
@@ -1110,8 +1241,10 @@ export class NativeStageRunner {
           ),
           deadline: lifecycle.deadline,
           signal,
-          classifyMissingCapture: ({ run }) => structuredCaptureDisposition(
-            this.ctx?.sessions?.get?.(String(run?.id || ""))?.events,
+          classifyMissingCapture: ({ run }, classificationDeadline) => synchronizedStructuredCaptureDisposition(
+            this.ctx,
+            String(run?.id || ""),
+            classificationDeadline,
           ),
         },
       );

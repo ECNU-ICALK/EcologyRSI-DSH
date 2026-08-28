@@ -19,7 +19,7 @@ from .sample_execution import (
 
 
 _DEFAULT_DSH_SAMPLE_OPERATION_MAX_TOKENS = {
-    "sample.planner": 2048,
+    "sample.planner": 4096,
     "sample.repair": 2048,
     "sample.critic": 2048,
 }

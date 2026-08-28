@@ -1700,8 +1700,19 @@
     var progressKind = stageProgress && stageProgress.progress_kind;
     var inFlightLabel = progressKind === "drained" ? "DSH 在飞已排空" : runStatus === "paused" ? "暂停快照 DSH 在飞" : "DSH 在飞";
     var inFlightText = Number.isInteger(inFlight) && inFlight >= 0 ? " · " + inFlightLabel + " " + formatNumber(inFlight) : "";
-    var queued = (showLiveProgressDetail || showDrainedProgressDetail || showPausedProgressDetail) && Number(stageProgress.provider_queued_requests != null ? stageProgress.provider_queued_requests : stageProgress.queued_batches);
-    var legacyAwaitingSubmission = stageProgress && stageProgress.queue_semantics === "awaiting_origin_submission";
+    var queueSemantics = stageProgress && stageProgress.queue_semantics;
+    var exactProviderQueue = queueSemantics === "provider_gate_snapshot";
+    var legacyAwaitingSubmission = queueSemantics === "awaiting_origin_submission";
+    // queued_batches is normally reconstructed from durable Host child
+    // events; it is not the private ProviderStageGate FIFO. Only label a value
+    // as Provider waiting when the API explicitly supplies that exact snapshot.
+    var queued = (showLiveProgressDetail || showDrainedProgressDetail || showPausedProgressDetail) && Number(
+      exactProviderQueue
+        ? stageProgress.provider_queued_requests
+        : legacyAwaitingSubmission
+          ? stageProgress.queued_batches
+          : NaN
+    );
     var queuedLabel = legacyAwaitingSubmission ? "当前阶段待提交" : progressKind === "drained" ? "暂停后 Provider 等待" : runStatus === "paused" ? "暂停快照 Provider 等待" : "Provider 等待";
     var queuedText = Number.isInteger(queued) && queued >= 0 ? " · " + queuedLabel + " " + formatNumber(queued) : "";
     var awaitingSubmission = (showLiveProgressDetail || showDrainedProgressDetail || showPausedProgressDetail) && Number(stageProgress.awaiting_submission_batches);

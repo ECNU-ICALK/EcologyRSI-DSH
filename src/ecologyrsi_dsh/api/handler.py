@@ -126,9 +126,11 @@ _DEFAULT_SAMPLE_OPERATION_MAX_TOKENS = {
 }
 _DSH_NATIVE_SAMPLE_OPERATION_MAX_TOKENS = {
     # A native sample child makes three short model turns (Skill, prediction
-    # tool, structured output). Bound every turn; the prior unbounded route
-    # produced rare 8k-11k output tails for a deterministic one-tool action.
-    "sample.planner": 2048,
+    # tool, structured output). Live 64-origin validation found that 2,048
+    # tokens still truncated about five percent of planners after the
+    # prediction tool had succeeded. 4,096 remains bounded while leaving room
+    # for the required terminal structured call.
+    "sample.planner": 4096,
     "sample.repair": 2048,
     "sample.critic": 2048,
 }

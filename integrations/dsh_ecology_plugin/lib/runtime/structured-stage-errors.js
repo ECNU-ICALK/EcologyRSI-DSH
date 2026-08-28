@@ -35,7 +35,7 @@ function persistencePublicDetail(cause) {
   return null;
 }
 
-export function structuredPhaseError(phase, cause = null) {
+export function structuredPhaseError(phase, cause = null, metadata = null) {
   const code = PHASE_CODES[phase];
   if (!code) throw new Error("unknown structured stage error phase");
   const error = new Error(code);
@@ -44,10 +44,21 @@ export function structuredPhaseError(phase, cause = null) {
     ? persistencePublicDetail(cause)
     : null;
   if (publicDetail !== null) error.publicDetail = publicDetail;
-  trustedStructuredErrors.set(error, { phase, cause });
+  trustedStructuredErrors.set(error, { phase, cause, metadata });
   return error;
 }
 
 export function isTrustedStructuredPhase(error, phase) {
   return trustedStructuredErrors.get(error)?.phase === phase;
+}
+
+export function structuredRetryAfterMs(error) {
+  const value = trustedStructuredErrors.get(error)?.metadata?.retryAfterMs;
+  return Number.isSafeInteger(value) && value > 0 && value <= 3_600_000
+    ? value
+    : null;
+}
+
+export function isStructuredProviderRateLimit(error) {
+  return trustedStructuredErrors.get(error)?.metadata?.providerRateLimit === true;
 }

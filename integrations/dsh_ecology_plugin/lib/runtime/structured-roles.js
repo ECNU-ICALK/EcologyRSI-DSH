@@ -178,7 +178,14 @@ export async function runStructuredRole(
     let captureDisposition = null;
     if (!validStructured && stopReason === "error" && hasCaptureClassifier) {
       try {
-        captureDisposition = classifyMissingCapture({ run, result });
+        const classificationDeadline = deadlineAt === null ? null : Object.freeze({
+          signal: pending.controller.signal,
+          throwIfExpired: requireBeforeDeadline,
+          remainingTimeoutMs,
+        });
+        captureDisposition = await withinDeadline(
+          () => classifyMissingCapture({ run, result }, classificationDeadline),
+        );
       } catch {
         captureDisposition = "non-missing";
       }
@@ -186,7 +193,19 @@ export async function runStructuredRole(
     requireBeforeDeadline();
     if (stopReason && stopReason !== "completed") {
       if (stopReason === "aborted") throw structuredPhaseError("aborted");
-      if (captureDisposition === "missing") throw structuredPhaseError("capture");
+      const captureKind = typeof captureDisposition === "object"
+        ? captureDisposition?.kind
+        : captureDisposition;
+      if (captureKind === "missing") throw structuredPhaseError("capture");
+      if (captureKind === "retryable-model") {
+        throw structuredPhaseError("model");
+      }
+      if (captureKind === "retryable-provider") {
+        throw structuredPhaseError("model", null, {
+          providerRateLimit: true,
+          retryAfterMs: captureDisposition?.retryAfterMs,
+        });
+      }
       if (stopReason === "error" && captureDisposition !== null) {
         throw structuredPhaseError("model_terminal");
       }

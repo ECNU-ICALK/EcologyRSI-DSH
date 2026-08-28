@@ -209,6 +209,46 @@ test("provider stage gate applies a bounded cooldown after a failed turn", async
   assert.deepEqual(waits, [30]);
 });
 
+test("a Retry-After extends an in-progress spacing wait without one early start", async () => {
+  let now = 1_000;
+  const waits = [];
+  let gate;
+  gate = new ProviderStageGate({
+    minimumIntervalMs: 10,
+    maxInFlight: 1,
+    now: () => now,
+    delay: async (milliseconds) => {
+      waits.push(milliseconds);
+      if (waits.length === 1) {
+        gate.penalize("pjlab", 100, { reduceConcurrency: false });
+      }
+      now += milliseconds;
+    },
+  });
+
+  await gate.run("pjlab", async () => {}, { runId: "run-first" });
+  let secondStartedAt = null;
+  await gate.run("pjlab", async () => { secondStartedAt = now; }, {
+    runId: "run-second",
+  });
+
+  assert.deepEqual(waits, [10, 90]);
+  assert.equal(secondStartedAt, 1_100);
+});
+
+test("an RPM cooldown does not rewrite the provider concurrency capacity", async () => {
+  const gate = new ProviderStageGate({
+    minimumIntervalMs: 0,
+    maxInFlight: 8,
+    adaptiveFloor: 2,
+  });
+
+  gate.penalize("pjlab", 30_000, { reduceConcurrency: false });
+
+  assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 8);
+  assert.ok(gate.snapshot("pjlab").cooldownRemainingMs > 0);
+});
+
 test("provider stage gate reduces burst concurrency once per cooldown and recovers slowly", async () => {
   let now = 1_000;
   const gate = new ProviderStageGate({

@@ -2,7 +2,7 @@
 
 一个把农业与生态预测研究中的“数据边界—模型调研—候选生成—科学评测—人工治理”串成可复现闭环的轻量 DSH 插件。
 
-> 当前交付：`0.3.51` 可交付候选版 · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
+> 当前交付：`0.3.52` 可交付候选版 · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
 
 ## 为什么做这个工作台
 
@@ -301,7 +301,7 @@ PYTHONPATH=src python -m ecologyrsi_dsh data fetch agc_tomato_2019
 
 ## DSH 原生 Agent 运行时
 
-0.3.51 新建运行使用 `dsh_native_plugin_evolution@1`：Agent Session、上下文压缩和
+0.3.52 新建运行使用 `dsh_native_plugin_evolution@1`：Agent Session、上下文压缩和
 一次性结构化 subagent 由 DSH 管理；逐 origin 的 `sample.plan` 使用直接子 Agent。
 Python 只提供科学工具与持久账本。安装后直接运行：
 
@@ -408,7 +408,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --samples-per-task 1 \
   --minimum-coverage 0.8 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.51-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.52-real-api-agent-tool-acceptance.json
 ```
 
 验收无论通过或失败都会原子写入 JSON 报告；省略 `--output` 时默认写到系统临时目录下的
@@ -610,7 +610,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --db /tmp/ecologyrsi-dsh-dsh-adapter.sqlite3 \
   --samples-per-task 1 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.51-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.52-real-api-agent-tool-acceptance.json
 ```
 
 构建 wheel、sdist 和完整交付包需要 `uv`：
@@ -640,6 +640,15 @@ PYTHONPATH=src python -m ecologyrsi_dsh summary run:demo --db /tmp/ecologyrsi-de
 - 单进程锁和 SQLite 适用于本地交付与研究验证，不是多租户、高并发生产架构。
 
 发布前的人工验收项与安全边界见 `RELEASE-CHECKLIST.md`。
+
+## 0.3.52 交付更新
+
+- 实测故障来自上游 RPM 窗口，而不是“并发 64”参数本身：每个 planner 通常需要 Skill、预测工具、结构化输出三次模型 turn。新版保留宿主并发默认 64、最高 128，同时默认每 3 秒启动一个新 child，避免在首个反馈前用完 RPM。这是启动速率保护，不是把并发上限改成 8。
+- 终态 `RATE_LIMIT`/HTTP 429 会优先采用 DSH 的 `providerRetryAfterMs`，并安全兼容消息中的 `retry_after`；新请求会等到冷却结束，且 RPM 限流不再被误当成物理并发不足而把 128 降到 4。
+- 结构化结果判定会最多等待 2 秒的完整 Session 终态。若第一次 `structured_output` 精确返回 `INVALID_ARGS`，即使旧 child 稍后又调用成功，也会按 exactly-once 合同开启一个干净的有界重试；授权拒绝、未知工具和重用 call ID 仍严格终止。
+- `sample.plan` 的原生输出上限由 2,048 提高到 4,096 Token，解决预测工具已成功但最终结构化输出被截断的少数样本。
+- 页面不再把宿主账本推算的 `queued_batches` 冒充为精确的“Provider 等待”；仍展示可核验的宿主并发、宿主等待和当前阶段待提交。
+- 0.3.51 的 64-origin Host admission、Top 2 双通道、500-origin 自适应 epoch、最终 revision 继承、耐久进度与页面分层监控保持不变。
 
 ## 0.3.51 交付更新
 

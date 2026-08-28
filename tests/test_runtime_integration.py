@@ -918,7 +918,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                 "sample_operation_max_tokens"
             ],
             {
-                "sample.planner": 2048,
+                "sample.planner": 4096,
                 "sample.repair": 2048,
                 "sample.critic": 2048,
             },

@@ -3150,7 +3150,10 @@ def _adaptive_progress_projection(
             )
     if "in_flight_batches" in live_fields:
         live_fields["in_flight_requests"] = live_fields["in_flight_batches"]
-    if "queued_batches" in live_fields:
+    if (
+        "queued_batches" in live_fields
+        and live_fields.get("queue_semantics") == "provider_gate_snapshot"
+    ):
         live_fields["provider_queued_requests"] = live_fields["queued_batches"]
     live_fields["samples_per_minute"] = rolling_rate
     live_fields["estimated_remaining_seconds"] = rolling_eta

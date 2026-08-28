@@ -1498,7 +1498,7 @@ assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("宿�
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("宿主等待 191"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("DSH 在飞 8"));
 assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("2 wave"), false);
-assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("Provider 等待 0"));
+assert.ok(!monitorNodes["#execution-sample-progress"].textContent.includes("Provider 等待"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("当前阶段待提交 247"));
 assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("排队 247"), false);
 assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("已结算 1"), false);
@@ -1703,9 +1703,10 @@ const pausedDrainingRun = {
   },
 };
 modelSandbox.renderExecutionMonitor(pausedDrainingRun);
-for (const text of ["暂停快照 DSH 在飞 3", "暂停快照 Provider 等待 2", "当前阶段待提交 40", "待结算 5"]) {
+for (const text of ["暂停快照 DSH 在飞 3", "当前阶段待提交 40", "待结算 5"]) {
   assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes(text), `missing paused drain detail: ${text}`);
 }
+assert.ok(!monitorNodes["#execution-sample-progress"].textContent.includes("暂停快照 Provider 等待"));
 assert.ok(monitorNodes["#execution-heartbeat"].textContent.includes("正在排空暂停前请求"));
 
 const legacyDrainedQueueRun = {
@@ -3188,7 +3189,7 @@ assert.match(html, /id="show-archived-runs"/);
 assert.match(html, /id="archive-button"/);
 assert.match(html, /id="delete-button"/);
 assert.equal(manifest.display_name, "生态模型进化工作台");
-assert.equal(manifest.version, "0.3.51");
+assert.equal(manifest.version, "0.3.52");
 assert.equal(manifest.entrypoint.file, "index.html");
 assert.equal(manifest.entrypoint.route, "/plugins/ecology/evolution/");
 assert.equal(manifest.development_only, false);

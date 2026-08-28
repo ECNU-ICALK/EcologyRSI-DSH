@@ -252,6 +252,10 @@ export class ProviderStageGate {
             this.records.delete(record);
             continue;
           }
+          // penalize() may have extended nextAllowedAt while this queue head
+          // was sleeping for the ordinary start interval. Re-enter the loop
+          // and recompute the absolute deadline before admitting anything.
+          continue;
         }
         if (record.controller.signal.aborted || this.closedRuns.has(record.runId)) {
           continue;
@@ -319,7 +323,11 @@ export class ProviderStageGate {
     }
   }
 
-  penalize(provider, milliseconds = this.failureCooldownMs) {
+  penalize(
+    provider,
+    milliseconds = this.failureCooldownMs,
+    { reduceConcurrency = true } = {},
+  ) {
     const key = String(provider || "default");
     const cooldown = boundedDelay(milliseconds, "provider failure cooldown");
     const now = this.now();
@@ -327,6 +335,10 @@ export class ProviderStageGate {
       key,
       Math.max(this.nextAllowedAt.get(key) || 0, now + cooldown),
     );
+    // An RPM limit is a start-rate signal, not evidence that the provider
+    // cannot sustain the current number of long-running children. Keep those
+    // controls independent so a Retry-After cannot silently turn 64 into 4.
+    if (!reduceConcurrency) return;
     const lastReduction = this.lastReductionAt.get(key);
     if (lastReduction == null || now - lastReduction >= cooldown) {
       const current = this.#effectiveLimit(key);

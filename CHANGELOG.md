@@ -2,6 +2,38 @@
 
 All notable changes to EcologyRSI-DSH are recorded in this file.
 
+## 0.3.52 - 2026-08-28
+
+### Provider-rate and capture recovery
+
+- Pace new structured children at a three-second default interval while
+  preserving the configured 64-origin Host admission and 128-origin physical
+  ceiling. A sample planner normally uses three model turns, so this prevents a
+  recovered run from exhausting a user-RPM window before the first feedback.
+- Detect terminal `RATE_LIMIT`/HTTP 429 failures, prefer DSH's bounded
+  `providerRetryAfterMs` signal, and use a redacted message value only as a
+  fallback. Retry the same Host origin after the absolute cooldown without
+  incorrectly reducing the provider concurrency capacity; re-check an
+  in-progress spacing wait when a later Retry-After extends it.
+- Detect the exact zero-turn DSH child shape produced when a provider rejects a
+  request after Session allocation but before any model/tool boundary, then
+  back off and retry it in a fresh bounded child.
+- Wait for a bounded final Session projection before classifying a missing
+  structured result. An exact `INVALID_ARGS` structured-output rejection is
+  retried in a fresh child even if DSH later projects another successful call;
+  reused call identities and authorization/unknown-tool failures remain
+  fail-closed. Local capture retries no longer penalize provider capacity.
+- Raise the native `sample.plan` output ceiling from 2,048 to 4,096 tokens after
+  live validation found rare truncations after a successful prediction tool.
+- Stop presenting Host-derived `queued_batches` as an exact Provider queue in
+  the browser. Provider waiting is shown only when an explicit gate snapshot is
+  available; Host concurrency, Host waiting, and awaiting submission remain.
+
+### Delivery
+
+- Align the Python package, browser plugin, Host plugin, lockfile, legal
+  metadata, documentation, and packed Host artifact at version 0.3.52.
+
 ## 0.3.51 - 2026-08-28
 
 ### Effective concurrency and durable execution

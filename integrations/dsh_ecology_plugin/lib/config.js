@@ -78,10 +78,12 @@ export function resolvePluginConfig(config = {}, { defaultStaticRoot, env = proc
     ),
     structuredStageMinIntervalMs: nonNegativeInteger(
       config.structuredStageMinIntervalMs,
-      // The run-level 64/128 setting remains the true in-flight ceiling. A
-      // short launch interval prevents a recovered run from sending the whole
-      // cohort in one burst before provider feedback can reduce the gate.
-      500,
+      // A sample planner normally consumes three provider turns (Skill,
+      // prediction tool, structured output).  Keep the run-level 64/128 value
+      // as the true in-flight ceiling while pacing new children to roughly the
+      // provider's user-RPM envelope.  This is a start-rate guard, not an
+      // eight-request concurrency cap.
+      3_000,
       "structuredStageMinIntervalMs",
     ),
     structuredStageMaxInFlight: boundedConcurrency(

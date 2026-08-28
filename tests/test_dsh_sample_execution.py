@@ -911,7 +911,7 @@ class DshSampleExecutionTests(unittest.TestCase):
         self.assertNotIn("ground_truth", encoded)
         self.assertEqual(
             [item["request"]["max_tokens"] for item in runtime.requests],
-            [2048, 2048],
+            [4096, 2048],
         )
         critic_sample = runtime.requests[1]["request"]["context"]["samples"][0]
         self.assertNotIn("sample", critic_sample)

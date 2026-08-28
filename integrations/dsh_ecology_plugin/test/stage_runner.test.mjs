@@ -71,6 +71,7 @@ function rc6ConsumedEvents(skillName, {
   prediction = false,
   structuredResult = null,
   terminalKind = "completed",
+  terminalError = { message: "provider failed", code: "UPSTREAM" },
 } = {}) {
   let seq = 1;
   const turn = 1;
@@ -131,7 +132,7 @@ function rc6ConsumedEvents(skillName, {
       data: {
         turn,
         reason: terminalKind === "error"
-          ? { kind: "error", error: { message: "provider failed", code: "UPSTREAM" } }
+          ? { kind: "error", error: terminalError }
           : { kind: terminalKind },
       },
     },
@@ -304,6 +305,7 @@ function directSampleHarness({
   const reservationRequests = [];
   const persisted = [];
   const failures = [];
+  const penalties = [];
   const sessions = new Map();
   const roleHost = {
     sessionId: `${stage}-parent`,
@@ -385,10 +387,20 @@ function directSampleHarness({
     structuredStageMaxAttempts: maxAttempts,
     providerStageGate: {
       run: async (_provider, operation) => operation(),
-      penalize: () => {},
+      penalize: (provider, milliseconds, options) => {
+        penalties.push({ provider, milliseconds, options });
+      },
     },
   });
-  return { runner, starts, reservations, reservationRequests, persisted, failures };
+  return {
+    runner,
+    starts,
+    reservations,
+    reservationRequests,
+    persisted,
+    failures,
+    penalties,
+  };
 }
 
 test("post-score sample reflection is a registered structured DSH stage", () => {
@@ -1098,7 +1110,7 @@ test("sample critic retries a consumed completed turn with no capture in a fresh
   assert.equal(reservations, 2);
   assert.equal(persisted, 1);
   assert.equal(failures, 1);
-  assert.equal(penalties, 1);
+  assert.equal(penalties, 0);
   for (const childRequest of childRequests) {
     assert.deepEqual(childRequest.outputSchema.properties.wave_digest, {
       type: "string",
@@ -1275,6 +1287,120 @@ test("an unconsumed completed no-op turn cannot hide the prior consumed provider
   assert.equal(harness.persisted.length, 0);
 });
 
+test("sample planner retries a zero-turn child after provider backpressure", async () => {
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  const harness = directSampleHarness({
+    stage: "sample.plan",
+    results: [
+      { stopReason: "error" },
+      { stopReason: "completed", structured },
+    ],
+    sessionEvents: (attempt) => attempt === 1
+      ? [{ type: "session", data: { id: "allocated-before-provider-rejection" } }]
+      : skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
+  });
+
+  const result = await harness.runner.run(
+    directSampleBinding("sample.plan", samplePlanContext()),
+  );
+
+  assert.deepEqual(result.structured, structured);
+  assert.equal(harness.starts.length, 2);
+  assert.equal(harness.reservations.length, 2);
+  assert.equal(harness.failures.length, 1);
+  assert.equal(harness.failures[0].error_code, "structured_child_model_error");
+  assert.deepEqual(harness.penalties, [{
+    provider: "pjlab",
+    milliseconds: undefined,
+    options: { reduceConcurrency: true },
+  }]);
+  assert.equal(harness.persisted.length, 1);
+});
+
+test("sample planner honors provider retry_after after a consumed RATE_LIMIT turn", async () => {
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  const harness = directSampleHarness({
+    stage: "sample.plan",
+    results: [
+      { stopReason: "error" },
+      { stopReason: "completed", structured },
+    ],
+    sessionEvents: (attempt) => attempt === 1
+      ? rc6ConsumedEvents("origin-vector-forecasting-balanced", {
+        prediction: true,
+        terminalKind: "error",
+        terminalError: {
+          code: "RATE_LIMIT",
+          message: "429 user_rpm_rate_limit_exceeded {\"retry_after\":17}",
+        },
+      })
+      : skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
+  });
+
+  const result = await harness.runner.run(
+    directSampleBinding("sample.plan", samplePlanContext()),
+  );
+
+  assert.deepEqual(result.structured, structured);
+  assert.equal(harness.starts.length, 2);
+  assert.equal(harness.reservations.length, 2);
+  assert.equal(harness.failures.length, 1);
+  assert.equal(harness.failures[0].error_code, "structured_child_model_error");
+  assert.deepEqual(harness.penalties, [{
+    provider: "pjlab",
+    milliseconds: 17_000,
+    options: { reduceConcurrency: false },
+  }]);
+  assert.equal(harness.persisted.length, 1);
+});
+
+test("sample planner prefers structured 429 Retry-After metadata", async () => {
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  const harness = directSampleHarness({
+    stage: "sample.plan",
+    results: [
+      { stopReason: "error" },
+      { stopReason: "completed", structured },
+    ],
+    sessionEvents: (attempt) => attempt === 1
+      ? rc6ConsumedEvents("origin-vector-forecasting-balanced", {
+        prediction: true,
+        terminalKind: "error",
+        terminalError: {
+          status: 429,
+          providerRetryAfterMs: 23_000,
+          message: "redacted provider failure",
+        },
+      })
+      : skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
+  });
+
+  const result = await harness.runner.run(
+    directSampleBinding("sample.plan", samplePlanContext()),
+  );
+
+  assert.deepEqual(result.structured, structured);
+  assert.deepEqual(harness.penalties, [{
+    provider: "pjlab",
+    milliseconds: 23_000,
+    options: { reduceConcurrency: false },
+  }]);
+  assert.equal(harness.failures.length, 1);
+  assert.equal(harness.persisted.length, 1);
+});
+
 test("completed child events cannot turn a public model_error into missing capture", async () => {
   const context = {
     schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
@@ -1329,6 +1455,7 @@ test("direct structured-output authorization, abort, and unknown-tool failures n
     assert.equal(harness.reservations.length, 1, error?.code || "authorization");
     assert.equal(harness.starts.length, 1, error?.code || "authorization");
     assert.equal(harness.persisted.length, 0, error?.code || "authorization");
+    assert.equal(harness.penalties.length, 0, error?.code || "authorization");
   }
 });
 
@@ -1621,6 +1748,10 @@ test("sample planner uses a bounded native one-shot child and retries one missin
       plannerPrompt.instruction,
       /call structured_output exactly once/i,
     );
+    assert.match(
+      plannerPrompt.instruction,
+      /rejected.*terminate.*do not retry/i,
+    );
   }
   assert.equal(
     jsonDigest(harness.starts[0].request.outputSchema),
@@ -1695,6 +1826,88 @@ test("completed sample result after INVALID_ARGS retries as missing capture", as
     directSampleBinding("sample.plan", samplePlanContext()),
   );
 
+  assert.deepEqual(result.structured, structured);
+  assert.equal(harness.starts.length, 2);
+  assert.equal(harness.failures.length, 1);
+  assert.equal(harness.failures[0].error_code, "structured_result_missing");
+  assert.equal(harness.persisted.length, 1);
+});
+
+test("error result waits for a late completed INVALID_ARGS projection before retry", async () => {
+  const skillName = "origin-vector-forecasting-balanced";
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  let terminalProjected = false;
+  const harness = directSampleHarness({
+    stage: "sample.plan",
+    results: [
+      { stopReason: "error" },
+      { stopReason: "completed", structured },
+    ],
+    sessionEvents: (attempt) => {
+      if (attempt !== 1) {
+        return skillFirstEvents(skillName, { prediction: true });
+      }
+      const events = rc6ConsumedEvents(skillName, {
+        prediction: true,
+        structuredResult: {
+          isError: true,
+          error: { name: "ToolArgsError", code: "INVALID_ARGS" },
+        },
+      });
+      const terminal = events.pop();
+      const firstStepEnd = events.pop();
+      setTimeout(() => {
+        let seq = firstStepEnd.seq;
+        events.push(
+          firstStepEnd,
+          { seq: ++seq, type: "step/start", data: { turn: 1, step: 1 } },
+          {
+            seq: ++seq,
+            type: "tool/call",
+            data: {
+              turn: 1,
+              step: 1,
+              callId: "structured-call-late",
+              name: "structured_output",
+              arguments: "{}",
+            },
+          },
+          {
+            seq: ++seq,
+            type: "tool/result",
+            data: {
+              turn: 1,
+              step: 1,
+              message: {
+                role: "tool",
+                content: [{
+                  type: "tool-result",
+                  toolCallId: "structured-call-late",
+                  isError: false,
+                  content: [],
+                }],
+              },
+            },
+            sourceEventSeqs: [seq - 1],
+          },
+          { seq: ++seq, type: "step/end", data: { turn: 1, step: 1 } },
+          { ...terminal, seq: ++seq },
+        );
+        terminalProjected = true;
+      }, 30);
+      return events;
+    },
+  });
+
+  const result = await harness.runner.run(
+    directSampleBinding("sample.plan", samplePlanContext()),
+  );
+
+  assert.equal(terminalProjected, true);
   assert.deepEqual(result.structured, structured);
   assert.equal(harness.starts.length, 2);
   assert.equal(harness.failures.length, 1);
