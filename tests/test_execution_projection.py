@@ -267,6 +267,148 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["gateway_request_count"], 1)
         self.assertEqual(progress["configured_concurrency"], 64)
 
+    def test_adaptive_progress_includes_live_formal_origin_receipts(self) -> None:
+        schedule = {
+            "screening_origin_count": 64,
+            "formal_origin_count_per_finalist": 500,
+            "selection_holdout_origin_count": 169,
+            "local_batch_origin_count": 50,
+        }
+        members = [f"{index:064x}" for index in range(1, 10)]
+        events = (
+            SimpleNamespace(
+                seq=10,
+                kind="FormalBatchStarted",
+                payload={"batch": {
+                    "generation": 0,
+                    "candidate_id": "candidate:formal",
+                    "batch_index": 1,
+                    "batch_count": 10,
+                    "origin_count": 50,
+                    "cohort_digest": "a" * 64,
+                }},
+                created_at="2026-08-28T00:00:00+00:00",
+            ),
+            SimpleNamespace(
+                seq=11,
+                kind="DshChildLaunchReserved",
+                payload={"launch": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:formal-origin-a",
+                    "reservation_id": "reservation-formal-a",
+                    "sample_member_digests": members,
+                }},
+                created_at="2026-08-28T00:00:01+00:00",
+            ),
+            SimpleNamespace(
+                seq=12,
+                kind="DshPredictionToolExecuted",
+                payload={
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:formal-origin-a",
+                    "prediction_count": 9,
+                },
+                created_at="2026-08-28T00:00:02+00:00",
+            ),
+        )
+        screening_events = tuple(
+            SimpleNamespace(payload={"generation": 0, "origin_count": 64})
+            for _ in range(4)
+        )
+        prior_formal = SimpleNamespace(
+            scope=SimpleNamespace(
+                generation=0,
+                candidate_id="candidate:formal",
+                batch_index=0,
+                cohort_digest="b" * 64,
+                origin_count=50,
+            )
+        )
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(metadata={
+                "optimization_protocol": "top2_adaptive_epoch@1",
+                "optimization_schedule": schedule,
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                "two_stage_evaluation_enabled": True,
+                "sample_reflection_policy": "candidate_aggregate_post_score@1",
+                "sample_concurrency": 64,
+                "prediction_cells_per_origin": 9,
+            }),
+            run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
+            candidate_screening_events=screening_events,
+            formal_batch_evaluations=(prior_formal,),
+            holdout_evaluations=(),
+            formal_batches=(SimpleNamespace(
+                generation=0,
+                candidate_id="candidate:formal",
+                batch_index=1,
+            ),),
+            candidates=(),
+            events=events,
+        )
+
+        progress = _adaptive_progress_projection(state)
+
+        self.assertEqual(progress["evaluation_phase"], "formal_batch")
+        self.assertEqual(progress["completed_origins"], 307)
+        self.assertEqual(progress["succeeded_samples"], 307)
+        self.assertEqual(progress["failed_samples"], 0)
+        self.assertEqual(progress["in_flight_batches"], 1)
+        self.assertEqual(progress["awaiting_submission_batches"], 49)
+        self.assertEqual(progress["awaiting_settlement_batches"], 1)
+        self.assertEqual(progress["gateway_request_count"], 1)
+        self.assertEqual(progress["updated_at"], events[-1].created_at)
+
+    def test_dsh_activity_uses_unresolved_formal_child_without_stage_event(self) -> None:
+        launch = SimpleNamespace(
+            seq=20,
+            kind="DshChildLaunchReserved",
+            payload={"launch": {
+                "stage": "candidate.local_edit",
+                "role": "candidate-proposer",
+                "launch_attempt": 1,
+                "reservation_id": "reservation-local-edit",
+            }},
+            created_at="2026-08-28T00:00:00+00:00",
+        )
+
+        activity = _dsh_activity_projection(
+            SimpleNamespace(events=(launch,)),
+            current_stage="evaluation",
+            run_status="running",
+        )
+
+        self.assertEqual(activity["state"], "model_running")
+        self.assertEqual(activity["dsh_stage"], "candidate.local_edit")
+        self.assertEqual(activity["role"], "candidate-proposer")
+
+    def test_dsh_activity_ignores_unresolved_child_before_resume_boundary(self) -> None:
+        launch = SimpleNamespace(
+            seq=20,
+            kind="DshChildLaunchReserved",
+            payload={"launch": {
+                "stage": "sample.plan",
+                "role": "sample-planner",
+                "launch_attempt": 1,
+                "reservation_id": "reservation-before-pause",
+            }},
+            created_at="2026-08-28T00:00:00+00:00",
+        )
+        resumed = SimpleNamespace(
+            seq=21,
+            kind="RunResumed",
+            payload={},
+            created_at="2026-08-28T00:01:00+00:00",
+        )
+
+        activity = _dsh_activity_projection(
+            SimpleNamespace(events=(launch, resumed)),
+            current_stage="evaluation",
+            run_status="running",
+        )
+
+        self.assertIsNone(activity)
+
     def test_native_retry_wait_clears_on_its_structured_success_contract(self) -> None:
         retry = SimpleNamespace(
             seq=10,
@@ -1197,6 +1339,54 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         self.assertEqual(state.events[-1].kind, "DshStructuredResultAccepted")
         self.assertEqual(state.events[-1].payload["identity"]["stage"], "sample.reflect")
+
+    def test_candidate_local_edit_structured_result_replays(self) -> None:
+        with EventLedger() as ledger:
+            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            run_id = director.start_evolution(
+                _task(), run_id="run:projection-candidate-local-edit"
+            ).run.run_id
+            structured = {
+                "schema_version": "ecology-local-edit@1",
+                "decision": "mutate",
+                "operations": [
+                    {
+                        "op": "select_registered_pipeline",
+                        "predictor_id": "greenhouse-horizon-targetwise-ridge@1",
+                    }
+                ],
+                "evidence_refs": ["batch:score", "batch:metrics"],
+                "expected_effect_cells": ["air_temperature@6h"],
+                "risk_cells": ["relative_humidity@6h"],
+            }
+            ledger.append(
+                run_id,
+                "DshStructuredResultAccepted",
+                {
+                    "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
+                    "identity": {
+                        "run_id": run_id,
+                        "role": "candidate-proposer",
+                        "stage": "candidate.local_edit",
+                        "session_id": "dsh-child-local-editor-1",
+                    },
+                    "output_schema_id": "ecology-local-edit@1",
+                    "result_digest": digest(structured),
+                    "structured": structured,
+                    "skill_invocation_evidence": _skill_evidence(
+                        "candidate.local_edit",
+                        "bounded-plugin-experiment",
+                    ),
+                },
+            )
+
+            state = director.state(run_id)
+
+        self.assertEqual(state.events[-1].kind, "DshStructuredResultAccepted")
+        self.assertEqual(
+            state.events[-1].payload["identity"]["stage"],
+            "candidate.local_edit",
+        )
 
     def test_candidate_review_skill_evidence_replays(self) -> None:
         with EventLedger() as ledger:

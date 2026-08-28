@@ -83,6 +83,7 @@ _DSH_STAGE_SKILLS: dict[str, frozenset[str]] = {
     "generation.research-synthesis": frozenset({"autonomous-ecology-research"}),
     "generation.reflect": frozenset({"batch-scientific-reflection"}),
     "candidate.propose": frozenset({"bounded-plugin-experiment"}),
+    "candidate.local_edit": frozenset({"bounded-plugin-experiment"}),
     # Replay must remain compatible with results accepted before the judge and
     # batch-reflection stages were split.  The write-side DSH tool contract
     # still accepts only candidate-scientific-review for new judge results.
@@ -2699,6 +2700,10 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 "candidate.propose": (
                     "candidate-proposer",
                     "ecology-genome-mutation@1",
+                ),
+                "candidate.local_edit": (
+                    "candidate-proposer",
+                    "ecology-local-edit@1",
                 ),
                 "generation.judge": (
                     "generation-judge",

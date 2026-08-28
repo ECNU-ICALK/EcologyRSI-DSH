@@ -1581,6 +1581,8 @@ def _dsh_evolution_stage(stage: str | None) -> str | None:
         return "research"
     if value == "candidate.propose":
         return "proposal"
+    if value == "candidate.local_edit":
+        return "evaluation"
     if value.startswith("sample."):
         return "evaluation"
     if value == "generation.judge":
@@ -1986,19 +1988,45 @@ def _dsh_activity_projection(
         ),
         None,
     )
-    if stage_started is None:
-        return None
     stage_seq = int(getattr(stage_started, "seq", 0) or 0)
+    control_seq = max(
+        (
+            int(event.seq)
+            for event in state.events
+            if event.kind in {"RunPaused", "RunResumed", "RunCancelled"}
+        ),
+        default=0,
+    )
+    activity_floor_seq = max(stage_seq, control_seq)
     launches: list[tuple[Any, Mapping[str, Any]]] = []
     for event in state.events:
-        if event.kind != "DshChildLaunchReserved" or int(event.seq) < stage_seq:
+        if (
+            event.kind != "DshChildLaunchReserved"
+            or int(event.seq) < activity_floor_seq
+        ):
             continue
         launch = event.payload.get("launch")
         if not isinstance(launch, Mapping):
             continue
         if _dsh_evolution_stage(launch.get("stage")) == current_stage:
             launches.append((event, launch))
+    terminal_reservations = {
+        str(identity.get("child_reservation_id") or "").strip()
+        for event in state.events
+        if event.kind in {"DshStructuredResultAccepted", "DshChildExecutionFailed"}
+        and isinstance((identity := event.payload.get("identity")), Mapping)
+        and str(identity.get("child_reservation_id") or "").strip()
+    }
+    unresolved_launches = [
+        (event, launch)
+        for event, launch in launches
+        if str(launch.get("reservation_id") or "").strip()
+        not in terminal_reservations
+    ]
+    if stage_started is None and not unresolved_launches:
+        return None
     if not launches:
+        assert stage_started is not None
         return {
             "schema_version": "ecologyrsi-dsh.dsh-activity/1",
             "state": "waiting_for_model_slot",
@@ -2012,7 +2040,9 @@ def _dsh_activity_projection(
             "evidence": "append_only_stage_event",
         }
 
-    launch_event, launch = launches[-1]
+    launch_event, launch = (
+        unresolved_launches[-1] if unresolved_launches else launches[-1]
+    )
     reservation_id = launch.get("reservation_id")
     accepted_event = next(
         (
@@ -2050,6 +2080,169 @@ def _dsh_activity_projection(
         "updated_at": updated_at,
         "event_seq": event_seq,
         "evidence": "append_only_dsh_child_events",
+    }
+
+
+def _formal_batch_live_projection(state: Any) -> dict[str, Any] | None:
+    """Project the active formal batch from durable DSH origin events.
+
+    Formal trajectory batches do not emit the legacy per-candidate progress
+    heartbeat.  Without this projection the browser shows a real, busy DSH
+    batch as queued with zero successes until the whole 50-origin evaluation
+    is atomically recorded.
+    """
+
+    status = getattr(getattr(state.run, "status", None), "value", None)
+    if status not in {None, "running"}:
+        return None
+    events = tuple(getattr(state, "events", ()))
+    if not events:
+        return None
+    generation = int(state.run.generation)
+    started = next(
+        (
+            event
+            for event in reversed(events)
+            if event.kind == "FormalBatchStarted"
+            and isinstance(event.payload.get("batch"), Mapping)
+            and int(event.payload["batch"].get("generation", -1)) == generation
+        ),
+        None,
+    )
+    if started is None:
+        return None
+    batch = started.payload["batch"]
+    candidate_id = str(batch.get("candidate_id") or "")
+    batch_index = int(batch.get("batch_index", -1))
+    cohort_digest = str(batch.get("cohort_digest") or "")
+    if any(
+        item.scope.generation == generation
+        and item.scope.candidate_id == candidate_id
+        and item.scope.batch_index == batch_index
+        and item.scope.cohort_digest == cohort_digest
+        for item in state.formal_batch_evaluations
+    ):
+        return None
+    origin_total = max(1, int(batch.get("origin_count") or 0))
+    metadata = state.task_manifest.metadata
+    cells_per_origin = int(metadata.get("prediction_cells_per_origin") or 1)
+    configured_concurrency = metadata.get(
+        "sample_concurrency",
+        HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
+    )
+    if (
+        isinstance(configured_concurrency, bool)
+        or not isinstance(configured_concurrency, int)
+        or not 1 <= configured_concurrency <= MAX_SAMPLE_CONCURRENCY
+    ):
+        configured_concurrency = HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK
+
+    launch_by_key: dict[str, tuple[Any, Mapping[str, Any]]] = {}
+    launch_by_reservation: dict[str, tuple[Any, Mapping[str, Any]]] = {}
+    latest_launch_by_key: dict[str, tuple[Any, Mapping[str, Any]]] = {}
+    accepted_reservations: set[str] = set()
+    failed_reservations: set[str] = set()
+    completed_keys: set[str] = set()
+    sample_events: list[Any] = []
+    launch_count = 0
+    for event in events:
+        if int(event.seq) <= int(started.seq):
+            continue
+        if event.kind in {"RunPaused", "RunResumed"}:
+            latest_launch_by_key.clear()
+            continue
+        if event.kind == "DshChildLaunchReserved":
+            launch = event.payload.get("launch")
+            if not isinstance(launch, Mapping) or launch.get("stage") != "sample.plan":
+                continue
+            key = str(launch.get("idempotency_key") or "").strip()
+            if not key:
+                continue
+            launch_count += 1
+            launch_by_key[key] = (event, launch)
+            latest_launch_by_key[key] = (event, launch)
+            reservation = str(launch.get("reservation_id") or "").strip()
+            if reservation:
+                launch_by_reservation[reservation] = (event, launch)
+            sample_events.append(event)
+        elif event.kind == "DshPredictionToolExecuted":
+            if event.payload.get("stage") != "sample.plan":
+                continue
+            key = str(event.payload.get("idempotency_key") or "").strip()
+            if key:
+                completed_keys.add(key)
+            sample_events.append(event)
+        elif event.kind == "DshStructuredResultAccepted":
+            identity = event.payload.get("identity")
+            if not isinstance(identity, Mapping) or identity.get("stage") != "sample.plan":
+                continue
+            key = str(identity.get("idempotency_key") or "").strip()
+            if key:
+                completed_keys.add(key)
+            reservation = str(identity.get("child_reservation_id") or "").strip()
+            if reservation:
+                accepted_reservations.add(reservation)
+            sample_events.append(event)
+        elif event.kind == "DshChildExecutionFailed":
+            identity = event.payload.get("identity")
+            if not isinstance(identity, Mapping) or identity.get("stage") != "sample.plan":
+                continue
+            reservation = str(identity.get("child_reservation_id") or "").strip()
+            if reservation:
+                failed_reservations.add(reservation)
+            sample_events.append(event)
+    if not sample_events:
+        return None
+
+    source_origins = {
+        members
+        for _, launch in launch_by_key.values()
+        if (members := _sample_member_digest_set(launch.get("sample_member_digests")))
+        is not None
+        and len(members) == cells_per_origin
+    }
+    completed_origins: set[frozenset[str]] = set()
+    for key in completed_keys:
+        correlated = launch_by_key.get(key)
+        if correlated is None:
+            continue
+        members = _sample_member_digest_set(
+            correlated[1].get("sample_member_digests")
+        )
+        if members is not None and len(members) == cells_per_origin:
+            completed_origins.add(members)
+
+    active_origins: set[frozenset[str]] = set()
+    for _, launch in latest_launch_by_key.values():
+        reservation = str(launch.get("reservation_id") or "").strip()
+        if reservation in accepted_reservations or reservation in failed_reservations:
+            continue
+        members = _sample_member_digest_set(launch.get("sample_member_digests"))
+        if members is None:
+            continue
+        source = next(
+            (origin for origin in source_origins if members <= origin),
+            members,
+        )
+        active_origins.add(source)
+
+    remotely_completed = min(origin_total, len(completed_origins))
+    in_flight = min(len(active_origins), configured_concurrency)
+    queued = max(0, len(active_origins) - in_flight)
+    submitted = min(origin_total, len(source_origins))
+    latest = max(sample_events, key=lambda event: int(event.seq))
+    return {
+        "completed_origins": remotely_completed,
+        "progress_kind": "settling" if remotely_completed else "waiting",
+        "in_flight_batches": in_flight,
+        "queued_batches": queued,
+        "awaiting_submission_batches": max(0, origin_total - submitted),
+        "awaiting_settlement_batches": remotely_completed,
+        "gateway_request_count": launch_count,
+        "configured_concurrency": configured_concurrency,
+        "queue_semantics": "provider_admission_only",
+        "updated_at": latest.created_at,
+        "event_seq": latest.seq,
     }
 
 
@@ -2182,6 +2375,20 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
                 "estimated_remaining_seconds": None,
             }
         )
+    elif phase == "formal_batch":
+        live_formal = _formal_batch_live_projection(state)
+        if live_formal is not None:
+            remote_completed = int(live_formal.pop("completed_origins"))
+            completed = min(total, completed + remote_completed)
+            live_fields.update(live_formal)
+            live_fields.update(
+                {
+                    "succeeded_samples": completed,
+                    "failed_samples": 0,
+                    "samples_per_minute": None,
+                    "estimated_remaining_seconds": None,
+                }
+            )
     return {
         "schema_version": "ecologyrsi-dsh.adaptive-progress/1",
         "evaluation_phase": phase,

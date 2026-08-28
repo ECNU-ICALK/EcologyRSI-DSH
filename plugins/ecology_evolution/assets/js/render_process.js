@@ -688,7 +688,7 @@
     var runStatus = String(run.status || "").toLowerCase();
     var paused = runStatus === "paused";
     var stageProgress = run.execution_progress && run.execution_progress.stage_progress;
-    if (executionRunAllowsLiveStatus(run) && stageProgress && stageProgress.evaluation_phase === "screening") {
+    if (executionRunAllowsLiveStatus(run) && stageProgress && ["screening", "formal_batch", "holdout"].indexOf(stageProgress.evaluation_phase) >= 0) {
       statuses[2] = "running";
       active = 2;
     }

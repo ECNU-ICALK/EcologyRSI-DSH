@@ -12,6 +12,7 @@ from ecologyrsi_dsh.evolution.local_edits import (
     LocalEditContext,
     LocalEditProposal,
     apply_local_edit_bundle,
+    apply_or_reject_local_edit_bundle,
     validate_local_edit_proposal,
 )
 from ecologyrsi_dsh.knowledge.program_registry import current_program_registry
@@ -192,6 +193,56 @@ class LocalEditTests(unittest.TestCase):
                 parent, proposal, _context(parent), current_program_registry()
             )
         self.assertEqual(parent.to_dict(), before)
+
+    def test_invalid_model_authored_bundle_is_rejected_without_changing_parent(self) -> None:
+        parent = _parent()
+        before = parent.to_dict()
+        proposal = LocalEditProposal(
+            decision="mutate",
+            operations=(
+                {
+                    "op": "set_bounded_parameter",
+                    "name": "air_temperature_6h_residual_scale",
+                    "value": 0,
+                },
+            ),
+            evidence_refs=("metric:overall",),
+            expected_effect_cells=("air_temperature@1h",),
+            risk_cells=(),
+        )
+
+        result = apply_or_reject_local_edit_bundle(
+            parent, proposal, _context(parent), current_program_registry()
+        )
+
+        self.assertIs(result.outcome, LocalEditOutcome.REJECTED)
+        self.assertIsNone(result.child)
+        self.assertEqual(result.operations, proposal.operations)
+        self.assertEqual(parent.to_dict(), before)
+
+    def test_parent_identity_mismatch_is_never_downgraded_to_rejection(self) -> None:
+        parent = _parent()
+        context = _context(parent)
+        mismatched = LocalEditContext(
+            **{
+                **context.to_dict(),
+                "parent_genome_digest": "f" * 64,
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "parent genome digest mismatch"):
+            apply_or_reject_local_edit_bundle(
+                parent,
+                LocalEditProposal(
+                    decision="keep",
+                    operations=(),
+                    evidence_refs=(),
+                    expected_effect_cells=(),
+                    risk_cells=(),
+                ),
+                mismatched,
+                current_program_registry(),
+            )
 
     def test_outer_candidate_contract_remains_one_operation(self) -> None:
         source = (

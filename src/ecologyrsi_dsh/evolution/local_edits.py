@@ -314,6 +314,46 @@ def apply_local_edit_bundle(
     )
 
 
+def apply_or_reject_local_edit_bundle(
+    parent: EcologyEvolutionPluginGenome,
+    proposal: LocalEditProposal | Mapping[str, Any],
+    context: LocalEditContext,
+    registry: Any,
+) -> LocalEditResult:
+    """Apply one model-authored edit, or reject invalid bounded content.
+
+    A local editor is advisory: an unknown target or out-of-range value must
+    keep the active revision and advance the trajectory as ``rejected``.  It
+    must not fail the whole evolution run.  A parent identity mismatch remains
+    a Host invariant violation and is deliberately not downgraded.
+    """
+
+    if context.parent_genome_digest != parent.genome_digest:
+        raise ValueError("local edit parent genome digest mismatch")
+    try:
+        return apply_local_edit_bundle(parent, proposal, context, registry)
+    except (TypeError, ValueError):
+        proposal_data = (
+            proposal.to_dict()
+            if isinstance(proposal, LocalEditProposal)
+            else dict(proposal)
+        )
+        raw_operations = proposal_data.get("operations")
+        operations = (
+            tuple(dict(item) for item in raw_operations)
+            if isinstance(raw_operations, Sequence)
+            and not isinstance(raw_operations, (str, bytes))
+            and all(isinstance(item, Mapping) for item in raw_operations)
+            else ()
+        )
+        return LocalEditResult(
+            outcome=LocalEditOutcome.REJECTED,
+            operations=operations,
+            child=None,
+            proposal_digest=digest(proposal_data),
+        )
+
+
 __all__ = [
     "LOCAL_EDIT_MAXIMUM_OPERATIONS",
     "LOCAL_EDIT_SCHEMA_VERSION",
@@ -321,5 +361,6 @@ __all__ = [
     "LocalEditProposal",
     "LocalEditResult",
     "apply_local_edit_bundle",
+    "apply_or_reject_local_edit_bundle",
     "validate_local_edit_proposal",
 ]

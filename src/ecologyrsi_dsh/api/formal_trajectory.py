@@ -20,7 +20,7 @@ from ..evolution.genome import EcologyEvolutionPluginGenome, deep_thaw_json
 from ..evolution.local_edits import (
     LocalEditContext,
     LocalEditProposal,
-    apply_local_edit_bundle,
+    apply_or_reject_local_edit_bundle,
 )
 from ..evolution.strategies import (
     _genome_parameter_boundary,
@@ -381,7 +381,7 @@ def execute_next_local_edit(endpoint: Any, run_id: str, candidate_id: str) -> bo
             expected_effect_cells=(),
             risk_cells=(),
         )
-    validated = apply_local_edit_bundle(
+    validated = apply_or_reject_local_edit_bundle(
         EcologyEvolutionPluginGenome.from_dict(dict(revision.genome)),
         proposal,
         context,
@@ -407,6 +407,8 @@ def execute_next_local_edit(endpoint: Any, run_id: str, candidate_id: str) -> bo
         _director_mutation(endpoint, "create_candidate_revision", run_id, child_revision)
         active_revision_id = child_revision.revision_id
         advance_reason = RevisionAdvanceReason.LOCAL_EDIT_APPLIED
+    elif validated.outcome is LocalEditOutcome.REJECTED:
+        advance_reason = RevisionAdvanceReason.LOCAL_EDIT_REJECTED
     if recorded is None:
         _director_mutation(
             endpoint,

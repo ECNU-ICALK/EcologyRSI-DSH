@@ -1368,6 +1368,19 @@ assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("待�
 assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("排队 253"), false);
 modelSandbox.renderAutonomyProgress(screeningRun);
 assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "模型执行中");
+const formalLiveRun = {
+  ...screeningRun,
+  id: "run:formal-live",
+  execution_progress: {
+    ...screeningRun.execution_progress,
+    stage_progress: {
+      ...screeningRun.execution_progress.stage_progress,
+      evaluation_phase: "formal_batch",
+    },
+  },
+};
+modelSandbox.renderAutonomyProgress(formalLiveRun);
+assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "模型执行中");
 
 const settlingRun = {
   ...screeningRun,
@@ -2758,7 +2771,7 @@ assert.match(html, /id="show-archived-runs"/);
 assert.match(html, /id="archive-button"/);
 assert.match(html, /id="delete-button"/);
 assert.equal(manifest.display_name, "生态模型进化工作台");
-assert.equal(manifest.version, "0.3.42");
+assert.equal(manifest.version, "0.3.45");
 assert.equal(manifest.entrypoint.file, "index.html");
 assert.equal(manifest.entrypoint.route, "/plugins/ecology/evolution/");
 assert.equal(manifest.development_only, false);
