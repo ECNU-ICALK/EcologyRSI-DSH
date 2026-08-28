@@ -2,7 +2,7 @@
 
 一个把农业与生态预测研究中的“数据边界—模型调研—候选生成—科学评测—人工治理”串成可复现闭环的轻量 DSH 插件。
 
-> 当前交付：`0.3.52` 可交付候选版 · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
+> 当前交付：`0.3.54` 可交付候选版 · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
 
 ## 为什么做这个工作台
 
@@ -35,7 +35,7 @@ EcologyRSI-DSH 把模型放在“研究助理”的位置，把数据、评测�
 
 一个 prediction origin 是一个预测起点，不是一个“目标 × 时距”评分单元。默认温室任务的一次 origin 会同时产生温度、相对湿度和 CO₂ 在 1、6、24 小时的 9 个结果。500 因而表示每个入围候选的 500 次完整预测，而不是 500 个单独评分值。数据起点不足时，系统按可复现 occurrence 循环复用已用数据；每次使用仍记录窗口身份，不会把跨 cohort 原始分数直接比较。
 
-默认候选并发为 4，逐样本并发为 64（可配置 1–128），网关 origin wave 上限为 64；两条 finalist lane 可同时推进 50-origin batch，但始终共享同一个 run 级在飞预算。同一 provider 另有 128 个物理在飞请求的全局 FIFO 上限，并在观测到模型/拥塞失败后自适应降载。
+默认候选并发为 4，逐样本并发为 64（可配置 1–128）；这表示同一 run 最多准入 64 条完整的预测时点链，不是把 64 个 origins 合并成一次模型请求。每个时点的 3 目标 × 3 时距固定作为 9 个向量单元原子提交。两条 finalist lane 可同时推进 50-origin batch，但始终共享 run 级准入预算；Provider 再通过独立的平滑启动门限避免 RPM 突发。
 
 ## 界面概览
 
@@ -49,7 +49,7 @@ EcologyRSI-DSH 把模型放在“研究助理”的位置，把数据、评测�
 
 ![参数设计：统一设置代数、候选、样本批次、并发和总预算](docs/screenshots/02-parameter-design.jpg)
 
-参数设计页统一配置轮数、候选总预算、每个入围候选的 epoch 时点数、局部 batch、每批最大局部改动数、轮末 holdout、候选并发和逐样本并发。右侧按 candidate-origins 和评分单元同时计算单轮/全程预算，避免把一次包含 9 个结果的完整预测误算成 9 次模型请求。DSH-native 不设置跨调用的逐样本 Token 总预算；每次 sample 子模型调用单独限制最多输出 2,048 tokens，上下文压力和累计用量仍由 DSH Session 投影记录。
+参数设计页统一配置轮数、候选总预算、每个入围候选的 epoch 时点数、局部 batch、每批最大局部改动数、轮末 holdout、候选并发和逐样本并发；单时点向量容量按当前任务固定为 9。右侧按 candidate-origins 和评分单元同时计算单轮/全程预算，避免把一次包含 9 个结果的完整预测误算成 9 次模型请求。DSH-native 不设置跨调用的逐样本 Token 总预算；Planner/Repair 每次最多输出 4,096 tokens，Critic 每次最多 2,048 tokens，上下文压力和累计用量仍由 DSH Session 投影记录。
 
 ![训练数据：数据结构、分区边界与样本预览](docs/screenshots/03-training-data.jpg)
 
@@ -57,7 +57,7 @@ EcologyRSI-DSH 把模型放在“研究助理”的位置，把数据、评测�
 
 ![进化过程：同轮候选、当前最佳方案（incumbent）轨迹与阶段证据](docs/screenshots/04-evolution-process.jpg)
 
-进化过程页按“检索 → 能力编译 → 训练 → 科学评测 → 独立评审 → 轮末决策”展示每轮证据，并分开展示全程进度、当前阶段进度、Host admission、DSH 在飞、Provider 等待、待提交和最近心跳。提前终止的计划 origins 会明确标为跳过，不会继续伪装成排队。Top 2 进入正式 epoch 后，页面逐 batch 展示 revision 迁移、局部修改和诊断结果；蓝色点是同轮候选，绿色线只连接实际保留的 incumbent。
+进化过程页按“检索 → 能力编译 → 训练 → 科学评测 → 独立评审 → 轮末决策”展示每轮证据，并分开展示全程进度、当前阶段进度、Host 准入/等待、DSH 未终结子任务、待提交和最近心跳。页面只在服务端提供精确 gate 快照时才显示 Provider 等待，不用 Host 推算值冒充。提前终止的计划 origins 会明确标为跳过，不会继续伪装成排队。Top 2 进入正式 epoch 后，页面逐 batch 展示 revision 迁移、局部修改和诊断结果；蓝色点是同轮候选，绿色线只连接实际保留的 incumbent。
 
 ![候选评测：指标、约束、产物与搜索保留结论](docs/screenshots/05-candidate-evaluation.jpg)
 
@@ -301,7 +301,7 @@ PYTHONPATH=src python -m ecologyrsi_dsh data fetch agc_tomato_2019
 
 ## DSH 原生 Agent 运行时
 
-0.3.52 新建运行使用 `dsh_native_plugin_evolution@1`：Agent Session、上下文压缩和
+0.3.54 新建运行使用 `dsh_native_plugin_evolution@1`：Agent Session、上下文压缩和
 一次性结构化 subagent 由 DSH 管理；逐 origin 的 `sample.plan` 使用直接子 Agent。
 Python 只提供科学工具与持久账本。安装后直接运行：
 
@@ -408,7 +408,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --samples-per-task 1 \
   --minimum-coverage 0.8 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.52-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.54-real-api-agent-tool-acceptance.json
 ```
 
 验收无论通过或失败都会原子写入 JSON 报告；省略 `--output` 时默认写到系统临时目录下的
@@ -526,7 +526,7 @@ sidecar 主前缀是 `/api`；浏览器通过 DSH 同源代理使用 `/api/ecolo
   "review_model_id": "newapi-glm52-judge",
   "rounds": 5,
   "candidate_concurrency": 4,
-  "sample_agent_batch_size": 64,
+  "sample_agent_batch_size": 9,
   "sample_concurrency": 64,
   "budget": {
     "max_generations": 5,
@@ -610,7 +610,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --db /tmp/ecologyrsi-dsh-dsh-adapter.sqlite3 \
   --samples-per-task 1 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.52-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.54-real-api-agent-tool-acceptance.json
 ```
 
 构建 wheel、sdist 和完整交付包需要 `uv`：
@@ -657,14 +657,14 @@ PYTHONPATH=src python -m ecologyrsi_dsh summary run:demo --db /tmp/ecologyrsi-de
 - DSH 子任务完成后会等待 Session 投影与结构化结果同步，消除偶发的持久化竞态；明确的结构化输出参数错误按缺失结果在新的有界子任务中重试，日志只保留 sidecar 脱敏信息。
 - 轮末排名、入选原因和下一轮父方案改为直接读取冻结的 F1/F2/incumbent 三臂比较门禁，不再依赖候选槽位；聚合反思包含最终 revision、9 个目标/时距门禁、失败摘要和完整 10-batch 局部修改链。
 - 下一轮调研、研究综合、候选批次和提案会共同继承上一轮冻结的最终有效 revision，而不是候选初始 R0；即使首轮保留的是同轮 `screened_out` incumbent，也不会错误回退到留出门禁失败的 finalist。
-- 页面把全轮、当前阶段、Host admission、Host 等待、DSH 在飞、Provider 等待和待提交工作分层显示。候选提前终止后未执行的 origins 明确计为“跳过”，`screened_out` 作为终态处理，空微批分数保持“等待评测”，不再显示为 0 或永久排队。
+- 页面把全轮、当前阶段、Host 准入、Host 等待、DSH 未终结子任务和待提交工作分层显示；只有精确 gate 快照才标注为 Provider 等待。候选提前终止后未执行的 origins 明确计为“跳过”，`screened_out` 作为终态处理，空微批分数保持“等待评测”，不再显示为 0 或永久排队。
 - 删除前端已经失去调用方的旧参数归一化分支；创建、预算摘要和服务端共用当前严格参数合同，不保留旧运行数据兼容路径。
 
 ## 0.3.50 交付更新
 
 - `sample.plan` 不再经过当前 DSH 版本不支持输出上限参数的 Workflow bridge，而是直接启动一次性结构化子 Agent；2,048-token 上限通过 DSH 支持的 `agentOptions.maxTokens` 下发，provider/model 继续从冻结角色宿主继承。同步删除旧 Workflow 执行器、脚本模板、双重取消路径和对应冗余测试。
 - 预测工具回执只表示宿主工具已经产出向量，只有 `DshStructuredResultAccepted` 才算远端 origin 完成。候选 heartbeat 负责 Host 已结算的成功/失败拆分，避免结构化失败时总进度长期停在 0 或把失败误报为成功。
-- 私有账本仍保留固定最差惩罚用于确定性评分门禁，浏览 API、候选预览、实时执行和训练轨迹一律把它显示为“未产生有效预测”，并将预测、误差和 reward 置空。失败请求数、结构化错误数和失败 origin 数分开显示，重试请求不会伪装成失败样本。
+- 私有账本仍保留固定最差惩罚用于确定性评分门禁，浏览 API、候选预览、实时执行和训练轨迹一律把它显示为“未产生有效预测”，并将预测、误差和 reward 置空。失败请求数、子模型终止错误数和失败 origin 数分开显示，重试请求不会伪装成失败样本。
 - 局部编辑现在由 Host 对完整操作包做顺序无关的规范化签名；同一不可变父 revision 上已经被拒绝的完全相同操作包会保留提案审计记录，但直接以 `duplicate_recent_rejected_bundle` 拒绝，不再创建重复子 revision。父 revision 改变后不会被误拦截。
 - 当前样本执行模式更名为 `dsh_native_agent`；本版本不读取旧模式名或旧 preset 包，运行数据合同无需向前兼容。
 

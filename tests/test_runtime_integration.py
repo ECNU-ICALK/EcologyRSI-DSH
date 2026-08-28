@@ -705,7 +705,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     "ecology-coordinator-v4",
                     "ecology-researcher-v7",
                     "ecology-candidate-proposer-v4",
-                    "ecology-sample-planner-v4",
+                    "ecology-sample-planner-v5",
                     "ecology-sample-critic-v4",
                     "ecology-generation-judge-v7",
                 )
@@ -793,7 +793,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     },
                     "candidate_concurrency": 3,
                     "sample_concurrency": 128,
-                    "sample_agent_batch_size": 16,
+                    "sample_agent_batch_size": 9,
                     "auto_advance": 0,
                     "idempotency_key": "autonomous-runtime-explicit-sampling",
                 },
@@ -836,6 +836,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     ("samples_per_update", 4_501),
                     ("samples_per_update", 100_001),
                     ("candidate_concurrency", 9),
+                    ("sample_agent_batch_size", 16),
                     ("sample_agent_batch_size", 129),
                 )
             ):
@@ -902,7 +903,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
         self.assertEqual(self.model_server.requests, [])  # type: ignore[attr-defined]
         self.assertEqual(
             created["projection"]["configuration"]["sample_agent_batch_size"],
-            64,
+            9,
         )
         self.assertIsNone(
             created["projection"]["configuration"]["samples_per_update"]
@@ -919,7 +920,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
             ],
             {
                 "sample.planner": 4096,
-                "sample.repair": 2048,
+                "sample.repair": 4096,
                 "sample.critic": 2048,
             },
         )
@@ -932,7 +933,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
         )
         self.assertEqual(explicit_configuration["sample_concurrency"], 128)
         self.assertEqual(explicit_configuration["candidate_concurrency"], 3)
-        self.assertEqual(explicit_configuration["sample_agent_batch_size"], 16)
+        self.assertEqual(explicit_configuration["sample_agent_batch_size"], 9)
         self.assertEqual(
             created["projection"]["configuration"]["sample_operation_max_tokens"],
             {
@@ -983,7 +984,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
         )
         self.assertEqual(state.task_manifest.metadata["sample_concurrency"], 64)
         self.assertEqual(state.task_manifest.metadata["candidate_concurrency"], 4)
-        self.assertEqual(state.task_manifest.metadata["sample_agent_batch_size"], 64)
+        self.assertEqual(state.task_manifest.metadata["sample_agent_batch_size"], 9)
         self.assertEqual(
             state.task_manifest.metadata["sample_planner_prompt_profile"],
             {"version": "origin_shared_context@1"},

@@ -286,7 +286,7 @@
     try {
       optimizationSchedule = normalizedOptimizationSchedule(payload);
       candidateConcurrency = strictInteger(payload.candidate_concurrency == null ? 4 : payload.candidate_concurrency, "候选并发数", 1, 8);
-      sampleAgentBatchSize = strictInteger(payload.sample_agent_batch_size == null ? 64 : payload.sample_agent_batch_size, "网关 origin wave 上限", 1, 128);
+      sampleAgentBatchSize = strictInteger(payload.sample_agent_batch_size == null ? 9 : payload.sample_agent_batch_size, "单时点向量单元容量", 9, 9);
       sampleConcurrency = strictInteger(payload.sample_concurrency == null ? 64 : payload.sample_concurrency, "逐样本并发请求数", 1, 128);
     } catch (error) {
       showToast(error.message);

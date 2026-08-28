@@ -16,7 +16,8 @@ sidecar 监听 `127.0.0.1:8777`；无需再启动独立前端服务或其他项�
 研究、候选提议、样本规划/批评和代际评审均由 DSH Agent Session、受限 preset
 与直接、一次性的结构化子 Agent 执行。Python sidecar 只保留科学数值工具、不可变基因组编译
 和追加式事件账本。上下文压缩与角色生命周期由 DSH 管理；不设跨调用的逐样本
-Token 总预算，每次 sample 子模型通过 `agentOptions.maxTokens` 限制最多输出 2,048 tokens。
+Token 总预算；sample Planner/Repair 通过 `agentOptions.maxTokens` 限制最多输出
+4,096 tokens，Critic 最多输出 2,048 tokens。
 
 Generation Judge preset 内部使用两个职责隔离的 Skill：`candidate-scientific-review`
 只审查单个候选的冻结科学证据，`batch-scientific-reflection` 只读取 Host 生成的

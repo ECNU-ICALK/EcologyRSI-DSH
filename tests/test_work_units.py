@@ -96,6 +96,92 @@ class WorkUnitContractTests(unittest.TestCase):
             # deliberately proves a paused/non-adaptive scheduler is a no-op.
             self.assertFalse(work_units.execute_next_adaptive_work_unit(endpoint, "run:x"))
 
+    def test_existing_batch_resumes_incomplete_candidate_and_frozen_inputs(self):
+        batch = SimpleNamespace(generation=0, batch_size=4)
+        candidate = SimpleNamespace(
+            candidate_id="candidate:partial",
+            generation=0,
+            slot_index=0,
+        )
+        state = SimpleNamespace(
+            run=SimpleNamespace(status=RunStatus.RUNNING, generation=0),
+            batch_for=lambda _generation: batch,
+            candidates=(candidate,),
+            task_manifest=SimpleNamespace(
+                metadata={
+                    "optimization_protocol": "top2_adaptive_epoch@1",
+                    "cohort_capacity_enforced": True,
+                }
+            ),
+            initial_revision_for=lambda _candidate_id: None,
+            run_adaptation_cohort=None,
+            generation_cohort_for=lambda _generation: None,
+        )
+        endpoint = SimpleNamespace(
+            server=SimpleNamespace(
+                director=SimpleNamespace(state=lambda _run_id: state)
+            )
+        )
+
+        with (
+            patch.object(
+                generation_execution,
+                "_spawn_generation_candidates",
+                return_value=True,
+            ) as spawn,
+            patch.object(
+                generation_execution,
+                "_freeze_adaptive_generation_inputs",
+            ) as freeze,
+        ):
+            self.assertTrue(
+                work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+            )
+
+        spawn.assert_called_once_with(endpoint, "run:x", batch)
+        freeze.assert_called_once_with(endpoint, "run:x", 0)
+
+    def test_incomplete_batch_without_capacity_gate_does_not_claim_progress(self):
+        batch = SimpleNamespace(generation=0, batch_size=4)
+        candidate = SimpleNamespace(
+            candidate_id="candidate:partial",
+            generation=0,
+            slot_index=0,
+        )
+        state = SimpleNamespace(
+            run=SimpleNamespace(status=RunStatus.RUNNING, generation=0),
+            batch_for=lambda _generation: batch,
+            candidates=(candidate,),
+            task_manifest=SimpleNamespace(
+                metadata={
+                    "optimization_protocol": "top2_adaptive_epoch@1",
+                    "cohort_capacity_enforced": False,
+                }
+            ),
+        )
+        endpoint = SimpleNamespace(
+            server=SimpleNamespace(
+                director=SimpleNamespace(state=lambda _run_id: state)
+            )
+        )
+
+        with (
+            patch.object(
+                generation_execution,
+                "_spawn_generation_candidates",
+            ) as spawn,
+            patch.object(
+                generation_execution,
+                "_freeze_adaptive_generation_inputs",
+            ) as freeze,
+        ):
+            self.assertFalse(
+                work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+            )
+
+        spawn.assert_not_called()
+        freeze.assert_not_called()
+
     def test_top_two_lanes_rotate_after_each_batch_edit_pair(self):
         state = _AdaptiveLaneState()
         state.task_manifest.metadata["candidate_concurrency"] = 1

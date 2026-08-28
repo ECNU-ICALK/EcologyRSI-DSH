@@ -572,7 +572,7 @@
       { label: "配置目录已加载", ready: Boolean(catalogReady) },
       { label: "运行配置已完整选择", ready: selections },
       { label: "入围候选 " + formatNumber(schedule && schedule.formal_origin_count_per_finalist || Number($("#formal-origin-count").value)) + "-origin schedule、局部 batch 与轮末 holdout 参数有效", ready: scheduleReady },
-      { label: "固定 4 候选、候选并发、origin wave 与逐样本并发参数有效", ready: executionParametersReady },
+      { label: "固定 4 候选、单时点完整向量与逐样本并发参数有效", ready: executionParametersReady },
       { label: "候选总预算可完整覆盖全部轮次（至少 " + formatNumber(budget.required_candidates) + " 个）", ready: budget.budget_sufficient },
       { label: capacityLabel, ready: capacityReady },
       { label: "所选训练数据集可运行", ready: datasetReady },

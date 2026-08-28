@@ -420,7 +420,7 @@
       candidateEvidenceStat("失败", failed == null ? "—" : formatNumber(failed), "失败样本使用惩罚占位，不计为模型预测", failed == null ? "is-pending" : Number(failed) > 0 ? "is-warning" : "is-positive"),
       candidateEvidenceStat("重试", retries == null ? "—" : formatNumber(retries), "瞬时错误按预算退避重试", retries == null ? "is-pending" : Number(retries) > 0 ? "is-running" : ""),
       candidateEvidenceStat("修复", repairs == null ? "—" : formatNumber(repairs), "越界预测采用有界修复", repairs == null ? "is-pending" : Number(repairs) > 0 ? "is-warning" : ""),
-      candidateEvidenceStat("Planner 调用", plannerCalls == null ? "—" : formatNumber(plannerCalls), originBundleProtocol ? "每个预测时点一次，覆盖完整向量" : "每个有效样本独立调用", plannerCalls == null ? "is-pending" : "is-positive"),
+      candidateEvidenceStat("Planner 调用", plannerCalls == null ? "—" : formatNumber(plannerCalls), originBundleProtocol ? "按预测时点调用并覆盖完整向量；重试计入调用数" : "每个有效样本独立调用", plannerCalls == null ? "is-pending" : "is-positive"),
       candidateEvidenceStat("Critic 调用", criticCalls == null ? "—" : formatNumber(criticCalls), "工具执行后远程审核", criticCalls == null ? "is-pending" : "is-positive"),
       candidateEvidenceStat("Reflector 调用", reflectorCalls == null ? "—" : formatNumber(reflectorCalls), "宿主评分后远程反思", reflectorCalls == null ? "is-pending" : "is-positive"),
       candidateEvidenceStat("完整智能体链", completeChains == null ? "—" : formatNumber(completeChains), strictChainCoverage == null ? "覆盖率未记录" : "覆盖率 " + candidateEvidencePercent(strictChainCoverage), strictChainPass === false ? "is-warning" : strictChainPass === true ? "is-positive" : "is-pending"),

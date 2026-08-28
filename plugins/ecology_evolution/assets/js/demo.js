@@ -31,7 +31,7 @@
     id: "运行-演示-001", status: "running", generation: 3, total_generations: 5, candidates_count: 5, max_candidates: 20,
     projection_revision: 18, created_at: "2026-08-16T08:20:00Z", updated_at: "2026-08-16T08:36:00Z",
     manifest_digest: "sha256:demo-manifest-71c0", best_candidate_id: "候选-004",
-    candidates_per_generation: 4, candidate_concurrency: 4, sample_agent_batch_size: 64, sample_concurrency: 64,
+    candidates_per_generation: 4, candidate_concurrency: 4, sample_agent_batch_size: 9, sample_concurrency: 64,
     optimization_protocol: "top2_adaptive_epoch@1",
     optimization_schedule: { screening_origin_count: 64, formal_origin_count_per_finalist: 500, local_batch_origin_count: 50, max_local_edits_per_batch: 2, selection_holdout_origin_count: 169 },
     dsh_runtime: { native: true },

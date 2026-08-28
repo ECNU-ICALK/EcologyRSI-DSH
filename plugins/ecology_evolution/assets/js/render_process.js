@@ -1239,8 +1239,8 @@
     var phase = String(progress.evaluation_phase || "").toLowerCase();
     var fields = {
       screening: ["当前初筛", "screening_completed_origins", "screening_total_origins"],
-      formal_batch: ["当前正式评测", "formal_completed_origins", "formal_total_origins"],
-      holdout: ["当前留出评测", "holdout_completed_origins", "holdout_total_origins"]
+      formal_batch: ["正式阶段累计", "formal_completed_origins", "formal_total_origins"],
+      holdout: ["留出阶段累计", "holdout_completed_origins", "holdout_total_origins"]
     }[phase];
     if (!fields) { return ""; }
     var completed = executionDiagnosticNumber(progress[fields[1]]);
@@ -1698,7 +1698,7 @@
     var sampleRateText = Number.isFinite(sampleRate) && sampleRate > 0 ? " · " + formatNumber(sampleRate, 1) + " " + progressUnitLabel + "/分钟" : "";
     var inFlight = (showLiveProgressDetail || showDrainedProgressDetail || showPausedProgressDetail) && Number(stageProgress.in_flight_requests != null ? stageProgress.in_flight_requests : stageProgress.in_flight_batches);
     var progressKind = stageProgress && stageProgress.progress_kind;
-    var inFlightLabel = progressKind === "drained" ? "DSH 在飞已排空" : runStatus === "paused" ? "暂停快照 DSH 在飞" : "DSH 在飞";
+    var inFlightLabel = progressKind === "drained" ? "DSH 子任务已排空" : runStatus === "paused" ? "暂停快照未终结子任务" : "DSH 子任务未终结";
     var inFlightText = Number.isInteger(inFlight) && inFlight >= 0 ? " · " + inFlightLabel + " " + formatNumber(inFlight) : "";
     var queueSemantics = stageProgress && stageProgress.queue_semantics;
     var exactProviderQueue = queueSemantics === "provider_gate_snapshot";
@@ -1752,7 +1752,7 @@
     var failedChildRequests = showLiveProgressDetail && Number(stageProgress.child_execution_failed_request_count);
     var structuredChildErrors = showLiveProgressDetail && Number(stageProgress.structured_child_model_error_count);
     var childFailureText = Number.isInteger(failedChildRequests) && failedChildRequests > 0
-      ? " · 子任务失败请求 " + formatNumber(failedChildRequests) + (Number.isInteger(structuredChildErrors) && structuredChildErrors > 0 ? "（结构化错误 " + formatNumber(structuredChildErrors) + "）" : "")
+      ? " · 子任务失败请求 " + formatNumber(failedChildRequests) + (Number.isInteger(structuredChildErrors) && structuredChildErrors > 0 ? "（子模型终止错误 " + formatNumber(structuredChildErrors) + "）" : "")
       : "";
     var causalWave = showLiveProgressDetail && Number(stageProgress.causal_wave_sample_count);
     var causalWaveText = Number.isInteger(causalWave) && causalWave > 0 ? " · 本波次 " + formatNumber(causalWave) : "";
@@ -1895,6 +1895,10 @@
     var batchOrigins = Number(schedule.local_batch_origin_count || 0);
     var batchCount = formalOrigins > 0 && batchOrigins > 0 ? formalOrigins / batchOrigins : 0;
     var holdoutOrigins = Number(schedule.selection_holdout_origin_count || 0);
+    var fitnessProfile = configuration.fitness_profile && typeof configuration.fitness_profile === "object" ? configuration.fitness_profile : {};
+    var vectorTargetCount = Array.isArray(fitnessProfile.expected_targets) ? fitnessProfile.expected_targets.length : 0;
+    var vectorHorizonCount = Array.isArray(fitnessProfile.expected_horizons) ? fitnessProfile.expected_horizons.length : 0;
+    var vectorCellCount = vectorTargetCount > 0 && vectorHorizonCount > 0 ? vectorTargetCount * vectorHorizonCount : null;
     var generationCandidateOrigins = formalOrigins > 0 && holdoutOrigins > 0
       ? 4 * 64 + 2 * formalOrigins + 3 * holdoutOrigins
       : 0;
@@ -1907,8 +1911,8 @@
       ["入围候选轨迹", batchCount > 0 ? "Top 2 各 " + formatNumber(batchCount) + " × " + formatNumber(batchOrigins) + " origins；每批最多 " + formatNumber(schedule.max_local_edits_per_batch) + " 处改动" : "等待冻结 schedule"],
       ["轮末同 cohort 比较", holdoutOrigins > 0 ? "F1 / F2 / 上一冠军各 " + formatNumber(holdoutOrigins) + " origins" : "等待冻结 holdout"],
       ["单轮执行预算", generationCandidateOrigins > 0 ? formatNumber(generationCandidateOrigins) + " candidate-origins" : "等待冻结 schedule"],
-      ["网关 origin wave", Number(run.sample_agent_batch_size) > 0 ? "每 wave 最多 " + formatNumber(run.sample_agent_batch_size) + " 个 origins，实际完成数以运行进度为准" : "历史运行未配置"],
-      ["逐样本并发", Number(run.sample_concurrency) > 0 ? formatNumber(run.sample_concurrency) + " 个在飞请求" : "历史运行未配置"],
+      ["单时点向量链", vectorCellCount != null ? formatNumber(vectorTargetCount) + " 目标 × " + formatNumber(vectorHorizonCount) + " 时距 = " + formatNumber(vectorCellCount) + " 评分单元原子提交" : "等待绑定"],
+      ["逐样本并发", Number(run.sample_concurrency) > 0 ? formatNumber(run.sample_concurrency) + " 条预测时点链准入" : "历史运行未配置"],
       [nativeDshRuntime ? "DSH 上下文管理" : declaredTokenBudget ? tokenBudgetSubjectText(run) + " Token 硬预算" : "Token 账本（历史口径）", nativeDshRuntime ? "Session 压缩与输出长度由 DSH 统一管理" : Number(run.token_limit) > 0 ? formatNumber(run.token_limit) : "仅计量"],
       [nativeDshRuntime ? "用量来源" : "Token 计量范围", declaredTokenBudget ? tokenBudgetScopeText(run) : nativeDshRuntime ? "当前压力来自 TokenMeter；累计用量仅采信 Session provider 回执" : tokenBudgetScopeText(run)],
       ["当前保留得分", retainedScore == null ? "尚未产生" : formatNumber(retainedScore) + "（实际晋升序列）"],

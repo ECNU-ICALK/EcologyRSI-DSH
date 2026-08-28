@@ -93,8 +93,6 @@ _SAMPLE_TOKEN_BUDGET_POLICY = "hard_gateway_call_reservation@1"
 _SAMPLE_TOKEN_BUDGET_SCOPE = "sample_agent_gateway_calls_only@1"
 _DEFAULT_REAL_CANDIDATE_CONCURRENCY = 4
 _MAX_REAL_CANDIDATE_CONCURRENCY = 8
-_DEFAULT_SAMPLE_AGENT_BATCH_SIZE = 64
-_MAX_SAMPLE_AGENT_BATCH_SIZE = 128
 _DSH_SIDECAR_PUBLIC_ERROR_CODES = frozenset(
     {
         "dsh_tool_admission_closed",
@@ -131,7 +129,9 @@ _DSH_NATIVE_SAMPLE_OPERATION_MAX_TOKENS = {
     # prediction tool had succeeded. 4,096 remains bounded while leaving room
     # for the required terminal structured call.
     "sample.planner": 4096,
-    "sample.repair": 2048,
+    # A remote repair child now means a fresh Planner retry after a pre-tool
+    # transient failure, so it needs the same bounded output room as Planner.
+    "sample.repair": 4096,
     "sample.critic": 2048,
 }
 _DEFAULT_SAMPLE_TRUNCATION_RETRY_POLICY = {
@@ -155,7 +155,7 @@ _DSH_NATIVE_PRESET_IDS = (
     "ecology-coordinator-v4",
     "ecology-researcher-v7",
     "ecology-candidate-proposer-v4",
-    "ecology-sample-planner-v4",
+    "ecology-sample-planner-v5",
     "ecology-sample-critic-v4",
     "ecology-generation-judge-v7",
 )
@@ -1812,11 +1812,6 @@ class EvolutionRequestHandler(
                         "sample_agent_batch_size",
                         minimum=1,
                     )
-                    if sample_agent_batch_size > _MAX_SAMPLE_AGENT_BATCH_SIZE:
-                        raise ValueError(
-                            "sample_agent_batch_size must be between 1 and "
-                            f"{_MAX_SAMPLE_AGENT_BATCH_SIZE}"
-                        )
                     metadata["sample_agent_batch_size"] = sample_agent_batch_size
                 raw["metadata"] = metadata
             raw_dataset = raw.get("visible_datasets")
@@ -2759,17 +2754,17 @@ class EvolutionRequestHandler(
             if sample_concurrency is None:
                 sample_concurrency = DEFAULT_SAMPLE_CONCURRENCY
             sample_concurrency = validate_sample_concurrency(sample_concurrency)
-            if sample_agent_batch_size is None:
-                sample_agent_batch_size = _DEFAULT_SAMPLE_AGENT_BATCH_SIZE
-            if (
+            if sample_agent_batch_size is not None and (
                 isinstance(sample_agent_batch_size, bool)
                 or not isinstance(sample_agent_batch_size, int)
-                or not 1 <= sample_agent_batch_size <= _MAX_SAMPLE_AGENT_BATCH_SIZE
+                or sample_agent_batch_size != prediction_cells_per_origin
             ):
                 raise ValueError(
-                    "sample_agent_batch_size must be an integer between 1 and "
-                    f"{_MAX_SAMPLE_AGENT_BATCH_SIZE}"
+                    "sample_agent_batch_size is derived from the frozen fitness "
+                    "profile and must equal prediction_cells_per_origin="
+                    f"{prediction_cells_per_origin}"
                 )
+            sample_agent_batch_size = prediction_cells_per_origin
             if schedule is not None:
                 sample_budget_class = (
                     "selection_eligible"

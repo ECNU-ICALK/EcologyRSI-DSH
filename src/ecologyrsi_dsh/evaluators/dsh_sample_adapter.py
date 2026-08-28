@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from threading import RLock
 from typing import Any
 
 from ..core.models import digest
 from ..core.redaction import REMOTE_REASON_CODES
+from ..evolution.execution_plan import DerivedExecutionPlan
 from ..integrations.dsh_structured_roles import DshStructuredRoleRuntime
 from .gateway_sample_adapter import (
     GatewaySampleCollaborationAdapter,
@@ -20,9 +22,51 @@ from .sample_execution import (
 
 _DEFAULT_DSH_SAMPLE_OPERATION_MAX_TOKENS = {
     "sample.planner": 4096,
-    "sample.repair": 2048,
+    "sample.repair": 4096,
     "sample.critic": 2048,
 }
+_PRE_TOOL_TRANSIENT_FAILURES = frozenset(
+    {"connection", "rate_limited", "remote_transient", "timeout"}
+)
+
+
+def _latest_retry_feedback(plan: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    raw_feedback = plan.get("sample_retry_feedback")
+    if not isinstance(raw_feedback, (list, tuple)) or not raw_feedback:
+        return None
+    latest = raw_feedback[-1]
+    if not isinstance(latest, Mapping):
+        raise SampleExecutionContractError(
+            "DSH repair requires structured latest retry feedback"
+        )
+    return latest
+
+
+def _feedback_has_finite_prediction(feedback: Mapping[str, Any]) -> bool:
+    if "previous_prediction" not in feedback:
+        return False
+    value = feedback.get("previous_prediction")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        raise SampleExecutionContractError(
+            "DSH repair previous_prediction must be finite"
+        )
+    return True
+
+
+def _is_pre_tool_transient_retry(feedback: Mapping[str, Any]) -> bool:
+    tool_ids = feedback.get("tool_ids")
+    has_tool_evidence = isinstance(tool_ids, (list, tuple)) and bool(tool_ids)
+    return bool(
+        feedback.get("failure_class") in _PRE_TOOL_TRANSIENT_FAILURES
+        and feedback.get("retryable") is True
+        and not _feedback_has_finite_prediction(feedback)
+        and not has_tool_evidence
+        and "requested_tool_id" not in feedback
+    )
 
 
 def _sample_routing_wave(
@@ -747,14 +791,21 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
         if role not in {"planner", "repair"}:
             return super()._available_tool_catalog(request, plan, role=role)
         if role == "repair":
+            latest = _latest_retry_feedback(plan)
             retry_feedback = plan.get("sample_retry_feedback")
-            if isinstance(retry_feedback, (list, tuple)) and any(
+            critic_selected = isinstance(retry_feedback, (list, tuple)) and any(
                 isinstance(item, Mapping) and "requested_tool_id" in item
                 for item in retry_feedback
-            ):
-                # A critic-selected repair remains on the generic deterministic
-                # repair path.  Only pre-tool remote failures are replanned with
-                # the original registered predictor.
+            )
+            host_constraint_repair = bool(
+                latest is not None
+                and latest.get("failure_class") == "constraint_rejected"
+                and _feedback_has_finite_prediction(latest)
+            )
+            if critic_selected or host_constraint_repair:
+                # Critic-selected and Host-derived repair tools execute on the
+                # generic deterministic path.  They must never be rebound as a
+                # DSH Planner prediction tool.
                 return super()._available_tool_catalog(request, plan, role=role)
         return [
             {
@@ -763,6 +814,66 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
                 "purpose": "registered_candidate_prediction",
             }
         ]
+
+    def _forced_repair_route(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        attempt: int,
+    ) -> tuple[str, str, str, str] | None:
+        """Split explicit critic, Host constraint, and pre-tool retry routes."""
+
+        critic_route = super()._forced_repair_route(plan, attempt=attempt)
+        if critic_route is not None:
+            return critic_route
+        if attempt < 2:
+            return None
+        latest = _latest_retry_feedback(plan)
+        if latest is None:
+            raise SampleExecutionContractError(
+                "DSH repair attempt requires bounded retry feedback"
+            )
+        previous_attempt = latest.get("attempt")
+        if (
+            isinstance(previous_attempt, bool)
+            or not isinstance(previous_attempt, int)
+            or previous_attempt != attempt - 1
+        ):
+            raise SampleExecutionContractError(
+                "DSH repair feedback attempt is not contiguous"
+            )
+        if latest.get("failure_class") == "constraint_rejected" and (
+            _feedback_has_finite_prediction(latest)
+        ):
+            raw_execution_plan = plan.get("derived_execution_plan")
+            if not isinstance(raw_execution_plan, Mapping):
+                raise SampleExecutionContractError(
+                    "DSH Host constraint repair requires a frozen derived execution plan"
+                )
+            try:
+                execution_plan = DerivedExecutionPlan.from_dict(raw_execution_plan)
+            except (TypeError, ValueError) as exc:
+                raise SampleExecutionContractError(
+                    "DSH Host constraint repair execution plan is invalid"
+                ) from exc
+            repair_index = min(
+                attempt - 2,
+                len(execution_plan.repair_sequence) - 1,
+            )
+            return (
+                execution_plan.repair_sequence[repair_index],
+                "host_repair_router",
+                "derived_constraint_repair",
+                "execute_derived_repair_tool",
+            )
+        if _is_pre_tool_transient_retry(latest):
+            # A new remote child is appropriate only when no prediction/tool
+            # evidence exists and the prior Planner failed transiently before
+            # the registered predictor could run.
+            return None
+        raise SampleExecutionContractError(
+            "DSH implicit repair is neither Host constraint repair nor pre-tool transient retry"
+        )
 
     def _review_successes(
         self,

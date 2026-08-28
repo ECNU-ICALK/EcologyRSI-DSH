@@ -25,7 +25,7 @@ python -m http.server 4173 --directory plugins/ecology_evolution
 ## 六个工作区
 
 - **运行设置**：直接选择可运行训练数据集、策略模型 API 和独立评审模型 API。两个模型下拉框使用同一份 DSH `dsh_models` 登记目录。目录不依赖手工连接预验证；未配置凭据、后端路由被安全策略禁用或职责不匹配的条目会被禁用，真实连通性与 JSON 契约在提案/评审请求中检查。刷新目录时优先保留用户当前选择。真实 AGC 数据优先使用数据集目录中的指定 episode；兼容请求省略时才由服务端确定性回退。预测模型、进化策略和评测器由服务端根据数据集目录与模型研究结果自动绑定。
-- **参数设计**：设置进化轮数、每轮候选方案数 K、每个 finalist 的 500-origin epoch、50-origin 局部 batch、每批最大局部改动数、169-origin 轮末 holdout、候选并发、逐样本并发、候选总预算、随机种子与在线知识检索。新建真实自主运行默认使用 4 个候选并发，逐样本并发默认 64、可配置 1–128；同一 provider 的 DSH stage 全局最多同时在飞 128 个物理请求。上下文由 DSH Session 管理；每次 sample 子模型调用使用 2,048-token 输出上限，页面不提交跨调用的 `token_limit`。
+- **参数设计**：设置进化轮数、每轮候选方案数 K、每个 finalist 的 500-origin epoch、50-origin 局部 batch、每批最大局部改动数、169-origin 轮末 holdout、候选并发、逐样本并发、候选总预算、随机种子与在线知识检索。新建真实自主运行默认使用 4 个候选并发，逐样本并发默认 64、可配置 1–128；同一 provider 的 DSH stage 全局最多同时在飞 128 个物理请求。上下文由 DSH Session 管理；Planner/Repair 每次最多输出 4,096 tokens，Critic 每次最多 2,048 tokens，页面不提交跨调用的 `token_limit`。
 - **训练数据**：绑定当前运行冻结的数据集与 episode，通过“查看分区”在 `training_fit` 与 `training_feedback` 间切换分页样本及中文字段定义，显示来源归档大小/MD5 校验和每候选一条的完整脱敏进化训练轨迹。展开轨迹后可按顺序查看输入上下文、智能体交互、宿主编译、训练预测、评测反馈、优化方向和最终结果；不返回开发、门禁、隐藏、最终或外部留出样本。
 - **进化过程**：推进期间实时刷新“知识检索 → 逐代研究 → 能力编译 → 训练/评测 → 轮末决策”进度、真实预测时点、实际预测模型/评测器/时距摘要、候选散点和 incumbent 轨迹，并支持展开全部中文脱敏追加式事件。严格真实运行以预测起点为智能体样本：一次直接结构化 Planner 子 Agent 选择宿主登记的向量预测工具，一次返回全部目标 × 时距结果；只有不确定、异常或失败路径才调用 Critic，候选评分完成后再执行聚合反思。页面把 Host 已结算、远端已验收、在飞、provider 等待和待提交分开显示，同时保留逐评分单元结果。闭式岭回归只显示为宿主工具和 fit pass，不会替代智能体决策。严格 checkpoint 仅在完整向量完成评分后原子保存，中断的不完整时点会在恢复时重新执行。
 - **候选评测**：比较候选参数、训练子模型、三目标 × 1/6/24 小时时距指标、持续性基线、预测起点/目标时间和训练反馈搜索保留结论。
@@ -56,7 +56,7 @@ DELETE {base}/runs/{run_id}
 
 候选逐样本接口每页最多返回 200 条，并以完整 cohort 中冻结的 `sample_index` 稳定排序。状态区分尚未启动的 `pending`、执行中的 `running`、完整封口的 `completed` 和保留部分结果的 `aborted`。成功行的逐样本辅助 MAE 改善定义为 `|baseline - observed| - |predicted - observed|`，正值代表相对仅由 `training_fit` 选出的冻结评分基线更好；候选排名和科学门禁使用 RMSE 技能主适应度。失败行的固定最差惩罚只保留在私有评分归档中；公开接口返回 `prediction_source=failed_no_model_prediction`，并把预测、误差和 reward 置空。
 
-运行创建请求以 `dataset_id` 为必填首要输入；真实 AGC 运行同时冻结目录返回的 `episode_id`，研究领域、预测模型、策略和评测器均由服务端自动绑定。当前请求提交 `strategy_model_id`、`review_model_id`、`autonomous_mode=true`、`rounds`、`budget`、`candidates_per_generation`、`candidate_concurrency`、`sample_agent_batch_size`、`sample_concurrency`、`knowledge_online_enabled`、`seed_policy` 和 `optimization_schedule`；旧的 `samples_per_update` 已拒绝使用。默认 schedule 为四候选共享 64-origin 初筛、Top 2 各执行 500 origins（10 × 50 局部 batch，每批最多 2 处改动），最后两个 finalist 与 incumbent 在同一 169-origin holdout 比较，单轮合计 1,763 candidate-origins。默认温室任务每个 origin 同时评分 3 个目标 × 3 个时距，因此对应 15,867 个评分单元，但只算一次 Planner 请求。逐样本并发默认 64、最大 128；候选并发默认 4、允许 1–8。工作台默认提交自动推进，服务端后台以有界 worker 推进不同运行，同一运行每次只执行一个阶段边界；同一 provider 另有 128 个物理在飞请求的全局 FIFO 上限。
+运行创建请求以 `dataset_id` 为必填首要输入；真实 AGC 运行同时冻结目录返回的 `episode_id`，研究领域、预测模型、策略和评测器均由服务端自动绑定。当前请求提交 `strategy_model_id`、`review_model_id`、`autonomous_mode=true`、`rounds`、`budget`、`candidates_per_generation`、`candidate_concurrency`、`sample_agent_batch_size`、`sample_concurrency`、`knowledge_online_enabled`、`seed_policy` 和 `optimization_schedule`；旧的 `samples_per_update` 已拒绝使用。默认 schedule 为四候选共享 64-origin 初筛、Top 2 各执行 500 origins（10 × 50 局部 batch，每批最多 2 处改动），最后两个 finalist 与 incumbent 在同一 169-origin holdout 比较，单轮合计 1,763 candidate-origins。默认温室任务每个 origin 同时评分 3 个目标 × 3 个时距，因此对应 15,867 个评分单元，但只算一个预测时点链；若发生重试，Planner 实际调用数会增加。单时点向量容量默认为 9；逐样本并发默认 64、最大 128；候选并发默认 4、允许 1–8。工作台默认提交自动推进，服务端后台以有界 worker 推进不同运行，同一运行每次只执行一个阶段边界；同一 provider 另有 128 个物理在飞请求的全局 FIFO 上限和独立启动速率门限。
 
 低于晋级门槛的 API 诊断运行可以执行多代，以验收前代反思和检索知识进入后代，但每一代都保持不可晋级；工作台只创建满足正式门槛的运行。
 
@@ -68,7 +68,7 @@ DELETE {base}/runs/{run_id}
 
 `algorithm_synthesis` 必须与 Blueprint 的 pipeline 一致，证据引用必须来自 Blueprint 已引用的同代冻结证据，`parameter_focus` 也只能使用登记参数。本轮有 OpenAlex `metadata_only` 摘要时，Blueprint 和 synthesis 都必须至少引用其中一条；否则至少引用一条 `research_only` 方向证据。宿主把 plan、Blueprint 和 synthesis digest 编译到仅含登记算子的受限 IR；候选依次通过 compile、静态 debug 和 `training_fit` 时间前向 training smoke 后，才进入“直接结构化 Planner → 登记向量工具 → 条件 Critic → 宿主评分 → 候选聚合反思”合同。synthesis 与同代 compile/debug/评测/晋升结果会按 digest 关联记录，但不作因果归因。若共享系统代理对 OpenAlex 返回 429，且允许该固定 HTTPS 来源直连，可仅设置 `NO_PROXY=api.openalex.org`，不会改变模型 provider 的代理路径。
 
-DSH-native 运行不设跨调用的逐样本 Token 总预算，但每个 sample 子模型调用最多输出 2,048 tokens。页面只读显示 DSH TokenMeter 的当前上下文压力，累计用量只采信 Session projection 中的 provider usage，二者不互相推算。历史网关运行的硬预算账本仅用于只读回放。
+DSH-native 运行不设跨调用的逐样本 Token 总预算；Planner/Repair 每次最多输出 4,096 tokens，Critic 每次最多 2,048 tokens。页面只读显示 DSH TokenMeter 的当前上下文压力，累计用量只采信 Session projection 中的 provider usage，二者不互相推算。历史网关运行的硬预算账本仅用于只读回放。
 
 每代 research 都会收到由 SQLite 追加式事件账本重放派生的跨代经验摘要。它最多扫描最近 24 个已分析代、最多展示最近 6 代，汇总修改、synthesis、算法/样本失败、弱目标/时距、修复成效和是否改善；未解决问题与已有后续评测证据支持的已解决问题分别进入 `active_unresolved` 和 `resolved_archived`，各最多 16 项。摘要不含原始样本或预测记录，UTF-8 JSON 硬限制为 16 KiB，超限时确定性裁剪并保留 omitted 计数；相同事件流在服务重启后可派生相同经验。
 
@@ -85,7 +85,7 @@ DSH-native 运行不设跨调用的逐样本 Token 总预算，但每个 sample 
 插件加载后向父窗口发送：
 
 ```json
-{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.3.52"}
+{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.3.54"}
 ```
 
 宿主通过 `postMessage` 返回。最小兼容合同只要求同源代理地址和短期能力令牌；身份、能力范围和模型目录可选：

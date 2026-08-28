@@ -7,13 +7,13 @@ const presetCatalog = [
   "ecology-coordinator-v4",
   "ecology-researcher-v7",
   "ecology-candidate-proposer-v4",
-  "ecology-sample-planner-v4",
+  "ecology-sample-planner-v5",
   "ecology-sample-critic-v4",
   "ecology-generation-judge-v7",
 ].map((preset_id) => ({
   preset_id,
   tool_profile: "dynamic-retrieval-v1",
-  required_tools: preset_id === "ecology-sample-planner-v4"
+  required_tools: preset_id === "ecology-sample-planner-v5"
     ? ["ecology_execute_prediction_tool", "skill", "web_search"]
     : ["skill", "web_search"],
 }));

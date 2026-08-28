@@ -51,7 +51,7 @@ test("tool surface verification rejects undeclared extra tools", async () => {
   ];
   ctx.llm.resolveCallConfig = async () => ({ provider: "fake", model: "model" });
   const result = await runtimeCapabilities(ctx, [{
-    preset_id: "ecology-sample-planner-v4",
+    preset_id: "ecology-sample-planner-v5",
     required_tools: ["ecology_execute_prediction_tool"],
   }]);
   assert.equal(result.presets[0].tool_surface_verified, false);

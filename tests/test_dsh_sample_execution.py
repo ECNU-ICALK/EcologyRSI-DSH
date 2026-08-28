@@ -14,6 +14,7 @@ from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
 from ecologyrsi_dsh.core.redaction import REMOTE_REASON_CODES
 from ecologyrsi_dsh.core.sample_results import build_sample_results
 from ecologyrsi_dsh.data.registry import DatasetRegistry
+from ecologyrsi_dsh.evolution.execution_plan import DerivedExecutionPlan
 from ecologyrsi_dsh.evaluators.dsh_sample_adapter import (
     DshSampleCollaborationAdapter,
 )
@@ -22,6 +23,7 @@ from ecologyrsi_dsh.evaluators.gateway_sample_adapter import (
 )
 from ecologyrsi_dsh.evaluators.sample_execution import (
     CollaborativeSampleExecutor,
+    SampleExecutionContractError,
     SamplePredictionRequest,
     classify_sample_failure,
 )
@@ -655,6 +657,17 @@ class DshSampleExecutionTests(unittest.TestCase):
                 "algorithm_version": "1",
             }
         )
+        plan = {
+            **plan,
+            "sample_retry_feedback": [
+                {
+                    "attempt": 1,
+                    "failure_class": "remote_transient",
+                    "retryable": True,
+                    "error_type": "DshNativeRuntimeUnavailableError",
+                }
+            ],
+        }
 
         outcome = adapter.predict_samples(
             (_request("sample-pre-tool-retry"),),
@@ -677,6 +690,340 @@ class DshSampleExecutionTests(unittest.TestCase):
             ),
             1,
         )
+        self.assertEqual(native.requests[0]["request"]["max_tokens"], 4096)
+
+    def test_host_constraint_repair_uses_frozen_plan_without_remote_child(self) -> None:
+        runtime = _SampleRuntime()
+        forecast_calls = 0
+
+        def forecast_bundle(requests):
+            nonlocal forecast_calls
+            forecast_calls += 1
+            return _constant_forecast_bundle(999.0)(requests)
+
+        adapter = DshSampleCollaborationAdapter(
+            run_id="run-host-constraint-repair",
+            runtime_provider=lambda: runtime,
+            revision_provider=lambda _run_id: {
+                "run_state_revision": 7,
+                "ledger_expected_revision": 11,
+            },
+            identity_digests={
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            strategy_model_id="dsh/strategy",
+            review_model_id="dsh/review",
+            forecast_bundle_tool=forecast_bundle,
+            prediction_tool_binder=_fake_agent_prediction_binder,
+            remote_critic_policy={
+                "version": "uncertain_or_failure@1",
+                "min_planner_confidence": 0.5,
+            },
+        )
+        plan = adapter.plan_batch(
+            {
+                "run_id": "run-host-constraint-repair",
+                "candidate_id": "candidate-1",
+                "dataset_digest": "d" * 64,
+                "algorithm_id": "registered-predictor",
+                "algorithm_version": "1",
+                "derived_execution_plan": DerivedExecutionPlan(
+                    source_generation=None,
+                    source_analysis_digest=None,
+                ).to_dict(),
+            }
+        )
+        plan = {
+            **plan,
+            "sample_retry_feedback": [
+                {
+                    "attempt": 1,
+                    "failure_class": "constraint_rejected",
+                    "retryable": True,
+                    "error_type": "SampleRepairRequired",
+                    "tool_ids": ["registered-predictor", "physical-range-check"],
+                    "previous_prediction": 999.0,
+                }
+            ],
+        }
+
+        outcome = adapter.predict_samples(
+            (_request("sample-host-constraint-repair"),),
+            (plan,),
+            attempts=(2,),
+        )[0]
+
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.result["predicted"], 80.0)
+        self.assertEqual(forecast_calls, 0)
+        self.assertEqual(runtime.requests, [])
+        self.assertEqual(
+            [item["role"] for item in outcome.result["agent_decisions"]],
+            ["host_repair_router"],
+        )
+        self.assertEqual(
+            outcome.result["tool_calls"][0]["tool_id"],
+            "bounded-projection-repair",
+        )
+
+    def test_executor_routes_host_rejection_to_local_repair_end_to_end(self) -> None:
+        runtime = _SampleRuntime()
+        forecast_calls = 0
+
+        def forecast_bundle(requests):
+            nonlocal forecast_calls
+            forecast_calls += 1
+            return _constant_forecast_bundle(999.0)(requests)
+
+        adapter = DshSampleCollaborationAdapter(
+            run_id="run-host-repair-e2e",
+            runtime_provider=lambda: runtime,
+            revision_provider=lambda _run_id: {
+                "run_state_revision": 7,
+                "ledger_expected_revision": 11,
+            },
+            identity_digests={
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            strategy_model_id="dsh/strategy",
+            review_model_id="dsh/review",
+            forecast_bundle_tool=forecast_bundle,
+            prediction_tool_binder=_fake_agent_prediction_binder,
+            remote_critic_policy={
+                "version": "uncertain_or_failure@1",
+                "min_planner_confidence": 0.5,
+            },
+            sample_reflection_policy="candidate_aggregate_post_score@1",
+        )
+        row = _request("sample-host-repair-e2e").to_dict()
+        row["observed"] = 21.0
+        execution_plan = DerivedExecutionPlan(
+            source_generation=None,
+            source_analysis_digest=None,
+        ).to_dict()
+
+        batch = CollaborativeSampleExecutor(adapter).execute(
+            (row,),
+            context={
+                "run_id": "run-host-repair-e2e",
+                "candidate_id": "candidate-1",
+                "dataset_digest": "d" * 64,
+                "partition": "training_feedback",
+                "algorithm_id": "registered-predictor",
+                "algorithm_version": "1",
+                "derived_execution_plan": execution_plan,
+            },
+            target_bounds={
+                "air_temperature": {"minimum": -20.0, "maximum": 80.0}
+            },
+            algorithm_id="registered-predictor",
+            algorithm_version="1",
+        )
+
+        self.assertEqual(batch.summary["succeeded_examples"], 1)
+        self.assertEqual(batch.records[0]["attempts"], 2)
+        self.assertEqual(batch.records[0]["predicted"], 80.0)
+        self.assertEqual(
+            batch.records[0]["failure_history"][0]["failure_class"],
+            "constraint_rejected",
+        )
+        self.assertEqual(
+            batch.records[0]["failure_history"][0]["previous_prediction"],
+            999.0,
+        )
+        self.assertEqual(forecast_calls, 1)
+        self.assertEqual(
+            [request["stage"] for request in runtime.requests],
+            ["sample.plan"],
+        )
+        self.assertIn(
+            "host_repair_router",
+            [item["role"] for item in batch.records[0]["agent_trace"]],
+        )
+
+    def test_host_constraint_repair_honors_persistence_first_frozen_plan(self) -> None:
+        runtime = _SampleRuntime()
+        adapter = DshSampleCollaborationAdapter(
+            run_id="run-host-persistence-repair",
+            runtime_provider=lambda: runtime,
+            revision_provider=lambda _run_id: {
+                "run_state_revision": 7,
+                "ledger_expected_revision": 11,
+            },
+            identity_digests={
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            strategy_model_id="dsh/strategy",
+            review_model_id="dsh/review",
+            forecast_bundle_tool=_constant_forecast_bundle(999.0),
+            prediction_tool_binder=_fake_agent_prediction_binder,
+            remote_critic_policy={
+                "version": "uncertain_or_failure@1",
+                "min_planner_confidence": 0.5,
+            },
+        )
+        plan = adapter.plan_batch(
+            {
+                "run_id": "run-host-persistence-repair",
+                "candidate_id": "candidate-1",
+                "dataset_digest": "d" * 64,
+                "algorithm_id": "registered-predictor",
+                "algorithm_version": "1",
+                "derived_execution_plan": DerivedExecutionPlan(
+                    source_generation=None,
+                    source_analysis_digest=None,
+                    repair_sequence=(
+                        "bounded-persistence-fallback",
+                        "bounded-projection-repair",
+                    ),
+                ).to_dict(),
+            }
+        )
+        plan = {
+            **plan,
+            "sample_retry_feedback": [
+                {
+                    "attempt": 1,
+                    "failure_class": "constraint_rejected",
+                    "retryable": True,
+                    "error_type": "SampleRepairRequired",
+                    "previous_prediction": 999.0,
+                }
+            ],
+        }
+
+        outcome = adapter.predict_samples(
+            (_request("sample-host-persistence-repair"),),
+            (plan,),
+            attempts=(2,),
+        )[0]
+
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.result["predicted"], 20.0)
+        self.assertEqual(
+            outcome.result["tool_calls"][0]["tool_id"],
+            "bounded-persistence-fallback",
+        )
+        self.assertEqual(runtime.requests, [])
+
+    def test_requested_critic_repair_keeps_precedence_and_provenance(self) -> None:
+        runtime = _SampleRuntime()
+        adapter = DshSampleCollaborationAdapter(
+            run_id="run-critic-repair-precedence",
+            runtime_provider=lambda: runtime,
+            revision_provider=lambda _run_id: {
+                "run_state_revision": 7,
+                "ledger_expected_revision": 11,
+            },
+            identity_digests={
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            strategy_model_id="dsh/strategy",
+            review_model_id="dsh/review",
+            forecast_bundle_tool=_constant_forecast_bundle(999.0),
+            prediction_tool_binder=_fake_agent_prediction_binder,
+            remote_critic_policy={
+                "version": "uncertain_or_failure@1",
+                "min_planner_confidence": 0.5,
+            },
+        )
+        plan = adapter.plan_batch(
+            {
+                "run_id": "run-critic-repair-precedence",
+                "candidate_id": "candidate-1",
+                "dataset_digest": "d" * 64,
+                "algorithm_id": "registered-predictor",
+                "algorithm_version": "1",
+                "derived_execution_plan": DerivedExecutionPlan(
+                    source_generation=None,
+                    source_analysis_digest=None,
+                ).to_dict(),
+            }
+        )
+        plan = {
+            **plan,
+            "sample_retry_feedback": [
+                {
+                    "attempt": 1,
+                    "failure_class": "constraint_rejected",
+                    "retryable": True,
+                    "error_type": "SampleRepairRequired",
+                    "requested_tool_id": "bounded-persistence-fallback",
+                    "previous_prediction": 999.0,
+                }
+            ],
+        }
+
+        outcome = adapter.predict_samples(
+            (_request("sample-critic-repair-precedence"),),
+            (plan,),
+            attempts=(2,),
+        )[0]
+
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.result["predicted"], 20.0)
+        self.assertEqual(
+            [item["role"] for item in outcome.result["agent_decisions"]],
+            ["critic_repair_router"],
+        )
+        self.assertEqual(runtime.requests, [])
+
+    def test_implicit_repair_rejects_stale_feedback_before_remote_child(self) -> None:
+        adapter = DshSampleCollaborationAdapter(
+            run_id="run-stale-repair",
+            runtime_provider=lambda: _SampleRuntime(),
+            revision_provider=lambda _run_id: {
+                "run_state_revision": 7,
+                "ledger_expected_revision": 11,
+            },
+            identity_digests={
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            strategy_model_id="dsh/strategy",
+            review_model_id="dsh/review",
+            forecast_bundle_tool=_constant_forecast_bundle(999.0),
+            prediction_tool_binder=_fake_agent_prediction_binder,
+        )
+        plan = adapter.plan_batch(
+            {
+                "run_id": "run-stale-repair",
+                "candidate_id": "candidate-1",
+                "dataset_digest": "d" * 64,
+                "algorithm_id": "registered-predictor",
+                "algorithm_version": "1",
+            }
+        )
+        plan = {
+            **plan,
+            "sample_retry_feedback": [
+                {
+                    "attempt": 1,
+                    "failure_class": "remote_transient",
+                    "retryable": True,
+                    "error_type": "DshNativeRuntimeUnavailableError",
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            SampleExecutionContractError,
+            "not contiguous",
+        ):
+            adapter.predict_samples(
+                (_request("sample-stale-repair"),),
+                (plan,),
+                attempts=(3,),
+            )
 
     def test_single_registered_prediction_tool_still_uses_remote_agents(self) -> None:
         runtime = _SampleRuntime()

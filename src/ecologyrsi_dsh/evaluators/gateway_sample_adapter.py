@@ -908,8 +908,10 @@ class GatewaySampleCollaborationAdapter:
                 plan_data.get("decision_context_digest")
                 or digest(plan_data.get("decision_context", {}))
             )
-            requested_tool = (
-                _requested_repair_tool(plan_data) if role == "repair" else None
+            forced_repair_route = (
+                self._forced_repair_route(plan_data, attempt=attempt)
+                if role == "repair"
+                else None
             )
             try:
                 causal_wave = _causal_wave_identity(requests[index], index=index)
@@ -925,7 +927,12 @@ class GatewaySampleCollaborationAdapter:
                 )
                 continue
             grouped[
-                (role, context_digest, requested_tool or "", causal_wave)
+                (
+                    role,
+                    context_digest,
+                    canonical_json(forced_repair_route or ()),
+                    causal_wave,
+                )
             ].append(index)
 
         schedules: list[tuple[str, Sequence[int]]] = []
@@ -2139,14 +2146,23 @@ class GatewaySampleCollaborationAdapter:
             diagnostics.adaptive_split_max_depth,
             split_depth,
         )
-        requested_tools = {
-            _requested_repair_tool(plans[index]) for index in indices
+        forced_repair_routes = {
+            self._forced_repair_route(
+                plans[index],
+                attempt=attempts[index],
+            )
+            for index in indices
         }
-        forced_tool = (
-            next(iter(requested_tools))
+        forced_repair_route = (
+            next(iter(forced_repair_routes))
             if role == "repair"
-            and len(requested_tools) == 1
-            and None not in requested_tools
+            and len(forced_repair_routes) == 1
+            and None not in forced_repair_routes
+            else None
+        )
+        forced_tool = (
+            forced_repair_route[0]
+            if forced_repair_route is not None
             else None
         )
         deterministic_single_tool = False
@@ -2156,14 +2172,15 @@ class GatewaySampleCollaborationAdapter:
                 requests[index].sample_id: {
                     "sample_id": requests[index].sample_id,
                     "next_tool": forced_tool,
-                    "reason_code": "critic_requested_tool",
+                    "reason_code": forced_repair_route[2],
                     "confidence": 1.0,
                     "response_digest": digest(
                         {
-                            "role": "critic_repair_router",
+                            "role": forced_repair_route[1],
                             "sample_id": requests[index].sample_id,
                             "attempt": attempts[index],
-                            "requested_tool_id": forced_tool,
+                            "selected_tool_id": forced_tool,
+                            "reason_code": forced_repair_route[2],
                         }
                     ),
                 }
@@ -2378,12 +2395,17 @@ class GatewaySampleCollaborationAdapter:
                     request, plans[index], role=role
                 )
             }
-            requested_repair_tool = (
-                _requested_repair_tool(plans[index]) if role == "repair" else None
+            forced_route = (
+                self._forced_repair_route(
+                    plans[index],
+                    attempt=attempt,
+                )
+                if role == "repair"
+                else None
             )
             agent_steps = (
                 []
-                if requested_repair_tool is not None
+                if forced_route is not None
                 else [
                     {
                         "role": "host_deterministic_router",
@@ -2402,14 +2424,14 @@ class GatewaySampleCollaborationAdapter:
                     )
                 ]
             )
-            if requested_repair_tool is not None:
-                next_tool = requested_repair_tool
+            if forced_route is not None:
+                next_tool, router_role, reason_code, decision_prefix = forced_route
                 agent_steps.append(
                     {
-                        "role": "critic_repair_router",
-                        "decision": f"execute_requested_tool:{next_tool}",
+                        "role": router_role,
+                        "decision": f"{decision_prefix}:{next_tool}",
                         "status": "completed",
-                        "reason_code": "critic_requested_tool",
+                        "reason_code": reason_code,
                         "response_digest": decision["response_digest"],
                     }
                 )
@@ -2824,6 +2846,31 @@ class GatewaySampleCollaborationAdapter:
             for tool in self._tool_catalog(request)
             if tool["tool_id"] not in failed_tool_ids
         ]
+
+    def _forced_repair_route(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        attempt: int,
+    ) -> tuple[str, str, str, str] | None:
+        """Resolve an explicit critic repair without another model turn.
+
+        The tuple is ``(tool_id, router_role, reason_code, decision_prefix)``.
+        Subclasses may add Host-owned deterministic repair routes, but must keep
+        their provenance distinct from a tool explicitly selected by a critic.
+        """
+
+        if attempt < 2:
+            return None
+        requested_tool = _requested_repair_tool(plan)
+        if requested_tool is None:
+            return None
+        return (
+            requested_tool,
+            "critic_repair_router",
+            "critic_requested_tool",
+            "execute_requested_tool",
+        )
 
     def _available_tool_catalog(
         self,

@@ -208,7 +208,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
             "ecology-coordinator-v4",
             "ecology-researcher-v7",
             "ecology-candidate-proposer-v4",
-            "ecology-sample-planner-v4",
+            "ecology-sample-planner-v5",
             "ecology-sample-critic-v4",
             "ecology-generation-judge-v7",
         )
@@ -389,7 +389,7 @@ class _FakeNativeRuntime:
             "ecology-coordinator-v4",
             "ecology-researcher-v7",
             "ecology-candidate-proposer-v4",
-            "ecology-sample-planner-v4",
+            "ecology-sample-planner-v5",
             "ecology-sample-critic-v4",
             "ecology-generation-judge-v7",
         ):
@@ -599,7 +599,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                 "review_model_id": "dsh/review",
                 "candidate_concurrency": 1,
                 "sample_concurrency": 2,
-                "sample_agent_batch_size": 9,
+                "sample_agent_batch_size": 1,
                 "start": False,
                 "auto_advance": 0,
                 "idempotency_key": "native-create-1",
@@ -624,7 +624,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertEqual(state.task_manifest.metadata["candidate_concurrency"], 1)
         self.assertEqual(state.task_manifest.metadata["sample_concurrency"], 2)
         self.assertNotIn("samples_per_update", state.task_manifest.metadata)
-        self.assertEqual(state.task_manifest.metadata["sample_agent_batch_size"], 9)
+        self.assertEqual(state.task_manifest.metadata["sample_agent_batch_size"], 1)
         self.assertEqual(
             state.task_manifest.metadata["sample_budget_class"],
             "selection_eligible",

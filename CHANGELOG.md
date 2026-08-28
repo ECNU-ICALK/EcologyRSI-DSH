@@ -2,6 +2,45 @@
 
 All notable changes to EcologyRSI-DSH are recorded in this file.
 
+## 0.3.54 - 2026-08-28
+
+### Deterministic repair and durable adaptive execution
+
+- Split sample retries into three explicit routes. A critic-selected repair
+  keeps its critic provenance; a Host physical-range rejection now executes
+  the frozen derived repair sequence locally; only a genuine transient failure
+  before any prediction/tool evidence may create a fresh Planner child. This
+  removes the repeated-predictor loop that exhausted Repair output tokens and
+  stalled live 64-origin runs.
+- Give a genuine pre-tool Planner retry the same bounded 4,096-token output
+  allowance as the original Planner. Tighten the sample Planner preset so it
+  submits the registered vector tool result immediately and leaves numeric
+  validation and repair to the Host. Publish that changed immutable preset as
+  `ecology-sample-planner-v5` so an existing DSH installation upgrades without
+  accepting same-ID content drift.
+- Validate generation comparison reports against the fitness profile's exact
+  target-by-horizon grid. Missing, duplicate, extra, or malformed cells now
+  fail closed instead of defining a smaller comparison grid from their own
+  incomplete output.
+- Recover an adaptive batch after a crash between `GenerationBatchStarted` and
+  candidate/cohort freezing, and make candidate revision and holdout-freeze
+  replay idempotent while still rejecting real identity or status drift.
+
+### Parameters and monitoring
+
+- Keep full-origin admission at 64 by default and configurable through 128.
+  Present the separate per-origin vector capacity as nine atomic scoring cells,
+  preventing it from being mistaken for either origin concurrency or nine
+  independent model requests.
+- Label DSH counts as unfinished child tasks, model termination errors by their
+  real scope, and formal/holdout counters as phase totals. Show Provider waiting
+  only when the backend exposes an exact gate snapshot.
+
+### Delivery
+
+- Align the Python package, browser plugin, Host plugin, lockfile, legal
+  metadata, documentation, and packed Host artifact at version 0.3.54.
+
 ## 0.3.52 - 2026-08-28
 
 ### Provider-rate and capture recovery

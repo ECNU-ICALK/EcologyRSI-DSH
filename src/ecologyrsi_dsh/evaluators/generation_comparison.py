@@ -25,19 +25,39 @@ def _finite_number(value: Any) -> float | None:
     return number if number == number and abs(number) != float("inf") else None
 
 
-def _cell_map(evaluation: HoldoutEvaluation) -> dict[tuple[str, int], Mapping[str, Any]]:
+def _cell_map(
+    evaluation: HoldoutEvaluation,
+) -> tuple[dict[tuple[str, int], Mapping[str, Any]], bool]:
+    """Return the reported cells and whether their row identity is unambiguous.
+
+    A mapping alone cannot distinguish an exact grid from one containing a
+    duplicate key because the later row overwrites the earlier one.  Promotion
+    is fail-closed, so malformed, duplicate, and non-cell rows make the grid
+    inexact even when the surviving keys happen to look complete.
+    """
+
     rows = evaluation.metrics.get("targets")
     if not isinstance(rows, (list, tuple)):
-        return {}
+        return {}, False
     result: dict[tuple[str, int], Mapping[str, Any]] = {}
     for row in rows:
         if not isinstance(row, Mapping):
-            continue
+            return {}, False
         target = row.get("target")
         horizon = row.get("horizon_hours")
-        if isinstance(target, str) and isinstance(horizon, int) and not isinstance(horizon, bool):
-            result[(target, horizon)] = row
-    return result
+        if (
+            not isinstance(target, str)
+            or not target
+            or isinstance(horizon, bool)
+            or not isinstance(horizon, int)
+            or horizon < 1
+        ):
+            return {}, False
+        key = (target, horizon)
+        if key in result:
+            return {}, False
+        result[key] = row
+    return result, True
 
 
 def _plain_json(value: Any) -> Any:
@@ -63,19 +83,25 @@ def _promotion_view(evaluation: HoldoutEvaluation) -> Any:
 def _cell_gate(
     evaluation: HoldoutEvaluation,
     incumbent: HoldoutEvaluation,
+    expected: set[tuple[str, int]],
 ) -> dict[str, Any]:
-    current = _cell_map(evaluation)
-    baseline = _cell_map(incumbent)
-    expected = set(baseline)
+    current, current_well_formed = _cell_map(evaluation)
+    baseline, baseline_well_formed = _cell_map(incumbent)
     deltas: dict[str, float] = {}
     failures: list[str] = []
-    if not expected or set(current) != expected:
+    current_complete = current_well_formed and set(current) == expected
+    baseline_complete = baseline_well_formed and set(baseline) == expected
+    if not expected or not current_complete or not baseline_complete:
+        if not current_complete:
+            failures.append("objective_grid_incomplete")
+        if not baseline_complete:
+            failures.append("incumbent_objective_grid_incomplete")
         return {
             "complete": False,
             "coverage_pass": False,
             "no_regression": False,
             "worst_cell_delta": None,
-            "failures": ["objective_grid_incomplete"],
+            "failures": failures or ["objective_grid_incomplete"],
         }
     for key in sorted(expected):
         candidate_row = current[key]
@@ -182,6 +208,11 @@ def build_generation_comparison(
     if len({item.evaluator_digest for item in evaluations}) != 1:
         raise ValueError("holdout evaluations must share one evaluator digest")
     profile = fitness_profile or FitnessProfile()
+    expected_grid = {
+        (target, horizon)
+        for target in profile.expected_targets
+        for horizon in profile.expected_horizons
+    }
     assessments = assess_generation_selection(
         tuple(_promotion_view(item) for item in finalist_evaluations),
         _promotion_view(incumbent),
@@ -192,7 +223,7 @@ def build_generation_comparison(
     eligible_finalists = []
     for item in finalist_evaluations:
         scientific_gate = _gate(item)
-        cell_gate = _cell_gate(item, incumbent)
+        cell_gate = _cell_gate(item, incumbent, expected_grid)
         selection = assessment_by_candidate[item.scope.candidate_id]
         stability_floor = selection.selection_stability_floor
         delta = item.score - incumbent.score

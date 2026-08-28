@@ -131,7 +131,7 @@
         valid: true,
         raw: raw,
         schedule: normalizedOptimizationSchedule(raw),
-        sample_agent_batch_size: strictInteger(raw.sample_agent_batch_size, "网关 origin wave 上限", 1, 128),
+        sample_agent_batch_size: strictInteger(raw.sample_agent_batch_size, "单时点向量单元容量", 9, 9),
         candidate_concurrency: strictInteger(raw.candidate_concurrency, "候选并发数", 1, 8),
         sample_concurrency: strictInteger(raw.sample_concurrency, "逐样本并发请求数", 1, sampleConcurrencyMaximum)
       };
@@ -147,7 +147,7 @@
       + " · batch " + shown(raw.local_batch_origin_count)
       + " · 每批改动 " + shown(raw.max_local_edits_per_batch)
       + " · 留出 " + shown(raw.selection_holdout_origin_count)
-      + " · wave " + shown(raw.sample_agent_batch_size)
+      + " · 向量单元 " + shown(raw.sample_agent_batch_size)
       + " · 候选并发 " + shown(raw.candidate_concurrency)
       + " · 样本并发 " + shown(raw.sample_concurrency);
   }
@@ -256,10 +256,10 @@
       ["单轮执行预算", formatNumber(screeningCandidateOrigins) + " + " + formatNumber(formalCandidateOrigins) + " + " + formatNumber(holdoutCandidateOrigins) + " = " + formatNumber(generationCandidateOrigins) + " candidate-origins = " + formatNumber(generationScoringCells) + " cells"],
       ["全程执行预算", formatNumber(runCandidateOrigins) + " candidate-origins / " + formatNumber(runScoringCells) + " cells；" + capacityOriginText],
       ["服务端因果容量", state.cohortCapacityLoading ? "正在核验" : capacity ? cohortCapacityLabel(capacity) : state.cohortCapacityError || "等待核验"],
-      ["请求组织", "按因果预测起点组成 origin wave · wave 上限 " + formatNumber(microbatch) + " · 实际完成数以运行进度为准"],
-      ["并发上限", formatNumber(candidateConcurrency) + " 个编排候选；两条 lane 共享 " + formatNumber(concurrency) + " 个 run 级在飞请求"],
+      ["请求组织", "每个预测时点使用一条完整向量链 · " + formatNumber(microbatch) + " 个评分单元原子提交"],
+      ["并发上限", formatNumber(candidateConcurrency) + " 个编排候选；两条 lane 共享 " + formatNumber(concurrency) + " 条 run 级预测时点链准入"],
       ["候选总预算", formatNumber(budget.requested_max_candidates) + " 个（至少 " + formatNumber(budget.required_candidates) + " 个）"],
-      ["上下文与输出", "不设跨调用的逐样本 Token 总预算；每次 sample 子模型输出最多 2,048 tokens"],
+      ["上下文与输出", "不设跨调用的逐样本 Token 总预算；Planner/Repair 最多 4,096 tokens，Critic 最多 2,048 tokens"],
       ["复现与检索", ($("#fixed-seed").checked ? "固定种子" : "记录生成种子") + " · " + ($("#knowledge-online-enabled").checked ? "在线检索" : "内置目录")]
     ];
     $("#parameter-summary").innerHTML = values.map(function (item) {

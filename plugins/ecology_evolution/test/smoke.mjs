@@ -950,7 +950,7 @@ assert.equal(archivedRun.archived_at, "2026-08-17T00:00:00Z");
 const waitingRun = modelSandbox.normalizeRun({
   run_id: "run:waiting", status: "running", generation: 0, candidates_count: 0,
   total_generations: 2, candidates_per_generation: 4, max_candidates: 8, seed_policy: "fixed",
-  candidate_concurrency: 4, sample_agent_batch_size: 64, sample_concurrency: 2,
+  candidate_concurrency: 4, sample_agent_batch_size: 9, sample_concurrency: 2,
   token_limit: 100000000, token_budget_scope: "sample_agent_gateway_calls_only@1",
   run_wide_accounting_complete: false,
   budget: {max_generations: 2, candidates_per_generation: 4, max_candidates: 8, token_limit: 100000000},
@@ -958,6 +958,7 @@ const waitingRun = modelSandbox.normalizeRun({
     dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a",
     review_model_id: "judge-a", autonomous_mode: true, model_workflow: "research_compile_evolve@1",
     knowledge_online_enabled: true,
+    fitness_profile: {expected_targets: ["air_temperature", "relative_humidity", "co2_concentration"], expected_horizons: [1, 6, 24]},
     optimization_protocol: "top2_adaptive_epoch@1",
     optimization_schedule: {
       schema_version: "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
@@ -984,11 +985,9 @@ modelSandbox.document.querySelector = (selector) => selector === "#process-summa
 modelSandbox.renderProcessSummary(waitingRun);
 assert.ok(processSummaryNode.innerHTML.includes("逐样本智能体 Token 硬预算"));
 assert.ok(processSummaryNode.innerHTML.includes("仅计 planner / repair / critic；不含 research / proposal / judge"));
-for (const configuredExecutionParameter of ["入围候选轨迹", "Top 2 各 10 × 50 origins", "候选并发", "4 个候选", "网关 origin wave", "64 个 origins", "逐样本并发", "2 个在飞请求"]) {
+for (const configuredExecutionParameter of ["入围候选轨迹", "Top 2 各 10 × 50 origins", "候选并发", "4 个候选", "单时点向量链", "3 目标 × 3 时距 = 9", "逐样本并发", "2 条预测时点链准入"]) {
   assert.ok(processSummaryNode.innerHTML.includes(configuredExecutionParameter));
 }
-assert.ok(processSummaryNode.innerHTML.includes("origin wave"));
-assert.ok(processSummaryNode.innerHTML.includes("实际完成数以运行进度为准"));
 for (const holdoutDetail of ["轮末同 cohort 比较", "F1 / F2 / 上一冠军各 169 origins", "单轮执行预算", "1,763 candidate-origins"]) {
   assert.ok(processSummaryNode.innerHTML.includes(holdoutDetail));
 }
@@ -1496,7 +1495,7 @@ assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("全�
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("当前初筛 1 / 256 个预测时点"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("宿主并发 64 / 64"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("宿主等待 191"));
-assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("DSH 在飞 8"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("DSH 子任务未终结 8"));
 assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("2 wave"), false);
 assert.ok(!monitorNodes["#execution-sample-progress"].textContent.includes("Provider 等待"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("当前阶段待提交 247"));
@@ -1550,7 +1549,7 @@ const failedSettlementRun = {
   },
 };
 modelSandbox.renderExecutionMonitor(failedSettlementRun);
-for (const text of ["全轮预测时点进度：44 / 1,763", "当前初筛 44 / 256 个预测时点", "成功 0", "失败 44", "子任务失败请求 78", "结构化错误 78"]) {
+for (const text of ["全轮预测时点进度：44 / 1,763", "当前初筛 44 / 256 个预测时点", "成功 0", "失败 44", "子任务失败请求 78", "子模型终止错误 78"]) {
   assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes(text), `missing failed settlement detail: ${text}`);
 }
 const staleCandidateStage = {
@@ -1582,7 +1581,7 @@ modelSandbox.renderAutonomyProgress(formalLiveRun);
 assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "模型执行中");
 modelSandbox.renderExecutionMonitor(formalLiveRun);
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("全轮预测时点进度：306 / 1,763"));
-assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("当前正式评测 50 / 1,000 个预测时点"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("正式阶段累计 50 / 1,000 个预测时点"));
 const holdoutLiveRun = {
   ...formalLiveRun,
   id: "run:holdout-live",
@@ -1600,7 +1599,7 @@ const holdoutLiveRun = {
   },
 };
 modelSandbox.renderExecutionMonitor(holdoutLiveRun);
-assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("当前留出评测 138 / 507 个预测时点"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("留出阶段累计 138 / 507 个预测时点"));
 
 const staleButActiveDshRun = {
   ...screeningRun,
@@ -1703,7 +1702,7 @@ const pausedDrainingRun = {
   },
 };
 modelSandbox.renderExecutionMonitor(pausedDrainingRun);
-for (const text of ["暂停快照 DSH 在飞 3", "当前阶段待提交 40", "待结算 5"]) {
+for (const text of ["暂停快照未终结子任务 3", "当前阶段待提交 40", "待结算 5"]) {
   assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes(text), `missing paused drain detail: ${text}`);
 }
 assert.ok(!monitorNodes["#execution-sample-progress"].textContent.includes("暂停快照 Provider 等待"));
@@ -2224,7 +2223,7 @@ modelSandbox.request = async (path, options) => {
   assert.equal(options.body.optimization_schedule.selection_holdout_origin_count, 169);
   assert.equal(options.body.optimization_schedule.local_evaluation_mode, "prequential");
   assert.equal(options.body.candidate_concurrency, 4);
-  assert.equal(options.body.sample_agent_batch_size, 64);
+  assert.equal(options.body.sample_agent_batch_size, 9);
   assert.equal(options.body.sample_concurrency, 64);
   return {
     projection: {
@@ -2235,7 +2234,8 @@ modelSandbox.request = async (path, options) => {
         dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a", review_model_id: "judge-a",
         optimization_protocol: "top2_adaptive_epoch@1",
         optimization_schedule: options.body.optimization_schedule,
-        candidate_concurrency: 4, sample_agent_batch_size: 64, sample_concurrency: 64,
+        candidate_concurrency: 4, sample_agent_batch_size: 9, sample_concurrency: 64,
+        fitness_profile: {expected_targets: ["air_temperature", "relative_humidity", "co2_concentration"], expected_horizons: [1, 6, 24]},
       },
     },
   };
@@ -2257,7 +2257,7 @@ assert.deepEqual(
 );
 assert.equal(newlyQueuedRun.optimization_schedule.formal_origin_count_per_finalist, 500);
 assert.equal(newlyQueuedRun.candidate_concurrency, 4);
-assert.equal(newlyQueuedRun.sample_agent_batch_size, 64);
+assert.equal(newlyQueuedRun.sample_agent_batch_size, 9);
 assert.equal(newlyQueuedRun.sample_concurrency, 64);
 assert.equal(modelSandbox.state.createStatus.state, "queued");
 assert.equal(modelSandbox.state.candidateSelectionPinned, false);
@@ -2280,7 +2280,8 @@ modelSandbox.request = async (path, options) => {
         dataset_id: "dataset-a", episode_id: "episode-a", strategy_model_id: "policy-a", review_model_id: "judge-a",
         optimization_protocol: "top2_adaptive_epoch@1",
         optimization_schedule: options.body.optimization_schedule,
-        candidate_concurrency: 3, sample_agent_batch_size: 16, sample_concurrency: 3,
+        candidate_concurrency: 3, sample_agent_batch_size: 9, sample_concurrency: 3,
+        fitness_profile: {expected_targets: ["air_temperature", "relative_humidity", "co2_concentration"], expected_horizons: [1, 6, 24]},
       },
     },
   };
@@ -2291,7 +2292,7 @@ const nonDefaultRun = await modelSandbox.createRun({
   rounds: 3, candidates_per_generation: 4, max_candidates: 12,
   formal_origin_count: 600, local_batch_origin_count: 50,
   max_local_edits_per_batch: 3, selection_holdout_origin_count: 200,
-  candidate_concurrency: 3, sample_agent_batch_size: 16, sample_concurrency: 3,
+  candidate_concurrency: 3, sample_agent_batch_size: 9, sample_concurrency: 3,
   fixed_seed: true,
 });
 assert.equal(nonDefaultCreateBody.budget.max_generations, 3);
@@ -2302,20 +2303,20 @@ assert.equal(nonDefaultCreateBody.optimization_schedule.max_local_edits_per_batc
 assert.equal(nonDefaultCreateBody.optimization_schedule.selection_holdout_origin_count, 200);
 assert.equal(Object.hasOwn(nonDefaultCreateBody, "samples_per_update"), false);
 assert.equal(nonDefaultCreateBody.candidate_concurrency, 3);
-assert.equal(nonDefaultCreateBody.sample_agent_batch_size, 16);
+assert.equal(nonDefaultCreateBody.sample_agent_batch_size, 9);
 assert.equal(nonDefaultCreateBody.sample_concurrency, 3);
 assert.equal(nonDefaultRun.total_generations, 3);
 assert.equal(nonDefaultRun.candidates_per_generation, 4);
 assert.equal(nonDefaultRun.optimization_schedule.formal_origin_count_per_finalist, 600);
 assert.equal(nonDefaultRun.candidate_concurrency, 3);
-assert.equal(nonDefaultRun.sample_agent_batch_size, 16);
+assert.equal(nonDefaultRun.sample_agent_batch_size, 9);
 assert.equal(nonDefaultRun.sample_concurrency, 3);
 
 modelSandbox.document.querySelector = (selector) => selector === "#process-summary" ? processSummaryNode : modelQuerySelector(selector);
 modelSandbox.renderProcessSummary(nonDefaultRun);
 for (const nonDefaultExecutionParameter of [
   "每轮候选", "4 个版本",
-  "候选并发", "3 个候选", "网关 origin wave", "16 个 origins", "逐样本并发", "3 个在飞请求",
+  "候选并发", "3 个候选", "单时点向量链", "3 目标 × 3 时距 = 9", "逐样本并发", "3 条预测时点链准入",
 ]) {
   assert.ok(processSummaryNode.innerHTML.includes(nonDefaultExecutionParameter), nonDefaultExecutionParameter);
 }
@@ -3024,7 +3025,7 @@ const budgetNodes = {
   "#local-batch-origin-count": makeControlNode("50"),
   "#max-local-edits-per-batch": makeControlNode("2"),
   "#selection-holdout-origin-count": makeControlNode("169"),
-  "#sample-agent-batch-size": makeControlNode("64"),
+  "#sample-agent-batch-size": makeControlNode("9"),
   "#sample-concurrency": makeControlNode("64"),
   "#max-candidates": makeControlNode("20"),
   "#max-candidates-help": makeControlNode(),
@@ -3072,7 +3073,7 @@ const parameterNodes = {
   "#local-batch-origin-count": makeControlNode("50"),
   "#max-local-edits-per-batch": makeControlNode("2"),
   "#selection-holdout-origin-count": makeControlNode("169"),
-  "#sample-agent-batch-size": makeControlNode("64"),
+  "#sample-agent-batch-size": makeControlNode("9"),
   "#candidate-concurrency": makeControlNode("4"),
   "#sample-concurrency": makeControlNode("64"),
   "#parameter-summary-pill": makeControlNode(),
@@ -3189,7 +3190,7 @@ assert.match(html, /id="show-archived-runs"/);
 assert.match(html, /id="archive-button"/);
 assert.match(html, /id="delete-button"/);
 assert.equal(manifest.display_name, "生态模型进化工作台");
-assert.equal(manifest.version, "0.3.52");
+assert.equal(manifest.version, "0.3.54");
 assert.equal(manifest.entrypoint.file, "index.html");
 assert.equal(manifest.entrypoint.route, "/plugins/ecology/evolution/");
 assert.equal(manifest.development_only, false);
@@ -3324,13 +3325,12 @@ assert.match(html, /id="local-batch-origin-count"[^>]*name="local_batch_origin_c
 assert.match(html, /id="max-local-edits-per-batch"[^>]*name="max_local_edits_per_batch"[^>]*value="2"/);
 assert.match(html, /id="selection-holdout-origin-count"[^>]*name="selection_holdout_origin_count"[^>]*value="169"/);
 assert.match(html, /id="candidate-concurrency"[^>]*value="4"/);
-assert.match(html, /id="sample-agent-batch-size"[^>]*value="64"/);
+assert.match(html, /id="sample-agent-batch-size"[^>]*value="9"[^>]*readonly/);
 assert.match(html, /id="sample-concurrency"[^>]*max="128"[^>]*value="64"/);
 assert.ok(html.includes("每个入围候选 10 × 50"));
 assert.match(html, /id="max-candidates"[^>]*value="20"/);
 assert.doesNotMatch(html, /id="token-limit"/);
-assert.ok(html.includes("按因果预测起点组织请求"));
-assert.ok(html.includes("实际完成数以运行进度为准"));
+assert.ok(html.includes("单个预测时点始终由一条向量链原子处理"));
 assert.doesNotMatch(app, /wavesPerCandidate|每候选约/);
 const presetDirectories = fs.readdirSync(
   path.resolve(root, "../../integrations/dsh_ecology_plugin/presets"),
@@ -3341,7 +3341,7 @@ const activePresetDirectories = [
   "ecology-coordinator-v4",
   "ecology-researcher-v7",
   "ecology-candidate-proposer-v4",
-  "ecology-sample-planner-v4",
+  "ecology-sample-planner-v5",
   "ecology-sample-critic-v4",
   "ecology-generation-judge-v7",
 ];
@@ -3352,7 +3352,7 @@ for (const field of ["rounds", "candidates_per_generation", "formal_origin_count
 assert.match(app, /function syncCandidateBudget\(options\)/);
 assert.match(app, /\$\("#start-button"\)\.disabled = state\.busy;/);
 assert.ok(app.includes("暂时不能创建："));
-assert.ok(app.includes("固定 4 候选、候选并发、origin wave 与逐样本并发参数有效"));
+assert.ok(app.includes("固定 4 候选、单时点完整向量与逐样本并发参数有效"));
 for (const adaptiveEventLabel of [
   "candidate.screening_recorded", "formal.selection_cohort_frozen",
   "candidate.screened_out", "formal.batch_started", "formal.batch_evaluated",

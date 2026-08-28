@@ -110,6 +110,23 @@ def _evaluation(
 
 
 class GenerationComparisonTests(unittest.TestCase):
+    @staticmethod
+    def _with_target_rows(
+        evaluation: HoldoutEvaluation,
+        rows: list[dict],
+    ) -> HoldoutEvaluation:
+        metrics = evaluation.to_dict()["metrics"]
+        metrics["targets"] = rows
+        return HoldoutEvaluation(
+            evaluation_id=evaluation.evaluation_id,
+            scope=evaluation.scope,
+            score=evaluation.score,
+            passed=evaluation.passed,
+            metrics=metrics,
+            evaluator_digest=evaluation.evaluator_digest,
+            created_at=evaluation.created_at,
+        )
+
     def test_selects_best_eligible_finalist_and_records_delta(self):
         evaluations = (
             _evaluation(HoldoutArm.FINALIST_1, "candidate:a", "revision:a", 0.4, skill=0.2),
@@ -228,6 +245,90 @@ class GenerationComparisonTests(unittest.TestCase):
             comparison.gate_results["arms"]["finalist_1"]["promotion_assessment"]
             ["primary_selection_gate"]
         )
+
+    def test_shared_incomplete_reported_grid_cannot_define_its_own_expected_grid(self):
+        evaluations = tuple(
+            self._with_target_rows(item, [item.to_dict()["metrics"]["targets"][0]])
+            for item in (
+                _evaluation(
+                    HoldoutArm.FINALIST_1,
+                    "candidate:a",
+                    "revision:a",
+                    0.65,
+                    skill=0.2,
+                ),
+                _evaluation(
+                    HoldoutArm.FINALIST_2,
+                    "candidate:b",
+                    "revision:b",
+                    0.7,
+                    skill=0.3,
+                ),
+                _evaluation(
+                    HoldoutArm.INCUMBENT,
+                    "candidate:inc",
+                    "revision:inc",
+                    0.6,
+                    skill=0.1,
+                ),
+            )
+        )
+
+        comparison = build_generation_comparison(
+            run_id="run:comparison",
+            generation=0,
+            cohort_digest=evaluations[0].scope.cohort_digest,
+            holdout_evaluations=evaluations,
+            incumbent_candidate_id="candidate:inc",
+        )
+
+        self.assertEqual(comparison.selected_candidate_id, "candidate:inc")
+        for arm in ("finalist_1", "finalist_2"):
+            gate = comparison.gate_results["arms"][arm]
+            self.assertFalse(gate["complete_objective_grid"])
+            self.assertFalse(gate["eligible"])
+            self.assertIn("objective_grid_incomplete", gate["failures"])
+
+    def test_duplicate_reported_cell_cannot_overwrite_into_a_complete_grid(self):
+        finalist = _evaluation(
+            HoldoutArm.FINALIST_2,
+            "candidate:b",
+            "revision:b",
+            0.7,
+            skill=0.3,
+        )
+        rows = finalist.to_dict()["metrics"]["targets"]
+        finalist = self._with_target_rows(finalist, [*rows, dict(rows[0])])
+        evaluations = (
+            _evaluation(
+                HoldoutArm.FINALIST_1,
+                "candidate:a",
+                "revision:a",
+                0.4,
+                skill=0.2,
+            ),
+            finalist,
+            _evaluation(
+                HoldoutArm.INCUMBENT,
+                "candidate:inc",
+                "revision:inc",
+                0.6,
+                skill=0.1,
+            ),
+        )
+
+        comparison = build_generation_comparison(
+            run_id="run:comparison",
+            generation=0,
+            cohort_digest=evaluations[0].scope.cohort_digest,
+            holdout_evaluations=evaluations,
+            incumbent_candidate_id="candidate:inc",
+        )
+
+        gate = comparison.gate_results["arms"]["finalist_2"]
+        self.assertFalse(gate["complete_objective_grid"])
+        self.assertFalse(gate["eligible"])
+        self.assertEqual(comparison.selected_candidate_id, "candidate:inc")
 
 
 if __name__ == "__main__":

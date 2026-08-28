@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from ecologyrsi_dsh import EventLedger, EvolutionDirector, FakeDSHAdapter, TaskManifest
-from ecologyrsi_dsh.api import generation_execution
+from ecologyrsi_dsh.api import formal_trajectory, generation_execution
 from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.core.screening import screening_cohort_digest
 from ecologyrsi_dsh.core.trajectory import (
@@ -16,6 +17,7 @@ from ecologyrsi_dsh.core.trajectory import (
     GenerationComparison,
     HoldoutArm,
     HoldoutEvaluation,
+    LocalEditOutcome,
     RevisionAdvanceReason,
     RevisionStatus,
 )
@@ -24,6 +26,7 @@ from ecologyrsi_dsh.evaluators.epoch_cohorts import (
     plan_generation_selection_cohorts,
     plan_run_adaptation_cohort,
 )
+from ecologyrsi_dsh.evolution.local_edits import LocalEditProposal, LocalEditResult
 from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
 
 
@@ -140,6 +143,213 @@ class TrajectoryEventReplayTests(unittest.TestCase):
                 prediction_cell_count=64,
                 cohort_digest=_sha("missing-r0-screening"),
             )
+
+    def test_candidate_revision_retry_ignores_only_created_at(self) -> None:
+        candidate = self.candidates[0]
+        parent = self.revisions[candidate.candidate_id]
+        first = CandidateRevision(
+            revision_id=f"revision:{candidate.candidate_id}:batch:1",
+            run_id=self.run_id,
+            generation=0,
+            candidate_id=candidate.candidate_id,
+            parent_revision_id=parent.revision_id,
+            source_batch_index=0,
+            genome={"parameters": {"slot": 100}},
+            genome_digest=_sha("child-genome"),
+            behavior_digest=_sha("child-behavior"),
+            mutation_digest=_sha("child-mutation"),
+            status=RevisionStatus.ACTIVE,
+            created_at="2026-08-28T00:00:00+00:00",
+        )
+        persisted = self.director.create_candidate_revision(self.run_id, first)
+        replay = CandidateRevision.from_dict(
+            {
+                **first.to_dict(),
+                "created_at": "2026-08-28T00:01:00+00:00",
+            }
+        )
+
+        recovered = self.director.create_candidate_revision(self.run_id, replay)
+
+        self.assertEqual(recovered, persisted)
+        self.assertEqual(recovered.created_at, first.created_at)
+        self.assertEqual(
+            sum(
+                event.kind == "CandidateRevisionCreated"
+                and event.payload["revision"]["revision_id"] == first.revision_id
+                for event in self.director.state(self.run_id).events
+            ),
+            1,
+        )
+
+    def test_local_edit_recovery_reuses_persisted_child_without_reauthoring(
+        self,
+    ) -> None:
+        """Resume the exact crash window between child creation and edit decision."""
+
+        candidate = self._freeze_top2()[0]
+        parent = self.revisions[candidate.candidate_id]
+        self.director.start_formal_trajectory(
+            self.run_id,
+            candidate.candidate_id,
+            parent.revision_id,
+            self.schedule.batch_count,
+        )
+        batch = self.director.start_formal_batch(
+            self.run_id,
+            candidate.candidate_id,
+            parent.revision_id,
+            0,
+        )
+        scope = EvaluationScope(
+            run_id=self.run_id,
+            generation=0,
+            candidate_id=candidate.candidate_id,
+            candidate_revision_id=parent.revision_id,
+            phase=EvaluationPhase.FORMAL_BATCH,
+            cohort_digest=batch.cohort_digest,
+            origin_count=batch.origin_count,
+            batch_index=0,
+        )
+        self.director.record_formal_batch_evaluation(
+            self.run_id,
+            BatchEvaluation(
+                evaluation_id=f"evaluation:{candidate.candidate_id}:0",
+                scope=scope,
+                score=0.5,
+                passed=True,
+                metrics={
+                    "constraint_violations": 0,
+                    "sample_execution": {"coverage_pass": True},
+                },
+                evaluator_digest=_sha("local-edit-recovery-evaluator"),
+            ),
+        )
+        proposal = LocalEditProposal(
+            decision="mutate",
+            operations=(
+                {
+                    "op": "set_bounded_parameter",
+                    "name": "ridge_alpha",
+                    "value": 0.5,
+                },
+            ),
+            evidence_refs=("batch:score",),
+            expected_effect_cells=("air_temperature@1h",),
+            risk_cells=(),
+        )
+        self.director.record_local_edit_proposal(
+            self.run_id,
+            {
+                "proposal_id": f"local-edit:{candidate.candidate_id}:0",
+                "candidate_id": candidate.candidate_id,
+                "batch_index": 0,
+                "evidence_scope_digest": scope.scope_key,
+                "proposal": proposal.to_dict(),
+            },
+        )
+        child_payload = {"parameters": {"slot": 100}}
+        child_genome_digest = _sha("recovered-child-genome")
+        child_behavior_digest = _sha("recovered-child-behavior")
+        child_mutation_digest = _sha("recovered-child-mutation")
+        child_revision_id = f"revision:{candidate.candidate_id}:batch:1"
+        persisted_child = CandidateRevision(
+            revision_id=child_revision_id,
+            run_id=self.run_id,
+            generation=0,
+            candidate_id=candidate.candidate_id,
+            parent_revision_id=parent.revision_id,
+            source_batch_index=0,
+            genome=child_payload,
+            genome_digest=child_genome_digest,
+            behavior_digest=child_behavior_digest,
+            mutation_digest=child_mutation_digest,
+            status=RevisionStatus.ACTIVE,
+            created_at="2026-08-28T00:00:00+00:00",
+        )
+        self.director.create_candidate_revision(self.run_id, persisted_child)
+        child = SimpleNamespace(
+            to_dict=lambda: child_payload,
+            genome_digest=child_genome_digest,
+            behavior_digest=child_behavior_digest,
+            lineage={"mutation_digest": child_mutation_digest},
+        )
+        context = SimpleNamespace(
+            candidate_revision_id=parent.revision_id,
+            evidence_scope_digest=scope.scope_key,
+        )
+        endpoint = SimpleNamespace(server=SimpleNamespace(director=self.director))
+
+        with (
+            patch.object(
+                formal_trajectory,
+                "_local_edit_context",
+                return_value=context,
+            ),
+            patch.object(formal_trajectory, "_local_edit_proposal") as authored,
+            patch.object(
+                formal_trajectory.EcologyEvolutionPluginGenome,
+                "from_dict",
+                return_value=object(),
+            ),
+            patch.object(
+                formal_trajectory,
+                "apply_or_reject_local_edit_bundle",
+                return_value=LocalEditResult(
+                    LocalEditOutcome.APPLIED,
+                    tuple(proposal.operations),
+                    child,
+                    digest(proposal.to_dict()),
+                ),
+            ),
+        ):
+            progressed = formal_trajectory.execute_next_local_edit(
+                endpoint,
+                self.run_id,
+                candidate.candidate_id,
+            )
+
+        self.assertTrue(progressed)
+        authored.assert_not_called()
+        state = self.director.state(self.run_id)
+        outcome = next(
+            item
+            for item in state.local_edit_outcomes
+            if item["candidate_id"] == candidate.candidate_id
+            and item["batch_index"] == 0
+        )
+        self.assertEqual(outcome["outcome"], LocalEditOutcome.APPLIED.value)
+        self.assertEqual(outcome["active_revision_id"], child_revision_id)
+        activation = state.revision_activation_for(candidate.candidate_id, 0)
+        self.assertIsNotNone(activation)
+        self.assertEqual(activation.to_revision_id, child_revision_id)
+        self.assertEqual(
+            sum(
+                event.kind == "CandidateRevisionCreated"
+                and event.payload["revision"]["revision_id"] == child_revision_id
+                for event in state.events
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                event.kind == "LocalEditDecided"
+                and event.payload["candidate_id"] == candidate.candidate_id
+                and event.payload["batch_index"] == 0
+                for event in state.events
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                event.kind == "TrajectoryRevisionAdvanced"
+                and event.payload["activation"]["candidate_id"]
+                == candidate.candidate_id
+                and event.payload["activation"]["batch_index"] == 0
+                for event in state.events
+            ),
+            1,
+        )
 
     def _freeze_top2(self) -> tuple:
         cohort = self.generation_cohorts.screening.cohort_digest
@@ -415,6 +625,59 @@ class TrajectoryEventReplayTests(unittest.TestCase):
         self.assertEqual(
             endpoint.server.evaluators.evaluate_scientific.call_count,
             2,
+        )
+
+    def test_generation_holdout_retry_preserves_first_created_at(self) -> None:
+        finalists = self._freeze_top2()
+        for candidate in finalists:
+            self._complete_lane(candidate)
+        incumbent = self.candidates[2]
+        bindings = {
+            HoldoutArm.FINALIST_1.value: {
+                "candidate_id": finalists[0].candidate_id,
+                "candidate_revision_id": self.revisions[
+                    finalists[0].candidate_id
+                ].revision_id,
+            },
+            HoldoutArm.FINALIST_2.value: {
+                "candidate_id": finalists[1].candidate_id,
+                "candidate_revision_id": self.revisions[
+                    finalists[1].candidate_id
+                ].revision_id,
+            },
+            HoldoutArm.INCUMBENT.value: {
+                "candidate_id": incumbent.candidate_id,
+                "candidate_revision_id": self.revisions[
+                    incumbent.candidate_id
+                ].revision_id,
+            },
+        }
+        first_time = datetime(2026, 8, 28, 0, 0, tzinfo=timezone.utc)
+        retry_time = datetime(2026, 8, 28, 0, 1, tzinfo=timezone.utc)
+        with patch("ecologyrsi_dsh.core.models.datetime") as clock:
+            clock.now.return_value = first_time
+            first = self.director.freeze_generation_holdout(
+                self.run_id,
+                0,
+                self.generation_cohorts.holdout.cohort_digest,
+                bindings,
+            )
+            clock.now.return_value = retry_time
+            recovered = self.director.freeze_generation_holdout(
+                self.run_id,
+                0,
+                self.generation_cohorts.holdout.cohort_digest,
+                bindings,
+            )
+
+        self.assertEqual(recovered, first)
+        self.assertEqual(recovered.created_at, first_time.isoformat(timespec="milliseconds"))
+        self.assertEqual(
+            sum(
+                event.kind == "GenerationHoldoutFrozen"
+                for event in self.director.state(self.run_id).events
+            ),
+            1,
         )
 
     def test_screened_out_incumbent_holdout_opens_scoped_checkpoint(self) -> None:

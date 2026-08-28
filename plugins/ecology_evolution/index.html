@@ -136,8 +136,8 @@
                   </div></section>
                   <section class="parameter-group" data-group="throughput"><header><strong>吞吐</strong><span>两条 lane 共享同一 run 级限制</span></header><div class="form-grid parameter-grid">
                     <label><span>候选并发数</span><input id="candidate-concurrency" name="candidate_concurrency" form="start-form" type="number" min="1" max="8" step="1" value="4" required><small>候选/lane 编排并发，不会乘大逐样本真实在飞上限。</small></label>
-                    <label><span>网关 origin wave 上限</span><input id="sample-agent-batch-size" name="sample_agent_batch_size" form="start-form" type="number" min="1" max="128" step="1" value="64" required><small>按因果预测起点组织请求；实际完成数以运行进度为准。</small></label>
-                    <label><span>逐样本并发请求数</span><input id="sample-concurrency" name="sample_concurrency" form="start-form" type="number" min="1" max="128" step="1" value="64" required><small>同一 run 同时在飞请求默认 64、最高 128；不改变 cohort。</small></label>
+                    <label><span>单时点向量单元容量</span><input id="sample-agent-batch-size" name="sample_agent_batch_size" form="start-form" type="number" value="9" readonly aria-readonly="true" required><small>固定为 3 个目标 × 3 个时距；单个预测时点始终由一条向量链原子处理。</small></label>
+                    <label><span>逐样本并发请求数</span><input id="sample-concurrency" name="sample_concurrency" form="start-form" type="number" min="1" max="128" step="1" value="64" required><small>同一 run 最多同时准入 64 条完整预测时点链，最高 128；Provider 另行平滑放量。</small></label>
                   </div></section>
                   <section class="parameter-group parameter-policy" data-group="scientific-policy"><header><strong>科学策略（只读）</strong><span>完整 origin 原子提交</span></header><div class="parameter-policy-grid"><span>64 时点初筛</span><span>现有确定性 Top 2</span><span>完整 9 评分单元</span><span>轮末三臂同 cohort</span></div></section>
                 </div>
@@ -301,7 +301,7 @@
             </section>
           </section>
 
-          <footer class="footer-note"><span>插件版本 0.3.52 · 可交付候选版（未签名）</span><span id="last-updated">尚未同步</span></footer>
+          <footer class="footer-note"><span>插件版本 0.3.54 · 可交付候选版（未签名）</span><span id="last-updated">尚未同步</span></footer>
         </main>
       </div>
     </div>

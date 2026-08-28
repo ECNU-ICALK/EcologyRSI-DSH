@@ -2314,7 +2314,16 @@ class EvolutionDirector:
         except KeyError:
             existing = None
         if existing is not None:
-            if existing.to_dict() != revision.to_dict():
+            # ``created_at`` describes the successful durable insert, not the
+            # logical revision identity.  A process can stop after committing
+            # CandidateRevisionCreated but before the caller observes success;
+            # reconstructing that deterministic child on resume necessarily
+            # gives it a new local timestamp.  Preserve the original timestamp
+            # while still rejecting identity or lifecycle-status drift.
+            if (
+                existing.identity_dict() != revision.identity_dict()
+                or existing.status is not revision.status
+            ):
                 raise ValueError("revision_id already belongs to another revision")
             return existing
         if revision.parent_revision_id is None:
@@ -2752,7 +2761,15 @@ class EvolutionDirector:
             arm_bindings=arm_bindings,
         )
         if existing is not None:
-            if existing.to_dict() != holdout.to_dict():
+            existing_identity = existing.to_dict()
+            requested_identity = holdout.to_dict()
+            # As with candidate revisions, the timestamp belongs to the first
+            # committed freeze event.  Rebuilding the same deterministic
+            # three-arm contract after a crash must return that event instead
+            # of conflicting only because wall-clock time advanced.
+            existing_identity.pop("created_at", None)
+            requested_identity.pop("created_at", None)
+            if existing_identity != requested_identity:
                 raise ValueError("generation already has a different holdout")
             return existing
         completed = [

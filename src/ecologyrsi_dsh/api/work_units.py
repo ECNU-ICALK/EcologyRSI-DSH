@@ -8,6 +8,7 @@ from typing import Any
 
 from ..core.models import RunStatus
 from ..core.trajectory import TrajectoryStatus
+from ..evolution.schedule import OPTIMIZATION_PROTOCOL
 
 
 def _formal_lane_priority(
@@ -77,6 +78,34 @@ def execute_next_adaptive_work_unit(endpoint: Any, run_id: str) -> bool:
             return False
         _freeze_adaptive_generation_inputs(endpoint, run_id, batch.generation)
         return True
+    if (
+        state.task_manifest.metadata.get("optimization_protocol")
+        == OPTIMIZATION_PROTOCOL
+        and state.task_manifest.metadata.get("cohort_capacity_enforced") is True
+    ):
+        generation_candidates = tuple(
+            item
+            for item in state.candidates
+            if item.generation == batch.generation
+        )
+        inputs_complete = (
+            len(generation_candidates) == batch.batch_size
+            and all(
+                state.initial_revision_for(item.candidate_id) is not None
+                for item in generation_candidates
+            )
+            and state.run_adaptation_cohort is not None
+            and state.generation_cohort_for(batch.generation) is not None
+        )
+        if not inputs_complete:
+            # GenerationBatchStarted is the first durable boundary of an epoch.
+            # A crash immediately after it (or midway through spawning R0/cohort
+            # inputs) must resume that same batch rather than falling through to
+            # the screening gate and reporting a false no-progress condition.
+            if not _spawn_generation_candidates(endpoint, run_id, batch):
+                return False
+            _freeze_adaptive_generation_inputs(endpoint, run_id, batch.generation)
+            return True
     current = tuple(
         sorted(
             (
