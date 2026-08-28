@@ -28,10 +28,14 @@
     };
   });
   var demoRun = normalizeRun({
-    id: "运行-演示-001", status: "running", generation: 3, total_generations: 6, candidates_count: 5, max_candidates: 12,
+    id: "运行-演示-001", status: "running", generation: 3, total_generations: 5, candidates_count: 5, max_candidates: 20,
     projection_revision: 18, created_at: "2026-08-16T08:20:00Z", updated_at: "2026-08-16T08:36:00Z",
     manifest_digest: "sha256:demo-manifest-71c0", best_candidate_id: "候选-004",
-    execution_progress: { progress_percent: 58, completed_rounds: 3, total_rounds: 6, current_stage: "evaluation", active_candidate_id: "候选-005", status: "running" },
+    candidates_per_generation: 4, candidate_concurrency: 4, sample_agent_batch_size: 64, sample_concurrency: 64,
+    optimization_protocol: "top2_adaptive_epoch@1",
+    optimization_schedule: { screening_origin_count: 64, formal_origin_count_per_finalist: 500, local_batch_origin_count: 50, max_local_edits_per_batch: 2, selection_holdout_origin_count: 169 },
+    dsh_runtime: { native: true },
+    execution_progress: { progress_percent: 58, overall_progress_percent: 58, epoch_progress_percent: 58, completed_rounds: 3, total_rounds: 5, current_stage: "evaluation", active_candidate_id: "候选-005", status: "running" },
     execution_diagnostics: { execution_mode: "registered_lightweight", fit_method: "bias_fit", training_partition_rows: 144, training_eligible_examples: 144, training_used_examples: 144, training_skipped_examples: 0, evaluation_partition_rows: 48, evaluation_eligible_examples: 48, evaluation_used_examples: 48, evaluation_skipped_examples: 0, candidate_artifacts_count: 4, candidate_evaluations_count: 4, candidate_work_items: 192, fit_passes_completed: 4, fit_passes_per_candidate: 1, iterative_epoch_training: false, proposal_sources: { remote_model: 4, host_fallback: 1 }, remote_strategy_calls: 5, remote_strategy_successes: 4, remote_strategy_status: "partial_host_fallback", fallback_used: true, fallback_count: 1 },
     configuration: { domain_pack_id: "crop_soil_water", research_domain_id: "crop_soil_water", autonomous_mode: "model_led_research", model_workflow: "research_compile_evolve@1", dataset_id: "generated-toy-series@1", episode_id: "generated-toy-series@1:seed-0", prediction_model_id: "toy-rolling-water@1", strategy_id: "parameter_sweep@1", evaluator_id: "toy_time_forward@1", policy_model_id: "host_parameter_generator@1", judge_model_id: "rule_judge@1", slot: "bounded_predictor" },
     dataset: { id: "generated-toy-series@1", episode_id: "generated-toy-series@1:seed-0", partition: "training_fit", digest: "sha256:demo-dataset-8b42" },
