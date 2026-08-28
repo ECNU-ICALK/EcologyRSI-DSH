@@ -2,7 +2,7 @@
 
 一个把农业与生态预测研究中的“数据边界—模型调研—候选生成—科学评测—人工治理”串成可复现闭环的轻量 DSH 插件。
 
-> 当前交付：`0.3.49` 可交付候选版 · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
+> 当前交付：`0.3.50` 可交付候选版 · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
 
 ## 为什么做这个工作台
 
@@ -301,8 +301,9 @@ PYTHONPATH=src python -m ecologyrsi_dsh data fetch agc_tomato_2019
 
 ## DSH 原生 Agent 运行时
 
-0.3.49 新建运行使用 `dsh_native_plugin_evolution@1`：Agent Session、上下文压缩、
-subagent 和 Workflow 由 DSH 管理，Python 只提供科学工具与持久账本。安装后直接运行：
+0.3.50 新建运行使用 `dsh_native_plugin_evolution@1`：Agent Session、上下文压缩和
+一次性结构化 subagent 由 DSH 管理；逐 origin 的 `sample.plan` 使用直接子 Agent。
+Python 只提供科学工具与持久账本。安装后直接运行：
 
 ```bash
 ecologyrsi-dsh install-dsh-runtime --profile web
@@ -407,7 +408,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --samples-per-task 1 \
   --minimum-coverage 0.8 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.49-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.50-real-api-agent-tool-acceptance.json
 ```
 
 验收无论通过或失败都会原子写入 JSON 报告；省略 `--output` 时默认写到系统临时目录下的
@@ -501,7 +502,7 @@ sidecar 主前缀是 `/api`；浏览器通过 DSH 同源代理使用 `/api/ecolo
 | POST | `/api/runs/{id}/restore` | 恢复已归档运行 |
 | DELETE | `/api/runs/{id}` | 永久删除已归档终态运行，请求体必须精确确认 `confirm_run_id` |
 
-逐样本接口在评测开始前返回 `status=pending`，执行中返回 `running`，正常封口后返回 `completed`；候选异常终止且已有部分结果时返回 `aborted`。行顺序由完整评测 cohort 的固定 `sample_index` 决定。`raw_reward = |baseline - observed| - |predicted - observed|`，正值表示相对冻结评分基线降低了绝对误差；`normalized_reward = clip(raw_reward / training_fit_scale, -1, 1)` 用于跨目标学习信号。每行还返回 `model_reference_baseline`、`baseline_id`、`baseline_profile_digest` 和归一化奖励。失败行不得获得正 reward，并以 `prediction_source=scoring_fallback`、`scoring_fallback` 和 `scoring_fallback_source` 明确标识，不代表模型成功输出。
+逐样本接口在评测开始前返回 `status=pending`，执行中返回 `running`，正常封口后返回 `completed`；候选异常终止且已有部分结果时返回 `aborted`。行顺序由完整评测 cohort 的固定 `sample_index` 决定。成功行的 `raw_reward = |baseline - observed| - |predicted - observed|`，正值表示相对冻结评分基线降低了绝对误差；`normalized_reward = clip(raw_reward / training_fit_scale, -1, 1)` 用于跨目标学习信号。失败行在私有评分归档中保留固定最差惩罚，公开接口则返回 `prediction_source=failed_no_model_prediction`、`model_prediction_available=false`、`scoring_penalty_applied=true`，并将 `predicted`、误差和 reward 置空，不能被解释成模型输出。
 
 创建模型自主温室运行的完整显式请求示例（预测模型、搜索策略和评测器由服务端绑定）：
 
@@ -596,7 +597,8 @@ API 健康预检，直接按 900 秒请求窗口和 4 次传输重试执行。�
 进入远程路由；报告固定标记为不可晋级、不可生成训练资产、不可作为科学得分。
 
 当前原生执行协议由 DSH Web Profile 中的 Cordis 插件承载。角色 Agent Session、
-上下文压缩、模型路由、结构化子智能体和逐样本 Workflow 均由 DSH 执行；
+上下文压缩、模型路由和结构化子智能体由 DSH 执行；逐 origin `sample.plan`
+通过直接一次性子 Agent 执行，并在 Host 接受结构化结果后才计为远端完成；
 Python sidecar 只保留科学状态机、评测、幂等结果账本和治理边界。目录在运行时
 已绑定时返回 `harness_execution=dsh_native_agent_runtime` 与
 `official_harness_agent_loop=true`；当前交付只验收这一原生运行时路径。
@@ -608,7 +610,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --db /tmp/ecologyrsi-dsh-dsh-adapter.sqlite3 \
   --samples-per-task 1 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.49-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.50-real-api-agent-tool-acceptance.json
 ```
 
 构建 wheel、sdist 和完整交付包需要 `uv`：
@@ -632,12 +634,20 @@ PYTHONPATH=src python -m ecologyrsi_dsh summary run:demo --db /tmp/ecologyrsi-de
 - 对真实 AGC 数据，插件提交目录冻结的 `episode_id`；当前尚未实现跨 episode、跨团队联合评测。
 - `development`、`gate`、外部留出、隐藏和最终评测没有进入本地搜索保留闭环；插件也没有正式发布、回滚或实体控制权限。
 - DSH 接入包括本地 Web Profile Cordis 宿主插件、受限角色 preset、Session/压缩、
-  子智能体 Workflow、同源静态托管/API 代理与 Python 科学状态 sidecar；
+  结构化子智能体、同源静态托管/API 代理与 Python 科学状态 sidecar；
   仍未完成官方 OAuth、插件签名或市场发布。
 - 当前静态资源 CSP 只允许同源嵌入；跨域 DSH 宿主需要同源代理或经过审核的 CSP、origin 和令牌适配。
 - 单进程锁和 SQLite 适用于本地交付与研究验证，不是多租户、高并发生产架构。
 
 发布前的人工验收项与安全边界见 `RELEASE-CHECKLIST.md`。
+
+## 0.3.50 交付更新
+
+- `sample.plan` 不再经过当前 DSH 版本不支持输出上限参数的 Workflow bridge，而是直接启动一次性结构化子 Agent；2,048-token 上限通过 DSH 支持的 `agentOptions.maxTokens` 下发，provider/model 继续从冻结角色宿主继承。同步删除旧 Workflow 执行器、脚本模板、双重取消路径和对应冗余测试。
+- 预测工具回执只表示宿主工具已经产出向量，只有 `DshStructuredResultAccepted` 才算远端 origin 完成。候选 heartbeat 负责 Host 已结算的成功/失败拆分，避免结构化失败时总进度长期停在 0 或把失败误报为成功。
+- 私有账本仍保留固定最差惩罚用于确定性评分门禁，浏览 API、候选预览、实时执行和训练轨迹一律把它显示为“未产生有效预测”，并将预测、误差和 reward 置空。失败请求数、结构化错误数和失败 origin 数分开显示，重试请求不会伪装成失败样本。
+- 局部编辑现在由 Host 对完整操作包做顺序无关的规范化签名；同一不可变父 revision 上已经被拒绝的完全相同操作包会保留提案审计记录，但直接以 `duplicate_recent_rejected_bundle` 拒绝，不再创建重复子 revision。父 revision 改变后不会被误拦截。
+- 当前样本执行模式更名为 `dsh_native_agent`；本版本不读取旧模式名或旧 preset 包，运行数据合同无需向前兼容。
 
 ## 0.3.49 交付更新
 

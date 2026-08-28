@@ -21,6 +21,7 @@ from ..evolution.genome import EcologyEvolutionPluginGenome, deep_thaw_json
 from ..evolution.local_edits import (
     LocalEditContext,
     LocalEditProposal,
+    LocalEditResult,
     apply_or_reject_local_edit_bundle,
 )
 from ..evolution.strategies import (
@@ -457,6 +458,17 @@ def execute_next_local_edit(endpoint: Any, run_id: str, candidate_id: str) -> bo
         # instead of asking DSH to author a different edit on resume.
         proposal = LocalEditProposal.from_dict(recorded["proposal"])
         safety_reason = recorded.get("safety_reason")
+    policy_rejection_reason = (
+        None
+        if safety_reason is not None
+        else _local_edit_policy_rejection_reason(
+            state,
+            candidate_id,
+            pending.batch_index,
+            context.candidate_revision_id,
+            proposal,
+        )
+    )
     safety_rollback = _safety_requires_rollback(safety_reason)
     # Commit the complete, schema-validated proposal before deriving a child
     # revision.  This closes the old crash window where replay only had the
@@ -480,6 +492,17 @@ def execute_next_local_edit(endpoint: Any, run_id: str, candidate_id: str) -> bo
         # after a coverage or constraint breach.  The outcome rolls back to
         # the parent when available and remains explicitly explained on R0.
         validated = None
+    elif policy_rejection_reason is not None:
+        # Preserve the authored proposal for audit, but never re-apply an
+        # exact bundle that this same immutable parent revision already had
+        # rejected.  This decision is derived only from durable prior batches,
+        # so a crash after proposal persistence replays the same outcome.
+        validated = LocalEditResult(
+            outcome=LocalEditOutcome.REJECTED,
+            operations=tuple(proposal.operations),
+            child=None,
+            proposal_digest=digest(proposal.to_dict()),
+        )
     else:
         validated = apply_or_reject_local_edit_bundle(
             EcologyEvolutionPluginGenome.from_dict(dict(revision.genome)),
@@ -531,7 +554,11 @@ def execute_next_local_edit(endpoint: Any, run_id: str, candidate_id: str) -> bo
                 else validated.outcome.value
             ),
             "active_revision_id": active_revision_id,
-            **({"reason": safety_reason} if safety_reason is not None else {}),
+            **(
+                {"reason": safety_reason or policy_rejection_reason}
+                if safety_reason is not None or policy_rejection_reason is not None
+                else {}
+            ),
         },
     )
     _director_mutation(
@@ -758,6 +785,15 @@ def _recent_local_edit_history(
 ) -> list[dict[str, Any]]:
     """Return only bounded proposal outcomes from earlier batches in this lane."""
 
+    revision_ids = {
+        int(item.batch_index): str(item.revision_id)
+        for item in getattr(state, "formal_batches", ())
+        if getattr(item, "candidate_id", None) == candidate_id
+        and isinstance(getattr(item, "batch_index", None), int)
+        and not isinstance(getattr(item, "batch_index", None), bool)
+        and isinstance(getattr(item, "revision_id", None), str)
+        and str(item.revision_id).strip()
+    }
     outcomes = {
         int(item["batch_index"]): item
         for item in state.local_edit_outcomes
@@ -775,6 +811,7 @@ def _recent_local_edit_history(
         rows.append(
             {
                 "batch_index": batch_index,
+                "candidate_revision_id": revision_ids.get(batch_index),
                 "decision": detail.get("decision"),
                 "operations": [
                     dict(operation)
@@ -786,6 +823,45 @@ def _recent_local_edit_history(
             }
         )
     return deep_thaw_json(rows[-8:])
+
+
+def _local_edit_bundle_signature(operations: Any) -> str:
+    """Return an order-independent signature for one atomic operation bundle."""
+
+    if isinstance(operations, (str, bytes)) or not isinstance(
+        operations, (list, tuple)
+    ):
+        raise TypeError("local edit operations must be an array")
+    canonical_operations: list[str] = []
+    for operation in operations:
+        if not isinstance(operation, Mapping):
+            raise TypeError("local edit operation must be an object")
+        canonical_operations.append(canonical_json(dict(operation)))
+    return digest({"operations": sorted(canonical_operations)})
+
+
+def _local_edit_policy_rejection_reason(
+    state: Any,
+    candidate_id: str,
+    before_batch_index: int,
+    candidate_revision_id: str,
+    proposal: LocalEditProposal,
+) -> str | None:
+    """Reject a repeated failed bundle only while its parent revision is unchanged."""
+
+    if proposal.decision.value != "mutate":
+        return None
+    proposed_signature = _local_edit_bundle_signature(proposal.operations)
+    for row in _recent_local_edit_history(state, candidate_id, before_batch_index):
+        if (
+            row.get("outcome") != LocalEditOutcome.REJECTED.value
+            or row.get("candidate_revision_id") != candidate_revision_id
+            or row.get("decision") != "mutate"
+        ):
+            continue
+        if _local_edit_bundle_signature(row.get("operations")) == proposed_signature:
+            return "duplicate_recent_rejected_bundle"
+    return None
 
 
 def _local_edit_evidence_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:

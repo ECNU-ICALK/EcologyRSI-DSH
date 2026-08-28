@@ -28,7 +28,7 @@
       banner.hidden = false; banner.classList.add("is-demo"); title.textContent = "显式演示模式"; detail.textContent = "当前数据只存在于浏览器内，不会写入事件账本或治理服务。"; return;
     }
     if (state.catalog.dsh.harness_execution === "dsh_native_agent_runtime") {
-      banner.hidden = false; banner.classList.add("is-demo"); title.textContent = "DSH 原生智能体运行时"; detail.textContent = "DSH 已登记 " + formatNumber(dshModelTotalCount(false)) + " 个模型。Agent Session、上下文压缩、多智能体 Workflow 和模型路由由 DSH 执行；Python sidecar 仅负责科学状态、幂等结果和治理边界。"; return;
+      banner.hidden = false; banner.classList.add("is-demo"); title.textContent = "DSH 原生智能体运行时"; detail.textContent = "DSH 已登记 " + formatNumber(dshModelTotalCount(false)) + " 个模型。Agent Session、上下文压缩、模型路由和结构化子任务由 DSH 直接执行；Python sidecar 负责宿主预测工具、科学状态、幂等结果和治理边界。"; return;
     }
     if (state.catalog.dsh.environment && state.catalog.dsh.environment !== "production") {
       banner.hidden = false; banner.classList.add("is-demo"); title.textContent = environmentText(state.catalog.dsh.environment); detail.textContent = "DSH 已登记 " + formatNumber(dshModelTotalCount(false)) + " 个模型。当前使用历史兼容网关执行协议。"; return;

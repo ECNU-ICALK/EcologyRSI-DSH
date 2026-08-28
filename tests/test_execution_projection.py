@@ -15,6 +15,7 @@ from ecologyrsi_dsh.api.projection import (
     _gateway_retry_projection,
     _model_usage_summary,
     _projection_json,
+    _public_inference_trace,
     _public_evaluation_metrics,
     _run_failure_projection,
     _screening_progress_projection,
@@ -72,6 +73,53 @@ def _origin_members(label: str) -> list[str]:
 
 
 class ExecutionProjectionTests(unittest.TestCase):
+    def test_failed_scoring_penalty_is_not_projected_as_model_output(self) -> None:
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(
+                metadata={}, visible_datasets=("generated-toy-series@1",)
+            )
+        )
+        candidate = SimpleNamespace(status=SimpleNamespace(value="evaluated"))
+        proposal = SimpleNamespace(changes={"alpha": 0.2})
+        evaluation = SimpleNamespace(
+            partition="training_feedback",
+            metrics={
+                "n": 1,
+                "prediction_preview": [
+                    {
+                        "sample_id": "sample:failed",
+                        "target": "air_temperature",
+                        "observed": 21.0,
+                        "predicted": 60.0,
+                        "baseline": 20.0,
+                        "sample_execution_status": "failed",
+                        "scoring_fallback": "failure_non_improvement_penalty",
+                    }
+                ],
+                "sample_execution": {"eligible_examples": 1},
+                "sample_execution_records": [
+                    {
+                        "sample_id": "sample:failed",
+                        "status": "failed",
+                        "attempts": 1,
+                        "failure": {"class": "remote_batch_remote_rejected"},
+                    }
+                ],
+            },
+        )
+
+        trace = _public_inference_trace(
+            state, candidate, proposal, evaluation, None
+        )
+
+        row = trace["rows"][0]
+        self.assertEqual(row["status"], "failed")
+        self.assertIsNone(row["predicted"])
+        self.assertIs(row["model_prediction_available"], False)
+        self.assertIs(row["scoring_penalty_applied"], True)
+        self.assertNotIn("error", row)
+        self.assertNotIn("reward", row)
+
     def test_adaptive_progress_waits_for_evaluation_evidence(self) -> None:
         state = SimpleNamespace(
             task_manifest=SimpleNamespace(metadata={
@@ -203,8 +251,10 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         progress = _screening_progress_projection(state)
 
-        self.assertEqual(progress["completed_samples"], 1)
-        self.assertEqual(progress["succeeded_samples"], 1)
+        self.assertEqual(progress["completed_samples"], 0)
+        self.assertEqual(progress["succeeded_samples"], 0)
+        self.assertEqual(progress["prediction_tool_output_origins"], 1)
+        self.assertEqual(progress["prediction_tool_pending_origins"], 1)
         self.assertEqual(progress["in_flight_batches"], 1)
 
     def test_adaptive_progress_includes_live_screening_tool_receipts(self) -> None:
@@ -264,7 +314,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         progress = _adaptive_progress_projection(state)
 
         self.assertEqual(progress["evaluation_phase"], "screening")
-        self.assertEqual(progress["progress_kind"], "settling")
+        self.assertEqual(progress["progress_kind"], "waiting")
         self.assertEqual(progress["screening_completed_origins"], 0)
         self.assertEqual(progress["completed_origins"], 0)
         self.assertEqual(progress["settled_origins"], 0)
@@ -273,7 +323,9 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["in_flight_requests"], 1)
         self.assertEqual(progress["awaiting_submission_batches"], 255)
-        self.assertEqual(progress["awaiting_settlement_batches"], 1)
+        self.assertEqual(progress["awaiting_settlement_batches"], 0)
+        self.assertEqual(progress["prediction_tool_output_origins"], 1)
+        self.assertEqual(progress["prediction_tool_pending_origins"], 1)
         self.assertEqual(progress["gateway_request_count"], 1)
         self.assertEqual(progress["configured_concurrency"], 64)
 
@@ -391,6 +443,69 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(adaptive["active_repair_waves"], 1)
         self.assertEqual(adaptive["in_flight_requests"], 1)
 
+    def test_adaptive_screening_counts_host_settled_failed_origins(self) -> None:
+        schedule = {
+            "screening_origin_count": 64,
+            "formal_origin_count_per_finalist": 500,
+            "selection_holdout_origin_count": 169,
+            "local_batch_origin_count": 50,
+        }
+        heartbeat = SimpleNamespace(
+            seq=20,
+            kind="EvaluationProgressRecorded",
+            payload={
+                "schema_version": "ecologyrsi-dsh.evaluation-progress/3",
+                "revision": "revision:screening-a",
+                "progress_id": 44,
+                "progress_kind": "completed_batch",
+                "candidate_id": "candidate:screening-a",
+                "role": "planner",
+                "model_id": "model:test",
+                "batch_index": 44,
+                "batch_count": 64,
+                "batch_size": 1,
+                "completed_samples": 44,
+                "total_samples": 64,
+                "succeeded_samples": 0,
+                "failed_samples": 44,
+                "gateway_request_count": 44,
+                "in_flight_batches": 0,
+                "queued_batches": 0,
+            },
+            created_at="2026-08-28T02:00:00+00:00",
+        )
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(metadata={
+                "optimization_protocol": "top2_adaptive_epoch@1",
+                "optimization_schedule": schedule,
+                "sample_concurrency": 64,
+            }),
+            run=SimpleNamespace(
+                generation=0,
+                status=SimpleNamespace(value="running"),
+            ),
+            candidate_screening_events=(),
+            formal_batch_evaluations=(),
+            holdout_evaluations=(),
+            formal_batches=(),
+            candidates=(SimpleNamespace(
+                candidate_id="candidate:screening-a",
+                generation=0,
+            ),),
+            events=(heartbeat,),
+        )
+
+        progress = _adaptive_progress_projection(state)
+
+        self.assertEqual(progress["evaluation_phase"], "screening")
+        self.assertEqual(progress["completed_samples"], 44)
+        self.assertEqual(progress["settled_origins"], 44)
+        self.assertEqual(progress["succeeded_samples"], 0)
+        self.assertEqual(progress["failed_samples"], 44)
+        self.assertTrue(progress["outcomes_verified"])
+        self.assertEqual(progress["awaiting_submission_batches"], 212)
+        self.assertEqual(progress["updated_at"], heartbeat.created_at)
+
     def test_adaptive_progress_includes_live_formal_origin_receipts(self) -> None:
         schedule = {
             "screening_origin_count": 64,
@@ -487,14 +602,15 @@ class ExecutionProjectionTests(unittest.TestCase):
         )
 
         self.assertEqual(progress["evaluation_phase"], "formal_batch")
-        self.assertEqual(progress["completed_origins"], 307)
+        self.assertEqual(progress["completed_origins"], 306)
         self.assertEqual(progress["settled_origins"], 306)
         self.assertNotIn("succeeded_samples", progress)
         self.assertNotIn("failed_samples", progress)
         self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["in_flight_requests"], 1)
         self.assertEqual(progress["awaiting_submission_batches"], 49)
-        self.assertEqual(progress["awaiting_settlement_batches"], 1)
+        self.assertEqual(progress["awaiting_settlement_batches"], 0)
+        self.assertEqual(progress["prediction_tool_pending_origins"], 1)
         self.assertEqual(
             progress["completed_origins"],
             progress["settled_origins"]
@@ -594,10 +710,11 @@ class ExecutionProjectionTests(unittest.TestCase):
         progress = _adaptive_progress_projection(state)
 
         self.assertEqual(progress["evaluation_phase"], "holdout")
-        self.assertEqual(progress["completed_origins"], 1257)
-        self.assertEqual(progress["holdout_completed_origins"], 1)
+        self.assertEqual(progress["completed_origins"], 1256)
+        self.assertEqual(progress["holdout_completed_origins"], 0)
         self.assertEqual(progress["settled_origins"], 1256)
-        self.assertEqual(progress["awaiting_settlement_batches"], 1)
+        self.assertEqual(progress["awaiting_settlement_batches"], 0)
+        self.assertEqual(progress["prediction_tool_pending_origins"], 1)
         self.assertEqual(
             progress["completed_origins"],
             progress["settled_origins"]
@@ -609,6 +726,189 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertIsNone(progress["batch_count"])
         self.assertEqual(progress["awaiting_submission_batches"], 168)
         self.assertEqual(progress["in_flight_requests"], 1)
+
+    def test_adaptive_active_scopes_use_host_settlement_heartbeat(self) -> None:
+        schedule = {
+            "screening_origin_count": 64,
+            "formal_origin_count_per_finalist": 500,
+            "selection_holdout_origin_count": 169,
+            "local_batch_origin_count": 50,
+        }
+        screening_events = tuple(
+            SimpleNamespace(
+                payload={"generation": 0, "origin_count": 64},
+                created_at=f"2026-08-28T00:0{index}:00+00:00",
+            )
+            for index in range(4)
+        )
+        for phase, origin_total, succeeded, failed in (
+            ("formal_batch", 50, 0, 1),
+            ("holdout", 169, 1, 0),
+        ):
+            with self.subTest(phase=phase):
+                candidate_id = f"candidate:{phase}"
+                revision_id = f"revision:{phase}"
+                cohort_digest = digest(f"cohort:{phase}")
+                if phase == "formal_batch":
+                    boundary = SimpleNamespace(
+                        seq=10,
+                        kind="FormalBatchStarted",
+                        payload={"batch": {
+                            "generation": 0,
+                            "candidate_id": candidate_id,
+                            "revision_id": revision_id,
+                            "batch_index": 1,
+                            "batch_count": 10,
+                            "origin_count": origin_total,
+                            "cohort_digest": cohort_digest,
+                        }},
+                        created_at="2026-08-28T01:00:00+00:00",
+                    )
+                    formal_batch_index = 1
+                    holdout_arm = None
+                    formal_count = 1
+                    expected_completed = 307
+                    expected_scope = "active_formal_batch"
+                    expected_awaiting_submission = 48
+                else:
+                    boundary = SimpleNamespace(
+                        seq=10,
+                        kind="HoldoutArmStarted",
+                        payload={
+                            "generation": 0,
+                            "candidate_id": candidate_id,
+                            "candidate_revision_id": revision_id,
+                            "holdout_arm": "finalist_1",
+                            "origin_count": origin_total,
+                            "cohort_digest": cohort_digest,
+                        },
+                        created_at="2026-08-28T01:00:00+00:00",
+                    )
+                    formal_batch_index = None
+                    holdout_arm = "finalist_1"
+                    formal_count = 20
+                    expected_completed = 1257
+                    expected_scope = "active_holdout_arm"
+                    expected_awaiting_submission = 167
+                revision_start = SimpleNamespace(
+                    seq=11,
+                    kind="EvaluationSampleResultsStarted",
+                    payload={
+                        "candidate_id": candidate_id,
+                        "revision": f"sample-revision:{phase}",
+                        "checkpoint": {
+                            "evaluation_phase": phase,
+                            "formal_batch_index": formal_batch_index,
+                            "holdout_arm": holdout_arm,
+                            "candidate_revision_id": revision_id,
+                            "cohort_digest": cohort_digest,
+                        },
+                    },
+                    created_at="2026-08-28T01:00:01+00:00",
+                )
+                child_events = []
+                for offset, label in enumerate(("a", "b")):
+                    key = f"run:test:sample.plan:{phase}:{label}"
+                    reservation = f"reservation:{phase}:{label}"
+                    child_events.extend((
+                        SimpleNamespace(
+                            seq=12 + offset * 2,
+                            kind="DshChildLaunchReserved",
+                            payload={"launch": {
+                                "stage": "sample.plan",
+                                "idempotency_key": key,
+                                "reservation_id": reservation,
+                                "sample_member_digests": _origin_members(
+                                    f"{phase}:{label}"
+                                ),
+                            }},
+                            created_at=f"2026-08-28T01:00:0{2 + offset * 2}+00:00",
+                        ),
+                        SimpleNamespace(
+                            seq=13 + offset * 2,
+                            kind="DshStructuredResultAccepted",
+                            payload={"identity": {
+                                "stage": "sample.plan",
+                                "idempotency_key": key,
+                                "child_reservation_id": reservation,
+                            }},
+                            created_at=f"2026-08-28T01:00:0{3 + offset * 2}+00:00",
+                        ),
+                    ))
+                heartbeat = SimpleNamespace(
+                    seq=16,
+                    kind="EvaluationProgressRecorded",
+                    payload={
+                        "schema_version": "ecologyrsi-dsh.evaluation-progress/3",
+                        "revision": f"sample-revision:{phase}",
+                        "progress_id": 1,
+                        "progress_kind": "completed_batch",
+                        "candidate_id": candidate_id,
+                        "role": "planner",
+                        "model_id": "model:test",
+                        "batch_index": 1,
+                        "batch_count": origin_total,
+                        "batch_size": 1,
+                        "completed_samples": 1,
+                        "total_samples": origin_total,
+                        "succeeded_samples": succeeded,
+                        "failed_samples": failed,
+                        "gateway_request_count": 2,
+                        "in_flight_batches": 0,
+                        "queued_batches": 0,
+                    },
+                    created_at="2026-08-28T01:00:06+00:00",
+                )
+                formal_evaluations = tuple(
+                    SimpleNamespace(
+                        scope=SimpleNamespace(
+                            generation=0,
+                            candidate_id=f"candidate:{index // 10}",
+                            batch_index=index % 10,
+                            cohort_digest=f"{index + 1:064x}",
+                            origin_count=50,
+                        ),
+                        created_at=f"2026-08-28T00:{10 + index:02d}:00+00:00",
+                    )
+                    for index in range(formal_count)
+                )
+                state = SimpleNamespace(
+                    task_manifest=SimpleNamespace(metadata={
+                        "optimization_protocol": "top2_adaptive_epoch@1",
+                        "optimization_schedule": schedule,
+                        "sample_concurrency": 64,
+                        "prediction_cells_per_origin": 9,
+                    }),
+                    run=SimpleNamespace(
+                        generation=0,
+                        status=SimpleNamespace(value="running"),
+                    ),
+                    candidate_screening_events=screening_events,
+                    formal_batch_evaluations=formal_evaluations,
+                    holdout_evaluations=(),
+                    formal_batches=(SimpleNamespace(
+                        generation=0,
+                        candidate_id=candidate_id,
+                        batch_index=formal_batch_index or 9,
+                    ),),
+                    events=(boundary, revision_start, *child_events, heartbeat),
+                )
+
+                progress = _adaptive_progress_projection(state)
+
+                self.assertEqual(progress["completed_origins"], expected_completed)
+                self.assertEqual(progress["settled_origins"], expected_completed)
+                self.assertEqual(progress["remote_completed_origins"], 2)
+                self.assertEqual(progress["awaiting_settlement_batches"], 1)
+                self.assertEqual(
+                    progress["awaiting_submission_batches"],
+                    expected_awaiting_submission,
+                )
+                self.assertEqual(progress["succeeded_samples"], succeeded)
+                self.assertEqual(progress["failed_samples"], failed)
+                self.assertTrue(progress["outcomes_verified"])
+                self.assertEqual(progress["outcome_scope"], expected_scope)
+                self.assertEqual(progress["updated_at"], heartbeat.created_at)
 
     def test_dsh_activity_uses_unresolved_formal_child_without_stage_event(self) -> None:
         launch = SimpleNamespace(
@@ -850,6 +1150,16 @@ class ExecutionProjectionTests(unittest.TestCase):
             ),
             SimpleNamespace(
                 seq=12,
+                kind="DshPredictionToolExecuted",
+                payload={
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:failed-a",
+                    "prediction_count": 9,
+                },
+                created_at="2026-08-26T06:00:01+00:00",
+            ),
+            SimpleNamespace(
+                seq=13,
                 kind="DshChildExecutionFailed",
                 payload={
                     "schema_version": "ecologyrsi-dsh.child-execution-failed/1",
@@ -858,9 +1168,9 @@ class ExecutionProjectionTests(unittest.TestCase):
                         "idempotency_key": "run:test:sample.plan:failed-a",
                         "child_reservation_id": "reservation-failed-a",
                     },
-                    "error_code": "rate_limit",
+                    "error_code": "structured_child_model_error",
                 },
-                created_at="2026-08-26T06:00:01+00:00",
+                created_at="2026-08-26T06:00:02+00:00",
             ),
         )
         state = SimpleNamespace(
@@ -883,6 +1193,10 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["completed_samples"], 0)
         self.assertEqual(progress["succeeded_samples"], 0)
         self.assertEqual(progress["failed_samples"], 0)
+        self.assertEqual(progress["prediction_tool_output_origins"], 1)
+        self.assertEqual(progress["prediction_tool_pending_origins"], 0)
+        self.assertEqual(progress["child_execution_failed_request_count"], 1)
+        self.assertEqual(progress["structured_child_model_error_count"], 1)
         self.assertEqual(progress["in_flight_batches"], 0)
         self.assertEqual(progress["queued_batches"], 0)
         self.assertEqual(progress["awaiting_submission_batches"], 256)
@@ -1048,7 +1362,8 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         progress = _screening_progress_projection(state)
 
-        self.assertEqual(progress["completed_samples"], 1)
+        self.assertEqual(progress["completed_samples"], 0)
+        self.assertEqual(progress["prediction_tool_pending_origins"], 1)
         self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["awaiting_submission_batches"], 255)
 
@@ -1121,8 +1436,10 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         progress = _screening_progress_projection(state)
 
-        self.assertEqual(progress["completed_samples"], 1)
-        self.assertEqual(progress["succeeded_samples"], 1)
+        self.assertEqual(progress["completed_samples"], 0)
+        self.assertEqual(progress["succeeded_samples"], 0)
+        self.assertEqual(progress["prediction_tool_output_origins"], 1)
+        self.assertEqual(progress["prediction_tool_pending_origins"], 1)
         self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["queued_batches"], 0)
         self.assertEqual(progress["awaiting_submission_batches"], 255)
@@ -1192,7 +1509,8 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         progress = _screening_progress_projection(state)
 
-        self.assertEqual(progress["completed_samples"], 1)
+        self.assertEqual(progress["completed_samples"], 0)
+        self.assertEqual(progress["prediction_tool_pending_origins"], 0)
         self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["queued_batches"], 0)
         self.assertEqual(progress["awaiting_submission_batches"], 255)

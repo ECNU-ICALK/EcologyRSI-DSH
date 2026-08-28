@@ -89,6 +89,33 @@ test("runtime creation freezes the Python-owned initial run status", () => {
   );
 });
 
+test("role hosts do not require an unused Workflow service", async () => {
+  const created = [];
+  const controller = new RuntimeController({}, {
+    presetCatalog: [
+      { preset_id: "ecology-coordinator-v4", tool_profile: "test" },
+      { preset_id: "ecology-sample-planner-v4", tool_profile: "test" },
+    ],
+  });
+  controller.roleAgents = {
+    createRoleAgent: async (roleBinding) => {
+      created.push(roleBinding);
+      return { dispose: async () => {} };
+    },
+    quiesceRun: async () => {},
+  };
+  await controller.startRun(binding({
+    idempotency_key: "direct-sample-planner-role-host",
+    binding: {
+      initial_run_status: "running",
+      strategy_model_id: "provider/strategy",
+      review_model_id: "provider/review",
+    },
+  }));
+
+  assert.equal(created.every((item) => !("require_workflow" in item)), true);
+});
+
 test("registry exact start replay returns the current record and preserves its generation", () => {
   const registry = new RuntimeRunRegistry();
   const startBinding = binding({

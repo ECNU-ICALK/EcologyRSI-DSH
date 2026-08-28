@@ -21,9 +21,8 @@ import {
 import { runStructuredRole } from "./structured-roles.js";
 import {
   isTrustedStructuredPhase,
-  structuredPhaseError,
 } from "./structured-stage-errors.js";
-import { PendingChildStarts, startHomogeneousWorkflow } from "./workflows.js";
+import { PendingChildStarts } from "./pending-child-starts.js";
 
 const STAGES = Object.freeze({
   "generation.research": Object.freeze({
@@ -83,7 +82,9 @@ const STAGES = Object.freeze({
     skillName: "bounded-plugin-experiment",
     instruction: [
       "Review only aggregate evidence and the Host mutation catalog for the completed batch.",
+      "Read current_candidate_state and recent_edit_history before choosing an operation; never repeat an exact bundle rejected for the same candidate revision and never repeat an unchanged current value.",
       "Return exactly one local-edit object. Choose keep with an empty operations array or mutate with only registered operations.",
+      "If no distinct registered local change is admissible, return keep instead of recycling a recent rejected bundle.",
       "Never include raw observations, predictions, timestamps, prompts, or executable code.",
       "The Host enforces the per-batch maximum operation count and applies valid operations atomically.",
     ].join(" "),
@@ -647,7 +648,6 @@ export class NativeStageRunner {
       launchFence: this.providerStageGate,
     });
     this.childBindings = new ChildBindingRegistry();
-    this.activeWorkflows = new Set();
     this.schemaCache = new Map();
     this.bridge = Object.freeze({
       bindingFor: (exec, expected) => this.childBindings.bindingFor(exec?.agent || exec, expected),
@@ -990,40 +990,27 @@ export class NativeStageRunner {
         persistenceDeadline.throwIfExpired();
         return receipt;
       };
-      const result = binding.stage === "sample.plan"
-        ? await this.#runWorkflowStage({
-          binding,
-          roleHost,
-          reservation,
-          prompt,
-          outputSchema,
-          maxTokens: request.max_tokens,
+      const result = await runStructuredRole(
+        roleHost,
+        reservation,
+        { prompt, outputSchema, maxTokens: request.max_tokens },
+        {
+          pendingStarts: this.pendingStarts,
           admission,
-          persist,
+          persist: async ({ structured, session_id }, persistenceDeadline) => persist(
+            structured,
+            session_id,
+            null,
+            null,
+            persistenceDeadline,
+          ),
           deadline: lifecycle.deadline,
           signal,
-        })
-        : await runStructuredRole(
-          roleHost,
-          reservation,
-          { prompt, outputSchema, maxTokens: request.max_tokens },
-          {
-            pendingStarts: this.pendingStarts,
-            admission,
-            persist: async ({ structured, session_id }, persistenceDeadline) => persist(
-              structured,
-              session_id,
-              null,
-              null,
-              persistenceDeadline,
-            ),
-            deadline: lifecycle.deadline,
-            signal,
-            classifyMissingCapture: ({ run }) => structuredCaptureDisposition(
-              this.ctx?.sessions?.get?.(String(run?.id || ""))?.events,
-            ),
-          },
-        );
+          classifyMissingCapture: ({ run }) => structuredCaptureDisposition(
+            this.ctx?.sessions?.get?.(String(run?.id || ""))?.events,
+          ),
+        },
+      );
       requireStructuredDeadline(lifecycle.deadline);
       const returnedStructured = result.structured;
       requireStructuredDeadline(lifecycle.deadline);
@@ -1043,285 +1030,6 @@ export class NativeStageRunner {
     }
   }
 
-  async #runWorkflowStage({
-    binding,
-    roleHost,
-    reservation,
-    prompt,
-    outputSchema,
-    maxTokens,
-    admission,
-    persist,
-    deadline,
-    signal = null,
-  }) {
-    requireStructuredDeadline(deadline);
-    const persistenceController = new AbortController();
-    const timeoutError = structuredOperationalTimeout();
-    let workflow;
-    let pendingWorkflow = null;
-    let active = null;
-    let timeout = null;
-    let timedOut = false;
-    let cancelRequested = false;
-    let deadlinePromise;
-    const detach = (operation) => {
-      try {
-        Promise.resolve(operation?.()).catch(() => {});
-      } catch {
-        // Expired cleanup is observational and must never replace the timeout.
-      }
-    };
-    const expireDeadline = () => {
-      if (!timedOut) {
-        timedOut = true;
-        persistenceController.abort();
-      }
-      // The deadline may fire before the workflow publication completes. In
-      // that case retry cancellation once the pending/active handle appears,
-      // but issue the underlying cancel at most once.
-      if (!cancelRequested && pendingWorkflow !== null && workflow === undefined) {
-        cancelRequested = true;
-        detach(() => this.pendingStarts.cancel(
-          pendingWorkflow,
-          "structured role operational timeout",
-        ));
-      } else if (
-        !cancelRequested
-        && workflow
-        // A concurrent quiesceRun() owns cancellation through the memoized
-        // PendingChildStarts lifecycle. Avoid issuing a second direct cancel.
-        && pendingWorkflow?.quiescence === null
-      ) {
-        cancelRequested = true;
-        try { workflow.cancel?.("structured role operational timeout"); } catch {}
-      }
-      return timeoutError;
-    };
-    signal?.addEventListener("abort", expireDeadline, { once: true });
-    if (signal?.aborted) expireDeadline();
-    const deadlineExpired = () => (
-      timedOut || structuredDeadlineExpired(deadline)
-    );
-    const throwIfExpired = () => {
-      if (deadlineExpired()) throw expireDeadline();
-    };
-    const withinDeadline = async (operation) => {
-      throwIfExpired();
-      try {
-        const value = await Promise.race([
-          Promise.resolve().then(operation),
-          deadlinePromise,
-        ]);
-        throwIfExpired();
-        return value;
-      } catch (error) {
-        if (deadlineExpired() || error === timeoutError) throw expireDeadline();
-        throw error;
-      }
-    };
-    deadlinePromise = new Promise((_resolve, reject) => {
-      timeout = setTimeout(
-        () => reject(expireDeadline()),
-        remainingStructuredDeadlineMs(deadline),
-      );
-    });
-    deadlinePromise.catch(() => {});
-    const persistenceDeadline = Object.freeze({
-      signal: persistenceController.signal,
-      throwIfExpired,
-      remainingTimeoutMs: () => {
-        throwIfExpired();
-        return Math.max(1, remainingStructuredDeadlineMs(deadline));
-      },
-    });
-    throwIfExpired();
-    const workflowName = `ecology-wave-${jsonDigest({
-      run_id: binding.run_id,
-      reservation_id: reservation.launch.reservation_id,
-    }).slice(0, 24)}`;
-    let childSessionId = null;
-    let childOutcome = null;
-    let capturedSessionMetrics = null;
-    let capturedSessionEvents = null;
-    const removeListener = this.ctx.on?.(
-      "workflow/agent-start",
-      (info, agent) => {
-        if (info?.meta?.name !== workflowName || agent?.label !== reservation.label) return;
-        childSessionId = String(agent.childId || "") || null;
-        if (!childSessionId) return;
-        this.childBindings.claimPublished(
-          roleHost.sessionId,
-          reservation.label,
-          childSessionId,
-        );
-        if (!this.childBindings.activeByChild.has(childSessionId)) {
-          this.childBindings.openActivation(childSessionId, {
-            revision: binding.run_state_revision,
-            stage_attempt: binding.stage_attempt,
-            idempotency_key: binding.idempotency_key,
-          });
-        }
-      },
-    );
-    const removeEndListener = this.ctx.on?.(
-      "workflow/agent-end",
-      (info, agent) => {
-        if (info?.meta?.name !== workflowName || agent?.label !== reservation.label) return;
-        const endedChildId = String(agent.childId || "") || null;
-        if (!endedChildId || (childSessionId && endedChildId !== childSessionId)) return;
-        childOutcome = typeof agent?.outcome === "string" ? agent.outcome : null;
-        capturedSessionMetrics = dshSessionMetrics(this.ctx, endedChildId);
-        const endedSession = this.ctx?.sessions?.get?.(endedChildId);
-        if (Array.isArray(endedSession?.events)) {
-          capturedSessionEvents = structuredClone(endedSession.events);
-        }
-      },
-    );
-    try {
-      throwIfExpired();
-      try {
-        pendingWorkflow = this.pendingStarts.startWorkflow(
-          () => startHomogeneousWorkflow(
-            roleHost,
-            {
-              template_id: "ecology-one-shot-v1",
-              workflow_name: workflowName,
-              max_total_agents: 1,
-              max_concurrent: 1,
-              max_items: 1,
-              sync_timeout_ms: deadline.timeoutMs,
-            },
-            [{
-              label: reservation.label,
-              prompt,
-              schema: outputSchema,
-              ...(maxTokens === undefined ? {} : { maxTokens }),
-            }],
-          ),
-          { runId: binding.run_id, roleHostAgent: roleHost.agent },
-        );
-      } catch (error) {
-        throw structuredPhaseError(
-          error?.code === "provider_stage_admission_closed" ? "control" : "start",
-          error,
-        );
-      }
-      workflow = pendingWorkflow.result;
-      throwIfExpired();
-      active = { runId: binding.run_id, workflow, lifecycle: pendingWorkflow };
-      this.activeWorkflows.add(active);
-      let settled;
-      try {
-        settled = await withinDeadline(() => workflow.result);
-      } catch (error) {
-        if (deadlineExpired() || error === timeoutError) throw expireDeadline();
-        throw structuredPhaseError("result", error);
-      }
-      throwIfExpired();
-      const structured = Array.isArray(settled?.value) && settled.value.length === 1
-        ? settled.value[0]
-        : undefined;
-      const validStructured = structured
-        && typeof structured === "object"
-        && !Array.isArray(structured);
-      if (settled?.stopReason !== "completed") {
-        if (["cancelled", "aborted"].includes(settled?.stopReason)) {
-          throw structuredPhaseError("aborted");
-        }
-        throw structuredPhaseError("model_terminal");
-      }
-      if (!validStructured) {
-        const failedNullItem = childOutcome === "failed"
-          && Array.isArray(settled?.value)
-          && settled.value.length === 1
-          && settled.value[0] === null;
-        const disposition = failedNullItem
-          ? structuredCaptureDisposition(
-            capturedSessionEvents
-              || this.ctx?.sessions?.get?.(childSessionId)?.events,
-          )
-          : "non-missing";
-        if (disposition === "missing") throw structuredPhaseError("capture");
-        throw structuredPhaseError("model_terminal");
-      }
-      throwIfExpired();
-      if (!childSessionId) throw structuredPhaseError("child_session");
-      let admissionOpen;
-      try {
-        admissionOpen = await withinDeadline(() => admission.isOpen(reservation));
-      } catch (error) {
-        if (deadlineExpired() || error === timeoutError) throw expireDeadline();
-        throw structuredPhaseError("admission", error);
-      }
-      throwIfExpired();
-      if (!admissionOpen) {
-        const error = structuredPhaseError("admission_closed");
-        error.message = "structured result admission is closed";
-        throw error;
-      }
-      const persistedStructured = structuredClone(structured);
-      throwIfExpired();
-      let accepted;
-      try {
-        accepted = await withinDeadline(
-          () => persist(
-            persistedStructured,
-            childSessionId,
-            capturedSessionMetrics,
-            capturedSessionEvents,
-            persistenceDeadline,
-          ),
-        );
-      } catch (error) {
-        if (deadlineExpired() || error === timeoutError) throw expireDeadline();
-        throw structuredPhaseError("persistence", error);
-      }
-      throwIfExpired();
-      const receiptAccepted = accepted?.accepted;
-      throwIfExpired();
-      if (!accepted || receiptAccepted !== true) {
-        throw structuredPhaseError("not_accepted");
-      }
-      const returnedStructured = structuredClone(structured);
-      throwIfExpired();
-      const response = Object.freeze({
-        structured: returnedStructured,
-        receipt: accepted,
-        session_id: childSessionId,
-      });
-      throwIfExpired();
-      return response;
-    } finally {
-      if (typeof removeListener === "function") removeListener();
-      if (typeof removeEndListener === "function") removeEndListener();
-      if (workflow) {
-        if (deadlineExpired()) expireDeadline();
-        if (timedOut) {
-          if (active !== null) this.activeWorkflows.delete(active);
-          detach(() => pendingWorkflow !== null
-            ? this.pendingStarts.dispose(pendingWorkflow)
-            : workflow.dispose?.());
-        } else {
-          try {
-            await withinDeadline(() => pendingWorkflow !== null
-              ? this.pendingStarts.dispose(pendingWorkflow)
-              : workflow.dispose?.());
-          } catch (error) {
-            if (deadlineExpired() || error === timeoutError) expireDeadline();
-            // A normal private disposer failure is drained, never surfaced.
-          } finally {
-            if (active !== null) this.activeWorkflows.delete(active);
-          }
-        }
-      }
-      if (timeout !== null) clearTimeout(timeout);
-      signal?.removeEventListener("abort", expireDeadline);
-      if (pendingWorkflow !== null) this.pendingStarts.finish(pendingWorkflow);
-      if (deadlineExpired()) throw expireDeadline();
-    }
-  }
-
   closeLaunchFence(runId) {
     this.pendingStarts.closeRun(runId);
     if (typeof this.providerStageGate.closeRun === "function") {
@@ -1338,17 +1046,8 @@ export class NativeStageRunner {
 
   async #drainLaunchLifecycles(runId) {
     while (true) {
-      const workflows = [...this.activeWorkflows].filter((item) => item.runId === runId);
-      const activeDrains = workflows.map((item) => item.lifecycle
-        ? this.pendingStarts.quiesce(item.lifecycle)
-        : Promise.resolve().then(() => item.workflow.cancel?.("run quiescing")));
       await this.pendingStarts.cancelAndQuiesce({ runId });
-      await Promise.allSettled(activeDrains);
-      for (const item of workflows) this.activeWorkflows.delete(item);
-      if (
-        !this.pendingStarts.hasRun(runId)
-        && ![...this.activeWorkflows].some((item) => item.runId === runId)
-      ) break;
+      if (!this.pendingStarts.hasRun(runId)) break;
     }
   }
 

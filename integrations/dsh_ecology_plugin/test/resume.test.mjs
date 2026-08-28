@@ -11,7 +11,6 @@ function binding(overrides = {}) {
     session_id: "session-1",
     model: "dsh/strategy",
     cwd: "/tmp",
-    require_workflow: false,
     preset_content_digest: "a".repeat(64),
     standing_tool_surface_digest: "b".repeat(64),
     route_config_digest: "c".repeat(64),

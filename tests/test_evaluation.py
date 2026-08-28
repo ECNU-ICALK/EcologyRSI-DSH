@@ -1199,7 +1199,7 @@ class GreenhouseEvaluationTests(unittest.TestCase):
             **task_data["metadata"],
             "prediction_model_id": EXOGENOUS_RIDGE_MODEL_ID,
             "evaluator_id": GREENHOUSE_MULTIHORIZON_EVALUATOR_ID,
-            "sample_agent_mode": "dsh_native_workflow",
+            "sample_agent_mode": "dsh_native_agent",
             "sample_agent_protocol": "dsh-strict-origin-bundle@3",
             "sample_agent_batch_size": 9,
             "sample_concurrency": 1,

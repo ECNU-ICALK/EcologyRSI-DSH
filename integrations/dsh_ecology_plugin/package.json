@@ -1,6 +1,6 @@
 {
   "name": "@ecologyrsi/dsh-evolution-plugin",
-  "version": "0.3.49",
+  "version": "0.3.50",
   "description": "DeepSeek Harness host bridge for the EcologyRSI evolution workbench",
   "private": true,
   "type": "module",
@@ -12,7 +12,6 @@
     "./runtime/capabilities": "./lib/runtime/capabilities.js",
     "./runtime/structured-roles": "./lib/runtime/structured-roles.js",
     "./runtime/stage-runner": "./lib/runtime/stage-runner.js",
-    "./runtime/reconciliation": "./lib/runtime/reconciliation.js",
     "./sidecar/client": "./lib/sidecar/client.js",
     "./package.json": "./package.json"
   },

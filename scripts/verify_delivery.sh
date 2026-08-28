@@ -73,7 +73,6 @@ integrations/dsh_ecology_plugin/package.json
 integrations/dsh_ecology_plugin/lib/index.js
 integrations/dsh_ecology_plugin/lib/client.js
 integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js
-integrations/dsh_ecology_plugin/lib/runtime/reconciliation.js
 integrations/dsh_ecology_plugin/lib/tools/agent-plugin.js
 integrations/dsh_ecology_plugin/lib/tools/retrieval.js
 integrations/dsh_ecology_plugin/schemas/genome-mutation.schema.json

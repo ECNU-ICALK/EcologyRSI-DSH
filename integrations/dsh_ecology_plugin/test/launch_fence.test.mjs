@@ -135,8 +135,8 @@ function skillFirstEvents(skillName) {
   ];
 }
 
-function stageBinding({ workflow = false, suffix = "race", revision = 7 } = {}) {
-  const context = workflow
+function stageBinding({ samplePlan = false, suffix = "race", revision = 7 } = {}) {
+  const context = samplePlan
     ? {
       schema_version: "ecologyrsi-dsh.sample-routing-wave/1",
       wave_digest: "f".repeat(64),
@@ -151,8 +151,8 @@ function stageBinding({ workflow = false, suffix = "race", revision = 7 } = {}) 
     }
     : { question: "bounded launch fence" };
   return {
-    run_id: workflow ? "run-workflow-launch-race" : "run-child-launch-race",
-    stage: workflow ? "sample.plan" : "generation.research",
+    run_id: samplePlan ? "run-sample-plan-launch-race" : "run-child-launch-race",
+    stage: samplePlan ? "sample.plan" : "generation.research",
     admission_id: `admission-${suffix}`,
     run_state_revision: revision,
     stage_attempt: 2,
@@ -160,11 +160,11 @@ function stageBinding({ workflow = false, suffix = "race", revision = 7 } = {}) 
     idempotency_key: `stage-${suffix}`,
     binding: { initial_run_status: "running" },
     request: {
-      role: workflow ? "sample-planner" : "researcher",
-      output_schema_id: workflow
+      role: samplePlan ? "sample-planner" : "researcher",
+      output_schema_id: samplePlan
         ? "ecology-sample-decisions@1"
         : "ecology-research-result@1",
-      ...(workflow ? { max_tokens: 2048 } : {}),
+      ...(samplePlan ? { max_tokens: 2048 } : {}),
       context,
       context_canonical_json: canonicalJson(context),
       context_digest: jsonDigest(context),
@@ -187,7 +187,7 @@ function controlBinding(stage, { status, revision }) {
   };
 }
 
-function launchRaceHarness({ workflow = false } = {}) {
+function launchRaceHarness({ samplePlan = false } = {}) {
   const schemaEntered = deferred();
   const releaseSchema = deferred();
   const registry = new RuntimeRunRegistry();
@@ -195,14 +195,14 @@ function launchRaceHarness({ workflow = false } = {}) {
     minimumIntervalMs: 0,
     failureCooldownMs: 0,
   });
-  const structured = workflow
+  const structured = samplePlan
     ? {
       schema_version: "ecology-sample-decisions@1",
       wave_digest: "f".repeat(64),
       decisions: [],
     }
     : { schema_version: "ecology-research-result@1", findings: [] };
-  const outputSchema = workflow
+  const outputSchema = samplePlan
     ? {
       type: "object",
       properties: {
@@ -218,24 +218,11 @@ function launchRaceHarness({ workflow = false } = {}) {
     }
     : { type: "object", additionalProperties: true };
   let childStarts = 0;
-  let workflowStarts = 0;
   let reservations = 0;
   const roleHost = {
-    sessionId: workflow ? "planner-parent" : "research-parent",
-    agent: { id: workflow ? "planner-host" : "research-host" },
+    sessionId: samplePlan ? "planner-parent" : "research-parent",
+    agent: { id: samplePlan ? "planner-host" : "research-host" },
     binding: { model: "pjlab/deepseek-v4-pro-0813" },
-    services: {
-      workflowEngine: {
-        start: () => {
-          workflowStarts += 1;
-          return {
-            result: Promise.resolve({ value: [structured], stopReason: "completed" }),
-            cancel: () => {},
-            dispose: async () => {},
-          };
-        },
-      },
-    },
   };
   const ctx = {
     on: () => () => {},
@@ -303,7 +290,7 @@ function launchRaceHarness({ workflow = false } = {}) {
     providerStageGate,
     schemaEntered,
     releaseSchema,
-    counts: () => ({ childStarts, workflowStarts }),
+    counts: () => ({ childStarts }),
   };
 }
 
@@ -327,9 +314,8 @@ test("pause closes the fence before a schema-blocked direct child can launch", {
   const [outcome] = await Promise.all([stageOutcome, pausing]);
   assert.ok(outcome.error);
   assert.equal(outcome.error.code, "provider_stage_admission_closed");
-  assert.deepEqual(harness.counts(), { childStarts: 0, workflowStarts: 0 });
+  assert.deepEqual(harness.counts(), { childStarts: 0 });
   assert.equal(harness.runner.pendingStarts.size, 0);
-  assert.equal(harness.runner.activeWorkflows.size, 0);
   assert.equal(harness.providerStageGate.records.size, 0);
   assert.equal(harness.registry.get(first.run_id).status, "paused");
 
@@ -341,13 +327,13 @@ test("pause closes the fence before a schema-blocked direct child can launch", {
   const result = await harness.controller.runStage(resumed);
 
   assert.equal(result.accepted, true);
-  assert.deepEqual(harness.counts(), { childStarts: 1, workflowStarts: 0 });
+  assert.deepEqual(harness.counts(), { childStarts: 1 });
   assert.equal(harness.registry.get(first.run_id).status, "running");
 });
 
-test("cancel closes the fence before a schema-blocked Workflow can launch", { timeout: 2_000 }, async () => {
-  const harness = launchRaceHarness({ workflow: true });
-  const first = stageBinding({ workflow: true });
+test("cancel closes the fence before a schema-blocked sample planner child can launch", { timeout: 2_000 }, async () => {
+  const harness = launchRaceHarness({ samplePlan: true });
+  const first = stageBinding({ samplePlan: true });
   await startReadyControllerRun(harness.controller, first);
   const stageOutcome = harness.controller.runStage(first).then(
     (value) => ({ value }),
@@ -365,9 +351,8 @@ test("cancel closes the fence before a schema-blocked Workflow can launch", { ti
   const [outcome] = await Promise.all([stageOutcome, cancelling]);
   assert.ok(outcome.error);
   assert.equal(outcome.error.code, "provider_stage_admission_closed");
-  assert.deepEqual(harness.counts(), { childStarts: 0, workflowStarts: 0 });
+  assert.deepEqual(harness.counts(), { childStarts: 0 });
   assert.equal(harness.runner.pendingStarts.size, 0);
-  assert.equal(harness.runner.activeWorkflows.size, 0);
   assert.equal(harness.providerStageGate.records.size, 0);
   assert.equal(harness.registry.get(first.run_id).status, "cancelled");
 });
@@ -406,7 +391,7 @@ test("real controller reconciles a durable paused restore with admission closed 
 
   assert.equal(rejected.status, "rejected");
   assert.equal(rejected.reason.code, "provider_stage_admission_closed");
-  assert.deepEqual(harness.counts(), { childStarts: 0, workflowStarts: 0 });
+  assert.deepEqual(harness.counts(), { childStarts: 0 });
 
   await controller.resume(controlBinding(restored, {
     status: "resume",
@@ -422,7 +407,7 @@ test("real controller reconciles a durable paused restore with admission closed 
 
   assert.equal(resumed.accepted, true);
   assert.equal(harness.registry.get(restored.run_id).status, "running");
-  assert.deepEqual(harness.counts(), { childStarts: 1, workflowStarts: 0 });
+  assert.deepEqual(harness.counts(), { childStarts: 1 });
 });
 
 test("global live readiness survives one run cleanup and closes after the final live run", async () => {

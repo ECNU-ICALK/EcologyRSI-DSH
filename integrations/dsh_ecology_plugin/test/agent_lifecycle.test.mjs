@@ -33,7 +33,7 @@ test("role-host creation is single-flight, resumable and has no token hard cap",
     },
   };
   const manager = new RoleAgentManager(ctx);
-  const binding = { run_id: "r1", role: "coordinator", preset_id: "ecology-coordinator-v4", model: "p/m", cwd: "/tmp", require_workflow: true };
+  const binding = { run_id: "r1", role: "coordinator", preset_id: "ecology-coordinator-v4", model: "p/m", cwd: "/tmp" };
   const [a, b] = await Promise.all([manager.createRoleAgent(binding), manager.createRoleAgent(binding)]);
   assert.equal(a, b);
   assert.equal(calls.filter(([name]) => name === "create").length, 1);
@@ -49,7 +49,7 @@ test("role-host creation is single-flight, resumable and has no token hard cap",
     { agentPreset: binding.preset_id },
   ]);
   assert.deepEqual(a.services.compaction, { name: "compaction" });
-  assert.deepEqual(a.services.workflowEngine, { name: "workflowEngine" });
+  assert.equal("workflowEngine" in a.services, false);
   assert.equal(calls.some(([name]) => name === "flush"), true);
   await manager.dispose();
   assert.equal(calls.some(([name]) => name === "dispose"), true);
@@ -83,7 +83,6 @@ test("run quiescence waits pending creations and disposes every published host",
     run_id: "run-pending-cleanup",
     model: "provider/model",
     cwd: "/tmp",
-    require_workflow: false,
   };
   const researcher = manager.createRoleAgent({
     ...common,
@@ -166,7 +165,6 @@ test("role creation preserves its setup error when private disposal also fails",
     preset_id: "ecology-researcher-v7",
     model: "provider/model",
     cwd: "/tmp",
-    require_workflow: false,
   }));
 
   assert.equal(result.status, "rejected");

@@ -592,7 +592,6 @@ def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
             "package/lib/tools/agent-plugin.js",
             "package/lib/tools/retrieval.js",
             "package/lib/runtime/stage-runner.js",
-            "package/lib/runtime/reconciliation.js",
             "package/schemas/genome-mutation.schema.json",
             "package/presets/ecology-coordinator-v4/preset.yml",
             "package/presets/ecology-generation-judge-v7/agent.cordis.yml",

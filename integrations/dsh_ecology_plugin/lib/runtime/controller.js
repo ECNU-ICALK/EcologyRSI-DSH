@@ -155,7 +155,6 @@ export class RuntimeController {
           model: reviewRole ? reviewModel : strategyModel,
           cwd: process.cwd(),
           tool_profile,
-          require_workflow: role === "coordinator" || role === "sample-planner",
           preset_content_digest: frozen.preset_content_digest,
           standing_tool_surface_digest: frozen.standing_tool_surface_digest,
           route_config_digest: reviewRole

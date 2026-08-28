@@ -1082,7 +1082,7 @@ class EvaluatorRegistry:
                 if forecast_tool is not None
                 else self.sample_executor
             )
-        if mode == "dsh_native_workflow":
+        if mode == "dsh_native_agent":
             if (
                 not run_id
                 or not candidate_id
@@ -2122,7 +2122,7 @@ class EvaluatorRegistry:
             on_sample_control=on_sample_control,
             forecast_bundle_tool=(
                 toy_forecast_bundle_tool
-                if task.metadata.get("sample_agent_mode") == "dsh_native_workflow"
+                if task.metadata.get("sample_agent_mode") == "dsh_native_agent"
                 else None
             ),
         ).execute(
@@ -2461,7 +2461,7 @@ class EvaluatorRegistry:
         defer_feedback_prediction = (
             not self._sample_executor_injected
             and task.metadata.get("sample_agent_mode")
-            in {"gateway_microbatch", "dsh_native_workflow"}
+            in {"gateway_microbatch", "dsh_native_agent"}
         )
         generated_feedback_rows: list[dict[str, Any]] = []
         target_contexts: list[dict[str, Any]] = []
@@ -2601,7 +2601,7 @@ class EvaluatorRegistry:
                 rolling_forecast_bundle_tool
                 if defer_feedback_prediction
                 and task.metadata.get("sample_agent_mode")
-                == "dsh_native_workflow"
+                == "dsh_native_agent"
                 else None
             ),
         ).execute(
@@ -3207,7 +3207,7 @@ class EvaluatorRegistry:
         defer_feedback_prediction = (
             not self._sample_executor_injected
             and task.metadata.get("sample_agent_mode")
-            in {"gateway_microbatch", "dsh_native_workflow"}
+            in {"gateway_microbatch", "dsh_native_agent"}
         )
         prediction = fit_predict_exogenous_ridge(
             series,
@@ -3373,7 +3373,7 @@ class EvaluatorRegistry:
             ),
             tools=(
                 ()
-                if task.metadata.get("sample_agent_mode") == "dsh_native_workflow"
+                if task.metadata.get("sample_agent_mode") == "dsh_native_agent"
                 else alternate_tools
             ),
         ).execute(

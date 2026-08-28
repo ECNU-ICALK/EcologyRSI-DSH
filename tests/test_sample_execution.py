@@ -4949,7 +4949,7 @@ class SampleExecutionTests(unittest.TestCase):
                     domain_pack="greenhouse_cucumber_2018",
                     visible_datasets=("agc_cucumber_2018",),
                     metadata={
-                        "sample_agent_mode": "dsh_native_workflow",
+                        "sample_agent_mode": "dsh_native_agent",
                         "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                         "sample_agent_batch_size": 16,
                         "sample_concurrency": limit,

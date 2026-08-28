@@ -9,9 +9,11 @@ from unittest.mock import Mock, patch
 
 from ecologyrsi_dsh.api.formal_trajectory import (
     _durable_batch_metrics,
+    _local_edit_bundle_signature,
     _local_edit_context,
     _local_edit_current_state,
     _local_edit_evidence_metrics,
+    _local_edit_policy_rejection_reason,
     _local_edit_proposal,
     _prequential_safety_reason,
     _recent_local_edit_history,
@@ -22,7 +24,11 @@ from ecologyrsi_dsh.core.trajectory import LocalEditOutcome, RevisionAdvanceReas
 from ecologyrsi_dsh.evaluators.sample_execution import (
     encode_sample_execution_trace,
 )
-from ecologyrsi_dsh.evolution.local_edits import LocalEditContext, LocalEditResult
+from ecologyrsi_dsh.evolution.local_edits import (
+    LocalEditContext,
+    LocalEditProposal,
+    LocalEditResult,
+)
 from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
 
 
@@ -134,6 +140,14 @@ class FormalTrajectoryTests(unittest.TestCase):
             for index in range(10)
         }
         state = SimpleNamespace(
+            formal_batches=tuple(
+                SimpleNamespace(
+                    candidate_id="candidate:history",
+                    batch_index=index,
+                    revision_id=f"revision:history:{index}",
+                )
+                for index in range(10)
+            ),
             local_edit_outcomes=tuple(
                 {
                     "candidate_id": "candidate:history",
@@ -147,7 +161,210 @@ class FormalTrajectoryTests(unittest.TestCase):
         history = _recent_local_edit_history(state, "candidate:history", 10)
         self.assertEqual(len(history), 8)
         self.assertEqual(history[0]["batch_index"], 2)
+        self.assertEqual(
+            history[0]["candidate_revision_id"], "revision:history:2"
+        )
         self.assertEqual(history[-1]["operations"][0]["value"], 10)
+
+    def test_rejected_bundle_dedup_is_order_stable_and_revision_scoped(self) -> None:
+        first = {
+            "op": "set_bounded_parameter",
+            "name": "ridge_alpha",
+            "value": 0.5,
+        }
+        second = {
+            "op": "set_bounded_parameter",
+            "name": "history_steps",
+            "value": 7,
+        }
+        state = SimpleNamespace(
+            formal_batches=(
+                SimpleNamespace(
+                    candidate_id="candidate:dedup",
+                    batch_index=0,
+                    revision_id="revision:dedup:r0",
+                ),
+            ),
+            local_edit_outcomes=(
+                {
+                    "candidate_id": "candidate:dedup",
+                    "batch_index": 0,
+                    "outcome": "rejected",
+                },
+            ),
+            local_edit_proposal_for=lambda _candidate, index: (
+                {
+                    "proposal": {
+                        "decision": "mutate",
+                        "operations": [first, second],
+                    }
+                }
+                if index == 0
+                else None
+            ),
+        )
+        reordered = LocalEditProposal(
+            decision="mutate",
+            operations=(second, first),
+            evidence_refs=(),
+            expected_effect_cells=(),
+            risk_cells=(),
+        )
+
+        self.assertEqual(
+            _local_edit_bundle_signature((first, second)),
+            _local_edit_bundle_signature((second, first)),
+        )
+        self.assertEqual(
+            _local_edit_policy_rejection_reason(
+                state,
+                "candidate:dedup",
+                2,
+                "revision:dedup:r0",
+                reordered,
+            ),
+            "duplicate_recent_rejected_bundle",
+        )
+        self.assertIsNone(
+            _local_edit_policy_rejection_reason(
+                state,
+                "candidate:dedup",
+                2,
+                "revision:dedup:r1",
+                reordered,
+            )
+        )
+        changed = LocalEditProposal(
+            decision="mutate",
+            operations=(second, {**first, "value": 0.6}),
+            evidence_refs=(),
+            expected_effect_cells=(),
+            risk_cells=(),
+        )
+        self.assertIsNone(
+            _local_edit_policy_rejection_reason(
+                state,
+                "candidate:dedup",
+                2,
+                "revision:dedup:r0",
+                changed,
+            )
+        )
+
+    def test_same_revision_repeated_rejected_bundle_never_creates_child(self) -> None:
+        candidate = SimpleNamespace(candidate_id="candidate:dedup", generation=0)
+        revision = SimpleNamespace(
+            revision_id="revision:dedup:r0",
+            genome={},
+            parent_revision_id=None,
+        )
+        prior = SimpleNamespace(
+            candidate_id=candidate.candidate_id,
+            batch_index=0,
+            revision_id=revision.revision_id,
+        )
+        pending = SimpleNamespace(
+            candidate_id=candidate.candidate_id,
+            batch_index=2,
+            revision_id=revision.revision_id,
+        )
+        evaluation = SimpleNamespace(
+            metrics={
+                "constraint_violations": 0,
+                "sample_execution_coverage_pass": True,
+            }
+        )
+        operation = {
+            "op": "set_bounded_parameter",
+            "name": "ridge_alpha",
+            "value": 0.5,
+        }
+        prior_record = {
+            "proposal_id": "local-edit:candidate:dedup:0",
+            "candidate_id": candidate.candidate_id,
+            "batch_index": 0,
+            "proposal": {
+                "decision": "mutate",
+                "operations": [operation],
+            },
+        }
+        state = SimpleNamespace(
+            candidate=lambda _id: candidate,
+            trajectory_for=lambda _id: SimpleNamespace(batch_count=4),
+            formal_batches=(prior, pending),
+            batch_evaluation_for=lambda *_args: evaluation,
+            revision_activation_for=lambda _candidate, index: (
+                object() if index == 0 else None
+            ),
+            local_edit_outcomes=(
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "batch_index": 0,
+                    "outcome": "rejected",
+                },
+            ),
+            local_edit_proposal_for=lambda _candidate, index: (
+                prior_record if index == 0 else None
+            ),
+            revision=lambda _id: revision,
+        )
+        endpoint = SimpleNamespace(
+            server=SimpleNamespace(director=SimpleNamespace(state=lambda _id: state))
+        )
+        proposal = LocalEditProposal(
+            decision="mutate",
+            operations=(operation,),
+            evidence_refs=("batch:score",),
+            expected_effect_cells=(),
+            risk_cells=(),
+        )
+        context = SimpleNamespace(
+            candidate_revision_id=revision.revision_id,
+            evidence_scope_digest="a" * 64,
+        )
+        calls = []
+
+        with (
+            patch(
+                "ecologyrsi_dsh.api.formal_trajectory._local_edit_context",
+                return_value=context,
+            ),
+            patch(
+                "ecologyrsi_dsh.api.formal_trajectory._local_edit_proposal",
+                return_value=proposal,
+            ),
+            patch(
+                "ecologyrsi_dsh.api.formal_trajectory.apply_or_reject_local_edit_bundle"
+            ) as apply_edit,
+            patch(
+                "ecologyrsi_dsh.api.formal_trajectory._director_mutation",
+                side_effect=lambda *args: calls.append(args),
+            ),
+        ):
+            self.assertTrue(
+                execute_next_local_edit(
+                    endpoint, "run:dedup", candidate.candidate_id
+                )
+            )
+
+        apply_edit.assert_not_called()
+        self.assertEqual(
+            [call[1] for call in calls],
+            [
+                "record_local_edit_proposal",
+                "decide_local_edit",
+                "advance_trajectory_revision",
+            ],
+        )
+        self.assertEqual(calls[0][3]["proposal"], proposal.to_dict())
+        self.assertEqual(calls[1][3]["outcome"], LocalEditOutcome.REJECTED.value)
+        self.assertEqual(
+            calls[1][3]["reason"], "duplicate_recent_rejected_bundle"
+        )
+        self.assertEqual(calls[1][3]["active_revision_id"], revision.revision_id)
+        self.assertEqual(
+            calls[2][6], RevisionAdvanceReason.LOCAL_EDIT_REJECTED
+        )
 
     def test_batch_local_catalog_excludes_whole_predictor_replacement(self) -> None:
         from tests.test_local_edits import _parent
@@ -426,7 +643,10 @@ class FormalTrajectoryTests(unittest.TestCase):
         endpoint = SimpleNamespace(
             server=SimpleNamespace(director=SimpleNamespace(state=lambda _id: state))
         )
-        context = SimpleNamespace(evidence_scope_digest="a" * 64)
+        context = SimpleNamespace(
+            evidence_scope_digest="a" * 64,
+            candidate_revision_id=revision.revision_id,
+        )
         mutations = []
 
         with (

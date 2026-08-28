@@ -417,7 +417,7 @@
     var stats = [
       candidateEvidenceStat("样本覆盖率", candidateEvidencePercent(coverage), coverageThreshold, summary.coverage_pass === false ? "is-warning" : coverage != null ? "is-positive" : "is-pending"),
       candidateEvidenceStat("成功", succeeded == null ? "—" : formatNumber(succeeded), liveProgress && progressTotal != null ? "已完成 " + formatNumber(attempted) + " / " + formatNumber(progressTotal) : attempted == null ? "逐样本预测" : "共尝试 " + formatNumber(attempted), succeeded == null ? "is-pending" : "is-positive"),
-      candidateEvidenceStat("失败", failed == null ? "—" : formatNumber(failed), "失败样本使用保守计分", failed == null ? "is-pending" : Number(failed) > 0 ? "is-warning" : "is-positive"),
+      candidateEvidenceStat("失败", failed == null ? "—" : formatNumber(failed), "失败样本使用惩罚占位，不计为模型预测", failed == null ? "is-pending" : Number(failed) > 0 ? "is-warning" : "is-positive"),
       candidateEvidenceStat("重试", retries == null ? "—" : formatNumber(retries), "瞬时错误按预算退避重试", retries == null ? "is-pending" : Number(retries) > 0 ? "is-running" : ""),
       candidateEvidenceStat("修复", repairs == null ? "—" : formatNumber(repairs), "越界预测采用有界修复", repairs == null ? "is-pending" : Number(repairs) > 0 ? "is-warning" : ""),
       candidateEvidenceStat("Planner 调用", plannerCalls == null ? "—" : formatNumber(plannerCalls), originBundleProtocol ? "每个预测时点一次，覆盖完整向量" : "每个有效样本独立调用", plannerCalls == null ? "is-pending" : "is-positive"),
@@ -630,6 +630,7 @@
   }
   function candidateSampleStatusDescriptor(row) {
     var status = String(row && row.sample_status || "").toLowerCase();
+    if (!status && row && row.scoring_fallback) { status = "failed"; }
     if (!status && row && row.failure_message) { status = "failed"; }
     if (!status && row && row.predicted != null && row.predicted !== "" && Number.isFinite(Number(row.predicted))) { status = "completed"; }
     if (["completed", "succeeded", "success", "accepted", "scored", "passed"].indexOf(status) >= 0) { return {text: "已完成", className: "pill-green", rowClass: "is-complete"}; }
@@ -644,17 +645,26 @@
     var number = Number(value);
     return Number.isFinite(number) ? formatNumber(number, digits == null ? 4 : digits) : displayText(value);
   }
+  function candidatePreviewPredictionCell(row) {
+    var source = String(row && row.prediction_source || "").toLowerCase();
+    var fallback = Boolean(row && row.scoring_fallback) || source === "scoring_fallback" || source === "failed_no_model_prediction" || String(row && (row.sample_execution_status || row.status) || "").toLowerCase() === "failed" || Boolean(row && row.model_prediction_available === false);
+    if (fallback) {
+      return "<span class=\"candidate-sample-value-stack\"><strong>未产生有效预测</strong><small>固定惩罚仅用于内部门禁</small></span>";
+    }
+    return "<strong>" + escapeHTML(formatNumber(row && row.predicted)) + "</strong>";
+  }
   function renderCandidateSampleRows(rows, offset) {
     return (Array.isArray(rows) ? rows : []).map(function (row, index) {
       row = row && typeof row === "object" ? row : {};
       var status = candidateSampleStatusDescriptor(row);
       var targetTime = row.target_timestamp != null ? row.target_timestamp : row.timestamp;
       var originTime = row.origin_timestamp;
-      var reward = Number(row.reward);
+      var reward = row.reward == null || row.reward === "" ? NaN : Number(row.reward);
       var rewardClass = Number.isFinite(reward) ? reward > 0 ? "is-positive" : reward < 0 ? "is-negative" : "" : "is-missing";
       var sampleId = row.sample_id || "sample:" + (Number(offset || 0) + index + 1);
       var scoringFallback = row.scoring_fallback ? String(row.scoring_fallback) : "";
-      var failureSource = row.failure_message || row.failure_class || (scoringFallback ? "未获得有效预测，已采用评分惩罚值" : "");
+      var failedSample = status.rowClass === "is-failed" || Boolean(scoringFallback) || row.model_prediction_available === false;
+      var failureSource = row.failure_message || row.failure_class || (failedSample ? "模型调用失败，未产生有效预测；宿主惩罚占位仅用于评分" : "");
       var failure = failureSource ? candidateEvidenceText(failureSource, "样本执行失败", 100) : "";
       var attempts = Number(row.attempts);
       var retryCount = Number(row.retry_count);
@@ -663,8 +673,8 @@
         : "";
       var executionDetail = [failure, retryDetail].filter(Boolean).join(" · ");
       var sampleMeta = [row.unit && row.unit !== "unknown" ? unitText(row.unit) : "", shortId(sampleId)].filter(Boolean).join(" · ");
-      var prediction = scoringFallback
-        ? "<span class=\"candidate-sample-value-stack\"><strong>" + escapeHTML(candidateSampleValue(row.predicted)) + "</strong><small>评分惩罚值</small></span>"
+      var prediction = failedSample
+        ? "<span class=\"candidate-sample-value-stack\"><strong>未产生有效预测</strong><small>失败惩罚占位，未计为模型预测</small></span>"
         : escapeHTML(candidateSampleValue(row.predicted));
       return "<tr class=\"candidate-sample-row " + status.rowClass + "\" data-sample-id=\"" + escapeHTML(sampleId) + "\"><td data-label=\"时间\"><span class=\"candidate-sample-time\"><strong>" + escapeHTML(targetTime == null ? "—" : formatObservationTime(targetTime)) + "</strong><small>" + escapeHTML(originTime == null ? "起点未提供" : "起点 " + formatObservationTime(originTime)) + "</small></span></td><td data-label=\"目标\"><span class=\"candidate-sample-target\"><strong>" + escapeHTML(targetLabels[row.target] || row.target || "预测目标") + "</strong><small title=\"" + escapeHTML(sampleId) + "\">" + escapeHTML(sampleMeta) + "</small></span></td><td data-label=\"时距\">" + escapeHTML(row.horizon_hours == null ? "—" : formatNumber(row.horizon_hours) + " 小时") + "</td><td data-label=\"真实值\" class=\"candidate-sample-number\">" + escapeHTML(candidateSampleValue(row.observed)) + "</td><td data-label=\"预测值\" class=\"candidate-sample-number candidate-sample-prediction\">" + prediction + "</td><td data-label=\"辅助 MAE 改善（原始单位）\" class=\"candidate-sample-number candidate-sample-reward " + rewardClass + "\" title=\"相对冻结评分基线的绝对误差改善，是辅助学习信号，正值更好；候选排名使用 RMSE 技能主适应度\">" + escapeHTML(candidateSampleValue(row.reward)) + "</td><td data-label=\"状态\"><span class=\"candidate-sample-status\"><strong class=\"pill " + status.className + "\">" + escapeHTML(status.text) + "</strong>" + (executionDetail ? "<small title=\"" + escapeHTML(executionDetail) + "\">" + escapeHTML(executionDetail) + "</small>" : "") + "</span></td></tr>";
     }).join("");
@@ -810,7 +820,7 @@
     var secondaryMetrics = metrics.filter(function (key) { return key !== "targets" && key !== "prediction_preview" && keyMetricKeys.indexOf(key) < 0 && (key !== "judge_accepted" || judgeCompleted); });
     var predictionLimit = 8;
     var shownPredictionRows = predictionRows.slice(0, predictionLimit);
-    var predictionTable = predictionRows.length ? "<div class=\"table-wrap detail-table-wrap candidate-preview-table\" tabindex=\"0\" aria-label=\"预测效果预览，可横向滚动\"><table class=\"prediction-table\"><thead><tr><th>预测起点</th><th>目标时间</th><th>时距</th><th>目标</th><th>观测值</th><th>候选预测</th><th>基线预测</th><th>单位</th></tr></thead><tbody>" + shownPredictionRows.map(function (row) { return "<tr><td data-label=\"预测起点\">" + escapeHTML(row.origin_timestamp == null ? "—" : formatObservationTime(row.origin_timestamp)) + "</td><td data-label=\"目标时间\">" + escapeHTML(formatObservationTime(row.target_timestamp != null ? row.target_timestamp : row.timestamp)) + "</td><td data-label=\"时距\">" + escapeHTML(row.horizon_hours == null ? "—" : formatNumber(row.horizon_hours) + " 小时") + "</td><td data-label=\"目标\">" + escapeHTML(targetLabels[row.target] || row.target || "预测目标") + "</td><td data-label=\"观测值\">" + escapeHTML(formatNumber(row.observed)) + "</td><td data-label=\"候选预测\"><strong>" + escapeHTML(formatNumber(row.predicted)) + "</strong></td><td data-label=\"基线预测\">" + escapeHTML(formatNumber(row.baseline)) + "</td><td data-label=\"单位\">" + escapeHTML(unitText(row.unit)) + "</td></tr>"; }).join("") + "</tbody></table></div>" + (predictionRows.length > predictionLimit ? "<small class=\"candidate-preview-note\">已显示前 " + escapeHTML(formatNumber(predictionLimit)) + " 行，共 " + escapeHTML(formatNumber(predictionRows.length)) + " 行；完整记录可在下方逐样本结果中分页查看。</small>" : "") : "<span class=\"empty-state\">当前评测器未提供预测效果预览。</span>";
+    var predictionTable = predictionRows.length ? "<div class=\"table-wrap detail-table-wrap candidate-preview-table\" tabindex=\"0\" aria-label=\"预测效果预览，可横向滚动\"><table class=\"prediction-table\"><thead><tr><th>预测起点</th><th>目标时间</th><th>时距</th><th>目标</th><th>观测值</th><th>候选预测 / 失败占位</th><th>基线预测</th><th>单位</th></tr></thead><tbody>" + shownPredictionRows.map(function (row) { return "<tr><td data-label=\"预测起点\">" + escapeHTML(row.origin_timestamp == null ? "—" : formatObservationTime(row.origin_timestamp)) + "</td><td data-label=\"目标时间\">" + escapeHTML(formatObservationTime(row.target_timestamp != null ? row.target_timestamp : row.timestamp)) + "</td><td data-label=\"时距\">" + escapeHTML(row.horizon_hours == null ? "—" : formatNumber(row.horizon_hours) + " 小时") + "</td><td data-label=\"目标\">" + escapeHTML(targetLabels[row.target] || row.target || "预测目标") + "</td><td data-label=\"观测值\">" + escapeHTML(formatNumber(row.observed)) + "</td><td data-label=\"候选预测 / 失败占位\">" + candidatePreviewPredictionCell(row) + "</td><td data-label=\"基线预测\">" + escapeHTML(formatNumber(row.baseline)) + "</td><td data-label=\"单位\">" + escapeHTML(unitText(row.unit)) + "</td></tr>"; }).join("") + "</tbody></table></div>" + (predictionRows.length > predictionLimit ? "<small class=\"candidate-preview-note\">已显示前 " + escapeHTML(formatNumber(predictionLimit)) + " 行，共 " + escapeHTML(formatNumber(predictionRows.length)) + " 行；完整记录可在下方逐样本结果中分页查看。</small>" : "") : "<span class=\"empty-state\">当前评测器未提供预测效果预览。</span>";
     var artifactSection = artifact ? "<div class=\"artifact-summary\"><div class=\"detail-grid\"><div class=\"detail-value\"><span>训练模型</span><strong title=\"" + escapeHTML(artifact.model_id || "") + "\">" + escapeHTML(predictionModelReferenceLabel(artifact.model_id)) + "</strong></div><div class=\"detail-value\"><span>训练分区</span><strong>" + escapeHTML(partitionText(artifact.training_partition)) + "</strong></div><div class=\"detail-value\"><span>训练样本数</span><strong>" + escapeHTML(formatNumber(artifact.training_rows)) + "</strong></div><div class=\"detail-value\"><span>产物校验值</span><strong title=\"" + escapeHTML(artifact.artifact_digest || "") + "\">" + escapeHTML(shortId(artifact.artifact_digest || "未提供")) + "</strong></div></div><h4>拟合参数</h4><div class=\"change-list\">" + renderArtifactMapping(artifact.learned_parameters) + "</div><h4>训练指标</h4><div class=\"change-list\">" + renderArtifactMapping(artifact.metrics) + "</div></div>" : "<span class=\"empty-state\">尚未记录该候选的训练产物。</span>";
     var failureReason = candidate.failure_reason || (candidate.status === "failed" ? "候选在训练或评测阶段失败，服务端未提供公开原因。" : "");
     var failureSection = failureReason ? "<section class=\"detail-section failure-detail candidate-section\"><h3>执行异常</h3><div class=\"failure-message\"><strong>" + escapeHTML(candidate.failed_stage ? "阶段：" + (evolutionStageLabels[candidate.failed_stage] || candidate.failed_stage) : "候选执行失败") + "</strong><p>" + escapeHTML(failureReason) + "</p><span>当前版本没有阶段级重试按钮；请保留同一任务证据并新建运行重试。</span></div></section>" : "";

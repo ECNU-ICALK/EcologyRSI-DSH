@@ -222,12 +222,17 @@
       var predicted = trainingTraceFirst(raw, ["predicted", "predicted_value", "prediction", "forecast", "forecast_value"]);
       var baseline = trainingTraceFirst(raw, ["baseline", "baseline_value", "persistence"]);
       var error = trainingTraceFirst(raw, ["error", "absolute_error", "residual"]);
+      var status = String(trainingTraceFirst(raw, ["sample_execution_status", "execution_status", "status"]) || "").toLowerCase();
+      var source = String(raw.prediction_source || "").toLowerCase();
+      var failed = status === "failed" || Boolean(raw.scoring_fallback) || source === "scoring_fallback" || source === "failed_no_model_prediction" || raw.model_prediction_available === false;
+      if (failed) { predicted = null; error = null; }
       if (error == null && observed != null && predicted != null && Number.isFinite(Number(observed)) && Number.isFinite(Number(predicted))) { error = Number(predicted) - Number(observed); }
       return {
         index: Number(raw.sample_index || raw.index || index + 1) || index + 1,
         target: trainingTraceValueText(trainingTraceFirst(raw, ["target", "target_name", "variable"]) || "目标变量"),
         input: trainingTraceValueText(trainingTraceFirst(raw, ["input_summary", "input_reference", "input", "features", "context", "input_context"])),
         observed: observed, predicted: predicted, error: error, baseline: baseline,
+        failed: failed,
         unit: trainingTraceFirst(raw, ["unit", "target_unit"]),
         partition: trainingTraceFirst(raw, ["partition"]) || (trainingTraceIsObject(raw.input_reference) ? trainingTraceFirst(raw.input_reference, ["partition"]) : null),
         step: trainingTraceFirst(raw, ["step_summary", "method_step", "method"]),
@@ -270,7 +275,9 @@
     var rows = visible.map(function (row) {
       var inputCell = row.input === "未提供" ? "—" : shortId(row.input);
       if (row.step) { inputCell += "<small title=\"" + escapeHTML(row.step) + "\">步骤：" + escapeHTML(shortId(row.step)) + "</small>"; }
-      return "<tr><td>" + escapeHTML(formatNumber(row.index)) + (row.timestamp != null ? "<small>" + escapeHTML(formatObservationTime(row.timestamp)) + "</small>" : "") + "</td><td title=\"" + escapeHTML(row.target) + "\">" + escapeHTML(shortId(row.target)) + "</td><td title=\"" + escapeHTML(row.input) + "\">" + inputCell + "</td><td>" + escapeHTML(formatNumber(row.observed)) + "</td><td>" + escapeHTML(formatNumber(row.predicted)) + "</td><td>" + escapeHTML(formatNumber(row.error)) + "</td><td>" + escapeHTML(formatNumber(row.baseline)) + "</td></tr>";
+      var predictionCell = row.failed ? "未产生有效预测<small>固定惩罚仅用于内部门禁</small>" : escapeHTML(formatNumber(row.predicted));
+      var errorCell = row.failed ? "不可用" : escapeHTML(formatNumber(row.error));
+      return "<tr><td>" + escapeHTML(formatNumber(row.index)) + (row.timestamp != null ? "<small>" + escapeHTML(formatObservationTime(row.timestamp)) + "</small>" : "") + "</td><td title=\"" + escapeHTML(row.target) + "\">" + escapeHTML(shortId(row.target)) + "</td><td title=\"" + escapeHTML(row.input) + "\">" + inputCell + "</td><td>" + escapeHTML(formatNumber(row.observed)) + "</td><td>" + predictionCell + "</td><td>" + errorCell + "</td><td>" + escapeHTML(formatNumber(row.baseline)) + "</td></tr>";
     }).join("");
     var totalCandidate = Number(totalHint != null ? totalHint : predictions.length);
     var total = Number.isFinite(totalCandidate) && totalCandidate >= predictions.length ? totalCandidate : predictions.length;

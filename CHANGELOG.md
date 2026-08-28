@@ -2,6 +2,44 @@
 
 All notable changes to EcologyRSI-DSH are recorded in this file.
 
+## 0.3.50 - 2026-08-28
+
+### DSH child compatibility and cleanup
+
+- Run every `sample.plan` as a direct one-shot structured DSH child and pass
+  its 2,048-token output cap through the supported
+  `SubagentStartRequest.agentOptions.maxTokens` field while inheriting the
+  frozen provider and model from the retained role host.
+- Remove the obsolete per-sample Workflow executor, script template, active
+  Workflow registry, duplicate cancellation/disposal paths, worker-thread
+  preset dependency, and their redundant tests. Rename the current sample
+  execution mode to `dsh_native_agent`; this release does not accept the old
+  mode name.
+
+### Truthful failure evidence and progress
+
+- Treat prediction-tool execution as intermediate evidence only; a remote
+  origin completes only after its structured child result is accepted. Keep
+  Host-settled success/failure counts separate from remote completion,
+  provider admission, retries, and structured-child request failures.
+- Aggregate active screening heartbeats with sealed candidate checkpoints so
+  failed origins advance the settled counter instead of leaving total progress
+  at zero, without double-counting a sealed candidate.
+- Retain deterministic worst-case failure penalties only in the private
+  scoring archive. Public sample APIs, candidate previews, live monitoring,
+  inference traces, and training trajectories now expose failed rows as having
+  no model prediction, error, or reward.
+- Canonicalize each local-edit operation bundle and reject an exact bundle that
+  was already rejected for the same immutable candidate revision. The original
+  proposal remains durable audit evidence, while the Host records
+  `duplicate_recent_rejected_bundle` without creating a redundant child
+  revision; a changed parent revision remains eligible for reconsideration.
+
+### Delivery
+
+- Align the Python package, browser plugin, Host plugin, lockfile, legal
+  metadata, documentation, and packed Host artifact at version 0.3.50.
+
 ## 0.3.49 - 2026-08-28
 
 ### Durable adaptive scopes

@@ -414,6 +414,83 @@ class DshSampleExecutionTests(unittest.TestCase):
             ("remote_transient", True, "DshNativeRuntimeUnavailableError"),
         )
 
+    def test_structured_child_error_is_failed_not_a_model_prediction(self) -> None:
+        class StructuredChildFailureRuntime:
+            def run_stage(self, request: dict) -> dict:
+                del request
+                raise DshNativeRuntimeUnavailableError(
+                    "structured child output rejected",
+                    error_code="structured_child_model_error",
+                    status_code=422,
+                )
+
+        progress: list[dict] = []
+        publications: list[dict] = []
+        adapter = DshSampleCollaborationAdapter(
+            run_id="run-structured-child-failure",
+            runtime_provider=lambda: StructuredChildFailureRuntime(),
+            revision_provider=lambda _run_id: {
+                "run_state_revision": 7,
+                "ledger_expected_revision": 11,
+            },
+            identity_digests={
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            strategy_model_id="dsh/strategy",
+            review_model_id="dsh/review",
+            forecast_bundle_tool=_constant_forecast_bundle(21.5),
+            prediction_tool_binder=_fake_agent_prediction_binder,
+            progress_callback=progress.append,
+            sample_reflection_policy="candidate_aggregate_post_score@1",
+        )
+        row = _request("sample-structured-child-failure").to_dict()
+        row["observed"] = 21.0
+
+        batch = CollaborativeSampleExecutor(adapter).execute(
+            (row,),
+            context={
+                "run_id": "run-structured-child-failure",
+                "candidate_id": "candidate-1",
+                "dataset_digest": "d" * 64,
+                "partition": "training_feedback",
+                "algorithm_id": "registered-predictor",
+                "algorithm_version": "1",
+            },
+            target_bounds={
+                "air_temperature": {"minimum": -20.0, "maximum": 80.0}
+            },
+            algorithm_id="registered-predictor",
+            algorithm_version="1",
+            result_callback=lambda values: publications.extend(
+                dict(item) for item in values
+            ),
+        )
+
+        self.assertEqual(batch.successful_rows, ())
+        self.assertEqual(batch.summary["succeeded_examples"], 0)
+        self.assertEqual(batch.summary["failed_examples"], 1)
+        self.assertEqual(batch.summary["coverage"], 0.0)
+        self.assertEqual(batch.summary["scoring_fallback_examples"], 1)
+        self.assertEqual(batch.records[0]["status"], "failed")
+        self.assertIsNone(batch.records[0]["predicted"])
+        self.assertEqual(
+            batch.scoring_rows[0]["scoring_fallback"],
+            "failure_non_improvement_penalty",
+        )
+        self.assertEqual(
+            batch.scoring_rows[0]["sample_execution_status"], "failed"
+        )
+        self.assertEqual(publications[0]["sample_execution_status"], "failed")
+        settled = [
+            item
+            for item in progress
+            if item.get("completed_samples") == 1
+        ][-1]
+        self.assertEqual(settled["succeeded_samples"], 0)
+        self.assertEqual(settled["failed_samples"], 1)
+
     def test_retryable_dsh_critic_failure_crosses_the_sample_boundary(self) -> None:
         class TransientCriticRuntime(_SampleRuntime):
             def run_stage(self, request: dict) -> dict:
@@ -757,7 +834,7 @@ class DshSampleExecutionTests(unittest.TestCase):
             budget={"max_candidates": 1},
             metadata={
                 "execution_protocol": "dsh_native_plugin_evolution@1",
-                "sample_agent_mode": "dsh_native_workflow",
+                "sample_agent_mode": "dsh_native_agent",
                 "sample_agent_protocol": "dsh-strict-origin-bundle@3",
                 "sample_agent_batch_size": 8,
                 "sample_concurrency": 2,

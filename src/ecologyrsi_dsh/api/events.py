@@ -34,6 +34,40 @@ _TERMINAL_RUN_STATUSES = frozenset(
 )
 
 
+def _browser_sample_result_row(value: dict[str, Any]) -> dict[str, Any]:
+    """Hide private scoring penalties from the model-prediction surface.
+
+    The private archive retains a finite worst-case value so a failed model
+    call cannot gain an advantage and checkpoint resume stays deterministic.
+    That host-generated penalty is not a model prediction, error, or reward.
+    """
+
+    row = dict(value)
+    status = str(row.get("status") or "").strip().casefold()
+    scoring_fallback = row.get("scoring_fallback")
+    failed = status == "failed" or bool(scoring_fallback)
+    if not failed:
+        row["model_prediction_available"] = row.get("predicted") is not None
+        row["scoring_penalty_applied"] = False
+        return row
+
+    row.update(
+        {
+            "status": "failed",
+            "predicted": None,
+            "prediction_source": "failed_no_model_prediction",
+            "absolute_error": None,
+            "reward": None,
+            "model_prediction_available": False,
+            "scoring_penalty_applied": bool(scoring_fallback),
+        }
+    )
+    for name in ("raw_normalized_reward", "normalized_reward"):
+        if name in row:
+            row[name] = None
+    return row
+
+
 class EventEndpointsMixin:
     @staticmethod
     def _event_json(
@@ -95,7 +129,10 @@ class EventEndpointsMixin:
             "ExpertConsultationApplied": "专家答复已纳入后续轮次的研究上下文。",
             "EvolutionStageRecorded": "进化阶段执行状态已记录。",
             "GatewayRetryScheduled": "网关暂时繁忙，已安排延迟重试。",
-            "DshChildExecutionFailed": "DSH 子任务失败预约已结算并等待重试。",
+            "DshChildExecutionFailed": (
+                "DSH 子任务请求失败并已释放预约；"
+                "该请求不计为模型成功，最终失败 origin 由宿主结算记录。"
+            ),
             "ModelUsageRecorded": "模型调用 token 用量已记录。",
             "AlgorithmAttemptRecorded": "候选算法编译或调试证据已记录。",
         }.get(event.kind, "运行记录已更新。")
@@ -1108,7 +1145,10 @@ class EventEndpointsMixin:
         complete = completed is not None or terminal
 
         total = len(rows)
-        page_rows = rows[offset : offset + limit]
+        page_rows = [
+            _browser_sample_result_row(row)
+            for row in rows[offset : offset + limit]
+        ]
         consumed = offset + len(page_rows)
         reward_definition = (
             str(completed.payload.get("reward_definition"))

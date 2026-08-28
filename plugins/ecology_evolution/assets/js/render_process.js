@@ -180,6 +180,13 @@
     if (event.type === "gateway.retry_scheduled") {
       return [payload.retry_at ? "下次重试 " + formatTime(payload.retry_at) : "等待下一次调用", payload.delay_seconds != null ? "延迟 " + formatNumber(payload.delay_seconds, 1) + " 秒" : "", payload.attempt ? "第 " + formatNumber(payload.attempt) + " 次" : "", payload.reason || "网关队列繁忙，运行保持存活"].filter(Boolean).join(" · ");
     }
+    if (event.type === "dsh.child_execution_failed") {
+      var childErrorCode = String(payload.error_code || "");
+      var childErrorText = childErrorCode === "structured_child_model_error"
+        ? "模型未返回可验收的结构化结果"
+        : "DSH 子任务未完成";
+      return [payload.stage ? "阶段 " + payload.stage : "", childErrorText, "不计为模型成功；最终失败预测时点按宿主结算口径记录"].filter(Boolean).join(" · ");
+    }
     if (event.type === "promotion.decided") {
       var explanation = payload.reason;
       if (explanation && /[\u3400-\u9fff]/.test(String(explanation))) { return String(explanation); }
@@ -1007,6 +1014,11 @@
     var keys = Object.keys(input).filter(function (key) { return !/(token|secret|password|reasoning|prompt|raw|observed|predicted)/i.test(key); }).slice(0, 3);
     return keys.length ? "输入：" + keys.map(function (key) { return humanizeTechnicalText(key) + "=" + executionSafeValue(input[key]); }).join(" · ") : "输入：按冻结数据分区取样";
   }
+  function executionRowUsesScoringFallback(row) {
+    var source = String(row && row.prediction_source || "").toLowerCase();
+    var status = String(row && (row.sample_status || row.sample_execution_status || row.status) || "").toLowerCase();
+    return Boolean(row && row.scoring_fallback) || source === "scoring_fallback" || source === "failed_no_model_prediction" || ["failed", "error", "rejected", "timeout", "aborted", "cancelled"].indexOf(status) >= 0 || Boolean(row && row.model_prediction_available === false);
+  }
   function executionPredictionRows(candidate, run) {
     // The paged sample endpoint is the live source while a candidate is
     // evaluating.  Prefer it over the bounded projection preview so rows
@@ -1139,11 +1151,15 @@
     var configuration = run && run.configuration || {};
     var predictionModelId = candidate.execution && candidate.execution.prediction_model_id || configuration.prediction_model_id;
     var previewRows = executionPredictionRows(candidate, run);
+    var validPreviewCount = previewRows.filter(function (row) { return !executionRowUsesScoringFallback(row); }).length;
+    var penaltyPreviewCount = previewRows.length - validPreviewCount;
     var adaptiveProgress = explicitProgress.stage_progress && typeof explicitProgress.stage_progress === "object" ? explicitProgress.stage_progress : {};
     var adaptiveBatchText = Number.isFinite(Number(adaptiveProgress.batch_index)) && Number.isFinite(Number(adaptiveProgress.batch_count))
       ? "微批 " + formatNumber(adaptiveProgress.batch_index) + " / " + formatNumber(adaptiveProgress.batch_count) + " · 本轮已结算 " + formatNumber(adaptiveProgress.completed_samples || 0) + " / " + formatNumber(adaptiveProgress.total_samples || 0) + " origins"
       : "";
-    var previewText = previewRows.length ? "已形成 " + previewRows.length + " 条预测记录" : adaptiveBatchText || (liveAllowed ? "等待样本评测" : "未保留样本预览");
+    var previewText = previewRows.length
+      ? (validPreviewCount ? "有效预测 " + validPreviewCount + " 条" : "尚无有效预测") + (penaltyPreviewCount ? " · 失败惩罚占位 " + penaltyPreviewCount + " 条" : "")
+      : adaptiveBatchText || (liveAllowed ? "等待样本评测" : "未保留样本预览");
     node.innerHTML = "<div class=\"execution-candidate-identity\"><strong>" + escapeHTML(shortId(candidate.id || candidate.candidate_id || "候选尚未生成")) + "</strong><code title=\"" + escapeHTML(candidate.id || candidate.candidate_id || "") + "\">第 " + escapeHTML(candidate.generation || round && round.generation || "—") + " 轮 · 槽位 " + escapeHTML(Number(candidate.slot_index || 0) + 1) + "</code><span>" + escapeHTML(stageText + " · " + previewText) + "</span></div><dl class=\"execution-key-values\"><div><dt>父方案</dt><dd title=\"" + escapeHTML(candidate.parent_id || "") + "\">" + escapeHTML(shortId(candidate.parent_id || "当前基线")) + "</dd></div><div><dt>预测模型</dt><dd title=\"" + escapeHTML(predictionModelId || "") + "\">" + escapeHTML(predictionModelReferenceLabel(predictionModelId)) + "</dd></div><div><dt>综合得分</dt><dd>" + escapeHTML(formatNumber(candidate.score)) + "</dd></div></dl><p class=\"execution-rationale\">" + escapeHTML(compactTechnicalText(String(candidate.rationale || "等待模型方案摘要。").slice(0, 260))) + "</p>";
   }
   function renderExecutionSamples(candidate, run) {
@@ -1153,7 +1169,10 @@
     var rows = executionPredictionRows(candidate, run);
     var trace = executionPredictionTrace(candidate, run);
     var total = trace && Number.isFinite(Number(trace.sample_count)) ? Number(trace.sample_count) : rows.length;
-    countNode.textContent = total > rows.length ? formatNumber(rows.length) + " / " + formatNumber(total) + " 条" : formatNumber(rows.length) + " 条";
+    var penaltyCount = rows.filter(executionRowUsesScoringFallback).length;
+    var validPredictionCount = rows.length - penaltyCount;
+    var countPrefix = total > rows.length ? formatNumber(rows.length) + " / " + formatNumber(total) + " 条" : formatNumber(rows.length) + " 条";
+    countNode.textContent = countPrefix + (penaltyCount ? "（有效预测 " + formatNumber(validPredictionCount) + " · 失败惩罚占位 " + formatNumber(penaltyCount) + "）" : "");
     countNode.title = trace && trace.truncated === true ? "当前展示脱敏预览；完整样本由候选评测记录保留。" : "";
     if (!rows.length) {
       list.innerHTML = "<div class=\"empty-state\">候选完成评测后显示样本结果。</div>";
@@ -1161,27 +1180,31 @@
     }
     list.innerHTML = rows.map(function (row, index) {
       row = row && typeof row === "object" ? row : {};
-      var predicted = Number(row.predicted);
-      var observed = Number(row.observed);
-      var baseline = Number(row.baseline);
-      var error = Number(row.error);
+      var scoringFallback = executionRowUsesScoringFallback(row);
+      var predicted = !scoringFallback && row.predicted != null && row.predicted !== "" ? Number(row.predicted) : NaN;
+      var observed = row.observed != null && row.observed !== "" ? Number(row.observed) : NaN;
+      var baseline = row.baseline != null && row.baseline !== "" ? Number(row.baseline) : NaN;
+      var error = !scoringFallback && row.error != null && row.error !== "" ? Number(row.error) : NaN;
       if (!Number.isFinite(error) && Number.isFinite(predicted) && Number.isFinite(observed)) { error = predicted - observed; }
       var baselineError = Number(row.baseline_error);
       if (!Number.isFinite(baselineError) && Number.isFinite(baseline) && Number.isFinite(observed)) { baselineError = baseline - observed; }
-      var improved = Number.isFinite(error) && Number.isFinite(baselineError) ? Math.abs(error) <= Math.abs(baselineError) : null;
-      var tone = improved === true ? "is-improved" : improved === false ? "is-regressed" : "";
+      var improved = !scoringFallback && Number.isFinite(error) && Number.isFinite(baselineError) ? Math.abs(error) <= Math.abs(baselineError) : null;
+      var tone = scoringFallback ? "is-failed" : improved === true ? "is-improved" : improved === false ? "is-regressed" : "";
       var target = targetLabels[row.target] || row.target || "预测目标";
       var targetTime = row.target_timestamp != null ? row.target_timestamp : row.timestamp;
       var timeText = targetTime == null ? "目标时间未提供" : "目标 " + formatObservationTime(targetTime);
       var horizon = row.horizon_hours != null ? " · " + formatNumber(row.horizon_hours) + " 小时" : "";
-      var predictionText = Number.isFinite(predicted) ? formatNumber(predicted) : "未产生";
+      var predictionText = scoringFallback ? "未产生有效预测" : Number.isFinite(predicted) ? formatNumber(predicted) : "未产生";
       var observedText = Number.isFinite(observed) ? formatNumber(observed) : "未提供";
-      var errorText = Number.isFinite(error) ? "误差 " + signedNumber(error) : "误差未提供";
+      var errorText = scoringFallback ? "模型误差不可用" : Number.isFinite(error) ? "误差 " + signedNumber(error) : "误差未提供";
       var baselineText = Number.isFinite(baseline) ? "基线 " + formatNumber(baseline) : "基线未提供";
-      var reward = Number(row.reward);
-      var rewardText = Number.isFinite(reward) ? "辅助 MAE 改善 " + signedNumber(reward) : "辅助 MAE 改善未提供";
-      var method = executionPredictionMethod(candidate, index, row);
-      return "<article class=\"sample-inference-row " + tone + "\"><span class=\"sample-inference-index\">样本 " + escapeHTML(String(index + 1).padStart(2, "0")) + "</span><div class=\"sample-inference-main\"><strong>" + escapeHTML(String(target)) + " · " + escapeHTML(timeText + horizon) + "</strong><span>" + escapeHTML(executionInputSummary(row)) + "</span><small>预测 " + escapeHTML(predictionText) + " · 观测 " + escapeHTML(observedText) + " · " + escapeHTML(errorText) + " · " + escapeHTML(baselineText) + " · " + escapeHTML(rewardText) + "</small><small>步骤：" + escapeHTML(compactTechnicalText(String(method).slice(0, 180))) + "</small></div><div class=\"sample-inference-values\"><strong>" + escapeHTML(predictionText) + "</strong><span>" + escapeHTML(unitText(row.unit)) + "</span></div></article>";
+      var reward = !scoringFallback && row.reward != null && row.reward !== "" ? Number(row.reward) : NaN;
+      var rewardText = scoringFallback ? "不作为有效预测改善" : Number.isFinite(reward) ? "辅助 MAE 改善 " + signedNumber(reward) : "辅助 MAE 改善未提供";
+      var method = scoringFallback ? "子任务失败；固定最差惩罚仅用于内部门禁，未作为模型预测" : executionPredictionMethod(candidate, index, row);
+      var resultText = scoringFallback ? "执行失败，未产生有效预测" : "预测 " + predictionText;
+      var valueText = scoringFallback ? "失败" : predictionText;
+      var valueUnit = scoringFallback ? "无模型预测" : unitText(row.unit);
+      return "<article class=\"sample-inference-row " + tone + "\"><span class=\"sample-inference-index\">样本 " + escapeHTML(String(index + 1).padStart(2, "0")) + "</span><div class=\"sample-inference-main\"><strong>" + escapeHTML(String(target)) + " · " + escapeHTML(timeText + horizon) + "</strong><span>" + escapeHTML(executionInputSummary(row)) + "</span><small>" + escapeHTML(resultText) + " · 观测 " + escapeHTML(observedText) + " · " + escapeHTML(errorText) + " · " + escapeHTML(baselineText) + " · " + escapeHTML(rewardText) + "</small><small>步骤：" + escapeHTML(compactTechnicalText(String(method).slice(0, 180))) + "</small></div><div class=\"sample-inference-values\"><strong>" + escapeHTML(valueText) + "</strong><span>" + escapeHTML(valueUnit) + "</span></div></article>";
     }).join("");
   }
 
@@ -1281,7 +1304,13 @@
     var explicitVerification = heartbeat && (heartbeat.outcomes_verified === true || heartbeat.outcome_counts_verified === true || String(heartbeat.verification_status || "").toLowerCase() === "verified");
     var completeTerminalBreakdown = !snapshot.live && snapshot.succeeded_samples != null && snapshot.failed_samples != null && Number(snapshot.succeeded_samples) + Number(snapshot.failed_samples) === completed;
     snapshot.outcomes_verified = Boolean(explicitVerification || completeTerminalBreakdown);
-    if (snapshot.settled_origins == null && originBundleProtocol) { snapshot.settled_origins = completed; }
+    if (snapshot.settled_origins == null && originBundleProtocol) {
+      // A DSH heartbeat can be ahead of Host scoring (or can end in a
+      // structured child error after the prediction tool returned). Only
+      // durable Host rows are settled; never relabel remote completion as
+      // settlement merely because the protocol is origin-bundled.
+      snapshot.settled_origins = durableCompleted == null ? 0 : durableCompleted;
+    }
     return snapshot;
   }
 
@@ -1646,6 +1675,13 @@
       : hasActiveRepairWaves ? " · 修复波在飞 " + formatNumber(activeRepairWaves) : "";
     var gatewayAttempts = showLiveProgressDetail && Number(stageProgress.gateway_request_count);
     var gatewayAttemptsText = Number.isInteger(gatewayAttempts) && gatewayAttempts >= 0 ? " · 网关尝试 " + formatNumber(gatewayAttempts) : "";
+    var predictionPending = showLiveProgressDetail && Number(stageProgress.prediction_tool_pending_origins);
+    var predictionPendingText = Number.isInteger(predictionPending) && predictionPending > 0 ? " · 预测已产出待验收 " + formatNumber(predictionPending) : "";
+    var failedChildRequests = showLiveProgressDetail && Number(stageProgress.child_execution_failed_request_count);
+    var structuredChildErrors = showLiveProgressDetail && Number(stageProgress.structured_child_model_error_count);
+    var childFailureText = Number.isInteger(failedChildRequests) && failedChildRequests > 0
+      ? " · 子任务失败请求 " + formatNumber(failedChildRequests) + (Number.isInteger(structuredChildErrors) && structuredChildErrors > 0 ? "（结构化错误 " + formatNumber(structuredChildErrors) + "）" : "")
+      : "";
     var causalWave = showLiveProgressDetail && Number(stageProgress.causal_wave_sample_count);
     var causalWaveText = Number.isInteger(causalWave) && causalWave > 0 ? " · 本波次 " + formatNumber(causalWave) : "";
     var remainingSeconds = showLiveProgressDetail && Number(stageProgress.estimated_remaining_seconds);
@@ -1653,11 +1689,15 @@
     var outcomesVerified = Boolean(stageProgress && stageProgress.outcomes_verified === true);
     var succeeded = stageProgress && Number(stageProgress.succeeded_samples);
     var failedSamples = stageProgress && Number(stageProgress.failed_samples);
-    var verifiedOutcomeText = outcomesVerified && Number.isFinite(succeeded) && Number.isFinite(failedSamples) ? " · 成功 " + formatNumber(succeeded) + " · 失败 " + formatNumber(failedSamples) : "";
-    var settled = stageProgress && Number(stageProgress.settled_origins != null ? stageProgress.settled_origins : stageProgress.completed_samples);
-    var settledText = !outcomesVerified && Number.isFinite(settled) && settled >= 0 ? " · 已结算 " + formatNumber(settled) : "";
+    var outcomeScope = String(stageProgress && stageProgress.outcome_scope || "");
+    var outcomeScopeLabel = outcomeScope === "active_formal_batch"
+      ? "本批"
+      : outcomeScope === "active_holdout_arm" ? "本臂" : "";
+    var verifiedOutcomeText = outcomesVerified && Number.isFinite(succeeded) && Number.isFinite(failedSamples) ? " · " + outcomeScopeLabel + "成功 " + formatNumber(succeeded) + " · " + outcomeScopeLabel + "失败 " + formatNumber(failedSamples) : "";
+    var settled = stageProgress && stageProgress.settled_origins != null ? Number(stageProgress.settled_origins) : NaN;
+    var settledText = Number.isFinite(settled) && settled >= 0 ? " · 已结算 " + formatNumber(settled) : "";
     var evidenceQualifierText = stageProgress && !stageProgress.live && stageProgress.evidence_qualifier ? " · " + stageProgress.evidence_qualifier : "";
-    sampleNode.textContent = stageProgress ? progressUnitLabel + "进度：" + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + settledText + verifiedOutcomeText + evidenceQualifierText + causalWaveText + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText + requestBreakdownText + repairWaveText + gatewayAttemptsText + sampleRateText + (remainingText ? " · 预计剩余 " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测评分单元：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
+    sampleNode.textContent = stageProgress ? progressUnitLabel + "进度：" + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + settledText + verifiedOutcomeText + evidenceQualifierText + causalWaveText + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText + predictionPendingText + childFailureText + requestBreakdownText + repairWaveText + gatewayAttemptsText + sampleRateText + (remainingText ? " · 预计剩余 " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测评分单元：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
     if (tokenNode) {
       tokenNode.title = tokenBudgetScopeText(run);
       tokenNode.textContent = modelUsageTokenProgressText(run, stageProgress, candidate);

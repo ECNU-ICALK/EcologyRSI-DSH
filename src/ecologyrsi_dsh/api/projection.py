@@ -528,7 +528,7 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
     partial_evaluation_retained_candidate_count = 0
     partial_evaluation_aborted_candidate_count = 0
     partial_evaluation_sources: set[str] = set()
-    for candidate in state.candidates:
+    for candidate in tuple(getattr(state, "candidates", ())):
         if candidate.candidate_id in evaluated_candidate_ids:
             continue
         progress = _evaluation_progress_projection(state, candidate.candidate_id)
@@ -899,15 +899,36 @@ def _public_inference_trace(
             "predicted": predicted,
             "baseline": baseline,
         }
+        scoring_fallback = _trace_scalar(raw.get("scoring_fallback"))
+        prediction_source = _trace_scalar(raw.get("prediction_source"))
+        if scoring_fallback is not None:
+            row["scoring_fallback"] = scoring_fallback
+            row["prediction_source"] = "failed_no_model_prediction"
+            row["status"] = "failed"
+        elif prediction_source is not None:
+            row["prediction_source"] = prediction_source
+        failure_class = _trace_scalar(raw.get("failure_class"))
+        if failure_class is not None:
+            row["failure_class"] = failure_class
         sample_id = _trace_scalar(raw.get("sample_id"))
         if sample_id is not None:
             row["sample_id"] = sample_id
             record = records_by_id.get(str(sample_id))
             evidence = record if isinstance(record, Mapping) else raw
             if isinstance(evidence, Mapping):
-                row["status"] = _trace_scalar(
+                evidence_fallback = _trace_scalar(
+                    evidence.get("scoring_fallback")
+                )
+                if evidence_fallback is not None:
+                    scoring_fallback = evidence_fallback
+                    row["scoring_fallback"] = evidence_fallback
+                    row["prediction_source"] = "failed_no_model_prediction"
+                    row["status"] = "failed"
+                evidence_status = _trace_scalar(
                     evidence.get("status", evidence.get("sample_execution_status"))
                 )
+                if scoring_fallback is None:
+                    row["status"] = evidence_status
                 row["attempts"] = _finite_number(
                     evidence.get("attempts", evidence.get("sample_execution_attempts"))
                 )
@@ -933,6 +954,21 @@ def _public_inference_trace(
                         action.get("agent_decisions")
                     )
                     row["tool_calls"] = _safe_plan_value(action.get("tool_calls"))
+        failed = (
+            str(row.get("status") or "").strip().casefold() == "failed"
+            or scoring_fallback is not None
+        )
+        if failed:
+            # A finite private gate penalty keeps failures non-competitive and
+            # resumable, but it is never public model output or score evidence.
+            row["status"] = "failed"
+            row["predicted"] = None
+            row["model_prediction_available"] = False
+            row["scoring_penalty_applied"] = scoring_fallback is not None
+            predicted = None
+        else:
+            row["model_prediction_available"] = predicted is not None
+            row["scoring_penalty_applied"] = False
         if observed is not None and predicted is not None:
             row["error"] = predicted - observed
         if observed is not None and baseline is not None:
@@ -963,6 +999,8 @@ def _public_inference_trace(
                     "target": _trace_scalar(raw.get("target")),
                     "horizon_hours": _finite_number(raw.get("horizon_hours")),
                     "predicted": None,
+                    "model_prediction_available": False,
+                    "scoring_penalty_applied": False,
                     "failure_action": _trace_scalar(raw.get("failure_action")),
                     "failure": _safe_plan_value(raw.get("failure")),
                 }
@@ -1745,6 +1783,9 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     launch_by_reservation_id: dict[str, tuple[Any, Mapping[str, Any]]] = {}
     accepted_reservations: set[str] = set()
     failed_reservations: set[str] = set()
+    prediction_tool_events: dict[str, Any] = {}
+    child_execution_failed_request_count = 0
+    structured_child_model_error_count = 0
     reflection_enabled = (
         metadata.get("sample_reflection_policy")
         != "candidate_aggregate_post_score@1"
@@ -1818,17 +1859,20 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
             ).strip()
             if reservation_id:
                 failed_reservations.add(reservation_id)
+            child_execution_failed_request_count += 1
+            if event.payload.get("error_code") == "structured_child_model_error":
+                structured_child_model_error_count += 1
             sample_events.append(event)
         elif event.kind == "DshPredictionToolExecuted" and not reflection_enabled:
-            # For aggregate post-score reflection this receipt proves that the
-            # registered predictor produced the complete origin vector. It can
-            # advance prediction progress, but the structured candidate result
-            # below remains the only boundary that advances the workflow from
-            # screening into formal evaluation.
+            # A prediction-tool receipt proves only that the Host predictor
+            # produced a vector.  The DSH child can still fail while producing
+            # its required structured result, so never promote this receipt to
+            # a completed/successful origin.  Keep it as explicit intermediate
+            # evidence until DshStructuredResultAccepted closes the child.
             stage = str(event.payload.get("stage") or "")
             key = str(event.payload.get("idempotency_key") or "").strip()
             if stage == terminal_stage and key:
-                completed_terminals[key] = event
+                prediction_tool_events[key] = event
             sample_events.append(event)
     if not sample_events:
         return None
@@ -1899,6 +1943,34 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     completed_terminal_events = [
         event for event, _, _ in completed_origins.values()
     ]
+
+    prediction_tool_origins: set[frozenset[str]] = set()
+    prediction_tool_pending_origins: set[frozenset[str]] = set()
+    for tool_key in prediction_tool_events:
+        correlated_launch = launch_history_by_key.get(tool_key)
+        if correlated_launch is None:
+            continue
+        launch = correlated_launch[1]
+        member_digests = _sample_member_digest_set(
+            launch.get("sample_member_digests")
+        )
+        if (
+            launch.get("stage") != "sample.plan"
+            or member_digests is None
+            or len(member_digests) != cells_per_origin
+        ):
+            continue
+        prediction_tool_origins.add(member_digests)
+        reservation_id = str(launch.get("reservation_id") or "").strip()
+        # Only the latest live attempt can be awaiting structured acceptance.
+        # A paused/resumed boundary, accepted child, or failed child has
+        # already retired the tool receipt operationally.
+        if (
+            tool_key in latest_launch_by_key
+            and reservation_id not in accepted_reservations
+            and reservation_id not in failed_reservations
+        ):
+            prediction_tool_pending_origins.add(member_digests)
 
     total = len(candidates) * _TWO_STAGE_SCREENING_ORIGINS
     completed = min(total, len(completed_origins))
@@ -2066,9 +2138,20 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         "batch_size": 1 if completed else 0,
         "completed_samples": completed,
         "remote_completed_origins": completed,
+        "prediction_tool_output_origins": len(prediction_tool_origins),
+        "prediction_tool_pending_origins": len(
+            prediction_tool_pending_origins
+        ),
         "total_samples": total,
         "succeeded_samples": succeeded,
         "failed_samples": failed,
+        "outcomes_verified": False,
+        "child_execution_failed_request_count": (
+            child_execution_failed_request_count
+        ),
+        "structured_child_model_error_count": (
+            structured_child_model_error_count
+        ),
         "gateway_request_count": launch_count,
         "primary_gateway_request_count": primary_launch_count,
         "repair_gateway_request_count": repair_launch_count,
@@ -2243,7 +2326,10 @@ def _origin_live_projection_after(
     latest_launch_by_key: dict[str, tuple[Any, Mapping[str, Any]]] = {}
     accepted_reservations: set[str] = set()
     failed_reservations: set[str] = set()
-    completed_keys: set[str] = set()
+    accepted_keys: set[str] = set()
+    prediction_tool_keys: set[str] = set()
+    child_execution_failed_request_count = 0
+    structured_child_model_error_count = 0
     sample_events: list[Any] = []
     launch_count = 0
     for event in events:
@@ -2269,7 +2355,7 @@ def _origin_live_projection_after(
                 continue
             key = str(event.payload.get("idempotency_key") or "").strip()
             if key:
-                completed_keys.add(key)
+                prediction_tool_keys.add(key)
             sample_events.append(event)
         elif event.kind == "DshStructuredResultAccepted":
             identity = event.payload.get("identity")
@@ -2277,7 +2363,7 @@ def _origin_live_projection_after(
                 continue
             key = str(identity.get("idempotency_key") or "").strip()
             if key:
-                completed_keys.add(key)
+                accepted_keys.add(key)
             reservation = str(identity.get("child_reservation_id") or "").strip()
             if reservation:
                 accepted_reservations.add(reservation)
@@ -2289,6 +2375,9 @@ def _origin_live_projection_after(
             reservation = str(identity.get("child_reservation_id") or "").strip()
             if reservation:
                 failed_reservations.add(reservation)
+            child_execution_failed_request_count += 1
+            if event.payload.get("error_code") == "structured_child_model_error":
+                structured_child_model_error_count += 1
             sample_events.append(event)
     if not sample_events:
         return None
@@ -2301,7 +2390,7 @@ def _origin_live_projection_after(
         and len(members) == cells_per_origin
     }
     completed_origins: set[frozenset[str]] = set()
-    for key in completed_keys:
+    for key in accepted_keys:
         correlated = launch_by_key.get(key)
         if correlated is None:
             continue
@@ -2310,6 +2399,25 @@ def _origin_live_projection_after(
         )
         if members is not None and len(members) == cells_per_origin:
             completed_origins.add(members)
+
+    prediction_tool_origins: set[frozenset[str]] = set()
+    prediction_tool_pending_origins: set[frozenset[str]] = set()
+    for key in prediction_tool_keys:
+        correlated = launch_by_key.get(key)
+        if correlated is None:
+            continue
+        launch = correlated[1]
+        members = _sample_member_digest_set(launch.get("sample_member_digests"))
+        if members is None or len(members) != cells_per_origin:
+            continue
+        prediction_tool_origins.add(members)
+        reservation = str(launch.get("reservation_id") or "").strip()
+        if (
+            key in latest_launch_by_key
+            and reservation not in accepted_reservations
+            and reservation not in failed_reservations
+        ):
+            prediction_tool_pending_origins.add(members)
 
     active_origins: set[frozenset[str]] = set()
     for _, launch in latest_launch_by_key.values():
@@ -2328,10 +2436,23 @@ def _origin_live_projection_after(
     remotely_completed = min(origin_total, len(completed_origins))
     in_flight = min(len(active_origins), configured_concurrency)
     queued = max(0, len(active_origins) - in_flight)
-    submitted = min(origin_total, len(source_origins))
+    # Failed/retired historical launches are eligible for resubmission.  Only
+    # an accepted or currently active origin occupies a submitted slot.
+    submitted = min(origin_total, len(completed_origins | active_origins))
     latest = max(sample_events, key=lambda event: int(event.seq))
     return {
         "completed_origins": remotely_completed,
+        "remote_completed_origins": remotely_completed,
+        "prediction_tool_output_origins": len(prediction_tool_origins),
+        "prediction_tool_pending_origins": len(
+            prediction_tool_pending_origins
+        ),
+        "child_execution_failed_request_count": (
+            child_execution_failed_request_count
+        ),
+        "structured_child_model_error_count": (
+            structured_child_model_error_count
+        ),
         "progress_kind": "settling" if remotely_completed else "waiting",
         "in_flight_batches": in_flight,
         "queued_batches": queued,
@@ -2345,8 +2466,202 @@ def _origin_live_projection_after(
     }
 
 
+def _active_scoped_evaluation_progress(
+    state: Any,
+    *,
+    started: Any,
+    candidate_id: str,
+    evaluation_phase: str,
+    origin_total: int,
+    formal_batch_index: int | None = None,
+    holdout_arm: str | None = None,
+    candidate_revision_id: str | None = None,
+    cohort_digest: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the heartbeat fenced to the active formal/holdout revision.
+
+    Candidate ids are reused across formal batches and can also appear in a
+    holdout arm.  A candidate-level heartbeat is therefore insufficient: the
+    revision start and its frozen EvaluationScope must both be newer than the
+    active work boundary and match it exactly.
+    """
+
+    events = tuple(getattr(state, "events", ()))
+    revision_start = next(
+        (
+            event
+            for event in reversed(events)
+            if int(event.seq) > int(started.seq)
+            and event.kind == "EvaluationSampleResultsStarted"
+            and event.payload.get("candidate_id") == candidate_id
+            and isinstance(event.payload.get("checkpoint"), Mapping)
+            and event.payload["checkpoint"].get("evaluation_phase")
+            == evaluation_phase
+            and event.payload["checkpoint"].get("formal_batch_index")
+            == formal_batch_index
+            and event.payload["checkpoint"].get("holdout_arm") == holdout_arm
+            and (
+                not candidate_revision_id
+                or event.payload["checkpoint"].get("candidate_revision_id")
+                == candidate_revision_id
+            )
+            and (
+                not cohort_digest
+                or event.payload["checkpoint"].get("cohort_digest")
+                == cohort_digest
+            )
+        ),
+        None,
+    )
+    if revision_start is None:
+        return None
+    latest_candidate_start = next(
+        (
+            event
+            for event in reversed(events)
+            if event.kind == "EvaluationSampleResultsStarted"
+            and event.payload.get("candidate_id") == candidate_id
+        ),
+        None,
+    )
+    if (
+        latest_candidate_start is None
+        or int(latest_candidate_start.seq) != int(revision_start.seq)
+    ):
+        return None
+    progress = _evaluation_progress_projection(state, candidate_id)
+    if (
+        progress is None
+        or int(progress.get("event_seq") or 0) <= int(revision_start.seq)
+        or progress.get("revision") != revision_start.payload.get("revision")
+        or int(progress.get("total_samples") or 0) != origin_total
+    ):
+        return None
+    return progress
+
+
+def _merge_scoped_origin_progress(
+    state: Any,
+    *,
+    started: Any,
+    candidate_id: str,
+    evaluation_phase: str,
+    origin_total: int,
+    outcome_scope: str,
+    formal_batch_index: int | None = None,
+    holdout_arm: str | None = None,
+    candidate_revision_id: str | None = None,
+    cohort_digest: str | None = None,
+) -> dict[str, Any] | None:
+    """Merge DSH activity with the host's authoritative settlement count."""
+
+    remote = _origin_live_projection_after(state, started, origin_total)
+    host = _active_scoped_evaluation_progress(
+        state,
+        started=started,
+        candidate_id=candidate_id,
+        evaluation_phase=evaluation_phase,
+        origin_total=origin_total,
+        formal_batch_index=formal_batch_index,
+        holdout_arm=holdout_arm,
+        candidate_revision_id=candidate_revision_id,
+        cohort_digest=cohort_digest,
+    )
+    if remote is None and host is None:
+        return None
+
+    merged = dict(remote or {})
+    remote_completed = min(
+        origin_total,
+        max(0, int(merged.get("remote_completed_origins") or 0)),
+    )
+    remote_awaiting_submission = (
+        remote.get("awaiting_submission_batches")
+        if remote is not None
+        else None
+    )
+    host_completed = min(
+        origin_total,
+        max(0, int((host or {}).get("completed_samples") or 0)),
+    )
+    # A structured child receipt proves only that DSH returned a payload. It
+    # cannot become completed progress until host scoring has settled it.
+    awaiting_settlement = min(
+        max(0, origin_total - host_completed),
+        max(0, remote_completed - host_completed),
+    )
+    merged.update(
+        {
+            "completed_origins": host_completed,
+            "host_settled_origins": host_completed,
+            "remote_completed_origins": remote_completed,
+            "awaiting_settlement_batches": awaiting_settlement,
+            "settlement_semantics": "host_heartbeat_authoritative",
+        }
+    )
+
+    remote_event_seq = int(merged.get("event_seq") or 0)
+    host_event_seq = int((host or {}).get("event_seq") or 0)
+    if host is not None:
+        merged.update(
+            {
+                "host_settlement_revision": host.get("revision"),
+                "host_settlement_event_seq": host_event_seq,
+                "outcome_scope": outcome_scope,
+            }
+        )
+        succeeded = host.get("succeeded_samples")
+        failed = host.get("failed_samples")
+        outcomes_verified = bool(
+            host_completed > 0
+            and isinstance(succeeded, int)
+            and not isinstance(succeeded, bool)
+            and succeeded >= 0
+            and isinstance(failed, int)
+            and not isinstance(failed, bool)
+            and failed >= 0
+            and succeeded + failed == host_completed
+        )
+        merged["outcomes_verified"] = outcomes_verified
+        if outcomes_verified:
+            merged["succeeded_samples"] = succeeded
+            merged["failed_samples"] = failed
+
+        # Prefer the latest source for operational counters. Settlement and
+        # outcome counts above always remain host-owned regardless of order.
+        if host_event_seq >= remote_event_seq:
+            for key in (
+                "progress_kind",
+                "in_flight_batches",
+                "queued_batches",
+                "awaiting_submission_batches",
+                "gateway_request_count",
+                "configured_concurrency",
+            ):
+                if host.get(key) is not None:
+                    merged[key] = host[key]
+            merged["updated_at"] = host.get("updated_at")
+            merged["event_seq"] = host_event_seq
+        host_awaiting_submission = host.get("awaiting_submission_batches")
+        submission_bounds = tuple(
+            int(value)
+            for value in (
+                remote_awaiting_submission,
+                host_awaiting_submission,
+            )
+            if isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+        )
+        if submission_bounds:
+            merged["awaiting_submission_batches"] = min(submission_bounds)
+    if awaiting_settlement > 0:
+        merged["progress_kind"] = "settling"
+    return merged
+
+
 def _formal_batch_live_projection(state: Any) -> dict[str, Any] | None:
-    """Project the active formal batch from durable DSH origin events."""
+    """Project the active formal batch from DSH and host settlement events."""
 
     status = getattr(getattr(state.run, "status", None), "value", None)
     if status not in {None, "running"}:
@@ -2379,10 +2694,17 @@ def _formal_batch_live_projection(state: Any) -> dict[str, Any] | None:
         for item in state.formal_batch_evaluations
     ):
         return None
-    return _origin_live_projection_after(
+    origin_total = max(1, int(batch.get("origin_count") or 0))
+    return _merge_scoped_origin_progress(
         state,
-        started,
-        max(1, int(batch.get("origin_count") or 0)),
+        started=started,
+        candidate_id=candidate_id,
+        evaluation_phase="formal_batch",
+        origin_total=origin_total,
+        outcome_scope="active_formal_batch",
+        formal_batch_index=batch_index,
+        candidate_revision_id=str(batch.get("revision_id") or "") or None,
+        cohort_digest=cohort_digest or None,
     )
 
 
@@ -2411,10 +2733,19 @@ def _holdout_arm_live_projection(state: Any) -> dict[str, Any] | None:
         for item in state.holdout_evaluations
     ):
         return None
-    live = _origin_live_projection_after(
+    origin_total = max(1, int(started.payload.get("origin_count") or 0))
+    live = _merge_scoped_origin_progress(
         state,
-        started,
-        max(1, int(started.payload.get("origin_count") or 0)),
+        started=started,
+        candidate_id=str(started.payload.get("candidate_id") or ""),
+        evaluation_phase="holdout",
+        origin_total=origin_total,
+        outcome_scope="active_holdout_arm",
+        holdout_arm=arm,
+        candidate_revision_id=(
+            str(started.payload.get("candidate_revision_id") or "") or None
+        ),
+        cohort_digest=(str(started.payload.get("cohort_digest") or "") or None),
     )
     if live is not None:
         live["holdout_arm"] = arm
@@ -2441,16 +2772,77 @@ def _adaptive_progress_projection(
     if not isinstance(schedule, Mapping):
         return None
     try:
-        screening_total = 4 * int(schedule["screening_origin_count"])
+        screening_origin_count = int(schedule["screening_origin_count"])
+        screening_total = 4 * screening_origin_count
         formal_total = 2 * int(schedule["formal_origin_count_per_finalist"])
         holdout_total = 3 * int(schedule["selection_holdout_origin_count"])
     except (KeyError, TypeError, ValueError):
         return None
     generation = state.run.generation
-    settled_screening_completed = sum(
-        int(event.payload.get("origin_count") or 0)
+    generation_screening_events = tuple(
+        event
         for event in state.candidate_screening_events
         if int(event.payload.get("generation", -1)) == generation
+    )
+    sealed_screening_by_candidate = {
+        str(event.payload.get("candidate_id")): int(
+            event.payload.get("origin_count") or 0
+        )
+        for event in generation_screening_events
+        if isinstance(event.payload.get("candidate_id"), str)
+        and event.payload.get("candidate_id")
+    }
+    settled_screening_completed = sum(
+        int(event.payload.get("origin_count") or 0)
+        for event in generation_screening_events
+    )
+    screening_succeeded = 0
+    screening_failed = 0
+    screening_outcome_counted = 0
+    screening_candidate_progress: list[dict[str, Any]] = []
+    for candidate in tuple(getattr(state, "candidates", ())):
+        if int(candidate.generation) != generation:
+            continue
+        raw_candidate_id = getattr(candidate, "candidate_id", None)
+        if not isinstance(raw_candidate_id, str) or not raw_candidate_id:
+            continue
+        candidate_id = raw_candidate_id
+        progress = _evaluation_progress_projection(state, candidate_id)
+        if progress is None:
+            continue
+        screening_candidate_progress.append(progress)
+        heartbeat_completed = min(
+            screening_origin_count,
+            max(0, int(progress.get("completed_samples") or 0)),
+        )
+        sealed_completed = min(
+            screening_origin_count,
+            max(0, sealed_screening_by_candidate.get(candidate_id, 0)),
+        )
+        settled_screening_completed += max(
+            0, heartbeat_completed - sealed_completed
+        )
+        heartbeat_succeeded = progress.get("succeeded_samples")
+        heartbeat_failed = progress.get("failed_samples")
+        if (
+            isinstance(heartbeat_succeeded, int)
+            and not isinstance(heartbeat_succeeded, bool)
+            and heartbeat_succeeded >= 0
+            and isinstance(heartbeat_failed, int)
+            and not isinstance(heartbeat_failed, bool)
+            and heartbeat_failed >= 0
+            and heartbeat_succeeded + heartbeat_failed
+            == heartbeat_completed
+        ):
+            screening_succeeded += heartbeat_succeeded
+            screening_failed += heartbeat_failed
+            screening_outcome_counted += heartbeat_completed
+    settled_screening_completed = min(
+        screening_total, settled_screening_completed
+    )
+    screening_outcomes_verified = bool(
+        settled_screening_completed > 0
+        and screening_outcome_counted == settled_screening_completed
     )
     # Completed progress is the host-settled candidate boundary. A predictor
     # receipt can be followed by schema repair, optional critic work, or host
@@ -2460,6 +2852,7 @@ def _adaptive_progress_projection(
     live_screening = _screening_progress_projection(state)
     has_adaptive_boundary = (
         live_screening is not None
+        or settled_screening_completed > 0
         or any(
             int(event.payload.get("generation", -1)) == generation
             for event in state.candidate_screening_events
@@ -2567,6 +2960,7 @@ def _adaptive_progress_projection(
     if phase != "formal_batch":
         active_batch = None
     live_fields: dict[str, Any] = {}
+    live_formal_completed = 0
     live_holdout_completed = 0
     if live_screening is not None and phase == "screening":
         # Child events remain useful activity evidence, but cannot increase
@@ -2582,6 +2976,10 @@ def _adaptive_progress_projection(
             "primary_gateway_request_count",
             "repair_gateway_request_count",
             "remote_completed_origins",
+            "prediction_tool_output_origins",
+            "prediction_tool_pending_origins",
+            "child_execution_failed_request_count",
+            "structured_child_model_error_count",
             "completed_repair_waves",
             "active_repair_waves",
             "updated_at",
@@ -2597,8 +2995,21 @@ def _adaptive_progress_projection(
         awaiting_settlement = max(
             0, remotely_completed - settled_screening_completed
         )
-        awaiting_submission = max(
+        raw_awaiting_submission = max(
             0, int(live_screening.get("awaiting_submission_batches") or 0)
+        )
+        outstanding = max(
+            0,
+            screening_total
+            - remotely_completed
+            - raw_awaiting_submission,
+        )
+        awaiting_submission = max(
+            0,
+            screening_total
+            - settled_screening_completed
+            - awaiting_settlement
+            - outstanding,
         )
         live_fields.update(
             {
@@ -2612,11 +3023,34 @@ def _adaptive_progress_projection(
                 "estimated_remaining_seconds": None,
             }
         )
+    elif phase == "screening":
+        latest_candidate_progress = max(
+            screening_candidate_progress,
+            key=lambda item: int(item.get("event_seq") or 0),
+            default=None,
+        )
+        live_fields.update(
+            {
+                "progress_kind": "waiting",
+                "settled_origins": settled_screening_completed,
+                "awaiting_settlement_batches": 0,
+                "awaiting_submission_batches": max(
+                    0, screening_total - settled_screening_completed
+                ),
+                "samples_per_minute": None,
+                "estimated_remaining_seconds": None,
+            }
+        )
+        if latest_candidate_progress is not None:
+            live_fields["updated_at"] = latest_candidate_progress.get("updated_at")
+            live_fields["event_seq"] = latest_candidate_progress.get("event_seq")
     elif phase == "formal_batch":
         live_formal = _formal_batch_live_projection(state)
         if live_formal is not None:
-            remote_completed = int(live_formal.pop("completed_origins"))
-            completed = min(total, completed + remote_completed)
+            live_formal_completed = int(
+                live_formal.pop("completed_origins")
+            )
+            completed = min(total, completed + live_formal_completed)
             live_fields.update(live_formal)
             live_fields.update(
                 {
@@ -2624,8 +3058,8 @@ def _adaptive_progress_projection(
                         screening_completed
                         + formal_completed
                         + holdout_completed
+                        + live_formal_completed
                     ),
-                    "awaiting_settlement_batches": remote_completed,
                     "samples_per_minute": None,
                     "estimated_remaining_seconds": None,
                 }
@@ -2644,6 +3078,7 @@ def _adaptive_progress_projection(
                         screening_completed
                         + formal_completed
                         + holdout_completed
+                        + live_holdout_completed
                     ),
                     "samples_per_minute": None,
                     "estimated_remaining_seconds": None,
@@ -2672,6 +3107,20 @@ def _adaptive_progress_projection(
             }
         )
     epoch_progress_percent = round(100.0 * completed / max(1, total), 1)
+    if phase == "screening":
+        live_fields.update(
+            {
+                "screening_succeeded_origins": screening_succeeded,
+                "screening_failed_origins": screening_failed,
+                "screening_outcome_counted_origins": (
+                    screening_outcome_counted
+                ),
+                "outcomes_verified": screening_outcomes_verified,
+            }
+        )
+        if screening_outcomes_verified:
+            live_fields["succeeded_samples"] = screening_succeeded
+            live_fields["failed_samples"] = screening_failed
     return {
         "schema_version": "ecologyrsi-dsh.adaptive-progress/2",
         "evaluation_phase": phase,
@@ -2683,7 +3132,10 @@ def _adaptive_progress_projection(
         "epoch_progress_percent": epoch_progress_percent,
         "screening_completed_origins": min(screening_completed, screening_total),
         "screening_total_origins": screening_total,
-        "formal_completed_origins": min(formal_completed, formal_total),
+        "formal_completed_origins": min(
+            formal_completed + live_formal_completed,
+            formal_total,
+        ),
         "formal_total_origins": formal_total,
         "holdout_completed_origins": min(
             holdout_completed + live_holdout_completed,

@@ -561,7 +561,7 @@ def main() -> int:
             )
         )
         print(f"durable_prediction_tool_events={len(prediction_tool_events)}")
-    print("workflow_reconciliation=separately_verified_by_fault_injection")
+    print("direct_child_reconciliation=verified_by_durable_acceptance")
     print("reward_contract=unchanged")
     print(f"sample_budget_class={sample_budget_class}")
     print(

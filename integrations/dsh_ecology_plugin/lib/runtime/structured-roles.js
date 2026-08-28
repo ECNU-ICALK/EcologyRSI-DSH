@@ -136,9 +136,13 @@ export async function runStructuredRole(
         label: reservedBinding.label,
         prompt: [{ type: "text", text: request.prompt }],
         outputSchema,
+        // DSH accepts child generation overrides through
+        // SubagentStartRequest.agentOptions. Provider and model deliberately
+        // remain inherited from the retained role-host; this stage may only
+        // narrow the child output budget.
         ...(request.maxTokens === undefined
           ? {}
-          : { maxTokens: request.maxTokens }),
+          : { agentOptions: { maxTokens: request.maxTokens } }),
       }, {
         roleHostAgent: roleHost.agent,
         runId: reservedBinding?.launch?.run_id || reservedBinding?.binding?.run_id,
@@ -205,12 +209,12 @@ export async function runStructuredRole(
     requireBeforeDeadline();
     if (!admissionOpen) {
       const error = structuredPhaseError("admission_closed");
-      // Preserve the legacy message for callers that surface this safe state.
+      // Keep the public message stable for callers that surface this safe state.
       error.message = "structured result admission is closed";
       throw error;
     }
     // rc.6 SubagentRun publishes the real child Session identity as `id`.
-    // `childId` belongs to the continuable-start and Workflow event seams.
+    // `childId` belongs to the continuable-start seam.
     const sessionId = String(run?.id || "");
     requireBeforeDeadline();
     if (!sessionId) throw structuredPhaseError("child_session");

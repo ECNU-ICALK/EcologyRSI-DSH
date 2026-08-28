@@ -835,6 +835,9 @@ assert.equal(modelSandbox.state.candidateSamplePage.rows[0].reward, 0.84);
 assert.equal(modelSandbox.state.candidateSamplePage.rows[1].attempts, 3);
 assert.equal(modelSandbox.state.candidateSamplePage.rows[1].retry_count, 2);
 assert.equal(modelSandbox.state.candidateSamplePage.rows[1].scoring_fallback, "scoring_fallback");
+assert.equal(modelSandbox.state.candidateSamplePage.rows[1].predicted, null);
+assert.equal(modelSandbox.state.candidateSamplePage.rows[1].reward, null);
+assert.equal(modelSandbox.state.candidateSamplePage.rows[1].model_prediction_available, false);
 const legacySampleRow = modelSandbox.normalizeCandidateSampleRow({
   sample_id: "legacy-sample", observed: 10, predicted: 8, baseline: 7, error: -2,
 }, 0);
@@ -851,9 +854,11 @@ assert.ok(sampleRowsHtml.includes("冻结评分基线"));
 for (const text of ["室内气温", "1 小时", "22.4000", "22.1000", "0.8400", "已完成", "失败"]) {
   assert.ok(sampleRowsHtml.includes(text), `missing candidate sample result: ${text}`);
 }
-for (const text of ["评分惩罚值", "tool_timeout", "已重试 2 次", "共 3 次尝试"]) {
+for (const text of ["未产生有效预测", "失败惩罚占位，未计为模型预测", "tool_timeout", "已重试 2 次", "共 3 次尝试"]) {
   assert.ok(sampleRowsHtml.includes(text), `missing candidate sample execution detail: ${text}`);
 }
+assert.equal(sampleRowsHtml.includes("95.0000"), false);
+assert.equal(sampleRowsHtml.includes("-20.0000"), false);
 assert.equal(modelSandbox.candidateSamplesAreLive(modelSandbox.state.activeRun, modelSandbox.state.activeRun.candidates[0]), true);
 assert.equal(modelSandbox.candidateSamplesAreLive({...modelSandbox.state.activeRun, status: "paused"}, modelSandbox.state.activeRun.candidates[0]), false);
 assert.equal(modelSandbox.candidateSamplesAreLive({...modelSandbox.state.activeRun, status: "cancelled"}, modelSandbox.state.activeRun.candidates[0]), false);
@@ -1451,6 +1456,32 @@ assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("2 
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("等待 provider 许可 0"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("待提交 253"));
 assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("排队 253"), false);
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("已结算 0"));
+assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("成功 0"), false);
+assert.equal(monitorNodes["#execution-sample-progress"].textContent.includes("失败 1"), false);
+const failedSettlementRun = {
+  ...screeningRun,
+  execution_progress: {
+    ...screeningRun.execution_progress,
+    stage_progress: {
+      ...screeningRun.execution_progress.stage_progress,
+      completed_samples: 44,
+      total_samples: 1763,
+      settled_origins: 44,
+      succeeded_samples: 0,
+      failed_samples: 44,
+      outcomes_verified: true,
+      in_flight_batches: 0,
+      awaiting_submission_batches: 212,
+      child_execution_failed_request_count: 78,
+      structured_child_model_error_count: 78,
+    },
+  },
+};
+modelSandbox.renderExecutionMonitor(failedSettlementRun);
+for (const text of ["预测时点进度：44 / 1,763", "已结算 44", "成功 0", "失败 44", "子任务失败请求 78", "结构化错误 78"]) {
+  assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes(text), `missing failed settlement detail: ${text}`);
+}
 const staleCandidateStage = {
   ...screeningCandidate,
   execution: {...screeningCandidate.execution, current_stage: "training"},
@@ -2668,6 +2699,22 @@ assert.deepEqual(
 const liveTrace = modelSandbox.executionPredictionTrace(liveSampleCandidate, liveSampleRun);
 assert.equal(liveTrace.sample_count, 2);
 assert.equal(liveTrace.truncated, true);
+modelSandbox.state.candidateSamplePage = {
+  total: 1, truncated: false, complete: false,
+  rows: [{sample_id: "failed-live-row", predicted: 60, observed: 20, baseline: 21, scoring_fallback: "failure_non_improvement_penalty", prediction_source: "scoring_fallback"}],
+};
+modelSandbox.document.querySelector = (selector) => monitorNodes[selector] || monitorQuerySelector(selector);
+modelSandbox.renderExecutionSamples(liveSampleCandidate, liveSampleRun);
+assert.ok(monitorNodes["#sample-inference-count"].textContent.includes("有效预测 0"), monitorNodes["#sample-inference-count"].textContent);
+assert.ok(monitorNodes["#sample-inference-count"].textContent.includes("失败惩罚占位 1"));
+assert.ok(monitorNodes["#sample-inference-list"].innerHTML.includes("未产生有效预测"));
+assert.ok(monitorNodes["#sample-inference-list"].innerHTML.includes("固定最差惩罚仅用于内部门禁"));
+assert.equal(monitorNodes["#sample-inference-list"].innerHTML.includes("60"), false);
+assert.equal(monitorNodes["#sample-inference-list"].innerHTML.includes("预测 60"), false);
+const failedPreviewCell = modelSandbox.candidatePreviewPredictionCell({predicted: 60, scoring_fallback: "failure_non_improvement_penalty"});
+assert.ok(failedPreviewCell.includes("未产生有效预测"));
+assert.equal(failedPreviewCell.includes("60"), false);
+modelSandbox.document.querySelector = monitorQuerySelector;
 modelSandbox.state.candidateSamplePage = null;
 const exhaustedProgress = modelSandbox.executionProgress(exhaustedProjection, null, []);
 assert.ok(exhaustedProgress.percent < 100);
@@ -2831,6 +2878,16 @@ const traceHtml = traceSandbox.renderTrainingTrajectory({
 for (const text of ["样本输入", "智能体调研", "调整历史窗口", "候选训练", "0.29", "智能体反馈", "搜索保留", "最终结果"]) {
   assert.ok(traceHtml.includes(text), `trajectory renderer missing: ${text}`);
 }
+const failedTraceRows = traceSandbox.trainingTracePredictions({prediction_records: [{
+  sample_index: 1, target: "air_temperature", observed_value: 21,
+  predicted_value: 60, baseline_value: 20, error: 39,
+  status: "failed", scoring_fallback: "failure_non_improvement_penalty",
+}]}, {});
+const failedTraceHtml = traceSandbox.trainingTracePredictionTable(failedTraceRows, 1);
+assert.ok(failedTraceHtml.includes("未产生有效预测"));
+assert.ok(failedTraceHtml.includes("固定惩罚仅用于内部门禁"));
+assert.equal(failedTraceHtml.includes(">60<"), false);
+assert.equal(failedTraceHtml.includes(">39<"), false);
 
 const makeControlNode = (value = "") => ({
   value, textContent: "", innerHTML: "", validationMessage: "",
@@ -2997,7 +3054,7 @@ assert.match(html, /id="show-archived-runs"/);
 assert.match(html, /id="archive-button"/);
 assert.match(html, /id="delete-button"/);
 assert.equal(manifest.display_name, "生态模型进化工作台");
-assert.equal(manifest.version, "0.3.49");
+assert.equal(manifest.version, "0.3.50");
 assert.equal(manifest.entrypoint.file, "index.html");
 assert.equal(manifest.entrypoint.route, "/plugins/ecology/evolution/");
 assert.equal(manifest.development_only, false);
@@ -3403,7 +3460,7 @@ assert.match(app, /function trainingTraceSource\(asset\)/);
 assert.match(app, /prediction_records/);
 assert.ok(html.includes("相对冻结评分基线的绝对误差改善"));
 assert.ok(html.includes("候选排名使用 RMSE 技能主适应度"));
-assert.ok(app.includes("评分惩罚值"));
+assert.ok(app.includes("失败惩罚占位"));
 for (const text of ["样本输入", "智能体交互", "反馈评测", "优化更新", "最终预测与观测"]) {
   assert.ok(app.includes(text), `missing training trajectory label: ${text}`);
 }

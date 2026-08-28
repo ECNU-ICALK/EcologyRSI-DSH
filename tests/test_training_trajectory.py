@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from ecologyrsi_dsh import (
     EventLedger,
@@ -15,9 +16,38 @@ from ecologyrsi_dsh import (
 )
 from ecologyrsi_dsh.core.models import Evaluation
 from ecologyrsi_dsh.presentation.reporting import training_assets
+from ecologyrsi_dsh.presentation.trajectory import _prediction_records
 
 
 class TrainingTrajectoryContractTests(unittest.TestCase):
+    def test_failed_gate_penalty_is_not_a_trajectory_prediction(self) -> None:
+        projection = _prediction_records(
+            SimpleNamespace(
+                metrics={
+                    "prediction_preview": [
+                        {
+                            "sample_id": "sample:failed",
+                            "observed": 21.0,
+                            "predicted": 60.0,
+                            "baseline": 20.0,
+                            "sample_execution_status": "failed",
+                            "scoring_fallback": (
+                                "failure_non_improvement_penalty"
+                            ),
+                        }
+                    ]
+                }
+            )
+        )
+
+        record = projection["prediction_records"][0]
+        self.assertEqual(record["status"], "failed")
+        self.assertIsNone(record["predicted_value"])
+        self.assertIsNone(record["value"])
+        self.assertIs(record["model_prediction_available"], False)
+        self.assertIs(record["scoring_penalty_applied"], True)
+        self.assertNotIn("error", record)
+
     def _task(self, max_candidates: int = 1) -> TaskManifest:
         return TaskManifest(
             task_id="trajectory-contract",

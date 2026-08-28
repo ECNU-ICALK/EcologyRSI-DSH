@@ -137,19 +137,13 @@ export class RoleAgentManager {
     try {
       const compaction = await this.ctx.agentPresets.serviceFor(agent, "compaction");
       if (!compaction) throw new Error(`preset ${presetId} has no Compaction service`);
-      const workflowEngine = binding.require_workflow
-        ? await this.ctx.agentPresets.serviceFor(agent, "workflowEngine")
-        : null;
-      if (binding.require_workflow && !workflowEngine) {
-        throw new Error(`preset ${presetId} has no Workflow service`);
-      }
       const handle = Object.freeze({
         agent,
         rawHandle,
         sessionId,
         standingKey,
         binding: Object.freeze({ ...binding }),
-        services: Object.freeze({ compaction, workflowEngine }),
+        services: Object.freeze({ compaction }),
         async dispose() { await rawHandle.dispose(); },
       });
       this.handles.set(key, handle);
@@ -186,19 +180,13 @@ export class RoleAgentManager {
       await persistPresetBoundary(agent, presetId);
       const compaction = await this.ctx.agentPresets.serviceFor(agent, "compaction");
       if (!compaction) throw new Error(`preset ${presetId} has no Compaction service`);
-      const workflowEngine = binding.require_workflow
-        ? await this.ctx.agentPresets.serviceFor(agent, "workflowEngine")
-        : null;
-      if (binding.require_workflow && !workflowEngine) {
-        throw new Error(`preset ${presetId} has no Workflow service`);
-      }
       const handle = Object.freeze({
         agent,
         rawHandle,
         sessionId,
         standingKey,
         binding: Object.freeze({ ...binding }),
-        services: Object.freeze({ compaction, workflowEngine }),
+        services: Object.freeze({ compaction }),
         async dispose() { await rawHandle.dispose(); },
       });
       this.handles.set(key, handle);

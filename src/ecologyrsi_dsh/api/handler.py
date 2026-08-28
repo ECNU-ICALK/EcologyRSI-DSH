@@ -2809,7 +2809,7 @@ class EvolutionRequestHandler(
                 # into the task digest. Other execution modes retain their own
                 # explicit sample adapters.
                 "sample_agent_mode": (
-                    "dsh_native_workflow"
+                    "dsh_native_agent"
                     if native_protocol
                     else "gateway_microbatch"
                     if autonomous_mode and not toy_domain

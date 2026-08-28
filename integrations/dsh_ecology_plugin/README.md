@@ -11,16 +11,20 @@
 
 浏览器只需访问 DSH 端口。Python 服务仍在回环地址运行，但不再作为用户入口。
 
-0.3.0 起，研究、候选提议、样本规划/批评和代际评审均由 DSH Agent
-Session、受限 preset、subagent 和 Workflow 执行；Python sidecar 只保留科学数值工具、
-不可变基因组编译和追加式事件账本。上下文压缩、输出长度和多智能体生命周期
-均交由 DSH 管理；不设跨调用的逐样本 Token 总预算，但每次 sample 子模型输出最多 2,048 tokens。
+研究、候选提议、样本规划/批评和代际评审均由 DSH Agent Session、受限 preset
+与直接、一次性的结构化子 Agent 执行。Python sidecar 只保留科学数值工具、不可变基因组编译
+和追加式事件账本。上下文压缩与角色生命周期由 DSH 管理；不设跨调用的逐样本
+Token 总预算，每次 sample 子模型通过 `agentOptions.maxTokens` 限制最多输出 2,048 tokens。
 
 Generation Judge preset 内部使用两个职责隔离的 Skill：`candidate-scientific-review`
 只审查单个候选的冻结科学证据，`batch-scientific-reflection` 只读取 Host 生成的
 rank→candidate→direction 聚合映射并提出建议；后者不能替代下一代 Host 预检，也不拥有选择或晋级权限。
 
-当前六个活动角色 preset 都暴露同一个 `web_search`；安装包还保留六个前版不可变 ID，共十二个已安装 preset ID，用于升级和历史回放。Agent 在必需 Skill 之后、阶段终端工具之前按需提交查询，不指定 provider；工具默认使用 DSH `ctx.web.search`，技术失败或定量证据不足时由 Python sidecar 自动切到 OpenAlex 元数据检索。结果和路由进入追加式事件账本并可重放。插件不挂载 `dsh-tool-web`、不开放 `web_fetch`，动态结果也不能替代冻结证据、登记预测工具或科学门禁。
+当前六个活动角色 preset 都暴露同一个 `web_search`，安装包只交付这六个当前 ID。
+Agent 在必需 Skill 之后、阶段终端工具之前按需提交查询，不指定 provider；工具默认使用
+DSH `ctx.web.search`，技术失败或定量证据不足时由 Python sidecar 自动切到 OpenAlex
+元数据检索。结果和路由进入追加式事件账本并可重放。插件不挂载 `dsh-tool-web`、
+不开放 `web_fetch`，动态结果也不能替代冻结证据、登记预测工具或科学门禁。
 
 安装已打包的运行时：
 
@@ -28,13 +32,14 @@ rank→candidate→direction 聚合映射并提出建议；后者不能替代下
 ecologyrsi-dsh install-dsh-runtime --profile web
 ```
 
-安装器使用 `dsh plugin --profile web add --save-exact file:<tgz>`，安装十二个
+安装器使用 `dsh plugin --profile web add --save-exact file:<tgz>`，安装六个当前
 不可变 preset ID，并写入受管 `cordis.patch.yml` 区块。
 
-新建严格运行默认每次更新 500 个完整预测时点（4,500 个评分单元）；每候选先用
-64 个完整预测时点筛选，再让 Top 2 各用 500 个完整预测时点正式评估。候选并发
-默认 4；逐样本并发默认 64、可配置 1–128；同一 provider 的 DSH stage 全局物理
-在飞上限为 128。
+新建严格运行先让 4 个候选共享 64-origin 初筛，再让 Top 2 各执行一个
+500-origin adaptive epoch（默认 `10 × 50`，每批最多接受 2 处局部改动）；最后把
+两个最终 revision 与 incumbent 放入同一 169-origin holdout。单轮合计 1,763
+candidate-origins；默认 9 单元温室任务对应 15,867 个评分单元。候选并发默认 4；
+逐样本并发默认 64、可配置 1–128；同一 provider 的 DSH stage 全局物理在飞上限为 128。
 
 Node 宿主插件的 API 代理支持以下配置：
 
@@ -45,7 +50,7 @@ config:
   # 普通结构化阶段 10 分钟；长上下文调研阶段默认 30 分钟
   structuredStageTimeoutMs: 600000
   researchStageTimeoutMs: 1800000
-  # 评分前 sample critic/reflect 独立上限 10 分钟
+  # 评分前 sample critic 独立上限 10 分钟
   sampleCriticStageTimeoutMs: 600000
   # 可选：也可以省略此项，直接使用 Node 进程环境变量
   serviceToken: replace-with-runtime-token
@@ -53,8 +58,8 @@ config:
 
 `researchStageTimeoutMs` 只用于搜索规划和证据综合等 researcher 阶段，
 避免大上下文、慢推理模型被普通 10 分钟阶段上限误伤。
-`sampleCriticStageTimeoutMs` 只用于评分前 sample critic/reflect；默认 10 分钟，以覆盖高并发下正常的长响应，同时仍限制无效结构化输出后的异常长生成；
-样本预测、候选提案、评分和反思仍使用 `structuredStageTimeoutMs`。
+`sampleCriticStageTimeoutMs` 只用于评分前 `sample.critic`；默认 10 分钟，以覆盖高并发下正常的长响应，同时仍限制无效结构化输出后的异常长生成；
+样本预测、候选提案、评分和反思使用 `structuredStageTimeoutMs`。
 
 `serviceToken` 也可以省略，插件会读取 Node 进程的
 `ECOLOGYRSI_SERVICE_TOKEN`。配置后，代理在服务端覆盖 iframe 请求中的

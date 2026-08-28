@@ -267,6 +267,16 @@ def _prediction_records(evaluation: Any | None) -> dict[str, Any]:
         baseline = _finite(
             item.get("baseline", item.get("baseline_value", item.get("persistence")))
         )
+        status = str(
+            item.get("status", item.get("sample_execution_status", "")) or ""
+        ).strip().casefold()
+        scoring_fallback = item.get("scoring_fallback")
+        failed = status == "failed" or bool(scoring_fallback)
+        if failed:
+            # The source may contain a finite host-generated worst-case gate
+            # penalty.  Training trajectories describe model behavior, so the
+            # value must not be represented as prediction or error evidence.
+            predicted = None
         record: dict[str, Any] = {
             "sample_index": index + 1,
             "origin_timestamp": _scalar(item.get("origin_timestamp")),
@@ -283,6 +293,9 @@ def _prediction_records(evaluation: Any | None) -> dict[str, Any]:
             # Compact aliases make the record convenient for generic episode
             # consumers while the explicit *_value fields stay self-describing.
             "reference": observed,
+            "status": "failed" if failed else status or "succeeded",
+            "model_prediction_available": not failed and predicted is not None,
+            "scoring_penalty_applied": bool(scoring_fallback),
         }
         if observed is not None and predicted is not None:
             record["error"] = predicted - observed

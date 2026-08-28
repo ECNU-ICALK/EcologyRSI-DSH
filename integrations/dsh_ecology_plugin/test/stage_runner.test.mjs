@@ -232,16 +232,16 @@ function samplePlanContext() {
   };
 }
 
-function samplePlanBinding({ admissionId = "admission-workflow-deadline-1" } = {}) {
+function samplePlanBinding({ admissionId = "admission-sample-plan-1" } = {}) {
   const context = samplePlanContext();
   return {
-    run_id: "run-workflow-deadline",
+    run_id: "run-sample-plan",
     stage: "sample.plan",
     admission_id: admissionId,
     run_state_revision: 7,
     stage_attempt: 2,
     ledger_expected_revision: 11,
-    idempotency_key: "sample-plan-deadline-1",
+    idempotency_key: "sample-plan-1",
     request: {
       role: "sample-planner",
       output_schema_id: "ecology-sample-decisions@1",
@@ -258,94 +258,9 @@ function samplePlanBinding({ admissionId = "admission-workflow-deadline-1" } = {
   };
 }
 
-function workflowDeadlineHarness({
-  startWorkflow,
-  timeoutMs = 20,
-  runRegistry = { get: () => ({ status: "running" }) },
-  persist = async (options) => ({ accepted: true, result_digest: options.body.result_digest }),
-  onReservation = () => {},
-  onPenalty = () => {},
-  maxAttempts = 1,
-} = {}) {
-  const listeners = new Map();
-  let reservationCount = 0;
-  const failures = [];
-  const sessions = new Map([[
-    "workflow-deadline-child",
-    {
-      id: "workflow-deadline-child",
-      events: skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
-    },
-  ]]);
-  const roleHost = {
-    sessionId: "workflow-deadline-parent",
-    agent: { id: "workflow-deadline-role-host" },
-    binding: { model: "pjlab/deepseek-v4-pro-0813" },
-    services: {
-      workflowEngine: {
-        start: (request) => startWorkflow({ request, listeners, sessions }),
-      },
-    },
-  };
-  const runner = new NativeStageRunner({
-    on: (name, listener) => {
-      listeners.set(name, listener);
-      return () => listeners.delete(name);
-    },
-    sessions: { get: (sessionId) => sessions.get(sessionId) },
-    subagents: { start: async () => { throw new Error("Workflow path required"); } },
-  }, {
-    roleAgents: { get: () => roleHost },
-    runRegistry,
-    sidecar: {
-      request: async (path, options) => {
-        if (path.endsWith("/child-reservations")) {
-          reservationCount += 1;
-          onReservation(options, reservationCount);
-          return {
-            accepted: true,
-            admission_id: options.body.admission_id,
-            timeout_ms: options.body.timeout_ms,
-            launch: {
-              reservation_id: `workflow-deadline-reservation-${reservationCount}`,
-              launch_attempt: reservationCount,
-            },
-            ledger_expected_revision: 12,
-          };
-        }
-        if (path.endsWith("/child-failures")) {
-          failures.push(structuredClone(options.body));
-          return { accepted: true };
-        }
-        return persist(options);
-      },
-    },
-    structuredStageTimeoutMs: timeoutMs,
-    structuredStageMaxAttempts: maxAttempts,
-    providerStageGate: {
-      run: async (_provider, operation) => operation(),
-      penalize: onPenalty,
-    },
-  });
-  return { runner, listeners, sessions, failures };
-}
-
-function publishWorkflowChild(
-  listeners,
-  request,
-  childId = "workflow-deadline-child",
-  outcome = "completed",
-) {
-  const agent = { label: request.args.items[0].label, childId };
-  listeners.get("workflow/agent-start")?.({ meta: request.meta }, agent);
-  listeners.get("workflow/agent-end")?.(
-    { meta: request.meta },
-    { ...agent, outcome },
-  );
-}
-
 function directSampleBinding(stage, context) {
   const reflection = stage === "sample.reflect";
+  const planner = stage === "sample.plan";
   return {
     run_id: `run-${stage}`,
     stage,
@@ -355,10 +270,13 @@ function directSampleBinding(stage, context) {
     ledger_expected_revision: 11,
     idempotency_key: `${stage}-1`,
     request: {
-      role: "sample-critic",
-      output_schema_id: reflection
-        ? "ecology-sample-reflection@1"
-        : "ecology-sample-review@1",
+      role: planner ? "sample-planner" : "sample-critic",
+      output_schema_id: planner
+        ? "ecology-sample-decisions@1"
+        : reflection
+          ? "ecology-sample-reflection@1"
+          : "ecology-sample-review@1",
+      ...(planner ? { max_tokens: 2048 } : {}),
       context,
       context_canonical_json: canonicalJson(context),
       context_digest: jsonDigest(context),
@@ -485,6 +403,15 @@ test("post-score sample reflection is a registered structured DSH stage", () => 
   );
   assert.match(STAGES["sample.reflect"].instruction, /prediction vector is already immutable/i);
   assert.match(STAGES["sample.reflect"].instruction, /next-generation action/i);
+});
+
+test("candidate local edit must avoid same-revision rejected bundles", () => {
+  const localEdit = STAGES["candidate.local_edit"];
+
+  assert.match(localEdit.instruction, /current_candidate_state/i);
+  assert.match(localEdit.instruction, /recent_edit_history/i);
+  assert.match(localEdit.instruction, /same candidate revision/i);
+  assert.match(localEdit.instruction, /no distinct registered local change.*return keep/i);
 });
 
 test("pre-score sample critic has a bounded schema-recovery protocol", () => {
@@ -742,7 +669,8 @@ test("native stage runner reserves before first child tool and durably persists 
         childStartUnixMs = Date.now();
         blockFor(20);
         assert.equal(provider, "spawn");
-        assert.equal(request.maxTokens, 2048);
+        assert.deepEqual(request.agentOptions, { maxTokens: 2048 });
+        assert.equal("maxTokens" in request, false);
         assert.deepEqual(request.prompt[0], { type: "text", text: request.prompt[0].text });
         const prompt = JSON.parse(request.prompt[0].text);
         assert.match(prompt.instruction, /Do not narrate analysis/i);
@@ -1310,112 +1238,6 @@ test("direct sample exact INVALID_ARGS rejection is a bounded missing-capture re
   assert.equal(harness.persisted.length, 0);
 });
 
-test("Workflow completed null with failed child exact INVALID_ARGS is a bounded missing-capture retry", async () => {
-  let workflowStarts = 0;
-  let persistCalls = 0;
-  const reservations = [];
-  const { runner } = workflowDeadlineHarness({
-    timeoutMs: 1_000,
-    maxAttempts: 2,
-    onReservation: (_options, attempt) => reservations.push(attempt),
-    persist: async () => {
-      persistCalls += 1;
-      return { accepted: true };
-    },
-    startWorkflow: ({ request, listeners, sessions }) => {
-      workflowStarts += 1;
-      const childId = `workflow-schema-rejected-child-${workflowStarts}`;
-      sessions.set(childId, {
-        id: childId,
-        events: rc6ConsumedEvents("origin-vector-forecasting-balanced", {
-          prediction: true,
-          structuredResult: {
-            isError: true,
-            error: { name: "ToolArgsError", code: "INVALID_ARGS" },
-          },
-        }),
-      });
-      publishWorkflowChild(listeners, request, childId, "failed");
-      return {
-        result: Promise.resolve({ stopReason: "completed", value: [null] }),
-        cancel: () => {},
-        dispose: async () => {},
-      };
-    },
-  });
-
-  await assert.rejects(
-    runner.run(samplePlanBinding()),
-    (error) => error?.code === "structured_result_missing",
-  );
-  assert.deepEqual(reservations, [1, 2]);
-  assert.equal(workflowStarts, 2);
-  assert.equal(persistCalls, 0);
-});
-
-test("direct and Workflow provider terminal errors are non-retryable model failures", async () => {
-  const context = {
-    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
-    wave_digest: "9".repeat(64),
-    sample: { sample_id: "origin-model-error" },
-    outcome: { cells: [] },
-  };
-  const direct = directSampleHarness({
-    stage: "sample.reflect",
-    results: [{ stopReason: "error", output: [{ type: "text", text: "private transport failure" }] }],
-    sessionEvents: () => rc6ConsumedEvents("origin-vector-review", {
-      structuredResult: {
-        isError: true,
-        error: { name: "ToolArgsError", code: "INVALID_ARGS" },
-      },
-      terminalKind: "error",
-    }),
-  });
-  await assert.rejects(
-    direct.runner.run(directSampleBinding("sample.reflect", context)),
-    (error) => error?.code === "structured_child_model_error",
-  );
-  assert.equal(direct.reservations.length, 1);
-  assert.equal(direct.starts.length, 1);
-  assert.equal(direct.persisted.length, 0);
-  assert.equal(direct.failures.length, 1);
-
-  let workflowStarts = 0;
-  let workflowPenalties = 0;
-  const workflowReservations = [];
-  const workflow = workflowDeadlineHarness({
-    timeoutMs: 1_000,
-    maxAttempts: 2,
-    onPenalty: () => { workflowPenalties += 1; },
-    onReservation: (_options, attempt) => workflowReservations.push(attempt),
-    startWorkflow: ({ request, listeners, sessions }) => {
-      workflowStarts += 1;
-      const childId = `workflow-provider-error-${workflowStarts}`;
-      sessions.set(childId, {
-        id: childId,
-        events: rc6ConsumedEvents("origin-vector-forecasting-balanced", {
-          prediction: true,
-          terminalKind: "error",
-        }),
-      });
-      publishWorkflowChild(listeners, request, childId, "failed");
-      return {
-        result: Promise.resolve({ stopReason: "completed", value: [null] }),
-        cancel: () => {},
-        dispose: async () => {},
-      };
-    },
-  });
-  await assert.rejects(
-    workflow.runner.run(samplePlanBinding()),
-    (error) => error?.code === "structured_child_model_error",
-  );
-  assert.deepEqual(workflowReservations, [1]);
-  assert.equal(workflowStarts, 1);
-  assert.equal(workflowPenalties, 1);
-  assert.equal(workflow.failures.length, 1);
-});
-
 test("an unconsumed completed no-op turn cannot hide the prior consumed provider error", async () => {
   const context = {
     schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
@@ -1527,319 +1349,6 @@ test("direct reused callId and mismatched source cannot authorize a missing retr
   assert.equal(harness.reservations.length, 1);
   assert.equal(harness.starts.length, 1);
   assert.equal(harness.persisted.length, 0);
-});
-
-test("Workflow completed null with failed child no-call completion retries as missing", async () => {
-  let starts = 0;
-  const reservations = [];
-  const harness = workflowDeadlineHarness({
-    timeoutMs: 1_000,
-    maxAttempts: 2,
-    onReservation: (_options, attempt) => reservations.push(attempt),
-    startWorkflow: ({ request, listeners, sessions }) => {
-      starts += 1;
-      const childId = `workflow-no-capture-${starts}`;
-      sessions.set(childId, {
-        id: childId,
-        events: rc6ConsumedEvents("origin-vector-forecasting-balanced", { prediction: true }),
-      });
-      publishWorkflowChild(listeners, request, childId, "failed");
-      return {
-        result: Promise.resolve({ stopReason: "completed", value: [null] }),
-        cancel: () => {},
-        dispose: async () => {},
-      };
-    },
-  });
-
-  await assert.rejects(
-    harness.runner.run(samplePlanBinding()),
-    (error) => error?.code === "structured_result_missing",
-  );
-  assert.deepEqual(reservations, [1, 2]);
-  assert.equal(starts, 2);
-});
-
-test("Workflow completed null with authorization-rejected child is non-missing and non-retryable", async () => {
-  let starts = 0;
-  const reservations = [];
-  const harness = workflowDeadlineHarness({
-    timeoutMs: 1_000,
-    maxAttempts: 2,
-    onReservation: (_options, attempt) => reservations.push(attempt),
-    startWorkflow: ({ request, listeners, sessions }) => {
-      starts += 1;
-      const childId = `workflow-authorization-${starts}`;
-      sessions.set(childId, {
-        id: childId,
-        events: rc6ConsumedEvents("origin-vector-forecasting-balanced", {
-          prediction: true,
-          structuredResult: { isError: true },
-        }),
-      });
-      publishWorkflowChild(listeners, request, childId, "failed");
-      return {
-        result: Promise.resolve({ stopReason: "completed", value: [null] }),
-        cancel: () => {},
-        dispose: async () => {},
-      };
-    },
-  });
-
-  await assert.rejects(
-    harness.runner.run(samplePlanBinding()),
-    (error) => error?.code === "structured_child_model_error",
-  );
-  assert.deepEqual(reservations, [1]);
-  assert.equal(starts, 1);
-});
-
-test("Workflow completed null cannot infer missing from a non-failed child outcome", async () => {
-  let starts = 0;
-  const reservations = [];
-  const harness = workflowDeadlineHarness({
-    timeoutMs: 1_000,
-    maxAttempts: 2,
-    onReservation: (_options, attempt) => reservations.push(attempt),
-    startWorkflow: ({ request, listeners, sessions }) => {
-      starts += 1;
-      const childId = `workflow-nonfailed-null-${starts}`;
-      sessions.set(childId, {
-        id: childId,
-        events: rc6ConsumedEvents("origin-vector-forecasting-balanced", { prediction: true }),
-      });
-      publishWorkflowChild(listeners, request, childId, "completed");
-      return {
-        result: Promise.resolve({ stopReason: "completed", value: [null] }),
-        cancel: () => {},
-        dispose: async () => {},
-      };
-    },
-  });
-
-  await assert.rejects(
-    harness.runner.run(samplePlanBinding()),
-    (error) => error?.code === "structured_child_model_error",
-  );
-  assert.deepEqual(reservations, [1]);
-  assert.equal(starts, 1);
-});
-
-test("Workflow failed child capture evidence cannot authorize a non-null-batch shape", async () => {
-  let starts = 0;
-  const reservations = [];
-  const harness = workflowDeadlineHarness({
-    timeoutMs: 1_000,
-    maxAttempts: 2,
-    onReservation: (_options, attempt) => reservations.push(attempt),
-    startWorkflow: ({ request, listeners, sessions }) => {
-      starts += 1;
-      const childId = `workflow-wrong-batch-${starts}`;
-      sessions.set(childId, {
-        id: childId,
-        events: rc6ConsumedEvents("origin-vector-forecasting-balanced", { prediction: true }),
-      });
-      publishWorkflowChild(listeners, request, childId, "failed");
-      return {
-        result: Promise.resolve({ stopReason: "completed", value: [] }),
-        cancel: () => {},
-        dispose: async () => {},
-      };
-    },
-  });
-
-  await assert.rejects(
-    harness.runner.run(samplePlanBinding()),
-    (error) => error?.code === "structured_child_model_error",
-  );
-  assert.deepEqual(reservations, [1]);
-  assert.equal(starts, 1);
-});
-
-test("Workflow cancelled, error, unknown, and legacy aborted stops are exact nonretry boundaries", async () => {
-  const cases = [
-    { stopReason: "cancelled", expectedCode: "structured_child_aborted" },
-    { stopReason: "error", expectedCode: "structured_child_model_error" },
-    { stopReason: "future-stop-token", expectedCode: "structured_child_model_error" },
-    { stopReason: "aborted", expectedCode: "structured_child_aborted" },
-  ];
-
-  for (const { stopReason, expectedCode } of cases) {
-    let starts = 0;
-    let penalties = 0;
-    let persistCalls = 0;
-    const reservations = [];
-    const harness = workflowDeadlineHarness({
-      timeoutMs: 1_000,
-      maxAttempts: 2,
-      onReservation: (_options, attempt) => reservations.push(attempt),
-      onPenalty: () => { penalties += 1; },
-      persist: async () => {
-        persistCalls += 1;
-        return { accepted: true };
-      },
-      startWorkflow: () => {
-        starts += 1;
-        return {
-          result: Promise.resolve({ value: null, stopReason, agentsStarted: 0 }),
-          cancel: () => {},
-          dispose: async () => {},
-        };
-      },
-    });
-
-    const error = await harness.runner.run(samplePlanBinding()).then(
-      () => null,
-      (caught) => caught,
-    );
-    assert.deepEqual({
-      code: error?.code,
-      reservations,
-      starts,
-      penalties,
-      persistCalls,
-    }, {
-      code: expectedCode,
-      reservations: [1],
-      starts: 1,
-      penalties: expectedCode === "structured_child_model_error" ? 1 : 0,
-      persistCalls: 0,
-    }, stopReason);
-  }
-});
-
-test("direct phase causes cannot spoof either retry allowlist code", async () => {
-  const context = {
-    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
-    wave_digest: "8".repeat(64),
-    sample: { sample_id: "origin-phase-spoof" },
-    outcome: { cells: [] },
-  };
-  const structured = {
-    schema_version: "ecology-sample-reflection@1",
-    wave_digest: "8".repeat(64),
-    sample_id: "origin-phase-spoof",
-    outcome_class: "neutral",
-    error_source: "unknown",
-    next_action: "keep",
-    confidence: 0.8,
-    summary: "Keep the bounded configuration.",
-  };
-  const expectedPhaseCode = {
-    start: "structured_child_start_failed",
-    result: "structured_child_result_failed",
-    admission: "structured_result_admission_failed",
-    persistence: "structured_result_persist_failed",
-  };
-
-  for (const phase of Object.keys(expectedPhaseCode)) {
-    for (const publicCode of [
-      "structured_result_missing",
-      "structured_child_model_error",
-    ]) {
-      const harness = directSampleHarness({
-        stage: "sample.reflect",
-        results: [{ stopReason: "completed", structured }],
-        failurePhase: phase,
-        failureCode: publicCode,
-      });
-      await assert.rejects(
-        harness.runner.run(directSampleBinding("sample.reflect", context)),
-        (error) => error?.code === expectedPhaseCode[phase]
-          && error?.cause === undefined
-          && !String(error).includes("private"),
-        `${phase}:${publicCode}`,
-      );
-      assert.equal(harness.reservations.length, 1, `${phase}:${publicCode}`);
-      assert.equal(harness.starts.length, 1, `${phase}:${publicCode}`);
-      assert.equal(
-        harness.persisted.length,
-        phase === "persistence" ? 1 : 0,
-        `${phase}:${publicCode}`,
-      );
-    }
-  }
-});
-
-test("Workflow phase causes cannot spoof retry or duplicate a post-commit persist", async () => {
-  const structured = {
-    schema_version: "ecology-sample-decisions@1",
-    wave_digest: "f".repeat(64),
-    decisions: [],
-  };
-  const expectedPhaseCode = {
-    start: "structured_child_start_failed",
-    result: "structured_child_result_failed",
-    admission: "structured_result_admission_failed",
-    persistence: "structured_result_persist_failed",
-  };
-
-  for (const phase of Object.keys(expectedPhaseCode)) {
-    for (const publicCode of [
-      "structured_result_missing",
-      "structured_child_model_error",
-    ]) {
-      let workflowStarts = 0;
-      let persistCalls = 0;
-      const reservations = [];
-      const codedCause = () => Object.assign(
-        new Error(`private ${phase} failure after possible external effect`),
-        { code: publicCode },
-      );
-      const runRegistry = {
-        get: () => {
-          if (phase === "admission") throw codedCause();
-          return { status: "running" };
-        },
-      };
-      const harness = workflowDeadlineHarness({
-        timeoutMs: 1_000,
-        maxAttempts: 2,
-        runRegistry,
-        onReservation: (_options, attempt) => reservations.push(attempt),
-        persist: async () => {
-          persistCalls += 1;
-          if (phase === "persistence") throw codedCause();
-          return { accepted: true };
-        },
-        startWorkflow: ({ request, listeners, sessions }) => {
-          workflowStarts += 1;
-          if (phase === "start") throw codedCause();
-          const childId = `workflow-${phase}-child-${workflowStarts}`;
-          sessions.set(childId, {
-            id: childId,
-            events: skillFirstEvents(
-              "origin-vector-forecasting-balanced",
-              { prediction: true },
-            ),
-          });
-          publishWorkflowChild(listeners, request, childId);
-          return {
-            result: phase === "result"
-              ? Promise.reject(codedCause())
-              : Promise.resolve({ value: [structured], stopReason: "completed" }),
-            cancel: () => {},
-            dispose: async () => {},
-          };
-        },
-      });
-
-      await assert.rejects(
-        harness.runner.run(samplePlanBinding()),
-        (error) => error?.code === expectedPhaseCode[phase]
-          && error?.cause === undefined
-          && !String(error).includes("private"),
-        `${phase}:${publicCode}`,
-      );
-      assert.deepEqual(reservations, [1], `${phase}:${publicCode}`);
-      assert.equal(workflowStarts, 1, `${phase}:${publicCode}`);
-      assert.equal(
-        persistCalls,
-        phase === "persistence" ? 1 : 0,
-        `${phase}:${publicCode}`,
-      );
-    }
-  }
 });
 
 test("sample schema specialization is isolated to each schema clone", async () => {
@@ -1979,13 +1488,9 @@ test("malformed sample Host identities fail locally before child launch or persi
   assert.equal(malformedReflection.persisted.length, 0);
   assert.equal(malformedReflection.reservations.length, 1);
 
-  let workflowStarts = 0;
-  const malformedPlan = workflowDeadlineHarness({
-    timeoutMs: 1_000,
-    startWorkflow: () => {
-      workflowStarts += 1;
-      throw new Error("must not start");
-    },
+  const malformedPlan = directSampleHarness({
+    stage: "sample.plan",
+    results: [{ stopReason: "completed" }],
   });
   const malformedPlanBinding = samplePlanBinding();
   const malformedPlanContext = samplePlanContext();
@@ -2000,7 +1505,9 @@ test("malformed sample Host identities fail locally before child launch or persi
     malformedPlan.runner.run(malformedPlanBinding),
     (error) => error?.code === "sample_stage_context_invalid",
   );
-  assert.equal(workflowStarts, 0);
+  assert.equal(malformedPlan.starts.length, 0);
+  assert.equal(malformedPlan.persisted.length, 0);
+  assert.equal(malformedPlan.reservations.length, 1);
 });
 
 test("sample missing-output retry does not broaden to lifecycle or durable-boundary errors", async () => {
@@ -2054,613 +1561,74 @@ test("sample missing-output retry does not broaden to lifecycle or durable-bound
   }
 });
 
-test("sample planner retries a missing Workflow result with a fresh reservation and session", async () => {
-  let workflowStarts = 0;
-  let persistCalls = 0;
-  const reservations = [];
-  const workflowRequests = [];
-  const childIds = [];
+test("sample planner uses a bounded native one-shot child and retries one missing capture", async () => {
+  const skillName = "origin-vector-forecasting-balanced";
   const structured = {
     schema_version: "ecology-sample-decisions@1",
     wave_digest: "f".repeat(64),
     decisions: [],
   };
-  const { runner } = workflowDeadlineHarness({
-    timeoutMs: 1_000,
-    maxAttempts: 2,
-    onReservation: (_options, attempt) => reservations.push(attempt),
-    persist: async (options) => {
-      persistCalls += 1;
-      return { accepted: true, result_digest: options.body.result_digest };
-    },
-    startWorkflow: ({ request, listeners, sessions }) => {
-      workflowStarts += 1;
-      workflowRequests.push(request);
-      const childId = `workflow-retry-child-${workflowStarts}`;
-      childIds.push(childId);
-      sessions.set(childId, {
-        id: childId,
-        events: workflowStarts === 1
-          ? rc6ConsumedEvents("origin-vector-forecasting-balanced", { prediction: true })
-          : skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
-      });
-      publishWorkflowChild(
-        listeners,
-        request,
-        childId,
-        workflowStarts === 1 ? "failed" : "completed",
-      );
-      return {
-        result: Promise.resolve(workflowStarts === 1
-          ? { value: [null], stopReason: "completed" }
-          : { value: [structured], stopReason: "completed" }),
-        cancel: () => {},
-        dispose: async () => {},
-      };
-    },
+  const harness = directSampleHarness({
+    stage: "sample.plan",
+    results: [
+      { stopReason: "error" },
+      { stopReason: "completed", structured },
+    ],
+    sessionEvents: (attempt) => (
+      attempt === 1
+        ? rc6ConsumedEvents(skillName, {
+          prediction: true,
+          structuredResult: {
+            isError: true,
+            error: { name: "ToolArgsError", code: "INVALID_ARGS" },
+          },
+        })
+        : skillFirstEvents(skillName, { prediction: true })
+    ),
   });
 
-  const result = await runner.run(samplePlanBinding());
+  const result = await harness.runner.run(
+    directSampleBinding("sample.plan", samplePlanContext()),
+  );
 
   assert.deepEqual(result.structured, structured);
-  assert.deepEqual(reservations, [1, 2]);
-  assert.deepEqual(childIds, ["workflow-retry-child-1", "workflow-retry-child-2"]);
-  assert.equal(workflowStarts, 2);
-  assert.equal(persistCalls, 1);
-  for (const request of workflowRequests) {
-    const item = request.args.items[0];
-    assert.deepEqual(item.schema.properties.wave_digest, { type: "string" });
-    assert.deepEqual(item.schema.properties.decisions.items.properties.sample_id, {
-      type: "string",
-    });
-    assert.equal(item.maxTokens, 2048);
-    assert.match(JSON.parse(item.prompt).instruction, /copy.*exact.*Host.*sample_id/i);
+  assert.equal(harness.starts.length, 2);
+  assert.equal(harness.reservations.length, 2);
+  assert.equal(harness.failures.length, 1);
+  assert.equal(harness.persisted.length, 1);
+  for (const { request } of harness.starts) {
+    assert.deepEqual(request.parent, { id: "sample.plan-role-host" });
+    assert.deepEqual(request.agentOptions, { maxTokens: 2048 });
+    assert.equal("maxTokens" in request, false);
+    assert.deepEqual(request.outputSchema.properties.wave_digest, { type: "string" });
+    assert.deepEqual(
+      request.outputSchema.properties.decisions.items.properties.sample_id,
+      { type: "string" },
+    );
+    const plannerPrompt = JSON.parse(request.prompt[0].text);
+    assert.match(
+      plannerPrompt.instruction,
+      /first response must call skill exactly once with name origin-vector-forecasting-balanced/i,
+    );
+    assert.match(
+      plannerPrompt.instruction,
+      /call ecology_execute_prediction_tool exactly once/i,
+    );
+    assert.match(
+      plannerPrompt.instruction,
+      /call structured_output exactly once/i,
+    );
   }
   assert.equal(
-    jsonDigest(workflowRequests[0].args.items[0].schema),
-    jsonDigest(workflowRequests[1].args.items[0].schema),
+    jsonDigest(harness.starts[0].request.outputSchema),
+    jsonDigest(harness.starts[1].request.outputSchema),
   );
-});
-
-test("sample planner waves execute through the retained DSH Workflow Engine", async () => {
-  const listeners = new Map();
-  const sessions = new Map([[
-    "workflow-child-session",
-    {
-      id: "workflow-child-session",
-      events: skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
-    },
-  ]]);
-  let directSubagentStarted = false;
-  let workflowRequest;
-  let workflowDisposed = false;
-  const structured = {
-    schema_version: "ecology-sample-decisions@1",
-    wave_digest: "f".repeat(64),
-    decisions: [],
-  };
-  const roleHost = {
-    sessionId: "planner-parent-session",
-    agent: { id: "planner-role-host" },
-    binding: {
-      model: "pjlab/deepseek-v4-pro-0813",
-      tool_profile: "dynamic-retrieval-v1",
-    },
-    services: {
-      workflowEngine: {
-        start: (request) => {
-          workflowRequest = request;
-          const item = request.args.items[0];
-          listeners.get("workflow/agent-start")?.(
-            { id: "workflow-run-1", meta: request.meta },
-            { seq: 1, label: item.label, childId: "workflow-child-session" },
-          );
-          listeners.get("workflow/agent-end")?.(
-            { id: "workflow-run-1", meta: request.meta },
-            {
-              seq: 1,
-              label: item.label,
-              childId: "workflow-child-session",
-              outcome: "completed",
-            },
-          );
-          sessions.delete("workflow-child-session");
-          return {
-            id: "workflow-run-1",
-            result: Promise.resolve({
-              value: [structured],
-              stopReason: "completed",
-              agentsStarted: 1,
-            }),
-            cancel: () => {},
-            dispose: async () => { workflowDisposed = true; },
-          };
-        },
-      },
-    },
-  };
-  const persisted = [];
-  const ctx = {
-    on: (name, listener) => {
-      listeners.set(name, listener);
-      return () => listeners.delete(name);
-    },
-    sessions: { get: (sessionId) => sessions.get(sessionId) },
-    tokenMeter: {
-      measure: () => ({
-        logRevision: 4,
-        baseline: { kind: "usage", tokens: 70 },
-        totalTokens: 75,
-        surfaceTokens: 50,
-      }),
-    },
-    sessionProjections: {
-      snapshot: () => ({
-        values: {
-          tokenUsage: {
-            uncachedInputTokens: 50,
-            outputTokens: 15,
-            cacheReadTokens: 10,
-            cacheWriteTokens: 0,
-          },
-        },
-      }),
-    },
-    subagents: {
-      start: async () => {
-        directSubagentStarted = true;
-        throw new Error("sample planner must use Workflow Engine");
-      },
-    },
-  };
-  const runner = new NativeStageRunner(ctx, {
-    roleAgents: { get: () => roleHost },
-    runRegistry: { get: () => ({ status: "running" }) },
-    sidecar: {
-      request: async (path, options) => {
-        persisted.push({ path, body: options.body });
-        if (path.endsWith("/child-reservations")) {
-          return {
-            accepted: true,
-            admission_id: options.body.admission_id,
-            timeout_ms: options.body.timeout_ms,
-            launch: {
-              reservation_id: "workflow-reservation-1",
-              launch_attempt: 1,
-            },
-            ledger_expected_revision: 12,
-          };
-        }
-        return { accepted: true, result_digest: options.body.result_digest };
-      },
-    },
-  });
-  const context = {
-    schema_version: "ecologyrsi-dsh.sample-routing-wave/1",
-    wave_digest: "f".repeat(64),
-    samples: [
-      { sample_id: "origin-a" },
-      { sample_id: "origin-b" },
-    ],
-    context: {
-      candidate_agent_profile: {
-        schema_version: "ecologyrsi-dsh.candidate-agent-profile/1",
-        role: "sample-planner",
-        skill_name: "origin-vector-forecasting-balanced",
-      },
-    },
-  };
-  const result = await runner.run({
-    run_id: "run-workflow",
-    stage: "sample.plan",
-    admission_id: "admission-workflow-1",
-    run_state_revision: 7,
-    stage_attempt: 2,
-    ledger_expected_revision: 11,
-    idempotency_key: "sample-plan-1",
-    request: {
-      role: "sample-planner",
-      output_schema_id: "ecology-sample-decisions@1",
-      max_tokens: 2048,
-      context,
-      context_canonical_json: canonicalJson(context),
-      context_digest: jsonDigest(context),
-      identity_digests: {
-        genome_digest: "a".repeat(64),
-        compiled_behavior_digest: "b".repeat(64),
-        phenotype_instance_digest: "c".repeat(64),
-      },
-    },
-  });
-
-  assert.equal(directSubagentStarted, false);
-  assert.equal(workflowRequest.parent, roleHost.agent);
-  assert.match(workflowRequest.script, /parallel/);
-  assert.equal(workflowRequest.args.items[0].schema.type, "object");
-  assert.deepEqual(
-    workflowRequest.args.items[0].schema.properties.wave_digest,
-    { type: "string" },
+  assert.equal(result.skill_invocation_evidence.skill_name, skillName);
+  assert.equal(
+    result.skill_invocation_evidence.next_tool_name,
+    "ecology_execute_prediction_tool",
   );
-  assert.deepEqual(
-    workflowRequest.args.items[0].schema.properties.decisions.items.properties.sample_id,
-    { type: "string" },
-  );
-  assert.equal(workflowRequest.args.items[0].maxTokens, 2048);
-  assert.match(workflowRequest.script, /maxTokens: item\.maxTokens/);
-  assert.deepEqual(
-    persisted[0].body.sample_member_digests,
-    [jsonDigest("origin-a"), jsonDigest("origin-b")].sort(),
-  );
-  const plannerPrompt = JSON.parse(workflowRequest.args.items[0].prompt);
-  assert.match(
-    plannerPrompt.instruction,
-    /first response must call skill exactly once with name origin-vector-forecasting-balanced/i,
-  );
-  assert.match(
-    plannerPrompt.instruction,
-    /Then call ecology_execute_prediction_tool exactly once/i,
-  );
-  assert.match(
-    plannerPrompt.instruction,
-    /After the prediction-tool result, call structured_output exactly once/i,
-  );
-  assert.equal(persisted[1].body.identity.session_id, "workflow-child-session");
-  assert.deepEqual(
-    persisted[1].body.session_metrics.provider_usage.totals,
-    {
-      uncached_input_tokens: 50,
-      output_tokens: 15,
-      cache_read_tokens: 10,
-      cache_write_tokens: 0,
-      total_tokens: 75,
-    },
-  );
-  assert.equal(result.session_id, "workflow-child-session");
-  assert.deepEqual(result.structured, structured);
-  assert.equal(workflowDisposed, true);
-});
-
-test("sample planner deadline bounds cancel-ignoring Workflow result and disposal", async () => {
-  let cancelled = false;
-  let disposeCalled = false;
-  const never = new Promise(() => {});
-  const { runner } = workflowDeadlineHarness({
-    startWorkflow: () => ({
-      result: never,
-      cancel: () => { cancelled = true; },
-      dispose: () => {
-        disposeCalled = true;
-        return never;
-      },
-    }),
-  });
-  const runPromise = runner.run(samplePlanBinding());
-  const outcome = await Promise.race([
-    runPromise.then(
-      () => ({ kind: "success" }),
-      (error) => ({ kind: "error", error }),
-    ),
-    new Promise((resolve) => setTimeout(() => resolve({ kind: "guard" }), 160)),
-  ]);
-
-  assert.equal(outcome.kind, "error", "Workflow result must not outlive its hard deadline");
-  assert.equal(outcome.error?.code, "structured_role_operational_timeout");
-  assert.equal(cancelled, true);
-  assert.equal(disposeCalled, true);
-  assert.equal(runner.activeWorkflows.size, 0);
-});
-
-test("sample planner hard deadline releases a drain waiting on its cancel-ignoring Workflow", { timeout: 1_000 }, async () => {
-  const workflowStarted = deferred();
-  const never = new Promise(() => {});
-  const { runner } = workflowDeadlineHarness({
-    startWorkflow: () => {
-      workflowStarted.resolve();
-      return {
-        result: never,
-        cancel: () => {},
-        dispose: () => never,
-      };
-    },
-  });
-  const role = runner.run(samplePlanBinding());
-  await workflowStarted.promise;
-  const draining = runner.quiesceRun("run-workflow-deadline");
-
-  const roleOutcome = await role.then(
-    () => ({ status: "fulfilled" }),
-    (error) => ({ status: "rejected", error }),
-  );
-  const drainOutcome = await Promise.race([
-    draining.then(() => "drained"),
-    new Promise((resolve) => setTimeout(() => resolve("still-pending"), 100)),
-  ]);
-
-  assert.equal(roleOutcome.status, "rejected");
-  assert.equal(roleOutcome.error.code, "structured_role_operational_timeout");
-  assert.equal(drainOutcome, "drained");
-  assert.equal(runner.activeWorkflows.size, 0);
-  assert.equal(runner.pendingStarts.size, 0);
-});
-
-test("reentrant Workflow quiescence rescans the active publication gap before returning", { timeout: 1_000 }, async () => {
-  const never = new Promise(() => {});
-  const workflowStartEntered = deferred();
-  let harness;
-  let draining;
-  let cancels = 0;
-  let disposals = 0;
-  harness = workflowDeadlineHarness({
-    startWorkflow: () => {
-      draining = harness.runner.quiesceRun("run-workflow-deadline");
-      workflowStartEntered.resolve();
-      return {
-        result: never,
-        cancel: () => { cancels += 1; },
-        dispose: () => { disposals += 1; return never; },
-      };
-    },
-  });
-
-  const role = harness.runner.run(samplePlanBinding());
-  await workflowStartEntered.promise;
-  const drainSnapshot = draining.then(() => ({
-    active: harness.runner.activeWorkflows.size,
-    pending: harness.runner.pendingStarts.size,
-  }));
-  const [roleOutcome, snapshot] = await Promise.all([
-    role.then(
-      () => ({ status: "fulfilled" }),
-      (error) => ({ status: "rejected", error }),
-    ),
-    drainSnapshot,
-  ]);
-
-  assert.equal(roleOutcome.status, "rejected");
-  assert.equal(roleOutcome.error.code, "structured_role_operational_timeout");
-  assert.deepEqual(snapshot, { active: 0, pending: 0 });
-  assert.equal(cancels, 1);
-  assert.equal(disposals, 1);
-});
-
-test("sample planner normal cleanup stays active through disposal and drains rejection", async () => {
-  let releaseDispose;
-  const disposeRelease = new Promise((resolve) => { releaseDispose = resolve; });
-  let disposeStarted;
-  const startedDisposal = new Promise((resolve) => { disposeStarted = resolve; });
-  const structured = {
-    schema_version: "ecology-sample-decisions@1",
-    wave_digest: "f".repeat(64),
-    decisions: [],
-  };
-  const { runner } = workflowDeadlineHarness({
-    timeoutMs: 1_000,
-    startWorkflow: ({ request, listeners }) => {
-      publishWorkflowChild(listeners, request);
-      return {
-        result: Promise.resolve({ value: [structured], stopReason: "completed" }),
-        cancel: () => {},
-        dispose: async () => {
-          disposeStarted();
-          await disposeRelease;
-          throw new Error("private workflow disposal failure");
-        },
-      };
-    },
-  });
-  const runPromise = runner.run(samplePlanBinding());
-  await startedDisposal;
-  const activeDuringDisposal = runner.activeWorkflows.size;
-  releaseDispose();
-  const outcome = await runPromise.then(
-    (value) => ({ value }),
-    (error) => ({ error }),
-  );
-
-  assert.equal(activeDuringDisposal, 1);
-  assert.equal(outcome.error, undefined);
-  assert.deepEqual(outcome.value.structured, structured);
-  assert.equal(runner.activeWorkflows.size, 0);
-});
-
-test("sample planner classifies an admission boundary crossing as operational timeout", async () => {
-  let persistCalls = 0;
-  const structured = {
-    schema_version: "ecology-sample-decisions@1",
-    wave_digest: "f".repeat(64),
-    decisions: [],
-  };
-  const { runner } = workflowDeadlineHarness({
-    runRegistry: {
-      get: () => {
-        blockFor(30);
-        return { status: "paused" };
-      },
-    },
-    persist: async () => {
-      persistCalls += 1;
-      return { accepted: true };
-    },
-    startWorkflow: ({ request, listeners }) => {
-      publishWorkflowChild(listeners, request);
-      return {
-        result: Promise.resolve({ value: [structured], stopReason: "completed" }),
-        cancel: () => {},
-        dispose: async () => {},
-      };
-    },
-  });
-
-  await assert.rejects(
-    runner.run(samplePlanBinding()),
-    (error) => error?.code === "structured_role_operational_timeout",
-  );
-  assert.equal(persistCalls, 0);
-});
-
-test("sample planner does not persist when its persistence clone crosses the deadline", async () => {
-  let persistCalls = 0;
-  let blockClone = true;
-  const structured = {
-    schema_version: "ecology-sample-decisions@1",
-    wave_digest: "f".repeat(64),
-    decisions: [],
-  };
-  const originalStructuredClone = globalThis.structuredClone;
-  const { runner } = workflowDeadlineHarness({
-    persist: async () => {
-      persistCalls += 1;
-      return { accepted: true };
-    },
-    startWorkflow: ({ request, listeners }) => {
-      publishWorkflowChild(listeners, request);
-      return {
-        result: Promise.resolve({ value: [structured], stopReason: "completed" }),
-        cancel: () => {},
-        dispose: async () => {},
-      };
-    },
-  });
-  globalThis.structuredClone = (value, options) => {
-    if (value === structured && blockClone) {
-      blockClone = false;
-      blockFor(30);
-    }
-    return originalStructuredClone(value, options);
-  };
-  try {
-    await assert.rejects(
-      runner.run(samplePlanBinding()),
-      (error) => error?.code === "structured_role_operational_timeout",
-    );
-  } finally {
-    globalThis.structuredClone = originalStructuredClone;
-  }
-  assert.equal(persistCalls, 0);
-});
-
-test("sample planner rechecks its hard deadline after the final return clone", async () => {
-  let structuredCloneCalls = 0;
-  const structured = {
-    schema_version: "ecology-sample-decisions@1",
-    wave_digest: "f".repeat(64),
-    decisions: [],
-  };
-  const originalStructuredClone = globalThis.structuredClone;
-  const { runner } = workflowDeadlineHarness({
-    startWorkflow: ({ request, listeners }) => {
-      publishWorkflowChild(listeners, request);
-      return {
-        result: Promise.resolve({ value: [structured], stopReason: "completed" }),
-        cancel: () => {},
-        dispose: async () => {},
-      };
-    },
-  });
-  globalThis.structuredClone = (value, options) => {
-    if (value === structured) {
-      structuredCloneCalls += 1;
-      if (structuredCloneCalls === 2) blockFor(30);
-    }
-    return originalStructuredClone(value, options);
-  };
-  try {
-    await assert.rejects(
-      runner.run(samplePlanBinding()),
-      (error) => error?.code === "structured_role_operational_timeout",
-    );
-  } finally {
-    globalThis.structuredClone = originalStructuredClone;
-  }
-  assert.equal(structuredCloneCalls, 2);
-});
-
-test("sample planner deadline bounds persistence that ignores abort", async () => {
-  const never = new Promise(() => {});
-  const structured = {
-    schema_version: "ecology-sample-decisions@1",
-    wave_digest: "f".repeat(64),
-    decisions: [],
-  };
-  const { runner } = workflowDeadlineHarness({
-    persist: async () => never,
-    startWorkflow: ({ request, listeners }) => {
-      publishWorkflowChild(listeners, request);
-      return {
-        result: Promise.resolve({ value: [structured], stopReason: "completed" }),
-        cancel: () => {},
-        dispose: async () => {},
-      };
-    },
-  });
-  const outcome = await Promise.race([
-    runner.run(samplePlanBinding()).then(
-      () => ({ kind: "success" }),
-      (error) => ({ kind: "error", error }),
-    ),
-    new Promise((resolve) => setTimeout(() => resolve({ kind: "guard" }), 160)),
-  ]);
-
-  assert.equal(outcome.kind, "error");
-  assert.equal(outcome.error?.code, "structured_role_operational_timeout");
-  assert.equal(runner.activeWorkflows.size, 0);
-});
-
-test("sample planner retries reuse one absolute local and frozen server deadline", async () => {
-  let workflowStarts = 0;
-  const reservationTimeouts = [];
-  const armedTimeouts = [];
-  const structured = {
-    schema_version: "ecology-sample-decisions@1",
-    wave_digest: "f".repeat(64),
-    decisions: [],
-  };
-  const { runner } = workflowDeadlineHarness({
-    timeoutMs: 100,
-    onReservation: (options) => {
-      reservationTimeouts.push(options.timeoutMs);
-      armedTimeouts.push(options.body.timeout_ms);
-    },
-    startWorkflow: ({ request, listeners, sessions }) => {
-      workflowStarts += 1;
-      if (workflowStarts === 1) {
-        const childId = "workflow-deadline-missing-child";
-        sessions.set(childId, {
-          id: childId,
-          events: rc6ConsumedEvents("origin-vector-forecasting-balanced", {
-            prediction: true,
-          }),
-        });
-        publishWorkflowChild(listeners, request, childId, "failed");
-        return {
-          result: Promise.resolve({
-            value: [null],
-            stopReason: "completed",
-            agentsStarted: 1,
-          }),
-          cancel: () => {},
-          dispose: async () => { blockFor(30); },
-        };
-      }
-      publishWorkflowChild(listeners, request);
-      return {
-        result: Promise.resolve({ value: [structured], stopReason: "completed" }),
-        cancel: () => {},
-        dispose: async () => {},
-      };
-    },
-  });
-  runner.structuredStageMaxAttempts = 2;
-
-  const result = await runner.run(samplePlanBinding());
-
-  assert.deepEqual(result.structured, structured);
-  assert.deepEqual(armedTimeouts, [100, 100]);
-  assert.equal(reservationTimeouts.length, 2);
-  assert.ok(
-    reservationTimeouts[1] <= reservationTimeouts[0] - 20,
-    "retry transport must use the first attempt's remaining absolute budget",
-  );
+  assert.equal(result.skill_invocation_evidence.order_verified, true);
 });
 
 test("sample critic uses its shorter independent operational timeout", async () => {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { runStructuredRole } from "../lib/runtime/structured-roles.js";
-import { PendingChildStarts } from "../lib/runtime/workflows.js";
+import { PendingChildStarts } from "../lib/runtime/pending-child-starts.js";
 
 function blockFor(milliseconds) {
   const state = new Int32Array(new SharedArrayBuffer(4));
@@ -52,7 +52,8 @@ test("one-shot structured role persists only structured output and disposes its 
   );
   assert.equal(request.label, "safe-label");
   assert.deepEqual(request.prompt, [{ type: "text", text: "research" }]);
-  assert.equal(request.maxTokens, 2048);
+  assert.deepEqual(request.agentOptions, { maxTokens: 2048 });
+  assert.equal("maxTokens" in request, false);
   assert.deepEqual(result.structured, { schema_version: "ecology-research-result@1", summary: "ok", evidence: [] });
   assert.equal("text" in persisted[0], false);
   assert.equal(persisted[0].session_id, "researcher-child-session");

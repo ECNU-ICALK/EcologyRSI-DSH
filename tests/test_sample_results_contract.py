@@ -23,6 +23,7 @@ from ecologyrsi_dsh import (
 )
 from ecologyrsi_dsh.core.sample_results import (
     build_sample_results,
+    decode_sample_result_batch,
     decode_sample_results,
     sample_result_batch_event_payload,
     sample_results_event_payload,
@@ -956,6 +957,18 @@ class SampleResultHTTPTests(unittest.TestCase):
                 batch_index=1,
             ),
         )
+        batch_event = next(
+            event
+            for event in director.state(run_id).events
+            if event.kind == "EvaluationSampleResultBatchRecorded"
+        )
+        private_failed = decode_sample_result_batch(batch_event.payload)[0]
+        self.assertEqual(private_failed["predicted"], 0.9)
+        self.assertAlmostEqual(private_failed["reward"], -0.2)
+        self.assertEqual(
+            private_failed["scoring_fallback"],
+            "failure_non_improvement_penalty",
+        )
         director.pause_run(
             run_id,
             reason="operator acceptance checkpoint",
@@ -975,8 +988,14 @@ class SampleResultHTTPTests(unittest.TestCase):
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["observed"], 0.5)
         self.assertEqual(failed["baseline"], 0.7)
-        self.assertEqual(failed["predicted"], 0.9)
-        self.assertAlmostEqual(failed["reward"], -0.2)
+        self.assertIsNone(failed["predicted"])
+        self.assertIsNone(failed["absolute_error"])
+        self.assertIsNone(failed["reward"])
+        self.assertIs(failed["model_prediction_available"], False)
+        self.assertIs(failed["scoring_penalty_applied"], True)
+        self.assertEqual(
+            failed["prediction_source"], "failed_no_model_prediction"
+        )
         self.assertEqual(failed["attempts"], 3)
         self.assertEqual(failed["failure_class"], "tool_timeout")
         self.assertEqual(

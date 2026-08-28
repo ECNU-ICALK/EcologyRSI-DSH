@@ -28,11 +28,10 @@ test("six legal role presets expose only the narrow agent plane", async () => {
   }
 });
 
-test("only workflow-driving roles mount the non-model-facing worker service", async () => {
-  const workerRoles = new Set(["ecology-coordinator-v4", "ecology-sample-planner-v4"]);
+test("no retained role mounts the unused Workflow worker service", async () => {
   for (const id of ids) {
     const text = await readFile(new URL(`../presets/${id}/agent.cordis.yml`, import.meta.url), "utf8");
-    assert.equal(text.includes("@deepseek-ai/dsh-workflow-worker-thread"), workerRoles.has(id));
+    assert.equal(text.includes("@deepseek-ai/dsh-workflow-worker-thread"), false);
   }
 });
 

@@ -98,7 +98,8 @@
     "intervention.recorded": "专家主动意见已记录", "intervention.applied": "专家主动意见处理结果已记录", "intervention.submitted": "专家主动意见已提交",
     "expert_consultation.requested": "模型已提交专家咨询", "expert_consultation.answered": "专家咨询已答复", "expert_consultation.applied": "专家答复已用于后续轮次",
     "consultation.requested": "模型已提交专家咨询", "consultation.answered": "专家咨询已答复", "consultation.applied": "专家答复已用于后续轮次",
-    "stage.recorded": "进化阶段状态已更新", "gateway.retry_scheduled": "网关繁忙，已安排延迟重试"
+    "stage.recorded": "进化阶段状态已更新", "gateway.retry_scheduled": "网关繁忙，已安排延迟重试",
+    "dsh.child_execution_failed": "DSH 子任务请求失败"
   };
   var state = {
     apiBase: EcologyDSHHost.getPublicContext().apiBase,

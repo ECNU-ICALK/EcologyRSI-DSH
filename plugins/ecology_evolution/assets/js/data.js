@@ -110,13 +110,18 @@
     var attempts = candidateSampleFirstValue(row, ["attempts", "sample_execution_attempts", "attempt_count"]);
     var retryCount = candidateSampleFirstValue(row, ["retry_count", "sample_execution_retry_count", "retries"]);
     var predictionSource = candidateSampleFirstValue(row, ["prediction_source", "source"]);
+    var scoringFallback = row.scoring_fallback || (String(predictionSource || "").toLowerCase() === "scoring_fallback" ? "scoring_fallback" : null);
     var failureMessage = candidateSampleFirstValue(row, ["failure_message", "public_error", "failure_reason"])
       || failure.message || failure.public_error || failure.failure_code || failure.error_type || null;
-    var failedStatus = ["failed", "error", "rejected", "timeout", "aborted", "cancelled"].indexOf(String(sampleStatus || "").toLowerCase()) >= 0;
+    var failedStatus = ["failed", "error", "rejected", "timeout", "aborted", "cancelled"].indexOf(String(sampleStatus || "").toLowerCase()) >= 0 || Boolean(scoringFallback);
     if (!failureMessage && failedStatus && typeof row.error === "string" && row.error.trim() && !Number.isFinite(Number(row.error))) {
       failureMessage = row.error;
     }
-    if (reward == null && [observed, predicted, baseline].every(function (item) { return item != null && item !== "" && Number.isFinite(Number(item)); })) {
+    if (failedStatus) {
+      predicted = null;
+      reward = null;
+      predictionSource = "failed_no_model_prediction";
+    } else if (reward == null && [observed, predicted, baseline].every(function (item) { return item != null && item !== "" && Number.isFinite(Number(item)); })) {
       reward = Math.abs(Number(baseline) - Number(observed)) - Math.abs(Number(predicted) - Number(observed));
     }
     return Object.assign({}, row, {
@@ -132,7 +137,9 @@
       attempts: attempts,
       retry_count: retryCount,
       prediction_source: predictionSource,
-      scoring_fallback: row.scoring_fallback || (String(predictionSource || "").toLowerCase() === "scoring_fallback" ? "scoring_fallback" : null),
+      scoring_fallback: scoringFallback,
+      scoring_penalty_applied: row.scoring_penalty_applied === true || Boolean(scoringFallback),
+      model_prediction_available: failedStatus ? false : row.model_prediction_available !== false && predicted != null && predicted !== "",
       sample_status: sampleStatus,
       failure_message: failureMessage
     });
