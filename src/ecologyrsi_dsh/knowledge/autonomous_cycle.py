@@ -171,9 +171,14 @@ def _normalize_candidate_outcomes(value: Any) -> tuple[Mapping[str, Any], ...]:
                 f"canonical_candidate_outcomes[{index}].score must be a "
                 "finite number or null"
             )
-        if (rank is None) != (score is None):
+        # A diagnostic candidate can have a settled score without receiving a
+        # formal rank.  Adaptive epochs deliberately retain screening scores
+        # for screened-out candidates and holdout scores for finalists that
+        # failed a Host gate.  The reverse shape remains invalid: assigning a
+        # rank without score evidence would manufacture an ordering.
+        if rank is not None and score is None:
             raise ValueError(
-                "canonical candidate rank and score must both be present or null"
+                "ranked canonical candidate outcomes require a score"
             )
         slot_index = raw.get("slot_index")
         if (

@@ -2,6 +2,59 @@
 
 All notable changes to EcologyRSI-DSH are recorded in this file.
 
+## 0.3.51 - 2026-08-28
+
+### Effective concurrency and durable execution
+
+- Remove the hidden eight-request provider cold-start window. A default
+  64-origin run now enters DSH at its configured run limit immediately, while
+  the provider-wide ceiling remains 128 and AIMD still reduces the window
+  after an observed model or congestion failure.
+- Advance both Top-2 finalist lanes in the same scheduler turn when candidate
+  concurrency permits it. Their two 50-origin batches share the existing
+  run-level 64-request admission budget; local-edit boundaries remain
+  serialized and recheck pause/cancel before starting.
+- Wait briefly for the DSH Session projection after a child result completes,
+  eliminating the race that intermittently reported
+  `structured_result_persist_failed`. Treat an exact structured-output
+  `INVALID_ARGS` receipt as a missing capture and retry it in a fresh bounded
+  child; retain only Sidecar-redacted diagnostics in local logs.
+
+### Adaptive evidence and truthful monitoring
+
+- Build adaptive ranking and selection reasons from the frozen three-arm
+  comparison gates instead of candidate slot order. Diagnostic screening or
+  failed-holdout scores may remain visible without a formal rank, and an
+  incumbent win now remains the next generation's search parent.
+- Carry the exact frozen effective final revision into the next generation's
+  search, research, batch and proposal contexts. A same-generation
+  `screened_out` incumbent may remain the parent after winning the three-arm
+  comparison; the system no longer falls back to its original R0 genome or a
+  failed finalist.
+- Feed the generation reflector the selected final revision and digests, all
+  nine target/horizon cell gates, bounded failure reasons, and the complete
+  ten-batch revision/edit chain while distinguishing the outer generation
+  mutation from within-epoch local edits.
+- Derive the live adaptive phase from durable state-machine boundaries. Origins
+  that were not executed because a candidate terminated early are shown as
+  skipped, not queued forever, so phase and epoch progress cannot remain stuck
+  on screening after Top-2 has already been frozen.
+- Present full-epoch and current-phase progress separately, including Host
+  admission, DSH in-flight work, provider waiting, pending submissions, and
+  skipped origins. Treat `screened_out` as terminal, preserve null microbatch
+  scores as “waiting”, use current DSH activity to avoid false stalled alarms,
+  and show invalid parameter input instead of silently normalizing it.
+- Give adaptive screening, formal-batch, holdout and comparison events stable
+  public timeline types and Chinese labels instead of grouping them under the
+  generic “system event” fallback.
+- Remove the three obsolete browser-side parameter normalization helpers now
+  that creation and summaries share strict validation.
+
+### Delivery
+
+- Align the Python package, browser plugin, Host plugin, lockfile, legal
+  metadata, documentation, and packed Host artifact at version 0.3.51.
+
 ## 0.3.50 - 2026-08-28
 
 ### DSH child compatibility and cleanup

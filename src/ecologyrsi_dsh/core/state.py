@@ -1524,6 +1524,24 @@ class RunState:
         if generation == 0:
             return self.materialized_seed_genome()
         if batch is None:
+            if (
+                self.task_manifest.metadata.get("optimization_protocol")
+                == OPTIMIZATION_PROTOCOL
+            ):
+                from ..evolution.genome import (
+                    EcologyEvolutionPluginGenome,
+                    deep_thaw_json,
+                )
+
+                selected_revision_id = self.effective_revision_for(generation - 1)
+                if selected_revision_id is None:
+                    raise ValueError(
+                        "adaptive generation has no frozen effective parent revision"
+                    )
+                selected_revision = self.revision(selected_revision_id)
+                return EcologyEvolutionPluginGenome.from_dict(
+                    deep_thaw_json(selected_revision.genome)
+                )
             previous = self.analysis_for(generation - 1)
             if (
                 previous is not None

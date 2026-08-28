@@ -21,6 +21,7 @@ import {
 import { runStructuredRole } from "./structured-roles.js";
 import {
   isTrustedStructuredPhase,
+  structuredPhaseError,
 } from "./structured-stage-errors.js";
 import { PendingChildStarts } from "./pending-child-starts.js";
 
@@ -522,6 +523,103 @@ function successfulResultAfter(events, call) {
   }) || null;
 }
 
+function exactInvalidStructuredArgsSeen(rawEvents) {
+  if (!Array.isArray(rawEvents)) return false;
+  const events = rawEvents
+    .map((event, index) => ({ event, seq: eventSequence(event, index) }))
+    .sort((left, right) => left.seq - right.seq);
+  for (const call of events) {
+    if (call.event?.type !== "tool/call") continue;
+    const callData = eventData(call.event);
+    if (callData.name !== "structured_output" || typeof callData.callId !== "string") {
+      continue;
+    }
+    const result = events.find((item) => {
+      if (item.event?.type !== "tool/result" || item.seq <= call.seq) return false;
+      const identity = toolResultIdentity(item.event);
+      return identity?.callId === callData.callId
+        && identity.isError === true
+        && Array.isArray(item.event.sourceEventSeqs)
+        && item.event.sourceEventSeqs.length === 1
+        && item.event.sourceEventSeqs[0] === call.seq;
+    });
+    const error = eventData(result?.event).error;
+    if (error?.name === "ToolArgsError" && error?.code === "INVALID_ARGS") {
+      return true;
+    }
+  }
+  return false;
+}
+
+const SESSION_PROJECTION_SYNC_GRACE_MS = 2_000;
+const SESSION_PROJECTION_SYNC_POLL_MS = 20;
+
+function waitForSessionProjection(milliseconds, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason || new Error("session projection wait aborted"));
+      return;
+    }
+    let timer;
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason || new Error("session projection wait aborted"));
+    };
+    timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function verifiedSkillInvocationEvidence(events, options) {
+  if (exactInvalidStructuredArgsSeen(events)) {
+    throw structuredPhaseError("capture");
+  }
+  return skillInvocationEvidence(events, options);
+}
+
+async function synchronizedSkillInvocationEvidence(ctx, sessionId, options, deadline) {
+  const graceMs = Math.min(
+    SESSION_PROJECTION_SYNC_GRACE_MS,
+    Math.max(1, deadline.remainingTimeoutMs()),
+  );
+  const expiresAt = Date.now() + graceMs;
+  let lastError = null;
+  while (true) {
+    deadline.throwIfExpired();
+    const events = ctx?.sessions?.get?.(sessionId)?.events;
+    // Check the exact tool rejection before accepting ordering evidence: the
+    // latter intentionally proves call order, not whether structured_output
+    // accepted its arguments.
+    try {
+      return verifiedSkillInvocationEvidence(events, options);
+    } catch (error) {
+      lastError = error;
+      // A schema-tool rejection is a bounded missing capture even when DSH
+      // subsequently reports a structured result. Retrying it in a fresh
+      // child preserves the exactly-once structured-output contract instead
+      // of misreporting a local evidence rejection as persistence failure.
+      // Once the consumed turn-end is visible, all prior tool events for that
+      // turn have been projected. A remaining evidence error is a real
+      // contract violation, not eventual-consistency lag.
+      if (Array.isArray(events) && consumedTerminalEnd(events)) throw error;
+    }
+    const remainingGraceMs = expiresAt - Date.now();
+    if (remainingGraceMs <= 0) {
+      const error = new Error("DSH child Session projection did not synchronize");
+      error.code = "dsh_session_projection_not_ready";
+      error.cause = lastError;
+      throw error;
+    }
+    await waitForSessionProjection(
+      Math.min(SESSION_PROJECTION_SYNC_POLL_MS, remainingGraceMs),
+      deadline.signal,
+    );
+  }
+}
+
 export function skillInvocationEvidence(
   rawEvents,
   {
@@ -946,14 +1044,20 @@ export class NativeStageRunner {
           });
         }
         persistenceDeadline.throwIfExpired();
-        const liveSession = this.ctx?.sessions?.get?.(sessionId);
-        const sessionEvents = capturedSessionEvents || liveSession?.events;
-        const evidence = skillInvocationEvidence(sessionEvents, {
+        const evidenceOptions = {
           stage: binding.stage,
           skillName,
           requiresPredictionTool: contract.requiresPredictionTool === true,
           allowDynamicRetrieval: dynamicRetrieval,
-        });
+        };
+        const evidence = capturedSessionEvents
+          ? verifiedSkillInvocationEvidence(capturedSessionEvents, evidenceOptions)
+          : await synchronizedSkillInvocationEvidence(
+            this.ctx,
+            sessionId,
+            evidenceOptions,
+            persistenceDeadline,
+          );
         persistenceDeadline.throwIfExpired();
         persistedSkillEvidence = evidence;
         const resultDigest = jsonDigest(structured);

@@ -4,7 +4,6 @@
   var $$ = function (selector) { return Array.prototype.slice.call(document.querySelectorAll(selector)); };
   var dataRequestTimeout = 30000;
   var evolutionCommandTimeout = 120000;
-  var sampleConcurrencyDefault = 64;
   var sampleConcurrencyMaximum = 128;
   var eventInitialTail = 200;
   var eventMemoryLimit = 500;
@@ -18,7 +17,7 @@
   };
   var candidateStatusLabels = {
     accepted: "训练反馈搜索保留", promoted: "训练反馈搜索保留", retained: "训练反馈搜索保留", released: "已发布", evaluating: "训练反馈检查中",
-    evaluated: "训练反馈已检查", pending: "等待训练反馈", spawned: "等待训练反馈", rejected: "未保留", failed: "失败", duplicate: "重复版本",
+    evaluated: "训练反馈已检查", pending: "等待训练反馈", spawned: "等待训练反馈", screened_out: "初筛未进入 Top 2", rejected: "未保留", failed: "失败", duplicate: "重复版本",
     paused: "已暂停", aborted: "已中止", not_recorded: "未封存"
   };
   var metricLabels = {
@@ -86,20 +85,23 @@
   var eventLabels = {
     "run.created": "进化运行已创建", "run.started": "进化运行已启动", "run.paused": "进化运行已暂停",
     "run.resumed": "进化运行已恢复", "run.cancelled": "进化运行已取消", "run.completed": "进化运行已完成",
-    "run.failed": "进化运行失败", "generation.started": "进化轮次已开始", "generation.advanced": "进化轮次已推进",
-    "generation.completed": "进化轮次已完成", "generation.batch_started": "本轮候选批次已冻结", "generation.analyzed": "本轮结果分析已完成", "generation.champion_selected": "本轮冠军选择已完成", "proposal.submitted": "变更提案已提交", "candidate.spawned": "候选方案已生成",
+    "run.failed": "进化运行失败", "runseedgenomematerialized": "运行初始种子方案已冻结", "dshruntimebound": "DSH 运行时已绑定",
+    "generation.started": "进化轮次已开始", "generation.advanced": "进化轮次已推进", "generation.search_planned": "本轮搜索计划已冻结",
+    "generation.completed": "进化轮次已完成", "generation.batch_started": "本轮候选批次已冻结", "generation.analyzed": "本轮结果分析已完成", "generation.reflected": "本轮反思结果已记录", "generation.champion_selected": "本轮冠军选择已完成", "generationresearchiterated": "本轮研究计划已更新", "runadaptationcohortfrozen": "本次运行的自适应数据队列已冻结", "generationcohortsfrozen": "本轮初筛与留出数据队列已冻结", "proposal.submitted": "变更提案已提交", "candidate.spawned": "候选方案已生成", "candidaterevisioncreated": "候选方案修订已冻结", "algorithmattemptrecorded": "候选算法编译或调试证据已记录",
     "knowledge.retrieved": "本轮知识检索已冻结", "knowledge.assessed": "知识指导结果已判断",
     "research.started": "模型自主调研已开始", "research.completed": "模型自主调研已完成",
     "implementation.started": "预测模型与进化策略能力编译已开始", "implementation.completed": "宿主能力编译已完成",
     "optimization.started": "迭代优化分析已开始", "optimization.completed": "迭代优化决策已完成",
-    "candidate.submitted": "候选方案已提交", "candidate.accepted": "候选方案已在训练反馈搜索中保留", "candidate.failed": "候选方案生成失败", "candidate.duplicate": "重复候选已跳过",
+    "candidate.submitted": "候选方案已提交", "candidate.accepted": "候选方案已在训练反馈搜索中保留", "candidate.failed": "候选方案生成失败", "candidate.duplicate": "重复候选已跳过", "candidate.screening_recorded": "候选初筛结果已记录", "candidate.screened_out": "候选未进入 Top 2",
+    "formal.selection_cohort_frozen": "Top 2 正式评测队列已冻结", "formal.batch_started": "正式 epoch 微批已启动", "formal.batch_evaluated": "正式 epoch 微批已完成",
+    "holdout.arm_started": "轮末留出评测臂已启动", "generation.comparison_recorded": "轮末三臂比较结果已记录",
     "artifact.recorded": "候选训练产物已记录",
-    "evaluation.progress": "真实样本评测正在推进", "evaluation.completed": "训练反馈检查已完成", "promotion.decided": "搜索保留决策已记录", "promotion.pending": "等待搜索保留决策",
+    "evaluation.progress": "真实样本评测正在推进", "evaluation.sample_results_started": "样本评测结果开始写入", "evaluation.sample_result_batch": "样本评测结果批次已写入", "evaluation.sample_results_completed": "样本评测结果已写入", "evaluation.completed": "训练反馈检查已完成", "evaluation.judged": "候选方案独立评审结论已记录", "promotion.decided": "搜索保留决策已记录", "promotion.pending": "等待搜索保留决策",
     "intervention.recorded": "专家主动意见已记录", "intervention.applied": "专家主动意见处理结果已记录", "intervention.submitted": "专家主动意见已提交",
     "expert_consultation.requested": "模型已提交专家咨询", "expert_consultation.answered": "专家咨询已答复", "expert_consultation.applied": "专家答复已用于后续轮次",
     "consultation.requested": "模型已提交专家咨询", "consultation.answered": "专家咨询已答复", "consultation.applied": "专家答复已用于后续轮次",
-    "stage.recorded": "进化阶段状态已更新", "gateway.retry_scheduled": "网关繁忙，已安排延迟重试",
-    "dsh.child_execution_failed": "DSH 子任务请求失败"
+    "stage.recorded": "进化阶段状态已更新", "gateway.retry_scheduled": "网关繁忙，已安排延迟重试", "model.usage_recorded": "模型调用用量已记录",
+    "dsh.child_execution_failed": "DSH 子任务请求失败", "dshchildlaunchreserved": "DSH 子任务已获得执行槽位", "dshretrievalexecuted": "DSH 资料检索已执行", "dshpredictiontoolexecuted": "DSH 预测工具已执行", "dshstructuredresultaccepted": "DSH 结构化结果已验收"
   };
   var state = {
     apiBase: EcologyDSHHost.getPublicContext().apiBase,
@@ -637,7 +639,7 @@
   function candidateStatusClass(value) {
     if (["accepted", "promoted", "retained", "released"].indexOf(value) >= 0) { return "pill-green"; }
     if (["evaluating", "evaluated", "pending", "spawned", "paused"].indexOf(value) >= 0) { return "pill-amber"; }
-    if (value === "duplicate" || value === "not_recorded") { return "pill-neutral"; }
+    if (value === "duplicate" || value === "not_recorded" || value === "screened_out") { return "pill-neutral"; }
     if (value === "failed" || value === "rejected" || value === "aborted") { return "pill-red"; }
     return "pill-neutral";
   }

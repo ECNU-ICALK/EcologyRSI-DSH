@@ -346,7 +346,7 @@
     var sampleStatus = sample.trace.status || (Object.keys(summary).length ? "completed" : "pending");
     var candidateStatus = String(candidate.status || "").toLowerCase();
     var terminalTrace = ["completed", "failed", "skipped"].indexOf(projectedTraceStatus) >= 0;
-    var terminalCandidate = ["promoted", "rejected", "failed", "duplicate"].indexOf(candidateStatus) >= 0;
+    var terminalCandidate = ["promoted", "rejected", "failed", "duplicate", "screened_out"].indexOf(candidateStatus) >= 0;
     var liveProgress = sample.progress && !terminalTrace && !terminalCandidate ? sample.progress : null;
     var progressKind = String(liveProgress && liveProgress.progress_kind || "").toLowerCase();
     var runStatus = String(run && run.status || "").toLowerCase();
@@ -450,6 +450,7 @@
       scientific_gate_failed: "未通过固定科学门禁",
       judge_rejected: "科学门禁通过，独立评审未接受",
       judge_unavailable: "独立评审不可用，未作正式晋升",
+      not_selected_by_screening_top_k: "初筛未进入 Top 2，不参加正式评测",
       execution_failed: "训练或评测失败",
       duplicate: "参数重复，未重复评测"
     }[String(value || "")] || String(value || "等待轮末统一选择");
@@ -524,6 +525,7 @@
     if (run && run.best_candidate_id && candidate.id === run.best_candidate_id) { return { text: "当前保留", className: "pill-green" }; }
     if (run && run.best_observed_candidate_id && candidate.id === run.best_observed_candidate_id) { return { text: "原始最高观测", className: "pill-blue" }; }
     if (String(candidate.status || "").toLowerCase() === "failed") { return { text: "执行失败", className: "pill-red" }; }
+    if (String(candidate.status || "").toLowerCase() === "screened_out") { return { text: "初筛未进入 Top 2", className: "pill-neutral" }; }
     if (String(candidate.status || "").toLowerCase() === "rejected") { return { text: "未保留", className: "pill-red" }; }
     if (String(candidate.status || "").toLowerCase() === "duplicate") { return { text: "重复跳过", className: "pill-neutral" }; }
     return { text: candidateStatusText(candidate.status), className: candidateStatusClass(candidate.status) };

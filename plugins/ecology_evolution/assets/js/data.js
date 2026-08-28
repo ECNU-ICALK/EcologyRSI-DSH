@@ -423,7 +423,7 @@
     var runStatus = String(run && run.status || "").toLowerCase();
     var candidateStatus = String(candidate && candidate.status || "").toLowerCase();
     if (runStatus !== "running") { return false; }
-    return ["accepted", "promoted", "retained", "released", "evaluated", "rejected", "failed", "duplicate", "cancelled"].indexOf(candidateStatus) < 0;
+    return ["accepted", "promoted", "retained", "released", "evaluated", "screened_out", "rejected", "failed", "duplicate", "cancelled"].indexOf(candidateStatus) < 0;
   }
 
   function renderCandidateSampleViews() {

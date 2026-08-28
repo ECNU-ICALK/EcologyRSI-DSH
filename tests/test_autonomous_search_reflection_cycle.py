@@ -724,8 +724,8 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         )
 
     def test_candidate_outcome_mapping_is_rank_ordered_and_persisted(self) -> None:
-        direction_digests = ("1" * 64, "2" * 64, "3" * 64)
-        behavior_digests = ("4" * 64, "5" * 64, "6" * 64)
+        direction_digests = ("1" * 64, "2" * 64, "3" * 64, "7" * 64)
+        behavior_digests = ("4" * 64, "5" * 64, "6" * 64, "8" * 64)
         candidates = (
             SimpleNamespace(
                 candidate_id="candidate:slot-zero",
@@ -746,7 +746,14 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                 proposal_id="proposal:slot-two",
                 generation=0,
                 slot_index=2,
-                status=CandidateStatus.FAILED,
+                status=CandidateStatus.REJECTED,
+            ),
+            SimpleNamespace(
+                candidate_id="candidate:slot-three",
+                proposal_id="proposal:slot-three",
+                generation=0,
+                slot_index=3,
+                status=CandidateStatus.REJECTED,
             ),
         )
         proposals = {
@@ -792,6 +799,20 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                     "behavior_digest": behavior_digests[2],
                 }
             ),
+            "proposal:slot-three": SimpleNamespace(
+                metadata={
+                    "candidate_direction_id": "d4",
+                    "candidate_direction_digest": direction_digests[3],
+                    "mutation_operations": [
+                        {
+                            "op": "set_bounded_parameter",
+                            "name": "history_steps",
+                            "value": 9,
+                        }
+                    ],
+                    "behavior_digest": behavior_digests[3],
+                }
+            ),
         }
         state = SimpleNamespace(
             candidates=candidates,
@@ -800,7 +821,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         analysis = GenerationAnalysis(
             run_id=self.run_id,
             generation=0,
-            candidate_count=3,
+            candidate_count=4,
             eligible_count=0,
             outcome="no_eligible_candidate",
             ranking=(
@@ -823,10 +844,18 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                 {
                     "candidate_id": "candidate:slot-two",
                     "rank": None,
-                    "score": None,
+                    "score": 0.2,
                     "eligible": False,
-                    "classification": "execution_failed",
-                    "selection_reason": "execution_failed",
+                    "classification": "holdout_gate_failed",
+                    "selection_reason": "holdout_gate_failed:cell_regression",
+                },
+                {
+                    "candidate_id": "candidate:slot-three",
+                    "rank": None,
+                    "score": 0.05,
+                    "eligible": False,
+                    "classification": "screened_out",
+                    "selection_reason": "not_selected_by_screening_top_k",
                 },
             ),
         )
@@ -839,9 +868,15 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
 
         self.assertEqual(
             [item["candidate_id"] for item in outcomes],
-            ["candidate:slot-one", "candidate:slot-zero", "candidate:slot-two"],
+            [
+                "candidate:slot-one",
+                "candidate:slot-zero",
+                "candidate:slot-two",
+                "candidate:slot-three",
+            ],
         )
-        self.assertEqual([item["rank"] for item in outcomes], [1, 2, None])
+        self.assertEqual([item["rank"] for item in outcomes], [1, 2, None, None])
+        self.assertEqual([item["score"] for item in outcomes[2:]], [0.2, 0.05])
         self.assertEqual(outcomes[0]["direction_id"], "d2")
         self.assertEqual(outcomes[0]["direction_digest"], direction_digests[1])
         self.assertEqual(
@@ -880,6 +915,9 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         )
         replayed = GenerationReflection.from_dict(reflection.to_dict())
         self.assertEqual(replayed, reflection)
+        replayed_twice = GenerationReflection.from_dict(replayed.to_dict())
+        self.assertEqual(replayed_twice, replayed)
+        self.assertEqual(replayed_twice.reflection_digest, reflection.reflection_digest)
         self.assertEqual(
             replayed.to_dict()["canonical_candidate_outcomes"],
             list(outcomes),

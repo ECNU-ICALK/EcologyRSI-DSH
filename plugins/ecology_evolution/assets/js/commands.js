@@ -247,24 +247,6 @@
     });
   }
 
-  function normalizedSampleAgentBatchSize(value) {
-    var parsed = Math.floor(Number(value));
-    if (!Number.isFinite(parsed) || parsed < 1) { return 64; }
-    return Math.min(parsed, 128);
-  }
-
-  function normalizedSampleConcurrency(value) {
-    var parsed = Math.floor(Number(value));
-    if (!Number.isFinite(parsed) || parsed < 1) { return sampleConcurrencyDefault; }
-    return Math.min(parsed, sampleConcurrencyMaximum);
-  }
-
-  function normalizedCandidateConcurrency(value) {
-    var parsed = Math.floor(Number(value));
-    if (!Number.isFinite(parsed) || parsed < 1) { return 4; }
-    return Math.min(parsed, 8);
-  }
-
   function candidateBudgetStatus() {
     var budget = normalizedEvolutionBudget(
       $("#max-generations").value,

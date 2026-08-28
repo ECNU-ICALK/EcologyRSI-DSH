@@ -85,11 +85,13 @@ export class ProviderStageGate {
     minimumIntervalMs = 0,
     failureCooldownMs = 30_000,
     maxInFlight = MAX_STRUCTURED_STAGE_IN_FLIGHT,
-    // Eight is a conservative cold-start window, not a ceiling. Successful
-    // work quickly probes beyond it toward the configured 64/128 limit, while
-    // AIMD feedback can still retreat before a fresh process stampedes the
-    // provider with sixteen uncalibrated requests.
-    adaptiveInitialInFlight = Math.min(8, maxInFlight),
+    // Start at the configured physical provider limit. Each run still owns a
+    // separate Host-side origin admission limit (64 by default, at most 128),
+    // so this gate must not silently turn a requested 64-origin wave into an
+    // eight-request wave. AIMD reduction remains available after an observed
+    // provider failure; successful cold starts no longer have to spend nearly
+    // two thousand calls climbing from 8 to 64 one slot at a time.
+    adaptiveInitialInFlight = maxInFlight,
     adaptiveFloor = 4,
     adaptiveRecoverySuccesses = 8,
     // Remember a demonstrated congestion point for long enough that a busy

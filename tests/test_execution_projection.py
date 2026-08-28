@@ -20,6 +20,7 @@ from ecologyrsi_dsh.api.projection import (
     _run_failure_projection,
     _screening_progress_projection,
 )
+from ecologyrsi_dsh.api.shared import _event_type
 from ecologyrsi_dsh.core.models import (
     Evaluation,
     ModelArtifact,
@@ -73,6 +74,31 @@ def _origin_members(label: str) -> list[str]:
 
 
 class ExecutionProjectionTests(unittest.TestCase):
+    def test_adaptive_events_have_stable_public_timeline_types(self) -> None:
+        self.assertEqual(
+            {
+                kind: _event_type(kind)
+                for kind in (
+                    "CandidateScreeningRecorded",
+                    "FormalSelectionCohortFrozen",
+                    "CandidateScreenedOut",
+                    "FormalBatchStarted",
+                    "FormalBatchEvaluated",
+                    "HoldoutArmStarted",
+                    "GenerationComparisonRecorded",
+                )
+            },
+            {
+                "CandidateScreeningRecorded": "candidate.screening_recorded",
+                "FormalSelectionCohortFrozen": "formal.selection_cohort_frozen",
+                "CandidateScreenedOut": "candidate.screened_out",
+                "FormalBatchStarted": "formal.batch_started",
+                "FormalBatchEvaluated": "formal.batch_evaluated",
+                "HoldoutArmStarted": "holdout.arm_started",
+                "GenerationComparisonRecorded": "generation.comparison_recorded",
+            },
+        )
+
     def test_failed_scoring_penalty_is_not_projected_as_model_output(self) -> None:
         state = SimpleNamespace(
             task_manifest=SimpleNamespace(
@@ -505,6 +531,75 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertTrue(progress["outcomes_verified"])
         self.assertEqual(progress["awaiting_submission_batches"], 212)
         self.assertEqual(progress["updated_at"], heartbeat.created_at)
+
+    def test_adaptive_progress_uses_frozen_phase_boundary_after_early_failure(
+        self,
+    ) -> None:
+        schedule = {
+            "screening_origin_count": 64,
+            "formal_origin_count_per_finalist": 500,
+            "selection_holdout_origin_count": 169,
+            "local_batch_origin_count": 50,
+        }
+        screening_events = tuple(
+            SimpleNamespace(
+                payload={
+                    "generation": 0,
+                    "candidate_id": f"candidate:{index}",
+                    "origin_count": 64,
+                },
+                created_at=f"2026-08-28T02:0{index}:00+00:00",
+            )
+            for index in range(3)
+        )
+        events = (
+            SimpleNamespace(
+                seq=1,
+                kind="GenerationBatchStarted",
+                payload={"batch": {"generation": 0}},
+                created_at="2026-08-28T02:00:00+00:00",
+            ),
+            SimpleNamespace(
+                seq=2,
+                kind="FormalSelectionCohortFrozen",
+                payload={"generation": 0},
+                created_at="2026-08-28T02:04:00+00:00",
+            ),
+        )
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(
+                metadata={
+                    "optimization_protocol": "top2_adaptive_epoch@1",
+                    "optimization_schedule": schedule,
+                    "sample_concurrency": 64,
+                }
+            ),
+            run=SimpleNamespace(
+                generation=0,
+                status=SimpleNamespace(value="running"),
+            ),
+            candidate_screening_events=screening_events,
+            formal_batch_evaluations=(),
+            holdout_evaluations=(),
+            formal_batches=(),
+            candidates=tuple(
+                SimpleNamespace(
+                    candidate_id=f"candidate:{index}",
+                    generation=0,
+                )
+                for index in range(4)
+            ),
+            events=events,
+        )
+
+        progress = _adaptive_progress_projection(state)
+
+        self.assertEqual(progress["evaluation_phase"], "formal_batch")
+        self.assertEqual(progress["screening_completed_origins"], 192)
+        self.assertEqual(progress["screening_skipped_origins"], 64)
+        self.assertEqual(progress["terminal_skipped_origins"], 64)
+        self.assertEqual(progress["completed_origins"], 256)
+        self.assertNotIn("awaiting_submission_batches", progress)
 
     def test_adaptive_progress_includes_live_formal_origin_receipts(self) -> None:
         schedule = {

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import unittest
+from types import SimpleNamespace
 
 from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.api.dsh_tools import DshToolService
 from ecologyrsi_dsh.core.ledger import EventLedger
+from ecologyrsi_dsh.core.state import RunState
 from ecologyrsi_dsh.core.models import (
+    CandidateStatus,
     Evaluation,
     ModelArtifact,
     Promotion,
@@ -25,7 +28,13 @@ from ecologyrsi_dsh.evolution.analysis import (
     GenerationAnalysis,
     build_cross_generation_experience,
 )
-from ecologyrsi_dsh.evolution.batches import start_generation_batch
+from ecologyrsi_dsh.evolution.batches import (
+    _generation_parent_candidate_id,
+    _generation_parent_genome,
+    _search_parent_from_analysis,
+    start_generation_batch,
+)
+from ecologyrsi_dsh.evolution.schedule import OPTIMIZATION_PROTOCOL
 from ecologyrsi_dsh.evolution.strategies import (
     FakeDSHAdapter,
     _native_evolution_reflection_from_experience,
@@ -80,6 +89,108 @@ class GenomeReplayTests(unittest.TestCase):
         self.director.create_run(_new_task(), run_id=run_id)
         self.director.start_run(run_id)
         return run_id
+
+    def test_adaptive_next_epoch_uses_frozen_effective_final_revision(self) -> None:
+        run_id = self._start_new("run:effective-final-parent")
+        seed = self.director.state(run_id).materialized_seed_genome()
+        final = apply_genome_mutation(
+            seed,
+            {
+                "schema_version": "ecologyrsi-dsh.genome-mutation/1",
+                "operations": [
+                    {
+                        "op": "set_bounded_parameter",
+                        "name": "ridge_alpha",
+                        "value": 0.35,
+                    }
+                ],
+            },
+            GenomeMutationContextV1(
+                run_id=run_id,
+                generation=0,
+                slot_index=2,
+                slot_seed=102,
+                parent_candidate_id=None,
+                parent_genome_digest=seed.genome_digest,
+                generation_batch_digest="1" * 64,
+                research_iteration_digest="2" * 64,
+                knowledge_snapshot_digest="3" * 64,
+                mutation_budget_digest="4" * 64,
+                mutation_operator_id="bounded-single-parent-mutation@1",
+            ),
+            current_program_registry(),
+        )
+        incumbent_id = "candidate:screened-incumbent"
+        failed_finalist_id = "candidate:failed-finalist"
+        revision = SimpleNamespace(
+            revision_id="revision:incumbent:final",
+            candidate_id=incumbent_id,
+            genome=final.to_dict(),
+            genome_digest=final.genome_digest,
+        )
+        candidates = {
+            incumbent_id: SimpleNamespace(status=CandidateStatus.SCREENED_OUT),
+            failed_finalist_id: SimpleNamespace(status=CandidateStatus.REJECTED),
+        }
+        analysis = SimpleNamespace(
+            search_parent_candidate_id=incumbent_id,
+            ranking=(
+                {
+                    "candidate_id": incumbent_id,
+                    "score": 0.8,
+                    "constraint_violations": 0,
+                },
+                {
+                    "candidate_id": failed_finalist_id,
+                    "score": 0.7,
+                    "constraint_violations": 0,
+                },
+            ),
+        )
+
+        def persisted_genome_for(candidate_id: str):
+            self.fail(
+                "automatic adaptive parenting must not reload the candidate R0: "
+                + candidate_id
+            )
+
+        state = SimpleNamespace(
+            run=SimpleNamespace(
+                generation=1,
+                best_candidate_id=failed_finalist_id,
+            ),
+            task_manifest=SimpleNamespace(
+                metadata={"optimization_protocol": OPTIMIZATION_PROTOCOL}
+            ),
+            pending_interventions=(),
+            effective_revision_for=lambda generation: (
+                revision.revision_id if generation == 0 else None
+            ),
+            revision=lambda revision_id: (
+                revision
+                if revision_id == revision.revision_id
+                else (_ for _ in ()).throw(KeyError(revision_id))
+            ),
+            analysis_for=lambda generation: analysis if generation == 0 else None,
+            candidate=lambda candidate_id: candidates[candidate_id],
+            evaluation_for=lambda candidate_id: (
+                object() if candidate_id == failed_finalist_id else None
+            ),
+            persisted_genome_for=persisted_genome_for,
+            batch_for=lambda generation: None,
+        )
+
+        # The legacy completed-candidate resolver skips the screened-out
+        # incumbent and would incorrectly choose the failed finalist.
+        self.assertEqual(
+            _search_parent_from_analysis(state, analysis), failed_finalist_id
+        )
+        self.assertEqual(_generation_parent_candidate_id(state), incumbent_id)
+        parent = _generation_parent_genome(state, incumbent_id)
+        self.assertEqual(parent.genome_digest, final.genome_digest)
+        self.assertNotEqual(parent.genome_digest, seed.genome_digest)
+        replay_parent = RunState.parent_genome_for_generation(state, 1)
+        self.assertEqual(replay_parent.genome_digest, final.genome_digest)
 
     def _proposal(self, run_id: str, *, slot_index: int = 0) -> Proposal:
         state = self.director.state(run_id)

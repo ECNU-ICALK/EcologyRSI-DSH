@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import threading
+import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
-from types import SimpleNamespace
 
 from ecologyrsi_dsh.api import work_units
 from ecologyrsi_dsh.api import formal_trajectory
@@ -96,6 +98,7 @@ class WorkUnitContractTests(unittest.TestCase):
 
     def test_top_two_lanes_rotate_after_each_batch_edit_pair(self):
         state = _AdaptiveLaneState()
+        state.task_manifest.metadata["candidate_concurrency"] = 1
         endpoint = SimpleNamespace(
             server=SimpleNamespace(
                 director=SimpleNamespace(state=lambda _run_id: state)
@@ -170,6 +173,7 @@ class WorkUnitContractTests(unittest.TestCase):
 
     def test_half_finished_pair_is_recovered_before_switching_lanes(self):
         state = _AdaptiveLaneState()
+        state.task_manifest.metadata["candidate_concurrency"] = 1
         state.batches.add(("candidate:a", 0))
         state.evaluations.add(("candidate:a", 0))
         endpoint = SimpleNamespace(
@@ -218,6 +222,167 @@ class WorkUnitContractTests(unittest.TestCase):
 
         self.assertEqual(calls, ["candidate:a:batch", "candidate:a:edit"])
         self.assertNotIn(("candidate:b", 0), state.activations)
+
+    def test_two_finalist_batches_advance_in_the_same_scheduler_turn(self):
+        state = _AdaptiveLaneState()
+        endpoint = SimpleNamespace(
+            server=SimpleNamespace(
+                director=SimpleNamespace(state=lambda _run_id: state)
+            )
+        )
+        rendezvous = threading.Barrier(2)
+        calls: list[str] = []
+        calls_lock = threading.Lock()
+
+        def execute_batch(_endpoint, _run_id, candidate_id):
+            rendezvous.wait(timeout=1)
+            with calls_lock:
+                calls.append(candidate_id)
+            state.batches.add((candidate_id, 0))
+            state.evaluations.add((candidate_id, 0))
+            return True
+
+        with (
+            patch.object(
+                generation_execution,
+                "_two_stage_screening_enabled",
+                return_value=True,
+            ),
+            patch.object(
+                formal_trajectory,
+                "ensure_formal_trajectory",
+                side_effect=lambda _endpoint, _run_id, candidate_id: (
+                    state.trajectories[candidate_id]
+                ),
+            ),
+            patch.object(
+                formal_trajectory,
+                "execute_next_formal_batch",
+                side_effect=execute_batch,
+            ),
+            patch.object(
+                formal_trajectory,
+                "execute_next_local_edit",
+                return_value=False,
+            ),
+        ):
+            self.assertTrue(
+                work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+            )
+
+        self.assertCountEqual(calls, ["candidate:a", "candidate:b"])
+        self.assertEqual(
+            state.evaluations,
+            {("candidate:a", 0), ("candidate:b", 0)},
+        )
+
+    def test_two_pending_local_edits_are_serialized_and_both_advance(self):
+        state = _AdaptiveLaneState()
+        for candidate_id in ("candidate:a", "candidate:b"):
+            state.batches.add((candidate_id, 0))
+            state.evaluations.add((candidate_id, 0))
+        endpoint = SimpleNamespace(
+            server=SimpleNamespace(
+                director=SimpleNamespace(state=lambda _run_id: state)
+            )
+        )
+        active_edits = 0
+        maximum_active_edits = 0
+        edit_lock = threading.Lock()
+
+        def execute_edit(_endpoint, _run_id, candidate_id):
+            nonlocal active_edits, maximum_active_edits
+            with edit_lock:
+                active_edits += 1
+                maximum_active_edits = max(maximum_active_edits, active_edits)
+            time.sleep(0.01)
+            state.activations.add((candidate_id, 0))
+            with edit_lock:
+                active_edits -= 1
+            return True
+
+        with (
+            patch.object(
+                generation_execution,
+                "_two_stage_screening_enabled",
+                return_value=True,
+            ),
+            patch.object(
+                formal_trajectory,
+                "ensure_formal_trajectory",
+                side_effect=lambda _endpoint, _run_id, candidate_id: (
+                    state.trajectories[candidate_id]
+                ),
+            ),
+            patch.object(
+                formal_trajectory,
+                "execute_next_formal_batch",
+                return_value=False,
+            ),
+            patch.object(
+                formal_trajectory,
+                "execute_next_local_edit",
+                side_effect=execute_edit,
+            ),
+        ):
+            self.assertTrue(
+                work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+            )
+
+        self.assertEqual(maximum_active_edits, 1)
+        self.assertEqual(
+            state.activations,
+            {("candidate:a", 0), ("candidate:b", 0)},
+        )
+
+    def test_queued_local_edit_rechecks_pause_before_starting(self):
+        state = _AdaptiveLaneState()
+        for candidate_id in ("candidate:a", "candidate:b"):
+            state.batches.add((candidate_id, 0))
+            state.evaluations.add((candidate_id, 0))
+        endpoint = SimpleNamespace(
+            server=SimpleNamespace(
+                director=SimpleNamespace(state=lambda _run_id: state)
+            )
+        )
+        calls: list[str] = []
+
+        def execute_edit(_endpoint, _run_id, candidate_id):
+            calls.append(candidate_id)
+            state.activations.add((candidate_id, 0))
+            state.run.status = RunStatus.PAUSED
+            return True
+
+        with (
+            patch.object(
+                generation_execution,
+                "_two_stage_screening_enabled",
+                return_value=True,
+            ),
+            patch.object(
+                formal_trajectory,
+                "ensure_formal_trajectory",
+                side_effect=lambda _endpoint, _run_id, candidate_id: (
+                    state.trajectories[candidate_id]
+                ),
+            ),
+            patch.object(
+                formal_trajectory,
+                "execute_next_formal_batch",
+                return_value=False,
+            ),
+            patch.object(
+                formal_trajectory,
+                "execute_next_local_edit",
+                side_effect=execute_edit,
+            ),
+        ):
+            self.assertTrue(
+                work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(state.activations), 1)
 
     def test_trajectory_initialization_derives_batch_count_from_schedule(self):
         """The manifest stores only canonical schedule fields, not derived counts."""

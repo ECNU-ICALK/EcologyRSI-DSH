@@ -2779,6 +2779,7 @@ def _adaptive_progress_projection(
     except (KeyError, TypeError, ValueError):
         return None
     generation = state.run.generation
+    runtime_events = tuple(getattr(state, "events", ()))
     generation_screening_events = tuple(
         event
         for event in state.candidate_screening_events
@@ -2868,9 +2869,44 @@ def _adaptive_progress_projection(
         or any(
             event.kind == "HoldoutArmStarted"
             and int(event.payload.get("generation", -1)) == generation
-            for event in state.events
+            for event in runtime_events
         )
         or any(batch.generation == generation for batch in state.formal_batches)
+    )
+    generation_events = tuple(
+        event
+        for event in runtime_events
+        if (
+            int(event.payload.get("generation", -1)) == generation
+            or (
+                isinstance(event.payload.get("batch"), Mapping)
+                and int(event.payload["batch"].get("generation", -1))
+                == generation
+            )
+            or (
+                isinstance(event.payload.get("comparison"), Mapping)
+                and int(event.payload["comparison"].get("generation", -1))
+                == generation
+            )
+        )
+    )
+    formal_selection_frozen = any(
+        event.kind == "FormalSelectionCohortFrozen"
+        for event in generation_events
+    )
+    holdout_started = any(
+        event.kind == "HoldoutArmStarted"
+        for event in generation_events
+    )
+    comparison_recorded = any(
+        event.kind == "GenerationComparisonRecorded"
+        for event in generation_events
+    )
+    has_adaptive_boundary = (
+        has_adaptive_boundary
+        or formal_selection_frozen
+        or holdout_started
+        or comparison_recorded
     )
     if not has_adaptive_boundary:
         # The schedule exists from run creation, but it is not progress
@@ -2888,10 +2924,34 @@ def _adaptive_progress_projection(
         for item in state.holdout_evaluations
         if item.scope.generation == generation
     )
+    # A failed candidate can be closed before it reaches every planned origin.
+    # Once the next durable phase boundary exists, the unexecuted remainder is
+    # terminally skipped rather than work that is still queued.  Keeping this
+    # count separate from successful/failed origins makes the run-level bar
+    # truthful without leaving it permanently below 100%.
+    screening_skipped = (
+        max(0, screening_total - settled_screening_completed)
+        if formal_selection_frozen
+        else 0
+    )
+    formal_skipped = (
+        max(0, formal_total - formal_completed)
+        if holdout_started
+        else 0
+    )
+    holdout_skipped = (
+        max(0, holdout_total - holdout_completed)
+        if comparison_recorded
+        else 0
+    )
+    terminal_skipped = screening_skipped + formal_skipped + holdout_skipped
     total = screening_total + formal_total + holdout_total
     completed = min(
         total,
-        screening_completed + formal_completed + holdout_completed,
+        screening_completed
+        + formal_completed
+        + holdout_completed
+        + terminal_skipped,
     )
     throughput_rows: list[tuple[datetime, int]] = []
     for event in state.candidate_screening_events:
@@ -2939,12 +2999,16 @@ def _adaptive_progress_projection(
         rolling_rate = round(sum(count for _at, count in window[1:]) / elapsed_minutes, 3)
         if rolling_rate > 0:
             rolling_eta = int(math.ceil(max(0, total - completed) / rolling_rate * 60.0))
+    # Phase is a state-machine projection, not a numeric heuristic.  In
+    # particular, a candidate may fail screening early and therefore never
+    # emit a full 64-origin screening record; the frozen Top-2 cohort still
+    # proves that screening is over.
     phase = "screening"
-    if settled_screening_completed >= screening_total:
+    if formal_selection_frozen or settled_screening_completed >= screening_total:
         phase = "formal_batch"
-    if formal_completed >= formal_total:
+    if holdout_started or formal_completed >= formal_total:
         phase = "holdout"
-    if holdout_completed >= holdout_total:
+    if comparison_recorded or holdout_completed >= holdout_total:
         phase = "decision"
     batch_count = max(1, int(schedule.get("formal_origin_count_per_finalist", 500))) // max(
         1, int(schedule.get("local_batch_origin_count", 50))
@@ -3132,16 +3196,20 @@ def _adaptive_progress_projection(
         "epoch_progress_percent": epoch_progress_percent,
         "screening_completed_origins": min(screening_completed, screening_total),
         "screening_total_origins": screening_total,
+        "screening_skipped_origins": screening_skipped,
         "formal_completed_origins": min(
             formal_completed + live_formal_completed,
             formal_total,
         ),
         "formal_total_origins": formal_total,
+        "formal_skipped_origins": formal_skipped,
         "holdout_completed_origins": min(
             holdout_completed + live_holdout_completed,
             holdout_total,
         ),
         "holdout_total_origins": holdout_total,
+        "holdout_skipped_origins": holdout_skipped,
+        "terminal_skipped_origins": terminal_skipped,
         # The existing browser progress renderer consumes the generic
         # ``batch_index``/``batch_count`` pair.  Keep the human-facing index
         # one-based here while durable FormalBatch state remains zero-based.

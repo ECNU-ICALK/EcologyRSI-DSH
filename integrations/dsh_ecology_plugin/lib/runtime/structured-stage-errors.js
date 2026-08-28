@@ -15,11 +15,35 @@ const PHASE_CODES = Object.freeze({
 
 const trustedStructuredErrors = new WeakMap();
 
+function persistencePublicDetail(cause) {
+  if (cause?.code === "dsh_session_projection_not_ready") {
+    return "dsh_session_projection_not_ready";
+  }
+  // SidecarClient only retains this field after the Python boundary has
+  // applied its credential-redacting public error policy. Preserve that
+  // bounded diagnostic in the local service log while the HTTP response and
+  // durable failure event continue to expose only the stable phase code.
+  if (cause?.name === "SidecarError" && typeof cause.publicDetail === "string") {
+    const normalized = cause.publicDetail
+      .replace(/[\u0000-\u001f\u007f]/g, " ")
+      .trim();
+    if (normalized) return normalized.slice(0, 256);
+  }
+  if (cause?.name === "SidecarError" && typeof cause.code === "string") {
+    return `sidecar_${cause.code}`.slice(0, 256);
+  }
+  return null;
+}
+
 export function structuredPhaseError(phase, cause = null) {
   const code = PHASE_CODES[phase];
   if (!code) throw new Error("unknown structured stage error phase");
   const error = new Error(code);
   error.code = code;
+  const publicDetail = phase === "persistence"
+    ? persistencePublicDetail(cause)
+    : null;
+  if (publicDetail !== null) error.publicDetail = publicDetail;
   trustedStructuredErrors.set(error, { phase, cause });
   return error;
 }

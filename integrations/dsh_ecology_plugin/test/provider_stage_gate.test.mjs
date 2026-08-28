@@ -3,12 +3,12 @@ import test from "node:test";
 
 import { ProviderStageGate } from "../lib/runtime/provider-stage-gate.js";
 
-test("provider stage gate cold-starts at eight, then grows beyond it toward 128", async () => {
+test("provider stage gate admits the configured 128-request provider window immediately", async () => {
   const gate = new ProviderStageGate({ minimumIntervalMs: 0 });
   let active = 0;
   let maximum = 0;
   const releases = [];
-  const jobs = Array.from({ length: 17 }, (_, index) => gate.run(
+  const jobs = Array.from({ length: 129 }, (_, index) => gate.run(
     "pjlab",
     async () => {
       active += 1;
@@ -21,24 +21,19 @@ test("provider stage gate cold-starts at eight, then grows beyond it toward 128"
   ));
 
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(maximum, 8);
-  assert.equal(releases.filter(Boolean).length, 8);
+  assert.equal(maximum, 128);
+  assert.equal(releases.filter(Boolean).length, 128);
   assert.deepEqual(gate.snapshot("pjlab"), {
     maxInFlight: 128,
-    effectiveMaxInFlight: 8,
-    active: 8,
-    queued: 9,
+    effectiveMaxInFlight: 128,
+    active: 128,
+    queued: 1,
     cooldownRemainingMs: 0,
   });
 
-  // Keep the window full with queued demand for eight successful releases.
-  // Only those saturated successes are valid evidence for probing one slot up.
-  for (let index = 0; index < 8; index += 1) {
-    releases[index]();
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 9);
-  for (let index = 8; index < releases.length; index += 1) releases[index]();
+  for (let index = 0; index < 128; index += 1) releases[index]();
+  await new Promise((resolve) => setImmediate(resolve));
+  releases[128]();
   await Promise.all(jobs);
 
   assert.throws(
@@ -56,7 +51,59 @@ test("provider stage gate does not learn burst capacity from idle successes", as
   for (let index = 0; index < 100; index += 1) {
     await gate.run("pjlab", async () => index, { runId: "run-idle" });
   }
-  assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 8);
+  assert.equal(gate.snapshot("pjlab").effectiveMaxInFlight, 128);
+});
+
+test("provider stage gate does not queue a default 64-origin Host wave", async () => {
+  const gate = new ProviderStageGate({ minimumIntervalMs: 0 });
+  let active = 0;
+  let maximum = 0;
+  let release;
+  const hold = new Promise((resolve) => { release = resolve; });
+  const jobs = Array.from({ length: 64 }, () => gate.run(
+    "pjlab",
+    async () => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await hold;
+      active -= 1;
+    },
+    { runId: "run-host-64" },
+  ));
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(maximum, 64);
+  assert.equal(gate.snapshot("pjlab").active, 64);
+  assert.equal(gate.snapshot("pjlab").queued, 0);
+  release();
+  await Promise.all(jobs);
+});
+
+test("two default 64-origin runs share one 128-request provider ceiling", async () => {
+  const gate = new ProviderStageGate({ minimumIntervalMs: 0 });
+  let active = 0;
+  let maximum = 0;
+  let release;
+  const hold = new Promise((resolve) => { release = resolve; });
+  const jobs = ["run-a", "run-b"].flatMap((runId) => (
+    Array.from({ length: 64 }, () => gate.run(
+      "pjlab",
+      async () => {
+        active += 1;
+        maximum = Math.max(maximum, active);
+        await hold;
+        active -= 1;
+      },
+      { runId },
+    ))
+  ));
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(maximum, 128);
+  assert.equal(gate.snapshot("pjlab").active, 128);
+  assert.equal(gate.snapshot("pjlab").queued, 0);
+  release();
+  await Promise.all(jobs);
 });
 
 test("provider stage gate enforces the configured provider-wide concurrency", async () => {

@@ -1107,7 +1107,33 @@ class EvolutionDirector:
         if selected_parents:
             parent_candidate_id = selected_parents[-1]
         parent_context = None
-        if parent_candidate_id is not None:
+        adaptive_effective_parent = False
+        if (
+            generation_batch is not None
+            and generation_batch.generation > 0
+            and state.task_manifest.metadata.get("optimization_protocol")
+            == OPTIMIZATION_PROTOCOL
+        ):
+            selected_revision_id = state.effective_revision_for(
+                generation_batch.generation - 1
+            )
+            if selected_revision_id is None:
+                raise RuntimeError(
+                    "adaptive generation is missing the previous effective revision"
+                )
+            selected_revision = state.revision(selected_revision_id)
+            adaptive_effective_parent = (
+                selected_revision.candidate_id == parent_candidate_id
+            )
+            if (
+                adaptive_effective_parent
+                and generation_batch.parent_genome_digest
+                != selected_revision.genome_digest
+            ):
+                raise RuntimeError(
+                    "generation batch parent genome differs from the effective revision"
+                )
+        if parent_candidate_id is not None and not adaptive_effective_parent:
             parent_context = self._completed_parent_context(
                 state, parent_candidate_id
             )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -73,6 +73,7 @@ from ..evolution.analysis import (
     strict_generation_controls_required,
 )
 from ..evolution.context import safe_aggregate_feedback
+from ..evolution.genome import deep_thaw_json
 from ..evolution.schedule import OPTIMIZATION_PROTOCOL, OptimizationSchedule
 from ..integrations.dsh_native_runtime import (
     DSH_NATIVE_EXECUTION_PROTOCOL,
@@ -104,6 +105,9 @@ _ALGORITHM_SMOKE_MAX_ATTEMPTS = 3
 _MAX_CANDIDATE_CONCURRENCY = 8
 _SCREENING_ORIGIN_COUNT = 64
 _FORMAL_FINALIST_COUNT = 2
+_ADAPTIVE_REFLECTION_BATCH_LIMIT = 10
+_ADAPTIVE_CELL_LIMIT = 16
+_ADAPTIVE_FAILURE_LIMIT = 16
 
 
 def _sample_run_control(director: Any, run_id: str) -> str:
@@ -2923,6 +2927,252 @@ def _holdout_from_canonical_evaluation(
     )
 
 
+def _bounded_operation_categories(operations: Any) -> list[str]:
+    """Return a small, aggregate-only description of a mutation bundle."""
+
+    if isinstance(operations, (str, bytes)) or not isinstance(
+        operations, Sequence
+    ):
+        return []
+    categories: list[str] = []
+    for operation in operations:
+        if not isinstance(operation, Mapping):
+            continue
+        category = str(operation.get("op") or "unknown").strip()[:120]
+        if category and category not in categories:
+            categories.append(category)
+        if len(categories) >= 5:
+            break
+    return categories
+
+
+def _outer_mutation_evidence(state: Any, candidate: Candidate) -> dict[str, Any]:
+    """Describe the once-per-generation mutation separately from local edits."""
+
+    metadata = state.proposal(candidate.proposal_id).metadata
+    operations = metadata.get("mutation_operations")
+    operation_count = (
+        len(operations)
+        if isinstance(operations, Sequence)
+        and not isinstance(operations, (str, bytes))
+        else 0
+    )
+    return {
+        "kind": "outer_generation_mutation",
+        "direction_id": metadata.get("candidate_direction_id"),
+        "direction_digest": metadata.get("candidate_direction_digest"),
+        "source_behavior_digest": metadata.get("behavior_digest"),
+        "operation_count": min(operation_count, 5),
+        "operation_categories": _bounded_operation_categories(operations),
+    }
+
+
+def _adaptive_gate_failures(gate: Mapping[str, Any]) -> list[str]:
+    """Explain a finalist gate from the canonical comparison artifact."""
+
+    failures: list[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()[:180]
+        if (
+            text
+            and text not in failures
+            and len(failures) < _ADAPTIVE_FAILURE_LIMIT
+        ):
+            failures.append(text)
+
+    raw_failures = gate.get("failures")
+    if isinstance(raw_failures, Sequence) and not isinstance(
+        raw_failures, (str, bytes)
+    ):
+        for item in raw_failures:
+            add(item)
+    if gate.get("passed") is not True:
+        add("scientific_gate_failed")
+    constraint_violations = gate.get("constraint_violations")
+    if (
+        isinstance(constraint_violations, (int, float))
+        and not isinstance(constraint_violations, bool)
+        and constraint_violations > 0
+    ):
+        add("constraint_violations")
+    if gate.get("complete_objective_grid") is False:
+        add("objective_grid_incomplete")
+    if gate.get("coverage_pass") is False:
+        add("coverage_failed")
+    if gate.get("no_cell_regression") is False:
+        add("cell_regression")
+    assessment = gate.get("promotion_assessment")
+    if isinstance(assessment, Mapping) and assessment.get(
+        "primary_selection_gate"
+    ) is not True:
+        add(assessment.get("status") or "primary_selection_gate_failed")
+    if gate.get("eligible") is not True and not failures:
+        add("comparison_gate_ineligible")
+    return failures
+
+
+def _bounded_comparison_gate(gate: Mapping[str, Any]) -> dict[str, Any]:
+    """Project the comparison gate without leaking evaluator sample records."""
+
+    cell_deltas = gate.get("cell_deltas")
+    bounded_cells = (
+        {
+            str(key)[:160]: value
+            for key, value in sorted(
+                cell_deltas.items(), key=lambda item: str(item[0])
+            )[:_ADAPTIVE_CELL_LIMIT]
+        }
+        if isinstance(cell_deltas, Mapping)
+        else {}
+    )
+    assessment = gate.get("promotion_assessment")
+    bounded_assessment = (
+        {
+            name: assessment.get(name)
+            for name in (
+                "evidence_class",
+                "status",
+                "paired_block_count",
+                "valid_three_day_start_count",
+                "paired_block_ids_digest",
+                "primary_delta",
+                "selection_stability_floor",
+                "primary_selection_gate",
+            )
+        }
+        if isinstance(assessment, Mapping)
+        else {}
+    )
+    return deep_thaw_json(
+        {
+            "eligible": gate.get("eligible") is True,
+            "scientific_pass": gate.get("passed") is True,
+            "constraint_violations": gate.get("constraint_violations"),
+            "overall_coverage": gate.get("overall_coverage"),
+            "coverage_pass": gate.get("coverage_pass"),
+            "complete_objective_grid": gate.get("complete_objective_grid"),
+            "no_cell_regression": gate.get("no_cell_regression"),
+            "worst_cell_delta": gate.get("worst_cell_delta"),
+            "cell_deltas": bounded_cells,
+            "stability_lower_bound": gate.get("stability_lower_bound"),
+            "promotion_assessment": bounded_assessment,
+            "failures": _adaptive_gate_failures(gate),
+        }
+    )
+
+
+def _local_edit_trajectory_evidence(
+    state: Any,
+    candidate_id: str,
+    final_revision_id: str,
+) -> dict[str, Any]:
+    """Build bounded ten-batch lineage evidence for one completed finalist."""
+
+    trajectory = state.trajectory_for(candidate_id)
+    if trajectory is None:
+        raise RuntimeError("adaptive finalist is missing its formal trajectory")
+    if trajectory.final_revision_id != final_revision_id:
+        raise RuntimeError(
+            "adaptive holdout revision does not match the completed trajectory"
+        )
+    formal_batches = sorted(
+        (
+            item
+            for item in getattr(state, "formal_batches", ())
+            if item.candidate_id == candidate_id
+        ),
+        key=lambda item: item.batch_index,
+    )
+    if len(formal_batches) != trajectory.batch_count:
+        raise RuntimeError("adaptive finalist batch history is incomplete")
+    proposal_by_batch = {
+        int(item["batch_index"]): item
+        for item in getattr(state, "local_edit_proposals", ())
+        if item.get("candidate_id") == candidate_id
+        and isinstance(item.get("batch_index"), int)
+        and not isinstance(item.get("batch_index"), bool)
+    }
+    outcome_by_batch = {
+        int(item["batch_index"]): item
+        for item in getattr(state, "local_edit_outcomes", ())
+        if item.get("candidate_id") == candidate_id
+        and isinstance(item.get("batch_index"), int)
+        and not isinstance(item.get("batch_index"), bool)
+    }
+    activation_by_batch = {
+        item.batch_index: item
+        for item in getattr(state, "trajectory_revision_activations", ())
+        if item.candidate_id == candidate_id
+    }
+    batch_rows: list[dict[str, Any]] = []
+    revision_chain = [trajectory.initial_revision_id]
+    outcome_counts: dict[str, int] = {}
+    operation_category_counts: dict[str, int] = {}
+    for batch in formal_batches:
+        proposal = proposal_by_batch.get(batch.batch_index)
+        outcome = outcome_by_batch.get(batch.batch_index)
+        activation = activation_by_batch.get(batch.batch_index)
+        if proposal is None or outcome is None or activation is None:
+            raise RuntimeError("adaptive finalist local-edit history is incomplete")
+        detail = proposal.get("proposal", proposal)
+        operations = (
+            detail.get("operations", ()) if isinstance(detail, Mapping) else ()
+        )
+        categories = _bounded_operation_categories(operations)
+        category = "|".join(categories) if categories else "none"
+        outcome_name = str(outcome.get("outcome") or "unknown")[:120]
+        outcome_counts[outcome_name] = outcome_counts.get(outcome_name, 0) + 1
+        for item in categories:
+            operation_category_counts[item] = (
+                operation_category_counts.get(item, 0) + 1
+            )
+        reason = getattr(activation.reason, "value", activation.reason)
+        batch_rows.append(
+            {
+                "batch_index": batch.batch_index,
+                "batch_number": batch.batch_index + 1,
+                "evaluated_revision_id": batch.revision_id,
+                "decision": (
+                    detail.get("decision")
+                    if isinstance(detail, Mapping)
+                    else None
+                ),
+                # A scalar keeps the aggregate reflection envelope within its
+                # strict depth bound while retaining the operation category.
+                "operation_category": category,
+                "operation_count": min(
+                    len(operations)
+                    if isinstance(operations, Sequence)
+                    and not isinstance(operations, (str, bytes))
+                    else 0,
+                    5,
+                ),
+                "outcome": outcome_name,
+                "outcome_reason": (
+                    str(outcome.get("reason") or "")[:240] or None
+                ),
+                "from_revision_id": activation.from_revision_id,
+                "active_revision_id": activation.to_revision_id,
+                "advance_reason": str(reason)[:120],
+            }
+        )
+        revision_chain.append(activation.to_revision_id)
+    included = batch_rows[:_ADAPTIVE_REFLECTION_BATCH_LIMIT]
+    return {
+        "kind": "batch_local_edits",
+        "batch_count": trajectory.batch_count,
+        "included_batch_count": len(included),
+        "truncated_batch_count": max(0, len(batch_rows) - len(included)),
+        "initial_revision_id": trajectory.initial_revision_id,
+        "final_revision_id": final_revision_id,
+        "revision_chain": revision_chain[: _ADAPTIVE_REFLECTION_BATCH_LIMIT + 1],
+        "outcome_counts": outcome_counts,
+        "operation_category_counts": operation_category_counts,
+        "batches": included,
+    }
+
+
 def _build_adaptive_analysis(
     state: Any,
     generation: int,
@@ -2930,51 +3180,161 @@ def _build_adaptive_analysis(
     finalists: tuple[Candidate, ...],
     incumbent_candidate_id: str,
 ) -> Any:
-    """Create the aggregate analysis consumed by legacy parent/search code."""
+    """Create one gate-derived analysis with bounded adaptive lineage evidence."""
 
     finalist_evaluations = {
         item.scope.candidate_id: item
         for item in comparison.holdout_evaluations
         if item.scope.holdout_arm in {HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2}
     }
+    incumbent_evaluation = next(
+        item
+        for item in comparison.holdout_evaluations
+        if item.scope.holdout_arm is HoldoutArm.INCUMBENT
+    )
+    gate_results = comparison.gate_results
+    arms = gate_results.get("arms")
+    if not isinstance(arms, Mapping):
+        raise RuntimeError("adaptive comparison is missing arm gate results")
+    selected_arm = gate_results.get("selected_arm")
+    if selected_arm not in {arm.value for arm in HoldoutArm}:
+        raise RuntimeError("adaptive comparison selected arm is invalid")
+    selected_evaluation = next(
+        item
+        for item in comparison.holdout_evaluations
+        if item.scope.holdout_arm.value == selected_arm
+    )
+    if (
+        comparison.selected_candidate_id != selected_evaluation.scope.candidate_id
+        or comparison.selected_revision_id
+        != selected_evaluation.scope.candidate_revision_id
+    ):
+        raise RuntimeError("adaptive comparison selection binding is inconsistent")
     selected = (
         comparison.selected_candidate_id
-        if comparison.selected_candidate_id in finalist_evaluations
+        if selected_arm
+        in {HoldoutArm.FINALIST_1.value, HoldoutArm.FINALIST_2.value}
         else None
     )
+    finalist_gate_by_candidate: dict[str, Mapping[str, Any]] = {}
+    for candidate_id, evaluation in finalist_evaluations.items():
+        gate = arms.get(evaluation.scope.holdout_arm.value)
+        if not isinstance(gate, Mapping):
+            raise RuntimeError("adaptive finalist is missing its comparison gate")
+        finalist_gate_by_candidate[candidate_id] = gate
+    eligible_finalist_ids = [
+        candidate_id
+        for candidate_id, gate in finalist_gate_by_candidate.items()
+        if gate.get("eligible") is True
+    ]
+    if selected is not None:
+        if selected not in eligible_finalist_ids:
+            raise RuntimeError("adaptive comparison selected an ineligible finalist")
+    elif eligible_finalist_ids:
+        raise RuntimeError(
+            "adaptive comparison retained incumbent despite eligible finalist"
+        )
+    rank_by_candidate: dict[str, int] = {}
+    if selected is not None:
+        rank_by_candidate[selected] = 1
+        for candidate_id in sorted(
+            (item for item in eligible_finalist_ids if item != selected),
+            key=lambda item: (
+                next(
+                    candidate.slot_index
+                    for candidate in finalists
+                    if candidate.candidate_id == item
+                ),
+                item,
+            ),
+        ):
+            rank_by_candidate[candidate_id] = len(rank_by_candidate) + 1
     ranking: list[dict[str, Any]] = []
     screening = _screening_records(state, generation)
     generation_candidates = sorted(
         (item for item in state.candidates if item.generation == generation),
         key=lambda item: (item.slot_index, item.candidate_id),
     )
-    for rank, candidate in enumerate(generation_candidates, start=1):
+    for candidate in generation_candidates:
         holdout = finalist_evaluations.get(candidate.candidate_id)
         if holdout is not None:
-            gate = bool(
-                holdout.passed
-                and int(holdout.metrics.get("constraint_violations", 0)) == 0
-                and holdout.metrics.get("sample_execution_coverage_pass") is not False
-            )
+            arm = holdout.scope.holdout_arm
+            if arm is None:  # pragma: no cover - enforced by EvaluationScope
+                raise RuntimeError("adaptive finalist holdout arm is missing")
+            gate = finalist_gate_by_candidate[candidate.candidate_id]
+            eligible = gate.get("eligible") is True
+            is_selected = candidate.candidate_id == selected
+            failures = _adaptive_gate_failures(gate)
+            if is_selected:
+                selection_status = "selected"
+                selection_reason = "generation_holdout_winner"
+                classification = "selected"
+            elif eligible:
+                selection_status = "eligible_not_selected"
+                selection_reason = "lower_deterministic_holdout_rank"
+                classification = "eligible_not_selected"
+            else:
+                selection_status = "holdout_gate_failed"
+                selection_reason = (
+                    "holdout_gate_failed:" + ",".join(failures[:4])
+                )[:240]
+                classification = "holdout_gate_failed"
+            revision = state.revision(holdout.scope.candidate_revision_id)
+            if revision.candidate_id != candidate.candidate_id:
+                raise RuntimeError(
+                    "adaptive finalist revision belongs to another candidate"
+                )
+            assessment = gate.get("promotion_assessment")
             ranking.append(
                 {
-                    "rank": rank if gate else None,
+                    "rank": rank_by_candidate.get(candidate.candidate_id),
                     "candidate_id": candidate.candidate_id,
                     "slot_index": candidate.slot_index,
                     "score": holdout.score,
-                    "eligible": gate,
-                    "scientific_pass": holdout.passed,
-                    "constraint_violations": int(holdout.metrics.get("constraint_violations", 0)),
-                    "classification": "eligible" if gate else "scientific_gate_failed",
-                    "primary_selection_gate": gate and candidate.candidate_id == selected,
-                    "selection_status": "selected" if candidate.candidate_id == selected else "not_selected",
-                    "selection_reason": "generation_holdout_winner" if candidate.candidate_id == selected else "lower_holdout_score",
+                    "eligible": eligible,
+                    "scientific_pass": gate.get("passed") is True,
+                    "constraint_violations": int(
+                        gate.get("constraint_violations") or 0
+                    ),
+                    "classification": classification,
+                    "primary_selection_gate": bool(
+                        isinstance(assessment, Mapping)
+                        and assessment.get("primary_selection_gate") is True
+                    ),
+                    "selection_status": selection_status,
+                    "selection_reason": selection_reason,
                     "judge_available": True,
                     "judge_accepted": holdout.passed,
+                    "holdout_arm": arm.value,
+                    "delta_to_incumbent": holdout.score - incumbent_evaluation.score,
+                    "failure_reasons": failures,
+                    "final_revision_id": revision.revision_id,
+                    "final_revision_digest": revision.revision_digest,
+                    "final_genome_digest": revision.genome_digest,
+                    "final_behavior_digest": revision.behavior_digest,
+                    "comparison_gate": _bounded_comparison_gate(gate),
+                    "outer_mutation_evidence": _outer_mutation_evidence(
+                        state, candidate
+                    ),
+                    "local_edit_evidence": _local_edit_trajectory_evidence(
+                        state,
+                        candidate.candidate_id,
+                        revision.revision_id,
+                    ),
                 }
             )
         else:
             record = screening.get(candidate.candidate_id, {})
+            screening_passed = record.get("passed") is True
+            screening_constraints = int(record.get("constraint_violations", 0))
+            screening_gate_passed = bool(
+                screening_passed and screening_constraints == 0
+            )
+            screening_failures = []
+            if not screening_passed:
+                screening_failures.append("screening_scientific_gate_failed")
+            if screening_constraints > 0:
+                screening_failures.append("screening_constraint_violations")
             ranking.append(
                 {
                     "rank": None,
@@ -2982,31 +3342,73 @@ def _build_adaptive_analysis(
                     "slot_index": candidate.slot_index,
                     "score": record.get("score"),
                     "eligible": False,
-                    "scientific_pass": False,
-                    "constraint_violations": int(record.get("constraint_violations", 0)),
-                    "classification": "screened_out",
+                    "scientific_pass": screening_passed,
+                    "constraint_violations": screening_constraints,
+                    "classification": (
+                        "screened_out_lower_rank"
+                        if screening_gate_passed
+                        else "screening_gate_failed"
+                    ),
                     "primary_selection_gate": False,
                     "selection_status": "screened_out",
-                    "selection_reason": "not_selected_by_screening_top_k",
+                    "selection_reason": (
+                        "not_selected_by_screening_top_k"
+                        if screening_gate_passed
+                        else (
+                            "screening_gate_failed:"
+                            + ",".join(screening_failures)
+                        )[:240]
+                    ),
                     "judge_available": False,
                     "judge_accepted": False,
+                    "failure_reasons": (
+                        ["screened_out_before_adaptive_epoch"]
+                        if screening_gate_passed
+                        else screening_failures
+                    ),
+                    "outer_mutation_evidence": _outer_mutation_evidence(
+                        state, candidate
+                    ),
+                    "local_edit_evidence": {
+                        "kind": "not_run_screened_out",
+                        "batch_count": 0,
+                    },
                 }
             )
+    ranking.sort(
+        key=lambda row: (
+            row["rank"] is None,
+            row["rank"] if row["rank"] is not None else 0,
+            row["slot_index"],
+            row["candidate_id"],
+        )
+    )
     outcome = "promoted" if selected is not None else "no_improvement"
     return GenerationAnalysis(
         run_id=state.run.run_id,
         generation=generation,
         candidate_count=len(generation_candidates),
-        eligible_count=sum(1 for row in ranking if row["eligible"]),
+        eligible_count=len(eligible_finalist_ids),
         outcome=outcome,
         selected_candidate_id=selected,
         champion_candidate_id=selected,
         incumbent_before_candidate_id=incumbent_candidate_id,
         incumbent_after_candidate_id=selected or incumbent_candidate_id,
-        search_parent_candidate_id=selected or finalists[0].candidate_id,
+        search_parent_candidate_id=selected or incumbent_candidate_id,
         ranking=tuple(ranking),
-        next_search_direction=("围绕留出集冠军继续有界局部搜索",),
-        next_generation_focus="保持 Top-2 结构，在同一评测协议下继续批次局部更新",
+        next_search_direction=(
+            "围绕留出比较选中候选的最终 revision 继续有界局部搜索"
+            if selected
+            else (
+                "保留 incumbent 的最终 revision，针对 finalist "
+                "的留出门禁失败开展下一轮有界搜索"
+            ),
+        ),
+        next_generation_focus=(
+            "保持 Top-2 结构，围绕留出比较选中候选继续批次局部更新"
+            if selected
+            else "保持 Top-2 结构，修复本轮 finalist 的留出门禁失败"
+        ),
         selection_reason=(
             f"候选 {selected} 在冻结 169-origin 三臂留出比较中胜出。"
             if selected

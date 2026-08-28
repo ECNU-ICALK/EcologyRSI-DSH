@@ -39,6 +39,8 @@ from .analysis import (
     evaluation_cohort_digest,
     sample_update_windows_enabled,
 )
+from .genome import EcologyEvolutionPluginGenome, deep_thaw_json
+from .schedule import OPTIMIZATION_PROTOCOL
 
 
 _EXPERT_PENDING_CONTEXT_LIMIT = 16
@@ -227,21 +229,66 @@ def _model_search_cycle_enabled(state: Any) -> bool:
     )
 
 
-def _generation_parent_candidate_id(state: Any) -> str | None:
-    parent_candidate_id = state.run.best_candidate_id
-    previous = (
-        state.analysis_for(state.run.generation - 1)
-        if state.run.generation > 0
-        else None
-    )
-    if previous is not None:
-        parent_candidate_id = (
-            _search_parent_from_analysis(state, previous) or parent_candidate_id
+def _adaptive_effective_parent_revision(state: Any):
+    generation = state.run.generation
+    if (
+        generation == 0
+        or state.task_manifest.metadata.get("optimization_protocol")
+        != OPTIMIZATION_PROTOCOL
+    ):
+        return None
+    selected_revision_id = state.effective_revision_for(generation - 1)
+    if selected_revision_id is None:
+        raise RuntimeError(
+            "adaptive generation is missing the previous effective revision"
         )
+    return state.revision(selected_revision_id)
+
+
+def _generation_parent_candidate_id(state: Any) -> str | None:
+    generation = state.run.generation
+    parent_candidate_id = state.run.best_candidate_id
+    effective_parent_revision = _adaptive_effective_parent_revision(state)
+    if effective_parent_revision is not None:
+        parent_candidate_id = effective_parent_revision.candidate_id
+    else:
+        previous = state.analysis_for(generation - 1) if generation > 0 else None
+        if previous is not None:
+            parent_candidate_id = (
+                _search_parent_from_analysis(state, previous) or parent_candidate_id
+            )
     for intervention in state.pending_interventions:
         if intervention.kind is InterventionKind.PARENT_SELECTION:
             parent_candidate_id = intervention.target_candidate_id
     return parent_candidate_id
+
+
+def _generation_parent_genome(state: Any, parent_candidate_id: str | None):
+    """Resolve the exact frozen source genome for the current generation."""
+
+    generation = state.run.generation
+    if generation == 0:
+        return state.materialized_seed_genome()
+    if parent_candidate_id is None:
+        raise RuntimeError("generation is missing its parent candidate")
+    effective_parent_revision = _adaptive_effective_parent_revision(state)
+    if effective_parent_revision is not None:
+        if effective_parent_revision.candidate_id == parent_candidate_id:
+            return EcologyEvolutionPluginGenome.from_dict(
+                deep_thaw_json(effective_parent_revision.genome)
+            )
+        # A pending, explicitly validated parent-selection intervention may
+        # deliberately replace the automatic effective-revision parent.
+        overridden_parent_ids = {
+            item.target_candidate_id
+            for item in state.pending_interventions
+            if item.kind is InterventionKind.PARENT_SELECTION
+        }
+        if parent_candidate_id not in overridden_parent_ids:
+            raise RuntimeError(
+                "adaptive parent candidate differs from the frozen effective revision"
+            )
+    return state.persisted_genome_for(parent_candidate_id)
 
 
 def _next_stage_attempt(state: Any, stage: str) -> int:
@@ -278,11 +325,7 @@ def _ensure_generation_search_plan(
         state.reflection_for(generation - 1) if generation > 0 else None
     )
     parent_candidate_id = _generation_parent_candidate_id(state)
-    parent = (
-        state.materialized_seed_genome()
-        if generation == 0
-        else state.persisted_genome_for(parent_candidate_id)
-    )
+    parent = _generation_parent_genome(state, parent_candidate_id)
     attempt = _next_stage_attempt(state, "search")
     director.record_evolution_stage(
         state.run.run_id,
@@ -532,10 +575,8 @@ def _ensure_generation_research_iteration(
                     == "dsh_native_plugin_evolution@1"
                 ):
                     parent_candidate_id = _generation_parent_candidate_id(state)
-                    parent = (
-                        state.materialized_seed_genome()
-                        if generation == 0
-                        else state.persisted_genome_for(parent_candidate_id)
+                    parent = _generation_parent_genome(
+                        state, parent_candidate_id
                     )
                     planner_kwargs.update(
                         {
@@ -764,7 +805,12 @@ def start_generation_batch(director: Any, run_id: str) -> GenerationBatch:
         else None
     )
     parent_candidate_id = _generation_parent_candidate_id(state)
-    if parent_candidate_id is not None:
+    effective_parent_revision = _adaptive_effective_parent_revision(state)
+    adaptive_effective_parent = (
+        effective_parent_revision is not None
+        and effective_parent_revision.candidate_id == parent_candidate_id
+    )
+    if parent_candidate_id is not None and not adaptive_effective_parent:
         director._completed_parent_context(state, parent_candidate_id)
 
     parent_genome = None
@@ -773,11 +819,7 @@ def start_generation_batch(director: Any, run_id: str) -> GenerationBatch:
         state.task_manifest.metadata.get("execution_protocol")
         == "dsh_native_plugin_evolution@1"
     ):
-        parent_genome = (
-            state.materialized_seed_genome()
-            if state.run.generation == 0
-            else state.persisted_genome_for(parent_candidate_id)
-        )
+        parent_genome = _generation_parent_genome(state, parent_candidate_id)
         parent_data = parent_genome.to_dict()
         runtime_binding = dict(parent_data["runtime_binding"])
         frozen_contracts = dict(parent_data["frozen_contract_refs"])
@@ -961,6 +1003,69 @@ def _canonical_candidate_outcomes(
     return tuple(outcomes)
 
 
+def _adaptive_reflection_analysis(
+    state: Any,
+    analysis: GenerationAnalysis,
+) -> dict[str, Any]:
+    """Expose adaptive epoch evidence while keeping legacy reflection compact."""
+
+    reflection_analysis = analysis.to_dict()
+    reflection_analysis.pop("ranking", None)
+    if (
+        state.task_manifest.metadata.get("optimization_protocol")
+        != OPTIMIZATION_PROTOCOL
+    ):
+        return reflection_analysis
+    comparison = state.comparison_for(analysis.generation)
+    if comparison is None:
+        raise RuntimeError("adaptive reflection is missing generation comparison")
+    incumbent = next(
+        item
+        for item in comparison.holdout_evaluations
+        if item.scope.holdout_arm.value == "incumbent"
+    )
+    selected_revision = state.revision(comparison.selected_revision_id)
+    incumbent_revision = state.revision(incumbent.scope.candidate_revision_id)
+
+    def revision_summary(revision: Any, *, score: float) -> dict[str, Any]:
+        return {
+            "candidate_id": revision.candidate_id,
+            "revision_id": revision.revision_id,
+            "revision_digest": revision.revision_digest,
+            "genome_digest": revision.genome_digest,
+            "behavior_digest": revision.behavior_digest,
+            "holdout_score": score,
+        }
+
+    selected_holdout = next(
+        item
+        for item in comparison.holdout_evaluations
+        if item.scope.candidate_id == comparison.selected_candidate_id
+        and item.scope.candidate_revision_id == comparison.selected_revision_id
+    )
+    gate_results = comparison.gate_results
+    reflection_analysis["adaptive_epoch_evidence"] = {
+        "schema_version": "ecologyrsi-dsh.adaptive-reflection-evidence/1",
+        "generation": analysis.generation,
+        "comparison_digest": comparison.comparison_digest,
+        "selected_arm": gate_results.get("selected_arm"),
+        "selected": revision_summary(
+            selected_revision,
+            score=selected_holdout.score,
+        ),
+        "incumbent": revision_summary(
+            incumbent_revision,
+            score=incumbent.score,
+        ),
+        "delta_to_incumbent": gate_results.get("delta_to_incumbent"),
+        # These are Host-authored aggregate rows.  Their two distinct evidence
+        # blocks make the once-per-generation outer mutation and the ten
+        # within-candidate batch edits impossible to conflate during reflection.
+        "candidate_results": json.loads(canonical_json(list(analysis.ranking))),
+    }
+    return reflection_analysis
+
+
 def _ensure_generation_reflection(
     director: Any,
     state: Any,
@@ -989,8 +1094,7 @@ def _ensure_generation_reflection(
     if not isinstance(batch.parent_genome_canonical_json, str):
         raise RuntimeError("generation reflection is missing the frozen parent genome")
     parent_genome = json.loads(batch.parent_genome_canonical_json)
-    reflection_analysis = analysis.to_dict()
-    reflection_analysis.pop("ranking", None)
+    reflection_analysis = _adaptive_reflection_analysis(state, analysis)
     attempt = _next_stage_attempt(state, "reflection")
     director.record_evolution_stage(
         state.run.run_id,

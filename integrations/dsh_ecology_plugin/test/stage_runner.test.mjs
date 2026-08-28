@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { SidecarError } from "../lib/sidecar/client.js";
 import {
   NativeStageRunner,
   STAGES,
@@ -296,6 +297,7 @@ function directSampleHarness({
   sessionEvents = () => skillFirstEvents("origin-vector-review"),
   failurePhase = null,
   failureCode = null,
+  persistenceError = null,
 }) {
   const starts = [];
   const reservations = [];
@@ -371,6 +373,7 @@ function directSampleHarness({
           return { accepted: true };
         }
         persisted.push(options.body);
+        if (persistenceError) throw persistenceError;
         if (failurePhase === "persistence") {
           const error = new Error(`private ${failurePhase} failure`);
           error.code = failureCode;
@@ -1629,6 +1632,104 @@ test("sample planner uses a bounded native one-shot child and retries one missin
     "ecology_execute_prediction_tool",
   );
   assert.equal(result.skill_invocation_evidence.order_verified, true);
+});
+
+test("sample planner waits for the child Session projection before persistence", async () => {
+  const skillName = "origin-vector-forecasting-balanced";
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  let projected = false;
+  const events = skillFirstEvents(skillName, { prediction: true });
+  const structuredCall = events.pop();
+  const harness = directSampleHarness({
+    stage: "sample.plan",
+    results: [{ stopReason: "completed", structured }],
+    sessionEvents: () => {
+      setTimeout(() => {
+        events.push(structuredCall);
+        projected = true;
+      }, 30);
+      return events;
+    },
+  });
+
+  const result = await harness.runner.run(
+    directSampleBinding("sample.plan", samplePlanContext()),
+  );
+
+  assert.equal(projected, true);
+  assert.deepEqual(result.structured, structured);
+  assert.equal(harness.starts.length, 1);
+  assert.equal(harness.persisted.length, 1);
+  assert.equal(harness.failures.length, 0);
+});
+
+test("completed sample result after INVALID_ARGS retries as missing capture", async () => {
+  const skillName = "origin-vector-forecasting-balanced";
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  const harness = directSampleHarness({
+    stage: "sample.plan",
+    results: [
+      { stopReason: "completed", structured },
+      { stopReason: "completed", structured },
+    ],
+    sessionEvents: (attempt) => attempt === 1
+      ? rc6ConsumedEvents(skillName, {
+        prediction: true,
+        structuredResult: {
+          isError: true,
+          error: { name: "ToolArgsError", code: "INVALID_ARGS" },
+        },
+      })
+      : skillFirstEvents(skillName, { prediction: true }),
+  });
+
+  const result = await harness.runner.run(
+    directSampleBinding("sample.plan", samplePlanContext()),
+  );
+
+  assert.deepEqual(result.structured, structured);
+  assert.equal(harness.starts.length, 2);
+  assert.equal(harness.failures.length, 1);
+  assert.equal(harness.failures[0].error_code, "structured_result_missing");
+  assert.equal(harness.persisted.length, 1);
+});
+
+test("persistence preserves only the Sidecar safe public diagnostic", async () => {
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: "f".repeat(64),
+    decisions: [],
+  };
+  const harness = directSampleHarness({
+    stage: "sample.plan",
+    maxAttempts: 1,
+    results: [{ stopReason: "completed", structured }],
+    sessionEvents: () => skillFirstEvents(
+      "origin-vector-forecasting-balanced",
+      { prediction: true },
+    ),
+    persistenceError: new SidecarError("sidecar_rejected", "sidecar_rejected", {
+      publicDetail: "sample.plan result does not match its prediction wave",
+    }),
+  });
+
+  await assert.rejects(
+    harness.runner.run(directSampleBinding("sample.plan", samplePlanContext())),
+    (error) => (
+      error?.code === "structured_result_persist_failed"
+      && error?.publicDetail === "sample.plan result does not match its prediction wave"
+    ),
+  );
+  assert.equal(harness.persisted.length, 1);
+  assert.equal(harness.failures.length, 1);
 });
 
 test("sample critic uses its shorter independent operational timeout", async () => {

@@ -1,19 +1,18 @@
 """Durable, bounded background progression for autonomous evolution runs.
 
 The HTTP request that creates a run should not have to stay open for the whole
-search budget.  ``AutoProgressManager`` owns a bounded multi-run worker pool
-and advances one complete generation per run at a time.  Every generation
-still goes through the same ``execute_generation`` path used by the explicit
-``/advance`` endpoint, so the
-event ledger remains the source of truth and a process restart can resume a
-partially written generation.
+search budget.  ``AutoProgressManager`` owns a bounded multi-run worker pool.
+Ordinary protocols advance through ``execute_generation``; the Top-2 adaptive
+protocol yields at durable phase boundaries through its lane scheduler.  In
+both cases the event ledger remains the source of truth and a process restart
+can resume a partially written generation.
 
 Only runs whose immutable task manifest contains ``auto_progress=true`` are
 scheduled.  Legacy runs and explicit bounded ``auto_advance`` requests retain
 their previous manual-step semantics.  The Top-2 adaptive epoch protocol is
-scheduled as one durable work unit at a time (screening, one formal batch,
-one local edit, or epoch closeout), rather than holding the worker for an
-entire 500-origin finalist trajectory.
+scheduled as one durable scheduler turn at a time (screening, one boundary per
+admitted finalist lane, or epoch closeout), rather than holding the worker for
+an entire 500-origin finalist trajectory.
 """
 
 from __future__ import annotations
@@ -1162,11 +1161,11 @@ class AutoProgressManager:
                 continue
 
             try:
-                # Adaptive epochs deliberately yield at every durable batch or
-                # local-edit boundary.  This keeps pause/cancel responsive and
-                # makes progress visible even when a finalist needs ten 50-
-                # origin batches.  The explicit /advance path still uses the
-                # synchronous executor and is not changed here.
+                # Adaptive epochs deliberately yield after every lane-bounded
+                # scheduler turn. This keeps pause/cancel responsive while two
+                # finalist batches may share the same run-level origin permits.
+                # The explicit /advance path still uses the synchronous
+                # executor and is not changed here.
                 adaptive_protocol = (
                     state.task_manifest.metadata.get("optimization_protocol")
                     == "top2_adaptive_epoch@1"

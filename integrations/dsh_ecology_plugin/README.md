@@ -10,6 +10,8 @@
   provider、模型 ID、显示名和职责元数据传给 iframe，不读取或转发密钥。
 
 浏览器只需访问 DSH 端口。Python 服务仍在回环地址运行，但不再作为用户入口。
+当前交付只启动两个进程：DSH Web Profile 监听 `8848`，EcologyRSI Python
+sidecar 监听 `127.0.0.1:8777`；无需再启动独立前端服务或其他项目端口。
 
 研究、候选提议、样本规划/批评和代际评审均由 DSH Agent Session、受限 preset
 与直接、一次性的结构化子 Agent 执行。Python sidecar 只保留科学数值工具、不可变基因组编译
@@ -39,7 +41,9 @@ ecologyrsi-dsh install-dsh-runtime --profile web
 500-origin adaptive epoch（默认 `10 × 50`，每批最多接受 2 处局部改动）；最后把
 两个最终 revision 与 incumbent 放入同一 169-origin holdout。单轮合计 1,763
 candidate-origins；默认 9 单元温室任务对应 15,867 个评分单元。候选并发默认 4；
-逐样本并发默认 64、可配置 1–128；同一 provider 的 DSH stage 全局物理在飞上限为 128。
+逐样本并发默认 64、可配置 1–128。候选并发允许时，两条 finalist lane 会在同一
+调度轮各推进一个 50-origin batch，但共同使用同一个 run 级 64 请求 admission；
+同一 provider 的 DSH stage 全局物理在飞上限为 128，观测到拥塞或模型失败后会自适应降载。
 
 Node 宿主插件的 API 代理支持以下配置：
 

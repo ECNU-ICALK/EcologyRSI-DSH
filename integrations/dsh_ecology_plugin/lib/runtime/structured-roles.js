@@ -5,7 +5,10 @@ import {
   validateStructuredDeadline,
   validateStructuredTimeoutMs,
 } from "./structured-deadline.js";
-import { structuredPhaseError } from "./structured-stage-errors.js";
+import {
+  isTrustedStructuredPhase,
+  structuredPhaseError,
+} from "./structured-stage-errors.js";
 
 function structuredResult(run) {
   if (typeof run?.result === "function") return run.result();
@@ -234,6 +237,7 @@ export async function runStructuredRole(
       }, persistenceDeadline));
     } catch (error) {
       if (deadlineExpired() || error === timeoutError) throw expireDeadline();
+      if (isTrustedStructuredPhase(error, "capture")) throw error;
       throw structuredPhaseError("persistence", error);
     }
     requireBeforeDeadline();

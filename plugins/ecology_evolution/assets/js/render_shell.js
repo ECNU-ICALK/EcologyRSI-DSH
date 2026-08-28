@@ -116,6 +116,42 @@
     $("#delete-button").title = "永久删除该运行的事件和命令记录，不可恢复。";
   }
 
+  function optimizationControlSnapshot() {
+    var raw = {
+      formal_origin_count: $("#formal-origin-count").value,
+      local_batch_origin_count: $("#local-batch-origin-count").value,
+      max_local_edits_per_batch: $("#max-local-edits-per-batch").value,
+      selection_holdout_origin_count: $("#selection-holdout-origin-count").value,
+      sample_agent_batch_size: $("#sample-agent-batch-size").value,
+      candidate_concurrency: $("#candidate-concurrency").value,
+      sample_concurrency: $("#sample-concurrency").value
+    };
+    try {
+      return {
+        valid: true,
+        raw: raw,
+        schedule: normalizedOptimizationSchedule(raw),
+        sample_agent_batch_size: strictInteger(raw.sample_agent_batch_size, "网关 origin wave 上限", 1, 128),
+        candidate_concurrency: strictInteger(raw.candidate_concurrency, "候选并发数", 1, 8),
+        sample_concurrency: strictInteger(raw.sample_concurrency, "逐样本并发请求数", 1, sampleConcurrencyMaximum)
+      };
+    } catch (error) {
+      return {valid: false, raw: raw, message: error && error.message ? error.message : "请检查输入参数"};
+    }
+  }
+
+  function optimizationControlInputText(snapshot) {
+    var raw = snapshot && snapshot.raw || {};
+    function shown(value) { return value == null || value === "" ? "空" : String(value); }
+    return "更新时点 " + shown(raw.formal_origin_count)
+      + " · batch " + shown(raw.local_batch_origin_count)
+      + " · 每批改动 " + shown(raw.max_local_edits_per_batch)
+      + " · 留出 " + shown(raw.selection_holdout_origin_count)
+      + " · wave " + shown(raw.sample_agent_batch_size)
+      + " · 候选并发 " + shown(raw.candidate_concurrency)
+      + " · 样本并发 " + shown(raw.sample_concurrency);
+  }
+
   function renderReadiness() {
     var checks = readiness();
     var allReady = checks.every(function (item) { return item.ready; });
@@ -135,6 +171,7 @@
     $("#create-hint").textContent = createRunHint(createStatus, allReady, unmetChecks);
     var selectedDataset = selectedCatalogItem("datasets", "#dataset-id");
     var selectedEpisode = datasetEpisodes(selectedDataset).find(function (item) { return itemId(item) === $("#episode-id").value; });
+    var optimizationControls = optimizationControlSnapshot();
     var effectiveBudget = normalizedEvolutionBudget(
       $("#max-generations").value,
       $("#candidates-per-generation").value,
@@ -146,7 +183,9 @@
       ["策略模型（API）", itemLabel(selectedModelCatalogItem("#policy-model-id"))],
       ["独立评审模型（API）", itemLabel(selectedModelCatalogItem("#judge-model-id"))],
       ["进化预算", formatNumber(effectiveBudget.max_generations) + " 轮 · 每轮 " + formatNumber(effectiveBudget.candidates_per_generation) + " 个 · 总上限 " + formatNumber(effectiveBudget.requested_max_candidates) + " 个候选"],
-      ["入围候选持续优化", formatNumber(Number($("#formal-origin-count").value)) + " origins · batch " + formatNumber(Number($("#local-batch-origin-count").value)) + " · 每批最多 " + formatNumber(Number($("#max-local-edits-per-batch").value)) + " 处改动 · 样本并发 " + formatNumber(normalizedSampleConcurrency($("#sample-concurrency").value))],
+      ["入围候选持续优化", optimizationControls.valid
+        ? formatNumber(optimizationControls.schedule.formal_origin_count_per_finalist) + " origins · batch " + formatNumber(optimizationControls.schedule.local_batch_origin_count) + " · 每批最多 " + formatNumber(optimizationControls.schedule.max_local_edits_per_batch) + " 处改动 · 样本并发 " + formatNumber(optimizationControls.sample_concurrency)
+        : "参数无效：" + optimizationControls.message + "（" + optimizationControlInputText(optimizationControls) + "）"],
       ["自动绑定", "预测模型、进化策略、评测器由模型提出并由宿主登记能力校验确定"],
       ["知识检索", $("#knowledge-online-enabled").checked ? "每轮在线检索并冻结知识快照" : "仅使用内置知识目录"],
       ["运行环境", state.usingDemo ? "浏览器演示" : environmentText(state.catalog.dsh.environment)]
@@ -169,13 +208,27 @@
   }
 
   function renderParameters() {
-    var schedule;
-    try { schedule = optimizationScheduleFromControls(); }
-    catch (_error) { schedule = normalizedOptimizationSchedule({}); }
+    var optimizationControls = optimizationControlSnapshot();
+    if (!optimizationControls.valid) {
+      $("#parameter-summary-pill").textContent = "参数无效";
+      $("#agent-update-scope").textContent = "请修正后重新计算";
+      var invalidBudgetState = $("#parameter-budget-state");
+      invalidBudgetState.textContent = "参数无效";
+      invalidBudgetState.className = "is-insufficient";
+      var invalidValues = [
+        ["参数状态", "无法计算：" + optimizationControls.message],
+        ["当前输入", optimizationControlInputText(optimizationControls)]
+      ];
+      $("#parameter-summary").innerHTML = invalidValues.map(function (item) {
+        return "<div><dt>" + escapeHTML(item[0]) + "</dt><dd>" + escapeHTML(item[1]) + "</dd></div>";
+      }).join("");
+      return;
+    }
+    var schedule = optimizationControls.schedule;
     var cellsPerOrigin = predictionCellsPerOrigin();
-    var microbatch = normalizedSampleAgentBatchSize($("#sample-agent-batch-size").value);
-    var candidateConcurrency = normalizedCandidateConcurrency($("#candidate-concurrency").value);
-    var concurrency = normalizedSampleConcurrency($("#sample-concurrency").value);
+    var microbatch = optimizationControls.sample_agent_batch_size;
+    var candidateConcurrency = optimizationControls.candidate_concurrency;
+    var concurrency = optimizationControls.sample_concurrency;
     var budget = candidateBudgetStatus();
     var screeningCandidateOrigins = 4 * schedule.screening_origin_count;
     var formalCandidateOrigins = schedule.finalist_count * schedule.formal_origin_count_per_finalist;

@@ -1,7 +1,9 @@
-"""One-step scheduler for the Top-2 adaptive epoch protocol."""
+"""Lane-bounded scheduler for the Top-2 adaptive epoch protocol."""
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from typing import Any
 
 from ..core.models import RunStatus
@@ -43,10 +45,12 @@ def execute_next_adaptive_work_unit(endpoint: Any, run_id: str) -> bool:
     """Advance one durable boundary and return whether work was committed.
 
     Screening is kept as the existing four-candidate operation. Once Top-2 is
-    frozen, each invocation advances one durable boundary in the least-advanced
-    finalist lane. A started batch keeps the lane until its local-edit boundary
-    is activated, then the sibling lane gets the next pair. This keeps
-    pause/cancel responsive and makes every scheduler turn observable.
+    frozen, each invocation advances one durable boundary per admitted finalist
+    lane. Candidate concurrency of one preserves deterministic rotation;
+    concurrency of two lets both 50-origin evaluations share the run-level
+    sample permits. A started batch remains highest priority until its
+    local-edit boundary is activated. Every worker is drained before returning,
+    keeping pause/cancel and replay boundaries observable.
     """
 
     from .formal_trajectory import (
@@ -109,24 +113,76 @@ def execute_next_adaptive_work_unit(endpoint: Any, run_id: str) -> bool:
         ),
         key=lambda item: item[0],
     )
-    changed = False
-    for _priority, candidate_id in ranked_lanes:
+    def advance_lane(candidate_id: str, local_edit_lock: Lock | None) -> bool:
         state = endpoint.server.director.state(run_id)
+        if state.run.status is not RunStatus.RUNNING:
+            return False
         trajectory = ensure_formal_trajectory(endpoint, run_id, candidate_id)
         if trajectory.status.value == "completed":
-            continue
+            return False
         if execute_next_formal_batch(endpoint, run_id, candidate_id):
-            changed = True
-            # A single lane boundary is the work unit. The next FIFO turn
-            # advances the sibling lane and prevents one finalist monopolising
-            # the run-level sample permit.
-            break
-        if execute_next_local_edit(endpoint, run_id, candidate_id):
-            changed = True
-            break
+            return True
+        if local_edit_lock is None:
+            return execute_next_local_edit(endpoint, run_id, candidate_id)
+        # Local-edit stages currently use one run/revision admission identity.
+        # Keep those short DSH boundaries mutually exclusive while allowing
+        # the expensive, independent 50-origin evaluations to overlap. Recheck
+        # control after waiting so a queued edit never starts after pause or
+        # cancellation.
+        with local_edit_lock:
+            state = endpoint.server.director.state(run_id)
+            if state.run.status is not RunStatus.RUNNING:
+                return False
+            return execute_next_local_edit(endpoint, run_id, candidate_id)
+
+    candidate_concurrency = int(
+        state.task_manifest.metadata.get("candidate_concurrency") or 1
+    )
+    lane_limit = min(2, candidate_concurrency, len(ranked_lanes))
+    changed = False
+    if lane_limit >= 2:
+        selected_lanes = tuple(ranked_lanes[:lane_limit])
+        local_edit_lock = Lock()
+        # Both finalists receive one lane-local durable boundary per scheduler
+        # turn. Their origin workers still acquire the existing shared
+        # RunSampleAdmission permits, so two 50-origin batches use at most the
+        # frozen run-level sample_concurrency rather than 2x that limit.
+        with ThreadPoolExecutor(
+            max_workers=lane_limit,
+            thread_name_prefix="adaptive-finalist",
+        ) as executor:
+            futures = tuple(
+                (
+                    candidate_id,
+                    executor.submit(advance_lane, candidate_id, local_edit_lock),
+                )
+                for _priority, candidate_id in selected_lanes
+            )
+            results: list[bool] = []
+            failures: list[Exception] = []
+            # Observe results in deterministic frozen-lane order. The executor
+            # drains every sibling before an error is re-raised, so no worker
+            # can outlive the scheduler turn and mutate the ledger later.
+            for _candidate_id, future in futures:
+                try:
+                    results.append(bool(future.result()))
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(exc)
+            if failures:
+                raise failures[0]
+            changed = any(results)
+    else:
+        for _priority, candidate_id in ranked_lanes:
+            if advance_lane(candidate_id, None):
+                changed = True
+                # With one candidate lane permit, preserve the historical
+                # half-pair-first, one-boundary scheduler behavior.
+                break
     if changed:
         return True
     state = endpoint.server.director.state(run_id)
+    if state.run.status is not RunStatus.RUNNING:
+        return False
     analysis = _finalize_adaptive_generation(endpoint, run_id, batch)
     if analysis is None:
         return False
