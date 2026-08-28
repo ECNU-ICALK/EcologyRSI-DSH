@@ -5,6 +5,9 @@ import unittest
 from ecologyrsi_dsh.core.models import canonical_json, digest
 from ecologyrsi_dsh.evaluators.sample_execution import SamplePredictionRequest
 from ecologyrsi_dsh.evaluators.shared_sample_context import (
+    LEGACY_ORIGIN_ROUTING_MANIFEST_VERSION,
+    ORIGIN_ANOMALY_SUMMARY_SCHEMA,
+    ORIGIN_ROUTING_MANIFEST_VERSION,
     ORIGIN_SHARED_CONTEXT_PROFILE,
     build_origin_shared_routing_payload,
     expand_origin_shared_routing_payload,
@@ -14,7 +17,7 @@ from ecologyrsi_dsh.evaluators.shared_sample_context import (
 
 
 class SharedSampleContextTests(unittest.TestCase):
-    def test_origin_wave_encoding_is_lossless_and_omits_host_identifiers(self) -> None:
+    def test_v2_origin_wave_exposes_only_bounded_routing_manifest(self) -> None:
         requests = _origin_wave()
         samples, shared_contexts = build_origin_shared_routing_payload(
             requests,
@@ -29,6 +32,7 @@ class SharedSampleContextTests(unittest.TestCase):
                 == {
                     "sample_id",
                     "context_ref",
+                    "target",
                     "horizon_hours",
                     "target_timestamp",
                     "attempt",
@@ -36,6 +40,64 @@ class SharedSampleContextTests(unittest.TestCase):
                 }
                 for sample in samples
             )
+        )
+        expanded = expand_origin_shared_routing_payload(samples, shared_contexts)
+        shared = next(iter(shared_contexts.values()))
+        self.assertEqual(
+            shared["routing_manifest_version"],
+            ORIGIN_ROUTING_MANIFEST_VERSION,
+        )
+        for request in requests:
+            reconstructed = expanded[request.sample_id]
+            expected = request.to_dict()
+            for field in (
+                "sample_id",
+                "target",
+                "unit",
+                "horizon_hours",
+                "origin_timestamp",
+                "target_timestamp",
+                "baseline",
+                "minimum",
+                "maximum",
+            ):
+                self.assertEqual(reconstructed[field], expected[field])
+            self.assertEqual(
+                reconstructed["sample_context_digest"],
+                digest(request.label_free_context),
+            )
+            self.assertEqual(
+                reconstructed["causal_provenance_digest"],
+                digest(request.label_free_context["causal_provenance"]),
+            )
+            self.assertEqual(
+                reconstructed["anomaly_summary"]["schema_version"],
+                ORIGIN_ANOMALY_SUMMARY_SCHEMA,
+            )
+            self.assertNotIn("label_free_context", reconstructed)
+
+        encoded = canonical_json(
+            {"samples": samples, "shared_sample_contexts": shared_contexts}
+        )
+        self.assertNotIn("candidate:private", encoded)
+        self.assertNotIn("dataset:private", encoded)
+        self.assertNotIn("partition:private", encoded)
+        self.assertNotIn("history_window", encoded)
+        self.assertNotIn("feature_snapshot", encoded)
+        self.assertNotIn("feature:31", encoded)
+
+    def test_legacy_v1_expansion_remains_lossless(self) -> None:
+        requests = _origin_wave()
+        samples, shared_contexts = build_origin_shared_routing_payload(
+            requests,
+            (1,) * len(requests),
+            ((),) * len(requests),
+            manifest_version=LEGACY_ORIGIN_ROUTING_MANIFEST_VERSION,
+        )
+
+        self.assertNotIn(
+            "routing_manifest_version",
+            next(iter(shared_contexts.values())),
         )
         expanded = expand_origin_shared_routing_payload(samples, shared_contexts)
         for request in requests:
@@ -54,13 +116,6 @@ class SharedSampleContextTests(unittest.TestCase):
                 "label_free_context",
             ):
                 self.assertEqual(reconstructed[field], expected[field])
-
-        encoded = canonical_json(
-            {"samples": samples, "shared_sample_contexts": shared_contexts}
-        )
-        self.assertNotIn("candidate:private", encoded)
-        self.assertNotIn("dataset:private", encoded)
-        self.assertNotIn("partition:private", encoded)
 
     def test_origin_wave_encoding_reduces_repeated_payload_bytes(self) -> None:
         requests = _origin_wave()
@@ -88,7 +143,7 @@ class SharedSampleContextTests(unittest.TestCase):
             ).encode("utf-8")
         )
 
-        self.assertLess(compact_bytes, legacy_bytes * 0.70)
+        self.assertLess(compact_bytes, legacy_bytes * 0.40)
 
     def test_context_digest_never_reuses_a_different_origin(self) -> None:
         first = _origin_wave()[0]

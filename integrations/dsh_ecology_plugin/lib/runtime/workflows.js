@@ -6,6 +6,7 @@ for (let offset = 0; offset < args.items.length; offset += args.maxConcurrent) {
   const values = await parallel(batch.map((item) => () => agent(item.prompt, {
     label: item.label,
     schema: item.schema,
+    ...(item.maxTokens === undefined ? {} : { maxTokens: item.maxTokens }),
   })));
   results.push(...values);
 }
@@ -42,6 +43,12 @@ export function startHomogeneousWorkflow(roleHost, compiledSpec, items) {
       || typeof item.prompt !== "string" || !item.prompt
       || !item.schema || typeof item.schema !== "object" || Array.isArray(item.schema)
     ) throw new Error("workflow item is outside the structured contract");
+    if (
+      item.maxTokens !== undefined
+      && (!Number.isSafeInteger(item.maxTokens)
+        || item.maxTokens < 512
+        || item.maxTokens > 8192)
+    ) throw new Error("workflow item maxTokens must be between 512 and 8192");
   }
   const encoded = JSON.stringify(items);
   if (Buffer.byteLength(encoded, "utf8") > 256 * 1024) throw new Error("workflow structured args are too large");

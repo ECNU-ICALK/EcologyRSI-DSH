@@ -515,9 +515,8 @@ class ModelGatewayTests(unittest.TestCase):
             "schema_version": (
                 "ecologyrsi-dsh.origin-shared-sample-context/1"
             ),
+            "routing_manifest_version": "origin_routing_manifest@2",
             "origin_guard": origin_guard,
-            "sample_defaults": {"origin_timestamp": 0},
-            "label_free_context_defaults": {},
             "sample_variants": {variant_ref: variant},
             "sample_variant_refs": {"sample-shared": variant_ref},
             "sample_count": 1,
@@ -575,6 +574,9 @@ class ModelGatewayTests(unittest.TestCase):
         payload = json.loads(request["body"]["messages"][1]["content"])
         policy = payload["input"]["decision_policy"]
         self.assertIn("sample_context_resolution", policy)
+        self.assertIn("sample_variant_refs", policy["sample_context_resolution"])
+        self.assertIn("directly_without_applying_defaults", policy["sample_context_resolution"])
+        self.assertNotIn("apply_defaults_and", policy["sample_context_resolution"])
         self.assertEqual(
             payload["input"]["samples"][0]["context_ref"], context_ref
         )

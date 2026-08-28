@@ -408,9 +408,9 @@ class GatewaySampleCollaborationAdapter:
             self.adapter_version = "11-token-call-budget"
         if self.sample_planner_prompt_profile is not None:
             self.adapter_version = (
-                "12-origin-shared-context-token-call-budget"
+                "13-origin-routing-manifest-v2-token-call-budget"
                 if self.token_budget_enabled
-                else "12-origin-shared-context"
+                else "13-origin-routing-manifest-v2"
             )
         if self.sample_truncation_retry_policy is not None:
             self.adapter_version += "-truncation-retry"
@@ -615,7 +615,18 @@ class GatewaySampleCollaborationAdapter:
             call_id = uuid4().hex
             request_limit = (
                 {"max_tokens": max_tokens}
-                if isinstance(self.gateway, ModelGateway) and max_tokens is not None
+                if (
+                    max_tokens is not None
+                    and (
+                        isinstance(self.gateway, ModelGateway)
+                        or getattr(
+                            self.gateway,
+                            "supports_operation_max_tokens",
+                            False,
+                        )
+                        is True
+                    )
+                )
                 else {}
             )
             admitted = False
@@ -3108,7 +3119,6 @@ class GatewaySampleCollaborationAdapter:
                     "candidate_parameters",
                     "derived_execution_plan",
                     "tool_experience",
-                    "candidate_agent_profile",
                 )
                 if name in decision_context
             }
@@ -3128,9 +3138,10 @@ class GatewaySampleCollaborationAdapter:
                         for key, value in shared_sample_contexts.items()
                     },
                     "context_resolution": (
-                        "resolve_each_sample_context_ref_then_sample_id;merge_"
-                        "sample_defaults_with_sample_variant_and_merge_label_"
-                        "free_context_defaults_with_its_variant"
+                        "resolve_each_sample_context_ref_then_sample_id_to_"
+                        "its_bounded_routing_variant;use_target_horizon_bounds_"
+                        "causal_and_context_digests_and_host_anomaly_summary;"
+                        "raw_host_feature_and_history_rows_are_not_remote"
                     ),
                     "routing_policy": plan.get("routing_policy"),
                 },

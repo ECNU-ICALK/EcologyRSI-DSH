@@ -68,7 +68,7 @@ DELETE {base}/runs/{run_id}
 
 `algorithm_synthesis` 必须与 Blueprint 的 pipeline 一致，证据引用必须来自 Blueprint 已引用的同代冻结证据，`parameter_focus` 也只能使用登记参数。本轮有 OpenAlex `metadata_only` 摘要时，Blueprint 和 synthesis 都必须至少引用其中一条；否则至少引用一条 `research_only` 方向证据。宿主把 plan、Blueprint 和 synthesis digest 编译到仅含登记算子的受限 IR；候选依次通过 compile、静态 debug 和 `training_fit` 时间前向 training smoke 后，才进入真实样本的“远程 Planner → 登记工具 → 远程 Critic → 宿主评分 → 远程 Reflector”严格契约。synthesis 与同代 compile/debug/评测/晋升结果会按 digest 关联记录，但不作因果归因。若共享系统代理对 OpenAlex 返回 429，且允许该固定 HTTPS 来源直连，可仅设置 `NO_PROXY=api.openalex.org`，不会改变模型 provider 的代理路径。
 
-DSH-native 运行不设逐样本 Token 硬预算。页面只读显示 DSH TokenMeter 的当前上下文压力，累计用量只采信 Session projection 中的 provider usage，二者不互相推算。历史网关运行的硬预算账本仅用于只读回放。
+DSH-native 运行不设跨调用的逐样本 Token 总预算，但每个 sample 子模型调用最多输出 2,048 tokens。页面只读显示 DSH TokenMeter 的当前上下文压力，累计用量只采信 Session projection 中的 provider usage，二者不互相推算。历史网关运行的硬预算账本仅用于只读回放。
 
 每代 research 都会收到由 SQLite 追加式事件账本重放派生的跨代经验摘要。它最多扫描最近 24 个已分析代、最多展示最近 6 代，汇总修改、synthesis、算法/样本失败、弱目标/时距、修复成效和是否改善；未解决问题与已有后续评测证据支持的已解决问题分别进入 `active_unresolved` 和 `resolved_archived`，各最多 16 项。摘要不含原始样本或预测记录，UTF-8 JSON 硬限制为 16 KiB，超限时确定性裁剪并保留 omitted 计数；相同事件流在服务重启后可派生相同经验。
 
@@ -85,7 +85,7 @@ DSH-native 运行不设逐样本 Token 硬预算。页面只读显示 DSH TokenM
 插件加载后向父窗口发送：
 
 ```json
-{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.3.48"}
+{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.3.49"}
 ```
 
 宿主通过 `postMessage` 返回。最小兼容合同只要求同源代理地址和短期能力令牌；身份、能力范围和模型目录可选：

@@ -2,7 +2,7 @@
 
 一个把农业与生态预测研究中的“数据边界—模型调研—候选生成—科学评测—人工治理”串成可复现闭环的轻量 DSH 插件。
 
-> 当前交付：`0.3.48` 可交付候选版 · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
+> 当前交付：`0.3.49` 可交付候选版 · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
 
 ## 为什么做这个工作台
 
@@ -49,7 +49,7 @@ EcologyRSI-DSH 把模型放在“研究助理”的位置，把数据、评测�
 
 ![参数设计：统一设置代数、候选、样本批次、并发和总预算](docs/screenshots/02-parameter-design.jpg)
 
-参数设计页统一配置轮数、候选总预算、每个入围候选的 epoch 时点数、局部 batch、每批最大局部改动数、轮末 holdout、候选并发和逐样本并发。右侧按 candidate-origins 和评分单元同时计算单轮/全程预算，避免把一次包含 9 个结果的完整预测误算成 9 次模型请求。DSH-native 运行不设逐样本 Token 硬上限；上下文压缩和输出长度由 DSH Session 与模型路由统一管理。
+参数设计页统一配置轮数、候选总预算、每个入围候选的 epoch 时点数、局部 batch、每批最大局部改动数、轮末 holdout、候选并发和逐样本并发。右侧按 candidate-origins 和评分单元同时计算单轮/全程预算，避免把一次包含 9 个结果的完整预测误算成 9 次模型请求。DSH-native 不设置跨调用的逐样本 Token 总预算；每次 sample 子模型调用单独限制最多输出 2,048 tokens，上下文压力和累计用量仍由 DSH Session 投影记录。
 
 ![训练数据：数据结构、分区边界与样本预览](docs/screenshots/03-training-data.jpg)
 
@@ -301,7 +301,7 @@ PYTHONPATH=src python -m ecologyrsi_dsh data fetch agc_tomato_2019
 
 ## DSH 原生 Agent 运行时
 
-0.3.48 新建运行使用 `dsh_native_plugin_evolution@1`：Agent Session、上下文压缩、
+0.3.49 新建运行使用 `dsh_native_plugin_evolution@1`：Agent Session、上下文压缩、
 subagent 和 Workflow 由 DSH 管理，Python 只提供科学工具与持久账本。安装后直接运行：
 
 ```bash
@@ -407,7 +407,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --samples-per-task 1 \
   --minimum-coverage 0.8 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.48-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.49-real-api-agent-tool-acceptance.json
 ```
 
 验收无论通过或失败都会原子写入 JSON 报告；省略 `--output` 时默认写到系统临时目录下的
@@ -608,7 +608,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --db /tmp/ecologyrsi-dsh-dsh-adapter.sqlite3 \
   --samples-per-task 1 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.48-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.49-real-api-agent-tool-acceptance.json
 ```
 
 构建 wheel、sdist 和完整交付包需要 `uv`：
@@ -638,6 +638,14 @@ PYTHONPATH=src python -m ecologyrsi_dsh summary run:demo --db /tmp/ecologyrsi-de
 - 单进程锁和 SQLite 适用于本地交付与研究验证，不是多租户、高并发生产架构。
 
 发布前的人工验收项与安全边界见 `RELEASE-CHECKLIST.md`。
+
+## 0.3.49 交付更新
+
+- screening、每个 50-origin 正式微批和 incumbent holdout 都会在首次请求前打开 revision-scoped checkpoint，逐 origin 持久化行、进度和用量，并把阶段科学结果与全量样本完成事件原子封口。暂停或进程重启只重放未结算 origin，迟到的进度/用量不能写入已完成范围。
+- holdout checkpoint 严格绑定冻结的 arm、candidate revision 和 cohort：第 0 代可正确复评 `SCREENED_OUT` incumbent，后续代可复评历史冠军，但不会放宽 screening/formal 的同代、`SPAWNED` 边界。
+- DSH-native 每个 sample 子模型调用的输出上限冻结为 2,048 tokens，并同时传递到直接 child 和 Workflow child。新的 routing manifest v2 只远端提供目标、时距、边界、digest 和 Host 异常摘要，不重复发送原始历史/特征行；测试载荷缩至原来的 32.8%，非原生 ModelGateway 也按 v2 直接解析 variant，不再要求已删除的 defaults。
+- `sample.plan` 使用跨 wave 稳定的输出 schema，便于 provider 复用前缀缓存；Host 仍严格校验 wave digest、样本 ID 全集、唯一预测工具收据和每个预测的唯一决策。
+- 远端进度只把达到任务实际 `prediction_cells_per_origin` 的完整 `sample.plan` 主波计为一个预测时点；更小的 repair wave 单独展示完成/在飞数与主预测/修复请求数，不再虚增 origin 进度或待结算数。
 
 ## 0.3.48 交付更新
 

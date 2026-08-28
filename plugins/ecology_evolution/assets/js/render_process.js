@@ -1632,6 +1632,18 @@
     var awaitingSubmissionText = Number.isInteger(awaitingSubmission) && awaitingSubmission >= 0 ? " · 待提交 " + formatNumber(awaitingSubmission) : "";
     var awaitingSettlement = (showLiveProgressDetail || showDrainedProgressDetail || showPausedProgressDetail) && Number(stageProgress.awaiting_settlement_batches);
     var awaitingSettlementText = Number.isInteger(awaitingSettlement) && awaitingSettlement > 0 ? " · 待结算 " + formatNumber(awaitingSettlement) : "";
+    var primaryRequests = showLiveProgressDetail && Number(stageProgress.primary_gateway_request_count);
+    var repairRequests = showLiveProgressDetail && Number(stageProgress.repair_gateway_request_count);
+    var requestBreakdownText = Number.isInteger(primaryRequests) && primaryRequests >= 0 && Number.isInteger(repairRequests) && repairRequests > 0
+      ? " · 主预测请求 " + formatNumber(primaryRequests) + " · 修复请求 " + formatNumber(repairRequests)
+      : "";
+    var completedRepairWaves = showLiveProgressDetail && Number(stageProgress.completed_repair_waves);
+    var activeRepairWaves = showLiveProgressDetail && Number(stageProgress.active_repair_waves);
+    var hasCompletedRepairWaves = Number.isInteger(completedRepairWaves) && completedRepairWaves > 0;
+    var hasActiveRepairWaves = Number.isInteger(activeRepairWaves) && activeRepairWaves > 0;
+    var repairWaveText = hasCompletedRepairWaves
+      ? " · 修复波完成 " + formatNumber(completedRepairWaves) + (hasActiveRepairWaves ? " / 在飞 " + formatNumber(activeRepairWaves) : "")
+      : hasActiveRepairWaves ? " · 修复波在飞 " + formatNumber(activeRepairWaves) : "";
     var gatewayAttempts = showLiveProgressDetail && Number(stageProgress.gateway_request_count);
     var gatewayAttemptsText = Number.isInteger(gatewayAttempts) && gatewayAttempts >= 0 ? " · 网关尝试 " + formatNumber(gatewayAttempts) : "";
     var causalWave = showLiveProgressDetail && Number(stageProgress.causal_wave_sample_count);
@@ -1645,7 +1657,7 @@
     var settled = stageProgress && Number(stageProgress.settled_origins != null ? stageProgress.settled_origins : stageProgress.completed_samples);
     var settledText = !outcomesVerified && Number.isFinite(settled) && settled >= 0 ? " · 已结算 " + formatNumber(settled) : "";
     var evidenceQualifierText = stageProgress && !stageProgress.live && stageProgress.evidence_qualifier ? " · " + stageProgress.evidence_qualifier : "";
-    sampleNode.textContent = stageProgress ? progressUnitLabel + "进度：" + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + settledText + verifiedOutcomeText + evidenceQualifierText + causalWaveText + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText + gatewayAttemptsText + sampleRateText + (remainingText ? " · 预计剩余 " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测评分单元：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
+    sampleNode.textContent = stageProgress ? progressUnitLabel + "进度：" + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + settledText + verifiedOutcomeText + evidenceQualifierText + causalWaveText + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText + requestBreakdownText + repairWaveText + gatewayAttemptsText + sampleRateText + (remainingText ? " · 预计剩余 " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测评分单元：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
     if (tokenNode) {
       tokenNode.title = tokenBudgetScopeText(run);
       tokenNode.textContent = modelUsageTokenProgressText(run, stageProgress, candidate);

@@ -164,6 +164,7 @@ function stageBinding({ workflow = false, suffix = "race", revision = 7 } = {}) 
       output_schema_id: workflow
         ? "ecology-sample-decisions@1"
         : "ecology-research-result@1",
+      ...(workflow ? { max_tokens: 2048 } : {}),
       context,
       context_canonical_json: canonicalJson(context),
       context_digest: jsonDigest(context),

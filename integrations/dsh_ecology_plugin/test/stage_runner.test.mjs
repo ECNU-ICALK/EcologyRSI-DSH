@@ -245,6 +245,7 @@ function samplePlanBinding({ admissionId = "admission-workflow-deadline-1" } = {
     request: {
       role: "sample-planner",
       output_schema_id: "ecology-sample-decisions@1",
+      max_tokens: 2048,
       context,
       context_canonical_json: canonicalJson(context),
       context_digest: jsonDigest(context),
@@ -741,6 +742,7 @@ test("native stage runner reserves before first child tool and durably persists 
         childStartUnixMs = Date.now();
         blockFor(20);
         assert.equal(provider, "spawn");
+        assert.equal(request.maxTokens, 2048);
         assert.deepEqual(request.prompt[0], { type: "text", text: request.prompt[0].text });
         const prompt = JSON.parse(request.prompt[0].text);
         assert.match(prompt.instruction, /Do not narrate analysis/i);
@@ -829,6 +831,7 @@ test("native stage runner reserves before first child tool and durably persists 
     request: {
       role: "candidate-proposer",
       output_schema_id: "ecology-genome-mutation@1",
+      max_tokens: 2048,
       context,
       context_canonical_json: JSON.stringify(context),
       context_digest: jsonDigest(context),
@@ -916,6 +919,33 @@ test("native stage runner rejects a changed context before starting DSH", async 
     /context digest mismatch/,
   );
   assert.equal(started, false);
+});
+
+test("native stage runner rejects invalid or missing sample planner max_tokens locally", async () => {
+  let roleHostLookups = 0;
+  const runner = new NativeStageRunner({}, {
+    roleAgents: {
+      get: () => {
+        roleHostLookups += 1;
+        throw new Error("must not inspect a role host");
+      },
+    },
+  });
+  for (const maxTokens of [511, 8193, 2048.5, "2048"]) {
+    const binding = samplePlanBinding();
+    binding.request.max_tokens = maxTokens;
+    await assert.rejects(
+      runner.run(binding),
+      /structured stage max_tokens is invalid/,
+    );
+  }
+  const unbounded = samplePlanBinding();
+  delete unbounded.request.max_tokens;
+  await assert.rejects(
+    runner.run(unbounded),
+    /sample\.plan requires a bounded max_tokens/,
+  );
+  assert.equal(roleHostLookups, 0);
 });
 
 test("native stage runner retries one transient child model failure with a fresh reservation", async () => {
@@ -1948,6 +1978,29 @@ test("malformed sample Host identities fail locally before child launch or persi
   assert.equal(malformedReflection.starts.length, 0);
   assert.equal(malformedReflection.persisted.length, 0);
   assert.equal(malformedReflection.reservations.length, 1);
+
+  let workflowStarts = 0;
+  const malformedPlan = workflowDeadlineHarness({
+    timeoutMs: 1_000,
+    startWorkflow: () => {
+      workflowStarts += 1;
+      throw new Error("must not start");
+    },
+  });
+  const malformedPlanBinding = samplePlanBinding();
+  const malformedPlanContext = samplePlanContext();
+  malformedPlanContext.samples = [
+    { sample_id: "origin-duplicate" },
+    { sample_id: "origin-duplicate" },
+  ];
+  malformedPlanBinding.request.context = malformedPlanContext;
+  malformedPlanBinding.request.context_canonical_json = canonicalJson(malformedPlanContext);
+  malformedPlanBinding.request.context_digest = jsonDigest(malformedPlanContext);
+  await assert.rejects(
+    malformedPlan.runner.run(malformedPlanBinding),
+    (error) => error?.code === "sample_stage_context_invalid",
+  );
+  assert.equal(workflowStarts, 0);
 });
 
 test("sample missing-output retry does not broaden to lifecycle or durable-boundary errors", async () => {
@@ -2056,16 +2109,17 @@ test("sample planner retries a missing Workflow result with a fresh reservation 
   assert.equal(persistCalls, 1);
   for (const request of workflowRequests) {
     const item = request.args.items[0];
-    assert.deepEqual(item.schema.properties.wave_digest, {
-      type: "string",
-      const: "f".repeat(64),
-    });
+    assert.deepEqual(item.schema.properties.wave_digest, { type: "string" });
     assert.deepEqual(item.schema.properties.decisions.items.properties.sample_id, {
       type: "string",
-      enum: ["origin-a", "origin-b"],
     });
+    assert.equal(item.maxTokens, 2048);
     assert.match(JSON.parse(item.prompt).instruction, /copy.*exact.*Host.*sample_id/i);
   }
+  assert.equal(
+    jsonDigest(workflowRequests[0].args.items[0].schema),
+    jsonDigest(workflowRequests[1].args.items[0].schema),
+  );
 });
 
 test("sample planner waves execute through the retained DSH Workflow Engine", async () => {
@@ -2207,6 +2261,7 @@ test("sample planner waves execute through the retained DSH Workflow Engine", as
     request: {
       role: "sample-planner",
       output_schema_id: "ecology-sample-decisions@1",
+      max_tokens: 2048,
       context,
       context_canonical_json: canonicalJson(context),
       context_digest: jsonDigest(context),
@@ -2222,14 +2277,16 @@ test("sample planner waves execute through the retained DSH Workflow Engine", as
   assert.equal(workflowRequest.parent, roleHost.agent);
   assert.match(workflowRequest.script, /parallel/);
   assert.equal(workflowRequest.args.items[0].schema.type, "object");
-  assert.deepEqual(workflowRequest.args.items[0].schema.properties.wave_digest, {
-    type: "string",
-    const: "f".repeat(64),
-  });
+  assert.deepEqual(
+    workflowRequest.args.items[0].schema.properties.wave_digest,
+    { type: "string" },
+  );
   assert.deepEqual(
     workflowRequest.args.items[0].schema.properties.decisions.items.properties.sample_id,
-    { type: "string", enum: ["origin-a", "origin-b"] },
+    { type: "string" },
   );
+  assert.equal(workflowRequest.args.items[0].maxTokens, 2048);
+  assert.match(workflowRequest.script, /maxTokens: item\.maxTokens/);
   assert.deepEqual(
     persisted[0].body.sample_member_digests,
     [jsonDigest("origin-a"), jsonDigest("origin-b")].sort(),

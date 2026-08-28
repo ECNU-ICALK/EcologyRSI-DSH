@@ -60,6 +60,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
                 "episode_id": "episode:trajectory-replay",
                 "optimization_protocol": "top2_adaptive_epoch@1",
                 "optimization_schedule": schedule.to_dict(),
+                "prediction_cells_per_origin": 9,
             },
         )
         self.run_id = "run:trajectory-replay"
@@ -415,6 +416,74 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             endpoint.server.evaluators.evaluate_scientific.call_count,
             2,
         )
+
+    def test_screened_out_incumbent_holdout_opens_scoped_checkpoint(self) -> None:
+        finalists = self._freeze_top2()
+        for candidate in finalists:
+            self._complete_lane(candidate)
+
+        incumbent = self.candidates[2]
+        bindings = {
+            HoldoutArm.FINALIST_1.value: {
+                "candidate_id": finalists[0].candidate_id,
+                "candidate_revision_id": self.revisions[
+                    finalists[0].candidate_id
+                ].revision_id,
+            },
+            HoldoutArm.FINALIST_2.value: {
+                "candidate_id": finalists[1].candidate_id,
+                "candidate_revision_id": self.revisions[
+                    finalists[1].candidate_id
+                ].revision_id,
+            },
+            HoldoutArm.INCUMBENT.value: {
+                "candidate_id": incumbent.candidate_id,
+                "candidate_revision_id": self.revisions[
+                    incumbent.candidate_id
+                ].revision_id,
+            },
+        }
+        holdout = self.director.freeze_generation_holdout(
+            self.run_id,
+            0,
+            self.generation_cohorts.holdout.cohort_digest,
+            bindings,
+        )
+        binding = bindings[HoldoutArm.INCUMBENT.value]
+        scope = EvaluationScope(
+            run_id=self.run_id,
+            generation=0,
+            candidate_id=incumbent.candidate_id,
+            candidate_revision_id=binding["candidate_revision_id"],
+            phase=EvaluationPhase.HOLDOUT,
+            cohort_digest=holdout.cohort_digest,
+            origin_count=holdout.origin_count,
+            holdout_arm=HoldoutArm.INCUMBENT,
+        )
+        checkpoint = {
+            "schema_version": "ecologyrsi-dsh.sample-checkpoint/2",
+            "candidate_revision_id": scope.candidate_revision_id,
+            "evaluation_phase": scope.phase.value,
+            "formal_batch_index": None,
+            "holdout_arm": HoldoutArm.INCUMBENT.value,
+            "cohort_digest": scope.cohort_digest,
+            "execution_scope_digest": scope.scope_key,
+            "sample_cohort_digest": _sha("incumbent-holdout-samples"),
+            "execution_context_digest": _sha("incumbent-holdout-context"),
+            "sample_count": scope.origin_count * 9,
+        }
+
+        prepared = self.director.prepare_evaluation_sample_checkpoint(
+            self.run_id,
+            generation=0,
+            proposal_id=incumbent.proposal_id,
+            candidate_id=incumbent.candidate_id,
+            checkpoint=checkpoint,
+            scope=scope,
+        )
+
+        self.assertFalse(prepared["resumed"])
+        self.assertEqual(len(prepared["rows"]), 0)
 
     def test_trajectory_cannot_start_before_top2_freeze(self) -> None:
         candidate = self.candidates[0]

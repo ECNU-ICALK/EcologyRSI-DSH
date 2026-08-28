@@ -1485,6 +1485,10 @@ const settlingRun = {
       succeeded_samples: 64,
       awaiting_submission_batches: 128,
       awaiting_settlement_batches: 64,
+      primary_gateway_request_count: 254,
+      repair_gateway_request_count: 99,
+      completed_repair_waves: 98,
+      active_repair_waves: 1,
       gateway_request_count: 375,
     },
   },
@@ -1493,8 +1497,25 @@ modelSandbox.renderExecutionMonitor(settlingRun);
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("预测时点进度：64 / 256"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("待提交 128"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("待结算 64"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("主预测请求 254"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("修复请求 99"));
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("修复波完成 98 / 在飞 1"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("网关尝试 375"));
 assert.ok(monitorNodes["#execution-heartbeat"].textContent.includes("模型执行与宿主结算中"));
+
+const activeRepairOnlyRun = {
+  ...settlingRun,
+  execution_progress: {
+    ...settlingRun.execution_progress,
+    stage_progress: {
+      ...settlingRun.execution_progress.stage_progress,
+      completed_repair_waves: 0,
+      active_repair_waves: 2,
+    },
+  },
+};
+modelSandbox.renderExecutionMonitor(activeRepairOnlyRun);
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("修复波在飞 2"));
 
 const legacyPausedQueueRun = {
   ...pausedDrainedRun,
@@ -2976,7 +2997,7 @@ assert.match(html, /id="show-archived-runs"/);
 assert.match(html, /id="archive-button"/);
 assert.match(html, /id="delete-button"/);
 assert.equal(manifest.display_name, "生态模型进化工作台");
-assert.equal(manifest.version, "0.3.48");
+assert.equal(manifest.version, "0.3.49");
 assert.equal(manifest.entrypoint.file, "index.html");
 assert.equal(manifest.entrypoint.route, "/plugins/ecology/evolution/");
 assert.equal(manifest.development_only, false);

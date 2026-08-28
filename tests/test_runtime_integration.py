@@ -913,6 +913,16 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
         self.assertEqual(
             created["projection"]["configuration"]["candidate_concurrency"], 4
         )
+        self.assertEqual(
+            strict_created["projection"]["configuration"][
+                "sample_operation_max_tokens"
+            ],
+            {
+                "sample.planner": 2048,
+                "sample.repair": 2048,
+                "sample.critic": 2048,
+            },
+        )
         explicit_configuration = explicit_created["projection"]["configuration"]
         self.assertIsNone(explicit_configuration["samples_per_update"])
         self.assertEqual(explicit_configuration["sample_budget_class"], "selection_eligible")

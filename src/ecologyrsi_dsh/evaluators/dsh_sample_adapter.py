@@ -18,6 +18,13 @@ from .sample_execution import (
 )
 
 
+_DEFAULT_DSH_SAMPLE_OPERATION_MAX_TOKENS = {
+    "sample.planner": 2048,
+    "sample.repair": 2048,
+    "sample.critic": 2048,
+}
+
+
 def _sample_routing_wave(
     model_id: str,
     *,
@@ -38,6 +45,8 @@ def _sample_routing_wave(
 
 
 class _DshSampleDecisionClient:
+    supports_operation_max_tokens = True
+
     def __init__(
         self,
         *,
@@ -59,7 +68,7 @@ class _DshSampleDecisionClient:
         samples: Sequence[Mapping[str, Any]],
         context: Mapping[str, Any],
         available_tools: Sequence[Mapping[str, Any]],
-        **_legacy_options: Any,
+        **options: Any,
     ) -> Mapping[str, Any]:
         if role not in {"planner", "repair", "critic"}:
             raise SampleExecutionContractError("unsupported DSH sample role")
@@ -70,6 +79,15 @@ class _DshSampleDecisionClient:
             if role == "critic"
             else "ecology-sample-decisions@1"
         )
+        max_tokens = options.get("max_tokens")
+        if (
+            isinstance(max_tokens, bool)
+            or not isinstance(max_tokens, int)
+            or not 512 <= max_tokens <= 8192
+        ):
+            raise SampleExecutionContractError(
+                "DSH sample stage requires a bounded max_tokens value"
+            )
         wave = _sample_routing_wave(
             model_id,
             role=role,
@@ -93,6 +111,7 @@ class _DshSampleDecisionClient:
             ledger_expected_revision=int(revisions["ledger_expected_revision"]),
             idempotency_key=f"{self.run_id}:{stage}:{wave_digest}",
             identity_digests=self.identity_digests,
+            max_tokens=max_tokens,
         )
         expected_version = schema_id
         if structured.get("schema_version") != expected_version:
@@ -236,6 +255,7 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
         remote_critic_policy: Mapping[str, Any] | None = None,
         sample_reflection_policy: str | None = None,
         sample_planner_prompt_profile: Mapping[str, Any] | None = None,
+        operation_max_tokens: Mapping[str, int] | None = None,
     ) -> None:
         if not callable(forecast_bundle_tool):
             raise TypeError("strict DSH execution requires a vector prediction tool")
@@ -299,7 +319,11 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
             sample_planner_prompt_profile=sample_planner_prompt_profile,
             require_remote_planner=True,
             require_remote_critic=require_success_critic,
-            operation_max_tokens=None,
+            operation_max_tokens=(
+                dict(_DEFAULT_DSH_SAMPLE_OPERATION_MAX_TOKENS)
+                if operation_max_tokens is None
+                else operation_max_tokens
+            ),
             token_limit=0,
             token_reservation_per_wave=0,
         )

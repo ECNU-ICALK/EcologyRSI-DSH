@@ -1171,6 +1171,9 @@ class EvaluatorRegistry:
                 sample_planner_prompt_profile=task.metadata.get(
                     "sample_planner_prompt_profile"
                 ),
+                operation_max_tokens=task.metadata.get(
+                    "sample_operation_max_tokens"
+                ),
             )
             return CollaborativeSampleExecutor(
                 adapter,

@@ -246,6 +246,8 @@ _COMPACT_JSON_RETRY_INSTRUCTION = (
     "content. Emit no Markdown or explanatory text."
 )
 _ORIGIN_SHARED_CONTEXT_PROFILE = "origin_shared_context@1"
+_ORIGIN_ROUTING_MANIFEST_V1 = "origin_shared_context_manifest@1"
+_ORIGIN_ROUTING_MANIFEST_V2 = "origin_routing_manifest@2"
 _ORIGIN_SHARED_CONTEXT_SCHEMA = "ecologyrsi-dsh.origin-shared-sample-context/1"
 # OpenAI-compatible chat tokenizers are byte based, so prompt tokens cannot
 # outnumber the UTF-8 bytes in the serialized request.  Reserve an additional
@@ -2104,12 +2106,12 @@ def _public_error(exc: BaseException) -> str:
 def _validate_origin_shared_context_references(
     samples: Sequence[Mapping[str, Any]],
     context: Mapping[str, Any],
-) -> bool:
+) -> str | None:
     """Fail before transport when a compact sample cannot resolve its context."""
 
     raw_profile = context.get("sample_planner_prompt_profile")
     if raw_profile is None:
-        return False
+        return None
     if not isinstance(raw_profile, Mapping) or dict(raw_profile) != {
         "version": _ORIGIN_SHARED_CONTEXT_PROFILE
     }:
@@ -2117,6 +2119,7 @@ def _validate_origin_shared_context_references(
     shared_contexts = context.get("shared_sample_contexts")
     if not isinstance(shared_contexts, Mapping) or not shared_contexts:
         raise ValueError("origin-shared prompt requires shared_sample_contexts")
+    resolved_manifest_version: str | None = None
     for sample in samples:
         sample_id = sample.get("sample_id")
         context_ref = sample.get("context_ref")
@@ -2136,6 +2139,20 @@ def _validate_origin_shared_context_references(
             raise ValueError(
                 "origin-shared sample context digest does not match context_ref"
             )
+        manifest_version = shared.get("routing_manifest_version")
+        if manifest_version is None:
+            manifest_version = _ORIGIN_ROUTING_MANIFEST_V1
+        if manifest_version not in {
+            _ORIGIN_ROUTING_MANIFEST_V1,
+            _ORIGIN_ROUTING_MANIFEST_V2,
+        }:
+            raise ValueError("origin-shared routing manifest is unsupported")
+        if (
+            resolved_manifest_version is not None
+            and manifest_version != resolved_manifest_version
+        ):
+            raise ValueError("origin-shared routing manifests must use one version")
+        resolved_manifest_version = manifest_version
         origin_guard = shared.get("origin_guard")
         sample_refs = shared.get("sample_variant_refs")
         variants = shared.get("sample_variants")
@@ -2158,14 +2175,14 @@ def _validate_origin_shared_context_references(
             }
         ) != variant_ref:
             raise ValueError("origin-shared sample variant digest does not match")
-    return True
+    return resolved_manifest_version
 
 
 def _sample_decision_policy(
     role: str,
     *,
     compact_critic: bool = False,
-    origin_shared_context: bool = False,
+    origin_shared_context: str | None = None,
 ) -> dict[str, Any]:
     shared = {
         "tool_execution": "host_executes_only_the_selected_registered_tool",
@@ -2176,7 +2193,13 @@ def _sample_decision_policy(
             "version_or_at_version_suffix"
         ),
     }
-    if origin_shared_context:
+    if origin_shared_context == _ORIGIN_ROUTING_MANIFEST_V2:
+        shared["sample_context_resolution"] = (
+            "resolve_context_ref_in_context.shared_sample_contexts_then_use_"
+            "sample_variant_refs[sample_id]_to_read_sample_variants[ref]_"
+            "directly_without_applying_defaults"
+        )
+    elif origin_shared_context == _ORIGIN_ROUTING_MANIFEST_V1:
         shared["sample_context_resolution"] = (
             "resolve_context_ref_in_context.shared_sample_contexts_then_use_"
             "sample_id_to_apply_defaults_and_the_referenced_variant"

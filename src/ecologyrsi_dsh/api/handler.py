@@ -124,6 +124,14 @@ _DEFAULT_SAMPLE_OPERATION_MAX_TOKENS = {
     "sample.repair": 3072,
     "sample.critic": 2048,
 }
+_DSH_NATIVE_SAMPLE_OPERATION_MAX_TOKENS = {
+    # A native sample child makes three short model turns (Skill, prediction
+    # tool, structured output). Bound every turn; the prior unbounded route
+    # produced rare 8k-11k output tails for a deterministic one-tool action.
+    "sample.planner": 2048,
+    "sample.repair": 2048,
+    "sample.critic": 2048,
+}
 _DEFAULT_SAMPLE_TRUNCATION_RETRY_POLICY = {
     "version": "escalate_once@1",
     "max_tokens": 8192,
@@ -2873,8 +2881,12 @@ class EvolutionRequestHandler(
                 # process-wide gateway default, so later configuration changes
                 # cannot silently change an already-created real run.
                 "sample_operation_max_tokens": (
-                    dict(_DEFAULT_SAMPLE_OPERATION_MAX_TOKENS)
-                    if autonomous_mode and not toy_domain and not native_protocol
+                    dict(
+                        _DSH_NATIVE_SAMPLE_OPERATION_MAX_TOKENS
+                        if native_protocol
+                        else _DEFAULT_SAMPLE_OPERATION_MAX_TOKENS
+                    )
+                    if autonomous_mode and (not toy_domain or native_protocol)
                     else None
                 ),
                 # Sparse remote review preserves Host scoring while avoiding
@@ -2945,8 +2957,11 @@ class EvolutionRequestHandler(
             native_budget.pop("token_limit", None)
             native_budget.pop("token_reservation_per_wave", None)
             data["budget"] = native_budget
+            # Native provider usage is telemetry rather than an atomic Host
+            # reservation ledger, but each child still needs a frozen output
+            # cap. Keep sample_operation_max_tokens in the task manifest while
+            # removing only the legacy Host-side accounting policy.
             for legacy_token_field in (
-                "sample_operation_max_tokens",
                 "sample_truncation_retry_policy",
                 "sample_token_budget_policy",
                 "token_budget_scope",

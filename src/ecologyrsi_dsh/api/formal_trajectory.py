@@ -35,9 +35,9 @@ from ..evaluators.registry import EvaluatorRegistry
 from ..integrations.dsh_native_runtime import DshNativeRuntimeUnavailableError
 from ..integrations.dsh_structured_roles import DshStructuredRoleRuntime
 from .generation_execution import (
+    _ScopedEvaluationCallbacks,
     _director_mutation,
     _phase_task_manifest,
-    _sample_run_control,
 )
 
 
@@ -226,8 +226,14 @@ def execute_next_formal_batch(endpoint: Any, run_id: str, candidate_id: str) -> 
         state, candidate, active_revision_id, task
     )
 
-    def sample_run_control() -> str:
-        return _sample_run_control(endpoint.server.director, run_id)
+    callbacks = _ScopedEvaluationCallbacks(
+        endpoint,
+        run_id=run_id,
+        generation=candidate.generation,
+        proposal_id=proposal.proposal_id,
+        candidate_id=candidate_id,
+        scope=scope,
+    )
 
     if isinstance(endpoint.server.evaluators, EvaluatorRegistry):
         bundle = endpoint.server.evaluators.evaluate_scientific(
@@ -237,7 +243,7 @@ def execute_next_formal_batch(endpoint: Any, run_id: str, candidate_id: str) -> 
             scope=scope,
             cohort=planned_batch.cohort,
             algorithm_spec=compiled,
-            on_sample_control=sample_run_control,
+            **callbacks.evaluation_kwargs(),
         )
     else:
         bundle = endpoint.server.evaluators.evaluate_scientific(
@@ -246,25 +252,30 @@ def execute_next_formal_batch(endpoint: Any, run_id: str, candidate_id: str) -> 
             proposal,
             scope=scope,
             cohort=planned_batch.cohort,
-            on_sample_control=sample_run_control,
-    )
+            **callbacks.evaluation_kwargs(),
+        )
     metrics = dict(bundle.evaluation.metrics)
     summary = metrics.get("sample_execution")
     if not isinstance(summary, Mapping) or int(
         summary.get("attempted_origin_samples", 0)
     ) < scope.origin_count:
         raise RuntimeError("formal batch did not complete its frozen origin cohort")
+    batch_evaluation = BatchEvaluation(
+        evaluation_id=f"formal-evaluation:{candidate_id}:{batch_index}",
+        scope=scope,
+        score=bundle.evaluation.score,
+        passed=bundle.evaluation.passed,
+        metrics=_durable_batch_metrics(metrics),
+        evaluator_digest=digest({"evaluator": bundle.evaluation.evaluator_digest}),
+    )
     _director_mutation(
         endpoint,
         "record_formal_batch_evaluation",
         run_id,
-        BatchEvaluation(
-            evaluation_id=f"formal-evaluation:{candidate_id}:{batch_index}",
-            scope=scope,
-            score=bundle.evaluation.score,
-            passed=bundle.evaluation.passed,
-            metrics=_durable_batch_metrics(metrics),
-            evaluator_digest=digest({"evaluator": bundle.evaluation.evaluator_digest}),
+        batch_evaluation,
+        sample_results=callbacks.completion_payload(
+            batch_evaluation.evaluation_id,
+            bundle.sample_results,
         ),
     )
     return True

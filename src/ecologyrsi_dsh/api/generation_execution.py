@@ -34,6 +34,7 @@ from ..core.redaction import (
 from ..core.sample_results import (
     build_sample_results,
     sample_result_batch_event_payload,
+    sample_results_completion_payload,
     sample_results_event_payload,
 )
 from ..core.sample_budget import complete_origin_count
@@ -362,8 +363,14 @@ def _screen_candidate(endpoint: Any, run_id: str, candidate_id: str) -> None:
         origin_count=screening_cohort.origin_count,
     )
 
-    def sample_run_control() -> str:
-        return _sample_run_control(endpoint.server.director, run_id)
+    callbacks = _ScopedEvaluationCallbacks(
+        endpoint,
+        run_id=run_id,
+        generation=candidate.generation,
+        proposal_id=proposal.proposal_id,
+        candidate_id=candidate_id,
+        scope=screening_scope,
+    )
 
     try:
         bundle = endpoint.server.evaluators.evaluate_scientific(
@@ -374,7 +381,7 @@ def _screen_candidate(endpoint: Any, run_id: str, candidate_id: str) -> None:
             cohort=screening_cohort,
             algorithm_spec=AlgorithmSpec.from_dict(compiled),
             on_training_complete=lambda: None,
-            on_sample_control=sample_run_control,
+            **callbacks.evaluation_kwargs(),
         )
     except (SampleExecutionPausedError, SampleExecutionCancelledError):
         return
@@ -403,6 +410,9 @@ def _screen_candidate(endpoint: Any, run_id: str, candidate_id: str) -> None:
     )
     if attempted_origins < _SCREENING_ORIGIN_COUNT:
         raise RuntimeError("screening did not cover the frozen 64-origin cohort")
+    screening_evaluation_id = (
+        f"screening-evaluation:{candidate_id}:{candidate.generation}"
+    )
     _director_mutation(
         endpoint,
         "record_candidate_screening",
@@ -420,6 +430,10 @@ def _screen_candidate(endpoint: Any, run_id: str, candidate_id: str) -> None:
             str(bundle.evaluation.metrics.get("feedback_update_cohort_digest"))
             if bundle.evaluation.metrics.get("feedback_update_cohort_digest")
             else None
+        ),
+        sample_results=callbacks.completion_payload(
+            screening_evaluation_id,
+            bundle.sample_results,
         ),
     )
 
@@ -777,6 +791,195 @@ def _model_token_budget_state(state: Any) -> dict[str, int]:
         "tokens_used": tokens_used,
         "missing_call_count": missing_call_count,
     }
+
+
+class _ScopedEvaluationCallbacks:
+    """Durable per-origin callbacks shared by every adaptive evaluation scope.
+
+    Screening, one formal batch, and one holdout arm still publish their
+    scientific score only at the complete frozen-scope boundary.  The rows,
+    progress, and usage leading to that score are checkpointed independently
+    so a pause or process restart never has to replay already-settled origins.
+    """
+
+    def __init__(
+        self,
+        endpoint: Any,
+        *,
+        run_id: str,
+        generation: int,
+        proposal_id: str,
+        candidate_id: str,
+        scope: EvaluationScope,
+        on_evaluation_started: Any = None,
+    ) -> None:
+        self.endpoint = endpoint
+        self.run_id = run_id
+        self.generation = generation
+        self.proposal_id = proposal_id
+        self.candidate_id = candidate_id
+        self.scope = scope
+        self.on_evaluation_started = on_evaluation_started
+        self.revision: str | None = None
+        self.batch_index = 0
+        self._started = False
+
+    def _ensure_started(self) -> None:
+        if self._started:
+            return
+        if callable(self.on_evaluation_started):
+            self.on_evaluation_started()
+        self._started = True
+
+    def run_control(self) -> str:
+        return _sample_run_control(self.endpoint.server.director, self.run_id)
+
+    def accepts_publication(self) -> bool:
+        return _sample_publication_open(
+            self.endpoint.server.director, self.run_id
+        )
+
+    def prepare_checkpoint(
+        self, checkpoint: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        self._ensure_started()
+        prepared = _director_mutation(
+            self.endpoint,
+            "prepare_evaluation_sample_checkpoint",
+            self.run_id,
+            generation=self.generation,
+            proposal_id=self.proposal_id,
+            candidate_id=self.candidate_id,
+            checkpoint=checkpoint,
+            scope=self.scope,
+        )
+        revision = prepared.get("revision")
+        next_batch_index = prepared.get("next_batch_index")
+        if not isinstance(revision, str) or not revision.strip():
+            raise RuntimeError("sample checkpoint did not return a revision")
+        if (
+            isinstance(next_batch_index, bool)
+            or not isinstance(next_batch_index, int)
+            or next_batch_index < 1
+        ):
+            raise RuntimeError("sample checkpoint returned an invalid batch index")
+        if self.revision is not None and self.revision != revision:
+            raise RuntimeError("sample checkpoint changed revisions mid-evaluation")
+        self.revision = revision
+        self.batch_index = next_batch_index - 1
+        return {
+            **prepared,
+            "token_budget_state": _model_token_budget_state(
+                self.endpoint.server.director.state(self.run_id)
+            ),
+        }
+
+    def record_results(self, scoring_rows: Any) -> None:
+        if not self.accepts_publication():
+            return
+        self._ensure_started()
+        if self.revision is None:
+            raise RuntimeError("sample result callback ran before checkpoint")
+        projected = build_sample_results(self.candidate_id, scoring_rows)
+        if not projected:
+            return
+        self.batch_index += 1
+        try:
+            _director_mutation(
+                self.endpoint,
+                "record_evaluation_sample_result_batch",
+                self.run_id,
+                sample_result_batch_event_payload(
+                    self.run_id,
+                    self.candidate_id,
+                    projected,
+                    revision=self.revision,
+                    batch_index=self.batch_index,
+                ),
+            )
+        except Exception:
+            if not self.accepts_publication():
+                return
+            raise
+
+    def record_model_usage(self, receipts: Any) -> Mapping[str, Any]:
+        if self.revision is None:
+            raise SampleResultCallbackError(
+                "model usage callback ran before checkpoint"
+            )
+        try:
+            _director_mutation(
+                self.endpoint,
+                "record_model_usage_batch",
+                self.run_id,
+                generation=self.generation,
+                candidate_id=self.candidate_id,
+                revision=self.revision,
+                receipts=receipts,
+            )
+        except Exception as exc:
+            raise SampleResultCallbackError(
+                "model usage receipts could not be persisted"
+            ) from exc
+        return _model_token_budget_state(
+            self.endpoint.server.director.state(self.run_id)
+        )
+
+    def record_progress(self, progress: Mapping[str, Any]) -> None:
+        if progress.get("role") != "planner" or not self.accepts_publication():
+            return
+        self._ensure_started()
+        if self.revision is None:
+            raise SampleResultCallbackError(
+                "evaluation progress callback ran before checkpoint"
+            )
+        try:
+            _director_mutation(
+                self.endpoint,
+                "record_evaluation_progress",
+                self.run_id,
+                generation=self.generation,
+                proposal_id=self.proposal_id,
+                candidate_id=self.candidate_id,
+                progress=progress,
+                revision=self.revision,
+            )
+        except Exception as exc:
+            if not self.accepts_publication():
+                return
+            raise SampleResultCallbackError(
+                "evaluation progress heartbeat could not be persisted"
+            ) from exc
+
+    def evaluation_kwargs(self) -> dict[str, Any]:
+        return {
+            "on_sample_control": self.run_control,
+            "on_sample_checkpoint": self.prepare_checkpoint,
+            "on_sample_results": self.record_results,
+            "on_model_usage": self.record_model_usage,
+            "on_evaluation_progress": self.record_progress,
+        }
+
+    def completion_payload(
+        self,
+        evaluation_id: str,
+        sample_results: Any,
+    ) -> Mapping[str, Any] | None:
+        """Seal a scope only when its durable row stream actually exists."""
+
+        if sample_results is None and self.revision is None:
+            return None
+        if sample_results is None or self.revision is None:
+            raise RuntimeError(
+                "scoped evaluation has incomplete durable sample-result state"
+            )
+        return sample_results_completion_payload(
+            run_id=self.run_id,
+            evaluation_id=evaluation_id,
+            candidate_id=self.candidate_id,
+            rows=sample_results,
+            revision=self.revision,
+        )
 
 
 def _pause_for_model_token_budget(
@@ -2584,8 +2787,14 @@ def _execute_adaptive_holdout_arm(
         task,
     )
 
-    def sample_run_control() -> str:
-        return _sample_run_control(endpoint.server.director, run_id)
+    callbacks = _ScopedEvaluationCallbacks(
+        endpoint,
+        run_id=run_id,
+        generation=generation,
+        proposal_id=candidate.proposal_id,
+        candidate_id=candidate.candidate_id,
+        scope=scope,
+    )
 
     bundle = endpoint.server.evaluators.evaluate_scientific(
         task,
@@ -2594,7 +2803,7 @@ def _execute_adaptive_holdout_arm(
         scope=scope,
         cohort=cohort,
         algorithm_spec=spec,
-        on_sample_control=sample_run_control,
+        **callbacks.evaluation_kwargs(),
     )
     metrics = dict(bundle.evaluation.metrics)
     summary = metrics.get("sample_execution")
@@ -2643,13 +2852,34 @@ def _execute_adaptive_holdout_arm(
             evaluation_scope=scope.to_dict(),
             artifact_digest=artifact.digest,
         )
-        _director_mutation(endpoint, "record_evaluation", canonical)
+        if bundle.sample_results is None or callbacks.revision is None:
+            raise RuntimeError(
+                "finalist holdout is missing its durable sample-result checkpoint"
+            )
+        _director_mutation(
+            endpoint,
+            "record_evaluation",
+            canonical,
+            sample_results=sample_results_event_payload(
+                canonical,
+                bundle.sample_results,
+                revision=callbacks.revision,
+            ),
+        )
     if existing is None:
         _director_mutation(
             endpoint,
             "record_holdout_evaluation",
             run_id,
             evaluation,
+            sample_results=(
+                callbacks.completion_payload(
+                    evaluation.evaluation_id,
+                    bundle.sample_results,
+                )
+                if arm is HoldoutArm.INCUMBENT
+                else None
+            ),
         )
     return evaluation
 

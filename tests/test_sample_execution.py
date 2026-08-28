@@ -13,7 +13,7 @@ from unittest.mock import patch
 import ecologyrsi_dsh.evaluators.gateway_sample_adapter as gateway_sample_adapter_module
 import ecologyrsi_dsh.evaluators.registry as evaluator_registry_module
 import ecologyrsi_dsh.evaluators.sample_execution as sample_execution_module
-from ecologyrsi_dsh.core.models import Candidate, Proposal, TaskManifest
+from ecologyrsi_dsh.core.models import Candidate, Proposal, TaskManifest, digest
 from ecologyrsi_dsh.core.sample_results import build_sample_results
 from ecologyrsi_dsh.core.state import validate_evaluation_progress_payload
 from ecologyrsi_dsh.data.registry import DatasetRegistry, DatasetSeries
@@ -1813,7 +1813,7 @@ class SampleExecutionTests(unittest.TestCase):
             {"constraint_rejected": 1},
         )
 
-    def test_origin_shared_prompt_routes_with_lossless_context_references(self):
+    def test_origin_shared_prompt_routes_with_bounded_v2_manifest(self):
         gateway = _SampleDecisionGatewayFake(planner_tool="algorithm")
         adapter = GatewaySampleCollaborationAdapter(
             gateway,
@@ -1830,6 +1830,11 @@ class SampleExecutionTests(unittest.TestCase):
                 "algorithm_id": "algorithm",
                 "algorithm_version": "1",
                 "tool_experience": [{"tool_id": "algorithm", "final_accept": 2}],
+                "candidate_agent_profile": {
+                    "schema_version": "ecologyrsi-dsh.candidate-agent-profile/1",
+                    "role": "sample-planner",
+                    "skill_name": "origin-vector-forecasting-balanced",
+                },
             }
         )
 
@@ -1840,7 +1845,10 @@ class SampleExecutionTests(unittest.TestCase):
         )
 
         self.assertTrue(all(outcome.error is None for outcome in outcomes))
-        self.assertEqual(adapter.adapter_version, "12-origin-shared-context")
+        self.assertEqual(
+            adapter.adapter_version,
+            "13-origin-routing-manifest-v2",
+        )
         self.assertEqual(len(gateway.calls), 1)
         call = gateway.calls[0]
         self.assertEqual(
@@ -1851,20 +1859,33 @@ class SampleExecutionTests(unittest.TestCase):
             call["context"]["evolution_context"]["tool_experience"],
             [{"tool_id": "algorithm", "final_accept": 2}],
         )
+        self.assertEqual(
+            call["context"]["candidate_agent_profile"]["skill_name"],
+            "origin-vector-forecasting-balanced",
+        )
+        self.assertNotIn(
+            "candidate_agent_profile",
+            call["context"]["evolution_context"],
+        )
         expanded = expand_origin_shared_routing_payload(
             call["samples"], call["context"]["shared_sample_contexts"]
         )
         for request in requests:
             self.assertEqual(
-                expanded[request.sample_id]["label_free_context"],
-                request.label_free_context,
+                expanded[request.sample_id]["sample_context_digest"],
+                digest(request.label_free_context),
             )
             self.assertEqual(
                 expanded[request.sample_id]["baseline"], request.baseline
             )
+            self.assertNotIn(
+                "label_free_context",
+                expanded[request.sample_id],
+            )
         encoded = json.dumps(call, sort_keys=True)
         self.assertNotIn("candidate:test", encoded)
         self.assertNotIn("dataset:test", encoded)
+        self.assertNotIn("history_window", encoded)
 
     def test_origin_shared_profile_changes_token_budget_checkpoint_identity(self):
         adapter = GatewaySampleCollaborationAdapter(
@@ -1880,7 +1901,7 @@ class SampleExecutionTests(unittest.TestCase):
 
         self.assertEqual(
             adapter.adapter_version,
-            "12-origin-shared-context-token-call-budget",
+            "13-origin-routing-manifest-v2-token-call-budget",
         )
 
     def test_opt_in_truncation_retry_escalates_once_before_split(self):

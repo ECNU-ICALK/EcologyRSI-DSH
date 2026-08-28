@@ -370,11 +370,30 @@ def sample_results_event_payload(
 ) -> dict[str, Any]:
     """Build the private event payload stored beside a scientific evaluation."""
 
+    return sample_results_completion_payload(
+        run_id=evaluation.run_id,
+        evaluation_id=evaluation.evaluation_id,
+        candidate_id=evaluation.candidate_id,
+        rows=rows,
+        revision=revision,
+    )
+
+
+def sample_results_completion_payload(
+    *,
+    run_id: str,
+    evaluation_id: str,
+    candidate_id: str,
+    rows: Sequence[Mapping[str, Any]],
+    revision: str,
+) -> dict[str, Any]:
+    """Build one completion payload for any frozen evaluation scope."""
+
     projected = [dict(row) for row in rows]
     if not projected:
         raise ValueError("sample result completion must not be empty")
     for index, row in enumerate(projected):
-        if row.get("candidate_id") != evaluation.candidate_id:
+        if row.get("candidate_id") != candidate_id:
             raise ValueError(
                 f"sample_results[{index}] belongs to a different candidate"
             )
@@ -382,10 +401,10 @@ def sample_results_event_payload(
     cohort_digest = sample_results_cohort_digest(projected)
     return {
         "schema_version": SAMPLE_RESULTS_SCHEMA_VERSION,
-        "run_id": evaluation.run_id,
+        "run_id": _required_text(run_id, "run_id"),
         "revision": _required_text(revision, "revision"),
-        "evaluation_id": evaluation.evaluation_id,
-        "candidate_id": evaluation.candidate_id,
+        "evaluation_id": _required_text(evaluation_id, "evaluation_id"),
+        "candidate_id": _required_text(candidate_id, "candidate_id"),
         "reward_definition": SAMPLE_REWARD_DEFINITION,
         "positive_is_better": True,
         "record_count": archive["record_count"],
@@ -716,11 +735,23 @@ def sample_results_cohort_digest(rows: Sequence[Mapping[str, Any]]) -> str:
 def sample_results_event_id(evaluation: Evaluation) -> str:
     """Return a run-scoped idempotency key for the private result event."""
 
+    return sample_results_completion_event_id(
+        run_id=evaluation.run_id,
+        evaluation_id=evaluation.evaluation_id,
+        candidate_id=evaluation.candidate_id,
+    )
+
+
+def sample_results_completion_event_id(
+    *, run_id: str, evaluation_id: str, candidate_id: str
+) -> str:
+    """Return the idempotency key for a scoped sample-result completion."""
+
     identity = digest(
         {
-            "run_id": evaluation.run_id,
-            "evaluation_id": evaluation.evaluation_id,
-            "candidate_id": evaluation.candidate_id,
+            "run_id": _required_text(run_id, "run_id"),
+            "evaluation_id": _required_text(evaluation_id, "evaluation_id"),
+            "candidate_id": _required_text(candidate_id, "candidate_id"),
         }
     )
     return f"evaluation-sample-results:{identity}"
@@ -786,6 +817,8 @@ __all__ = [
     "decode_sample_result_batch",
     "decode_sample_results",
     "encode_sample_results",
+    "sample_results_completion_event_id",
+    "sample_results_completion_payload",
     "sample_results_event_id",
     "sample_result_batch_event_payload",
     "sample_results_cohort_digest",

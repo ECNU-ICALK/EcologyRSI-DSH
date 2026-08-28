@@ -55,6 +55,7 @@ from .sample_admission import (
 )
 
 _TWO_STAGE_SCREENING_ORIGINS = 64
+_HISTORICAL_PREDICTION_CELLS_PER_ORIGIN = 9
 
 # The browser projection is intentionally a compact operational trace.  It is
 # not a model chain-of-thought export: only values already produced by the
@@ -1692,6 +1693,17 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     """
 
     metadata = state.task_manifest.metadata
+    configured_cells_per_origin = metadata.get(
+        "prediction_cells_per_origin",
+        _HISTORICAL_PREDICTION_CELLS_PER_ORIGIN,
+    )
+    cells_per_origin = (
+        configured_cells_per_origin
+        if isinstance(configured_cells_per_origin, int)
+        and not isinstance(configured_cells_per_origin, bool)
+        and configured_cells_per_origin > 0
+        else _HISTORICAL_PREDICTION_CELLS_PER_ORIGIN
+    )
     if (
         not supports_two_stage_screening(metadata.get("sample_agent_protocol"))
         or metadata.get("two_stage_evaluation_enabled", True) is not True
@@ -1740,6 +1752,8 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     terminal_stage = "sample.reflect" if reflection_enabled else "sample.plan"
     completed_terminals: dict[str, Any] = {}
     launch_count = 0
+    primary_launch_count = 0
+    repair_launch_count = 0
     for event in state.events:
         if int(event.seq) <= batch_seq:
             continue
@@ -1763,6 +1777,14 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
             if not key:
                 continue
             launch_count += 1
+            launch_members = _sample_member_digest_set(
+                launch.get("sample_member_digests")
+            )
+            if launch.get("stage") == "sample.plan" and launch_members is not None:
+                if len(launch_members) == cells_per_origin:
+                    primary_launch_count += 1
+                elif len(launch_members) < cells_per_origin:
+                    repair_launch_count += 1
             latest_launch_by_key[key] = (event, launch)
             launch_history_by_key[key] = (event, launch)
             reservation_id = str(launch.get("reservation_id") or "").strip()
@@ -1815,6 +1837,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         tuple[str, frozenset[str] | tuple[str, str] | str],
         tuple[Any, frozenset[str] | None, tuple[str, str] | None],
     ] = {}
+    completed_repair_waves: dict[str, Any] = {}
     for terminal_key, terminal_event in completed_terminals.items():
         identity = terminal_event.payload.get("identity")
         reflection_reservation = str(
@@ -1836,7 +1859,26 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
             else None
         )
         legacy_key = _legacy_sample_launch_key(terminal_idempotency_key)
-        if member_digests is not None:
+        if not reflection_enabled:
+            # Aggregate-reflection screening uses sample.plan as the remote
+            # origin boundary.  Sparse retry/repair waves use the same stage,
+            # but they do not prove that one complete configured origin returned.
+            # Fail closed when durable launch membership is missing or has an
+            # unexpected shape; otherwise repair traffic can make screening
+            # appear remotely complete before any primary origin has settled.
+            if (
+                correlated_launch is None
+                or correlated_launch[1].get("stage") != "sample.plan"
+                or member_digests is None
+            ):
+                continue
+            if len(member_digests) < cells_per_origin:
+                completed_repair_waves[terminal_key] = terminal_event
+                continue
+            if len(member_digests) != cells_per_origin:
+                continue
+            origin_key = ("members", member_digests)
+        elif member_digests is not None:
             origin_key = ("members", member_digests)
         elif legacy_key is not None:
             origin_key = ("legacy", legacy_key)
@@ -1889,6 +1931,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     active_origins: set[
         tuple[str, frozenset[str] | tuple[str, str] | str]
     ] = set()
+    active_repair_waves: set[str] = set()
     outstanding_origins: set[
         tuple[str, frozenset[str] | tuple[str, str] | str]
     ] = set()
@@ -1904,6 +1947,19 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
             launch.get("sample_member_digests")
         )
         legacy_key = _legacy_sample_launch_key(launch.get("idempotency_key"))
+        is_aggregate_repair = (
+            not reflection_enabled
+            and launch.get("stage") == "sample.plan"
+            and member_digests is not None
+            and len(member_digests) < cells_per_origin
+        )
+        if is_aggregate_repair:
+            repair_key = reservation_id or launch_key
+            active_repair_waves.add(repair_key)
+            # This is still a real admitted provider request, so retain it in
+            # generic request activity while keeping it out of origin progress.
+            active_origins.add(("repair", repair_key))
+            continue
         if member_digests is not None:
             active_key = ("members", member_digests)
         elif legacy_key is not None:
@@ -1935,6 +1991,17 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
             # completed origin boundary. A later/parallel critic does not
             # advance forecast progress, but it remains real remote activity
             # that can block host settlement and must stay observable.
+            continue
+        if (
+            not reflection_enabled
+            and (
+                member_digests is None
+                or len(member_digests) != cells_per_origin
+            )
+        ):
+            # Only a complete primary wave reserves one origin slot. Unknown,
+            # malformed, and sparse repair launches remain request evidence but
+            # must not reduce the number of origins awaiting submission.
             continue
         if launch_key in completed_terminals:
             continue
@@ -1998,10 +2065,15 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         "batch_count": total,
         "batch_size": 1 if completed else 0,
         "completed_samples": completed,
+        "remote_completed_origins": completed,
         "total_samples": total,
         "succeeded_samples": succeeded,
         "failed_samples": failed,
         "gateway_request_count": launch_count,
+        "primary_gateway_request_count": primary_launch_count,
+        "repair_gateway_request_count": repair_launch_count,
+        "completed_repair_waves": len(completed_repair_waves),
+        "active_repair_waves": len(active_repair_waves),
         "adaptive_split_trigger_count": 0,
         "adaptive_split_count": 0,
         "adaptive_split_max_depth": 0,
@@ -2507,6 +2579,11 @@ def _adaptive_progress_projection(
             "configured_concurrency",
             "queue_semantics",
             "gateway_request_count",
+            "primary_gateway_request_count",
+            "repair_gateway_request_count",
+            "remote_completed_origins",
+            "completed_repair_waves",
+            "active_repair_waves",
             "updated_at",
             "event_seq",
         ):
@@ -2515,7 +2592,7 @@ def _adaptive_progress_projection(
         in_flight = max(0, int(live_fields.get("in_flight_batches") or 0))
         queued = max(0, int(live_fields.get("queued_batches") or 0))
         remotely_completed = max(
-            0, int(live_screening.get("completed_samples") or 0)
+            0, int(live_screening.get("remote_completed_origins") or 0)
         )
         awaiting_settlement = max(
             0, remotely_completed - settled_screening_completed

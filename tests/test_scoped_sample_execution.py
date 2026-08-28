@@ -6,6 +6,11 @@ from types import SimpleNamespace
 from ecologyrsi_dsh import EventLedger, EvolutionDirector, FakeDSHAdapter, TaskManifest
 from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.core.screening import screening_cohort_digest
+from ecologyrsi_dsh.core.sample_results import (
+    build_sample_results,
+    sample_result_batch_event_payload,
+    sample_results_completion_payload,
+)
 from ecologyrsi_dsh.core.trajectory import (
     BatchEvaluation,
     CandidateRevision,
@@ -157,6 +162,30 @@ class ScopedSampleExecutionTests(unittest.TestCase):
             "sample_count": scope.origin_count * 9,
         }
 
+    @staticmethod
+    def _sample_rows(candidate_id: str, count: int) -> tuple[dict, ...]:
+        return build_sample_results(
+            candidate_id,
+            [
+                {
+                    "sample_index": index,
+                    "sample_id": f"sample:{index}",
+                    "target": "air_temperature",
+                    "unit": "degC",
+                    "horizon_hours": 1,
+                    "origin_timestamp": index,
+                    "target_timestamp": index + 1,
+                    "observed": 21.0,
+                    "predicted": 20.5,
+                    "baseline": 20.0,
+                    "sample_execution_status": "succeeded",
+                    "sample_execution_attempts": 1,
+                    "sample_execution_retry_count": 0,
+                }
+                for index in range(1, count + 1)
+            ],
+        )
+
     def test_checkpoints_are_isolated_by_revision_phase_and_batch(self) -> None:
         candidate = self.finalist
         revision = self.revisions[candidate.candidate_id]
@@ -209,7 +238,31 @@ class ScopedSampleExecutionTests(unittest.TestCase):
             metrics={"rmse": 1.0},
             evaluator_digest=_sha("evaluator"),
         )
-        self.director.record_formal_batch_evaluation(self.run_id, evaluation)
+        rows = self._sample_rows(
+            candidate.candidate_id,
+            first_scope.origin_count * 9,
+        )
+        self.director.record_evaluation_sample_result_batch(
+            self.run_id,
+            sample_result_batch_event_payload(
+                self.run_id,
+                candidate.candidate_id,
+                rows,
+                revision=prepared["revision"],
+                batch_index=1,
+            ),
+        )
+        self.director.record_formal_batch_evaluation(
+            self.run_id,
+            evaluation,
+            sample_results=sample_results_completion_payload(
+                run_id=self.run_id,
+                evaluation_id=evaluation.evaluation_id,
+                candidate_id=candidate.candidate_id,
+                rows=rows,
+                revision=prepared["revision"],
+            ),
+        )
         self.director.record_local_edit_proposal(
             self.run_id,
             {

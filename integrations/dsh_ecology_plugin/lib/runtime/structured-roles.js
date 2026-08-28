@@ -47,6 +47,14 @@ export async function runStructuredRole(
   if (!request?.outputSchema || typeof request.outputSchema !== "object") {
     throw new Error("structured role requires an output schema");
   }
+  if (
+    request.maxTokens !== undefined
+    && (!Number.isSafeInteger(request.maxTokens)
+      || request.maxTokens < 512
+      || request.maxTokens > 8192)
+  ) {
+    throw new Error("structured role maxTokens must be between 512 and 8192");
+  }
   if (!pendingStarts?.start || typeof persist !== "function") {
     throw new Error("structured role lifecycle services are required");
   }
@@ -128,6 +136,9 @@ export async function runStructuredRole(
         label: reservedBinding.label,
         prompt: [{ type: "text", text: request.prompt }],
         outputSchema,
+        ...(request.maxTokens === undefined
+          ? {}
+          : { maxTokens: request.maxTokens }),
       }, {
         roleHostAgent: roleHost.agent,
         runId: reservedBinding?.launch?.run_id || reservedBinding?.binding?.run_id,

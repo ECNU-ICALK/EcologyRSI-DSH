@@ -43,7 +43,7 @@ test("one-shot structured role persists only structured output and disposes its 
   const result = await runStructuredRole(
     { agent: { id: "researcher-host" } },
     { label: "safe-label", reservation_id: "r1" },
-    { prompt: "research", outputSchema: { type: "object" } },
+    { prompt: "research", outputSchema: { type: "object" }, maxTokens: 2048 },
     {
       pendingStarts,
       admission: { isOpen: async () => true },
@@ -52,11 +52,41 @@ test("one-shot structured role persists only structured output and disposes its 
   );
   assert.equal(request.label, "safe-label");
   assert.deepEqual(request.prompt, [{ type: "text", text: "research" }]);
+  assert.equal(request.maxTokens, 2048);
   assert.deepEqual(result.structured, { schema_version: "ecology-research-result@1", summary: "ok", evidence: [] });
   assert.equal("text" in persisted[0], false);
   assert.equal(persisted[0].session_id, "researcher-child-session");
   assert.equal(result.session_id, "researcher-child-session");
   assert.equal(disposed, true);
+  assert.equal(pendingStarts.size, 0);
+});
+
+test("one-shot structured role rejects invalid maxTokens before child work", async () => {
+  let starts = 0;
+  const pendingStarts = new PendingChildStarts({
+    subagents: {
+      start: async () => {
+        starts += 1;
+        throw new Error("must not start");
+      },
+    },
+  });
+  for (const maxTokens of [511, 8193, 2048.5, "2048"]) {
+    await assert.rejects(
+      runStructuredRole(
+        { agent: { id: "researcher-host" } },
+        { label: "invalid-max-tokens" },
+        { prompt: "research", outputSchema: { type: "object" }, maxTokens },
+        {
+          pendingStarts,
+          admission: { isOpen: async () => true },
+          persist: async () => ({ accepted: true }),
+        },
+      ),
+      /maxTokens must be between 512 and 8192/,
+    );
+  }
+  assert.equal(starts, 0);
   assert.equal(pendingStarts.size, 0);
 });
 

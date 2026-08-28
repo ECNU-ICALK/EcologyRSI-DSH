@@ -288,10 +288,6 @@ function specializeSampleOutputSchema(stage, schema, context) {
   if (!properties?.wave_digest) {
     throw new Error("sample output schema has no wave_digest property");
   }
-  properties.wave_digest = {
-    ...properties.wave_digest,
-    const: waveDigest,
-  };
   if (stage === "sample.reflect") {
     const sampleId = context?.sample?.sample_id;
     if (!validSampleId(sampleId)) {
@@ -300,6 +296,10 @@ function specializeSampleOutputSchema(stage, schema, context) {
     if (!properties.sample_id) {
       throw new Error("sample reflection schema has no sample_id property");
     }
+    properties.wave_digest = {
+      ...properties.wave_digest,
+      const: waveDigest,
+    };
     properties.sample_id = {
       ...properties.sample_id,
       const: sampleId,
@@ -321,6 +321,17 @@ function specializeSampleOutputSchema(stage, schema, context) {
   if (!sampleIdSchema) {
     throw new Error("sample decision schema has no sample_id property");
   }
+  // sample.plan is the hot path.  Keep its output schema identical across
+  // origin waves so the provider can reuse the schema/prompt prefix cache.
+  // The Host still validates the exact wave digest, sample-id set, sole
+  // prediction-tool receipt, and one decision per prediction before accepting
+  // a result.  Critic schemas retain exact per-wave specialization because
+  // their much smaller volume benefits more from early schema rejection.
+  if (stage === "sample.plan") return schema;
+  properties.wave_digest = {
+    ...properties.wave_digest,
+    const: waveDigest,
+  };
   properties.decisions.items.properties.sample_id = {
     ...sampleIdSchema,
     enum: sampleIds,
@@ -713,6 +724,17 @@ export class NativeStageRunner {
     ) {
       throw new Error("DSH structured stage context digest mismatch");
     }
+    if (
+      request.max_tokens !== undefined
+      && (!Number.isSafeInteger(request.max_tokens)
+        || request.max_tokens < 512
+        || request.max_tokens > 8192)
+    ) {
+      throw new Error("DSH structured stage max_tokens is invalid");
+    }
+    if (binding.stage === "sample.plan" && request.max_tokens === undefined) {
+      throw new Error("DSH sample.plan requires a bounded max_tokens value");
+    }
     const identityDigests = request.identity_digests || {};
     const roleHost = this.roleAgents.get(binding.run_id, contract.role);
     if (!roleHost) throw new Error("DSH role-host is unavailable");
@@ -975,6 +997,7 @@ export class NativeStageRunner {
           reservation,
           prompt,
           outputSchema,
+          maxTokens: request.max_tokens,
           admission,
           persist,
           deadline: lifecycle.deadline,
@@ -983,7 +1006,7 @@ export class NativeStageRunner {
         : await runStructuredRole(
           roleHost,
           reservation,
-          { prompt, outputSchema },
+          { prompt, outputSchema, maxTokens: request.max_tokens },
           {
             pendingStarts: this.pendingStarts,
             admission,
@@ -1026,6 +1049,7 @@ export class NativeStageRunner {
     reservation,
     prompt,
     outputSchema,
+    maxTokens,
     admission,
     persist,
     deadline,
@@ -1168,7 +1192,12 @@ export class NativeStageRunner {
               max_items: 1,
               sync_timeout_ms: deadline.timeoutMs,
             },
-            [{ label: reservation.label, prompt, schema: outputSchema }],
+            [{
+              label: reservation.label,
+              prompt,
+              schema: outputSchema,
+              ...(maxTokens === undefined ? {} : { maxTokens }),
+            }],
           ),
           { runId: binding.run_id, roleHostAgent: roleHost.agent },
         );

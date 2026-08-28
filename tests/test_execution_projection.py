@@ -67,6 +67,10 @@ def _skill_evidence(stage: str, skill_name: str) -> dict:
     }
 
 
+def _origin_members(label: str) -> list[str]:
+    return sorted(digest(f"{label}:cell:{index}") for index in range(9))
+
+
 class ExecutionProjectionTests(unittest.TestCase):
     def test_adaptive_progress_waits_for_evaluation_evidence(self) -> None:
         state = SimpleNamespace(
@@ -118,6 +122,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "stage": "sample.plan",
                     "idempotency_key": "run:test:sample.plan:origin-a",
                     "reservation_id": "reservation-plan-a",
+                    "sample_member_digests": _origin_members("origin-a"),
                 }},
                 created_at="2026-08-26T06:00:00+00:00",
             ),
@@ -169,6 +174,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "stage": "sample.plan",
                     "idempotency_key": "run:test:sample.plan:origin-a",
                     "reservation_id": "reservation-plan-a",
+                    "sample_member_digests": _origin_members("origin-a"),
                 }},
                 created_at="2026-08-26T06:00:00+00:00",
             ),
@@ -222,6 +228,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "stage": "sample.plan",
                     "idempotency_key": "run:test:sample.plan:origin-a",
                     "reservation_id": "reservation-plan-a",
+                    "sample_member_digests": _origin_members("origin-a"),
                 }},
                 created_at="2026-08-26T06:00:00+00:00",
             ),
@@ -269,6 +276,120 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["awaiting_settlement_batches"], 1)
         self.assertEqual(progress["gateway_request_count"], 1)
         self.assertEqual(progress["configured_concurrency"], 64)
+
+    def test_screening_progress_separates_sparse_repair_from_primary_origin(
+        self,
+    ) -> None:
+        schedule = {
+            "screening_origin_count": 64,
+            "formal_origin_count_per_finalist": 500,
+            "selection_holdout_origin_count": 169,
+            "local_batch_origin_count": 50,
+        }
+        # Six cells proves the projection follows task metadata rather than
+        # assuming the historical 3-target x 3-horizon bundle.
+        primary_members = _origin_members("primary-a")[:6]
+        repair_members = primary_members[:1]
+        events = (
+            SimpleNamespace(
+                seq=10,
+                kind="GenerationBatchStarted",
+                payload={"batch": {"generation": 0}},
+                created_at="2026-08-28T06:00:00+00:00",
+            ),
+            SimpleNamespace(
+                seq=11,
+                kind="DshChildLaunchReserved",
+                payload={"launch": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:primary-a",
+                    "reservation_id": "reservation-primary-a",
+                    "sample_member_digests": primary_members,
+                }},
+                created_at="2026-08-28T06:00:01+00:00",
+            ),
+            SimpleNamespace(
+                seq=12,
+                kind="DshStructuredResultAccepted",
+                payload={"identity": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:primary-a",
+                    "child_reservation_id": "reservation-primary-a",
+                }},
+                created_at="2026-08-28T06:00:02+00:00",
+            ),
+            SimpleNamespace(
+                seq=13,
+                kind="DshChildLaunchReserved",
+                payload={"launch": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:repair-a",
+                    "reservation_id": "reservation-repair-a",
+                    "sample_member_digests": repair_members,
+                }},
+                created_at="2026-08-28T06:00:03+00:00",
+            ),
+            SimpleNamespace(
+                seq=14,
+                kind="DshStructuredResultAccepted",
+                payload={"identity": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:repair-a",
+                    "child_reservation_id": "reservation-repair-a",
+                }},
+                created_at="2026-08-28T06:00:04+00:00",
+            ),
+            SimpleNamespace(
+                seq=15,
+                kind="DshChildLaunchReserved",
+                payload={"launch": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:repair-active",
+                    "reservation_id": "reservation-repair-active",
+                    "sample_member_digests": primary_members[1:3],
+                }},
+                created_at="2026-08-28T06:00:05+00:00",
+            ),
+        )
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(metadata={
+                "optimization_protocol": "top2_adaptive_epoch@1",
+                "optimization_schedule": schedule,
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                "two_stage_evaluation_enabled": True,
+                "sample_reflection_policy": "candidate_aggregate_post_score@1",
+                "sample_concurrency": 64,
+                "prediction_cells_per_origin": 6,
+            }),
+            run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
+            candidate_screening_events=(),
+            formal_batch_evaluations=(),
+            holdout_evaluations=(),
+            formal_batches=(),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            events=events,
+        )
+
+        screening = _screening_progress_projection(state)
+
+        self.assertEqual(screening["completed_samples"], 1)
+        self.assertEqual(screening["remote_completed_origins"], 1)
+        self.assertEqual(screening["completed_repair_waves"], 1)
+        self.assertEqual(screening["active_repair_waves"], 1)
+        self.assertEqual(screening["primary_gateway_request_count"], 1)
+        self.assertEqual(screening["repair_gateway_request_count"], 2)
+        self.assertEqual(screening["gateway_request_count"], 3)
+        self.assertEqual(screening["in_flight_batches"], 1)
+        self.assertEqual(screening["awaiting_submission_batches"], 255)
+
+        adaptive = _adaptive_progress_projection(state)
+
+        self.assertEqual(adaptive["completed_origins"], 0)
+        self.assertEqual(adaptive["remote_completed_origins"], 1)
+        self.assertEqual(adaptive["awaiting_settlement_batches"], 1)
+        self.assertEqual(adaptive["completed_repair_waves"], 1)
+        self.assertEqual(adaptive["active_repair_waves"], 1)
+        self.assertEqual(adaptive["in_flight_requests"], 1)
 
     def test_adaptive_progress_includes_live_formal_origin_receipts(self) -> None:
         schedule = {
@@ -655,6 +776,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "stage": "sample.plan",
                     "idempotency_key": "run:test:sample.plan:stale-a",
                     "reservation_id": "reservation-stale-a",
+                    "sample_member_digests": _origin_members("stale-a"),
                 }},
                 created_at="2026-08-26T06:00:00+00:00",
             ),
@@ -683,6 +805,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "stage": "sample.plan",
                     "idempotency_key": "run:test:sample.plan:current-b",
                     "reservation_id": "reservation-current-b",
+                    "sample_member_digests": _origin_members("current-b"),
                 }},
                 created_at="2026-08-26T06:00:02+00:00",
             ),
@@ -721,6 +844,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "stage": "sample.plan",
                     "idempotency_key": "run:test:sample.plan:failed-a",
                     "reservation_id": "reservation-failed-a",
+                    "sample_member_digests": _origin_members("failed-a"),
                 }},
                 created_at="2026-08-26T06:00:00+00:00",
             ),
@@ -827,6 +951,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "stage": "sample.plan",
                     "idempotency_key": "run:test:sample.plan:origin-a",
                     "reservation_id": "reservation-plan-a",
+                    "sample_member_digests": _origin_members("origin-a"),
                 }},
                 created_at="2026-08-26T06:00:01+00:00",
             ),
@@ -837,6 +962,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "stage": "sample.critic",
                     "idempotency_key": "run:test:sample.critic:origin-a",
                     "reservation_id": "reservation-critic-a",
+                    "sample_member_digests": _origin_members("origin-a"),
                 }},
                 created_at="2026-08-26T06:00:02+00:00",
             ),
@@ -864,7 +990,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["awaiting_submission_batches"], 255)
 
     def test_prediction_receipt_retires_correlated_critic_launch(self) -> None:
-        members = sorted((digest("cell-a-1"), digest("cell-a-2")))
+        members = _origin_members("origin-a")
         events = (
             SimpleNamespace(
                 seq=10,
@@ -927,7 +1053,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["awaiting_submission_batches"], 255)
 
     def test_screening_progress_deduplicates_retried_origin(self) -> None:
-        members = [digest("cell-a-1")]
+        members = _origin_members("origin-a")
         events = (
             SimpleNamespace(
                 seq=10,
@@ -1002,7 +1128,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["awaiting_submission_batches"], 255)
 
     def test_completed_origin_retires_later_retry_launch(self) -> None:
-        members = [digest("cell-a-1")]
+        members = _origin_members("origin-a")
         events = (
             SimpleNamespace(
                 seq=10,

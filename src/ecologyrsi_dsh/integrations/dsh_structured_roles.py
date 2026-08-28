@@ -42,7 +42,14 @@ class DshStructuredRoleRuntime:
         ledger_expected_revision: int,
         idempotency_key: str,
         identity_digests: Mapping[str, str] | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
+        if max_tokens is not None and (
+            isinstance(max_tokens, bool)
+            or not isinstance(max_tokens, int)
+            or not 512 <= max_tokens <= 8192
+        ):
+            raise ValueError("DSH structured max_tokens must be between 512 and 8192")
         request = {
             "run_id": run_id,
             "stage": stage,
@@ -57,6 +64,7 @@ class DshStructuredRoleRuntime:
                 "context_canonical_json": canonical_json(context),
                 "context_digest": digest(context),
                 "identity_digests": dict(identity_digests or {}),
+                **({"max_tokens": max_tokens} if max_tokens is not None else {}),
             },
         }
         if self.admission is not None:

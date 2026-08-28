@@ -2,6 +2,42 @@
 
 All notable changes to EcologyRSI-DSH are recorded in this file.
 
+## 0.3.49 - 2026-08-28
+
+### Durable adaptive scopes
+
+- Stream and resume origin rows, model usage, and progress in screening, every
+  formal local batch, and every holdout arm instead of waiting for an entire
+  64/50/169-origin scope to return.
+- Atomically seal each scope's complete sample checkpoint with its screening,
+  formal-batch, or incumbent-holdout result; keep finalist canonical outcomes
+  on the existing atomic evaluation boundary and reject late writers.
+- Authorize incumbent holdout replay only through the exact frozen arm binding,
+  including generation-zero screened-out incumbents and historical champions,
+  without weakening screening or formal candidate-state fences.
+
+### Bounded native model traffic
+
+- Freeze a 2,048-token output cap for every DSH-native sample operation and
+  carry it through both direct children and Workflow Engine children.
+- Replace raw history/feature prompt duplication with a content-addressed
+  routing manifest containing bounded target, horizon, range, digest, and Host
+  anomaly summaries; the representative payload is 32.8% of its prior size.
+- Make the non-native ModelGateway resolve routing-manifest v2 variants
+  directly instead of applying defaults that v2 deliberately removed.
+- Keep `sample.plan` output schemas stable across origin waves for provider
+  prefix-cache reuse while retaining Host-side exact wave, sample-set, tool,
+  and decision validation.
+
+### Truthful progress and delivery
+
+- Count only complete task-sized primary waves as completed prediction origins.
+  Report sparse repair waves and primary/repair request counts independently in
+  the API and browser—including repair-only in-flight states—so repairs cannot
+  inflate progress or settlement queues.
+- Align the Python package, browser plugin, Host plugin, lockfile, legal
+  metadata, and packed Host artifact at version 0.3.49.
+
 ## 0.3.48 - 2026-08-28
 
 ### Progression and lifecycle recovery

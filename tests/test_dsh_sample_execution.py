@@ -399,6 +399,7 @@ class DshSampleExecutionTests(unittest.TestCase):
                 samples=(),
                 context={},
                 available_tools=(),
+                max_tokens=2048,
             )
 
     def test_dsh_runtime_5xx_is_a_retryable_remote_failure(self) -> None:
@@ -831,7 +832,10 @@ class DshSampleExecutionTests(unittest.TestCase):
         encoded = json.dumps(runtime.requests)
         self.assertNotIn("observed", encoded)
         self.assertNotIn("ground_truth", encoded)
-        self.assertNotIn("max_tokens", encoded)
+        self.assertEqual(
+            [item["request"]["max_tokens"] for item in runtime.requests],
+            [2048, 2048],
+        )
         critic_sample = runtime.requests[1]["request"]["context"]["samples"][0]
         self.assertNotIn("sample", critic_sample)
         self.assertNotIn("history_window", json.dumps(critic_sample))

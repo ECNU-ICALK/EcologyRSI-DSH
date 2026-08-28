@@ -89,6 +89,7 @@ from .sample_results import (
     decode_sample_result_batch,
     decode_sample_results,
     sample_results_cohort_digest,
+    sample_results_completion_event_id,
     sample_results_event_id,
 )
 from .exposure_registry import (
@@ -1987,6 +1988,7 @@ class EvolutionDirector:
         origin_count: int,
         prediction_cell_count: int,
         cohort_digest: str | None,
+        sample_results: Mapping[str, Any] | None = None,
     ) -> Event:
         """Persist the concise restart boundary for one screening evaluation."""
 
@@ -2070,12 +2072,47 @@ class EvolutionDirector:
         existing = state.screening_for(generation, candidate_id)
         if existing is None and candidate.status is not CandidateStatus.SPAWNED:
             raise ValueError("only a new candidate can be screened")
-        return self.ledger.append(
-            run_id,
-            "CandidateScreeningRecorded",
-            payload,
-            event_id=f"{run_id}:generation:{generation}:screening:{candidate_id}",
+        event_id = f"{run_id}:generation:{generation}:screening:{candidate_id}"
+        completion_entry = None
+        if sample_results is not None:
+            revision = state.initial_revision_for(candidate_id)
+            if revision is None:
+                raise ValueError("screening sample results require initial revision R0")
+            completion_entry = self._scoped_sample_results_completion_entry(
+                state,
+                scope=EvaluationScope(
+                    run_id=run_id,
+                    generation=generation,
+                    candidate_id=candidate_id,
+                    candidate_revision_id=revision.revision_id,
+                    phase=EvaluationPhase.SCREENING,
+                    cohort_digest=cohort_digest,
+                    origin_count=origin_count,
+                ),
+                evaluation_id=(
+                    f"screening-evaluation:{candidate_id}:{generation}"
+                ),
+                payload=sample_results,
+            )
+        elif existing is None and self._candidate_has_unfinished_sample_results(
+            state, candidate_id
+        ):
+            raise ValueError(
+                "screening with an active sample checkpoint must be sealed atomically"
+            )
+        if existing is not None:
+            if existing.payload != payload:
+                raise ValueError(
+                    "candidate screening event already has a different event payload"
+                )
+            if completion_entry is not None:
+                self.ledger.append(run_id, *completion_entry[:2], event_id=completion_entry[2])
+            return existing
+        entries = (
+            ("CandidateScreeningRecorded", payload, event_id),
+            *((completion_entry,) if completion_entry is not None else ()),
         )
+        return self.ledger.append_many(run_id, entries)[0]
 
     def freeze_run_adaptation_cohort(
         self,
@@ -2384,7 +2421,11 @@ class EvolutionDirector:
         return batch
 
     def record_formal_batch_evaluation(
-        self, run_id: str, evaluation: BatchEvaluation
+        self,
+        run_id: str,
+        evaluation: BatchEvaluation,
+        *,
+        sample_results: Mapping[str, Any] | None = None,
     ) -> BatchEvaluation:
         if not isinstance(evaluation, BatchEvaluation):
             raise TypeError("evaluation must be a BatchEvaluation")
@@ -2395,6 +2436,20 @@ class EvolutionDirector:
         if existing is not None:
             if existing.to_dict() != evaluation.to_dict():
                 raise ValueError("formal batch already has a different evaluation")
+            if sample_results is not None:
+                completion_entry = self._scoped_sample_results_completion_entry(
+                    state,
+                    scope=evaluation.scope,
+                    evaluation_id=evaluation.evaluation_id,
+                    payload=sample_results,
+                )
+                if completion_entry is not None:
+                    self.ledger.append(
+                        run_id,
+                        completion_entry[0],
+                        completion_entry[1],
+                        event_id=completion_entry[2],
+                    )
             return existing
         batch = state.formal_batch_for(key_candidate, key_index)
         if batch is None:
@@ -2406,11 +2461,35 @@ class EvolutionDirector:
             or evaluation.scope.origin_count != batch.origin_count
         ):
             raise ValueError("formal batch evaluation scope does not match batch")
-        self.ledger.append(
-            run_id,
+        completion_entry = (
+            self._scoped_sample_results_completion_entry(
+                state,
+                scope=evaluation.scope,
+                evaluation_id=evaluation.evaluation_id,
+                payload=sample_results,
+            )
+            if sample_results is not None
+            else None
+        )
+        if completion_entry is None and sample_results is None and (
+            self._candidate_has_unfinished_sample_results(state, key_candidate)
+        ):
+            raise ValueError(
+                "formal evaluation with an active sample checkpoint must be "
+                "sealed atomically"
+            )
+        evaluation_entry = (
             "FormalBatchEvaluated",
             {"evaluation": evaluation.to_dict()},
-            event_id=f"{run_id}:generation:{batch.generation}:trajectory:{key_candidate}:batch:{key_index}:evaluated",
+            f"{run_id}:generation:{batch.generation}:trajectory:"
+            f"{key_candidate}:batch:{key_index}:evaluated",
+        )
+        self.ledger.append_many(
+            run_id,
+            (
+                evaluation_entry,
+                *((completion_entry,) if completion_entry is not None else ()),
+            ),
         )
         return evaluation
 
@@ -2667,7 +2746,11 @@ class EvolutionDirector:
         return holdout
 
     def record_holdout_evaluation(
-        self, run_id: str, evaluation: HoldoutEvaluation
+        self,
+        run_id: str,
+        evaluation: HoldoutEvaluation,
+        *,
+        sample_results: Mapping[str, Any] | None = None,
     ) -> HoldoutEvaluation:
         if not isinstance(evaluation, HoldoutEvaluation):
             raise TypeError("evaluation must be a HoldoutEvaluation")
@@ -2678,6 +2761,20 @@ class EvolutionDirector:
         if existing is not None:
             if existing.to_dict() != evaluation.to_dict():
                 raise ValueError("holdout arm already has a different evaluation")
+            if sample_results is not None:
+                completion_entry = self._scoped_sample_results_completion_entry(
+                    state,
+                    scope=evaluation.scope,
+                    evaluation_id=evaluation.evaluation_id,
+                    payload=sample_results,
+                )
+                if completion_entry is not None:
+                    self.ledger.append(
+                        run_id,
+                        completion_entry[0],
+                        completion_entry[1],
+                        event_id=completion_entry[2],
+                    )
             return existing
         holdout = state.generation_holdout_for(evaluation.scope.generation)
         if holdout is None:
@@ -2691,11 +2788,36 @@ class EvolutionDirector:
             != binding["candidate_revision_id"]
         ):
             raise ValueError("holdout evaluation scope differs from frozen arm")
-        self.ledger.append(
-            run_id,
+        completion_entry = (
+            self._scoped_sample_results_completion_entry(
+                state,
+                scope=evaluation.scope,
+                evaluation_id=evaluation.evaluation_id,
+                payload=sample_results,
+            )
+            if sample_results is not None
+            else None
+        )
+        if completion_entry is None and sample_results is None and (
+            self._candidate_has_unfinished_sample_results(
+                state, evaluation.scope.candidate_id
+            )
+        ):
+            raise ValueError(
+                "holdout with an active sample checkpoint must be sealed atomically"
+            )
+        evaluation_entry = (
             "HoldoutEvaluationRecorded",
             {"evaluation": evaluation.to_dict()},
-            event_id=f"{run_id}:generation:{holdout.generation}:holdout:{arm.value}:evaluated",
+            f"{run_id}:generation:{holdout.generation}:"
+            f"holdout:{arm.value}:evaluated",
+        )
+        self.ledger.append_many(
+            run_id,
+            (
+                evaluation_entry,
+                *((completion_entry,) if completion_entry is not None else ()),
+            ),
         )
         return evaluation
 
@@ -2960,17 +3082,34 @@ class EvolutionDirector:
         evaluation: Evaluation,
         payload: Mapping[str, Any],
     ) -> None:
-        if payload.get("candidate_id") != evaluation.candidate_id:
+        self._validate_sample_results_completion_identity(
+            state,
+            run_id=evaluation.run_id,
+            candidate_id=evaluation.candidate_id,
+            evaluation_id=evaluation.evaluation_id,
+            payload=payload,
+        )
+
+    def _validate_sample_results_completion_identity(
+        self,
+        state: RunState,
+        *,
+        run_id: str,
+        candidate_id: str,
+        evaluation_id: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        if payload.get("candidate_id") != candidate_id:
             raise ValueError("sample results belong to another candidate")
-        if payload.get("run_id") != evaluation.run_id:
+        if payload.get("run_id") != run_id:
             raise ValueError("sample results belong to another run")
-        if payload.get("evaluation_id") != evaluation.evaluation_id:
+        if payload.get("evaluation_id") != evaluation_id:
             raise ValueError("sample results belong to another evaluation")
         completed_rows = decode_sample_results(payload)
         revision = str(payload.get("revision") or "")
         start, batch_events, completed = self._sample_result_revision_events(
             state,
-            evaluation.candidate_id,
+            candidate_id,
             revision,
         )
         if completed is not None:
@@ -3002,7 +3141,7 @@ class EvolutionDirector:
                 and event.kind == "EvaluationProgressRecorded"
                 and event.payload.get("schema_version")
                 == "ecologyrsi-dsh.evaluation-progress/3"
-                and event.payload.get("candidate_id") == evaluation.candidate_id
+                and event.payload.get("candidate_id") == candidate_id
                 and event.payload.get("revision") == revision
                 and event.payload.get("role") == "planner"
             ]
@@ -3045,7 +3184,7 @@ class EvolutionDirector:
             for event in state.events
             if event.seq > start.seq
             and event.kind == "EvaluationProgressRecorded"
-            and event.payload.get("candidate_id") == evaluation.candidate_id
+            and event.payload.get("candidate_id") == candidate_id
             and event.payload.get("role") == "planner"
         ]
         if planner_progress:
@@ -3054,6 +3193,60 @@ class EvolutionDirector:
                 raise ValueError(
                     "sample result completion does not cover the declared evaluation cohort"
                 )
+
+    def _scoped_sample_results_completion_entry(
+        self,
+        state: RunState,
+        *,
+        scope: EvaluationScope,
+        evaluation_id: str,
+        payload: Mapping[str, Any],
+    ) -> tuple[str, Mapping[str, Any], str] | None:
+        """Validate and build the atomic completion for a frozen scope."""
+
+        event_id = sample_results_completion_event_id(
+            run_id=scope.run_id,
+            evaluation_id=evaluation_id,
+            candidate_id=scope.candidate_id,
+        )
+        existing = next(
+            (
+                event
+                for event in state.events
+                if event.kind == "EvaluationSampleResultsRecorded"
+                and event.event_id == event_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if existing.payload != dict(payload):
+                raise ValueError(
+                    "evaluation scope already has different sample results"
+                )
+            return None
+        self._validate_sample_results_completion_identity(
+            state,
+            run_id=scope.run_id,
+            candidate_id=scope.candidate_id,
+            evaluation_id=evaluation_id,
+            payload=payload,
+        )
+        revision = str(payload.get("revision") or "")
+        start, _batches, _completed = self._sample_result_revision_events(
+            state, scope.candidate_id, revision
+        )
+        checkpoint = start.payload.get("checkpoint")
+        if not isinstance(checkpoint, Mapping):
+            raise ValueError("scoped sample result completion requires a checkpoint")
+        self._validate_evaluation_scope(
+            state, state.candidate(scope.candidate_id), scope
+        )
+        self._validate_checkpoint_scope(checkpoint, scope)
+        return (
+            "EvaluationSampleResultsRecorded",
+            dict(payload),
+            event_id,
+        )
 
     @staticmethod
     def _candidate_has_unfinished_sample_results(
@@ -3077,8 +3270,8 @@ class EvolutionDirector:
             for event in state.events
         )
 
-    @staticmethod
     def _sample_result_revision_events(
+        self,
         state: RunState,
         candidate_id: str,
         revision: str,
@@ -3102,9 +3295,21 @@ class EvolutionDirector:
         start = matching_starts[0]
         if starts[-1].event_id != start.event_id:
             raise ValueError("sample result revision has been superseded")
+        start_generation = start.payload.get("generation")
+        checkpoint = start.payload.get("checkpoint")
+        generation_matches = start_generation == candidate.generation or (
+            isinstance(start_generation, int)
+            and not isinstance(start_generation, bool)
+            and self._sample_checkpoint_matches_frozen_holdout(
+                state,
+                candidate,
+                checkpoint if isinstance(checkpoint, Mapping) else None,
+                generation=start_generation,
+            )
+        )
         if (
             start.payload.get("run_id") != state.run.run_id
-            or start.payload.get("generation") != candidate.generation
+            or not generation_matches
             or start.payload.get("proposal_id") != candidate.proposal_id
         ):
             raise ValueError("sample result revision start scope is invalid")
@@ -3521,13 +3726,38 @@ class EvolutionDirector:
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
         candidate = state.candidate(candidate_id)
-        if (
+        if revision is not None:
+            checkpoint_start, _batches, _completed = (
+                self._sample_result_revision_events(
+                    state, candidate_id, revision
+                )
+            )
+            if (
+                checkpoint_start.payload.get("generation") != generation
+                or checkpoint_start.payload.get("proposal_id") != proposal_id
+            ):
+                raise ValueError(
+                    "evaluation progress does not match its checkpoint scope"
+                )
+            if not self._sample_checkpoint_candidate_status_allowed(
+                state,
+                candidate,
+                checkpoint_start.payload.get("checkpoint")
+                if isinstance(
+                    checkpoint_start.payload.get("checkpoint"), Mapping
+                )
+                else None,
+                generation=generation,
+            ):
+                raise ValueError(
+                    "evaluation progress candidate is no longer being evaluated"
+                )
+            self._require_open_model_usage_checkpoint(state, candidate_id, revision)
+        elif (
             candidate.generation != generation
             or candidate.proposal_id != proposal_id
         ):
             raise ValueError("evaluation progress does not match its candidate scope")
-        if revision is not None:
-            self._require_open_model_usage_checkpoint(state, candidate_id, revision)
         schema_version = (
             "ecologyrsi-dsh.evaluation-progress/3"
             if revision is not None
@@ -3685,11 +3915,21 @@ class EvolutionDirector:
             RunStatus.FAILED,
         )
         candidate = state.candidate(candidate_id)
-        if candidate.generation != generation:
-            raise ValueError("model usage generation does not match its candidate")
-        if candidate.status is not CandidateStatus.SPAWNED:
-            raise ValueError("model usage candidate is no longer being evaluated")
         self._require_open_model_usage_checkpoint(state, candidate_id, revision)
+        checkpoint_start, _checkpoint_batches, _checkpoint_completed = (
+            self._sample_result_revision_events(state, candidate_id, revision)
+        )
+        if checkpoint_start.payload.get("generation") != generation:
+            raise ValueError("model usage generation does not match its checkpoint")
+        if not self._sample_checkpoint_candidate_status_allowed(
+            state,
+            candidate,
+            checkpoint_start.payload.get("checkpoint")
+            if isinstance(checkpoint_start.payload.get("checkpoint"), Mapping)
+            else None,
+            generation=generation,
+        ):
+            raise ValueError("model usage candidate is no longer being evaluated")
 
         existing_by_call_id: dict[str, Event] = {}
         next_usage_index = 0
@@ -3796,6 +4036,102 @@ class EvolutionDirector:
         if completed is not None:
             raise ValueError("model usage checkpoint is already completed")
 
+    @staticmethod
+    def _sample_checkpoint_candidate_status_allowed(
+        state: RunState,
+        candidate: Candidate,
+        checkpoint: Mapping[str, Any] | None,
+        *,
+        generation: int,
+    ) -> bool:
+        """Permit only the exact frozen holdout arm for a settled candidate."""
+
+        if candidate.status is CandidateStatus.SPAWNED:
+            return candidate.generation == generation
+        if not (
+            isinstance(checkpoint, Mapping)
+            and checkpoint.get("schema_version")
+            == _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION
+            and checkpoint.get("evaluation_phase")
+            == EvaluationPhase.HOLDOUT.value
+            and candidate.status
+            in {
+                CandidateStatus.EVALUATED,
+                CandidateStatus.PROMOTED,
+                CandidateStatus.REJECTED,
+                CandidateStatus.SCREENED_OUT,
+            }
+        ):
+            return False
+        return EvolutionDirector._sample_checkpoint_matches_frozen_holdout(
+            state,
+            candidate,
+            checkpoint,
+            generation=generation,
+        )
+
+    @staticmethod
+    def _sample_checkpoint_matches_frozen_holdout(
+        state: RunState,
+        candidate: Candidate,
+        checkpoint: Mapping[str, Any] | None,
+        *,
+        generation: int,
+    ) -> bool:
+        if not (
+            isinstance(checkpoint, Mapping)
+            and checkpoint.get("schema_version")
+            == _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION
+            and checkpoint.get("evaluation_phase")
+            == EvaluationPhase.HOLDOUT.value
+        ):
+            return False
+        try:
+            arm = HoldoutArm(checkpoint.get("holdout_arm"))
+        except ValueError:
+            return False
+        holdout = state.generation_holdout_for(generation)
+        binding = (
+            holdout.arm_bindings.get(arm.value)
+            if holdout is not None
+            else None
+        )
+        return bool(
+            binding is not None
+            and binding.get("candidate_id") == candidate.candidate_id
+            and binding.get("candidate_revision_id")
+            == checkpoint.get("candidate_revision_id")
+        )
+
+    @staticmethod
+    def _sample_checkpoint_generation_allowed(
+        state: RunState,
+        candidate: Candidate,
+        generation: int,
+        checkpoint: Mapping[str, Any] | None,
+        scope: EvaluationScope | None,
+    ) -> bool:
+        """Allow a frozen holdout to replay the prior generation incumbent."""
+
+        if candidate.generation == generation:
+            return True
+        return bool(
+            isinstance(checkpoint, Mapping)
+            and checkpoint.get("schema_version")
+            == _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION
+            and checkpoint.get("evaluation_phase")
+            == EvaluationPhase.HOLDOUT.value
+            and scope is not None
+            and scope.phase is EvaluationPhase.HOLDOUT
+            and scope.generation == generation
+            and EvolutionDirector._sample_checkpoint_matches_frozen_holdout(
+                state,
+                candidate,
+                checkpoint,
+                generation=generation,
+            )
+        )
+
     def start_evaluation_sample_results(
         self,
         run_id: str,
@@ -3814,12 +4150,6 @@ class EvolutionDirector:
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
         candidate = state.candidate(candidate_id)
-        if (
-            candidate.status is not CandidateStatus.SPAWNED
-            or candidate.generation != generation
-            or candidate.proposal_id != proposal_id
-        ):
-            raise ValueError("sample result revision does not match its candidate")
         if not isinstance(revision, str) or not revision.strip():
             raise ValueError("sample result revision must be non-empty text")
         checkpoint_data = (
@@ -3836,6 +4166,24 @@ class EvolutionDirector:
             self._validate_evaluation_scope(state, candidate, scope)
             self._validate_checkpoint_scope(checkpoint_data, scope)
             self._validate_checkpoint_sample_count(state, checkpoint_data, scope)
+        if (
+            candidate.proposal_id != proposal_id
+            or not self._sample_checkpoint_generation_allowed(
+                state,
+                candidate,
+                generation,
+                checkpoint_data,
+                scope,
+            )
+        ):
+            raise ValueError("sample result revision does not match its candidate")
+        if not self._sample_checkpoint_candidate_status_allowed(
+            state,
+            candidate,
+            checkpoint_data,
+            generation=generation,
+        ):
+            raise ValueError("sample result candidate is no longer being evaluated")
         if supersedes_revision is not None and (
             not isinstance(supersedes_revision, str)
             or not supersedes_revision.strip()
@@ -3900,12 +4248,6 @@ class EvolutionDirector:
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
         candidate = state.candidate(candidate_id)
-        if (
-            candidate.status is not CandidateStatus.SPAWNED
-            or candidate.generation != generation
-            or candidate.proposal_id != proposal_id
-        ):
-            raise ValueError("sample checkpoint does not match its candidate")
 
         resolved_scope = (
             scope
@@ -3928,6 +4270,24 @@ class EvolutionDirector:
             )
         elif resolved_scope is not None:
             raise ValueError("legacy sample checkpoint cannot claim EvaluationScope")
+        if (
+            candidate.proposal_id != proposal_id
+            or not self._sample_checkpoint_generation_allowed(
+                state,
+                candidate,
+                generation,
+                checkpoint_data,
+                resolved_scope,
+            )
+        ):
+            raise ValueError("sample checkpoint does not match its candidate")
+        if not self._sample_checkpoint_candidate_status_allowed(
+            state,
+            candidate,
+            checkpoint_data,
+            generation=generation,
+        ):
+            raise ValueError("sample checkpoint candidate is no longer evaluable")
 
         starts = [
             event
@@ -4214,8 +4574,11 @@ class EvolutionDirector:
     ) -> None:
         if (
             scope.run_id != state.run.run_id
-            or scope.generation != candidate.generation
             or scope.candidate_id != candidate.candidate_id
+            or (
+                scope.phase is not EvaluationPhase.HOLDOUT
+                and scope.generation != candidate.generation
+            )
         ):
             raise ValueError("evaluation scope does not match candidate")
         revision = state.revision(scope.candidate_revision_id)
@@ -4302,11 +4665,18 @@ class EvolutionDirector:
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
         candidate = state.candidate(candidate_id)
-        if candidate.status is not CandidateStatus.SPAWNED:
-            raise ValueError("sample result candidate is no longer being evaluated")
-        _start, batch_events, completed = self._sample_result_revision_events(
+        start, batch_events, completed = self._sample_result_revision_events(
             state, candidate_id, revision
         )
+        if not self._sample_checkpoint_candidate_status_allowed(
+            state,
+            candidate,
+            start.payload.get("checkpoint")
+            if isinstance(start.payload.get("checkpoint"), Mapping)
+            else None,
+            generation=int(start.payload["generation"]),
+        ):
+            raise ValueError("sample result candidate is no longer being evaluated")
         if completed is not None:
             raise ValueError("sample result revision is already completed")
         event_id = (

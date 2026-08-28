@@ -14,6 +14,7 @@ test("workflow uses a host-authored script and structured bounded arguments", as
     label: "safe-1",
     prompt: "literal ${notInterpolated}",
     schema: { type: "object", properties: { x: { type: "integer" } } },
+    maxTokens: 2048,
   }];
   const result = startHomogeneousWorkflow(roleHost, {
     template_id: "ecology-one-shot-v1", max_total_agents: 2, max_concurrent: 1, max_items: 2, sync_timeout_ms: 5000,
@@ -21,12 +22,23 @@ test("workflow uses a host-authored script and structured bounded arguments", as
   assert.equal(result, run);
   assert.doesNotMatch(starts[0].script, /notInterpolated/);
   assert.match(starts[0].script, /agent\(item\.prompt/);
+  assert.match(starts[0].script, /maxTokens: item\.maxTokens/);
   assert.deepEqual(starts[0].args.items, items);
   assert.equal(starts[0].args.maxConcurrent, 1);
   assert.equal(starts[0].maxTotalAgents, 2);
   assert.equal(starts[0].parent, roleHost.agent);
   assert.equal(starts[0].meta.name, "ecology-one-shot-v1");
   assert.throws(() => startHomogeneousWorkflow(roleHost, { template_id: "ecology-one-shot-v1", max_items: 0 }, items), /max_items/);
+  for (const maxTokens of [511, 8193, 2048.5, "2048"]) {
+    assert.throws(
+      () => startHomogeneousWorkflow(
+        roleHost,
+        { template_id: "ecology-one-shot-v1", max_items: 1 },
+        [{ ...items[0], maxTokens }],
+      ),
+      /maxTokens must be between 512 and 8192/,
+    );
+  }
 });
 
 test("cancellation covers a one-shot start before its promise settles", async () => {
