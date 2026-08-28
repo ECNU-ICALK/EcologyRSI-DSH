@@ -20,26 +20,32 @@ from __future__ import annotations
 
 import math
 import os
+import sqlite3
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from queue import Empty, Queue
 from types import SimpleNamespace
 from typing import Any
 
-from ..core.models import RunStatus
-from ..core.models import digest
 from ..core.errors import (
     FrozenRuntimeBindingDriftError,
     dsh_native_runtime_error_in_chain,
     dsh_native_runtime_retryable,
     find_exception,
 )
+from ..core.ledger import ConcurrentRunMutationError
+from ..core.models import RunStatus, digest
 from ..core.redaction import public_exception_summary
 from ..core.state import gateway_retry_error_code
-from ..evaluators.sample_execution import SampleResultCallbackError
+from ..evaluators.sample_execution import (
+    SampleExecutionControlUnavailableError,
+    SampleResultCallbackError,
+)
 from ..evolution.batches import ResearchResponseContractError
+from ..integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 from ..integrations.model_gateway import gateway_error_in_chain
 from .generation_execution import complete_if_budget_exhausted, execute_generation
 
@@ -52,6 +58,10 @@ _RETRY_TIMER_START_RETRY_SECONDS = 1.0
 _GATEWAY_RETRY_BASE_SECONDS = 15.0
 _GATEWAY_RETRY_MAX_SECONDS = 300.0
 _GATEWAY_RETRY_DEADLINE_MAX_SECONDS = 3600.0
+_NATIVE_QUIESCENCE_RETRY_BASE_SECONDS = 1.0
+_NATIVE_QUIESCENCE_RETRY_MAX_SECONDS = 30.0
+_SCHEDULER_COOLDOWN_MAINTENANCE_SECONDS = 5.0
+_SCHEDULER_ORPHAN_MAINTENANCE_SECONDS = 30.0
 _RESEARCH_RETRYABLE_RESPONSE_CODES = frozenset(
     {
         "gateway_response_error",
@@ -85,6 +95,19 @@ class _DeferredFailure:
     reason: str
     error_code: str
     failure_context: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _DeferredPause:
+    reason: str
+    code: str = "auto_progress_host_fault"
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeQuiescence:
+    request: dict[str, Any]
+    runtime: Any
+    marker: int | tuple[int, object]
 
 
 def _run_incarnation(state: Any) -> int:
@@ -201,6 +224,40 @@ def _failure_diagnostics(
     return f"auto_progress_{safe_stage}_{suffix}"[:120], context
 
 
+def _host_fault_pause(
+    state: Any,
+    exc: BaseException,
+    *,
+    stage: str | None = None,
+) -> _DeferredPause:
+    """Build a bounded public pause without retaining exception messages."""
+
+    try:
+        _failure_code, context = _failure_diagnostics(state, exc, stage=stage)
+    except Exception:  # noqa: BLE001 - diagnostics must not mask the fault
+        context = {
+            "stage": str(stage or "generation")[:80],
+            "work_unit_kind": "generation",
+        }
+    safe_stage = "".join(
+        character
+        for character in str(context.get("stage") or "generation")[:80]
+        if character.isalnum() or character in {"_", "-"}
+    ) or "generation"
+    safe_work_unit = "".join(
+        character
+        for character in str(context.get("work_unit_kind") or "generation")[:80]
+        if character.isalnum() or character in {"_", "-"}
+    ) or "generation"
+    return _DeferredPause(
+        reason=(
+            "自动推进检测到宿主异常，已暂停并保留当前检查点；"
+            f"阶段={safe_stage}，工作单元={safe_work_unit}，"
+            f"异常={public_exception_summary(exc)}。"
+        )[:500]
+    )
+
+
 class AutoProgressManager:
     """Fairly advance autonomous runs with a bounded background worker pool.
 
@@ -225,6 +282,10 @@ class AutoProgressManager:
         # terminal transition.  A restart recovers the still-running durable run
         # through ``recover_running`` if the process exits before persistence.
         self._deferred_failures: dict[_WorkItem, _DeferredFailure] = {}
+        # Host faults pause instead of consuming the scientific checkpoint. If
+        # the lifecycle append is temporarily unavailable, retain only this
+        # bounded transition and never replay the work unit first.
+        self._deferred_pauses: dict[_WorkItem, _DeferredPause] = {}
         # A request-local gateway retry may already have exhausted its small
         # transport budget while the provider is still queueing work.  Keep
         # the run alive and delay its next generation attempt instead of
@@ -239,6 +300,7 @@ class AutoProgressManager:
         self._retry_timers: dict[_WorkItem, threading.Timer] = {}
         self._state_lock = threading.RLock()
         self._stop = threading.Event()
+        self._maintenance_failure_count = 0
         self._retry_limit = self._read_retry_limit()
         self._worker_count = self._read_worker_count()
         self._threads = tuple(
@@ -282,15 +344,9 @@ class AutoProgressManager:
         return max(1, min(value, _MAX_WORKER_COUNT))
 
     def diagnostics(self, run_id: str) -> dict[str, Any]:
-        """Return a bounded scheduler snapshot after repairing stale cooldowns."""
+        """Return a bounded, side-effect-free scheduler snapshot."""
 
         target_run_id = str(run_id).strip()
-        # Cooldowns are an in-memory scheduling aid, while the ledger remains
-        # authoritative for run lifecycle.  Reconcile before reporting so an
-        # externally completed run or a dead Timer cannot remain visible as a
-        # permanent cooldown (and cannot orphan a still-running run).
-        self._reconcile_retry_cooldowns()
-        self._reconcile_idle_running_run(target_run_id)
         with self._state_lock:
             running_items = set(self._running)
             scheduled_items = set(self._scheduled)
@@ -394,6 +450,19 @@ class AutoProgressManager:
             return False
         return self._schedule_work_item((run_id, _run_incarnation(state)))
 
+    def _reconcile_idle_running_runs(self) -> int:
+        """Recover orphaned automatic runs without relying on GET side effects."""
+
+        recovered = 0
+        for run_id in self.server.ledger.run_ids(include_archived=False):
+            try:
+                if self.server.director.run_status(run_id) is not RunStatus.RUNNING:
+                    continue
+            except (KeyError, ValueError):
+                continue
+            recovered += int(self._reconcile_idle_running_run(run_id))
+        return recovered
+
     def schedule(self, run_id: str) -> bool:
         """Queue a run once; return ``True`` when a new work item was added."""
 
@@ -455,6 +524,7 @@ class AutoProgressManager:
             self._running.discard(work_item)
             self._reschedule_requested.discard(work_item)
             self._deferred_failures.pop(work_item, None)
+            self._deferred_pauses.pop(work_item, None)
             self._pending_gateway_retries.pop(work_item, None)
 
     def _clear_retry_cooldown_locked(
@@ -482,6 +552,7 @@ class AutoProgressManager:
                 self._clear_retry_cooldown_locked(work_item)
                 self._reschedule_requested.discard(work_item)
                 self._deferred_failures.pop(work_item, None)
+                self._deferred_pauses.pop(work_item, None)
                 self._pending_gateway_retries.pop(work_item, None)
             return
         except Exception:  # noqa: BLE001 - diagnostics must remain best effort
@@ -492,6 +563,7 @@ class AutoProgressManager:
             self._clear_retry_cooldown_locked(work_item)
             self._reschedule_requested.discard(work_item)
             self._deferred_failures.pop(work_item, None)
+            self._deferred_pauses.pop(work_item, None)
             self._pending_gateway_retries.pop(work_item, None)
 
     def _reconcile_retry_cooldowns(self) -> None:
@@ -547,6 +619,7 @@ class AutoProgressManager:
                         self._scheduled.discard(work_item)
                     self._reschedule_requested.discard(work_item)
                     self._deferred_failures.pop(work_item, None)
+                    self._deferred_pauses.pop(work_item, None)
                 elif expired:
                     self._clear_retry_cooldown_locked(work_item)
                     should_schedule = enabled_running and not (scheduled or running)
@@ -581,6 +654,8 @@ class AutoProgressManager:
         # recovery safe for migrated or administratively repaired ledgers.
         for run_id in self.server.ledger.run_ids(include_archived=False):
             try:
+                if self.server.director.run_status(run_id) is not RunStatus.RUNNING:
+                    continue
                 state = self.server.director.state(run_id)
             except (KeyError, ValueError):
                 continue
@@ -595,6 +670,43 @@ class AutoProgressManager:
                 recovered += int(
                     self._schedule_work_item((run_id, _run_incarnation(state)))
                 )
+        return recovered
+
+    def recover_native_quiescence(self) -> int:
+        """Restore Host-owned native pause/cancel boundaries after a restart."""
+
+        actions = {
+            RunStatus.PAUSED: "pause",
+            RunStatus.FAILED: "cancel",
+            RunStatus.CANCELLED: "cancel",
+        }
+        recovered = 0
+        # Include archived terminal runs: archival removes a run from normal
+        # work queues but cannot authorize a still-live DSH process to continue.
+        for run_id in self.server.ledger.run_ids(include_archived=True):
+            try:
+                status = self.server.director.run_status(run_id)
+                action = actions.get(status)
+                if action is None:
+                    continue
+                state = self.server.director.state(run_id)
+                if (
+                    state.run.status is not status
+                    or state.task_manifest.metadata.get("execution_protocol")
+                    != DSH_NATIVE_EXECUTION_PROTOCOL
+                ):
+                    continue
+                quiescence = self._close_native_admission(state, action=action)
+            except (KeyError, ValueError):
+                continue
+            if quiescence is None:
+                continue
+            self._start_native_quiescence(
+                action,
+                quiescence,
+                reconcile_runtime_status=True,
+            )
+            recovered += 1
         return recovered
 
     def close(self, *, timeout: float = 30.0) -> bool:
@@ -619,6 +731,7 @@ class AutoProgressManager:
             self._running.clear()
             self._reschedule_requested.clear()
             self._deferred_failures.clear()
+            self._deferred_pauses.clear()
             self._retry_not_before.clear()
             self._retry_authority.clear()
             self._pending_gateway_retries.clear()
@@ -690,10 +803,39 @@ class AutoProgressManager:
         return True
 
     def _worker(self) -> None:
+        maintenance_worker = threading.current_thread() is self._thread
+        next_cooldown_maintenance = (
+            time.monotonic() + _SCHEDULER_COOLDOWN_MAINTENANCE_SECONDS
+        )
+        next_orphan_maintenance = (
+            time.monotonic() + _SCHEDULER_ORPHAN_MAINTENANCE_SECONDS
+        )
         while not self._stop.is_set():
             try:
                 work_item = self._queue.get(timeout=0.25)
             except Empty:
+                if maintenance_worker:
+                    now = time.monotonic()
+                    if now >= next_cooldown_maintenance:
+                        next_cooldown_maintenance = (
+                            now + _SCHEDULER_COOLDOWN_MAINTENANCE_SECONDS
+                        )
+                        try:
+                            self._reconcile_retry_cooldowns()
+                        except Exception:  # noqa: BLE001 - maintenance is best effort
+                            # Maintenance is a repair path, never a reason to
+                            # terminate the only worker that can make progress.
+                            self._maintenance_failure_count += 1
+                    if now >= next_orphan_maintenance:
+                        next_orphan_maintenance = (
+                            now + _SCHEDULER_ORPHAN_MAINTENANCE_SECONDS
+                        )
+                        try:
+                            self._reconcile_idle_running_runs()
+                        except Exception:  # noqa: BLE001 - maintenance is best effort
+                            # A transient ledger read is retried at the next
+                            # bounded tick; normal FIFO work remains available.
+                            self._maintenance_failure_count += 1
                 continue
             continue_running = False
             reschedule_requested = False
@@ -765,25 +907,49 @@ class AutoProgressManager:
                 if work_item is not None:
                     try:
                         failure_state = self._state_for_work_item(work_item)
-                        code, context = _failure_diagnostics(
-                            failure_state, exc, stage="worker"
-                        )
-                        self._defer_failure(
-                            work_item,
-                            _DeferredFailure(
-                                "自动推进工作器异常："
-                                f"{public_exception_summary(exc)}",
-                                code,
-                                context,
-                            ),
-                        )
+                        deferred_error = _retry_later_error(exc, stage="worker")
+                        if deferred_error is not None:
+                            continue_running = self._defer_retry(
+                                work_item,
+                                self._gateway_retry_delay(
+                                    work_item,
+                                    1,
+                                    deferred_error,
+                                    stage="worker",
+                                ),
+                                deferred_error,
+                                stage="worker",
+                                attempt_anchor_seq=self._attempt_authority_seq(
+                                    failure_state
+                                ),
+                            )
+                        elif _progress_failure_irrecoverable(exc, stage="worker"):
+                            code, context = _failure_diagnostics(
+                                failure_state, exc, stage="worker"
+                            )
+                            self._defer_failure(
+                                work_item,
+                                _DeferredFailure(
+                                    "自动推进工作器异常："
+                                    f"{public_exception_summary(exc)}",
+                                    code,
+                                    context,
+                                ),
+                            )
+                            # The next FIFO turn persists only RunFailed.
+                            continue_running = True
+                        else:
+                            continue_running = self._persist_or_defer_pause(
+                                work_item,
+                                _host_fault_pause(
+                                    failure_state,
+                                    exc,
+                                    stage="worker",
+                                ),
+                            )
                     except (KeyError, ValueError):
                         continue_running = False
                         continue
-                    # Put the failed item at the FIFO tail. Its next turn only
-                    # persists the bounded terminal failure, while later work
-                    # can proceed on this still-live worker.
-                    continue_running = True
             finally:
                 if work_item is not None:
                     with self._state_lock:
@@ -830,6 +996,7 @@ class AutoProgressManager:
                 self._state_for_work_item(work_item)
             except KeyError:
                 self._clear_deferred_failure(work_item)
+                self._clear_deferred_pause(work_item)
                 retire_idle_lease = True
                 return False
             return self._run_one_generation_locked(work_item)
@@ -863,6 +1030,9 @@ class AutoProgressManager:
                 self._pending_gateway_retries.pop(work_item, None)
             return keep_running
         deferred_failure = self._deferred_failure(work_item)
+        deferred_pause = self._deferred_pause(work_item)
+        if deferred_pause is not None:
+            return self._persist_or_defer_pause(work_item, deferred_pause)
         if deferred_failure is not None:
             with self.server.mutation_lock:
                 retry_terminal_write = self._persist_run_failure(
@@ -878,6 +1048,7 @@ class AutoProgressManager:
         while not self._stop.is_set():
             retry_delay = 0.0
             preflight_failed = False
+            preflight_pause: _DeferredPause | None = None
             terminal_failure = False
             retry_terminal_write = False
             # Only the short state/binding boundary needs the HTTP mutation
@@ -931,7 +1102,19 @@ class AutoProgressManager:
                         # attempt.  Retry transient gateway/ledger boundaries a
                         # small number of times without busy-spinning.
                         retry_delay = min(2.0, 0.25 * (2 ** (failures - 1)))
-                    if not retryable or failures >= self._retry_limit:
+                    if (
+                        deferred_error is None
+                        and not _progress_failure_irrecoverable(
+                            exc,
+                            stage="preflight",
+                        )
+                    ):
+                        preflight_pause = _host_fault_pause(
+                            state,
+                            exc,
+                            stage="preflight",
+                        )
+                    elif not retryable or failures >= self._retry_limit:
                         terminal_failure = True
                         disposition = (
                             "网关请求已完成内部重试"
@@ -963,6 +1146,9 @@ class AutoProgressManager:
                             self._defer_failure(work_item, failure)
                             retry_terminal_write = True
 
+            if preflight_pause is not None:
+                return self._persist_or_defer_pause(work_item, preflight_pause)
+
             if terminal_failure:
                 if retry_terminal_write:
                     if self._stop.wait(_FAILURE_PERSISTENCE_RETRY_SECONDS):
@@ -988,6 +1174,7 @@ class AutoProgressManager:
                 if adaptive_protocol:
                     from .work_units import execute_next_adaptive_work_unit
 
+                    before_work_unit_seq = int(state.events[-1].seq)
                     progressed = execute_next_adaptive_work_unit(endpoint, run_id)
                     latest = self._state_for_work_item(work_item)
                     if _run_incarnation(latest) != work_item[1]:
@@ -997,6 +1184,11 @@ class AutoProgressManager:
                     if not progressed:
                         raise RuntimeError(
                             "adaptive work unit returned without durable progress"
+                        )
+                    if int(latest.events[-1].seq) <= before_work_unit_seq:
+                        raise RuntimeError(
+                            "adaptive work unit reported progress without "
+                            "advancing the durable event sequence"
                         )
                     return True
 
@@ -1044,18 +1236,16 @@ class AutoProgressManager:
                         )
                         or "宿主语义合同校验未通过"
                     )[:500]
-                    with self.server.mutation_lock:
-                        latest = self._state_for_work_item(work_item)
-                        if latest.run.status is RunStatus.RUNNING:
-                            self.server.director.pause_run(
-                                work_item[0],
-                                code="research_contract_retry_exhausted",
-                                reason=(
-                                    "研究响应已用尽本轮语义修复预算："
-                                    f"{validation_detail}"
-                                )[:500],
-                            )
-                    return False
+                    return self._persist_or_defer_pause(
+                        work_item,
+                        _DeferredPause(
+                            reason=(
+                                "研究响应已用尽本轮语义修复预算："
+                                f"{validation_detail}"
+                            )[:500],
+                            code="research_contract_retry_exhausted",
+                        ),
+                    )
                 retryable = _progress_failure_retryable(
                     exc,
                     stage=recovery_stage,
@@ -1084,6 +1274,18 @@ class AutoProgressManager:
                         deferred_error,
                         stage=recovery_stage,
                         attempt_anchor_seq=retry_attempt_anchor_seq,
+                    )
+                if not _progress_failure_irrecoverable(
+                    exc,
+                    stage=recovery_stage,
+                ):
+                    return self._persist_or_defer_pause(
+                        work_item,
+                        _host_fault_pause(
+                            recovery_state or state,
+                            exc,
+                            stage=recovery_stage,
+                        ),
                     )
                 terminal_failure = not retryable or failures >= self._retry_limit
                 retry_terminal_write = False
@@ -1171,6 +1373,48 @@ class AutoProgressManager:
         with self._state_lock:
             self._deferred_failures[work_item] = failure
 
+    def _deferred_pause(
+        self, work_item_or_run_id: _WorkItem | str
+    ) -> _DeferredPause | None:
+        work_item: _WorkItem | None
+        if isinstance(work_item_or_run_id, tuple):
+            work_item = work_item_or_run_id
+        else:
+            try:
+                state = self.server.director.state(work_item_or_run_id)
+            except (KeyError, ValueError):
+                return None
+            work_item = (work_item_or_run_id, _run_incarnation(state))
+        with self._state_lock:
+            return self._deferred_pauses.get(work_item)
+
+    def _defer_pause(self, work_item: _WorkItem, pause: _DeferredPause) -> None:
+        with self._state_lock:
+            self._deferred_pauses[work_item] = pause
+
+    def _clear_deferred_pause(self, work_item: _WorkItem) -> None:
+        with self._state_lock:
+            self._deferred_pauses.pop(work_item, None)
+
+    def _persist_or_defer_pause(
+        self,
+        work_item: _WorkItem,
+        pause: _DeferredPause,
+    ) -> bool:
+        """Persist a checkpoint-preserving pause before any work-unit replay."""
+
+        try:
+            with self.server.mutation_lock:
+                retry_pause_write = self._persist_run_pause(work_item, pause)
+        except Exception:  # noqa: BLE001 - retain the original transition intent
+            self._defer_pause(work_item, pause)
+            retry_pause_write = True
+        if not retry_pause_write:
+            return False
+        if self._stop.wait(_FAILURE_PERSISTENCE_RETRY_SECONDS):
+            return False
+        return True
+
     def _defer_retry(
         self,
         work_item: _WorkItem,
@@ -1241,6 +1485,23 @@ class AutoProgressManager:
             last_error_code=report.last_error_code,
         )
         event = decision.event
+        if decision.outcome == "paused":
+            # The retry circuit writes RunPaused atomically inside the
+            # director. Complete the same native-runtime fence used by every
+            # other automatic pause so Host and DSH cannot diverge.
+            try:
+                paused_state = self._state_for_work_item(work_item)
+            except (KeyError, ValueError):
+                paused_state = None
+            if paused_state is not None:
+                native_quiescence = self._close_native_admission(
+                    paused_state,
+                    action="pause",
+                )
+                self._start_native_quiescence("pause", native_quiescence)
+            with self._state_lock:
+                self._clear_retry_cooldown_locked(work_item)
+            return False
         if decision.outcome != "scheduled" or event is None:
             with self._state_lock:
                 self._clear_retry_cooldown_locked(work_item)
@@ -1544,6 +1805,294 @@ class AutoProgressManager:
         with self._state_lock:
             self._deferred_failures.pop(work_item, None)
 
+    def _persist_run_pause(
+        self,
+        work_item: _WorkItem,
+        pause: _DeferredPause,
+    ) -> bool:
+        """Persist RunPaused, or request a retry of only that transition."""
+
+        run_id = work_item[0]
+        try:
+            latest = self._state_for_work_item(work_item)
+        except KeyError:
+            self._clear_deferred_pause(work_item)
+            return False
+        except Exception:  # noqa: BLE001 - retry an unavailable ledger boundary
+            self._defer_pause(work_item, pause)
+            return True
+        if latest.run.status is not RunStatus.RUNNING:
+            self._clear_deferred_pause(work_item)
+            return False
+        native_quiescence = self._close_native_admission(latest, action="pause")
+        try:
+            self.server.director.pause_run(
+                run_id,
+                reason=str(pause.reason)[:500],
+                code=pause.code,
+            )
+        except Exception:  # noqa: BLE001 - distinguish a lifecycle race by replay
+            try:
+                latest = self._state_for_work_item(work_item)
+            except KeyError:
+                self._clear_native_quiescence(native_quiescence)
+                self._clear_deferred_pause(work_item)
+                return False
+            except Exception:  # noqa: BLE001 - ledger still unavailable
+                self._clear_native_quiescence(native_quiescence)
+                self._defer_pause(work_item, pause)
+                return True
+            if latest.run.status is not RunStatus.RUNNING:
+                if latest.run.status is RunStatus.PAUSED:
+                    self._start_native_quiescence("pause", native_quiescence)
+                else:
+                    self._clear_native_quiescence(native_quiescence)
+                self._clear_deferred_pause(work_item)
+                return False
+            self._clear_native_quiescence(native_quiescence)
+            self._defer_pause(work_item, pause)
+            return True
+        self._start_native_quiescence("pause", native_quiescence)
+        with self._state_lock:
+            self._deferred_pauses.pop(work_item, None)
+            self._deferred_failures.pop(work_item, None)
+            self._pending_gateway_retries.pop(work_item, None)
+            self._clear_retry_cooldown_locked(work_item)
+        return False
+
+    def _close_native_admission(
+        self,
+        state: Any,
+        *,
+        action: str,
+    ) -> _NativeQuiescence | None:
+        """Fence native tool writes before a terminal Host transition."""
+
+        if (
+            state.task_manifest.metadata.get("execution_protocol")
+            != DSH_NATIVE_EXECUTION_PROTOCOL
+        ):
+            return None
+        run_id = str(state.run.run_id)
+        self.server.dsh_tools.close_run_admissions(run_id)
+        runtime = getattr(self.server, "dsh_native_runtime", None)
+        method = getattr(runtime, action, None)
+        if not callable(method):
+            return None
+        run_revision = int(state.events[-1].seq)
+        request = {
+            "run_id": run_id,
+            "run_state_revision": run_revision,
+            "stage_attempt": 0,
+            "ledger_expected_revision": int(self.server.ledger.latest_seq()),
+            "idempotency_key": (
+                f"auto-progress-{action}:{run_id}:{run_revision}"
+            ),
+        }
+        marker = (id(runtime), object())
+        if not self.server.claim_native_control_inflight(run_id, marker):
+            # A control already owns remote quiescence for this run. Admission
+            # is closed, so starting a second out-of-order pause/cancel would
+            # only make a later explicit resume race the older operation.
+            return None
+        return _NativeQuiescence(
+            request=request,
+            runtime=runtime,
+            marker=marker,
+        )
+
+    def _clear_native_quiescence(
+        self,
+        quiescence: _NativeQuiescence | None,
+    ) -> None:
+        if quiescence is None:
+            return
+        run_id = str(quiescence.request["run_id"])
+        self.server.clear_native_control_inflight(run_id, quiescence.marker)
+
+    def _native_quiescence_owned(
+        self,
+        quiescence: _NativeQuiescence,
+    ) -> bool:
+        return self.server.native_control_inflight_owned(
+            str(quiescence.request["run_id"]),
+            quiescence.marker,
+        )
+
+    @staticmethod
+    def _native_quiescence_retry_delay(attempt: int) -> float:
+        retry_base = max(0.0, float(_NATIVE_QUIESCENCE_RETRY_BASE_SECONDS))
+        retry_max = max(0.0, float(_NATIVE_QUIESCENCE_RETRY_MAX_SECONDS))
+        if retry_base == 0.0 or retry_max == 0.0:
+            return 0.0
+        exponent = min(30, max(0, int(attempt) - 1))
+        return min(retry_max, math.ldexp(retry_base, exponent))
+
+    @staticmethod
+    def _native_status_disposition(action: str, payload: Any) -> str:
+        """Classify a runtime status without trusting unknown states."""
+
+        if not isinstance(payload, Mapping):
+            return "blocked"
+        status = payload.get("status")
+        if not isinstance(status, str):
+            return "blocked"
+        normalized = status.strip().lower()
+        if action == "pause" and normalized in {"paused", "cancelled"}:
+            return "quiesced"
+        if action == "cancel" and normalized == "cancelled":
+            return "quiesced"
+        if normalized in {"pausing", "cancelling"}:
+            return "wait"
+        allowed = (
+            {"created", "running", "resuming"}
+            if action == "pause"
+            else {"created", "running", "paused", "resuming"}
+        )
+        return "invoke" if normalized in allowed else "blocked"
+
+    def _finish_native_quiescence(
+        self,
+        action: str,
+        quiescence: _NativeQuiescence,
+        *,
+        reconcile_runtime_status: bool = False,
+    ) -> BaseException | None:
+        """Synchronously drain one runtime, retaining ownership until safe."""
+
+        method = getattr(quiescence.runtime, action, None)
+        if not callable(method):
+            # Admission remains closed. Keep the marker so start/resume cannot
+            # overtake a runtime that has not demonstrated quiescence.
+            return RuntimeError("native runtime has no quiescence method")
+        status_method = getattr(quiescence.runtime, "status", None)
+        attempt = 0
+        check_status = reconcile_runtime_status and callable(status_method)
+        while not self._stop.is_set() and self._native_quiescence_owned(
+            quiescence
+        ):
+            if check_status:
+                try:
+                    status_payload = status_method(
+                        str(quiescence.request["run_id"])
+                    )
+                except Exception as exc:  # noqa: BLE001 - classify boundary
+                    dsh_error = dsh_native_runtime_error_in_chain(exc)
+                    if (
+                        dsh_error is not None
+                        and getattr(dsh_error, "status_code", None) == 404
+                    ):
+                        # A missing runtime run has no live children to drain.
+                        return None
+                    if dsh_error is None or not dsh_native_runtime_retryable(
+                        dsh_error
+                    ):
+                        return exc
+                    disposition = "wait"
+                else:
+                    disposition = self._native_status_disposition(
+                        action,
+                        status_payload,
+                    )
+                if disposition == "quiesced":
+                    return None
+                if disposition == "blocked":
+                    return RuntimeError(
+                        "native runtime status did not prove quiescence"
+                    )
+                if disposition == "wait":
+                    attempt += 1
+                    if self._stop.wait(
+                        self._native_quiescence_retry_delay(attempt)
+                    ):
+                        return RuntimeError("native quiescence was stopped")
+                    continue
+            try:
+                method(dict(quiescence.request))
+            except Exception as exc:  # noqa: BLE001 - classify boundary
+                dsh_error = dsh_native_runtime_error_in_chain(exc)
+                if dsh_error is None or not dsh_native_runtime_retryable(
+                    dsh_error
+                ):
+                    # An unclassified/contract failure cannot prove silence.
+                    # Retain the marker until runtime replacement or recovery.
+                    return exc
+                attempt += 1
+                check_status = callable(status_method)
+                if self._stop.wait(
+                    self._native_quiescence_retry_delay(attempt)
+                ):
+                    return RuntimeError("native quiescence was stopped")
+                continue
+            return None
+        if self._stop.is_set():
+            return RuntimeError("native quiescence was stopped")
+        return RuntimeError("native quiescence ownership was superseded")
+
+    def finish_native_quiescence(
+        self,
+        action: str,
+        request: dict[str, Any],
+        runtime: Any,
+        marker: int | tuple[int, object],
+        *,
+        reconcile_runtime_status: bool = False,
+    ) -> BaseException | None:
+        """Share the safe drain loop with explicit native controls."""
+
+        return self._finish_native_quiescence(
+            action,
+            _NativeQuiescence(
+                request=dict(request),
+                runtime=runtime,
+                marker=marker,
+            ),
+            reconcile_runtime_status=reconcile_runtime_status,
+        )
+
+    def _start_native_quiescence(
+        self,
+        action: str,
+        quiescence: _NativeQuiescence | None,
+        *,
+        reconcile_runtime_status: bool = False,
+    ) -> None:
+        """Start the shared native drain outside the mutation lock."""
+
+        if quiescence is None:
+            return
+
+        def quiesce() -> None:
+            error = self._finish_native_quiescence(
+                action,
+                quiescence,
+                reconcile_runtime_status=reconcile_runtime_status,
+            )
+            if error is not None:
+                return
+            generation_barrier = self.server.acquire_generation_lease(
+                str(quiescence.request["run_id"])
+            )
+            if generation_barrier is None:
+                return
+            generation_barrier.release()
+            self._clear_native_quiescence(quiescence)
+
+        thread = threading.Thread(
+            target=quiesce,
+            name=(
+                f"ecologyrsi-auto-{action}-"
+                f"{str(quiescence.request['run_id'])[:8]}"
+            ),
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except Exception:
+            # Failing to start the drain cannot authorize resume. The closed
+            # admission fence and marker remain for startup/operator recovery.
+            return
+
     def _persist_run_failure(
         self, work_item: _WorkItem, failure: _DeferredFailure
     ) -> bool:
@@ -1570,6 +2119,7 @@ class AutoProgressManager:
         if latest.run.status is not RunStatus.RUNNING:
             self._clear_deferred_failure(work_item)
             return False
+        native_quiescence = self._close_native_admission(latest, action="cancel")
         try:
             self.server.director.fail_run(
                 run_id,
@@ -1581,16 +2131,24 @@ class AutoProgressManager:
             try:
                 latest = self._state_for_work_item(work_item)
             except KeyError:
+                self._clear_native_quiescence(native_quiescence)
                 self._clear_deferred_failure(work_item)
                 return False
             except Exception:  # noqa: BLE001 - ledger still unavailable
+                self._clear_native_quiescence(native_quiescence)
                 self._defer_failure(work_item, failure)
                 return True
             if latest.run.status is not RunStatus.RUNNING:
+                if latest.run.status is RunStatus.FAILED:
+                    self._start_native_quiescence("cancel", native_quiescence)
+                else:
+                    self._clear_native_quiescence(native_quiescence)
                 self._clear_deferred_failure(work_item)
                 return False
+            self._clear_native_quiescence(native_quiescence)
             self._defer_failure(work_item, failure)
             return True
+        self._start_native_quiescence("cancel", native_quiescence)
         self._clear_deferred_failure(work_item)
         return False
 
@@ -1608,6 +2166,23 @@ def _parse_retry_at(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _transient_persistence_error_in_chain(
+    exc: BaseException,
+) -> BaseException | None:
+    """Return only explicit Host persistence/control infrastructure faults."""
+
+    for error_type in (
+        SampleResultCallbackError,
+        SampleExecutionControlUnavailableError,
+        ConcurrentRunMutationError,
+        sqlite3.OperationalError,
+    ):
+        matched = find_exception(exc, error_type)
+        if matched is not None:
+            return matched
+    return None
 
 
 def _retry_class_and_error_code(
@@ -1645,7 +2220,10 @@ def _retry_class_and_error_code(
         # Keep the established public error code while separating timeout
         # failures into their own finite breaker scope.
         return "research_timeout", "timeout"
-    if exc is not None and find_exception(exc, SampleResultCallbackError) is not None:
+    if (
+        exc is not None
+        and _transient_persistence_error_in_chain(exc) is not None
+    ):
         return "sample_result_persistence", "sample_result_callback_error"
     return "model_gateway", "gateway_unavailable"
 
@@ -1716,12 +2294,40 @@ def _progress_failure_retryable(
                 stage=stage,
             )
         )
-    if find_exception(exc, SampleResultCallbackError) is not None:
+    if _transient_persistence_error_in_chain(exc) is not None:
         # Sample-result writes are part of the durable evaluation boundary.
         # A transient ledger/IPC failure must be retried after a cooldown, not
         # converted into a terminal generation failure after three attempts.
         return True
-    return not isinstance(exc, (KeyError, TypeError, ValueError))
+    # Built-in exceptions are ambiguous at this boundary. A RuntimeError,
+    # ValueError, KeyError, AssertionError, or similar host fault must not be
+    # guessed to be transient and replay a potentially non-idempotent work
+    # unit. The caller durably pauses these faults at the current checkpoint.
+    return False
+
+
+def _progress_failure_irrecoverable(
+    exc: BaseException,
+    *,
+    stage: str | None = None,
+) -> bool:
+    """Identify only explicit fail-closed boundaries owned by the Host."""
+
+    if find_exception(exc, FrozenRuntimeBindingDriftError) is not None:
+        return True
+    dsh_error = dsh_native_runtime_error_in_chain(exc)
+    if dsh_error is not None:
+        return not dsh_native_runtime_retryable(dsh_error)
+    gateway_error = gateway_error_in_chain(exc)
+    if gateway_error is not None:
+        return not (
+            bool(gateway_error.retryable)
+            or _research_gateway_failure_retryable_later(
+                gateway_error,
+                stage=stage,
+            )
+        )
+    return False
 
 
 def _retry_later_error(
@@ -1744,8 +2350,9 @@ def _retry_later_error(
         return None
     if stage == "research" and find_exception(exc, TimeoutError) is not None:
         return exc
-    if find_exception(exc, SampleResultCallbackError) is not None:
-        return exc
+    persistence_error = _transient_persistence_error_in_chain(exc)
+    if persistence_error is not None:
+        return persistence_error
     return None
 
 

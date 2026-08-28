@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from ecologyrsi_dsh import EventLedger, EvolutionDirector, FakeDSHAdapter, TaskManifest
+from ecologyrsi_dsh.api import generation_execution
 from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.core.screening import screening_cohort_digest
 from ecologyrsi_dsh.core.trajectory import (
@@ -325,6 +327,93 @@ class TrajectoryEventReplayTests(unittest.TestCase):
         )
         self.assertEqual(
             state.effective_revision_for(0), comparison.selected_revision_id
+        )
+
+    def test_holdout_arm_started_is_idempotent_across_real_state_replay(self) -> None:
+        finalists = self._freeze_top2()
+        for candidate in finalists:
+            self._complete_lane(candidate)
+
+        incumbent = self.candidates[2]
+        arm_bindings = {
+            HoldoutArm.FINALIST_1.value: {
+                "candidate_id": finalists[0].candidate_id,
+                "candidate_revision_id": self.revisions[
+                    finalists[0].candidate_id
+                ].revision_id,
+            },
+            HoldoutArm.FINALIST_2.value: {
+                "candidate_id": finalists[1].candidate_id,
+                "candidate_revision_id": self.revisions[
+                    finalists[1].candidate_id
+                ].revision_id,
+            },
+            HoldoutArm.INCUMBENT.value: {
+                "candidate_id": incumbent.candidate_id,
+                "candidate_revision_id": self.revisions[
+                    incumbent.candidate_id
+                ].revision_id,
+            },
+        }
+        holdout = self.director.freeze_generation_holdout(
+            self.run_id,
+            0,
+            _sha("idempotent-holdout"),
+            arm_bindings,
+        )
+        arm = HoldoutArm.FINALIST_1
+        endpoint = SimpleNamespace(
+            server=SimpleNamespace(
+                director=self.director,
+                ledger=self.ledger,
+                evaluators=Mock(),
+            )
+        )
+        endpoint.server.evaluators.evaluate_scientific.side_effect = RuntimeError(
+            "stop after durable start"
+        )
+        cohort = SimpleNamespace(
+            cohort_digest=holdout.cohort_digest,
+            origin_count=holdout.origin_count,
+        )
+        started_event_id = (
+            f"{self.run_id}:generation:0:holdout:{arm.value}:started"
+        )
+
+        with patch.object(
+            generation_execution,
+            "_holdout_replay_inputs",
+            return_value=(finalists[0], object(), object()),
+        ):
+            for _ in range(2):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "stop after durable start",
+                ):
+                    generation_execution._execute_adaptive_holdout_arm(
+                        endpoint,
+                        self.run_id,
+                        0,
+                        arm,
+                        arm_bindings[arm.value],
+                        cohort,
+                    )
+                replayed = self.director.replay(self.run_id)
+                starts = [
+                    event
+                    for event in replayed.events
+                    if event.event_id == started_event_id
+                ]
+                self.assertEqual(len(starts), 1)
+                self.assertEqual(starts[0].kind, "HoldoutArmStarted")
+                self.assertEqual(
+                    starts[0].payload["cohort_digest"],
+                    holdout.cohort_digest,
+                )
+
+        self.assertEqual(
+            endpoint.server.evaluators.evaluate_scientific.call_count,
+            2,
         )
 
     def test_trajectory_cannot_start_before_top2_freeze(self) -> None:

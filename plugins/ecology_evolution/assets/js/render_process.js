@@ -1596,7 +1596,12 @@
     var measuredRoundMs = round && round.timing && Number.isFinite(Number(round.timing.duration_ms)) ? Number(round.timing.duration_ms) : null;
     var effectiveElapsedMs = measuredRoundMs != null && !displayActive ? measuredRoundMs : elapsedMs;
     var elapsedText = executionElapsedText(effectiveElapsedMs, displayActive);
-    var batchText = stageProgress && Number.isFinite(Number(stageProgress.batch_index)) && Number.isFinite(Number(stageProgress.batch_count)) ? " · 微批 " + formatNumber(stageProgress.batch_index) + " / " + formatNumber(stageProgress.batch_count) : "";
+    var holdoutArmLabels = { finalist_1: "Top 1 候选", finalist_2: "Top 2 候选", incumbent: "上轮最优" };
+    var batchText = stageProgress && String(stageProgress.evaluation_phase || "").toLowerCase() === "holdout"
+      ? " · 留出评测 " + (holdoutArmLabels[String(stageProgress.holdout_arm || "")] || "准备中")
+      : stageProgress && Number.isFinite(Number(stageProgress.batch_index)) && Number.isFinite(Number(stageProgress.batch_count))
+        ? " · 微批 " + formatNumber(stageProgress.batch_index) + " / " + formatNumber(stageProgress.batch_count)
+        : "";
     var terminalEvidenceText = (failed || cancelled) && retainedEvidence ? " · " + executionEvidenceQualifier(run) : "";
     detailNode.textContent = hardTokenPause ? "逐样本智能体 Token 硬预算已耗尽；逐样本 checkpoint 已保留。" : retryCircuitPaused ? retryCircuitDetailText(run) : paused ? "暂停阶段：" + (stageText || "等待阶段状态") + (candidate ? " · " + shortId(candidate.id || candidate.candidate_id) : "") + batchText + (pausedDrained ? " · 请求已排空" : " · 已停止提交新请求") : retryWait ? retryWaitDetailText(retryWait) : schedulerQueue ? schedulerQueue.detail : heartbeatStalled ? "超过 120 秒没有新的执行心跳（最后更新 " + heartbeatState.age_text + "），正在核验模型与宿主状态。" : displayActive ? "当前阶段：" + (stageText || "等待事件回执") + (candidate ? " · " + shortId(candidate.id || candidate.candidate_id) : "") + batchText + (dshActivity ? " · " + dshActivity.detail : "") + elapsedText : statusText + terminalEvidenceText + (exhausted ? observedDetail + "，但未通过全部门禁" : candidate ? " · 最近候选 " + shortId(candidate.id || candidate.candidate_id) : "") + (autoActive ? elapsedText : "");
     track.className = "execution-progress-track" + (failed ? " is-failed" : paused ? " is-paused" : heartbeatStalled ? " is-stalled" : displayActive ? " is-running" : "");
@@ -1711,8 +1716,11 @@
       var lane = entry.lane;
       var batch = entry.batch;
       var score = Number(batch.score);
-      var coverage = Number(batch.coverage);
+      var rawCoverage = batch.prediction_cell_coverage != null ? batch.prediction_cell_coverage : batch.coverage;
+      var coverage = rawCoverage == null ? NaN : Number(rawCoverage);
       var coverageText = Number.isFinite(coverage) ? formatNumber(coverage <= 1 ? coverage * 100 : coverage, 1) + "%" : "—";
+      var originSuccessRate = batch.origin_success_rate == null ? NaN : Number(batch.origin_success_rate);
+      var originSuccessText = Number.isFinite(originSuccessRate) ? formatNumber(originSuccessRate <= 1 ? originSuccessRate * 100 : originSuccessRate, 1) + "%" : "—";
       var originText = formatNumber(batch.origin_count || 0) + " origins";
       var operations = Array.isArray(batch.operations) ? batch.operations : [];
       var batchStatus = String(batch.status || "").toLowerCase();
@@ -1732,7 +1740,7 @@
         + "<td><div class=\"adaptive-trajectory-cell\"><strong>第 " + escapeHTML(formatNumber(Number(lane.generation || 0) + 1)) + " 轮 · " + escapeHTML(shortId(lane.candidate_id)) + "</strong><small>轨迹 " + escapeHTML(formatNumber(lane.completed_batch_count || 0)) + " / " + escapeHTML(formatNumber(lane.batch_count || 0)) + "</small></div></td>"
         + "<td><div class=\"adaptive-trajectory-cell\"><strong>微批 " + escapeHTML(formatNumber(batch.batch_index)) + " / " + escapeHTML(formatNumber(batch.batch_count || lane.batch_count || 0)) + "</strong><span>" + escapeHTML(originText) + "</span><code title=\"" + escapeHTML(batch.cohort_digest || "") + "\">cohort " + escapeHTML(shortId(batch.cohort_digest || "—")) + "</code></div></td>"
         + "<td><div class=\"adaptive-trajectory-cell\"><code title=\"" + escapeHTML(batch.candidate_revision_id || "") + "\">" + escapeHTML(shortId(batch.candidate_revision_id || "—")) + "</code><span>→</span><code title=\"" + escapeHTML(batch.active_revision_id || "") + "\">" + escapeHTML(shortId(batch.active_revision_id || "—")) + "</code></div></td>"
-        + "<td><div class=\"adaptive-trajectory-cell\"><strong>得分 " + escapeHTML(Number.isFinite(score) ? formatNumber(score, 4) : "等待评测") + " · 覆盖率 " + escapeHTML(coverageText) + "</strong><small>" + escapeHTML(executionCounts || "批次执行统计待核验") + "</small><small class=\"adaptive-trajectory-warning\">不同 cohort 分数不可直接纵向归因</small></div></td>"
+        + "<td><div class=\"adaptive-trajectory-cell\"><strong>得分 " + escapeHTML(Number.isFinite(score) ? formatNumber(score, 4) : "等待评测") + "</strong><small>origin 成功率 " + escapeHTML(originSuccessText) + " · 评分单元覆盖率 " + escapeHTML(coverageText) + "</small><small>" + escapeHTML(executionCounts || "批次执行统计待核验") + "</small><small class=\"adaptive-trajectory-warning\">不同 cohort 分数不可直接纵向归因</small></div></td>"
         + "<td><div class=\"adaptive-trajectory-cell\">" + operationHtml + "</div></td>"
         + "<td><div class=\"adaptive-trajectory-cell\"><span class=\"pill " + outcomeTone + "\">" + escapeHTML(outcome) + "</span><small>" + escapeHTML(formatDate(batch.created_at)) + "</small></div></td>"
         + "</tr>";

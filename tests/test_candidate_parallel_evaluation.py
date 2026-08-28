@@ -6,7 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from ecologyrsi_dsh.api import generation_execution
 from ecologyrsi_dsh.api.dsh_tools import DshToolAdmissionClosedError
@@ -46,8 +46,60 @@ class _Director:
             task_manifest=self.task_manifest,
         )
 
+    def run_status(self, _run_id: str) -> RunStatus:
+        return self.status
+
 
 class CandidateParallelEvaluationTests(unittest.TestCase):
+    def test_hot_control_callbacks_use_constant_size_status_query_only(self) -> None:
+        director = Mock()
+        director.run_status.return_value = RunStatus.RUNNING
+        director.state.side_effect = AssertionError(
+            "hot control callback must not replay run state"
+        )
+
+        # A deterministic high-call-count assertion replaces a timing benchmark:
+        # every decision performs exactly one fixed-size status lookup regardless
+        # of event-stream length, and never asks for a projection replay.
+        iterations = 1_000
+        for _ in range(iterations):
+            self.assertEqual(
+                generation_execution._sample_run_control(director, "run:hot"),
+                "running",
+            )
+            self.assertTrue(
+                generation_execution._run_admission_open(director, "run:hot")
+            )
+            self.assertTrue(
+                generation_execution._sample_publication_open(
+                    director, "run:hot"
+                )
+            )
+
+        self.assertEqual(director.run_status.call_count, iterations * 3)
+        director.state.assert_not_called()
+
+        director.run_status.return_value = RunStatus.PAUSED
+        self.assertEqual(
+            generation_execution._sample_run_control(director, "run:hot"),
+            "paused",
+        )
+        self.assertFalse(
+            generation_execution._run_admission_open(director, "run:hot")
+        )
+        self.assertTrue(
+            generation_execution._sample_publication_open(director, "run:hot")
+        )
+
+        director.run_status.return_value = RunStatus.COMPLETED
+        self.assertEqual(
+            generation_execution._sample_run_control(director, "run:hot"),
+            "cancelled",
+        )
+        self.assertFalse(
+            generation_execution._sample_publication_open(director, "run:hot")
+        )
+
     def test_holdout_recovery_requires_exact_revision_scope_and_artifact(self) -> None:
         scope = EvaluationScope(
             run_id="run:holdout-recovery",

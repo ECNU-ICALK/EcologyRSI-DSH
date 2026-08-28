@@ -2146,47 +2146,14 @@ def _dsh_activity_projection(
     }
 
 
-def _formal_batch_live_projection(state: Any) -> dict[str, Any] | None:
-    """Project the active formal batch from durable DSH origin events.
+def _origin_live_projection_after(
+    state: Any,
+    started: Any,
+    origin_total: int,
+) -> dict[str, Any] | None:
+    """Count durable DSH origin receipts after one explicit work boundary."""
 
-    Formal trajectory batches do not emit the legacy per-candidate progress
-    heartbeat.  Without this projection the browser shows a real, busy DSH
-    batch as queued with zero successes until the whole 50-origin evaluation
-    is atomically recorded.
-    """
-
-    status = getattr(getattr(state.run, "status", None), "value", None)
-    if status not in {None, "running"}:
-        return None
     events = tuple(getattr(state, "events", ()))
-    if not events:
-        return None
-    generation = int(state.run.generation)
-    started = next(
-        (
-            event
-            for event in reversed(events)
-            if event.kind == "FormalBatchStarted"
-            and isinstance(event.payload.get("batch"), Mapping)
-            and int(event.payload["batch"].get("generation", -1)) == generation
-        ),
-        None,
-    )
-    if started is None:
-        return None
-    batch = started.payload["batch"]
-    candidate_id = str(batch.get("candidate_id") or "")
-    batch_index = int(batch.get("batch_index", -1))
-    cohort_digest = str(batch.get("cohort_digest") or "")
-    if any(
-        item.scope.generation == generation
-        and item.scope.candidate_id == candidate_id
-        and item.scope.batch_index == batch_index
-        and item.scope.cohort_digest == cohort_digest
-        for item in state.formal_batch_evaluations
-    ):
-        return None
-    origin_total = max(1, int(batch.get("origin_count") or 0))
     metadata = state.task_manifest.metadata
     cells_per_origin = int(metadata.get("prediction_cells_per_origin") or 1)
     configured_concurrency = metadata.get(
@@ -2201,7 +2168,6 @@ def _formal_batch_live_projection(state: Any) -> dict[str, Any] | None:
         configured_concurrency = HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK
 
     launch_by_key: dict[str, tuple[Any, Mapping[str, Any]]] = {}
-    launch_by_reservation: dict[str, tuple[Any, Mapping[str, Any]]] = {}
     latest_launch_by_key: dict[str, tuple[Any, Mapping[str, Any]]] = {}
     accepted_reservations: set[str] = set()
     failed_reservations: set[str] = set()
@@ -2225,8 +2191,6 @@ def _formal_batch_live_projection(state: Any) -> dict[str, Any] | None:
             launch_by_key[key] = (event, launch)
             latest_launch_by_key[key] = (event, launch)
             reservation = str(launch.get("reservation_id") or "").strip()
-            if reservation:
-                launch_by_reservation[reservation] = (event, launch)
             sample_events.append(event)
         elif event.kind == "DshPredictionToolExecuted":
             if event.payload.get("stage") != "sample.plan":
@@ -2309,6 +2273,83 @@ def _formal_batch_live_projection(state: Any) -> dict[str, Any] | None:
     }
 
 
+def _formal_batch_live_projection(state: Any) -> dict[str, Any] | None:
+    """Project the active formal batch from durable DSH origin events."""
+
+    status = getattr(getattr(state.run, "status", None), "value", None)
+    if status not in {None, "running"}:
+        return None
+    events = tuple(getattr(state, "events", ()))
+    if not events:
+        return None
+    generation = int(state.run.generation)
+    started = next(
+        (
+            event
+            for event in reversed(events)
+            if event.kind == "FormalBatchStarted"
+            and isinstance(event.payload.get("batch"), Mapping)
+            and int(event.payload["batch"].get("generation", -1)) == generation
+        ),
+        None,
+    )
+    if started is None:
+        return None
+    batch = started.payload["batch"]
+    candidate_id = str(batch.get("candidate_id") or "")
+    batch_index = int(batch.get("batch_index", -1))
+    cohort_digest = str(batch.get("cohort_digest") or "")
+    if any(
+        item.scope.generation == generation
+        and item.scope.candidate_id == candidate_id
+        and item.scope.batch_index == batch_index
+        and item.scope.cohort_digest == cohort_digest
+        for item in state.formal_batch_evaluations
+    ):
+        return None
+    return _origin_live_projection_after(
+        state,
+        started,
+        max(1, int(batch.get("origin_count") or 0)),
+    )
+
+
+def _holdout_arm_live_projection(state: Any) -> dict[str, Any] | None:
+    """Project the currently evaluating 169-origin holdout arm."""
+
+    status = getattr(getattr(state.run, "status", None), "value", None)
+    if status not in {None, "running"}:
+        return None
+    generation = int(state.run.generation)
+    started = next(
+        (
+            event
+            for event in reversed(tuple(getattr(state, "events", ())))
+            if event.kind == "HoldoutArmStarted"
+            and int(event.payload.get("generation", -1)) == generation
+        ),
+        None,
+    )
+    if started is None:
+        return None
+    arm = str(started.payload.get("holdout_arm") or "")
+    if any(
+        item.scope.generation == generation
+        and getattr(item.scope.holdout_arm, "value", None) == arm
+        for item in state.holdout_evaluations
+    ):
+        return None
+    live = _origin_live_projection_after(
+        state,
+        started,
+        max(1, int(started.payload.get("origin_count") or 0)),
+    )
+    if live is not None:
+        live["holdout_arm"] = arm
+        live["current_candidate_id"] = started.payload.get("candidate_id")
+    return live
+
+
 def _adaptive_progress_projection(
     state: Any,
     admission_snapshot: Mapping[str, Any] | None = None,
@@ -2358,6 +2399,11 @@ def _adaptive_progress_projection(
         or any(
             item.scope.generation == generation
             for item in state.holdout_evaluations
+        )
+        or any(
+            event.kind == "HoldoutArmStarted"
+            and int(event.payload.get("generation", -1)) == generation
+            for event in state.events
         )
         or any(batch.generation == generation for batch in state.formal_batches)
     )
@@ -2446,7 +2492,10 @@ def _adaptive_progress_projection(
         active_batch = batch.batch_index + 1
         active_candidate = batch.candidate_id
         break
+    if phase != "formal_batch":
+        active_batch = None
     live_fields: dict[str, Any] = {}
+    live_holdout_completed = 0
     if live_screening is not None and phase == "screening":
         # Child events remain useful activity evidence, but cannot increase
         # host-settled origin progress. Keep submitted-but-unsettled origins
@@ -2494,7 +2543,31 @@ def _adaptive_progress_projection(
             live_fields.update(live_formal)
             live_fields.update(
                 {
-                    "settled_origins": completed,
+                    "settled_origins": (
+                        screening_completed
+                        + formal_completed
+                        + holdout_completed
+                    ),
+                    "awaiting_settlement_batches": remote_completed,
+                    "samples_per_minute": None,
+                    "estimated_remaining_seconds": None,
+                }
+            )
+    elif phase == "holdout":
+        live_holdout = _holdout_arm_live_projection(state)
+        if live_holdout is not None:
+            live_holdout_completed = int(
+                live_holdout.pop("completed_origins")
+            )
+            completed = min(total, completed + live_holdout_completed)
+            live_fields.update(live_holdout)
+            live_fields.update(
+                {
+                    "settled_origins": (
+                        screening_completed
+                        + formal_completed
+                        + holdout_completed
+                    ),
                     "samples_per_minute": None,
                     "estimated_remaining_seconds": None,
                 }
@@ -2535,14 +2608,17 @@ def _adaptive_progress_projection(
         "screening_total_origins": screening_total,
         "formal_completed_origins": min(formal_completed, formal_total),
         "formal_total_origins": formal_total,
-        "holdout_completed_origins": min(holdout_completed, holdout_total),
+        "holdout_completed_origins": min(
+            holdout_completed + live_holdout_completed,
+            holdout_total,
+        ),
         "holdout_total_origins": holdout_total,
         # The existing browser progress renderer consumes the generic
         # ``batch_index``/``batch_count`` pair.  Keep the human-facing index
         # one-based here while durable FormalBatch state remains zero-based.
         "batch_index": active_batch,
         "current_batch": active_batch,
-        "batch_count": batch_count,
+        "batch_count": batch_count if phase == "formal_batch" else None,
         "current_candidate_id": active_candidate,
         "evidence": "durable_adaptive_cohort_and_trajectory_events",
         **live_fields,
@@ -2619,6 +2695,19 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
             coverage = _finite_number(
                 sample.get("coverage", metrics.get("sample_execution_coverage"))
             )
+            attempted_origins = _finite_number(
+                sample.get("attempted_origin_samples")
+            )
+            succeeded_origins = _finite_number(
+                sample.get("succeeded_origin_samples")
+            )
+            origin_success_rate = (
+                min(1.0, max(0.0, succeeded_origins / attempted_origins))
+                if attempted_origins is not None
+                and attempted_origins > 0
+                and succeeded_origins is not None
+                else None
+            )
             rows.append(
                 {
                     "batch_index": batch.batch_index + 1,
@@ -2642,14 +2731,14 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
                     "score": evaluation.score if evaluation is not None else None,
                     "passed": evaluation.passed if evaluation is not None else None,
                     "coverage": coverage,
+                    "prediction_cell_coverage": coverage,
+                    "origin_success_rate": origin_success_rate,
                     "coverage_pass": (
                         metrics.get("sample_execution_coverage_pass")
                         if isinstance(metrics, Mapping)
                         else None
                     ),
-                    "succeeded_origins": _finite_number(
-                        sample.get("succeeded_origin_samples")
-                    ),
+                    "succeeded_origins": succeeded_origins,
                     "failed_origins": _finite_number(
                         sample.get("failed_origin_samples")
                     ),

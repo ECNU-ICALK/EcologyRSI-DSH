@@ -2,6 +2,46 @@
 
 All notable changes to EcologyRSI-DSH are recorded in this file.
 
+## 0.3.48 - 2026-08-28
+
+### Progression and lifecycle recovery
+
+- Replace per-sample full-run projection replays with an O(1) lifecycle lookup
+  backed by a partial covering index, keeping 64-way origin execution from
+  starving monitor and control traffic as the event ledger grows.
+- Keep diagnostics read-only while moving dead retry-timer and orphaned-running
+  run repair into scheduler-owned maintenance; reject work-unit success unless
+  the durable run sequence actually advances.
+- Pause unclassified Host faults at the current checkpoint instead of replaying
+  ambiguous work, and durably reconcile native DSH pause/cancel quiescence so a
+  Host transition cannot silently leave its DSH run active.
+
+### Adaptive evidence safety
+
+- Record an idempotent start boundary for each finalist/incumbent holdout arm
+  and project its live completed, in-flight, queued, and unsubmitted origins
+  without waiting for the entire 169-origin arm to settle.
+- Separate complete-origin success from prediction-cell coverage. Require the
+  frozen origin-integrity threshold and strict agent chain before another local
+  mutation, rolling back to the parent revision when a changed lineage violates
+  that boundary.
+- Reserve whole registered-pipeline selection for the outer four-candidate
+  search while retaining bounded parameter and program edits inside each
+  finalist's 50-origin local batch; the deterministic Top-2 contract is
+  unchanged.
+
+### Observability, evidence size, and delivery
+
+- Show origin success and scoring-cell coverage independently, preserve the
+  distinction between Host-settled and remotely completed work, and avoid
+  rendering missing ratios as zero.
+- Compact `FormalBatchEvaluated` to aggregate decision inputs, immutable
+  science/data digests, and one canonical compressed trace archive. Drop the
+  duplicate expanded execution records and browser preview; revision-scoped
+  checkpoints and the retained archive preserve replay and failure audits.
+- Align the Python package, browser plugin, Host plugin, lockfile, legal
+  metadata, and packed Host artifact at version 0.3.48.
+
 ## 0.3.47 - 2026-08-28
 
 ### Adaptive decision safety

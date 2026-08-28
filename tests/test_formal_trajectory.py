@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import base64
 import json
 import unittest
+import zlib
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 from ecologyrsi_dsh.api.formal_trajectory import (
+    _durable_batch_metrics,
+    _local_edit_context,
     _local_edit_current_state,
     _local_edit_evidence_metrics,
     _local_edit_proposal,
@@ -14,12 +18,87 @@ from ecologyrsi_dsh.api.formal_trajectory import (
     _safety_requires_rollback,
     execute_next_local_edit,
 )
-from ecologyrsi_dsh.core.trajectory import LocalEditOutcome
-from ecologyrsi_dsh.core.trajectory import RevisionAdvanceReason
+from ecologyrsi_dsh.core.trajectory import LocalEditOutcome, RevisionAdvanceReason
+from ecologyrsi_dsh.evaluators.sample_execution import (
+    encode_sample_execution_trace,
+)
 from ecologyrsi_dsh.evolution.local_edits import LocalEditContext, LocalEditResult
+from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
 
 
 class FormalTrajectoryTests(unittest.TestCase):
+    def test_durable_batch_metrics_keep_one_auditable_compressed_trace(self) -> None:
+        trace_records = [
+            {
+                "sample_id": f"sample:{index}",
+                "status": "succeeded",
+                "prediction": {"air_temperature": 20.0 + index / 1000},
+                "observation": {"air_temperature": 20.5 + index / 1000},
+            }
+            for index in range(500)
+        ]
+        trace_archive = encode_sample_execution_trace(trace_records)
+        metrics = {
+            "objective_score": 0.2,
+            "constraint_violations": 0,
+            "sample_execution_coverage_pass": True,
+            "sample_execution_trace_digest": trace_archive["trace_digest"],
+            "dataset_digest": "b" * 64,
+            "sample_execution": {
+                "attempted_origin_samples": 50,
+                "succeeded_origin_samples": 49,
+                "coverage": 0.98,
+                "coverage_pass": True,
+                "failure_counts": {"provider": 1},
+                "batch_plan": {"origins": ["private"] * 500},
+                "action_catalog": [{"private": "action"}] * 100,
+            },
+            "targets": [
+                {
+                    "target": "air_temperature",
+                    "horizons": [{"hours": 1, "skill_score": 0.1}],
+                }
+            ],
+            "sample_execution_records": trace_records,
+            "sample_execution_trace_archive": trace_archive,
+            "prediction_preview": [{"observed": 42}] * 500,
+        }
+
+        durable = _durable_batch_metrics(metrics)
+
+        self.assertEqual(durable["dataset_digest"], "b" * 64)
+        self.assertEqual(
+            durable["sample_execution_trace_digest"],
+            trace_archive["trace_digest"],
+        )
+        self.assertEqual(
+            durable["sample_execution_trace_archive"]["record_count"],
+            500,
+        )
+        self.assertEqual(
+            durable["sample_execution_trace_archive"]["payload"],
+            metrics["sample_execution_trace_archive"]["payload"],
+        )
+        restored_trace = json.loads(
+            zlib.decompress(
+                base64.b64decode(
+                    durable["sample_execution_trace_archive"]["payload"]
+                )
+            ).decode("utf-8")
+        )
+        self.assertEqual(restored_trace, trace_records)
+        self.assertEqual(
+            durable["sample_execution_trace_archive"]["trace_digest"],
+            trace_archive["trace_digest"],
+        )
+        encoded = json.dumps(durable, ensure_ascii=False)
+        self.assertNotIn("sample_execution_records", durable)
+        self.assertNotIn("prediction_preview", durable)
+        self.assertLess(
+            len(encoded.encode("utf-8")),
+            len(json.dumps(metrics, ensure_ascii=False).encode("utf-8")),
+        )
+
     def test_local_editor_receives_current_values_and_bounded_outcome_history(self) -> None:
         from tests.test_local_edits import _parent
 
@@ -70,6 +149,55 @@ class FormalTrajectoryTests(unittest.TestCase):
         self.assertEqual(history[0]["batch_index"], 2)
         self.assertEqual(history[-1]["operations"][0]["value"], 10)
 
+    def test_batch_local_catalog_excludes_whole_predictor_replacement(self) -> None:
+        from tests.test_local_edits import _parent
+
+        parent = _parent()
+        revision = SimpleNamespace(
+            revision_id="revision:bounded-local:r0",
+            genome=parent.to_dict(),
+            genome_digest=parent.genome_digest,
+        )
+        state = SimpleNamespace(
+            run=SimpleNamespace(run_id="run:bounded-local"),
+            task_manifest=SimpleNamespace(
+                metadata={
+                    "optimization_schedule": OptimizationSchedule.default().to_dict()
+                }
+            ),
+            batch_evaluation_for=lambda *_args: SimpleNamespace(scope=SimpleNamespace(scope_key="a" * 64)),
+        )
+        candidate = SimpleNamespace(
+            candidate_id="candidate:bounded-local",
+            generation=0,
+        )
+        batch = SimpleNamespace(batch_index=0)
+
+        with (
+            patch(
+                "ecologyrsi_dsh.api.formal_trajectory._registered_mutation_targets",
+                return_value={
+                    "scientific_parameter": ("ridge_alpha",),
+                    "registered_predictor": (
+                        "greenhouse-horizon-targetwise-ridge@1",
+                    ),
+                },
+            ),
+            patch(
+                "ecologyrsi_dsh.api.formal_trajectory._genome_parameter_boundary",
+                return_value=("test", {}),
+            ),
+        ):
+            context = _local_edit_context(
+                state,
+                candidate,
+                revision,
+                batch,
+            )
+
+        self.assertNotIn("registered_predictor", context.allowed_mutation_targets)
+        self.assertIn("scientific_parameter", context.allowed_mutation_targets)
+
     def test_zero_local_edit_budget_returns_keep_without_calling_dsh(self) -> None:
         state = SimpleNamespace(candidate_identity_binding=Mock())
         endpoint = SimpleNamespace(
@@ -110,6 +238,10 @@ class FormalTrajectoryTests(unittest.TestCase):
                     {
                         "coverage": 0.95,
                         "coverage_pass": True,
+                        "minimum_coverage": 0.8,
+                        "strict_agent_chain_pass": False,
+                        "strict_agent_chain_coverage": 0.86,
+                        "complete_origin_agent_chains": 43,
                         "failure_counts": MappingProxyType(
                             {"constraint_rejected": 2}
                         ),
@@ -143,6 +275,10 @@ class FormalTrajectoryTests(unittest.TestCase):
             ],
             2,
         )
+        self.assertIs(
+            evidence["sample_execution"]["strict_agent_chain_pass"],
+            False,
+        )
         self.assertNotIn("sample_execution_records", evidence)
         self.assertNotIn("sample_execution_trace_archive", evidence)
         self.assertNotIn("prediction_preview", evidence)
@@ -164,6 +300,60 @@ class FormalTrajectoryTests(unittest.TestCase):
                     "sample_execution": {
                         "coverage_pass": False,
                         "failure_counts": {"constraint_rejected": 3},
+                    },
+                }
+            ),
+            "sample_constraint_guardrail_failed",
+        )
+        self.assertEqual(
+            _prequential_safety_reason(
+                {
+                    "constraint_violations": 0,
+                    "sample_execution_coverage_pass": True,
+                    "sample_execution": {
+                        "attempted_origin_samples": 50,
+                        "succeeded_origin_samples": 49,
+                        "minimum_coverage": 0.8,
+                        "coverage_pass": True,
+                        "strict_agent_chain_pass": False,
+                        "failure_counts": {},
+                    },
+                }
+            ),
+            "strict_origin_chain_guardrail_failed",
+        )
+        self.assertFalse(
+            _safety_requires_rollback("strict_origin_chain_guardrail_failed")
+        )
+        self.assertEqual(
+            _prequential_safety_reason(
+                {
+                    "constraint_violations": 0,
+                    "sample_execution_coverage_pass": True,
+                    "sample_execution": {
+                        "attempted_origin_samples": 50,
+                        "succeeded_origin_samples": 39,
+                        "minimum_coverage": 0.8,
+                        "coverage_pass": True,
+                        "strict_agent_chain_pass": True,
+                        "failure_counts": {},
+                    },
+                }
+            ),
+            "origin_coverage_guardrail_failed",
+        )
+        self.assertEqual(
+            _prequential_safety_reason(
+                {
+                    "constraint_violations": 0,
+                    "sample_execution_coverage_pass": True,
+                    "sample_execution": {
+                        "attempted_origin_samples": 50,
+                        "succeeded_origin_samples": 43,
+                        "minimum_coverage": 0.8,
+                        "coverage_pass": True,
+                        "strict_agent_chain_pass": False,
+                        "failure_counts": {"constraint_rejected": 7},
                     },
                 }
             ),

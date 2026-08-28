@@ -105,6 +105,29 @@ _SCREENING_ORIGIN_COUNT = 64
 _FORMAL_FINALIST_COUNT = 2
 
 
+def _sample_run_control(director: Any, run_id: str) -> str:
+    """Map the indexed durable lifecycle status to evaluator control."""
+
+    status = director.run_status(run_id)
+    if status is RunStatus.RUNNING:
+        return "running"
+    if status is RunStatus.PAUSED:
+        return "paused"
+    return "cancelled"
+
+
+def _run_admission_open(director: Any, run_id: str) -> bool:
+    """Allow new work only while the durable run status is running."""
+
+    return director.run_status(run_id) is RunStatus.RUNNING
+
+
+def _sample_publication_open(director: Any, run_id: str) -> bool:
+    """Allow in-flight sample checkpoints while running or draining a pause."""
+
+    return director.run_status(run_id) in {RunStatus.RUNNING, RunStatus.PAUSED}
+
+
 def _select_screening_finalists(
     candidates: Any,
     screening_by_candidate_id: Mapping[str, Mapping[str, Any]],
@@ -340,12 +363,7 @@ def _screen_candidate(endpoint: Any, run_id: str, candidate_id: str) -> None:
     )
 
     def sample_run_control() -> str:
-        status = endpoint.server.director.state(run_id).run.status
-        if status is RunStatus.RUNNING:
-            return "running"
-        if status is RunStatus.PAUSED:
-            return "paused"
-        return "cancelled"
+        return _sample_run_control(endpoint.server.director, run_id)
 
     try:
         bundle = endpoint.server.evaluators.evaluate_scientific(
@@ -431,9 +449,8 @@ def _prepare_formal_finalists(
             evaluate=lambda candidate_id: _screen_candidate(
                 endpoint, run_id, candidate_id
             ),
-            admission_open=lambda: (
-                endpoint.server.director.state(run_id).run.status
-                is RunStatus.RUNNING
+            admission_open=lambda: _run_admission_open(
+                endpoint.server.director, run_id
             ),
         )
         state = endpoint.server.director.state(run_id)
@@ -1790,21 +1807,12 @@ def _evaluate_candidate(endpoint: Any, run_id: str, candidate_id: str) -> None:
             def sample_run_control() -> str:
                 """Expose only the owning run's current scheduling state."""
 
-                run_status = endpoint.server.director.state(run_id).run.status
-                if run_status is RunStatus.RUNNING:
-                    return "running"
-                if run_status is RunStatus.PAUSED:
-                    return "paused"
-                # A sample invocation cannot make progress in created or terminal
-                # states. Treat every such transition as a terminal cancellation
-                # without exposing unrelated run state through the adapter API.
-                return "cancelled"
+                return _sample_run_control(endpoint.server.director, run_id)
 
             def accepts_sample_publication() -> bool:
-                return endpoint.server.director.state(run_id).run.status in {
-                    RunStatus.RUNNING,
-                    RunStatus.PAUSED,
-                }
+                return _sample_publication_open(
+                    endpoint.server.director, run_id
+                )
 
             evaluation_kwargs["on_sample_control"] = sample_run_control
 
@@ -2444,9 +2452,8 @@ def _evaluate_generation_candidates(
             evaluate=lambda candidate_id: execute_formal_trajectory(
                 endpoint, run_id, candidate_id
             ),
-            admission_open=lambda: (
-                endpoint.server.director.state(run_id).run.status
-                is RunStatus.RUNNING
+            admission_open=lambda: _run_admission_open(
+                endpoint.server.director, run_id
             ),
         )
         return
@@ -2465,9 +2472,8 @@ def _evaluate_generation_candidates(
             run_id,
             candidate_id,
         ),
-        admission_open=lambda: (
-            endpoint.server.director.state(run_id).run.status
-            is RunStatus.RUNNING
+        admission_open=lambda: _run_admission_open(
+            endpoint.server.director, run_id
         ),
     )
 
@@ -2543,6 +2549,27 @@ def _execute_adaptive_holdout_arm(
             recovered,
         )
 
+    started_event_id = (
+        f"{run_id}:generation:{generation}:holdout:{arm.value}:started"
+    )
+    if not any(event.event_id == started_event_id for event in state.events):
+        endpoint.server.ledger.append(
+            run_id,
+            "HoldoutArmStarted",
+            {
+                "schema_version": "ecologyrsi-dsh.holdout-arm-started/1",
+                "generation": generation,
+                "holdout_arm": arm.value,
+                "candidate_id": scope.candidate_id,
+                "candidate_revision_id": scope.candidate_revision_id,
+                "cohort_digest": scope.cohort_digest,
+                "origin_count": scope.origin_count,
+            },
+            event_id=started_event_id,
+            expected_run_seq=state.events[-1].seq,
+        )
+        state = endpoint.server.director.state(run_id)
+
     source_candidate = state.candidate(binding["candidate_id"])
     task = _phase_task_manifest(
         state.task_manifest,
@@ -2558,12 +2585,7 @@ def _execute_adaptive_holdout_arm(
     )
 
     def sample_run_control() -> str:
-        status = endpoint.server.director.state(run_id).run.status
-        if status is RunStatus.RUNNING:
-            return "running"
-        if status is RunStatus.PAUSED:
-            return "paused"
-        return "cancelled"
+        return _sample_run_control(endpoint.server.director, run_id)
 
     bundle = endpoint.server.evaluators.evaluate_scientific(
         task,

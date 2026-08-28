@@ -146,6 +146,16 @@ _AGGREGATE_EVALUATION_METRICS = frozenset(
     }
 )
 
+_RUN_STATUS_BY_LIFECYCLE_EVENT = {
+    "RunCreated": RunStatus.CREATED,
+    "RunStarted": RunStatus.RUNNING,
+    "RunPaused": RunStatus.PAUSED,
+    "RunResumed": RunStatus.RUNNING,
+    "RunCancelled": RunStatus.CANCELLED,
+    "RunFailed": RunStatus.FAILED,
+    "RunCompleted": RunStatus.COMPLETED,
+}
+
 _SAMPLE_CHECKPOINT_SCHEMA_VERSION = "ecologyrsi-dsh.sample-checkpoint/1"
 _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION = "ecologyrsi-dsh.sample-checkpoint/2"
 _SAMPLE_RESULTS_START_SCHEMA_VERSION = (
@@ -4528,6 +4538,14 @@ class EvolutionDirector:
         if not events:
             raise KeyError(f"unknown run: {run_id}")
         return project_run_state(events)
+
+    def run_status(self, run_id: str) -> RunStatus:
+        """Read one run's durable lifecycle status without replaying its stream."""
+
+        lifecycle_kind = self.ledger.latest_run_lifecycle_kind(run_id)
+        if lifecycle_kind is None:
+            raise KeyError(f"unknown run: {run_id}")
+        return _RUN_STATUS_BY_LIFECYCLE_EVENT[lifecycle_kind]
 
     # Explicit alias for callers that want to emphasize event replay.
     replay = state

@@ -4,6 +4,21 @@ import unittest
 from types import SimpleNamespace
 
 from ecologyrsi_dsh import EventLedger, EvolutionDirector, FakeDSHAdapter, TaskManifest
+from ecologyrsi_dsh.api.generation_execution import _model_token_budget_state
+from ecologyrsi_dsh.api.projection import (
+    _adaptive_progress_projection,
+    _adaptive_trajectory_projection,
+    _dsh_activity_projection,
+    _dsh_runtime_projection,
+    _evaluation_progress_projection,
+    _evaluation_progress_rates,
+    _gateway_retry_projection,
+    _model_usage_summary,
+    _projection_json,
+    _public_evaluation_metrics,
+    _run_failure_projection,
+    _screening_progress_projection,
+)
 from ecologyrsi_dsh.core.models import (
     Evaluation,
     ModelArtifact,
@@ -18,21 +33,6 @@ from ecologyrsi_dsh.core.sample_results import (
 )
 from ecologyrsi_dsh.data.toy import ToyCropSoilWater
 from ecologyrsi_dsh.presentation.reporting import run_completion_outcome, run_summary
-from ecologyrsi_dsh.api.generation_execution import _model_token_budget_state
-from ecologyrsi_dsh.api.projection import (
-    _dsh_activity_projection,
-    _dsh_runtime_projection,
-    _evaluation_progress_projection,
-    _evaluation_progress_rates,
-    _gateway_retry_projection,
-    _model_usage_summary,
-    _public_evaluation_metrics,
-    _run_failure_projection,
-    _screening_progress_projection,
-    _adaptive_progress_projection,
-    _adaptive_trajectory_projection,
-)
-from ecologyrsi_dsh.api.projection import _projection_json
 
 
 def _task(*, max_candidates: int = 1, max_generations: int = 1) -> TaskManifest:
@@ -367,13 +367,18 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         self.assertEqual(progress["evaluation_phase"], "formal_batch")
         self.assertEqual(progress["completed_origins"], 307)
-        self.assertEqual(progress["settled_origins"], 307)
+        self.assertEqual(progress["settled_origins"], 306)
         self.assertNotIn("succeeded_samples", progress)
         self.assertNotIn("failed_samples", progress)
         self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["in_flight_requests"], 1)
         self.assertEqual(progress["awaiting_submission_batches"], 49)
         self.assertEqual(progress["awaiting_settlement_batches"], 1)
+        self.assertEqual(
+            progress["completed_origins"],
+            progress["settled_origins"]
+            + progress["awaiting_settlement_batches"],
+        )
         self.assertEqual(progress["gateway_request_count"], 1)
         self.assertEqual(progress["updated_at"], events[-1].created_at)
         self.assertGreater(progress["samples_per_minute"], 0)
@@ -382,6 +387,107 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["admission_active"], 16)
         self.assertEqual(progress["admission_waiting"], 7)
         self.assertEqual(progress["admission_congestion_events"], 3)
+
+    def test_adaptive_progress_includes_live_holdout_origin_receipts(self) -> None:
+        schedule = {
+            "screening_origin_count": 64,
+            "formal_origin_count_per_finalist": 500,
+            "selection_holdout_origin_count": 169,
+            "local_batch_origin_count": 50,
+        }
+        members = [f"{index:064x}" for index in range(1, 10)]
+        events = (
+            SimpleNamespace(
+                seq=100,
+                kind="HoldoutArmStarted",
+                payload={
+                    "generation": 0,
+                    "holdout_arm": "finalist_1",
+                    "candidate_id": "candidate:finalist",
+                    "origin_count": 169,
+                },
+                created_at="2026-08-28T01:00:00+00:00",
+            ),
+            SimpleNamespace(
+                seq=101,
+                kind="DshChildLaunchReserved",
+                payload={"launch": {
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:holdout-origin-a",
+                    "reservation_id": "reservation-holdout-a",
+                    "sample_member_digests": members,
+                }},
+                created_at="2026-08-28T01:00:01+00:00",
+            ),
+            SimpleNamespace(
+                seq=102,
+                kind="DshPredictionToolExecuted",
+                payload={
+                    "stage": "sample.plan",
+                    "idempotency_key": "run:test:sample.plan:holdout-origin-a",
+                    "prediction_count": 9,
+                },
+                created_at="2026-08-28T01:00:02+00:00",
+            ),
+        )
+        screening_events = tuple(
+            SimpleNamespace(
+                payload={"generation": 0, "origin_count": 64},
+                created_at=f"2026-08-28T00:0{index}:00+00:00",
+            )
+            for index in range(4)
+        )
+        formal_evaluations = tuple(
+            SimpleNamespace(
+                scope=SimpleNamespace(
+                    generation=0,
+                    candidate_id=f"candidate:{index // 10}",
+                    batch_index=index % 10,
+                    cohort_digest=f"{index + 1:064x}",
+                    origin_count=50,
+                ),
+                created_at=f"2026-08-28T00:{10 + index:02d}:00+00:00",
+            )
+            for index in range(20)
+        )
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(metadata={
+                "optimization_protocol": "top2_adaptive_epoch@1",
+                "optimization_schedule": schedule,
+                "sample_concurrency": 64,
+                "prediction_cells_per_origin": 9,
+            }),
+            run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
+            candidate_screening_events=screening_events,
+            formal_batch_evaluations=formal_evaluations,
+            holdout_evaluations=(),
+            formal_batches=(SimpleNamespace(
+                generation=0,
+                candidate_id="candidate:1",
+                batch_index=9,
+            ),),
+            candidates=(),
+            events=events,
+        )
+
+        progress = _adaptive_progress_projection(state)
+
+        self.assertEqual(progress["evaluation_phase"], "holdout")
+        self.assertEqual(progress["completed_origins"], 1257)
+        self.assertEqual(progress["holdout_completed_origins"], 1)
+        self.assertEqual(progress["settled_origins"], 1256)
+        self.assertEqual(progress["awaiting_settlement_batches"], 1)
+        self.assertEqual(
+            progress["completed_origins"],
+            progress["settled_origins"]
+            + progress["awaiting_settlement_batches"],
+        )
+        self.assertEqual(progress["holdout_arm"], "finalist_1")
+        self.assertEqual(progress["current_candidate_id"], "candidate:finalist")
+        self.assertIsNone(progress["batch_index"])
+        self.assertIsNone(progress["batch_count"])
+        self.assertEqual(progress["awaiting_submission_batches"], 168)
+        self.assertEqual(progress["in_flight_requests"], 1)
 
     def test_dsh_activity_uses_unresolved_formal_child_without_stage_event(self) -> None:
         launch = SimpleNamespace(
@@ -415,6 +521,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                 "sample_execution_coverage": 0.96,
                 "sample_execution_coverage_pass": True,
                 "sample_execution": {
+                    "attempted_origin_samples": 50,
                     "succeeded_origin_samples": 48,
                     "failed_origin_samples": 2,
                     "failed_examples": 2,
@@ -474,6 +581,8 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(row["batch_index"], 1)
         self.assertEqual(row["succeeded_origins"], 48)
         self.assertEqual(row["failed_origins"], 2)
+        self.assertEqual(row["origin_success_rate"], 0.96)
+        self.assertEqual(row["prediction_cell_coverage"], 0.96)
         self.assertEqual(row["edit_outcome"], "applied")
         self.assertEqual(row["active_revision_id"], "revision:a:1")
         self.assertEqual(row["score_comparability"], "different_batch_cohort_diagnostic_only")

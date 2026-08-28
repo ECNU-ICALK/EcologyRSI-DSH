@@ -6,7 +6,7 @@ import math
 from dataclasses import replace
 from typing import Any, Mapping
 
-from ..core.models import Candidate, RunStatus, canonical_json, digest
+from ..core.models import Candidate, canonical_json, digest
 from ..core.trajectory import (
     BatchEvaluation,
     CandidateRevision,
@@ -34,7 +34,11 @@ from ..knowledge.program_registry import current_program_registry
 from ..evaluators.registry import EvaluatorRegistry
 from ..integrations.dsh_native_runtime import DshNativeRuntimeUnavailableError
 from ..integrations.dsh_structured_roles import DshStructuredRoleRuntime
-from .generation_execution import _director_mutation, _phase_task_manifest
+from .generation_execution import (
+    _director_mutation,
+    _phase_task_manifest,
+    _sample_run_control,
+)
 
 
 def _candidate_revision(state: Any, candidate_id: str, revision_id: str) -> CandidateRevision:
@@ -119,6 +123,48 @@ def _scope_for_batch(state: Any, candidate: Candidate, revision_id: str, batch: 
     )
 
 
+def _durable_batch_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist aggregate trajectory evidence without duplicate sample traces.
+
+    DSH already records every structured child/tool boundary in the run ledger.
+    Scientific evaluators also return an expanded record list, a UI preview,
+    and one compressed canonical trace.  The first two are derived copies; the
+    compressed trace is the only self-contained evidence from which the batch
+    can be audited.  Retain that archive plus aggregate decision inputs, while
+    dropping the expanded copies that made every status replay parse the same
+    sample data several times.
+    """
+
+    detached = deep_thaw_json(metrics)
+    if not isinstance(detached, dict):
+        raise TypeError("formal batch metrics must be a JSON object")
+    result = _local_edit_evidence_metrics(detached)
+    for name in (
+        "baseline_metrics_digest",
+        "baseline_profile_digest",
+        "dataset_digest",
+        "evaluation_index_digest",
+        "execution_scope_digest",
+        "feedback_update_cohort_digest",
+        "sample_execution_trace_digest",
+        "split_manifest_digest_sha256",
+        "reward_definition",
+        "primary_fitness_definition",
+        "objective_profile",
+        "prediction_model_id",
+        "causal_interpretation",
+    ):
+        if name in detached:
+            result[name] = detached[name]
+    archive = detached.get("sample_execution_trace_archive")
+    if isinstance(archive, Mapping):
+        # Do not reduce scientific auditability to a digest-only assertion:
+        # DSH tool events intentionally store output digests, not the complete
+        # predictions/observations used by the evaluator.
+        result["sample_execution_trace_archive"] = deep_thaw_json(archive)
+    return result
+
+
 def execute_next_formal_batch(endpoint: Any, run_id: str, candidate_id: str) -> bool:
     state = endpoint.server.director.state(run_id)
     trajectory = ensure_formal_trajectory(endpoint, run_id, candidate_id)
@@ -181,12 +227,7 @@ def execute_next_formal_batch(endpoint: Any, run_id: str, candidate_id: str) -> 
     )
 
     def sample_run_control() -> str:
-        status = endpoint.server.director.state(run_id).run.status
-        if status is RunStatus.RUNNING:
-            return "running"
-        if status is RunStatus.PAUSED:
-            return "paused"
-        return "cancelled"
+        return _sample_run_control(endpoint.server.director, run_id)
 
     if isinstance(endpoint.server.evaluators, EvaluatorRegistry):
         bundle = endpoint.server.evaluators.evaluate_scientific(
@@ -222,7 +263,7 @@ def execute_next_formal_batch(endpoint: Any, run_id: str, candidate_id: str) -> 
             scope=scope,
             score=bundle.evaluation.score,
             passed=bundle.evaluation.passed,
-            metrics=metrics,
+            metrics=_durable_batch_metrics(metrics),
             evaluator_digest=digest({"evaluator": bundle.evaluation.evaluator_digest}),
         ),
     )
@@ -232,7 +273,19 @@ def execute_next_formal_batch(endpoint: Any, run_id: str, candidate_id: str) -> 
 def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRevision, batch: Any) -> LocalEditContext:
     genome = EcologyEvolutionPluginGenome.from_dict(dict(revision.genome))
     # Use the same Host-owned registered target catalog exposed to the proposer.
-    targets = _registered_mutation_targets(state.task_manifest, genome)
+    targets = {
+        axis: values
+        for axis, values in _registered_mutation_targets(
+            state.task_manifest,
+            genome,
+        ).items()
+        # Replacing the complete prediction pipeline is a generation-level
+        # search direction, not a small batch-local adjustment. Keeping it in
+        # the local catalog allowed one 50-origin diagnostic window to replace
+        # the finalist's whole algorithm and destabilize the remaining epoch.
+        # The outer four-candidate proposer still owns this axis unchanged.
+        if axis != "registered_predictor"
+    }
     registry = current_program_registry()
     workflow_id = str(
         genome.agent_program["candidate_execution_program"]["workflow_template_ref"]["id"]
@@ -505,18 +558,50 @@ def _prequential_safety_reason(metrics: Mapping[str, Any]) -> str | None:
     coverage = metrics.get("sample_execution_coverage_pass")
     sample = metrics.get("sample_execution")
     sample_coverage = sample.get("coverage_pass") if isinstance(sample, Mapping) else None
-    if coverage is False or sample_coverage is False:
-        failures = sample.get("failure_counts") if isinstance(sample, Mapping) else None
-        rejected = (
-            failures.get("constraint_rejected", 0)
-            if isinstance(failures, Mapping)
-            else 0
-        )
+    failures = sample.get("failure_counts") if isinstance(sample, Mapping) else None
+    rejected = (
+        failures.get("constraint_rejected", 0)
+        if isinstance(failures, Mapping)
+        else 0
+    )
+    constraint_rejected = bool(
+        not isinstance(rejected, bool)
+        and isinstance(rejected, (int, float))
+        and math.isfinite(float(rejected))
+        and rejected > 0
+    )
+    if isinstance(sample, Mapping):
+        strict_chain_pass = sample.get("strict_agent_chain_pass")
+        if strict_chain_pass is False:
+            return (
+                "sample_constraint_guardrail_failed"
+                if constraint_rejected
+                else "strict_origin_chain_guardrail_failed"
+            )
+        attempted = sample.get("attempted_origin_samples")
+        succeeded = sample.get("succeeded_origin_samples")
+        minimum = sample.get("minimum_coverage")
         if (
-            not isinstance(rejected, bool)
-            and isinstance(rejected, (int, float))
-            and rejected > 0
+            not isinstance(attempted, bool)
+            and isinstance(attempted, (int, float))
+            and math.isfinite(float(attempted))
+            and attempted > 0
+            and not isinstance(succeeded, bool)
+            and isinstance(succeeded, (int, float))
+            and math.isfinite(float(succeeded))
+            and not isinstance(minimum, bool)
+            and isinstance(minimum, (int, float))
+            and math.isfinite(float(minimum))
+            and 0 <= float(minimum) <= 1
+            and float(succeeded) / float(attempted) < float(minimum)
         ):
+            return (
+                "sample_constraint_guardrail_failed"
+                if constraint_rejected
+                else "origin_coverage_guardrail_failed"
+            )
+    if coverage is False or sample_coverage is False:
+        if constraint_rejected:
             return "sample_constraint_guardrail_failed"
         return "coverage_guardrail_failed"
     if coverage is not True and sample_coverage is not True:
@@ -730,6 +815,10 @@ def _local_edit_evidence_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
                 "failed_origin_samples",
                 "coverage",
                 "coverage_pass",
+                "minimum_coverage",
+                "strict_agent_chain_pass",
+                "strict_agent_chain_coverage",
+                "complete_origin_agent_chains",
                 "failed_examples",
                 "scoring_fallback_examples",
                 "failure_counts",

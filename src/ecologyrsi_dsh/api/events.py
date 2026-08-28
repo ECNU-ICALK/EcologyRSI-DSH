@@ -70,6 +70,7 @@ class EventEndpointsMixin:
             "TrajectoryRevisionAdvanced": "下一批次的有效修订已冻结。",
             "FormalTrajectoryCompleted": "Top 2 候选的正式轨迹已完成。",
             "GenerationHoldoutFrozen": "本轮独立留出评测队列已冻结。",
+            "HoldoutArmStarted": "本轮一个留出评测臂已启动。",
             "HoldoutEvaluationRecorded": "本轮一个留出评测臂已完成。",
             "GenerationComparisonRecorded": "本轮三臂留出比较已完成。",
             "CandidateEffectiveRevisionFrozen": "本轮有效修订已冻结。",
@@ -396,6 +397,19 @@ class EventEndpointsMixin:
                     "score": evaluation.get("score"),
                     "passed": evaluation.get("passed"),
                     "evaluator_digest": evaluation.get("evaluator_digest"),
+                }
+            )
+        elif event.kind == "HoldoutArmStarted":
+            public_payload.update(
+                {
+                    "generation": payload.get("generation"),
+                    "holdout_arm": payload.get("holdout_arm"),
+                    "candidate_id": payload.get("candidate_id"),
+                    "candidate_revision_id": payload.get(
+                        "candidate_revision_id"
+                    ),
+                    "origin_count": payload.get("origin_count"),
+                    "cohort_digest": payload.get("cohort_digest"),
                 }
             )
         elif event.kind == "GenerationComparisonRecorded":

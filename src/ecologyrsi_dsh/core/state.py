@@ -3272,6 +3272,43 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             if existing is not None and existing.to_dict() != holdout.to_dict():
                 raise ValueError("conflicting generation holdout")
             generation_holdouts.setdefault(holdout.generation, holdout)
+        elif event.kind == "HoldoutArmStarted":
+            expected_fields = {
+                "schema_version",
+                "generation",
+                "holdout_arm",
+                "candidate_id",
+                "candidate_revision_id",
+                "cohort_digest",
+                "origin_count",
+            }
+            if (
+                set(payload) != expected_fields
+                or payload.get("schema_version")
+                != "ecologyrsi-dsh.holdout-arm-started/1"
+            ):
+                raise ValueError("HoldoutArmStarted payload is invalid")
+            try:
+                arm = HoldoutArm(str(payload["holdout_arm"]))
+            except ValueError:
+                raise ValueError("HoldoutArmStarted arm is invalid") from None
+            generation = payload["generation"]
+            holdout = (
+                generation_holdouts.get(generation)
+                if isinstance(generation, int) and not isinstance(generation, bool)
+                else None
+            )
+            binding = holdout.arm_bindings[arm.value] if holdout is not None else None
+            if (
+                holdout is None
+                or binding is None
+                or payload["candidate_id"] != binding["candidate_id"]
+                or payload["candidate_revision_id"]
+                != binding["candidate_revision_id"]
+                or payload["cohort_digest"] != holdout.cohort_digest
+                or payload["origin_count"] != holdout.origin_count
+            ):
+                raise ValueError("HoldoutArmStarted scope is invalid")
         elif event.kind == "HoldoutEvaluationRecorded":
             if set(payload) != {"evaluation"}:
                 raise ValueError("HoldoutEvaluationRecorded payload is invalid")

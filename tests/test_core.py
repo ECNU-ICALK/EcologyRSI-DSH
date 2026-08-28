@@ -86,6 +86,68 @@ class CoreTests(unittest.TestCase):
 
         self.assertLess(first.seq, latest_a.seq)
 
+    def test_lifecycle_tail_is_covered_and_ignores_non_lifecycle_history(self) -> None:
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        ledger.append("run:lifecycle", "RunCreated", {})
+        for index in range(200):
+            ledger.append("run:lifecycle", "SampleCheckpointed", {"index": index})
+        ledger.append("run:lifecycle", "RunStarted", {"session_id": "session:1"})
+        for index in range(200, 400):
+            ledger.append("run:lifecycle", "ModelUsageRecorded", {"index": index})
+
+        with patch.object(
+            ledger,
+            "events",
+            side_effect=AssertionError("run stream must not be loaded"),
+        ):
+            self.assertEqual(
+                ledger.latest_run_lifecycle_kind("run:lifecycle"),
+                "RunStarted",
+            )
+            self.assertIsNone(ledger.latest_run_lifecycle_kind("run:missing"))
+
+        plan = ledger._connection.execute(  # noqa: SLF001 - verify hot-path index
+            """
+            EXPLAIN QUERY PLAN
+            SELECT kind FROM evolution_events
+            WHERE run_id = ? AND kind IN (
+                'RunCreated', 'RunStarted', 'RunPaused', 'RunResumed',
+                'RunCancelled', 'RunFailed', 'RunCompleted'
+            )
+            ORDER BY seq DESC LIMIT 1
+            """,
+            ("run:lifecycle",),
+        ).fetchall()
+        self.assertIn(
+            "USING COVERING INDEX idx_evolution_events_run_lifecycle_seq",
+            " ".join(str(row["detail"]) for row in plan),
+        )
+
+    def test_director_run_status_matches_lifecycle_without_replay(self) -> None:
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        director = EvolutionDirector(ledger)
+        run_id = "run:indexed-status"
+        director.create_run(manifest(), run_id=run_id)
+        self.assertIs(director.run_status(run_id), RunStatus.CREATED)
+        director.start_run(run_id)
+        self.assertIs(director.run_status(run_id), RunStatus.RUNNING)
+        director.pause_run(run_id)
+        self.assertIs(director.run_status(run_id), RunStatus.PAUSED)
+        director.resume_run(run_id)
+        self.assertIs(director.run_status(run_id), RunStatus.RUNNING)
+        director.cancel_run(run_id)
+
+        with patch.object(
+            ledger,
+            "events",
+            side_effect=AssertionError("status lookup must not replay events"),
+        ):
+            self.assertIs(director.run_status(run_id), RunStatus.CANCELLED)
+            with self.assertRaisesRegex(KeyError, "unknown run"):
+                director.run_status("run:missing")
+
     def test_candidate_identity_source_has_one_durable_spawn_event(self) -> None:
         ledger = EventLedger()
         self.addCleanup(ledger.close)

@@ -7,6 +7,7 @@ import selectors
 import subprocess
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 import unittest
@@ -892,6 +893,95 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         )
         self.assertEqual(runtime.resumed[-1]["run_id"], run_id)
 
+    def test_server_startup_quiesces_native_runs_behind_host_boundaries(self) -> None:
+        runtime = _FakeNativeRuntime()
+        self.server.dsh_native_runtime = runtime
+        run_ids = {
+            "paused": "run:native-startup-recover-paused",
+            "failed": "run:native-startup-recover-failed",
+            "cancelled": "run:native-startup-recover-cancelled",
+        }
+        for status_name, run_id in run_ids.items():
+            status, payload = self._post(
+                {
+                    "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                    "run_id": run_id,
+                    "domain_pack_id": "crop_soil_water",
+                    "dataset_id": "generated-toy-series@1",
+                    "strategy_model_id": "dsh/strategy",
+                    "review_model_id": "dsh/review",
+                    "start": True,
+                    "auto_advance": 0,
+                    "idempotency_key": f"native-startup-recover-{status_name}",
+                }
+            )
+            self.assertEqual(status, 201, payload)
+
+        with self.server.mutation_lock:
+            self.server.director.pause_run(run_ids["paused"])
+            self.server.director.fail_run(
+                run_ids["failed"],
+                "simulated Host failure before native drain",
+            )
+            self.server.director.cancel_run(
+                run_ids["cancelled"],
+                "simulated Host cancellation before native drain",
+            )
+        self.assertEqual(runtime.paused, [])
+        self.assertEqual(runtime.cancelled, [])
+
+        database_path = Path(self.directory.name) / "events.sqlite3"
+        self.server.shutdown()
+        self.thread.join(timeout=2)
+        self.server.close()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ECOLOGYRSI_DSH_RUNTIME_URL": "http://127.0.0.1:1",
+                    "ECOLOGYRSI_DSH_RUNTIME_TOKEN": "startup-recovery-token",
+                },
+            ),
+            patch(
+                "ecologyrsi_dsh.api.handler.DshNativeAgentRuntimeClient",
+                return_value=runtime,
+            ),
+        ):
+            self.server = EvolutionHTTPServer(("127.0.0.1", 0), database_path)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            daemon=True,
+        )
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}/api"
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if len(runtime.paused) == 1 and len(runtime.cancelled) == 2:
+                break
+            time.sleep(0.001)
+
+        self.assertEqual(
+            {request["run_id"] for request in runtime.paused},
+            {run_ids["paused"]},
+        )
+        self.assertEqual(
+            {request["run_id"] for request in runtime.cancelled},
+            {run_ids["failed"], run_ids["cancelled"]},
+        )
+        for status_name, run_id in run_ids.items():
+            self.assertEqual(
+                self.server.director.state(run_id).run.status.value,
+                status_name,
+            )
+            self.assertEqual(
+                self.server.dsh_tools._run_admission[run_id],
+                "closed",
+            )
+            self.assertFalse(
+                self.server.native_control_inflight_for(run_id, runtime)
+            )
+
     def test_real_node_restart_resume_passes_the_python_handler_live_gate(self) -> None:
         run_id = "run:real-node-resume-restart"
         with _RealNodeRuntime() as runtime:
@@ -1239,24 +1329,35 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             "action": "cancel",
             "idempotency_key": "native-cancel-runtime-failure-control",
         }
-        status, failed = self._post_path(f"/runs/{run_id}/control", control)
+        with patch(
+            "ecologyrsi_dsh.api.auto_progress."
+            "_NATIVE_QUIESCENCE_RETRY_BASE_SECONDS",
+            0.0,
+        ):
+            status, failed = self._post_path(f"/runs/{run_id}/control", control)
 
-        self.assertEqual(status, 202, failed)
-        self.assertEqual(failed["command_status"], "pending")
-        self.assertEqual(
-            self.server.director.state(run_id).run.status.value,
-            "cancelled",
-        )
-        self.assertIn(failed["command_status"], {"pending", "completed"})
+            self.assertEqual(status, 202, failed)
+            self.assertEqual(failed["command_status"], "pending")
+            self.assertEqual(
+                self.server.director.state(run_id).run.status.value,
+                "cancelled",
+            )
+            receipt_key = f"{run_id}:native-cancel-runtime-failure-control"
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                receipt = self.server.ledger.command_receipt(receipt_key)
+                if receipt is not None and receipt.status == "completed":
+                    break
+                time.sleep(0.001)
 
         status, recovered = self._post_path(f"/runs/{run_id}/control", control)
 
         self.assertEqual(status, 200, recovered)
         self.assertEqual(recovered["projection"]["status"], "cancelled")
-        # The Host terminal boundary is durable even when the remote runtime
-        # is unavailable.  A same-key retry returns the completed receipt and
-        # must not invoke the remote cancel operation a second time.
-        self.assertEqual(observed_statuses, ["cancelled"])
+        # The Host terminal boundary remains durable during the transport
+        # outage. The drain retries in place, and a same-key HTTP retry then
+        # replays the completed receipt without a third runtime mutation.
+        self.assertEqual(observed_statuses, ["cancelled", "cancelled"])
         self.assertEqual(
             sum(
                 event.kind == "RunCancelled"

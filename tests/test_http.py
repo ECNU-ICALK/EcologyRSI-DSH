@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
@@ -15,11 +16,43 @@ from urllib.request import Request, urlopen
 from ecologyrsi_dsh.api import handler as handler_module
 from ecologyrsi_dsh.api import shared as api_shared
 from ecologyrsi_dsh.application.config import bind_toy_dataset
+from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
 from ecologyrsi_dsh.core.models import Evaluation, TaskManifest
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 from ecologyrsi_dsh.data.toy import ToyCropSoilWater
 from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
 from ecologyrsi_dsh.integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
+
+
+class _ImmediateNativeControlRuntime:
+    def __init__(self) -> None:
+        self.paused: list[dict] = []
+        self.cancelled: list[dict] = []
+
+    def capabilities(self) -> dict:
+        return {"ready": True}
+
+    def require_capabilities(
+        self,
+        _payload: dict,
+        _required: object,
+        **_kwargs: object,
+    ) -> None:
+        return
+
+    def create_run(self, request: dict) -> dict:
+        return {"accepted": True, **request}
+
+    def pause(self, request: dict) -> dict:
+        self.paused.append(dict(request))
+        return {"accepted": True, **request}
+
+    def cancel(self, request: dict) -> dict:
+        self.cancelled.append(dict(request))
+        return {"accepted": True, **request}
+
+    def resume(self, request: dict) -> dict:
+        return {"accepted": True, **request}
 
 
 class HTTPServerErrorHandlingTests(unittest.TestCase):
@@ -822,6 +855,233 @@ class HTTPContractTests(unittest.TestCase):
                     resume_thread.join(2)
                     self.assertFalse(resume_thread.is_alive())
                     self.assertEqual(resume_response[0][0], 409, resume_response)
+
+    def test_native_pause_reconciles_lifecycle_race_without_orphan_marker(self) -> None:
+        for outcome in ("target", "other_safe"):
+            with self.subTest(outcome=outcome):
+                runtime = _ImmediateNativeControlRuntime()
+                self.server.dsh_native_runtime = runtime
+                run_id = f"run:native-pause-race-{outcome}"
+                status, created = self.request(
+                    "/api/runs",
+                    "POST",
+                    {
+                        "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                        "run_id": run_id,
+                        "domain_pack_id": "crop_soil_water",
+                        "dataset_id": "generated-toy-series@1",
+                        "strategy_model_id": "dsh/strategy",
+                        "review_model_id": "dsh/review",
+                        "start": True,
+                        "auto_advance": 0,
+                        "idempotency_key": f"native-pause-race-{outcome}-create",
+                    },
+                )
+                self.assertEqual(status, 201, created)
+                original_pause = self.server.director.pause_run
+
+                def race_pause(target_run_id: str, **kwargs: object) -> None:
+                    if outcome == "target":
+                        original_pause(target_run_id, **kwargs)
+                    else:
+                        self.server.director.cancel_run(target_run_id, "race winner")
+                    raise RuntimeError("injected lifecycle race")
+
+                with patch.object(
+                    self.server.director,
+                    "pause_run",
+                    side_effect=race_pause,
+                ):
+                    status, payload = self.request(
+                        f"/api/runs/{quote(run_id, safe='')}/control",
+                        "POST",
+                        {
+                            "action": "pause",
+                            "idempotency_key": f"native-pause-race-{outcome}-control",
+                        },
+                    )
+
+                if outcome == "target":
+                    self.assertEqual(status, 202, payload)
+                    deadline = time.monotonic() + 2
+                    while (
+                        self.server.native_control_inflight_for(run_id, runtime)
+                        and time.monotonic() < deadline
+                    ):
+                        time.sleep(0.001)
+                    self.assertEqual(len(runtime.paused), 1)
+                else:
+                    # This request owned the only native drain before the
+                    # concurrent Host cancellation won. It must still quiesce
+                    # DSH instead of merely dropping its marker.
+                    self.assertEqual(status, 202, payload)
+                    self.assertEqual(
+                        self.server.director.state(run_id).run.status.value,
+                        "cancelled",
+                    )
+                    deadline = time.monotonic() + 2
+                    while (
+                        self.server.native_control_inflight_for(run_id, runtime)
+                        and time.monotonic() < deadline
+                    ):
+                        time.sleep(0.001)
+                    self.assertEqual(len(runtime.paused), 1)
+                self.assertFalse(
+                    self.server.native_control_inflight_for(run_id, runtime)
+                )
+
+    def test_native_control_thread_launch_failure_uses_inline_takeover(self) -> None:
+        runtime = _ImmediateNativeControlRuntime()
+        self.server.dsh_native_runtime = runtime
+        run_id = "run:native-thread-launch-fallback"
+        status, created = self.request(
+            "/api/runs",
+            "POST",
+            {
+                "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                "run_id": run_id,
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "strategy_model_id": "dsh/strategy",
+                "review_model_id": "dsh/review",
+                "start": True,
+                "auto_advance": 0,
+                "idempotency_key": "native-thread-launch-fallback-create",
+            },
+        )
+        self.assertEqual(status, 201, created)
+
+        with patch.object(
+            handler_module.EvolutionRequestHandler,
+            "_start_native_control_thread",
+            side_effect=RuntimeError("injected thread start failure"),
+        ) as start_thread:
+            status, paused = self.request(
+                f"/api/runs/{quote(run_id, safe='')}/control",
+                "POST",
+                {
+                    "action": "pause",
+                    "idempotency_key": "native-thread-launch-fallback-control",
+                },
+            )
+
+        self.assertEqual(status, 200, paused)
+        self.assertTrue(paused["remote_quiesced"])
+        self.assertEqual(len(runtime.paused), 1)
+        self.assertEqual(start_thread.call_count, 2)
+        self.assertFalse(self.server.native_control_inflight_for(run_id, runtime))
+
+    def test_manual_native_pause_retries_transient_drain_before_resume(self) -> None:
+        class TransientPauseRuntime:
+            def __init__(self) -> None:
+                self.run_ids: set[str] = set()
+                self.pause_calls = 0
+                self.first_failed = threading.Event()
+                self.retry_entered = threading.Event()
+                self.release_retry = threading.Event()
+
+            def capabilities(self) -> dict:
+                return {"ready": True}
+
+            def require_capabilities(
+                self,
+                _payload: dict,
+                _required: object,
+                **_kwargs: object,
+            ) -> None:
+                return
+
+            def create_run(self, request: dict) -> dict:
+                self.run_ids.add(request["run_id"])
+                return {"accepted": True, **request}
+
+            def status(self, run_id: str) -> dict:
+                return {"run_id": run_id, "status": "running"}
+
+            def pause(self, request: dict) -> dict:
+                self.pause_calls += 1
+                if self.pause_calls == 1:
+                    self.first_failed.set()
+                    raise DshNativeRuntimeUnavailableError(
+                        "temporary pause transport outage",
+                        error_code="dsh_native_runtime_transport_error",
+                    )
+                self.retry_entered.set()
+                self.release_retry.wait(timeout=3)
+                return {"accepted": True, **request}
+
+            def cancel(self, request: dict) -> dict:
+                return {"accepted": True, **request}
+
+            def resume(self, request: dict) -> dict:
+                return {"accepted": True, **request}
+
+        runtime = TransientPauseRuntime()
+        self.server.dsh_native_runtime = runtime
+        run_id = "run:manual-native-transient-pause"
+        status, created = self.request(
+            "/api/runs",
+            "POST",
+            {
+                "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                "run_id": run_id,
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "strategy_model_id": "dsh/strategy",
+                "review_model_id": "dsh/review",
+                "start": True,
+                "auto_advance": 0,
+                "idempotency_key": "manual-native-transient-create",
+            },
+        )
+        self.assertEqual(status, 201, created)
+
+        try:
+            with patch(
+                "ecologyrsi_dsh.api.auto_progress._NATIVE_QUIESCENCE_RETRY_BASE_SECONDS",
+                0.0,
+            ):
+                pause_status, paused = self.request(
+                    f"/api/runs/{quote(run_id, safe='')}/control",
+                    "POST",
+                    {
+                        "action": "pause",
+                        "idempotency_key": "manual-native-transient-pause",
+                    },
+                )
+                self.assertEqual(pause_status, 202, paused)
+                self.assertTrue(runtime.first_failed.wait(timeout=1))
+                self.assertTrue(runtime.retry_entered.wait(timeout=1))
+                self.assertTrue(
+                    self.server.native_control_inflight_for(run_id, runtime)
+                )
+                resume_status, resume_payload = self.request(
+                    f"/api/runs/{quote(run_id, safe='')}/control",
+                    "POST",
+                    {
+                        "action": "resume",
+                        "idempotency_key": "manual-native-resume-too-early",
+                    },
+                )
+                self.assertEqual(resume_status, 409, resume_payload)
+        finally:
+            runtime.release_retry.set()
+
+        receipt_key = f"{run_id}:manual-native-transient-pause"
+        deadline = time.monotonic() + 2
+        receipt = None
+        while time.monotonic() < deadline:
+            receipt = self.server.ledger.command_receipt(receipt_key)
+            if receipt is not None and receipt.status == "completed":
+                break
+            time.sleep(0.001)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt.status, "completed")
+        self.assertTrue(receipt.response["remote_quiesced"])
+        self.assertEqual(runtime.pause_calls, 2)
+        self.assertFalse(
+            self.server.native_control_inflight_for(run_id, runtime)
+        )
 
     def test_pause_control_persists_operator_reason_and_code(self) -> None:
         run_id, _created = self._create_running_run_for_boundary(

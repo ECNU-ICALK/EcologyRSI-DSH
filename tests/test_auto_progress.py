@@ -16,11 +16,18 @@ from urllib.request import Request, urlopen
 
 from ecologyrsi_dsh.api import auto_progress as auto_progress_module
 from ecologyrsi_dsh.api import generation_execution as generation_execution_module
+from ecologyrsi_dsh.api import work_units as work_units_module
 from ecologyrsi_dsh.evaluators.sample_execution import SampleResultCallbackError
 from ecologyrsi_dsh.evolution.batches import ResearchResponseContractError
-from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
+from ecologyrsi_dsh.core.errors import (
+    DshNativeRuntimeUnavailableError,
+    FrozenRuntimeBindingDriftError,
+)
 from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.integrations.model_gateway import GatewayResponseError
+from ecologyrsi_dsh.integrations.dsh_native_runtime import (
+    DSH_NATIVE_EXECUTION_PROTOCOL,
+)
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 
 
@@ -69,11 +76,20 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 GatewayResponseError("invalid JSON contract", retryable=False)
             )
         )
-        self.assertFalse(
-            auto_progress_module._progress_failure_retryable(
-                ValueError("frozen binding is invalid")
-            )
-        )
+        for error_type in (
+            ValueError,
+            TypeError,
+            KeyError,
+            RuntimeError,
+            AttributeError,
+            AssertionError,
+        ):
+            with self.subTest(host_fault=error_type.__name__):
+                self.assertFalse(
+                    auto_progress_module._progress_failure_retryable(
+                        error_type("unclassified host fault")
+                    )
+                )
         research_contract = ResearchResponseContractError(
             "research response failed host contract validation"
         )
@@ -95,7 +111,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 stage="research",
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             auto_progress_module._progress_failure_retryable(
                 TimeoutError("transient ledger boundary")
             )
@@ -224,6 +240,476 @@ class AutoProgressHTTPTests(unittest.TestCase):
         self.assertIs(deferred, outer)
         self.assertEqual(retry_class, "dsh_native_runtime")
         self.assertEqual(error_code, "dsh_native_runtime_http_error")
+
+    def test_unclassified_host_faults_pause_without_consuming_checkpoint(self) -> None:
+        for index, error_type in enumerate(
+            (
+                ValueError,
+                KeyError,
+                RuntimeError,
+                AttributeError,
+                AssertionError,
+            )
+        ):
+            with self.subTest(error_type=error_type.__name__):
+                status, created = self.request(
+                    "/runs",
+                    "POST",
+                    {
+                        "domain_pack_id": "crop_soil_water",
+                        "dataset_id": "generated-toy-series@1",
+                        "rounds": 1,
+                        "candidates_per_generation": 1,
+                        "max_candidates": 1,
+                        "auto_progress": True,
+                        "auto_advance": 0,
+                        "start": False,
+                        "idempotency_key": f"host-fault-pause-{index}",
+                    },
+                )
+                self.assertEqual(status, 201, created)
+                run_id = created["projection"]["run_id"]
+                self.server.director.start_run(run_id)
+                before = self.server.director.state(run_id)
+                secret = f"host-fault-secret-{index}"
+
+                with patch.object(
+                    auto_progress_module,
+                    "execute_generation",
+                    side_effect=error_type(secret),
+                ) as execute_generation:
+                    keep_running = self.server.auto_progress._run_one_generation(
+                        run_id
+                    )
+
+                self.assertFalse(keep_running)
+                execute_generation.assert_called_once()
+                state = self.server.director.state(run_id)
+                self.assertEqual(state.run.status.value, "paused")
+                self.assertEqual(state.run.generation, before.run.generation)
+                self.assertEqual(state.candidates, before.candidates)
+                self.assertEqual(
+                    [event.event_id for event in state.events[:-1]],
+                    [event.event_id for event in before.events],
+                )
+                paused = state.events[-1]
+                self.assertEqual(paused.kind, "RunPaused")
+                self.assertEqual(
+                    paused.payload["code"],
+                    "auto_progress_host_fault",
+                )
+                self.assertIn(error_type.__name__, paused.payload["reason"])
+                self.assertNotIn(secret, str(state.events))
+                self.assertFalse(
+                    any(
+                        event.kind in {"RunFailed", "CandidateFailed"}
+                        for event in state.events
+                    )
+                )
+
+    def test_host_fault_pause_write_is_retried_without_replaying_work(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "host-fault-pause-ledger-requeue",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        with self.server.mutation_lock:
+            self.server.director.start_run(run_id)
+
+        with (
+            patch.object(
+                auto_progress_module,
+                "execute_generation",
+                side_effect=RuntimeError("host fault; Bearer do-not-persist"),
+            ) as execute_generation,
+            patch.object(
+                self.server.director,
+                "pause_run",
+                side_effect=sqlite3.OperationalError("database is temporarily busy"),
+            ),
+            patch.object(
+                auto_progress_module,
+                "_FAILURE_PERSISTENCE_RETRY_SECONDS",
+                0.0,
+            ),
+        ):
+            keep_running = self.server.auto_progress._run_one_generation(run_id)
+
+        self.assertTrue(keep_running)
+        execute_generation.assert_called_once()
+        self.assertEqual(
+            self.server.director.state(run_id).run.status.value,
+            "running",
+        )
+        self.assertIsNotNone(self.server.auto_progress._deferred_pause(run_id))
+
+        with patch.object(
+            auto_progress_module,
+            "execute_generation",
+        ) as execute_generation:
+            keep_running = self.server.auto_progress._run_one_generation(run_id)
+
+        self.assertFalse(keep_running)
+        execute_generation.assert_not_called()
+        state = self.server.director.state(run_id)
+        self.assertEqual(state.run.status.value, "paused")
+        self.assertEqual(state.events[-1].kind, "RunPaused")
+        self.assertEqual(
+            state.events[-1].payload["code"],
+            "auto_progress_host_fault",
+        )
+        self.assertNotIn("do-not-persist", str(state.events))
+        self.assertIsNone(self.server.auto_progress._deferred_pause(run_id))
+
+    def test_adaptive_progress_claim_without_event_advance_pauses(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "adaptive-no-durable-seq-progress",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        self.server.director.start_run(run_id)
+        before = self.server.director.state(run_id)
+
+        def mark_adaptive(_endpoint, _run_id, state):
+            state.task_manifest.metadata["optimization_protocol"] = (
+                "top2_adaptive_epoch@1"
+            )
+            return state
+
+        with (
+            patch.object(
+                auto_progress_module,
+                "complete_if_budget_exhausted",
+                side_effect=mark_adaptive,
+            ),
+            patch.object(
+                self.server,
+                "validate_frozen_runtime_bindings",
+            ),
+            patch.object(
+                work_units_module,
+                "execute_next_adaptive_work_unit",
+                return_value=True,
+            ) as execute_work_unit,
+        ):
+            keep_running = self.server.auto_progress._run_one_generation(run_id)
+
+        self.assertFalse(keep_running)
+        execute_work_unit.assert_called_once()
+        state = self.server.director.state(run_id)
+        self.assertEqual(state.run.status.value, "paused")
+        self.assertEqual(state.run.generation, before.run.generation)
+        self.assertEqual(state.candidates, before.candidates)
+        self.assertEqual(state.events[-1].kind, "RunPaused")
+        self.assertEqual(
+            state.events[-1].payload["code"],
+            "auto_progress_host_fault",
+        )
+        self.assertFalse(
+            any(
+                event.kind in {"RunFailed", "CandidateFailed"}
+                for event in state.events
+            )
+        )
+
+    def test_auto_terminal_transitions_fence_and_quiesce_native_runtime(
+        self,
+    ) -> None:
+        pause_requests: list[dict] = []
+        cancel_requests: list[dict] = []
+        pause_called = threading.Event()
+        pause_release = threading.Event()
+        pause_finished = threading.Event()
+        cancel_called = threading.Event()
+
+        def pause_runtime(request: dict) -> dict:
+            pause_requests.append(request)
+            pause_called.set()
+            try:
+                pause_release.wait(timeout=3)
+                return {"accepted": True, **request}
+            finally:
+                pause_finished.set()
+
+        def cancel_runtime(request: dict) -> dict:
+            cancel_requests.append(request)
+            cancel_called.set()
+            return {"accepted": True, **request}
+
+        self.server.dsh_native_runtime = SimpleNamespace(
+            pause=pause_runtime,
+            cancel=cancel_runtime,
+            resume=lambda request: {"accepted": True, **request},
+        )
+
+        for index, transition in enumerate(("pause", "fail")):
+            with self.subTest(transition=transition):
+                status, created = self.request(
+                    "/runs",
+                    "POST",
+                    {
+                        "domain_pack_id": "crop_soil_water",
+                        "dataset_id": "generated-toy-series@1",
+                        "rounds": 1,
+                        "candidates_per_generation": 1,
+                        "max_candidates": 1,
+                        "auto_progress": True,
+                        "auto_advance": 0,
+                        "start": False,
+                        "idempotency_key": f"native-auto-terminal-{index}",
+                    },
+                )
+                self.assertEqual(status, 201, created)
+                run_id = created["projection"]["run_id"]
+                self.server.director.start_run(run_id)
+                state = self.server.director.state(run_id)
+                work_item = (run_id, state.events[0].seq)
+                self.server.dsh_tools.open_run_admissions(run_id)
+                original_state = self.server.auto_progress._state_for_work_item
+
+                def native_state(item):
+                    projected = original_state(item)
+                    projected.task_manifest.metadata["execution_protocol"] = (
+                        DSH_NATIVE_EXECUTION_PROTOCOL
+                    )
+                    return projected
+
+                with patch.object(
+                    self.server.auto_progress,
+                    "_state_for_work_item",
+                    side_effect=native_state,
+                ):
+                    if transition == "pause":
+                        retry = self.server.auto_progress._persist_run_pause(
+                            work_item,
+                            auto_progress_module._DeferredPause(
+                                "宿主异常，保留检查点。"
+                            ),
+                        )
+                    else:
+                        retry = self.server.auto_progress._persist_run_failure(
+                            work_item,
+                            auto_progress_module._DeferredFailure(
+                                "冻结绑定不可恢复。",
+                                "frozen_runtime_binding_drift",
+                                {
+                                    "generation": 0,
+                                    "stage": "preflight",
+                                    "work_unit_kind": "generation",
+                                },
+                            ),
+                        )
+
+                self.assertFalse(retry)
+                self.assertEqual(
+                    self.server.dsh_tools._run_admission[run_id],
+                    "closed",
+                )
+                if transition == "pause":
+                    self.assertTrue(pause_called.wait(timeout=1))
+                    self.assertEqual(
+                        self.server.director.state(run_id).run.status.value,
+                        "paused",
+                    )
+                    self.assertEqual(pause_requests[-1]["run_id"], run_id)
+                    self.assertIn(run_id, self.server._native_control_inflight)
+                    try:
+                        with patch.object(
+                            self.server.auto_progress,
+                            "schedule_if_enabled",
+                        ):
+                            resume_status, resume_payload = self.request(
+                                f"/runs/{run_id}/control",
+                                "POST",
+                                {
+                                    "action": "resume",
+                                    "idempotency_key": (
+                                        "resume-during-auto-native-pause"
+                                    ),
+                                },
+                            )
+                        self.assertEqual(resume_status, 409, resume_payload)
+                        self.assertEqual(
+                            self.server.director.state(run_id).run.status.value,
+                            "paused",
+                        )
+                    finally:
+                        pause_release.set()
+                    self.assertTrue(pause_finished.wait(timeout=1))
+                    deadline = time.monotonic() + 1
+                    while (
+                        run_id in self.server._native_control_inflight
+                        and time.monotonic() < deadline
+                    ):
+                        time.sleep(0.001)
+                    self.assertNotIn(run_id, self.server._native_control_inflight)
+                else:
+                    self.assertTrue(cancel_called.wait(timeout=1))
+                    self.assertEqual(
+                        self.server.director.state(run_id).run.status.value,
+                        "failed",
+                    )
+                    self.assertEqual(cancel_requests[-1]["run_id"], run_id)
+
+    def test_native_control_inflight_claim_has_one_atomic_owner(self) -> None:
+        run_id = "run:native-inflight-atomic-owner"
+        markers = [
+            (id(self.server.dsh_native_runtime), object())
+            for _ in range(12)
+        ]
+        claimed = [False] * len(markers)
+        barrier = threading.Barrier(len(markers))
+
+        def claim(index: int) -> None:
+            barrier.wait(timeout=2)
+            claimed[index] = self.server.claim_native_control_inflight(
+                run_id,
+                markers[index],
+            )
+
+        threads = [
+            threading.Thread(target=claim, args=(index,))
+            for index in range(len(markers))
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(sum(claimed), 1)
+        winner = markers[claimed.index(True)]
+        self.assertTrue(
+            self.server.native_control_inflight_owned(run_id, winner)
+        )
+        for index, marker in enumerate(markers):
+            if claimed[index]:
+                continue
+            self.assertFalse(
+                self.server.clear_native_control_inflight(run_id, marker)
+            )
+        self.assertTrue(
+            self.server.clear_native_control_inflight(run_id, winner)
+        )
+
+    def test_native_quiescence_retries_transient_outage_without_clearing_marker(
+        self,
+    ) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "native-quiescence-transient-retry",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        self.server.director.start_run(run_id)
+        state = self.server.director.state(run_id)
+        work_item = (run_id, state.events[0].seq)
+        first_failed = threading.Event()
+        retry_entered = threading.Event()
+        release_retry = threading.Event()
+        calls = 0
+
+        def pause_runtime(request: dict) -> dict:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_failed.set()
+                raise DshNativeRuntimeUnavailableError(
+                    "temporary native outage",
+                    error_code="dsh_native_runtime_transport_error",
+                )
+            retry_entered.set()
+            release_retry.wait(timeout=3)
+            return {"accepted": True, **request}
+
+        runtime = SimpleNamespace(pause=pause_runtime)
+        self.server.dsh_native_runtime = runtime
+        original_state = self.server.auto_progress._state_for_work_item
+
+        def native_state(item):
+            projected = original_state(item)
+            projected.task_manifest.metadata["execution_protocol"] = (
+                DSH_NATIVE_EXECUTION_PROTOCOL
+            )
+            return projected
+
+        try:
+            with (
+                patch.object(
+                    self.server.auto_progress,
+                    "_state_for_work_item",
+                    side_effect=native_state,
+                ),
+                patch.object(
+                    auto_progress_module,
+                    "_NATIVE_QUIESCENCE_RETRY_BASE_SECONDS",
+                    0.0,
+                ),
+            ):
+                retry = self.server.auto_progress._persist_run_pause(
+                    work_item,
+                    auto_progress_module._DeferredPause(
+                        "宿主异常，保留检查点。"
+                    ),
+                )
+                self.assertFalse(retry)
+                self.assertTrue(first_failed.wait(timeout=1))
+                self.assertTrue(retry_entered.wait(timeout=1))
+                self.assertTrue(
+                    self.server.native_control_inflight_for(run_id, runtime)
+                )
+                self.assertEqual(
+                    self.server.director.state(run_id).run.status.value,
+                    "paused",
+                )
+        finally:
+            release_retry.set()
+
+        deadline = time.monotonic() + 1
+        while (
+            self.server.native_control_inflight_for(run_id, runtime)
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.001)
+        self.assertEqual(calls, 2)
+        self.assertFalse(
+            self.server.native_control_inflight_for(run_id, runtime)
+        )
 
     def test_untrusted_dsh_error_code_never_reaches_ledger_or_public_export(
         self,
@@ -1246,6 +1732,28 @@ class AutoProgressHTTPTests(unittest.TestCase):
         run_id = created["projection"]["run_id"]
         with self.server.mutation_lock:
             self.server.director.start_run(run_id)
+        pause_requests: list[dict] = []
+        pause_called = threading.Event()
+
+        def pause_runtime(request: dict) -> dict:
+            pause_requests.append(request)
+            pause_called.set()
+            return {"accepted": True, **request}
+
+        self.server.dsh_native_runtime = SimpleNamespace(pause=pause_runtime)
+        self.server.dsh_tools.open_run_admissions(run_id)
+
+        def close_native_admission(state, *, action):
+            self.assertEqual(action, "pause")
+            self.server.dsh_tools.close_run_admissions(run_id)
+            marker = (id(self.server.dsh_native_runtime), object())
+            self.server._native_control_inflight[run_id] = marker
+            return auto_progress_module._NativeQuiescence(
+                request={"run_id": run_id},
+                runtime=self.server.dsh_native_runtime,
+                marker=marker,
+            )
+
         outage = DshNativeRuntimeUnavailableError(
             "DSH proxy failed; token=must-not-persist",
             error_code="dsh_native_runtime_http_error",
@@ -1257,6 +1765,11 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 "execute_generation",
                 side_effect=outage,
             ) as execute_generation,
+            patch.object(
+                self.server.auto_progress,
+                "_close_native_admission",
+                side_effect=close_native_admission,
+            ) as close_admission,
             patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
         ):
             outcomes = [
@@ -1283,6 +1796,10 @@ class AutoProgressHTTPTests(unittest.TestCase):
         )
         self.assertNotIn("must-not-persist", str(state.events))
         self.assertFalse(any(event.kind == "RunFailed" for event in state.events))
+        close_admission.assert_called_once()
+        self.assertEqual(self.server.dsh_tools._run_admission[run_id], "closed")
+        self.assertTrue(pause_called.wait(timeout=1))
+        self.assertEqual(pause_requests[-1]["run_id"], run_id)
 
     def test_dsh_proposal_timeout_is_not_converted_to_terminal_batch_failure(
         self,
@@ -1673,8 +2190,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
             patch.object(
                 self.server,
                 "validate_frozen_runtime_bindings",
-                side_effect=ValueError(
-                    "invalid frozen binding; Bearer preflight-audit-secret"
+                side_effect=FrozenRuntimeBindingDriftError(
+                    "preflight-audit-secret"
                 ),
             ),
             patch.object(
@@ -1708,11 +2225,11 @@ class AutoProgressHTTPTests(unittest.TestCase):
         failure = next(
             event for event in reversed(state.events) if event.kind == "RunFailed"
         )
-        self.assertIn("ValueError", failure.payload["reason"])
+        self.assertIn("FrozenRuntimeBindingDriftError", failure.payload["reason"])
         self.assertNotIn("preflight-audit-secret", failure.payload["reason"])
         self.assertEqual(
             failure.payload["error_code"],
-            "auto_progress_preflight_host_value_error",
+            "frozen_runtime_binding_drift",
         )
         self.assertEqual(failure.payload["failure_context"]["stage"], "preflight")
         projected = self.request(f"/runs/{run_id}")[1]["projection"]
@@ -1749,7 +2266,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
             patch.object(
                 auto_progress_module,
                 "execute_generation",
-                side_effect=RuntimeError("generation execution failed"),
+                side_effect=FrozenRuntimeBindingDriftError(),
             ) as execute_generation,
             patch.object(
                 self.server.director,
@@ -1811,7 +2328,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
             patch.object(
                 auto_progress_module,
                 "execute_generation",
-                side_effect=ValueError("terminal generation failure"),
+                side_effect=FrozenRuntimeBindingDriftError(),
             ) as execute_generation,
             patch.object(
                 self.server.director,
@@ -1844,7 +2361,9 @@ class AutoProgressHTTPTests(unittest.TestCase):
             1,
         )
 
-    def test_worker_survives_unexpected_state_error_and_processes_next_run(self) -> None:
+    def test_worker_durably_retries_transient_state_error_and_processes_next_run(
+        self,
+    ) -> None:
         run_ids: list[str] = []
         for label in ("faulty", "next"):
             status, created = self.request(
@@ -1889,6 +2408,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 "_FAILURE_PERSISTENCE_RETRY_SECONDS",
                 0.0,
             ),
+            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
         ):
             with self.server.mutation_lock:
                 for run_id in run_ids:
@@ -1901,26 +2421,31 @@ class AutoProgressHTTPTests(unittest.TestCase):
                     run_id: self.server.director.state(run_id).run.status.value
                     for run_id in run_ids
                 }
-                if statuses == {
-                    faulty_run_id: "failed",
-                    next_run_id: "completed",
-                } and self.server.auto_progress._queue.unfinished_tasks == 0:
+                if all(status == "completed" for status in statuses.values()) and (
+                    self.server.auto_progress._queue.unfinished_tasks == 0
+                ):
                     break
                 time.sleep(0.01)
 
         faulty_state = self.server.director.state(faulty_run_id)
-        self.assertEqual(faulty_state.run.status.value, "failed")
+        self.assertEqual(faulty_state.run.status.value, "completed")
         self.assertEqual(
             self.server.director.state(next_run_id).run.status.value,
             "completed",
         )
-        failure = next(
+        retry = next(
             event
             for event in reversed(faulty_state.events)
-            if event.kind == "RunFailed"
+            if event.kind == "GatewayRetryScheduled"
         )
-        self.assertIn("OperationalError", failure.payload["reason"])
-        self.assertNotIn("worker-exception-secret", failure.payload["reason"])
+        self.assertEqual(retry.payload["retry_class"], "sample_result_persistence")
+        self.assertNotIn("worker-exception-secret", str(faulty_state.events))
+        self.assertFalse(
+            any(
+                event.kind in {"RunPaused", "RunFailed", "CandidateFailed"}
+                for event in faulty_state.events
+            )
+        )
         self.assertTrue(self.server.auto_progress._thread.is_alive())
         self.assertEqual(self.server.auto_progress._queue.unfinished_tasks, 0)
         with self.server.auto_progress._state_lock:
@@ -2168,7 +2693,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         self.assertEqual(diagnostics["run_state"], "idle")
         self.assertEqual(diagnostics["cooldown_run_count"], 0)
 
-    def test_diagnostics_requeues_running_auto_progress_run_when_scheduler_idle(
+    def test_diagnostics_and_run_reads_do_not_requeue_idle_running_run(
         self,
     ) -> None:
         status, created = self.request(
@@ -2191,29 +2716,70 @@ class AutoProgressHTTPTests(unittest.TestCase):
         with self.server.mutation_lock:
             self.server.director.start_run(run_id)
 
-        entered = threading.Event()
-        release = threading.Event()
+        before_seq = self.server.director.state(run_id).events[-1].seq
+        with (
+            patch.object(
+                self.server.auto_progress,
+                "_reconcile_retry_cooldowns",
+            ) as reconcile_cooldowns,
+            patch.object(
+                self.server.auto_progress,
+                "_reconcile_idle_running_run",
+            ) as reconcile_idle,
+            patch.object(
+                self.server.auto_progress,
+                "_schedule_work_item",
+            ) as schedule_work_item,
+        ):
+            diagnostics = self.server.auto_progress.diagnostics(run_id)
+            status, detail = self.request(f"/runs/{run_id}")
+            list_status, listed = self.request("/runs?view=summary")
 
-        def hold_generation(*_args, **_kwargs):
-            entered.set()
-            release.wait(timeout=2)
-            return self.server.director.state(run_id)
+        self.assertEqual(diagnostics["run_state"], "idle")
+        self.assertEqual(status, 200, detail)
+        self.assertEqual(list_status, 200, listed)
+        self.assertEqual(detail["projection"]["execution_scheduler"]["run_state"], "idle")
+        reconcile_cooldowns.assert_not_called()
+        reconcile_idle.assert_not_called()
+        schedule_work_item.assert_not_called()
+        self.assertEqual(
+            self.server.director.state(run_id).events[-1].seq,
+            before_seq,
+        )
 
-        try:
-            with patch.object(
-                auto_progress_module,
-                "execute_generation",
-                side_effect=hold_generation,
-            ):
-                initial = self.server.auto_progress.diagnostics(run_id)
-                self.assertNotEqual(initial["run_state"], "idle")
-                self.assertTrue(entered.wait(timeout=1))
-                live = self.server.auto_progress.diagnostics(run_id)
-                self.assertEqual(live["run_state"], "running")
-        finally:
-            release.set()
+    def test_scheduler_maintenance_requeues_orphan_without_get_request(self) -> None:
+        status, created = self.request(
+            "/runs",
+            "POST",
+            {
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_progress": True,
+                "auto_advance": 0,
+                "start": False,
+                "idempotency_key": "maintenance-recovers-orphan",
+            },
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        self.server.director.start_run(run_id)
+        state = self.server.director.state(run_id)
+        work_item = (run_id, auto_progress_module._run_incarnation(state))
 
-    def test_diagnostics_clears_cooldown_for_every_terminal_status(self) -> None:
+        with patch.object(
+            self.server.auto_progress,
+            "_schedule_work_item",
+            return_value=True,
+        ) as schedule_work_item:
+            recovered = self.server.auto_progress._reconcile_idle_running_runs()
+
+        self.assertEqual(recovered, 1)
+        schedule_work_item.assert_called_once_with(work_item)
+
+    def test_diagnostics_does_not_clear_terminal_cooldown_bookkeeping(self) -> None:
         transitions = (
             ("completed", lambda run_id: self.server.director.complete_run(run_id)),
             ("cancelled", lambda run_id: self.server.director.cancel_run(run_id)),
@@ -2254,15 +2820,23 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 with self.server.mutation_lock:
                     transition(run_id)
 
-                diagnostics = self.server.auto_progress.diagnostics(run_id)
-                self.assertEqual(diagnostics["run_state"], "idle")
-                self.assertEqual(diagnostics["cooldown_run_count"], 0)
                 with self.server.auto_progress._state_lock:
-                    self.assertNotIn(
+                    cooldown_count = len(
+                        set(self.server.auto_progress._retry_timers)
+                        | set(self.server.auto_progress._retry_not_before)
+                    )
+                diagnostics = self.server.auto_progress.diagnostics(run_id)
+                self.assertEqual(diagnostics["run_state"], "cooldown")
+                self.assertEqual(
+                    diagnostics["cooldown_run_count"],
+                    cooldown_count,
+                )
+                with self.server.auto_progress._state_lock:
+                    self.assertIn(
                         work_item,
                         self.server.auto_progress._retry_not_before,
                     )
-                    self.assertNotIn(
+                    self.assertIn(
                         work_item,
                         self.server.auto_progress._retry_timers,
                     )
@@ -2312,7 +2886,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 timer,
             )
 
-    def test_dead_retry_timer_is_replaced_for_running_run(self) -> None:
+    def test_diagnostics_does_not_replace_dead_retry_timer(self) -> None:
         status, created = self.request(
             "/runs",
             "POST",
@@ -2346,6 +2920,17 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         diagnostics = self.server.auto_progress.diagnostics(run_id)
         self.assertEqual(diagnostics["run_state"], "cooldown")
+        with self.server.auto_progress._state_lock:
+            self.assertIs(
+                self.server.auto_progress._retry_timers.get(work_item),
+                dead_timer,
+            )
+            self.assertNotIn(work_item, self.server.auto_progress._scheduled)
+
+        # Reconciliation remains an explicit scheduler operation, not a read
+        # side effect. It can still repair the dead wakeup when invoked by an
+        # owning lifecycle path.
+        self.server.auto_progress._reconcile_retry_cooldowns()
         deadline = time.monotonic() + 2.0
         replacement = None
         while time.monotonic() < deadline:

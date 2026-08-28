@@ -581,7 +581,10 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
             # runtime process may be replaced while a previous drain is still
             # unwinding; the replacement must be allowed to restore/resume the
             # durable Host boundary without being blocked by that stale worker.
-            self._native_control_inflight: dict[str, int] = {}
+            self._native_control_inflight_lock = threading.RLock()
+            self._native_control_inflight: dict[
+                str, int | tuple[int, object]
+            ] = {}
             super().__init__(address, EvolutionRequestHandler)
             # A process can stop after RunCreated was durably bound to its
             # create receipt but before the HTTP response was sealed.  At this
@@ -594,6 +597,7 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
             # Recovery is projection-driven and only picks up manifests that
             # explicitly opted into this mode.
             self.auto_progress = AutoProgressManager(self)
+            self.auto_progress.recover_native_quiescence()
             self.auto_progress.recover_running()
         except BaseException:
             if hasattr(self, "socket"):
@@ -744,6 +748,70 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
                 lock = threading.RLock()
                 self._control_locks[key] = lock
             return lock
+
+    def claim_native_control_inflight(
+        self,
+        run_id: str,
+        marker: int | tuple[int, object],
+        *,
+        replace: bool = False,
+    ) -> bool:
+        """Atomically claim ownership of one asynchronous native drain."""
+
+        key = str(run_id).strip()
+        if not key:
+            raise ValueError("run_id must be non-empty")
+        with self._native_control_inflight_lock:
+            if not replace and key in self._native_control_inflight:
+                return False
+            self._native_control_inflight[key] = marker
+            return True
+
+    def native_control_inflight_owned(
+        self,
+        run_id: str,
+        marker: int | tuple[int, object],
+    ) -> bool:
+        """Return whether the exact marker still owns this run's drain."""
+
+        key = str(run_id).strip()
+        if not key:
+            return False
+        with self._native_control_inflight_lock:
+            current = self._native_control_inflight.get(key)
+            return current is marker or current == marker
+
+    def native_control_inflight_for(self, run_id: str, runtime: Any) -> bool:
+        """Atomically test whether the installed runtime owns a live drain."""
+
+        key = str(run_id).strip()
+        if not key:
+            return False
+        with self._native_control_inflight_lock:
+            marker = self._native_control_inflight.get(key)
+            runtime_id = (
+                marker[0]
+                if isinstance(marker, tuple) and len(marker) == 2
+                else marker
+            )
+            return runtime_id == id(runtime)
+
+    def clear_native_control_inflight(
+        self,
+        run_id: str,
+        marker: int | tuple[int, object],
+    ) -> bool:
+        """Atomically clear a drain only while its exact owner remains current."""
+
+        key = str(run_id).strip()
+        if not key:
+            return False
+        with self._native_control_inflight_lock:
+            current = self._native_control_inflight.get(key)
+            if current is not marker and current != marker:
+                return False
+            self._native_control_inflight.pop(key, None)
+            return True
 
     def acquire_generation_lease(
         self,
@@ -3363,21 +3431,13 @@ class EvolutionRequestHandler(
             self._send(HTTPStatus.ACCEPTED, self._command_status(cache_key))
             return
         if action in {"start", "resume"}:
-            for pending_key in self.server.ledger.pending_command_keys():
-                if pending_key == cache_key:
-                    continue
-                pending = self.server.ledger.command_receipt(pending_key)
-                if (
-                    pending is not None
-                    and pending.run_id == run_id
-                    and pending.status == "pending"
-                    and pending.command_kind in {"control:pause", "control:cancel"}
-                    and self.server._native_control_inflight.get(run_id)
-                    == id(self.server.dsh_native_runtime)
-                ):
-                    raise CommandInProgressError(
-                        "run control is draining; retry start/resume after the command receipt completes"
-                    )
+            if self.server.native_control_inflight_for(
+                run_id,
+                self.server.dsh_native_runtime,
+            ):
+                raise CommandInProgressError(
+                    "run control is draining; retry start/resume after native quiescence completes"
+                )
         if self._serve_existing_command(cache_key, run_id, f"control:{action}", body):
             return
         state = director.state(run_id)
@@ -3445,24 +3505,83 @@ class EvolutionRequestHandler(
             pause_reason = raw_pause_reason
             pause_code = raw_pause_code
         if native_protocol and action in {"pause", "cancel"}:
+            runtime = self.server.dsh_native_runtime
+            native_marker = (id(runtime), object())
+            if not self.server.claim_native_control_inflight(
+                run_id,
+                native_marker,
+            ):
+                raise CommandInProgressError(
+                    "run control is already draining; retry after native quiescence completes"
+                )
             self.server.dsh_tools.close_run_admissions(run_id)
             # Persist the Host safety boundary synchronously, then let remote
             # DSH quiesce/drain in a daemon worker. This prevents browser or
             # proxy timeouts from being coupled to provider latency.
             if not resumes_durable_native_quiescence:
-                with self.server.mutation_lock:
-                    if action == "pause":
-                        director.pause_run(
-                            run_id,
-                            reason=pause_reason,
-                            code=pause_code,
-                        )
+                try:
+                    with self.server.mutation_lock:
+                        if action == "pause":
+                            director.pause_run(
+                                run_id,
+                                reason=pause_reason,
+                                code=pause_code,
+                            )
+                        else:
+                            director.cancel_run(
+                                run_id,
+                                str(body.get("reason", "cancelled by user")),
+                            )
+                except Exception:
+                    # Another lifecycle writer may win after the state snapshot
+                    # above but before this compare-and-swap transition.  A
+                    # transition helper can also raise after its durable event
+                    # committed (for example while closing a Session).  Re-read
+                    # the ledger before deciding who owns the native drain.
+                    try:
+                        reconciled_state = director.state(run_id)
+                    except Exception:
+                        # The durable outcome is unknown.  Keep the admission
+                        # fence and ownership marker fail-closed; startup recovery
+                        # can prove the lifecycle before allowing a resume.
+                        raise
+                    reconciled_status = reconciled_state.run.status.value
+                    if reconciled_status == target_status:
+                        # Our event committed, or an equivalent control won.
+                        # Continue with the same remote quiescence boundary.
+                        state = reconciled_state
+                    elif reconciled_status in {
+                        "paused",
+                        "cancelled",
+                        "completed",
+                        "failed",
+                    }:
+                        # A different Host lifecycle boundary won after this
+                        # request had already claimed the only native drain.
+                        # That writer could not claim its own marker, so this
+                        # request must still finish the original pause/cancel;
+                        # merely clearing the marker would leave DSH running
+                        # behind a paused or terminal Host projection.
+                        state = reconciled_state
                     else:
-                        director.cancel_run(
+                        # The run is still live and this transition did not
+                        # commit. Restore its admission before returning the
+                        # retryable command error.
+                        self.server.clear_native_control_inflight(
                             run_id,
-                            str(body.get("reason", "cancelled by user")),
+                            native_marker,
                         )
+                        self.server.dsh_tools.open_run_admissions(run_id)
+                        raise
             accepted_state = director.state(run_id)
+            # A lifecycle race can advance the Host cursor after the request
+            # was assembled. Bind the remote quiescence to the state that is
+            # actually being acknowledged, while keeping the caller's stable
+            # idempotency key.
+            native_request["run_state_revision"] = accepted_state.events[-1].seq
+            native_request["ledger_expected_revision"] = (
+                self.server.ledger.latest_seq()
+            )
             accepted_payload = _state_payload(accepted_state)
             accepted_payload.update(
                 {
@@ -3472,16 +3591,24 @@ class EvolutionRequestHandler(
                     "message": "主机状态边界已落盘，DSH 资源正在后台排空。",
                 }
             )
-            runtime = self.server.dsh_native_runtime
-            worker = threading.Thread(
-                target=self._finish_native_control,
-                args=(cache_key, run_id, action, native_request, runtime),
-                name=f"ecology-control-{action}-{run_id[:8]}",
-                daemon=True,
+            completed_inline = self._launch_native_control_worker(
+                cache_key,
+                run_id,
+                action,
+                native_request,
+                runtime,
+                native_marker,
             )
-            self.server._native_control_inflight[run_id] = id(runtime)
-            worker.start()
             self._active_command = None
+            if completed_inline:
+                receipt = self.server.ledger.command_receipt(cache_key)
+                if (
+                    receipt is not None
+                    and receipt.status == "completed"
+                    and receipt.response is not None
+                ):
+                    self._send(HTTPStatus.OK, dict(receipt.response))
+                    return
             self._send(HTTPStatus.ACCEPTED, accepted_payload)
             return
         elif native_protocol and action == "resume":
@@ -3549,6 +3676,54 @@ class EvolutionRequestHandler(
             self._schedule_auto_progress(resulting_state)
         self._send(HTTPStatus.OK, payload)
 
+    @staticmethod
+    def _start_native_control_thread(worker: threading.Thread) -> None:
+        """Small seam for deterministic launch-failure recovery tests."""
+
+        worker.start()
+
+    def _launch_native_control_worker(
+        self,
+        cache_key: str,
+        run_id: str,
+        action: str,
+        native_request: dict[str, Any],
+        runtime: Any,
+        native_marker: tuple[int, object],
+    ) -> bool:
+        """Launch a native drain, falling back to an in-request takeover.
+
+        Thread creation can fail transiently under process resource pressure.
+        Retrying with a fresh Thread avoids reusing a partially-started object;
+        if process-local thread creation remains unavailable, the request thread
+        executes the same idempotent drain synchronously so ownership can never
+        become a permanent orphan.  ``True`` means that fallback completed
+        inline and the caller may return the completed receipt directly.
+        """
+
+        args = (
+            cache_key,
+            run_id,
+            action,
+            native_request,
+            runtime,
+            native_marker,
+        )
+        for _attempt in range(2):
+            worker = threading.Thread(
+                target=self._finish_native_control,
+                args=args,
+                name=f"ecology-control-{action}-{run_id[:8]}",
+                daemon=True,
+            )
+            try:
+                self._start_native_control_thread(worker)
+            except Exception:
+                continue
+            return False
+        self._finish_native_control(*args)
+        return True
+
     def _finish_native_control(
         self,
         cache_key: str,
@@ -3556,19 +3731,31 @@ class EvolutionRequestHandler(
         action: str,
         native_request: dict[str, Any],
         runtime: Any,
+        native_marker: tuple[int, object],
     ) -> None:
         """Complete a native pause/cancel receipt after remote quiescence."""
 
         error_code = None
         error_message = None
         try:
-            if action == "pause":
-                runtime.pause(native_request)
-            else:
-                runtime.cancel(native_request)
-            barrier = self.server.acquire_generation_lease(run_id)
-            if barrier is not None:
-                barrier.release()
+            quiescence_error = self.server.auto_progress.finish_native_quiescence(
+                action,
+                native_request,
+                runtime,
+                native_marker,
+            )
+            if quiescence_error is not None:
+                raise quiescence_error
+            generation_barrier = self.server.acquire_generation_lease(run_id)
+            if generation_barrier is None:
+                raise RuntimeError(
+                    "run generation quiescence barrier is unavailable"
+                )
+            generation_barrier.release()
+            self.server.clear_native_control_inflight(
+                run_id,
+                native_marker,
+            )
         except Exception as exc:  # remote drain errors remain observable
             error_code = safe_error_code(getattr(exc, "error_code", None)) or type(exc).__name__
             error_message = _public_http_error(exc)
@@ -3594,9 +3781,6 @@ class EvolutionRequestHandler(
             # The Host state boundary is already safe. Leave the receipt
             # pending for startup recovery or an explicit same-key retry.
             return
-        finally:
-            if self.server._native_control_inflight.get(run_id) == id(runtime):
-                self.server._native_control_inflight.pop(run_id, None)
 
     def _record_intervention(self, run_id: str, body: dict[str, Any]) -> None:
         cache_key = self._command_key(run_id, body)

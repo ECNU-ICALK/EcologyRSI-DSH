@@ -2,7 +2,7 @@
 
 一个把农业与生态预测研究中的“数据边界—模型调研—候选生成—科学评测—人工治理”串成可复现闭环的轻量 DSH 插件。
 
-> 当前交付：`0.3.47` 可交付候选版 · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
+> 当前交付：`0.3.48` 可交付候选版 · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
 
 ## 为什么做这个工作台
 
@@ -301,7 +301,7 @@ PYTHONPATH=src python -m ecologyrsi_dsh data fetch agc_tomato_2019
 
 ## DSH 原生 Agent 运行时
 
-0.3.47 新建运行使用 `dsh_native_plugin_evolution@1`：Agent Session、上下文压缩、
+0.3.48 新建运行使用 `dsh_native_plugin_evolution@1`：Agent Session、上下文压缩、
 subagent 和 Workflow 由 DSH 管理，Python 只提供科学工具与持久账本。安装后直接运行：
 
 ```bash
@@ -407,7 +407,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --samples-per-task 1 \
   --minimum-coverage 0.8 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.47-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.48-real-api-agent-tool-acceptance.json
 ```
 
 验收无论通过或失败都会原子写入 JSON 报告；省略 `--output` 时默认写到系统临时目录下的
@@ -608,7 +608,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --db /tmp/ecologyrsi-dsh-dsh-adapter.sqlite3 \
   --samples-per-task 1 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.47-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.48-real-api-agent-tool-acceptance.json
 ```
 
 构建 wheel、sdist 和完整交付包需要 `uv`：
@@ -638,6 +638,16 @@ PYTHONPATH=src python -m ecologyrsi_dsh summary run:demo --db /tmp/ecologyrsi-de
 - 单进程锁和 SQLite 适用于本地交付与研究验证，不是多租户、高并发生产架构。
 
 发布前的人工验收项与安全边界见 `RELEASE-CHECKLIST.md`。
+
+## 0.3.48 交付更新
+
+- 逐 origin 的运行控制不再重放完整事件流，而是通过只包含生命周期事件的 SQLite covering index 执行 O(1) 状态查询；64 路逐样本并发不会再因重复解析整条 run 历史挤占 sidecar，页面监控和控制请求也不再与科学执行争用同一条重放热路径。
+- 自动推进的诊断接口保持纯读，调度器自身以低频维护循环修复失效的 retry timer 和仍为 `RUNNING`、却意外失去队列 ownership 的运行；工作单元只有在追加式账本序号真实前进后才算成功，避免“返回成功但没有持久进度”的空转。
+- 未分类 Host 异常会在当前检查点安全暂停，不再按进程内猜测无限重放；暂停或失败前先关闭 DSH 写入 admission，并以可恢复的原生 quiescence 状态同步 pause/cancel。短暂的 DSH 控制失败会保留恢复证据并重试，服务重启后也会核对 Host 与 DSH 状态，避免一侧已终止、另一侧仍持续运行。
+- holdout 每个 F1/F2/incumbent arm 在发出第一个请求前写入独立的开始边界，页面能够显示当前 arm、已完成 origin、在飞、待提交与待结算数量；崩溃恢复仍要求完全相同的 revision、cohort 和 artifact 绑定，不会把其他阶段结果误作留出证据。
+- adaptive batch 新增严格 origin 安全门：评分单元覆盖率和“9 个目标/时距结果全部成功”的完整 origin 成功率分别计算；严格 agent chain 不完整或 origin 成功率低于冻结门槛时禁止继续修改，并在已有父 revision 时执行安全回退。完整 pipeline 的选择保留在轮级 4 候选搜索中，不再作为 50-origin batch 内的局部编辑，从而保持外层 Top 2 逻辑不变、局部 revision 只做有界小改动。
+- 进化页同时展示 `origin 成功率` 与 `评分单元覆盖率`，并明确区分 Host 已落盘、远端已完成、在飞和排队状态；空值不会再被显示成 0%，不同 cohort 的 batch 分数仍只用于诊断，不绘制伪趋势。
+- `FormalBatchEvaluated` 只保存决策所需的聚合指标、科学/数据校验值和一份规范化压缩轨迹；删除重复的展开执行记录与浏览器预览。逐样本 checkpoint 事件与该压缩归档共同保留可重放、可复现校验链和失败审计能力。
 
 ## 0.3.47 交付更新
 

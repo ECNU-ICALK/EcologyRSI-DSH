@@ -26,6 +26,16 @@ from .redaction import public_error_summary
 
 SCHEMA_VERSION = 7
 
+_RUN_LIFECYCLE_KINDS_SQL = """
+    'RunCreated',
+    'RunStarted',
+    'RunPaused',
+    'RunResumed',
+    'RunCancelled',
+    'RunFailed',
+    'RunCompleted'
+"""
+
 
 class CommandInProgressError(RuntimeError):
     """Raised when another worker already owns an idempotent command."""
@@ -102,6 +112,16 @@ class EventLedger:
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_evolution_events_run_seq "
                 "ON evolution_events(run_id, seq)"
+            )
+            # Lifecycle checks run once per sample admission/control decision.
+            # Keep that path independent of run history size: the partial index
+            # contains only status-changing events and covers the tail query.
+            self._connection.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_evolution_events_run_lifecycle_seq
+                ON evolution_events(run_id, seq DESC, kind)
+                WHERE kind IN ({_RUN_LIFECYCLE_KINDS_SQL})
+                """
             )
             self._connection.execute(
                 """
@@ -703,6 +723,27 @@ class EventLedger:
                 (run_id,),
             ).fetchone()
         return int(row["seq"]) if row is not None else 0
+
+    def latest_run_lifecycle_kind(self, run_id: str) -> str | None:
+        """Return the latest durable lifecycle event kind for one run.
+
+        The fixed-size result is served entirely by the partial covering index;
+        it does not load or decode any event payload and therefore does not grow
+        with the number of sample, trajectory, or model-usage events in a run.
+        ``None`` denotes a run with no durable lifecycle event.
+        """
+
+        run_id = self._required_text(run_id, "run_id")
+        with self._lock:
+            row = self._connection.execute(
+                f"""
+                SELECT kind FROM evolution_events
+                WHERE run_id = ? AND kind IN ({_RUN_LIFECYCLE_KINDS_SQL})
+                ORDER BY seq DESC LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+        return str(row["kind"]) if row is not None else None
 
     def run_ids(self, *, include_archived: bool = True) -> tuple[str, ...]:
         """Return distinct run IDs in first-seen order.
