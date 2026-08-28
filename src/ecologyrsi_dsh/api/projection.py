@@ -1363,6 +1363,16 @@ def _gateway_retry_projection(state: Any) -> dict[str, Any] | None:
         if newer.kind in {"RunPaused", "RunResumed", "RunStarted"}:
             return None
         if (
+            event.payload.get("continuity_reset_contract")
+            == "dsh_structured_success@1"
+            and newer.kind == "DshStructuredResultAccepted"
+        ):
+            # Native DSH retries are generation-scoped, so their synthetic
+            # stage name need not match an EvolutionStageRecorded row.  The
+            # durable structured receipt is the explicit v2 continuity-reset
+            # witness and must clear the stale cooldown banner immediately.
+            return None
+        if (
             newer.kind == "EvolutionStageRecorded"
             and newer.payload.get("status") in {"started", "completed"}
             and int(newer.payload.get("generation", -1))
@@ -1811,21 +1821,14 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         or not 1 <= configured_concurrency <= MAX_SAMPLE_CONCURRENCY
     ):
         configured_concurrency = None
+    active_origins: set[
+        tuple[str, frozenset[str] | tuple[str, str] | str]
+    ] = set()
     outstanding_origins: set[
         tuple[str, frozenset[str] | tuple[str, str] | str]
     ] = set()
     for _, launch in latest_launch_by_key.values():
-        if (
-            not reflection_enabled
-            and launch.get("stage") != terminal_stage
-        ):
-            # Aggregate post-score reflection declares sample.plan as the
-            # completed origin boundary. A later/parallel critic is remote
-            # activity for that same origin, not another forecast origin.
-            continue
         launch_key = str(launch.get("idempotency_key") or "").strip()
-        if launch_key in completed_terminals:
-            continue
         reservation_id = str(launch.get("reservation_id") or "").strip()
         if (
             reservation_id in accepted_reservations
@@ -1836,6 +1839,40 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
             launch.get("sample_member_digests")
         )
         legacy_key = _legacy_sample_launch_key(launch.get("idempotency_key"))
+        if member_digests is not None:
+            active_key = ("members", member_digests)
+        elif legacy_key is not None:
+            active_key = ("legacy", legacy_key)
+        else:
+            active_key = ("launch", reservation_id or launch_key)
+        completed_by_terminal_reflection = reflection_enabled and any(
+            (
+                (
+                    member_digests is not None
+                    and completed_members is not None
+                    and member_digests <= completed_members
+                )
+                or (
+                    legacy_key is not None
+                    and completed_legacy_key is not None
+                    and legacy_key == completed_legacy_key
+                )
+            )
+            for completed_members, completed_legacy_key in completed_launches
+        )
+        if not completed_by_terminal_reflection:
+            active_origins.add(active_key)
+        if (
+            not reflection_enabled
+            and launch.get("stage") != terminal_stage
+        ):
+            # Aggregate post-score reflection declares sample.plan as the
+            # completed origin boundary. A later/parallel critic does not
+            # advance forecast progress, but it remains real remote activity
+            # that can block host settlement and must stay observable.
+            continue
+        if launch_key in completed_terminals:
+            continue
         if any(
             (
                 (
@@ -1861,12 +1898,12 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         outstanding_origins.add(origin_key)
     outstanding = min(remaining, len(outstanding_origins))
     in_flight = min(
-        outstanding,
+        len(active_origins),
         configured_concurrency
         if configured_concurrency is not None
         else HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
     )
-    provider_queued = max(0, outstanding - in_flight)
+    provider_queued = max(0, len(active_origins) - in_flight)
     awaiting_submission = remaining - outstanding
     terminal_events = sorted(
         completed_terminal_events, key=lambda event: int(event.seq)

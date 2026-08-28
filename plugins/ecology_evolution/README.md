@@ -85,7 +85,7 @@ DSH-native 运行不设逐样本 Token 硬预算。页面只读显示 DSH TokenM
 插件加载后向父窗口发送：
 
 ```json
-{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.3.41"}
+{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.3.42"}
 ```
 
 宿主通过 `postMessage` 返回。最小兼容合同只要求同源代理地址和短期能力令牌；身份、能力范围和模型目录可选：

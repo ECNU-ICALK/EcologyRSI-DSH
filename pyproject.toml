@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ecologyrsi-dsh"
-version = "0.3.41"
+version = "0.3.42"
 description = "A small, replayable evolution core for EcologyRSI-DSH"
 readme = "README.md"
 license = "LicenseRef-Proprietary"
@@ -164,7 +164,7 @@ where = ["src"]
     "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v7/skills/candidate-scientific-review/SKILL.md",
 ]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/dist" = [
-    "integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.41.tgz",
+    "integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.42.tgz",
 ]
 "share/ecologyrsi-dsh/scripts" = [
     "scripts/install_dsh_ecology_runtime.mjs",

@@ -24,6 +24,7 @@ from ecologyrsi_dsh.api.projection import (
     _dsh_runtime_projection,
     _evaluation_progress_projection,
     _evaluation_progress_rates,
+    _gateway_retry_projection,
     _model_usage_summary,
     _public_evaluation_metrics,
     _run_failure_projection,
@@ -197,7 +198,7 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         self.assertEqual(progress["completed_samples"], 1)
         self.assertEqual(progress["succeeded_samples"], 1)
-        self.assertEqual(progress["in_flight_batches"], 0)
+        self.assertEqual(progress["in_flight_batches"], 1)
 
     def test_adaptive_progress_includes_live_screening_tool_receipts(self) -> None:
         schedule = {
@@ -260,11 +261,36 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["completed_origins"], 0)
         self.assertEqual(progress["succeeded_samples"], 0)
         self.assertEqual(progress["failed_samples"], 0)
-        self.assertEqual(progress["in_flight_batches"], 0)
+        self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["awaiting_submission_batches"], 255)
         self.assertEqual(progress["awaiting_settlement_batches"], 1)
         self.assertEqual(progress["gateway_request_count"], 1)
         self.assertEqual(progress["configured_concurrency"], 64)
+
+    def test_native_retry_wait_clears_on_its_structured_success_contract(self) -> None:
+        retry = SimpleNamespace(
+            seq=10,
+            kind="GatewayRetryScheduled",
+            payload={
+                "schema_version": "ecologyrsi-dsh.gateway-retry-scheduled/2",
+                "generation": 0,
+                "stage": "generation",
+                "continuity_reset_contract": "dsh_structured_success@1",
+            },
+            created_at="2026-08-27T06:00:00+00:00",
+        )
+        success = SimpleNamespace(
+            seq=11,
+            kind="DshStructuredResultAccepted",
+            payload={"identity": {"stage": "sample.plan"}},
+            created_at="2026-08-27T06:00:01+00:00",
+        )
+        state = SimpleNamespace(
+            run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
+            events=(retry, success),
+        )
+
+        self.assertIsNone(_gateway_retry_projection(state))
 
     def test_screening_progress_retires_launches_before_retry_boundary(self) -> None:
         events = (
@@ -549,7 +575,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         progress = _screening_progress_projection(state)
 
         self.assertEqual(progress["completed_samples"], 1)
-        self.assertEqual(progress["in_flight_batches"], 0)
+        self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["awaiting_submission_batches"], 255)
 
     def test_screening_progress_deduplicates_retried_origin(self) -> None:
@@ -623,7 +649,7 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         self.assertEqual(progress["completed_samples"], 1)
         self.assertEqual(progress["succeeded_samples"], 1)
-        self.assertEqual(progress["in_flight_batches"], 0)
+        self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["queued_batches"], 0)
         self.assertEqual(progress["awaiting_submission_batches"], 255)
 
@@ -693,7 +719,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         progress = _screening_progress_projection(state)
 
         self.assertEqual(progress["completed_samples"], 1)
-        self.assertEqual(progress["in_flight_batches"], 0)
+        self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["queued_batches"], 0)
         self.assertEqual(progress["awaiting_submission_batches"], 255)
 

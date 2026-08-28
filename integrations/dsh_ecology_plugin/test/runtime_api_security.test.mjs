@@ -25,12 +25,12 @@ function request(path, { address = "127.0.0.1", token = "secret", body = {}, hea
   return req;
 }
 
-function route() {
+function route(controller = {
+  async startRun(body) { return { accepted: true, run_state_revision: body.run_state_revision }; },
+}) {
   let registered;
   const ctx = { webServer: { register(value) { registered = value; return () => {}; } } };
-  registerRuntimeRoutes(ctx, {
-    async startRun(body) { return { accepted: true, run_state_revision: body.run_state_revision }; },
-  }, { runtimeToken: "secret", maxBodyBytes: 128 });
+  registerRuntimeRoutes(ctx, controller, { runtimeToken: "secret", maxBodyBytes: 128 });
   return registered;
 }
 
@@ -74,4 +74,38 @@ test("runtime prefix cannot proxy arbitrary methods or paths", async () => {
   req.method = "DELETE";
   await route().handler(req, res);
   assert.equal(res.statusCode, 404);
+});
+
+test("runtime API distinguishes bounded sample failure from runtime outage", async () => {
+  const valid = {
+    run_id: "run:1", run_state_revision: 2, stage_attempt: 1,
+    ledger_expected_revision: 3, idempotency_key: "idem:1",
+  };
+  for (const code of [
+    "structured_child_model_error",
+    "structured_result_persist_failed",
+  ]) {
+    const res = new Response();
+    await route({
+      async startRun() {
+        const error = new Error("private provider detail");
+        error.code = code;
+        throw error;
+      },
+    }).handler(request("/api/ecology-agent-runtime/v1/runs/start", { body: valid }), res);
+    assert.equal(res.statusCode, 422);
+    assert.deepEqual(res.json(), { error: "runtime_stage_failed", error_code: code });
+    assert.doesNotMatch(Buffer.concat(res.chunks).toString(), /private provider detail/);
+  }
+
+  const res = new Response();
+  await route({
+    async startRun() { throw new Error("private runtime detail"); },
+  }).handler(request("/api/ecology-agent-runtime/v1/runs/start", { body: valid }), res);
+  assert.equal(res.statusCode, 502);
+  assert.deepEqual(res.json(), {
+    error: "runtime_controller_failed",
+    error_code: "dsh_native_runtime_unavailable",
+  });
+  assert.doesNotMatch(Buffer.concat(res.chunks).toString(), /private runtime detail/);
 });

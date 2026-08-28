@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 from ecologyrsi_dsh.core.errors import (
     DshNativeRuntimeUnavailableError,
     FrozenRuntimeBindingDriftError,
+    dsh_native_runtime_retryable,
 )
 from ecologyrsi_dsh.api import generation_execution as generation_execution_module
 from ecologyrsi_dsh.api.dsh_tools import DshToolAdmissionClosedError
@@ -343,6 +344,19 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
         self.assertEqual(raised.exception.error_code, "runtime_busy")
         self.assertEqual(raised.exception.status_code, 503)
         self.assertNotIn("runtime-secret", str(raised.exception))
+
+    def test_bounded_sample_http_failure_is_not_a_runtime_retry_boundary(self) -> None:
+        self.server.responses.append(  # type: ignore[attr-defined]
+            (422, {"error_code": "structured_child_model_error"})
+        )
+        with self.assertRaises(DshNativeRuntimeUnavailableError) as raised:
+            self.client.status("run-1")
+
+        self.assertEqual(
+            raised.exception.error_code, "structured_child_model_error"
+        )
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertFalse(dsh_native_runtime_retryable(raised.exception))
 
     def test_caller_cancellation_fails_before_network(self) -> None:
         with self.assertRaises(DshNativeRuntimeUnavailableError) as raised:

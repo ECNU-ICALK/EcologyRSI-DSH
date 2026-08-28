@@ -15,6 +15,16 @@ const IDENTITY_FIELDS = new Set([
   "idempotency_key",
 ]);
 
+// These failures describe one bounded sample attempt, not loss of the DSH
+// runtime itself.  Preserve only this small public machine-code allowlist so
+// the Python coordinator can isolate the sample instead of retrying an entire
+// generation.  Every other controller failure remains an opaque, retryable
+// runtime outage.
+const PUBLIC_SAMPLE_FAILURE_CODES = new Set([
+  "structured_child_model_error",
+  "structured_result_persist_failed",
+]);
+
 function validIdentityBody(body, extraFields = new Set()) {
   const allowed = new Set([...IDENTITY_FIELDS, ...extraFields]);
   if (Object.keys(body).some((name) => !allowed.has(name))) return false;
@@ -34,6 +44,21 @@ function sendJson(res, status, value) {
     "x-content-type-options": "nosniff",
   });
   res.end(body);
+}
+
+function sendControllerError(res, error) {
+  const supplied = typeof error?.code === "string" ? error.code : "";
+  if (PUBLIC_SAMPLE_FAILURE_CODES.has(supplied)) {
+    sendJson(res, 422, {
+      error: "runtime_stage_failed",
+      error_code: supplied,
+    });
+    return;
+  }
+  sendJson(res, 502, {
+    error: "runtime_controller_failed",
+    error_code: "dsh_native_runtime_unavailable",
+  });
 }
 
 export function registerRuntimeRoutes(ctx, controller, config) {
@@ -122,7 +147,7 @@ export function registerRuntimeRoutes(ctx, controller, config) {
       } catch (error) {
         const diagnostic = error?.publicDetail || error?.code || error?.name || "unknown";
         console.warn(`[ecologyrsi] runtime controller failed: ${diagnostic}`);
-        safeJsonError(res, 502, "runtime_controller_failed");
+        sendControllerError(res, error);
       }
     },
   });
