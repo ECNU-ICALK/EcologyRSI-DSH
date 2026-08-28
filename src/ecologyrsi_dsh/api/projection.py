@@ -2953,12 +2953,12 @@ def _adaptive_progress_projection(
         + holdout_completed
         + terminal_skipped,
     )
-    throughput_rows: list[tuple[datetime, int]] = []
+    phase_throughput_rows: list[tuple[datetime, int]] = []
     for event in state.candidate_screening_events:
         if int(event.payload.get("generation", -1)) != generation:
             continue
         try:
-            throughput_rows.append(
+            phase_throughput_rows.append(
                 (
                     datetime.fromisoformat(
                         str(getattr(event, "created_at", "")).replace(
@@ -2974,7 +2974,7 @@ def _adaptive_progress_projection(
         if item.scope.generation != generation:
             continue
         try:
-            throughput_rows.append(
+            phase_throughput_rows.append(
                 (
                     datetime.fromisoformat(
                         str(getattr(item, "created_at", "")).replace(
@@ -2986,11 +2986,66 @@ def _adaptive_progress_projection(
             )
         except (TypeError, ValueError):
             continue
-    throughput_rows.sort(key=lambda row: row[0])
+    phase_throughput_rows.sort(key=lambda row: row[0])
+
+    # Sample-result batches are the earliest Host-owned durable settlement
+    # boundary.  In strict origin-vector runs each batch contains one or more
+    # complete target-by-horizon vectors, so it can drive a useful live rate
+    # before a 64-origin screening candidate or 50-origin formal batch seals.
+    # Fail closed on malformed/partial vectors and on candidates outside the
+    # current generation; the coarser phase boundaries remain the fallback.
+    cells_per_origin = metadata.get("prediction_cells_per_origin")
+    current_candidate_ids = {
+        str(candidate.candidate_id)
+        for candidate in tuple(getattr(state, "candidates", ()))
+        if int(candidate.generation) == generation
+        and isinstance(getattr(candidate, "candidate_id", None), str)
+        and candidate.candidate_id
+    }
+    origin_throughput_rows: list[tuple[datetime, int]] = []
+    if (
+        isinstance(cells_per_origin, int)
+        and not isinstance(cells_per_origin, bool)
+        and cells_per_origin > 0
+        and current_candidate_ids
+    ):
+        for event in runtime_events:
+            if event.kind != "EvaluationSampleResultBatchRecorded":
+                continue
+            if event.payload.get("candidate_id") not in current_candidate_ids:
+                continue
+            record_count = event.payload.get("record_count")
+            if (
+                isinstance(record_count, bool)
+                or not isinstance(record_count, int)
+                or record_count <= 0
+                or record_count % cells_per_origin != 0
+            ):
+                continue
+            try:
+                origin_throughput_rows.append(
+                    (
+                        datetime.fromisoformat(
+                            str(getattr(event, "created_at", "")).replace(
+                                "Z", "+00:00"
+                            )
+                        ),
+                        record_count // cells_per_origin,
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+    origin_throughput_rows.sort(key=lambda row: row[0])
+    use_origin_boundaries = len(origin_throughput_rows) >= 2
+    throughput_rows = (
+        origin_throughput_rows
+        if use_origin_boundaries
+        else phase_throughput_rows
+    )
     rolling_rate: float | None = None
     rolling_eta: int | None = None
     if len(throughput_rows) >= 2:
-        window = throughput_rows[-8:]
+        window = throughput_rows[-32:] if use_origin_boundaries else throughput_rows[-8:]
         latest_time = window[-1][0]
         now = datetime.now(latest_time.tzinfo)
         elapsed_minutes = max(
@@ -3157,7 +3212,11 @@ def _adaptive_progress_projection(
         live_fields["provider_queued_requests"] = live_fields["queued_batches"]
     live_fields["samples_per_minute"] = rolling_rate
     live_fields["estimated_remaining_seconds"] = rolling_eta
-    live_fields["throughput_semantics"] = "host_settled_origins_rolling_8_boundaries"
+    live_fields["throughput_semantics"] = (
+        "host_settled_origins_rolling_32_durable_result_boundaries"
+        if use_origin_boundaries
+        else "host_settled_origins_rolling_8_phase_boundaries_fallback"
+    )
     if isinstance(admission_snapshot, Mapping):
         live_fields.update(
             {

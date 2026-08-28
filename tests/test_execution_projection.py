@@ -355,6 +355,136 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["gateway_request_count"], 1)
         self.assertEqual(progress["configured_concurrency"], 64)
 
+    def test_adaptive_screening_rate_uses_durable_origin_result_batches(self) -> None:
+        schedule = {
+            "screening_origin_count": 64,
+            "formal_origin_count_per_finalist": 500,
+            "selection_holdout_origin_count": 169,
+            "local_batch_origin_count": 50,
+        }
+        candidate_id = "candidate:screening-rate"
+        revision = "revision:screening-rate"
+        events = (
+            SimpleNamespace(
+                seq=10,
+                kind="GenerationBatchStarted",
+                payload={"batch": {"generation": 0}},
+                created_at="2026-08-28T05:59:59+00:00",
+            ),
+            SimpleNamespace(
+                seq=11,
+                kind="EvaluationSampleResultsStarted",
+                payload={
+                    "candidate_id": candidate_id,
+                    "revision": revision,
+                },
+                created_at="2026-08-28T06:00:00+00:00",
+            ),
+            SimpleNamespace(
+                seq=12,
+                kind="EvaluationSampleResultBatchRecorded",
+                payload={
+                    "candidate_id": candidate_id,
+                    "revision": revision,
+                    "record_count": 9,
+                },
+                created_at="2026-08-28T06:00:10+00:00",
+            ),
+            SimpleNamespace(
+                seq=13,
+                kind="EvaluationProgressRecorded",
+                payload={
+                    "schema_version": "ecologyrsi-dsh.evaluation-progress/3",
+                    "revision": revision,
+                    "progress_id": 1,
+                    "progress_kind": "completed_batch",
+                    "candidate_id": candidate_id,
+                    "role": "planner",
+                    "model_id": "model:test",
+                    "batch_index": 1,
+                    "batch_count": 64,
+                    "batch_size": 1,
+                    "completed_samples": 1,
+                    "total_samples": 64,
+                    "succeeded_samples": 1,
+                    "failed_samples": 0,
+                    "in_flight_batches": 0,
+                    "queued_batches": 0,
+                },
+                created_at="2026-08-28T06:00:11+00:00",
+            ),
+            SimpleNamespace(
+                seq=14,
+                kind="EvaluationSampleResultBatchRecorded",
+                payload={
+                    "candidate_id": candidate_id,
+                    "revision": revision,
+                    "record_count": 9,
+                },
+                created_at="2026-08-28T06:00:40+00:00",
+            ),
+            SimpleNamespace(
+                seq=15,
+                kind="EvaluationProgressRecorded",
+                payload={
+                    "schema_version": "ecologyrsi-dsh.evaluation-progress/3",
+                    "revision": revision,
+                    "progress_id": 2,
+                    "progress_kind": "completed_batch",
+                    "candidate_id": candidate_id,
+                    "role": "planner",
+                    "model_id": "model:test",
+                    "batch_index": 2,
+                    "batch_count": 64,
+                    "batch_size": 1,
+                    "completed_samples": 2,
+                    "total_samples": 64,
+                    "succeeded_samples": 2,
+                    "failed_samples": 0,
+                    "in_flight_batches": 0,
+                    "queued_batches": 0,
+                },
+                created_at="2026-08-28T06:00:41+00:00",
+            ),
+        )
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(metadata={
+                "optimization_protocol": "top2_adaptive_epoch@1",
+                "optimization_schedule": schedule,
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                "two_stage_evaluation_enabled": True,
+                "sample_reflection_policy": "candidate_aggregate_post_score@1",
+                "sample_concurrency": 64,
+                "prediction_cells_per_origin": 9,
+            }),
+            run=SimpleNamespace(
+                generation=0,
+                status=SimpleNamespace(value="running"),
+            ),
+            candidate_screening_events=(),
+            formal_batch_evaluations=(),
+            holdout_evaluations=(),
+            formal_batches=(),
+            candidates=(
+                SimpleNamespace(candidate_id=candidate_id, generation=0),
+                SimpleNamespace(candidate_id="candidate:1", generation=0),
+                SimpleNamespace(candidate_id="candidate:2", generation=0),
+                SimpleNamespace(candidate_id="candidate:3", generation=0),
+            ),
+            events=events,
+        )
+
+        progress = _adaptive_progress_projection(state)
+
+        self.assertEqual(progress["evaluation_phase"], "screening")
+        self.assertEqual(progress["completed_origins"], 2)
+        self.assertGreater(progress["samples_per_minute"], 0)
+        self.assertGreater(progress["estimated_remaining_seconds"], 0)
+        self.assertEqual(
+            progress["throughput_semantics"],
+            "host_settled_origins_rolling_32_durable_result_boundaries",
+        )
+
     def test_screening_progress_separates_sparse_repair_from_primary_origin(
         self,
     ) -> None:

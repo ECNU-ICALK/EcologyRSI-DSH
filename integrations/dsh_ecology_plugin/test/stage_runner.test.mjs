@@ -375,7 +375,10 @@ function directSampleHarness({
           return { accepted: true };
         }
         persisted.push(options.body);
-        if (persistenceError) throw persistenceError;
+        const error = typeof persistenceError === "function"
+          ? persistenceError(persisted.length)
+          : persistenceError;
+        if (error) throw error;
         if (failurePhase === "persistence") {
           const error = new Error(`private ${failurePhase} failure`);
           error.code = failureCode;
@@ -1943,6 +1946,41 @@ test("persistence preserves only the Sidecar safe public diagnostic", async () =
   );
   assert.equal(harness.persisted.length, 1);
   assert.equal(harness.failures.length, 1);
+});
+
+test("sample persistence retry reuses one child and one frozen sidecar envelope", async () => {
+  const waveDigest = "a".repeat(64);
+  const structured = {
+    schema_version: "ecology-sample-decisions@1",
+    wave_digest: waveDigest,
+    decisions: [],
+  };
+  const harness = directSampleHarness({
+    stage: "sample.plan",
+    maxAttempts: 2,
+    results: [{ stopReason: "completed", structured }],
+    sessionEvents: () => skillFirstEvents(
+      "origin-vector-forecasting-balanced",
+      { prediction: true },
+    ),
+    persistenceError: (attempt) => {
+      if (attempt !== 1) return null;
+      const error = new Error("temporarily unavailable");
+      error.code = "structured_result_persistence_unavailable";
+      return error;
+    },
+  });
+
+  const result = await harness.runner.run(
+    directSampleBinding("sample.plan", samplePlanContext()),
+  );
+
+  assert.deepEqual(result.structured, structured);
+  assert.equal(harness.starts.length, 1);
+  assert.equal(harness.reservations.length, 1);
+  assert.equal(harness.persisted.length, 2);
+  assert.deepEqual(harness.persisted[1], harness.persisted[0]);
+  assert.equal(harness.failures.length, 0);
 });
 
 test("sample critic uses its shorter independent operational timeout", async () => {

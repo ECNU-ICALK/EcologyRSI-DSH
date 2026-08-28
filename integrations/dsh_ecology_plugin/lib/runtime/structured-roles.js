@@ -23,6 +23,22 @@ function operationalTimeoutError() {
   return error;
 }
 
+const STRUCTURED_PERSISTENCE_MAX_ATTEMPTS = 2;
+const RETRYABLE_PERSISTENCE_CODES = new Set([
+  "structured_result_persistence_unavailable",
+  "unavailable",
+  "timeout",
+  "dsh_session_projection_not_ready",
+]);
+
+function retryablePersistenceError(error) {
+  // These are the only transient states safe to replay with the exact frozen
+  // envelope: a Host append/control-plane fault, a loopback transport fault,
+  // or eventual consistency in the child Session projection. Contract,
+  // authorization, admission and cancellation failures remain fail-closed.
+  return RETRYABLE_PERSISTENCE_CODES.has(error?.code);
+}
+
 function detachCleanup(operation) {
   try {
     Promise.resolve(operation?.()).catch(() => {});
@@ -248,16 +264,30 @@ export async function runStructuredRole(
       remainingTimeoutMs,
     });
     let accepted;
-    try {
-      accepted = await withinDeadline(() => persist({
-        binding: reservedBinding,
-        structured: persistedStructured,
-        session_id: sessionId,
-      }, persistenceDeadline));
-    } catch (error) {
-      if (deadlineExpired() || error === timeoutError) throw expireDeadline();
-      if (isTrustedStructuredPhase(error, "capture")) throw error;
-      throw structuredPhaseError("persistence", error);
+    for (let persistenceAttempt = 1;
+      persistenceAttempt <= STRUCTURED_PERSISTENCE_MAX_ATTEMPTS;
+      persistenceAttempt += 1) {
+      try {
+        // Re-submit the exact immutable output from this child session. In
+        // particular, do not begin another planner turn or prediction-tool
+        // call merely because the Host ledger was briefly unavailable.
+        accepted = await withinDeadline(() => persist({
+          binding: reservedBinding,
+          structured: persistedStructured,
+          session_id: sessionId,
+        }, persistenceDeadline));
+        break;
+      } catch (error) {
+        if (deadlineExpired() || error === timeoutError) throw expireDeadline();
+        if (isTrustedStructuredPhase(error, "capture")) throw error;
+        if (
+          retryablePersistenceError(error)
+          && persistenceAttempt < STRUCTURED_PERSISTENCE_MAX_ATTEMPTS
+        ) {
+          continue;
+        }
+        throw structuredPhaseError("persistence", error);
+      }
     }
     requireBeforeDeadline();
     const receiptAccepted = accepted?.accepted;

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -13,6 +14,7 @@ from urllib.request import Request, urlopen
 from ecologyrsi_dsh.api.dsh_tools import (
     DshToolAdmissionClosedError,
     DshToolAuthorizationError,
+    DshStructuredResultPersistenceError,
     DshToolService,
     ROLE_TOOLS,
 )
@@ -921,6 +923,39 @@ class DshToolServiceTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "stage contract"):
             self.service.accept_structured(wrong_skill)
+
+    def test_structured_persistence_retries_same_result_without_tool_replay(
+        self,
+    ) -> None:
+        envelope = _research_envelope(
+            self.ledger,
+            deadline_unix_ms=FUTURE_DEADLINE_UNIX_MS,
+        )
+        _arm_structured_envelope(self.service, envelope)
+        original_append = self.ledger.append
+        append_calls = 0
+
+        def flaky_append(*args: object, **kwargs: object) -> object:
+            nonlocal append_calls
+            append_calls += 1
+            if append_calls == 1:
+                raise sqlite3.OperationalError("database temporarily busy")
+            return original_append(*args, **kwargs)
+
+        self.ledger.append = flaky_append
+        try:
+            receipt = self.service.accept_structured(envelope)
+        finally:
+            self.ledger.append = original_append
+
+        self.assertTrue(receipt["accepted"])
+        self.assertEqual(append_calls, 2)
+        self.assertEqual(
+            [event.kind for event in self.ledger.events("run:tool-test")].count(
+                "DshStructuredResultAccepted"
+            ),
+            1,
+        )
 
     def test_completed_planner_is_replayed_without_a_second_agent_call(self) -> None:
         executions = 0
@@ -2362,6 +2397,28 @@ class DshToolHTTPAuthTests(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertIn("error", payload)
         self.assertNotIn("error_code", payload)
+
+    def test_structured_persistence_unavailable_is_retryable_service_error(self) -> None:
+        original_accept = self.server.dsh_tools.accept_structured
+
+        def unavailable(_envelope: dict) -> dict:
+            raise DshStructuredResultPersistenceError("private sqlite detail")
+
+        self.server.dsh_tools.accept_structured = unavailable
+        try:
+            status, payload = self._post(
+                "/api/ecology-agent-sidecar/v1/structured-results",
+                {},
+            )
+        finally:
+            self.server.dsh_tools.accept_structured = original_accept
+
+        self.assertEqual(status, 503)
+        self.assertEqual(
+            payload["error_code"],
+            "structured_result_persistence_unavailable",
+        )
+        self.assertNotIn("private sqlite detail", str(payload))
 
 
 if __name__ == "__main__":

@@ -22,7 +22,6 @@ const IDENTITY_FIELDS = new Set([
 // runtime outage.
 const PUBLIC_SAMPLE_FAILURE_CODES = new Set([
   "structured_child_model_error",
-  "structured_result_persist_failed",
 ]);
 
 function validIdentityBody(body, extraFields = new Set()) {

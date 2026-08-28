@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import sqlite3
 import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -186,6 +187,18 @@ class DshPredictionBindingClosedError(DshToolAdmissionClosedError):
 
 class DshToolOperationalTimeoutError(RuntimeError):
     error_code = "structured_role_operational_timeout"
+
+
+class DshStructuredResultPersistenceError(RuntimeError):
+    """A retryable failure to durably accept an already-produced result.
+
+    The caller still owns the same immutable structured output and tool
+    receipt. Exposing this as a narrow public control error lets the native
+    runtime retry that write without converting an infrastructure incident
+    into a failed scientific prediction.
+    """
+
+    error_code = "structured_result_persistence_unavailable"
 
 
 @dataclass(slots=True)
@@ -1784,22 +1797,45 @@ class DshToolService:
                     )
                 yield
 
-        try:
-            event = self.ledger.append(
-                str(identity["run_id"]),
-                "DshStructuredResultAccepted",
-                payload,
-                event_id=event_id,
-                commit_guard=commit_guard,
-            )
-        except ValueError:
-            # A competing writer may have won after every prior lookup. Re-read
-            # through the durable validator so malformed winners fail closed
-            # and valid conflicts retain the structured idempotency error.
-            receipt = prior_receipt()
-            if receipt is not None:
-                return receipt
-            raise
+        # The child has already completed its prediction-tool call. A brief
+        # SQLite/control-plane failure at this point must never be translated
+        # into a scientific sample failure. Retry only the idempotent append
+        # with the same event ID and exact payload; no tool or child work is
+        # repeated here. The native caller performs a second bounded retry if
+        # this local window remains unavailable.
+        for persistence_attempt in range(2):
+            try:
+                event = self.ledger.append(
+                    str(identity["run_id"]),
+                    "DshStructuredResultAccepted",
+                    payload,
+                    event_id=event_id,
+                    commit_guard=commit_guard,
+                )
+                break
+            except ValueError:
+                # A competing writer may have won after every prior lookup.
+                # Re-read through the durable validator so malformed winners
+                # fail closed and valid conflicts retain the structured
+                # idempotency error.
+                receipt = prior_receipt()
+                if receipt is not None:
+                    return receipt
+                raise
+            except (sqlite3.OperationalError, ConcurrentRunMutationError) as exc:
+                # The insert may have committed before the caller observed its
+                # transient failure. Prefer its exact durable receipt before
+                # attempting the same append again.
+                receipt = prior_receipt()
+                if receipt is not None:
+                    return receipt
+                if persistence_attempt == 1:
+                    raise DshStructuredResultPersistenceError(
+                        "structured result persistence is temporarily unavailable"
+                    ) from exc
+                time.sleep(0.01)
+        else:  # pragma: no cover - loop always breaks or raises
+            raise AssertionError("structured persistence retry was not resolved")
         self._validate_recorded_structured_result(event)
         if not _strict_json_equal(event.payload, payload):
             raise ValueError("structured-result idempotency key was reused")

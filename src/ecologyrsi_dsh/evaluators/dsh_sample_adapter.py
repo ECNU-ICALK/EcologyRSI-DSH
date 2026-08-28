@@ -279,6 +279,12 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
 
     adapter_id = "dsh-native-sample-collaboration"
     adapter_version = "1"
+    # A retry carrying a finite Host-rejected prediction is resolved by
+    # ``_forced_repair_route`` with a frozen deterministic repair tool.  This
+    # capability lets the executor finish those local repairs even when the
+    # surrounding remote wave has reached a coverage terminal state; it never
+    # authorizes another remote child.
+    terminal_constraint_repair_is_local = True
 
     def __init__(
         self,

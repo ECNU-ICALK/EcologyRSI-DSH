@@ -62,6 +62,54 @@ test("one-shot structured role persists only structured output and disposes its 
   assert.equal(pendingStarts.size, 0);
 });
 
+test("structured persistence retries only safe transient states with one child output", async () => {
+  for (const transientCode of [
+    "structured_result_persistence_unavailable",
+    "unavailable",
+    "timeout",
+    "dsh_session_projection_not_ready",
+  ]) {
+    let starts = 0;
+    const persisted = [];
+    const pendingStarts = new PendingChildStarts({
+      subagents: {
+        start: async () => {
+          starts += 1;
+          return {
+            id: "planner-child-session",
+            result: Promise.resolve({ structured: { wave_digest: "w".repeat(64), decisions: [] } }),
+            dispose: async () => {},
+          };
+        },
+      },
+    });
+    const result = await runStructuredRole(
+      { agent: { id: "planner-host" } },
+      { label: "persistence-retry", reservation_id: "r-persist" },
+      { prompt: "plan", outputSchema: { type: "object" }, maxTokens: 2048 },
+      {
+        pendingStarts,
+        admission: { isOpen: async () => true },
+        persist: async (value) => {
+          persisted.push(value);
+          if (persisted.length === 1) {
+            const error = new Error("safe transient persistence failure");
+            error.code = transientCode;
+            throw error;
+          }
+          return { accepted: true, event_id: "accepted-on-retry" };
+        },
+      },
+    );
+
+    assert.equal(starts, 1, transientCode);
+    assert.equal(persisted.length, 2, transientCode);
+    assert.deepEqual(persisted[1], persisted[0], transientCode);
+    assert.equal(result.receipt.event_id, "accepted-on-retry", transientCode);
+    assert.equal(pendingStarts.size, 0, transientCode);
+  }
+});
+
 test("one-shot structured role rejects invalid maxTokens before child work", async () => {
   let starts = 0;
   const pendingStarts = new PendingChildStarts({

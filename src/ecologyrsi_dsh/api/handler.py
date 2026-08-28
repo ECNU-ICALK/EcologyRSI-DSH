@@ -66,7 +66,7 @@ from ..knowledge.autonomous_cycle import AUTONOMOUS_RESEARCH_PROTOCOL
 from ..knowledge.program_registry import current_program_registry
 from ..version import __version__
 from .auto_progress import AutoProgressManager
-from .dsh_tools import DshToolService
+from .dsh_tools import DshStructuredResultPersistenceError, DshToolService
 from .projection import _state_payload
 from .sample_admission import (
     DEFAULT_SAMPLE_CONCURRENCY,
@@ -99,11 +99,19 @@ _DSH_SIDECAR_PUBLIC_ERROR_CODES = frozenset(
         "dsh_tool_authorization_failed",
         "dsh_prediction_binding_closed",
         "structured_role_operational_timeout",
+        "structured_result_persistence_unavailable",
     }
 )
 
 
 def _dsh_sidecar_error(exc: BaseException) -> dict[str, str]:
+    if isinstance(exc, DshStructuredResultPersistenceError):
+        # Do not make storage-driver or filesystem text observable to the DSH
+        # process. The stable machine code is sufficient for its bounded retry.
+        return {
+            "error": "structured result persistence is temporarily unavailable",
+            "error_code": exc.error_code,
+        }
     payload = {"error": _public_http_error(exc)}
     error_code = getattr(exc, "error_code", None)
     if (
@@ -1038,6 +1046,14 @@ class EvolutionRequestHandler(
             try:
                 result = self.server.dsh_tools.accept_structured(self._body())
                 self._send(HTTPStatus.OK, result)
+            except DshStructuredResultPersistenceError as exc:
+                # The DSH child already has one immutable structured result.
+                # Tell its stage runner to retry that persistence boundary;
+                # never present this as a bounded prediction/contract error.
+                self._send(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    _dsh_sidecar_error(exc),
+                )
             except PermissionError as exc:
                 self._send(HTTPStatus.FORBIDDEN, _dsh_sidecar_error(exc))
             except (RuntimeError, TypeError, ValueError) as exc:

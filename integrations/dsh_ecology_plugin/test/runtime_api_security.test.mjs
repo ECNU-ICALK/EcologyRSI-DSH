@@ -83,7 +83,6 @@ test("runtime API distinguishes bounded sample failure from runtime outage", asy
   };
   for (const code of [
     "structured_child_model_error",
-    "structured_result_persist_failed",
   ]) {
     const res = new Response();
     await route({
@@ -97,6 +96,21 @@ test("runtime API distinguishes bounded sample failure from runtime outage", asy
     assert.deepEqual(res.json(), { error: "runtime_stage_failed", error_code: code });
     assert.doesNotMatch(Buffer.concat(res.chunks).toString(), /private provider detail/);
   }
+
+  const persistence = new Response();
+  await route({
+    async startRun() {
+      const error = new Error("private persistence detail");
+      error.code = "structured_result_persist_failed";
+      throw error;
+    },
+  }).handler(request("/api/ecology-agent-runtime/v1/runs/start", { body: valid }), persistence);
+  assert.equal(persistence.statusCode, 502);
+  assert.deepEqual(persistence.json(), {
+    error: "runtime_controller_failed",
+    error_code: "dsh_native_runtime_unavailable",
+  });
+  assert.doesNotMatch(Buffer.concat(persistence.chunks).toString(), /private persistence detail/);
 
   const res = new Response();
   await route({

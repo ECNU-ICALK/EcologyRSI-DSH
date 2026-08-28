@@ -7,6 +7,7 @@ const PUBLIC_SIDECAR_ERROR_CODES = new Set([
   "dsh_tool_authorization_failed",
   "dsh_prediction_binding_closed",
   "structured_role_operational_timeout",
+  "structured_result_persistence_unavailable",
 ]);
 
 export class SidecarError extends Error {

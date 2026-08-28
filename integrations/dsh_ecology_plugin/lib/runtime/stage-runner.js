@@ -1145,6 +1145,7 @@ export class NativeStageRunner {
           return current?.status === "running";
         },
       };
+      let persistenceBody = null;
       const persist = async (
         structured,
         sessionId,
@@ -1159,58 +1160,65 @@ export class NativeStageRunner {
           throw new Error("structured persistence requires a runtime deadline");
         }
         persistenceDeadline.throwIfExpired();
-        if (!reservation.claimed_child_id) {
-          this.childBindings.claimPublished(
-            roleHost.sessionId,
-            reservation.label,
-            sessionId,
-          );
-        }
-        persistenceDeadline.throwIfExpired();
-        if (!this.childBindings.activeByChild.has(sessionId)) {
-          this.childBindings.openActivation(sessionId, {
-            revision: binding.run_state_revision,
-            stage_attempt: binding.stage_attempt,
-            idempotency_key: binding.idempotency_key,
+        if (persistenceBody === null) {
+          if (!reservation.claimed_child_id) {
+            this.childBindings.claimPublished(
+              roleHost.sessionId,
+              reservation.label,
+              sessionId,
+            );
+          }
+          persistenceDeadline.throwIfExpired();
+          if (!this.childBindings.activeByChild.has(sessionId)) {
+            this.childBindings.openActivation(sessionId, {
+              revision: binding.run_state_revision,
+              stage_attempt: binding.stage_attempt,
+              idempotency_key: binding.idempotency_key,
+            });
+          }
+          persistenceDeadline.throwIfExpired();
+          const evidenceOptions = {
+            stage: binding.stage,
+            skillName,
+            requiresPredictionTool: contract.requiresPredictionTool === true,
+            allowDynamicRetrieval: dynamicRetrieval,
+          };
+          const evidence = capturedSessionEvents
+            ? verifiedSkillInvocationEvidence(capturedSessionEvents, evidenceOptions)
+            : await synchronizedSkillInvocationEvidence(
+              this.ctx,
+              sessionId,
+              evidenceOptions,
+              persistenceDeadline,
+            );
+          persistenceDeadline.throwIfExpired();
+          persistedSkillEvidence = evidence;
+          const resultDigest = jsonDigest(structured);
+          persistenceDeadline.throwIfExpired();
+          const { allowed_tools: _allowedTools, ...identity } = frozenIdentity;
+          persistenceBody = Object.freeze({
+            identity: {
+              ...identity,
+              session_id: sessionId,
+              child_reservation_id: reservation.launch.reservation_id,
+              activation_lease_id: (
+                this.childBindings.activeByChild.get(sessionId)
+                || `lease-${reservation.launch.reservation_id}`
+              ),
+            },
+            output_schema_id: contract.schema,
+            structured: structuredClone(structured),
+            result_digest: resultDigest,
+            session_metrics: capturedSessionMetrics || dshSessionMetrics(this.ctx, sessionId),
+            skill_invocation_evidence: evidence,
+            admission_id: binding.admission_id,
           });
+        } else if (
+          persistenceBody.identity.session_id !== sessionId
+          || persistenceBody.result_digest !== jsonDigest(structured)
+        ) {
+          throw new Error("structured persistence retry changed the frozen result");
         }
-        persistenceDeadline.throwIfExpired();
-        const evidenceOptions = {
-          stage: binding.stage,
-          skillName,
-          requiresPredictionTool: contract.requiresPredictionTool === true,
-          allowDynamicRetrieval: dynamicRetrieval,
-        };
-        const evidence = capturedSessionEvents
-          ? verifiedSkillInvocationEvidence(capturedSessionEvents, evidenceOptions)
-          : await synchronizedSkillInvocationEvidence(
-            this.ctx,
-            sessionId,
-            evidenceOptions,
-            persistenceDeadline,
-          );
-        persistenceDeadline.throwIfExpired();
-        persistedSkillEvidence = evidence;
-        const resultDigest = jsonDigest(structured);
-        persistenceDeadline.throwIfExpired();
-        const { allowed_tools: _allowedTools, ...identity } = frozenIdentity;
-        const body = {
-          identity: {
-            ...identity,
-            session_id: sessionId,
-            child_reservation_id: reservation.launch.reservation_id,
-            activation_lease_id: (
-              this.childBindings.activeByChild.get(sessionId)
-              || `lease-${reservation.launch.reservation_id}`
-            ),
-          },
-          output_schema_id: contract.schema,
-          structured,
-          result_digest: resultDigest,
-          session_metrics: capturedSessionMetrics || dshSessionMetrics(this.ctx, sessionId),
-          skill_invocation_evidence: evidence,
-          admission_id: binding.admission_id,
-        };
         persistenceDeadline.throwIfExpired();
         const requestTimeoutMs = Math.min(
           persistenceDeadline.remainingTimeoutMs(),
@@ -1218,7 +1226,7 @@ export class NativeStageRunner {
         );
         persistenceDeadline.throwIfExpired();
         const receipt = await this.sidecar.request("/api/ecology-agent-sidecar/v1/structured-results", {
-          body,
+          body: persistenceBody,
           signal: persistenceDeadline.signal,
           timeoutMs: requestTimeoutMs,
         });

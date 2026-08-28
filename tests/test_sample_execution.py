@@ -34,6 +34,7 @@ from ecologyrsi_dsh.evaluators.registry import (
 )
 from ecologyrsi_dsh.evaluators.sample_execution import (
     COVERAGE_UNREACHABLE_NOT_EXECUTED_FAILURE,
+    COVERAGE_UNREACHABLE_TERMINAL_REASON,
     SAMPLE_EXECUTION_SCHEMA_VERSION,
     SAMPLE_EXECUTION_TRACE_ARCHIVE_VERSION,
     CollaborativeSampleExecutor,
@@ -41,6 +42,7 @@ from ecologyrsi_dsh.evaluators.sample_execution import (
     SampleExecutionCancelledError,
     SampleExecutionControlError,
     SampleExecutionControlUnavailableError,
+    SampleExecutionAttemptError,
     SampleExecutionPausedError,
     SampleExecutionPolicy,
     SamplePredictionOutcome,
@@ -1358,6 +1360,191 @@ class SampleExecutionTests(unittest.TestCase):
         self.assertEqual(gate["active"], 0)
         self.assertNotIn("origin_admission", adapter.plan_contexts[0])
         self.assertNotIn("origin_admission", json.dumps(adapter.remote_requests))
+
+    def test_strict_terminal_origin_does_not_cancel_local_or_later_origin_repairs(
+        self,
+    ) -> None:
+        class TerminalOriginAdapter(_FailureAdapter):
+            terminal_constraint_repair_is_local = True
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.retry_sample_ids: list[str] = []
+
+            def plan_batch(self, context):
+                return {
+                    "plan_id": "strict-terminal-origin@4",
+                    "algorithm": context["algorithm_id"],
+                    "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                    "required_success_remote_roles": ["planner"],
+                }
+
+            def predict_sample(self, request, plan, *, attempt):
+                del request, plan, attempt
+                raise AssertionError("strict origin outcomes must stay prefetched")
+
+            def predict_samples(self, requests, plans, *, attempts):
+                del plans
+                outcomes = []
+                for request, attempt in zip(requests, attempts):
+                    if attempt == 2:
+                        self.retry_sample_ids.append(request.sample_id)
+                        outcomes.append(
+                            SamplePredictionOutcome(
+                                sample_id=request.sample_id,
+                                result={
+                                    "predicted": 80.0,
+                                    "agent_decisions": [
+                                        {
+                                            "role": "host_repair_router",
+                                            "decision": "execute_derived_repair_tool",
+                                            "status": "completed",
+                                        }
+                                    ],
+                                    "tool_calls": [
+                                        {
+                                            "tool_id": "bounded-projection-repair",
+                                            "version": "1",
+                                            "status": "completed",
+                                        }
+                                    ],
+                                },
+                            )
+                        )
+                        continue
+                    planner_step = {
+                        "role": "remote_planner_agent",
+                        "decision": "execute_registered_predictor",
+                        "status": "completed",
+                    }
+                    tool_step = {
+                        "tool_id": request.algorithm_id,
+                        "version": request.algorithm_version,
+                        "status": "completed",
+                    }
+                    if request.origin_timestamp == 200 and request.target == "y":
+                        outcomes.append(
+                            SamplePredictionOutcome(
+                                sample_id=request.sample_id,
+                                result={
+                                    "predicted": 21.5,
+                                    "agent_decisions": [planner_step],
+                                    "tool_calls": [tool_step],
+                                },
+                            )
+                        )
+                        continue
+                    if request.origin_timestamp == 100 and request.target == "x":
+                        error = SampleExecutionAttemptError(
+                            "remote terminal failure",
+                            failure_class="remote_rejected",
+                            retryable=False,
+                            error_type="RemoteTerminalError",
+                            agent_decisions=(planner_step,),
+                        )
+                    else:
+                        error = SampleExecutionAttemptError(
+                            "Host rejected an out-of-range prediction",
+                            failure_class="constraint_rejected",
+                            retryable=True,
+                            error_type="SampleRepairRequired",
+                            agent_decisions=(planner_step,),
+                            tool_calls=(tool_step,),
+                            previous_prediction=999.0,
+                        )
+                    outcomes.append(
+                        SamplePredictionOutcome(
+                            sample_id=request.sample_id,
+                            error=error,
+                            terminal_reason=(
+                                COVERAGE_UNREACHABLE_TERMINAL_REASON
+                                if request.origin_timestamp == 100
+                                else None
+                            ),
+                        )
+                    )
+                return tuple(outcomes)
+
+            def reflect_origin(self, requests, *, scored_cells):
+                del scored_cells
+                origin_sample_id = sample_execution_module.forecast_origin_sample_id(
+                    requests
+                )
+                return {
+                    "schema_version": "ecologyrsi-dsh.sample-origin-reflection/1",
+                    "sample_id": origin_sample_id,
+                    "origin_sample_id": origin_sample_id,
+                    "cell_sample_ids": [request.sample_id for request in requests],
+                    "outcome_class": "neutral",
+                    "error_source": "unknown",
+                    "next_action": "keep",
+                    "confidence": 0.5,
+                    "summary": "terminal scope regression fixture",
+                    "model_id": "fake-reflector",
+                    "response_digest": "a" * 64,
+                    "wave_digest": "b" * 64,
+                }
+
+        rows = [
+            {
+                "partition": "training_feedback",
+                "target": target,
+                "unit": "u",
+                "horizon_hours": 1,
+                "origin_timestamp": origin,
+                "target_timestamp": origin + 1,
+                "baseline": 20.0,
+                "observed": 21.0,
+                "predicted": 21.5,
+                "label_free_context": _causal_context(origin, [origin]),
+            }
+            for origin, target in (
+                (100, "x"),
+                (100, "y"),
+                (200, "x"),
+                (200, "y"),
+            )
+        ]
+        adapter = TerminalOriginAdapter()
+
+        batch = CollaborativeSampleExecutor(adapter, sleep=lambda _: None).execute(
+            rows,
+            context={
+                "candidate_id": "candidate:test",
+                "dataset_digest": "dataset:test",
+                "algorithm_id": "algorithm",
+                "algorithm_version": "1",
+                "sample_concurrency": 1,
+                "candidate_concurrency": 1,
+            },
+            target_bounds={
+                "x": {"unit": "u", "minimum": -100.0, "maximum": 80.0},
+                "y": {"unit": "u", "minimum": -100.0, "maximum": 80.0},
+            },
+            algorithm_id="algorithm",
+            algorithm_version="1",
+            policy=SampleExecutionPolicy(max_attempts=2, plan_max_attempts=1),
+        )
+
+        records = {record["sample_id"]: record for record in batch.records}
+        repaired = [
+            record
+            for record in records.values()
+            if record["status"] == "succeeded" and record["attempts"] == 2
+        ]
+        self.assertEqual(len(repaired), 2)
+        self.assertTrue(all(record["attempts"] == 2 for record in repaired))
+        self.assertTrue(all(record["retry_count"] == 1 for record in repaired))
+        self.assertEqual(len(adapter.retry_sample_ids), 2)
+        self.assertEqual(batch.summary["succeeded_examples"], 3)
+        self.assertEqual(batch.summary["failed_examples"], 1)
+        self.assertEqual(batch.summary["attempted_origin_samples"], 2)
+        self.assertEqual(batch.summary["succeeded_origin_samples"], 1)
+        self.assertTrue(batch.summary["coverage_early_stopped"])
+        self.assertEqual(
+            batch.summary["early_stop_reason"],
+            COVERAGE_UNREACHABLE_TERMINAL_REASON,
+        )
 
     def execute(
         self,

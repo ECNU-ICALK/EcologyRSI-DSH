@@ -2,6 +2,28 @@
 
 All notable changes to EcologyRSI-DSH are recorded in this file.
 
+## 0.3.55 - 2026-08-28
+
+### Origin-scoped recovery and truthful live progress
+
+- Keep a terminal outcome scoped to the single forecast origin that produced
+  it. One failed concurrent child can no longer suppress deterministic Host
+  repair for unrelated origins; finite physical-range rejections continue
+  through the frozen local repair sequence without launching another DSH
+  child.
+- Treat structured-result persistence as infrastructure, not scientific
+  evidence. DSH retries that boundary within a bounded attempt budget, and an
+  exhausted persistence failure aborts the work unit instead of writing a
+  model-score penalty.
+- Derive live throughput and ETA from durable, complete origin result batches
+  as soon as two origins settle. Coarser screening/formal/holdout phase
+  boundaries remain a replay-safe fallback.
+
+### Delivery
+
+- Align the Python package, browser plugin, Host plugin, lockfile, legal
+  metadata, documentation, and packed Host artifact at version 0.3.55.
+
 ## 0.3.54 - 2026-08-28
 
 ### Deterministic repair and durable adaptive execution

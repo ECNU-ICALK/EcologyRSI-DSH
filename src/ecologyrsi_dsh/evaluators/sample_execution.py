@@ -1100,6 +1100,7 @@ class CollaborativeSampleExecutor:
                 return finalized_statuses
 
         try:
+            terminal_sample_ids: set[str] = set()
             if use_preflection_publication:
                 outcome_setter(publish_gateway_outcomes)
             if callable(resume_setter):
@@ -1126,6 +1127,11 @@ class CollaborativeSampleExecutor:
                 )
                 terminal_reason = _batch_terminal_reason(
                     first_attempt_outcomes.values()
+                )
+                terminal_sample_ids.update(
+                    outcome.sample_id
+                    for outcome in first_attempt_outcomes.values()
+                    if outcome.terminal_reason is not None
                 )
                 prefetched_attempt_outcomes = self._prepare_retry_attempt_waves(
                     pending_rows,
@@ -1367,7 +1373,19 @@ class CollaborativeSampleExecutor:
                     prepared_origin_reflections.update(origin_reflections)
                     prepared_origin_ids.add(origin_sample_id)
                     if origin_terminal_reason is not None:
+                        if (
+                            terminal_reason is not None
+                            and terminal_reason != origin_terminal_reason
+                        ):
+                            raise SampleExecutionContractError(
+                                "strict origins returned conflicting terminal reasons"
+                            )
                         terminal_reason = origin_terminal_reason
+                        terminal_sample_ids.update(
+                            sample_id
+                            for (sample_id, attempt), outcome in origin_outcomes.items()
+                            if attempt == 1 and outcome.terminal_reason is not None
+                        )
                     bundle = origin_bundle_by_id.get(origin_sample_id)
                     if bundle is None:
                         raise SampleExecutionContractError(
@@ -1562,7 +1580,19 @@ class CollaborativeSampleExecutor:
                     prepared_origin_reflections.update(origin_reflections)
                     prepared_origin_ids.add(bundle.origin_sample_id)
                     if origin_terminal_reason is not None:
+                        if (
+                            terminal_reason is not None
+                            and terminal_reason != origin_terminal_reason
+                        ):
+                            raise SampleExecutionContractError(
+                                "strict origins returned conflicting terminal reasons"
+                            )
                         terminal_reason = origin_terminal_reason
+                        terminal_sample_ids.update(
+                            sample_id
+                            for (sample_id, attempt), outcome in origin_outcomes.items()
+                            if attempt == 1 and outcome.terminal_reason is not None
+                        )
             if plan is None:
                 category, retryable, error_type = plan_failure or (
                     "batch_plan_failure",
@@ -1622,8 +1652,21 @@ class CollaborativeSampleExecutor:
             prior_tools: list[dict[str, str]] = []
             attempt_trace: list[dict[str, Any]] = []
             attempts = 0
+            # Coverage termination belongs to the remote wave that emitted it,
+            # not to every concurrently prepared origin in the run.  A terminal
+            # sample normally remains capped at its first attempt.  The sole
+            # exception is a retry already prepared by an adapter that promises
+            # Host-owned deterministic constraint repair; no new remote child
+            # can be launched from this loop for that exception.
+            has_prefetched_retry = any(
+                (request.sample_id, attempt) in prefetched_attempt_outcomes
+                for attempt in range(2, policy.max_attempts + 1)
+            )
             sample_attempt_limit = (
-                1 if terminal_reason is not None else policy.max_attempts
+                1
+                if request.sample_id in terminal_sample_ids
+                and not has_prefetched_retry
+                else policy.max_attempts
             )
             for attempt in range(1, sample_attempt_limit + 1):
                 attempts = attempt
@@ -2427,11 +2470,9 @@ class CollaborativeSampleExecutor:
         """Batch retryable failures by attempt wave for adapters with batch support."""
 
         predict_samples = getattr(self.adapter, "predict_samples", None)
-        if _batch_terminal_reason(first_attempt_outcomes.values()) is not None:
-            return {
-                (sample_id, 1): outcome
-                for sample_id, outcome in first_attempt_outcomes.items()
-            }
+        # Validate one coherent terminal reason, but do not blanket-cancel
+        # deterministic Host repairs for sibling cells in the same origin.
+        _batch_terminal_reason(first_attempt_outcomes.values())
         if plan is None or not first_attempt_outcomes or not callable(predict_samples):
             return {
                 (sample_id, 1): outcome
@@ -2482,6 +2523,16 @@ class CollaborativeSampleExecutor:
                 )
                 histories[request.sample_id].append(feedback)
                 if not retryable:
+                    continue
+                if (
+                    outcome.terminal_reason is not None
+                    and not _terminal_constraint_repair_is_local(
+                        self.adapter,
+                        exc,
+                        category=category,
+                        retryable=retryable,
+                    )
+                ):
                     continue
                 retry_requests.append(request)
                 retry_plan = dict(plan)
@@ -3951,6 +4002,25 @@ def _batch_terminal_reason(
             "batched sample adapter returned conflicting terminal reasons"
         )
     return next(iter(reasons))
+
+
+def _terminal_constraint_repair_is_local(
+    adapter: Any,
+    exc: BaseException,
+    *,
+    category: str,
+    retryable: bool,
+) -> bool:
+    """Allow a terminal wave to finish only an already-derived Host repair."""
+
+    if getattr(adapter, "terminal_constraint_repair_is_local", False) is not True:
+        return False
+    if category != "constraint_rejected" or not retryable:
+        return False
+    return bool(
+        isinstance(exc, (SampleRepairRequired, SampleExecutionAttemptError))
+        and exc.previous_prediction is not None
+    )
 
 
 def _bounded_public_steps(
