@@ -529,6 +529,36 @@ class HTTPContractTests(unittest.TestCase):
         self.assertEqual(status, 200, events)
         self.assertEqual(events["run_id"], run_id)
 
+    def test_monitor_view_is_compact_and_shallow_merge_safe(self) -> None:
+        run_id, _created = self._create_running_run_for_boundary("monitor-view")
+        encoded = quote(run_id, safe="")
+        status, detail = self.request(f"/api/runs/{encoded}")
+        self.assertEqual(status, 200, detail)
+        status, monitor = self.request(f"/api/runs/{encoded}?view=monitor")
+        self.assertEqual(status, 200, monitor)
+        self.assertEqual(
+            monitor["schema_version"],
+            "ecologyrsi-dsh.browser-run-monitor/1",
+        )
+        projection = monitor["projection"]
+        self.assertEqual(projection["run_id"], run_id)
+        for required in (
+            "projection_revision",
+            "updated_at",
+            "status",
+            "generation",
+            "candidates_count",
+            "execution_progress",
+            "execution_scheduler",
+            "adaptive_trajectories",
+            "run_wide_usage",
+            "dsh_runtime",
+        ):
+            self.assertIn(required, projection)
+        for omitted in ("candidates", "rounds", "trajectory", "training_assets"):
+            self.assertNotIn(omitted, projection)
+        self.assertLess(len(json.dumps(monitor)), len(json.dumps(detail)))
+
     def test_negative_cursor_and_non_integer_steps_are_rejected_before_claim(self) -> None:
         run_id, _created = self._create_running_run_for_boundary("cursor-step-boundary")
         path = "/api/runs/" + quote(run_id, safe="")

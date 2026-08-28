@@ -78,7 +78,7 @@
     var tokenLimit = Number(run && run.token_limit);
     var usageAvailable = run && run.token_usage_available === true || usage.available === true;
     var sampleAgentTokenBudget = runUsesSampleAgentTokenBudget(run);
-    var tokenLabel = sampleAgentTokenBudget ? "逐样本智能体 Token" : "Token 账本（历史口径）";
+    var tokenLabel = sampleAgentTokenBudget ? tokenBudgetSubjectText(run) + " Token" : "Token 账本（历史口径）";
     if (!usageAvailable) { return tokenLabel + "：等待真实账本"; }
     if (!Number.isFinite(usedTokens)) { return tokenLabel + "：账本记录异常"; }
 
@@ -249,7 +249,11 @@
     var points = run && Array.isArray(run.trajectory) ? run.trajectory.filter(function (point) { return Number.isFinite(Number(point.score != null ? point.score : point.candidate_score)); }).slice().sort(function (left, right) {
       return Number(left.generation || 0) - Number(right.generation || 0) || Number(left.slot_index || 0) - Number(right.slot_index || 0) || String(left.candidate_id || "").localeCompare(String(right.candidate_id || ""));
     }) : [];
-    if (!points.length) { node.innerHTML = "<div class=\"empty-state\">候选完成评测后将在这里显示得分曲线。</div>"; return; }
+    if (!points.length) {
+      if (legend) { legend.innerHTML = "<i class=\"legend-best\"></i>实际晋升序列（尚无评测）"; }
+      node.innerHTML = "<div class=\"empty-state\">候选完成评测后将在这里显示得分曲线。</div>";
+      return;
+    }
     var measuredWidth = Math.round(node.getBoundingClientRect().width || 0);
     var compact = window.innerWidth <= 760 || measuredWidth && measuredWidth < 600;
     var width = compact ? Math.max(320, measuredWidth || 320) : Math.max(760, Math.min(1200, measuredWidth || 1000));
@@ -289,15 +293,19 @@
     if (legend) { legend.innerHTML = "<i class=\"legend-best\"></i>" + (crossCohort ? "跨 cohort 不连线" : incumbentPath ? "实际晋升序列" : "实际晋升序列（历史运行未记录）"); }
     var grid = [0, 1, 2, 3, 4].map(function (step) { var value = min + (max - min) * step / 4; var py = y(value); return "<line class=\"chart-grid\" x1=\"" + left + "\" y1=\"" + py + "\" x2=\"" + (width - right) + "\" y2=\"" + py + "\"/><text class=\"chart-axis\" x=\"" + (left - 8) + "\" y=\"" + (py + 4) + "\" text-anchor=\"end\">" + value.toFixed(2) + "</text>"; }).join("");
     var labelEvery = Math.max(1, Math.ceil(generations.length / (compact ? 6 : 12)));
+    var axisLabels = generations.map(function (generation) {
+      var groupIndex = generationIndex[generation];
+      return groupIndex % labelEvery === 0 || groupIndex === generations.length - 1
+        ? "<text class=\"chart-axis\" x=\"" + xCenter(generation) + "\" y=\"" + (height - 20) + "\" text-anchor=\"middle\">第 " + escapeHTML(String(generation)) + " 轮</text>"
+        : "";
+    }).join("");
     var circles = points.map(function (point, index) {
       var score = Number(point.score != null ? point.score : point.candidate_score);
       var label = point.candidate_id || "候选方案 " + (index + 1);
       var generation = Number(point.generation || 0);
-      var groupIndex = generationIndex[generation];
-      var axisLabel = groupIndex % labelEvery === 0 || groupIndex === generations.length - 1 ? "<text class=\"chart-axis\" x=\"" + xCenter(generation) + "\" y=\"" + (height - 20) + "\" text-anchor=\"middle\">第 " + escapeHTML(String(generation)) + " 轮</text>" : "";
-      return "<circle class=\"chart-point\" cx=\"" + x(point) + "\" cy=\"" + y(score) + "\" r=\"4\"><title>" + escapeHTML(label) + "（第 " + generation + " 轮候选）：" + score.toFixed(4) + "</title></circle>" + axisLabel;
+      return "<circle class=\"chart-point\" cx=\"" + x(point) + "\" cy=\"" + y(score) + "\" r=\"4\"><title>" + escapeHTML(label) + "（第 " + generation + " 轮候选）：" + score.toFixed(4) + "</title></circle>";
     }).join("");
-    node.innerHTML = "<svg viewBox=\"0 0 " + width + " " + height + "\" width=\"" + width + "\" height=\"" + height + "\" role=\"img\" aria-labelledby=\"trajectory-title trajectory-description\" preserveAspectRatio=\"xMidYMid meet\"><title id=\"trajectory-title\">按轮次分组的候选原始得分与实际晋升序列</title><desc id=\"trajectory-description\">蓝色点表示同轮候选的原始得分；只有同一冻结 cohort 的服务端 incumbent 得分才允许连线。</desc>" + grid + (incumbentPath ? "<path class=\"chart-best\" d=\"" + incumbentPath + "\"/>" : "") + circles + "<text class=\"chart-axis\" x=\"" + ((left + width - right) / 2) + "\" y=\"" + (height - 4) + "\" text-anchor=\"middle\">进化轮次</text></svg>" + (crossCohort ? "<p class=\"trajectory-comparability-note\">不同反馈窗口使用不同 cohort，原始得分不可直接纵向比较，因此不绘制趋势连线；晋升以各轮同 cohort holdout 为准。</p>" : "");
+    node.innerHTML = "<svg viewBox=\"0 0 " + width + " " + height + "\" width=\"" + width + "\" height=\"" + height + "\" role=\"img\" aria-labelledby=\"trajectory-title trajectory-description\" preserveAspectRatio=\"xMidYMid meet\"><title id=\"trajectory-title\">按轮次分组的候选原始得分与实际晋升序列</title><desc id=\"trajectory-description\">蓝色点表示同轮候选的原始得分；只有同一冻结 cohort 的服务端 incumbent 得分才允许连线。</desc>" + grid + (incumbentPath ? "<path class=\"chart-best\" d=\"" + incumbentPath + "\"/>" : "") + circles + axisLabels + "<text class=\"chart-axis\" x=\"" + ((left + width - right) / 2) + "\" y=\"" + (height - 4) + "\" text-anchor=\"middle\">进化轮次</text></svg>" + (crossCohort ? "<p class=\"trajectory-comparability-note\">不同反馈窗口使用不同 cohort，原始得分不可直接纵向比较，因此不绘制趋势连线；晋升以各轮同 cohort holdout 为准。</p>" : "");
   }
 
   function roundStageStatus(round, key, run) {
@@ -1191,6 +1199,19 @@
     var durableCompleted = executionDiagnosticNumber(diagnostics.live_evaluation_completed_examples);
     var durableTotal = executionDiagnosticNumber(diagnostics.live_evaluation_total_examples);
     var originBundleProtocol = String(run && run.sample_agent_protocol || "").indexOf("dsh-strict-origin-bundle@") === 0;
+    var adaptiveOriginProgress = originBundleProtocol && heartbeat && (
+      String(heartbeat.schema_version || "").indexOf("ecologyrsi-dsh.adaptive-progress/") === 0
+      || heartbeat.completed_origins != null && heartbeat.total_origins != null
+    );
+    if (adaptiveOriginProgress) {
+      // The adaptive projection already reports authoritative, generation-wide
+      // origin counts. Cumulative diagnostics may still be measured in scoring
+      // cells and must never be merged back into this origin denominator.
+      heartbeatCompleted = executionDiagnosticNumber(heartbeat.completed_origins != null ? heartbeat.completed_origins : heartbeat.completed_samples);
+      heartbeatTotal = executionDiagnosticNumber(heartbeat.total_origins != null ? heartbeat.total_origins : heartbeat.total_samples);
+      durableCompleted = null;
+      durableTotal = null;
+    }
     var cellsPerOrigin = Number(run && run.prediction_cells_per_origin);
     var configuredCellBudget = Number(run && run.samples_per_update);
     var durableUsesCellUnits = originBundleProtocol
@@ -1594,17 +1615,17 @@
     var progressUnitLabel = originBundleProtocol ? "预测时点" : "样本";
     var sampleRate = showLiveProgressDetail && Number(stageProgress.samples_per_minute);
     var sampleRateText = Number.isFinite(sampleRate) && sampleRate > 0 ? " · " + formatNumber(sampleRate, 1) + " " + progressUnitLabel + "/分钟" : "";
-    var inFlight = (showLiveProgressDetail || showDrainedProgressDetail) && Number(stageProgress.in_flight_requests != null ? stageProgress.in_flight_requests : stageProgress.in_flight_batches);
+    var inFlight = (showLiveProgressDetail || showDrainedProgressDetail || showPausedProgressDetail) && Number(stageProgress.in_flight_requests != null ? stageProgress.in_flight_requests : stageProgress.in_flight_batches);
     var progressKind = stageProgress && stageProgress.progress_kind;
     var inFlightLabel = progressKind === "drained" ? "在飞预测请求已排空" : runStatus === "paused" ? "暂停快照在飞预测请求" : "在飞预测请求";
     var inFlightText = Number.isInteger(inFlight) && inFlight >= 0 ? " · " + inFlightLabel + " " + formatNumber(inFlight) : "";
     var queued = (showLiveProgressDetail || showDrainedProgressDetail || showPausedProgressDetail) && Number(stageProgress.provider_queued_requests != null ? stageProgress.provider_queued_requests : stageProgress.queued_batches);
     var legacyAwaitingSubmission = stageProgress && stageProgress.queue_semantics === "awaiting_origin_submission";
-    var queuedLabel = legacyAwaitingSubmission ? "待提交" : progressKind === "drained" ? "暂停后排队" : runStatus === "paused" ? "暂停快照排队" : "排队";
+    var queuedLabel = legacyAwaitingSubmission ? "待提交" : progressKind === "drained" ? "暂停后等待 provider 许可" : runStatus === "paused" ? "暂停快照等待 provider 许可" : "等待 provider 许可";
     var queuedText = Number.isInteger(queued) && queued >= 0 ? " · " + queuedLabel + " " + formatNumber(queued) : "";
-    var awaitingSubmission = (showLiveProgressDetail || showDrainedProgressDetail) && Number(stageProgress.awaiting_submission_batches);
+    var awaitingSubmission = (showLiveProgressDetail || showDrainedProgressDetail || showPausedProgressDetail) && Number(stageProgress.awaiting_submission_batches);
     var awaitingSubmissionText = Number.isInteger(awaitingSubmission) && awaitingSubmission >= 0 ? " · 待提交 " + formatNumber(awaitingSubmission) : "";
-    var awaitingSettlement = (showLiveProgressDetail || showDrainedProgressDetail) && Number(stageProgress.awaiting_settlement_batches);
+    var awaitingSettlement = (showLiveProgressDetail || showDrainedProgressDetail || showPausedProgressDetail) && Number(stageProgress.awaiting_settlement_batches);
     var awaitingSettlementText = Number.isInteger(awaitingSettlement) && awaitingSettlement > 0 ? " · 待结算 " + formatNumber(awaitingSettlement) : "";
     var gatewayAttempts = showLiveProgressDetail && Number(stageProgress.gateway_request_count);
     var gatewayAttemptsText = Number.isInteger(gatewayAttempts) && gatewayAttempts >= 0 ? " · 网关尝试 " + formatNumber(gatewayAttempts) : "";
@@ -1630,7 +1651,7 @@
       } else if (stageProgress && stageProgress.updated_at && stageProgress.live) {
         heartbeatNode.textContent = "评测心跳：" + formatTime(heartbeatState.timestamp || stageProgress.updated_at) + (heartbeatState.age_text ? " · " + heartbeatState.age_text : "") + (stageProgress.progress_kind === "settling" ? " · 模型执行与宿主结算中" + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText + gatewayAttemptsText : stageProgress.progress_kind === "waiting" ? " · 网关执行中" + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText : causalWaveText ? " · 已提交" + causalWaveText + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText : inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText) + (dshActivity ? " · " + dshActivity.heartbeat : "");
       } else if (stageProgress && stageProgress.updated_at) {
-        heartbeatNode.textContent = (paused ? "最近评测记录：" : "评测证据：") + formatTime(stageProgress.updated_at) + (pausedDrained ? " · 暂停后请求已排空" + inFlightText + queuedText : stageProgress.evidence_qualifier ? " · " + stageProgress.evidence_qualifier : "");
+        heartbeatNode.textContent = (paused ? "最近评测记录：" : "评测证据：") + formatTime(stageProgress.updated_at) + (pausedDrained ? " · 暂停后请求已排空" + inFlightText + queuedText : paused ? " · 正在排空暂停前请求" + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText : stageProgress.evidence_qualifier ? " · " + stageProgress.evidence_qualifier : "");
       } else if (liveAllowed) {
         heartbeatNode.textContent = dshActivity ? "DSH 活动：" + dshActivity.heartbeat : "评测心跳：等待首个波次完成";
       } else {
@@ -1661,8 +1682,11 @@
   function adaptiveTrajectoryDecisionText(batch) {
     var outcome = String(batch && batch.edit_outcome || "").toLowerCase();
     var decision = String(batch && batch.edit_decision || "").toLowerCase();
+    var reason = String(batch && batch.edit_reason || "").toLowerCase();
+    if (outcome === "rolled_back") { return "安全门回退"; }
+    if (reason && outcome === "kept") { return "证据不足或安全门阻断，本批不改"; }
     return {
-      applied: "已应用局部修改", kept: "保持当前修订", rejected: "修改被宿主拒绝"
+      applied: "已应用，待后续批次/holdout验证", kept: "保持当前修订", rejected: "提案未通过宿主校验"
     }[outcome] || {
       mutate: "建议局部修改", keep: "建议保持"
     }[decision] || (String(batch && batch.status || "").toLowerCase() === "running" ? "评测中" : "等待局部决策");
@@ -1678,7 +1702,9 @@
     });
     count.textContent = lanes.length ? formatNumber(lanes.length) + " 个候选 · " + formatNumber(rows.length) + " 个微批" : "等待正式候选";
     if (!rows.length) {
-      table.innerHTML = "<tr><td colspan=\"6\" class=\"empty-state\">Top 2 候选进入正式 adaptive epoch 后，将在这里显示逐微批修订与局部修改证据。</td></tr>";
+      table.innerHTML = lanes.length
+        ? "<tr><td colspan=\"6\" class=\"empty-state\">入围候选已进入正式 adaptive epoch，正在等待首个微批证据。</td></tr>"
+        : "<tr><td colspan=\"6\" class=\"empty-state\">Top 2 候选进入正式 adaptive epoch 后，将在这里显示逐微批修订与局部修改证据。</td></tr>";
       return;
     }
     table.innerHTML = rows.map(function (entry) {
@@ -1689,9 +1715,18 @@
       var coverageText = Number.isFinite(coverage) ? formatNumber(coverage <= 1 ? coverage * 100 : coverage, 1) + "%" : "—";
       var originText = formatNumber(batch.origin_count || 0) + " origins";
       var operations = Array.isArray(batch.operations) ? batch.operations : [];
-      var operationHtml = operations.length ? operations.map(function (operation) { return "<span class=\"adaptive-trajectory-operation\">" + escapeHTML(adaptiveTrajectoryOperationText(operation)) + "</span>"; }).join("") : "<span>本批未记录局部修改</span>";
+      var batchStatus = String(batch.status || "").toLowerCase();
+      var editOutcome = String(batch.edit_outcome || "").toLowerCase();
+      var editDecision = String(batch.edit_decision || "").toLowerCase();
+      var operationHtml = operations.length
+        ? operations.map(function (operation) { return "<span class=\"adaptive-trajectory-operation\">" + escapeHTML(adaptiveTrajectoryOperationText(operation)) + "</span>"; }).join("")
+        : editOutcome === "kept" || editDecision === "keep"
+          ? "<span>KEEP：保持当前修订</span>"
+          : batchStatus === "running" || !editOutcome && !editDecision
+            ? "<span>等待本批评测与局部决策</span>"
+            : "<span>已记录决策，未公开局部操作摘要</span>";
       var outcome = adaptiveTrajectoryDecisionText(batch);
-      var outcomeTone = String(batch.edit_outcome || "").toLowerCase() === "applied" ? "pill-green" : String(batch.edit_outcome || "").toLowerCase() === "rejected" ? "pill-amber" : String(batch.status || "").toLowerCase() === "running" ? "pill-blue" : "pill-neutral";
+      var outcomeTone = String(batch.edit_outcome || "").toLowerCase() === "applied" ? "pill-blue" : String(batch.edit_outcome || "").toLowerCase() === "rejected" ? "pill-amber" : String(batch.status || "").toLowerCase() === "running" ? "pill-blue" : "pill-neutral";
       var executionCounts = [batch.succeeded_origins != null ? "成功 origins " + formatNumber(batch.succeeded_origins) : "", batch.failed_origins != null ? "失败 origins " + formatNumber(batch.failed_origins) : "", Number(batch.fallback_scoring_cells) > 0 ? "fallback cells " + formatNumber(batch.fallback_scoring_cells) : ""].filter(Boolean).join(" · ");
       return "<tr>"
         + "<td><div class=\"adaptive-trajectory-cell\"><strong>第 " + escapeHTML(formatNumber(Number(lane.generation || 0) + 1)) + " 轮 · " + escapeHTML(shortId(lane.candidate_id)) + "</strong><small>轨迹 " + escapeHTML(formatNumber(lane.completed_batch_count || 0)) + " / " + escapeHTML(formatNumber(lane.batch_count || 0)) + "</small></div></td>"
@@ -1718,6 +1753,7 @@
     var rawObservedScore = runRawBestObservedScore(run);
     var outcomeText = runOutcomeText(run) || displayRunStatusText(run, state.events);
     var sampleAgentTokenBudget = runUsesSampleAgentTokenBudget(run);
+    var declaredTokenBudget = sampleAgentTokenBudget;
     var nativeDshRuntime = run.dsh_runtime && run.dsh_runtime.native === true;
     var schedule = run.optimization_schedule || configuration.optimization_schedule || {};
     var formalOrigins = Number(schedule.formal_origin_count_per_finalist || 0);
@@ -1738,8 +1774,8 @@
       ["单轮执行预算", generationCandidateOrigins > 0 ? formatNumber(generationCandidateOrigins) + " candidate-origins" : "等待冻结 schedule"],
       ["网关 origin wave", Number(run.sample_agent_batch_size) > 0 ? "每 wave 最多 " + formatNumber(run.sample_agent_batch_size) + " 个 origins，实际完成数以运行进度为准" : "历史运行未配置"],
       ["逐样本并发", Number(run.sample_concurrency) > 0 ? formatNumber(run.sample_concurrency) + " 个在飞请求" : "历史运行未配置"],
-      [nativeDshRuntime ? "DSH 上下文管理" : sampleAgentTokenBudget ? "逐样本智能体 Token 硬预算" : "Token 账本（历史口径）", nativeDshRuntime ? "Session 压缩与输出长度由 DSH 统一管理" : Number(run.token_limit) > 0 ? formatNumber(run.token_limit) : "仅计量"],
-      [nativeDshRuntime ? "用量来源" : "Token 计量范围", nativeDshRuntime ? "当前压力来自 TokenMeter；累计用量仅采信 Session provider 回执" : tokenBudgetScopeText(run)],
+      [nativeDshRuntime ? "DSH 上下文管理" : declaredTokenBudget ? tokenBudgetSubjectText(run) + " Token 硬预算" : "Token 账本（历史口径）", nativeDshRuntime ? "Session 压缩与输出长度由 DSH 统一管理" : Number(run.token_limit) > 0 ? formatNumber(run.token_limit) : "仅计量"],
+      [nativeDshRuntime ? "用量来源" : "Token 计量范围", declaredTokenBudget ? tokenBudgetScopeText(run) : nativeDshRuntime ? "当前压力来自 TokenMeter；累计用量仅采信 Session provider 回执" : tokenBudgetScopeText(run)],
       ["当前保留得分", retainedScore == null ? "尚未产生" : formatNumber(retainedScore) + "（实际晋升序列）"],
       ["原始最高观测（跨窗口不可直接比较）", rawObservedScore == null ? "尚未产生" : formatNumber(rawObservedScore)],
       ["本次运行结果", outcomeText]

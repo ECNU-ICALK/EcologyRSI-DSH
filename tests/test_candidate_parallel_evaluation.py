@@ -11,7 +11,12 @@ from unittest.mock import patch
 from ecologyrsi_dsh.api import generation_execution
 from ecologyrsi_dsh.api.dsh_tools import DshToolAdmissionClosedError
 from ecologyrsi_dsh.api.generation_execution import _candidate_signature
-from ecologyrsi_dsh.core.models import RunStatus
+from ecologyrsi_dsh.core.models import Evaluation, ModelArtifact, RunStatus
+from ecologyrsi_dsh.core.trajectory import (
+    EvaluationPhase,
+    EvaluationScope,
+    HoldoutArm,
+)
 
 
 _FIXTURE_DIR = Path(__file__).with_name("fixtures")
@@ -43,6 +48,66 @@ class _Director:
 
 
 class CandidateParallelEvaluationTests(unittest.TestCase):
+    def test_holdout_recovery_requires_exact_revision_scope_and_artifact(self) -> None:
+        scope = EvaluationScope(
+            run_id="run:holdout-recovery",
+            generation=0,
+            candidate_id="candidate:finalist",
+            candidate_revision_id="revision:finalist:batch:10",
+            phase=EvaluationPhase.HOLDOUT,
+            cohort_digest="a" * 64,
+            origin_count=169,
+            holdout_arm=HoldoutArm.FINALIST_1,
+        )
+        artifact = ModelArtifact(
+            artifact_id="artifact:finalist:holdout",
+            run_id=scope.run_id,
+            candidate_id=scope.candidate_id,
+            candidate_revision_id=scope.candidate_revision_id,
+            evaluation_scope_digest=scope.scope_key,
+            model_id="greenhouse-targetwise-ridge@1",
+            dataset_digest="b" * 64,
+            training_partition="training_fit",
+            training_rows=500,
+        )
+        evaluation = Evaluation(
+            evaluation_id="evaluation:finalist:holdout",
+            run_id=scope.run_id,
+            candidate_id=scope.candidate_id,
+            candidate_revision_id=scope.candidate_revision_id,
+            evaluation_scope=scope.to_dict(),
+            score=0.2,
+            passed=True,
+            metrics={"constraint_violations": 0},
+            evaluator_digest="c" * 64,
+            artifact_digest=artifact.digest,
+        )
+
+        self.assertTrue(
+            generation_execution._canonical_holdout_outcome_complete(
+                artifact, evaluation, scope
+            )
+        )
+        wrong_scope = dict(scope.to_dict())
+        wrong_scope["phase"] = EvaluationPhase.SCREENING.value
+        screening_evaluation = Evaluation(
+            **{
+                **evaluation.to_dict(),
+                "evaluation_scope": wrong_scope,
+            }
+        )
+        self.assertFalse(
+            generation_execution._canonical_holdout_outcome_complete(
+                artifact, screening_evaluation, scope
+            )
+        )
+        recovered = generation_execution._holdout_from_canonical_evaluation(
+            evaluation, scope
+        )
+        self.assertEqual(recovered.scope, scope)
+        self.assertEqual(recovered.score, evaluation.score)
+        self.assertEqual(recovered.metrics, evaluation.metrics)
+
     def test_top2_screening_selection_is_a_locked_outer_contract(self) -> None:
         candidates, records, expected_ids = _load_top2_screening_golden()
 

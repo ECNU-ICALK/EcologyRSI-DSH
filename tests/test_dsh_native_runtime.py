@@ -580,8 +580,11 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             },
         )
         self.assertNotIn("samples_per_update", metadata)
+        self.assertNotIn("token_limit", state.task_manifest.budget)
+        self.assertNotIn("dsh_provider_token_budget_policy", metadata)
+        self.assertNotIn("token_budget_scope", metadata)
 
-    def test_native_setup_precedes_run_created_and_emits_no_token_budget(self) -> None:
+    def test_native_setup_precedes_run_created_without_hidden_provider_budget(self) -> None:
         runtime = _FakeNativeRuntime()
         self.server.dsh_native_runtime = runtime
         self.server.model_gateway.catalog = lambda: (_ for _ in ()).throw(AssertionError("legacy gateway used"))  # type: ignore[method-assign]
@@ -599,7 +602,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                 "start": False,
                 "auto_advance": 0,
                 "idempotency_key": "native-create-1",
-                "budget": {"max_generations": 1, "token_limit": 12345},
+                "budget": {"max_generations": 1},
             }
         )
         self.assertEqual(status, 201, payload)
@@ -614,6 +617,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         )
         self.assertNotIn("token_limit", state.task_manifest.budget)
         self.assertNotIn("token_reservation_per_wave", state.task_manifest.budget)
+        self.assertNotIn("dsh_provider_token_budget_policy", state.task_manifest.metadata)
+        self.assertNotIn("token_budget_scope", state.task_manifest.metadata)
         self.assertFalse(state.task_manifest.metadata["dsh_first_call_verified"])
         self.assertEqual(state.task_manifest.metadata["candidate_concurrency"], 1)
         self.assertEqual(state.task_manifest.metadata["sample_concurrency"], 2)
@@ -663,6 +668,27 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             self.server.validate_frozen_runtime_bindings(
                 TaskManifest.from_dict(tampered_data)
             )
+
+    def test_native_provider_token_limit_is_rejected_before_runtime_creation(self) -> None:
+        runtime = _FakeNativeRuntime()
+        self.server.dsh_native_runtime = runtime
+        status, payload = self._post(
+            {
+                "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                "run_id": "run:native-token-limit",
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "strategy_model_id": "dsh/strategy",
+                "review_model_id": "dsh/review",
+                "start": False,
+                "auto_advance": 0,
+                "idempotency_key": "native-token-limit-1",
+                "budget": {"max_generations": 1, "token_limit": 12345},
+            }
+        )
+        self.assertEqual(status, 400, payload)
+        self.assertIn("telemetry", payload["error"])
+        self.assertEqual(runtime.created, [])
 
     def test_native_schedule_replaces_diagnostic_sample_count(self) -> None:
         runtime = _FakeNativeRuntime()

@@ -306,6 +306,8 @@ def apply_local_edit_bundle(
         registry,
         parameter_schemas=context.parameter_schemas,
     )
+    if child.behavior_digest == parent.behavior_digest:
+        raise ValueError("local edit did not change executable behavior")
     return LocalEditResult(
         outcome=LocalEditOutcome.APPLIED,
         operations=tuple(validated.operations),

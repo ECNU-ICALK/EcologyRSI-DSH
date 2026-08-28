@@ -1710,6 +1710,17 @@ class AutoProgressHTTPTests(unittest.TestCase):
         )
         self.assertIn("ValueError", failure.payload["reason"])
         self.assertNotIn("preflight-audit-secret", failure.payload["reason"])
+        self.assertEqual(
+            failure.payload["error_code"],
+            "auto_progress_preflight_host_value_error",
+        )
+        self.assertEqual(failure.payload["failure_context"]["stage"], "preflight")
+        projected = self.request(f"/runs/{run_id}")[1]["projection"]
+        self.assertEqual(projected["failure_code"], failure.payload["error_code"])
+        self.assertEqual(
+            projected["failed_stage"]["evidence"],
+            "terminal_run_failure_context",
+        )
         execute_generation.assert_not_called()
 
     def test_generation_failure_write_is_requeued_without_replaying_generation(self) -> None:
@@ -1789,12 +1800,12 @@ class AutoProgressHTTPTests(unittest.TestCase):
         persisted_fail_run = self.server.director.fail_run
         failure_write_calls = 0
 
-        def flaky_fail_run(target_run_id: str, reason: str):
+        def flaky_fail_run(target_run_id: str, reason: str, **diagnostics):
             nonlocal failure_write_calls
             failure_write_calls += 1
             if failure_write_calls == 1:
                 raise sqlite3.OperationalError("database is temporarily busy")
-            return persisted_fail_run(target_run_id, reason)
+            return persisted_fail_run(target_run_id, reason, **diagnostics)
 
         with (
             patch.object(

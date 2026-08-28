@@ -2508,8 +2508,41 @@ def _execute_adaptive_holdout_arm(
 ) -> HoldoutEvaluation:
     state = endpoint.server.director.state(run_id)
     existing = state.holdout_evaluation_for(generation, arm)
-    if existing is not None:
+    scope = EvaluationScope(
+        run_id=run_id,
+        generation=generation,
+        candidate_id=binding["candidate_id"],
+        candidate_revision_id=binding["candidate_revision_id"],
+        phase=EvaluationPhase.HOLDOUT,
+        cohort_digest=cohort.cohort_digest,
+        origin_count=cohort.origin_count,
+        holdout_arm=arm,
+    )
+    existing_artifact = state.artifact_for(binding["candidate_id"])
+    existing_canonical = state.evaluation_for(binding["candidate_id"])
+    canonical_complete = _canonical_holdout_outcome_complete(
+        existing_artifact,
+        existing_canonical,
+        scope,
+    )
+    if existing is not None and (
+        arm is HoldoutArm.INCUMBENT or canonical_complete
+    ):
         return existing
+    if (
+        existing is None
+        and arm in {HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2}
+        and canonical_complete
+    ):
+        assert existing_canonical is not None
+        recovered = _holdout_from_canonical_evaluation(existing_canonical, scope)
+        return _director_mutation(
+            endpoint,
+            "record_holdout_evaluation",
+            run_id,
+            recovered,
+        )
+
     source_candidate = state.candidate(binding["candidate_id"])
     task = _phase_task_manifest(
         state.task_manifest,
@@ -2523,16 +2556,7 @@ def _execute_adaptive_holdout_arm(
         binding["candidate_revision_id"],
         task,
     )
-    scope = EvaluationScope(
-        run_id=run_id,
-        generation=generation,
-        candidate_id=binding["candidate_id"],
-        candidate_revision_id=binding["candidate_revision_id"],
-        phase=EvaluationPhase.HOLDOUT,
-        cohort_digest=cohort.cohort_digest,
-        origin_count=cohort.origin_count,
-        holdout_arm=arm,
-    )
+
     def sample_run_control() -> str:
         status = endpoint.server.director.state(run_id).run.status
         if status is RunStatus.RUNNING:
@@ -2554,7 +2578,7 @@ def _execute_adaptive_holdout_arm(
     summary = metrics.get("sample_execution")
     if not isinstance(summary, Mapping) or int(summary.get("attempted_origin_samples", 0)) < cohort.origin_count:
         raise RuntimeError("holdout did not complete the frozen 169-origin cohort")
-    evaluation = HoldoutEvaluation(
+    evaluation = existing or HoldoutEvaluation(
         evaluation_id=f"holdout-evaluation:{generation}:{arm.value}",
         scope=scope,
         score=bundle.evaluation.score,
@@ -2567,31 +2591,84 @@ def _execute_adaptive_holdout_arm(
         # like it used a different evaluator and block promotion.
         evaluator_digest=str(bundle.evaluation.evaluator_digest),
     )
-    _director_mutation(
-        endpoint,
-        "record_holdout_evaluation",
-        run_id,
-        evaluation,
-    )
 
     # Finalist holdout evidence is also the canonical candidate outcome used by
     # the existing parent/search pipeline.  The incumbent replay arm is never
     # written as a new candidate evaluation.
     if arm in {HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2}:
-        artifact = replace(
+        evaluated_artifact = replace(
             bundle.artifact,
             candidate_revision_id=binding["candidate_revision_id"],
             evaluation_scope_digest=scope.scope_key,
         )
-        _director_mutation(endpoint, "record_artifact", artifact)
+        if existing_artifact is not None:
+            if existing_artifact.digest != evaluated_artifact.digest:
+                raise RuntimeError(
+                    "persisted finalist holdout artifact differs from recovered evaluation"
+                )
+            artifact = existing_artifact
+        else:
+            artifact = _director_mutation(
+                endpoint, "record_artifact", evaluated_artifact
+            )
         canonical = replace(
             bundle.evaluation,
+            score=evaluation.score,
+            passed=evaluation.passed,
+            metrics=dict(evaluation.metrics),
+            evaluator_digest=evaluation.evaluator_digest,
             candidate_revision_id=binding["candidate_revision_id"],
             evaluation_scope=scope.to_dict(),
             artifact_digest=artifact.digest,
         )
         _director_mutation(endpoint, "record_evaluation", canonical)
+    if existing is None:
+        _director_mutation(
+            endpoint,
+            "record_holdout_evaluation",
+            run_id,
+            evaluation,
+        )
     return evaluation
+
+
+def _canonical_holdout_outcome_complete(
+    artifact: Any,
+    evaluation: Evaluation | None,
+    scope: EvaluationScope,
+) -> bool:
+    """Require the exact frozen holdout binding, never any candidate outcome."""
+
+    return bool(
+        artifact is not None
+        and evaluation is not None
+        and artifact.candidate_id == scope.candidate_id
+        and artifact.candidate_revision_id == scope.candidate_revision_id
+        and artifact.evaluation_scope_digest == scope.scope_key
+        and evaluation.candidate_id == scope.candidate_id
+        and evaluation.candidate_revision_id == scope.candidate_revision_id
+        and evaluation.evaluation_scope == scope.to_dict()
+        and evaluation.artifact_digest == artifact.digest
+    )
+
+
+def _holdout_from_canonical_evaluation(
+    evaluation: Evaluation,
+    scope: EvaluationScope,
+) -> HoldoutEvaluation:
+    """Seal a missing holdout event from its already durable canonical result."""
+
+    return HoldoutEvaluation(
+        evaluation_id=(
+            f"holdout-evaluation:{scope.generation}:{scope.holdout_arm.value}"
+        ),
+        scope=scope,
+        score=evaluation.score,
+        passed=evaluation.passed,
+        metrics=dict(evaluation.metrics),
+        evaluator_digest=evaluation.evaluator_digest,
+        created_at=evaluation.created_at,
+    )
 
 
 def _build_adaptive_analysis(
@@ -2702,11 +2779,13 @@ def _finalize_adaptive_generation(endpoint: Any, run_id: str, batch: Any) -> Any
     if cohorts is None:
         raise RuntimeError("adaptive generation is missing frozen holdout cohort")
 
-    incumbent_id = state.run.best_candidate_id
     incumbent_revision_id = (
-        state.effective_revision_for(generation - 1)
-        if incumbent_id is not None and generation > 0
-        else None
+        state.effective_revision_for(generation - 1) if generation > 0 else None
+    )
+    incumbent_id = (
+        state.revision(incumbent_revision_id).candidate_id
+        if incumbent_revision_id is not None
+        else state.run.best_candidate_id
     )
     if incumbent_id is None or incumbent_revision_id is None:
         fallback = next(
@@ -2767,6 +2846,7 @@ def _finalize_adaptive_generation(endpoint: Any, run_id: str, batch: Any) -> Any
             cohort_digest=holdout.cohort_digest,
             holdout_evaluations=tuple(item for item in evaluations if item is not None),
             incumbent_candidate_id=incumbent_id,
+            fitness_profile=FitnessProfile.from_task(state.task_manifest),
         )
         _director_mutation(endpoint, "record_generation_comparison", run_id, comparison)
     _director_mutation(

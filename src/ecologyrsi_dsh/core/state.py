@@ -3056,7 +3056,7 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 raise ValueError("conflicting formal batch evaluation")
             formal_batch_evaluations.setdefault(key, evaluation)
         elif event.kind == "LocalEditProposalRecorded":
-            fields = {
+            legacy_fields = {
                 "proposal_id",
                 "candidate_id",
                 "batch_index",
@@ -3064,7 +3064,14 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 "decision",
                 "operations",
             }
-            if set(payload) != fields:
+            fields = {
+                "proposal_id",
+                "candidate_id",
+                "batch_index",
+                "evidence_scope_digest",
+                "proposal",
+            }
+            if set(payload) not in (legacy_fields, fields, fields | {"safety_reason"}):
                 raise ValueError("local edit proposal payload is invalid")
             candidate_id = payload["candidate_id"]
             batch_index = payload["batch_index"]
@@ -3078,8 +3085,15 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 raise ValueError("local edit proposal scope is invalid")
             key = (candidate_id, batch_index)
             evaluation = formal_batch_evaluations.get(key)
-            decision = LocalEditProposalDecision(payload["decision"])
-            operations = payload["operations"]
+            if "proposal" in payload:
+                from ..evolution.local_edits import LocalEditProposal
+
+                proposal_value = LocalEditProposal.from_dict(payload["proposal"])
+                decision = proposal_value.decision
+                operations = list(proposal_value.operations)
+            else:
+                decision = LocalEditProposalDecision(payload["decision"])
+                operations = payload["operations"]
             if (
                 evaluation is None
                 or payload["evidence_scope_digest"] != evaluation.scope.scope_key
@@ -3087,7 +3101,34 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 or (decision is LocalEditProposalDecision.KEEP and operations)
             ):
                 raise ValueError("local edit proposal evidence is invalid")
-            normalized = dict(payload)
+            if "safety_reason" in payload and (
+                decision is not LocalEditProposalDecision.KEEP
+                or not isinstance(payload["safety_reason"], str)
+                or not payload["safety_reason"].strip()
+            ):
+                raise ValueError("local edit safety reason is invalid")
+            normalized = {
+                "proposal_id": payload["proposal_id"],
+                "candidate_id": candidate_id,
+                "batch_index": batch_index,
+                "evidence_scope_digest": payload["evidence_scope_digest"],
+                "proposal": (
+                    proposal_value.to_dict()
+                    if "proposal" in payload
+                    else {
+                        "schema_version": "ecology-local-edit@1",
+                        "decision": decision.value,
+                        "operations": [dict(item) for item in operations],
+                        "evidence_refs": ["batch:score"],
+                        "expected_effect_cells": [],
+                        "risk_cells": [],
+                    }
+                ),
+                "decision": decision.value,
+                "operations": [dict(item) for item in operations],
+            }
+            if "safety_reason" in payload:
+                normalized["safety_reason"] = payload["safety_reason"]
             existing = local_edit_proposals.get(key)
             if existing is not None and canonical_json(existing) != canonical_json(normalized):
                 raise ValueError("conflicting local edit proposal")
@@ -3100,7 +3141,7 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 "outcome",
                 "active_revision_id",
             }
-            if set(payload) != fields:
+            if set(payload) not in (fields, fields | {"reason"}):
                 raise ValueError("local edit outcome payload is invalid")
             key = (payload["candidate_id"], payload["batch_index"])
             proposal = local_edit_proposals.get(key)
@@ -3114,9 +3155,18 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 or (
                     proposal["decision"] == LocalEditProposalDecision.KEEP.value
                     and outcome is not LocalEditOutcome.KEPT
+                    and not (
+                        outcome is LocalEditOutcome.ROLLED_BACK
+                        and payload.get("reason") == proposal.get("safety_reason")
+                    )
                 )
             ):
                 raise ValueError("local edit outcome is inconsistent")
+            if "reason" in payload and (
+                not isinstance(payload["reason"], str)
+                or not payload["reason"].strip()
+            ):
+                raise ValueError("local edit outcome reason is invalid")
             normalized = dict(payload)
             existing = local_edit_outcomes.get(key)
             if existing is not None and canonical_json(existing) != canonical_json(normalized):
@@ -3146,12 +3196,19 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 LocalEditOutcome.KEPT.value: RevisionAdvanceReason.KEPT,
                 LocalEditOutcome.APPLIED.value: RevisionAdvanceReason.LOCAL_EDIT_APPLIED,
                 LocalEditOutcome.REJECTED.value: RevisionAdvanceReason.LOCAL_EDIT_REJECTED,
+                LocalEditOutcome.ROLLED_BACK.value: (
+                    RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK
+                ),
             }[outcome["outcome"]]
             if activation.reason is not expected_reason:
                 raise ValueError("trajectory revision activation reason is inconsistent")
             if activation.reason is RevisionAdvanceReason.LOCAL_EDIT_APPLIED:
                 if destination.source_batch_index != activation.batch_index:
                     raise ValueError("new revision source batch is inconsistent")
+            elif activation.reason is RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK:
+                source = candidate_revisions.get(batch.revision_id)
+                if source is None or source.parent_revision_id != activation.to_revision_id:
+                    raise ValueError("safety rollback must activate the batch revision parent")
             elif activation.to_revision_id != activation.from_revision_id:
                 raise ValueError("kept/rejected edit cannot change active revision")
             existing = trajectory_revision_activations.get(key)

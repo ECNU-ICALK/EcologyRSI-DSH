@@ -2,7 +2,7 @@
 
 一个把农业与生态预测研究中的“数据边界—模型调研—候选生成—科学评测—人工治理”串成可复现闭环的轻量 DSH 插件。
 
-> 当前交付：`0.3.46` 可交付候选版 · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
+> 当前交付：`0.3.47` 可交付候选版 · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
 
 ## 为什么做这个工作台
 
@@ -301,7 +301,7 @@ PYTHONPATH=src python -m ecologyrsi_dsh data fetch agc_tomato_2019
 
 ## DSH 原生 Agent 运行时
 
-0.3.46 新建运行使用 `dsh_native_plugin_evolution@1`：Agent Session、上下文压缩、
+0.3.47 新建运行使用 `dsh_native_plugin_evolution@1`：Agent Session、上下文压缩、
 subagent 和 Workflow 由 DSH 管理，Python 只提供科学工具与持久账本。安装后直接运行：
 
 ```bash
@@ -407,7 +407,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --samples-per-task 1 \
   --minimum-coverage 0.8 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.46-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.47-real-api-agent-tool-acceptance.json
 ```
 
 验收无论通过或失败都会原子写入 JSON 报告；省略 `--output` 时默认写到系统临时目录下的
@@ -608,7 +608,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
   --db /tmp/ecologyrsi-dsh-dsh-adapter.sqlite3 \
   --samples-per-task 1 \
   --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.3.46-real-api-agent-tool-acceptance.json
+  --output dist/ecologyrsi_dsh-0.3.47-real-api-agent-tool-acceptance.json
 ```
 
 构建 wheel、sdist 和完整交付包需要 `uv`：
@@ -638,6 +638,15 @@ PYTHONPATH=src python -m ecologyrsi_dsh summary run:demo --db /tmp/ecologyrsi-de
 - 单进程锁和 SQLite 适用于本地交付与研究验证，不是多租户、高并发生产架构。
 
 发布前的人工验收项与安全边界见 `RELEASE-CHECKLIST.md`。
+
+## 0.3.47 交付更新
+
+- 局部编辑现在携带当前 revision 的真实 pipeline、参数与最近 8 次编辑结果；同值/no-op 会被宿主拒绝，约束导致的样本失败会回退到父 revision，provider/覆盖率瞬时不足则保留当前 revision 并停止继续修改，避免把基础设施故障误判为模型退化。
+- 轮末 F1/F2/incumbent 共用同一 max-T 多重比较族与实际改善阈值；holdout 恢复必须同时匹配冻结 revision、cohort scope 和 artifact digest，已落盘的 canonical 结果可以补齐缺失事件，不会把其他阶段结果当作留出完成。
+- 自动推进失败现在公开稳定的阶段、候选、批次与工作单元位置；命令收据、知识检索终态竞态和删除后同 ID 重建均按追加式账本恢复，不再把无关终态误归到待处理操作。
+- 高频页面轮询改用有界 monitor 投影和增量事件尾；轻量状态先提交，候选详情仅在结构变化或低频刷新时补齐，详情/事件瞬时失败不会覆盖新的暂停、失败或终态，隐藏标签页自动降频。
+- DSH Session provider 回执累计用量会持续显示，但不是完整、原子的计费账本，因此 DSH-native 运行不接受 `token_limit`，也不再暗中附加 1 亿 token 上限；旧的 sample-gateway 模式仍保留其独立的硬预算合同。
+- 运行进度以 prediction origin 为唯一主口径，显示实时 admission 上限、在飞、等待 provider、待提交、待结算、滚动吞吐和 ETA；自适应轨迹区分“已应用待验证”“宿主拒绝”“安全回退”和“安全保持”。
 
 ## 0.3.46 交付更新
 

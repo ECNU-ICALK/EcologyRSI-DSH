@@ -16,7 +16,12 @@ from ..evaluators.registry import (
     TOY_EVALUATOR_ID,
     TOY_PREDICTOR_MODEL_ID,
 )
-from .projection import _projection_json, _run_summary_projection, _state_payload
+from .projection import (
+    _monitor_payload,
+    _projection_json,
+    _run_summary_projection,
+    _state_payload,
+)
 
 
 class CatalogEndpointsMixin:
@@ -483,6 +488,16 @@ class CatalogEndpointsMixin:
         return item
 
     def _run_payload(self, run_id: str) -> dict[str, Any]:
-        payload = _state_payload(self.server.director.replay(run_id))
+        state = self.server.director.replay(run_id)
+        admission_snapshot = self.server.sample_admission.snapshot(run_id)
+        query = parse_qs(urlparse(self.path).query)
+        view = query.get("view", ["detail"])[0]
+        if view not in {"detail", "monitor"}:
+            raise ValueError("view must be detail or monitor")
+        payload = (
+            _monitor_payload(state, admission_snapshot)
+            if view == "monitor"
+            else _state_payload(state, admission_snapshot)
+        )
         payload["projection"] = self._decorate_run_projection(payload["projection"])
         return payload

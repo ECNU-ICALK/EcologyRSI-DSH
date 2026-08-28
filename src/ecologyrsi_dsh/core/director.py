@@ -1006,13 +1006,50 @@ class EvolutionDirector:
         self._close_session(state.run)
         return self.state(run_id).run
 
-    def fail_run(self, run_id: str, reason: str) -> Run:
+    def fail_run(
+        self,
+        run_id: str,
+        reason: str,
+        *,
+        error_code: str | None = None,
+        failure_context: Mapping[str, Any] | None = None,
+    ) -> Run:
         if not str(reason).strip():
             raise ValueError("reason must be non-empty")
+        payload: dict[str, Any] = {"reason": str(reason)}
+        if error_code is not None:
+            code = str(error_code).strip()
+            if not code or len(code) > 120 or not all(
+                char.isalnum() or char in "._-" for char in code
+            ):
+                raise ValueError("error_code must be a compact host identifier")
+            payload["error_code"] = code
+        if failure_context is not None:
+            allowed = {
+                "generation",
+                "stage",
+                "work_unit_kind",
+                "candidate_id",
+                "batch_id",
+                "batch_index",
+                "batch_count",
+            }
+            context = dict(failure_context)
+            if not context or not set(context) <= allowed:
+                raise ValueError("failure_context has an invalid shape")
+            if not isinstance(context.get("generation"), int):
+                raise ValueError("failure_context generation must be an integer")
+            for key, value in context.items():
+                if key in {"generation", "batch_index", "batch_count"}:
+                    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                        raise ValueError(f"failure_context {key} must be non-negative")
+                elif not isinstance(value, str) or not value.strip() or len(value) > 160:
+                    raise ValueError(f"failure_context {key} must be bounded text")
+            payload["failure_context"] = context
         state = self._append_run_transition(
             run_id,
             "RunFailed",
-            lambda _state: {"reason": str(reason)},
+            lambda _state: payload,
             RunStatus.CREATED,
             RunStatus.RUNNING,
             RunStatus.PAUSED,
@@ -2371,7 +2408,7 @@ class EvolutionDirector:
         self, run_id: str, proposal_payload: Mapping[str, Any]
     ) -> Event:
         payload = dict(proposal_payload)
-        fields = {
+        legacy_fields = {
             "proposal_id",
             "candidate_id",
             "batch_index",
@@ -2379,7 +2416,14 @@ class EvolutionDirector:
             "decision",
             "operations",
         }
-        if set(payload) != fields:
+        fields = {
+            "proposal_id",
+            "candidate_id",
+            "batch_index",
+            "evidence_scope_digest",
+            "proposal",
+        }
+        if set(payload) not in (legacy_fields, fields, fields | {"safety_reason"}):
             raise ValueError("local edit proposal payload is invalid")
         state = self.state(run_id)
         candidate_id = str(payload["candidate_id"])
@@ -2387,8 +2431,14 @@ class EvolutionDirector:
         if isinstance(batch_index, bool) or not isinstance(batch_index, int):
             raise TypeError("batch_index must be an integer")
         evaluation = state.batch_evaluation_for(candidate_id, batch_index)
-        decision = LocalEditProposalDecision(payload["decision"])
-        operations = payload["operations"]
+        if "proposal" in payload:
+            from ..evolution.local_edits import LocalEditProposal
+            proposal = LocalEditProposal.from_dict(payload["proposal"])
+            decision = proposal.decision
+            operations = list(proposal.operations)
+        else:
+            decision = LocalEditProposalDecision(payload["decision"])
+            operations = payload["operations"]
         schedule = OptimizationSchedule.from_dict(
             state.task_manifest.metadata["optimization_schedule"]
         )
@@ -2401,6 +2451,13 @@ class EvolutionDirector:
             or (decision is LocalEditProposalDecision.MUTATE and not operations)
         ):
             raise ValueError("local edit proposal evidence or operation count is invalid")
+        if "safety_reason" in payload:
+            if (
+                decision is not LocalEditProposalDecision.KEEP
+                or not isinstance(payload["safety_reason"], str)
+                or not payload["safety_reason"].strip()
+            ):
+                raise ValueError("local edit safety reason requires a keep proposal")
         return self.ledger.append(
             run_id,
             "LocalEditProposalRecorded",
@@ -2419,7 +2476,7 @@ class EvolutionDirector:
             "outcome",
             "active_revision_id",
         }
-        if set(payload) != fields:
+        if set(payload) not in (fields, fields | {"reason"}):
             raise ValueError("local edit decision payload is invalid")
         state = self.state(run_id)
         key = (payload["candidate_id"], payload["batch_index"])
@@ -2440,9 +2497,17 @@ class EvolutionDirector:
             or (
                 proposal["decision"] == LocalEditProposalDecision.KEEP.value
                 and outcome is not LocalEditOutcome.KEPT
+                and not (
+                    outcome is LocalEditOutcome.ROLLED_BACK
+                    and payload.get("reason") == proposal.get("safety_reason")
+                )
             )
         ):
             raise ValueError("local edit decision is inconsistent")
+        if "reason" in payload and (
+            not isinstance(payload["reason"], str) or not payload["reason"].strip()
+        ):
+            raise ValueError("local edit decision reason must be non-empty text")
         return self.ledger.append(
             run_id,
             "LocalEditDecided",
@@ -2484,9 +2549,16 @@ class EvolutionDirector:
             LocalEditOutcome.KEPT.value: RevisionAdvanceReason.KEPT,
             LocalEditOutcome.APPLIED.value: RevisionAdvanceReason.LOCAL_EDIT_APPLIED,
             LocalEditOutcome.REJECTED.value: RevisionAdvanceReason.LOCAL_EDIT_REJECTED,
+            LocalEditOutcome.ROLLED_BACK.value: (
+                RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK
+            ),
         }[outcome["outcome"]]
         if reason != expected_reason or outcome["active_revision_id"] != revision_id:
             raise ValueError("revision activation differs from local decision")
+        if reason is RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK:
+            parent_revision_id = state.revision(batch.revision_id).parent_revision_id
+            if parent_revision_id is None or revision_id != parent_revision_id:
+                raise ValueError("safety rollback must activate the batch revision parent")
         activation = TrajectoryRevisionActivation(
             activation_id=f"activation:{candidate_id}:{batch_index}",
             run_id=run_id,

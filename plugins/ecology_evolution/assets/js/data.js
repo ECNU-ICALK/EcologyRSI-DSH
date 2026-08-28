@@ -370,6 +370,10 @@
       renderProgressViews();
       return;
     }
+    if (document.hidden === true) {
+      queueRunMonitor(runId, runMonitorMaxDelayMs);
+      return;
+    }
     if (state.runMonitorInFlight) {
       queueRunMonitor(runId, runMonitorBaseDelayMs);
       return;
@@ -382,8 +386,14 @@
     }
     state.runMonitorInFlight = true;
     state.runMonitorLastPollAt = Date.now();
-    refreshProgressForRun(runId).then(function () {
+    refreshProgressForRun(runId).then(function (ok) {
       if (state.runMonitorRunId !== runId || state.runMonitorContextEpoch !== state.contextEpoch) { return; }
+      if (!ok) {
+        state.runMonitorRetry = Number(state.runMonitorRetry || 0) + 1;
+        var retryDelay = Math.min(runMonitorMaxDelayMs, runMonitorBaseDelayMs * Math.pow(2, Math.min(3, state.runMonitorRetry - 1)));
+        queueRunMonitor(runId, retryDelay);
+        return;
+      }
       var current = state.activeRun;
       state.runMonitorRetry = 0;
       if (!current || current.id !== runId || String(current.status || "").toLowerCase() !== "running" || runIsTerminal(current)) {
@@ -631,40 +641,93 @@
     var contextEpoch = state.contextEpoch;
     var requestId = state.runReadRequest + 1;
     state.runReadRequest = requestId;
-    return Promise.all([request("/runs/" + encodeURIComponent(runId)), request(eventRequestPath(runId, false))]).then(function (results) {
+    // The projection is the authority for live run state. Event streaming is a
+    // supplementary tail and must not prevent a fresh projection from being
+    // accepted when that endpoint has a transient failure.
+    return Promise.all([
+      request("/runs/" + encodeURIComponent(runId) + "?view=monitor"),
+      request(eventRequestPath(runId, false)).catch(function () { return null; })
+    ]).then(function (results) {
       if (requestId !== state.runReadRequest || contextEpoch !== state.contextEpoch) { return false; }
       if (!state.activeRun || state.activeRun.id !== runId) { return false; }
       var previousRun = state.activeRun;
-      var incomingRun = normalizeRun(results[0]);
-      if (incomingRun.projection_revision < state.activeRun.projection_revision) { return false; }
-      state.activeRun = incomingRun;
-      state.runs = state.runs.map(function (run) { return run.id === runId ? incomingRun : run; });
-      mergeEventStream(runId, results[1]);
-      observeRunStatus(previousRun, state.activeRun, state.events);
-      state.lastUpdated = new Date().toISOString();
-      // The active candidate is discovered asynchronously after RunCreated.
-      // Reconcile it on every projection heartbeat so the sample endpoint is
-      // subscribed as soon as the first candidate enters evaluation.
-      var candidateSelectionChanged = syncCandidateSelection(state.activeRun);
-      var selectionChanged = reconcileVisibleRunSelection();
-      if (selectionChanged) {
+      var compactProjection = results[0] && (results[0].projection || results[0].run_projection) || results[0] || {};
+      var compactRunId = compactProjection.run_id || compactProjection.id;
+      if (compactRunId != null && String(compactRunId) !== String(runId)) {
+        throw new Error("运行监视响应返回了其他运行的数据。");
+      }
+      // Candidate collections remain intentionally absent from monitor
+      // responses. Hydrate the full projection only at structural boundaries;
+      // per-batch progress and adaptive trajectories stay on the compact path.
+      var structuralChange = (
+        Number.isFinite(Number(compactProjection.candidates_count))
+        && Number(compactProjection.candidates_count) !== Number(previousRun.candidates_count)
+      ) || (
+        Number.isFinite(Number(compactProjection.generation))
+        && Number(compactProjection.generation) !== Number(previousRun.generation)
+      ) || (runIsTerminal(compactProjection) && !runIsTerminal(previousRun));
+      function commitProjection(authoritativeProjection) {
+        if (requestId !== state.runReadRequest || contextEpoch !== state.contextEpoch) { return false; }
+        if (!state.activeRun || state.activeRun.id !== runId) { return false; }
+        var priorRun = state.activeRun;
+        // Merge compact live fields into the last full projection so rounds,
+        // candidates and assets survive between structural hydrations.
+        var incomingRun = normalizeRun(Object.assign({}, state.activeRun, authoritativeProjection));
+        if (incomingRun.projection_revision < state.activeRun.projection_revision) { return false; }
+        state.activeRun = incomingRun;
+        state.runs = state.runs.map(function (run) { return run.id === runId ? incomingRun : run; });
+        if (results[1]) { mergeEventStream(runId, results[1]); }
+        observeRunStatus(priorRun, state.activeRun, state.events);
+        state.lastUpdated = new Date().toISOString();
+        state.loadState = "ready";
+        state.lastError = null;
+        setConnection("online", state.hostContextReceived ? "DSH 宿主已连接" : "本地服务已连接");
+        // The active candidate is discovered asynchronously after RunCreated.
+        // Reconcile it on every projection heartbeat so the sample endpoint is
+        // subscribed as soon as the first candidate enters evaluation.
+        var candidateSelectionChanged = syncCandidateSelection(state.activeRun);
+        var selectionChanged = reconcileVisibleRunSelection();
+        if (selectionChanged) {
+          renderProgressViews();
+          return state.activeRun ? selectRun(state.activeRun.id, false) : true;
+        }
         renderProgressViews();
-        return state.activeRun ? selectRun(state.activeRun.id, false) : true;
+        // Do not hold the run heartbeat on a potentially slow sample page. The
+        // sample loader is single-flight and renders its own completion/error.
+        if (candidateSelectionChanged) {
+          loadCandidateSamples(0, {force: true, silent: true});
+        } else {
+          refreshCandidateSamples({silent: true});
+        }
+        // A read-only poll is also the recovery hook after a page reload or a
+        // DSH reconnect. The scheduler itself remains the only writer.
+        if (state.activeRun && state.activeRun.id === runId && typeof ensureAutoAdvanceForRun === "function") {
+          ensureAutoAdvanceForRun(runId);
+        }
+        return true;
       }
+      // Commit the compact authority immediately. A structural detail request
+      // is best-effort and must never hide a fresh pause/failure/terminal state
+      // merely because the much larger candidate projection is slow.
+      return Promise.resolve(commitProjection(compactProjection)).then(function (committed) {
+        if (!committed || !structuralChange) { return committed; }
+        return request("/runs/" + encodeURIComponent(runId)).then(function (payload) {
+          var detail = payload && (payload.projection || payload.run_projection) || payload || {};
+          state.structureHydrationStale = false;
+          return commitProjection(Object.assign({}, detail, compactProjection));
+        }).catch(function () {
+          if (requestId === state.runReadRequest && contextEpoch === state.contextEpoch) {
+            state.structureHydrationStale = true;
+          }
+          return true;
+        });
+      });
+    }).catch(function (error) {
+      if (requestId !== state.runReadRequest || contextEpoch !== state.contextEpoch) { return false; }
+      state.loadState = "stale";
+      state.lastError = errorMessage(error);
+      setConnection("offline", "连接已中断 · 显示上次状态");
       renderProgressViews();
-      // Do not hold the run heartbeat on a potentially slow sample page.  The
-      // sample loader is single-flight and renders its own completion/error;
-      // progress and stage updates remain responsive while it is in flight.
-      if (candidateSelectionChanged) {
-        loadCandidateSamples(0, {force: true, silent: true});
-      } else {
-        refreshCandidateSamples({silent: true});
-      }
-      // A read-only poll is also the recovery hook after a page reload or a
-      // DSH reconnect.  The scheduler itself remains the only writer.
-      if (state.activeRun && state.activeRun.id === runId && typeof ensureAutoAdvanceForRun === "function") {
-        ensureAutoAdvanceForRun(runId);
-      }
-      return true;
-    }).catch(function () { return false; });
+      return false;
+    });
   }

@@ -475,6 +475,61 @@ class RecoveryAndLineageTests(unittest.TestCase):
         self.assertEqual(recovered["projection"]["candidates_count"], 1)
         self.assertEqual(self.server.ledger.pending_command_keys(), ())
 
+    def test_restart_seals_pending_mutation_proven_by_later_terminal_event(self) -> None:
+        status, created = self.request(
+            "/api/runs", "POST", self.create_body("terminal-receipt", auto_advance=0)
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        command_key = f"{run_id}:stale-cancel"
+        request = {"action": "cancel", "reason": "test"}
+        self.assertIsNone(
+            self.server.ledger.begin_command(
+                command_key, run_id, "control:cancel", request
+            )
+        )
+        self.server.director.cancel_run(run_id, "test")
+
+        self.server.shutdown()
+        self.thread.join(timeout=2)
+        self.server.close()
+        self.server = EvolutionHTTPServer(("127.0.0.1", 0), self.db_path)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+        receipt = self.server.ledger.command_receipt(command_key)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt.status, "completed")
+        self.assertEqual(receipt.response["projection"]["status"], "cancelled")
+
+    def test_restart_does_not_misattribute_cancel_to_pending_pause(self) -> None:
+        status, created = self.request(
+            "/api/runs", "POST", self.create_body("terminal-receipt-scope", auto_advance=0)
+        )
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        command_key = f"{run_id}:stale-pause"
+        request = {"action": "pause"}
+        self.assertIsNone(
+            self.server.ledger.begin_command(
+                command_key, run_id, "control:pause", request
+            )
+        )
+        self.server.director.cancel_run(run_id, "separate cancel")
+
+        self.server.shutdown()
+        self.thread.join(timeout=2)
+        self.server.close()
+        self.server = EvolutionHTTPServer(("127.0.0.1", 0), self.db_path)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+        receipt = self.server.ledger.command_receipt(command_key)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt.status, "pending")
+
     def test_restart_keeps_bound_unstarted_create_resumable(self) -> None:
         body = self.create_body("restart-resume-start", auto_advance=0)
         with patch.object(
@@ -526,6 +581,7 @@ class RecoveryAndLineageTests(unittest.TestCase):
             *,
             event_id=None,
             created_at=None,
+            expected_run_seq=None,
         ):
             if kind == "RunCompleted":
                 raise RuntimeError("simulated process boundary")
@@ -535,6 +591,7 @@ class RecoveryAndLineageTests(unittest.TestCase):
                 payload,
                 event_id=event_id,
                 created_at=created_at,
+                expected_run_seq=expected_run_seq,
             )
 
         with patch.object(self.server.ledger, "append", side_effect=fail_completion):
@@ -618,6 +675,7 @@ class RecoveryAndLineageTests(unittest.TestCase):
             *,
             event_id=None,
             created_at=None,
+            expected_run_seq=None,
         ):
             if kind == "HumanInterventionApplied":
                 raise KeyboardInterrupt("simulated hard process exit")
@@ -627,6 +685,7 @@ class RecoveryAndLineageTests(unittest.TestCase):
                 payload,
                 event_id=event_id,
                 created_at=created_at,
+                expected_run_seq=expected_run_seq,
             )
 
         with patch.object(

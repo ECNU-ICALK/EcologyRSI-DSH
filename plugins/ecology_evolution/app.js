@@ -9,7 +9,18 @@
 
   function exportSummary() {
     if (!state.activeRun) { showToast("当前没有可导出的进化运行。" ); return; }
-    var payload = { exported_at: new Date().toISOString(), projection: state.activeRun, events: state.events, redaction: "仅包含脱敏状态视图" };
+    var payload = {
+      exported_at: new Date().toISOString(),
+      projection: state.activeRun,
+      events: state.events,
+      event_stream: {
+        next_cursor: state.eventCursor,
+        total_public_events: Number(state.eventTotal || state.events.length),
+        retained_event_count: state.events.length,
+        truncated: state.eventHistoryTruncated === true
+      },
+      redaction: "仅包含脱敏状态视图"
+    };
     var blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     var anchor = document.createElement("a");
     anchor.href = URL.createObjectURL(blob); anchor.download = state.activeRun.id + "-运行摘要.json"; anchor.click(); URL.revokeObjectURL(anchor.href);
@@ -213,6 +224,16 @@
       connectAndLoad();
     });
     window.addEventListener("resize", scheduleTrajectoryRender);
+    if (typeof document.addEventListener === "function") {
+      document.addEventListener("visibilitychange", function () {
+        if (document.hidden === true || !state.activeRun) { return; }
+        var runId = state.activeRun.id;
+        if (String(state.activeRun.status || "").toLowerCase() === "running") {
+          startRunMonitor(runId);
+          queueRunMonitor(runId, 0);
+        }
+      });
+    }
   }
 
   function publicState() {

@@ -427,7 +427,7 @@
     if (!state.activeRun || state.busy) { return Promise.resolve(false); }
     if (!hasCapability("run.control")) { showToast("当前 DSH 会话未授予运行控制能力。"); return Promise.resolve(false); }
     if (action === "resume" && runHasHardTokenPause(state.activeRun)) {
-      showToast("该运行已达到冻结的逐样本智能体 Token 硬预算，不能直接恢复；请创建更高预算的新运行。");
+      showToast("该运行已达到冻结的" + tokenBudgetSubjectText(state.activeRun) + " Token 硬预算，不能直接恢复；请创建更高预算的新运行。");
       return Promise.resolve(false);
     }
     var runId = state.activeRun.id;
@@ -748,14 +748,14 @@
     state.runReadRequest = requestId;
     state.refreshing = true;
     renderAll();
-    return Promise.all([request("/catalog", { timeout: dataRequestTimeout }), request(runsListPath()), request("/runs/" + encodeURIComponent(runId)), request(eventRequestPath(runId, false))]).then(function (results) {
+    return Promise.all([request("/catalog", { timeout: dataRequestTimeout }), request(runsListPath()), request("/runs/" + encodeURIComponent(runId)), request(eventRequestPath(runId, false)).catch(function () { return null; })]).then(function (results) {
       if (requestId !== state.runReadRequest || viewEpoch !== state.viewEpoch || !state.activeRun || state.activeRun.id !== runId) { return false; }
       state.catalog = normalizeCatalog(results[0]);
       var previousRun = state.activeRun;
       var incomingRun = normalizeRun(results[2]);
       if (!state.activeRun || incomingRun.projection_revision >= state.activeRun.projection_revision) {
         state.activeRun = incomingRun;
-        mergeEventStream(runId, results[3]);
+        if (results[3]) { mergeEventStream(runId, results[3]); }
       }
       state.runs = listFrom(results[1], "runs").map(normalizeRun).map(function (run) { return run.id === runId ? state.activeRun : run; }).sort(function (left, right) {
         var leftTime = Date.parse(left.updated_at || left.created_at || "") || 0;
@@ -769,6 +769,7 @@
       state.lastUpdated = new Date().toISOString();
       state.loadState = state.activeRun ? "ready" : "empty";
       state.lastError = null;
+      state.structureHydrationStale = false;
       if (String(state.activeRun && state.activeRun.status || "").toLowerCase() !== "failed") {
         state.commandError = null;
       }

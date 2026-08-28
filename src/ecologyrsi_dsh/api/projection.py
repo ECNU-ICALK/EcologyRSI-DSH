@@ -139,6 +139,23 @@ def _run_failure_projection(state: Any) -> tuple[str | None, dict[str, Any] | No
             reason = public_error_summary(raw_reason)
     if failure_code == FROZEN_RUNTIME_BINDING_DRIFT_CODE:
         reason = FROZEN_RUNTIME_BINDING_DRIFT_PUBLIC_MESSAGE
+    terminal_context = (
+        failed_event.payload.get("failure_context")
+        if failed_event is not None
+        else None
+    )
+    if isinstance(terminal_context, Mapping):
+        return reason, {
+            "generation": terminal_context.get("generation"),
+            "stage": terminal_context.get("stage"),
+            "work_unit_kind": terminal_context.get("work_unit_kind"),
+            "candidate_id": terminal_context.get("candidate_id"),
+            "batch_id": terminal_context.get("batch_id"),
+            "batch_index": terminal_context.get("batch_index"),
+            "batch_count": terminal_context.get("batch_count"),
+            "created_at": failed_event.created_at,
+            "evidence": "terminal_run_failure_context",
+        }
     stage_event = next(
         (
             event
@@ -2292,7 +2309,10 @@ def _formal_batch_live_projection(state: Any) -> dict[str, Any] | None:
     }
 
 
-def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
+def _adaptive_progress_projection(
+    state: Any,
+    admission_snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Project origin-level progress for the Top-2 adaptive protocol.
 
     The legacy six-stage bar has no representation for ten 50-origin batches,
@@ -2362,6 +2382,52 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
         total,
         screening_completed + formal_completed + holdout_completed,
     )
+    throughput_rows: list[tuple[datetime, int]] = []
+    for event in state.candidate_screening_events:
+        if int(event.payload.get("generation", -1)) != generation:
+            continue
+        try:
+            throughput_rows.append(
+                (
+                    datetime.fromisoformat(
+                        str(getattr(event, "created_at", "")).replace(
+                            "Z", "+00:00"
+                        )
+                    ),
+                    int(event.payload.get("origin_count") or 0),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    for item in (*state.formal_batch_evaluations, *state.holdout_evaluations):
+        if item.scope.generation != generation:
+            continue
+        try:
+            throughput_rows.append(
+                (
+                    datetime.fromisoformat(
+                        str(getattr(item, "created_at", "")).replace(
+                            "Z", "+00:00"
+                        )
+                    ),
+                    int(item.scope.origin_count),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    throughput_rows.sort(key=lambda row: row[0])
+    rolling_rate: float | None = None
+    rolling_eta: int | None = None
+    if len(throughput_rows) >= 2:
+        window = throughput_rows[-8:]
+        latest_time = window[-1][0]
+        now = datetime.now(latest_time.tzinfo)
+        elapsed_minutes = max(
+            1.0 / 60.0, (max(now, latest_time) - window[0][0]).total_seconds() / 60.0
+        )
+        rolling_rate = round(sum(count for _at, count in window[1:]) / elapsed_minutes, 3)
+        if rolling_rate > 0:
+            rolling_eta = int(math.ceil(max(0, total - completed) / rolling_rate * 60.0))
     phase = "screening"
     if settled_screening_completed >= screening_total:
         phase = "formal_batch"
@@ -2437,6 +2503,24 @@ def _adaptive_progress_projection(state: Any) -> dict[str, Any] | None:
         live_fields["in_flight_requests"] = live_fields["in_flight_batches"]
     if "queued_batches" in live_fields:
         live_fields["provider_queued_requests"] = live_fields["queued_batches"]
+    live_fields["samples_per_minute"] = rolling_rate
+    live_fields["estimated_remaining_seconds"] = rolling_eta
+    live_fields["throughput_semantics"] = "host_settled_origins_rolling_8_boundaries"
+    if isinstance(admission_snapshot, Mapping):
+        live_fields.update(
+            {
+                "admission_limit": admission_snapshot.get("limit"),
+                "adaptive_admission_limit": admission_snapshot.get(
+                    "adaptive_limit"
+                ),
+                "admission_active": admission_snapshot.get("active"),
+                "admission_waiting": admission_snapshot.get("waiting"),
+                "admission_congestion_events": admission_snapshot.get(
+                    "congestion_events"
+                ),
+                "admission_semantics": "host_origin_admission_live_snapshot",
+            }
+        )
     epoch_progress_percent = round(100.0 * completed / max(1, total), 1)
     return {
         "schema_version": "ecologyrsi-dsh.adaptive-progress/2",
@@ -2511,13 +2595,18 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
             proposal = proposals.get(key)
             outcome = outcomes.get(key)
             activation = activations.get(key)
+            activation_reason = getattr(activation, "reason", None)
+            activation_reason_value = getattr(
+                activation_reason, "value", activation_reason
+            )
             metrics = evaluation.metrics if evaluation is not None else {}
             sample = metrics.get("sample_execution") if isinstance(metrics, Mapping) else None
             if not isinstance(sample, Mapping):
                 sample = {}
             operations: list[dict[str, Any]] = []
-            if proposal is not None and isinstance(proposal.get("operations"), (list, tuple)):
-                for operation in proposal["operations"][:5]:
+            proposal_detail = proposal.get("proposal", proposal) if proposal else {}
+            if isinstance(proposal_detail, Mapping) and isinstance(proposal_detail.get("operations"), (list, tuple)):
+                for operation in proposal_detail["operations"][:5]:
                     if not isinstance(operation, Mapping):
                         continue
                     operations.append(
@@ -2538,6 +2627,12 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
                     "candidate_revision_id": batch.revision_id,
                     "cohort_digest": batch.cohort_digest,
                     "status": (
+                        "rolled_back"
+                        if activation is not None
+                        and activation_reason_value == "prequential_safety_rollback"
+                        else "safety_kept"
+                        if outcome is not None and outcome.get("reason")
+                        else
                         "edited"
                         if activation is not None
                         else "evaluated"
@@ -2564,8 +2659,9 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
                     "fallback_scoring_cells": _finite_number(
                         sample.get("scoring_fallback_examples")
                     ),
-                    "edit_decision": proposal.get("decision") if proposal else None,
+                    "edit_decision": proposal_detail.get("decision") if isinstance(proposal_detail, Mapping) else None,
                     "edit_outcome": outcome.get("outcome") if outcome else None,
+                    "edit_reason": outcome.get("reason") if outcome else proposal.get("safety_reason") if proposal else None,
                     "operations": operations,
                     "active_revision_id": (
                         activation.to_revision_id
@@ -2602,7 +2698,10 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
     return lanes
 
 
-def _run_execution_progress(state: Any) -> dict[str, Any]:
+def _run_execution_progress(
+    state: Any,
+    admission_snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Summarize durable execution evidence for a compact progress bar."""
 
     task = state.task_manifest
@@ -2726,7 +2825,7 @@ def _run_execution_progress(state: Any) -> dict[str, Any]:
             1,
         )
 
-    adaptive_progress = _adaptive_progress_projection(state)
+    adaptive_progress = _adaptive_progress_projection(state, admission_snapshot)
     epoch_progress_percent: float | None = None
     if adaptive_progress is not None:
         stage_progress = adaptive_progress
@@ -2830,6 +2929,51 @@ def _token_budget_scope(task: Any, metadata: Mapping[str, Any]) -> str | None:
         # hard-budget policy before the explicit scope marker was introduced.
         return _SAMPLE_TOKEN_BUDGET_SCOPE
     return None
+
+
+def _run_wide_token_usage(
+    task: Any,
+    metadata: Mapping[str, Any],
+    model_usage: Mapping[str, Any],
+    dsh_runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Select the frozen accounting source used by the public run budget."""
+
+    limit = _budget_value(task, "token_limit", 0)
+    provider = dsh_runtime.get("provider_usage")
+    provider_available = (
+        isinstance(provider, Mapping) and provider.get("available") is True
+    )
+    if provider_available:
+        available = True
+        used = int(provider.get("total_tokens", 0)) if available else 0
+        source = "dsh_provider_reported_sessions"
+    else:
+        available = model_usage.get("available") is True
+        used = int(
+            model_usage.get(
+                "budget_accounted_tokens", model_usage.get("total_tokens", 0)
+            )
+        )
+        source = "model_usage_receipts"
+    ratio = (used / limit) if limit > 0 else None
+    return {
+        "available": available,
+        "source": source,
+        "tokens_used": used,
+        "token_limit": limit,
+        "remaining_tokens": max(0, limit - used) if limit > 0 else None,
+        "utilization_ratio": round(ratio, 6) if ratio is not None else None,
+        "warning": (
+            "exhausted"
+            if ratio is not None and ratio >= 1.0
+            else "approaching_limit"
+            if ratio is not None and ratio >= 0.8
+            else None
+        ),
+        "enforcement": None,
+        "scope": _token_budget_scope(task, metadata),
+    }
 
 
 def _model_usage_summary(state: Any) -> dict[str, Any]:
@@ -3565,7 +3709,10 @@ def _expert_consultation_projection(state: Any, item: Any) -> dict[str, Any]:
     }
 
 
-def _projection_json(state: Any) -> dict[str, Any]:
+def _projection_json(
+    state: Any,
+    admission_snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build the small browser-safe read model from the event projection."""
 
     # Keep this helper safe even when called outside ``_state_payload`` (for
@@ -3818,10 +3965,13 @@ def _projection_json(state: Any) -> dict[str, Any]:
         "variants_per_round": task.candidates_per_generation,
         "knowledge_online_enabled": bool(metadata.get("knowledge_online_enabled", False)),
     }
-    execution_progress = _run_execution_progress(state)
+    execution_progress = _run_execution_progress(state, admission_snapshot)
     execution_diagnostics = _execution_diagnostics(state)
     model_usage = _model_usage_summary(state)
     dsh_runtime = _dsh_runtime_projection(state)
+    run_wide_usage = _run_wide_token_usage(
+        task, metadata, model_usage, dsh_runtime
+    )
     pause_reason, pause_code, retry_circuit = _run_pause_projection(state)
     return {
         "id": run.run_id,
@@ -3863,16 +4013,15 @@ def _projection_json(state: Any) -> dict[str, Any]:
             "two_stage_evaluation_enabled", True
         ),
         "budget": dict(task.budget),
-        "token_usage_available": model_usage["available"],
-        "tokens_used": model_usage.get(
-            "budget_accounted_tokens", model_usage["total_tokens"]
-        ),
+        "token_usage_available": run_wide_usage["available"],
+        "tokens_used": run_wide_usage["tokens_used"],
         "token_limit": _budget_value(task, "token_limit", 0),
         "token_reservation_per_wave": _budget_value(
             task, "token_reservation_per_wave", 0
         ),
         "token_budget_scope": token_budget_scope,
         "run_wide_accounting_complete": False,
+        "run_wide_usage": run_wide_usage,
         "model_usage": model_usage,
         "dsh_runtime": dsh_runtime,
         "manifest_digest": task.digest,
@@ -4106,9 +4255,68 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
     }
 
 
-def _state_payload(state: Any) -> dict[str, Any]:
+def _state_payload(
+    state: Any,
+    admission_snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     _assert_http_scope(state)
     return {
         "schema_version": "ecologyrsi-dsh.browser-run/3",
-        "projection": _projection_json(state),
+        "projection": _projection_json(state, admission_snapshot),
+    }
+
+
+def _monitor_payload(
+    state: Any,
+    admission_snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a polling-safe projection without candidate/evidence payloads."""
+
+    _assert_http_scope(state)
+    task = state.task_manifest
+    metadata = dict(task.metadata)
+    outcome, termination_reason = run_completion_outcome(state)
+    failure_reason, failed_stage = _run_failure_projection(state)
+    pause_reason, pause_code, retry_circuit = _run_pause_projection(state)
+    model_usage = _model_usage_summary(state)
+    dsh_runtime = _dsh_runtime_projection(state)
+    run_wide_usage = _run_wide_token_usage(
+        task, metadata, model_usage, dsh_runtime
+    )
+    latest_at = state.events[-1].created_at if state.events else state.run.created_at
+    return {
+        "schema_version": "ecologyrsi-dsh.browser-run-monitor/1",
+        "projection": {
+            "id": state.run.run_id,
+            "run_id": state.run.run_id,
+            "status": state.run.status.value,
+            "outcome": outcome,
+            "termination_reason": termination_reason,
+            "failure_reason": failure_reason,
+            "failure_code": _run_failure_code(state),
+            "failed_stage": failed_stage,
+            "pause_reason": pause_reason,
+            "pause_code": pause_code,
+            "retry_circuit": retry_circuit,
+            "updated_at": latest_at,
+            "projection_revision": state.events[-1].seq if state.events else 0,
+            "generation": state.run.generation,
+            "total_generations": _max_generations(task),
+            "candidates_count": len(state.candidates),
+            "max_candidates": task.max_candidates,
+            "execution_progress": _run_execution_progress(
+                state, admission_snapshot
+            ),
+            # This is a bounded public aggregate (two finalist lanes per
+            # generation), so the batch table can stay live without returning
+            # candidate metrics or per-origin evidence on every poll.
+            "adaptive_trajectories": _adaptive_trajectory_projection(state),
+            "token_usage_available": run_wide_usage["available"],
+            "tokens_used": run_wide_usage["tokens_used"],
+            "token_limit": run_wide_usage["token_limit"],
+            "token_budget_scope": run_wide_usage["scope"],
+            "run_wide_usage": run_wide_usage,
+            "model_usage": model_usage,
+            "dsh_runtime": dsh_runtime,
+        },
     }

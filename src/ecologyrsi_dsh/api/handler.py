@@ -589,6 +589,7 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
             # process still completing that command, so close only receipts
             # whose exact run can be replayed into a public projection.
             self._recover_bound_create_receipts()
+            self._recover_terminal_command_receipts()
             # Continuous autonomous runs are progressed by a bounded worker pool.
             # Recovery is projection-driven and only picks up manifests that
             # explicitly opted into this mode.
@@ -623,6 +624,50 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
             except (KeyError, TypeError, ValueError, RuntimeError):
                 # Unbound, missing, or malformed recovery evidence remains
                 # pending for an explicit same-key retry or operator review.
+                continue
+            self.ledger.complete_command(command_key, payload)
+            recovered += 1
+        return recovered
+
+    def _recover_terminal_command_receipts(self) -> int:
+        """Seal stale run mutations when a later terminal event proves success.
+
+        A process can commit the requested cancel/advance transition and stop
+        before sealing its HTTP receipt.  We only reconcile non-create
+        receipts when this exact run has a terminal event newer than the
+        receipt claim; receipts claimed after termination remain ambiguous.
+        """
+
+        proof_kinds = {
+            "advance": {"RunCompleted", "RunFailed"},
+            "control:advance": {"RunCompleted", "RunFailed"},
+            "control:step": {"RunCompleted", "RunFailed"},
+            "control:cancel": {"RunCancelled"},
+            "control:complete": {"RunCompleted"},
+        }
+        recovered = 0
+        for command_key in self.ledger.pending_command_keys():
+            receipt = self.ledger.command_receipt(command_key)
+            if (
+                receipt is None
+                or receipt.status != "pending"
+                or receipt.command_kind == "create_run"
+                or receipt.resource_run_id is None
+                or receipt.command_kind not in proof_kinds
+            ):
+                continue
+            try:
+                state = self.director.state(receipt.resource_run_id)
+                if state.run.status.value not in {"completed", "cancelled", "failed"}:
+                    continue
+                if not any(
+                    event.kind in proof_kinds[receipt.command_kind]
+                    and int(event.seq) > receipt.start_seq
+                    for event in state.events
+                ):
+                    continue
+                payload = _state_payload(state)
+            except (KeyError, TypeError, ValueError, RuntimeError):
                 continue
             self.ledger.complete_command(command_key, payload)
             recovered += 1
@@ -1182,12 +1227,18 @@ class EvolutionRequestHandler(
             terminal_status = state.run.status.value
             if terminal_status not in {"completed", "cancelled", "failed"}:
                 raise RuntimeError("只能永久删除已完成、已取消或失败的终态运行")
+            admission = self.server.sample_admission.snapshot(run_id)
+            if int(admission.get("active", 0)) or int(admission.get("waiting", 0)):
+                raise CommandInProgressError(
+                    "run still has active or waiting sample admissions"
+                )
             deleted = self.server.ledger.purge_run(
                 run_id,
                 confirmation=confirmation,
                 terminal_status=terminal_status,
             )
             self.server.dsh_identity_cache.forget(run_id)
+            self.server.sample_admission.forget(run_id)
             purged = True
             # Queue entries cannot be physically removed. Withdraw their exact
             # incarnation while the retiring lease still prevents dequeue from
@@ -2813,6 +2864,16 @@ class EvolutionRequestHandler(
         data["metadata"] = metadata
         if native_protocol:
             native_budget = dict(data["budget"])
+            native_token_limit = int(native_budget.get("token_limit", 0))
+            if native_token_limit > 0:
+                raise ValueError(
+                    "DSH-native token_limit is unsupported because provider "
+                    "session reports are telemetry, not an atomic reservation ledger"
+                )
+            # DSH-native runs do not receive a hidden static cap: the observed
+            # default 5-epoch plan needs well above the legacy sample-gateway
+            # budget. Session context bounds remain owned by DSH, while the
+            # sidecar exposes provider-reported cumulative usage as telemetry.
             native_budget.pop("token_limit", None)
             native_budget.pop("token_reservation_per_wave", None)
             data["budget"] = native_budget
@@ -2823,6 +2884,7 @@ class EvolutionRequestHandler(
                 "token_budget_scope",
                 "run_wide_accounting_complete",
                 "sample_token_budget_defaulted",
+                "dsh_provider_token_budget_policy",
             ):
                 metadata.pop(legacy_token_field, None)
             data["metadata"] = metadata

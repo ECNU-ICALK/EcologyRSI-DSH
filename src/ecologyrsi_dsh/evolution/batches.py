@@ -722,14 +722,32 @@ def start_generation_batch(director: Any, run_id: str) -> GenerationBatch:
                 else None
             ),
         )
-        director.ledger.append(
-            run_id,
-            "GenerationKnowledgeRetrieved",
-            {"knowledge_snapshot": knowledge.to_dict()},
-            event_id=f"{run_id}:generation:{state.run.generation}:knowledge-retrieved",
-        )
-        state = director.state(run_id)
-        knowledge = state.knowledge_for(state.run.generation) or knowledge
+        # Retrieval is intentionally outside the mutation boundary. Re-check
+        # the run before committing its result: an operator may have cancelled
+        # or completed the run while the remote knowledge request was in
+        # flight. The expected revision closes the remaining check/append race.
+        latest = director.state(run_id)
+        already_recorded = latest.knowledge_for(state.run.generation)
+        if already_recorded is not None:
+            state = latest
+            knowledge = already_recorded
+        elif (
+            latest.run.status is not RunStatus.RUNNING
+            or latest.run.generation != state.run.generation
+        ):
+            raise RuntimeError(
+                "run stopped or advanced while generation knowledge was retrieved"
+            )
+        else:
+            director.ledger.append(
+                run_id,
+                "GenerationKnowledgeRetrieved",
+                {"knowledge_snapshot": knowledge.to_dict()},
+                event_id=f"{run_id}:generation:{state.run.generation}:knowledge-retrieved",
+                expected_run_seq=latest.events[-1].seq,
+            )
+            state = director.state(run_id)
+            knowledge = state.knowledge_for(state.run.generation) or knowledge
 
     _ensure_generation_research_iteration(
         director,

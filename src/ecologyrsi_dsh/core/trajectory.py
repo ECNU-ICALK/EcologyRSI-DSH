@@ -47,12 +47,14 @@ class LocalEditOutcome(str, Enum):
     KEPT = "kept"
     APPLIED = "applied"
     REJECTED = "rejected"
+    ROLLED_BACK = "rolled_back"
 
 
 class RevisionAdvanceReason(str, Enum):
     KEPT = "kept"
     LOCAL_EDIT_APPLIED = "local_edit_applied"
     LOCAL_EDIT_REJECTED = "local_edit_rejected"
+    PREQUENTIAL_SAFETY_ROLLBACK = "prequential_safety_rollback"
 
 
 class HoldoutArm(str, Enum):

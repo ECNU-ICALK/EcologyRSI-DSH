@@ -74,6 +74,21 @@ class RunSampleAdmission:
                 )
             return state
 
+    def forget(self, run_id: str) -> bool:
+        """Forget a purged run after all of its admissions have quiesced."""
+
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("run_id must be non-empty text")
+        with self._condition:
+            state = self._states.get(run_id)
+            if state is None:
+                return False
+            if state.active or state.waiting:
+                raise RuntimeError("cannot forget a run with active or waiting admissions")
+            del self._states[run_id]
+            self._condition.notify_all()
+            return True
+
     @contextmanager
     def admit(self, run_id: str, limit: int) -> Iterator[None]:
         state = self._state_for(run_id, limit)

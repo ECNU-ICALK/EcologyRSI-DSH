@@ -320,14 +320,17 @@ class EventEndpointsMixin:
                 }
             )
         elif event.kind == "LocalEditProposalRecorded":
-            operations = payload.get("operations")
+            proposal = payload.get("proposal")
+            if not isinstance(proposal, dict):
+                proposal = payload
+            operations = proposal.get("operations")
             public_payload.update(
                 {
                     "proposal_id": payload.get("proposal_id"),
                     "candidate_id": payload.get("candidate_id"),
                     "batch_index": payload.get("batch_index"),
                     "evidence_scope_digest": payload.get("evidence_scope_digest"),
-                    "decision": payload.get("decision"),
+                    "decision": proposal.get("decision"),
                     "operation_count": len(operations)
                     if isinstance(operations, list)
                     else 0,
@@ -341,6 +344,7 @@ class EventEndpointsMixin:
                     "batch_index": payload.get("batch_index"),
                     "outcome": payload.get("outcome"),
                     "active_revision_id": payload.get("active_revision_id"),
+                    "reason": payload.get("reason"),
                 }
             )
         elif event.kind == "TrajectoryRevisionAdvanced":

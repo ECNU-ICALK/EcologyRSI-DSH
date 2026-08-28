@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.core.trajectory import (
@@ -15,6 +16,7 @@ from ecologyrsi_dsh.evolution.promotion import (
     PROMOTION_SCORE_DEFINITION,
 )
 from ecologyrsi_dsh.evaluators.generation_comparison import build_generation_comparison
+from ecologyrsi_dsh.evaluators.fitness import FitnessProfile, SelectionAssessment
 
 
 TARGETS = ("air_temperature", "relative_humidity", "co2_concentration")
@@ -188,6 +190,44 @@ class GenerationComparisonTests(unittest.TestCase):
         )
         self.assertEqual(comparison.selected_candidate_id, "candidate:inc")
         self.assertEqual(comparison.gate_results["eligible_finalist_count"], 0)
+
+    def test_shared_max_t_family_rejects_noisy_sibling_and_keeps_stable_one(self):
+        evaluations = (
+            _evaluation(HoldoutArm.FINALIST_1, "candidate:noisy", "revision:noisy", 0.8, skill=0.2),
+            _evaluation(HoldoutArm.FINALIST_2, "candidate:stable", "revision:stable", 0.7, skill=0.3),
+            _evaluation(HoldoutArm.INCUMBENT, "candidate:inc", "revision:inc", 0.5, skill=0.1),
+        )
+        profile = FitnessProfile(exploratory_resamples=100)
+        assessments = (
+            SelectionAssessment(
+                "candidate:noisy", "exploratory_adaptive_data", "unstable_or_below_delta",
+                8, 6, "a" * 64, 0.3, -0.1, False,
+            ),
+            SelectionAssessment(
+                "candidate:stable", "exploratory_adaptive_data", "selection_only",
+                8, 6, "a" * 64, 0.2, 0.1, True,
+            ),
+        )
+        with patch(
+            "ecologyrsi_dsh.evaluators.generation_comparison.assess_generation_selection",
+            return_value=assessments,
+        ) as assess:
+            comparison = build_generation_comparison(
+                run_id="run:comparison",
+                generation=0,
+                cohort_digest=evaluations[0].scope.cohort_digest,
+                holdout_evaluations=evaluations,
+                incumbent_candidate_id="candidate:inc",
+                fitness_profile=profile,
+            )
+
+        self.assertEqual(assess.call_count, 1)
+        self.assertIs(assess.call_args.args[2], profile)
+        self.assertEqual(comparison.selected_candidate_id, "candidate:stable")
+        self.assertFalse(
+            comparison.gate_results["arms"]["finalist_1"]["promotion_assessment"]
+            ["primary_selection_gate"]
+        )
 
 
 if __name__ == "__main__":

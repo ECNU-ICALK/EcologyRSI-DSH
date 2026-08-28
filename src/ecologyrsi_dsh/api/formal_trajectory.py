@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from typing import Any, Mapping
 
@@ -324,6 +325,9 @@ def execute_next_local_edit(endpoint: Any, run_id: str, candidate_id: str) -> bo
             LocalEditOutcome.KEPT.value: RevisionAdvanceReason.KEPT,
             LocalEditOutcome.APPLIED.value: RevisionAdvanceReason.LOCAL_EDIT_APPLIED,
             LocalEditOutcome.REJECTED.value: RevisionAdvanceReason.LOCAL_EDIT_REJECTED,
+            LocalEditOutcome.ROLLED_BACK.value: (
+                RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK
+            ),
         }[outcome["outcome"]]
         _director_mutation(
             endpoint,
@@ -368,28 +372,60 @@ def execute_next_local_edit(endpoint: Any, run_id: str, candidate_id: str) -> bo
     context = _local_edit_context(state, candidate, revision, pending)
     recorded = state.local_edit_proposal_for(candidate_id, pending.batch_index)
     if recorded is None:
-        proposal = _local_edit_proposal(endpoint, state, candidate, pending, context)
+        safety_reason = _prequential_safety_reason(
+            state.batch_evaluation_for(candidate_id, pending.batch_index).metrics
+        )
+        proposal = (
+            LocalEditProposal(
+                decision="keep",
+                operations=(),
+                evidence_refs=("batch:score",),
+                expected_effect_cells=(),
+                risk_cells=(),
+            )
+            if safety_reason is not None
+            else _local_edit_proposal(endpoint, state, candidate, pending, context)
+        )
     else:
         # A process/ledger failure may have committed the proposal before the
         # child revision or decision.  Reconstruct the validated, minimal
         # proposal from the durable event and finish that exact work unit
         # instead of asking DSH to author a different edit on resume.
-        proposal = LocalEditProposal(
-            decision=recorded["decision"],
-            operations=tuple(recorded["operations"]),
-            evidence_refs=("batch:score",),
-            expected_effect_cells=(),
-            risk_cells=(),
+        proposal = LocalEditProposal.from_dict(recorded["proposal"])
+        safety_reason = recorded.get("safety_reason")
+    safety_rollback = _safety_requires_rollback(safety_reason)
+    # Commit the complete, schema-validated proposal before deriving a child
+    # revision.  This closes the old crash window where replay only had the
+    # child genome and a lossy operation list, and might ask for a new edit.
+    if recorded is None:
+        _director_mutation(
+            endpoint,
+            "record_local_edit_proposal",
+            run_id,
+            {
+                "proposal_id": f"local-edit:{candidate_id}:{pending.batch_index}",
+                "candidate_id": candidate_id,
+                "batch_index": pending.batch_index,
+                "evidence_scope_digest": context.evidence_scope_digest,
+                "proposal": proposal.to_dict(),
+                **({"safety_reason": safety_reason} if safety_reason is not None else {}),
+            },
         )
-    validated = apply_or_reject_local_edit_bundle(
-        EcologyEvolutionPluginGenome.from_dict(dict(revision.genome)),
-        proposal,
-        context,
-        current_program_registry(),
-    )
+    if safety_reason is not None:
+        # The just-recorded batch is authoritative: do not mutate a lineage
+        # after a coverage or constraint breach.  The outcome rolls back to
+        # the parent when available and remains explicitly explained on R0.
+        validated = None
+    else:
+        validated = apply_or_reject_local_edit_bundle(
+            EcologyEvolutionPluginGenome.from_dict(dict(revision.genome)),
+            proposal,
+            context,
+            current_program_registry(),
+        )
     active_revision_id = revision.revision_id
     advance_reason = RevisionAdvanceReason.KEPT
-    if validated.child is not None:
+    if validated is not None and validated.child is not None:
         child = validated.child
         child_revision = CandidateRevision(
             revision_id=f"revision:{candidate_id}:batch:{pending.batch_index + 1}",
@@ -407,22 +443,14 @@ def execute_next_local_edit(endpoint: Any, run_id: str, candidate_id: str) -> bo
         _director_mutation(endpoint, "create_candidate_revision", run_id, child_revision)
         active_revision_id = child_revision.revision_id
         advance_reason = RevisionAdvanceReason.LOCAL_EDIT_APPLIED
-    elif validated.outcome is LocalEditOutcome.REJECTED:
+    elif safety_reason is not None:
+        if safety_rollback and revision.parent_revision_id is not None:
+            active_revision_id = revision.parent_revision_id
+            advance_reason = RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK
+    elif (
+        validated is not None and validated.outcome is LocalEditOutcome.REJECTED
+    ):
         advance_reason = RevisionAdvanceReason.LOCAL_EDIT_REJECTED
-    if recorded is None:
-        _director_mutation(
-            endpoint,
-            "record_local_edit_proposal",
-            run_id,
-            {
-                "proposal_id": f"local-edit:{candidate_id}:{pending.batch_index}",
-                "candidate_id": candidate_id,
-                "batch_index": pending.batch_index,
-                "evidence_scope_digest": context.evidence_scope_digest,
-                "decision": proposal.decision.value,
-                "operations": [dict(item) for item in proposal.operations],
-            },
-        )
     _director_mutation(
         endpoint,
         "decide_local_edit",
@@ -431,8 +459,15 @@ def execute_next_local_edit(endpoint: Any, run_id: str, candidate_id: str) -> bo
             "proposal_id": f"local-edit:{candidate_id}:{pending.batch_index}",
             "candidate_id": candidate_id,
             "batch_index": pending.batch_index,
-            "outcome": validated.outcome.value,
+            "outcome": (
+                LocalEditOutcome.ROLLED_BACK.value
+                if safety_rollback and revision.parent_revision_id is not None
+                else LocalEditOutcome.KEPT.value
+                if safety_reason is not None
+                else validated.outcome.value
+            ),
             "active_revision_id": active_revision_id,
+            **({"reason": safety_reason} if safety_reason is not None else {}),
         },
     )
     _director_mutation(
@@ -453,6 +488,47 @@ def execute_next_local_edit(endpoint: Any, run_id: str, candidate_id: str) -> bo
             active_revision_id,
         )
     return True
+
+
+def _prequential_safety_reason(metrics: Mapping[str, Any]) -> str | None:
+    """Return a durable reason when a batch is unsafe to adapt from."""
+
+    if not isinstance(metrics, Mapping):
+        return "batch_metrics_invalid"
+    violations = metrics.get("constraint_violations", 0)
+    if isinstance(violations, bool) or not isinstance(violations, (int, float)):
+        return "constraint_guardrail_invalid"
+    if not math.isfinite(float(violations)) or float(violations) < 0:
+        return "constraint_guardrail_invalid"
+    if violations > 0:
+        return "constraint_guardrail_failed"
+    coverage = metrics.get("sample_execution_coverage_pass")
+    sample = metrics.get("sample_execution")
+    sample_coverage = sample.get("coverage_pass") if isinstance(sample, Mapping) else None
+    if coverage is False or sample_coverage is False:
+        failures = sample.get("failure_counts") if isinstance(sample, Mapping) else None
+        rejected = (
+            failures.get("constraint_rejected", 0)
+            if isinstance(failures, Mapping)
+            else 0
+        )
+        if (
+            not isinstance(rejected, bool)
+            and isinstance(rejected, (int, float))
+            and rejected > 0
+        ):
+            return "sample_constraint_guardrail_failed"
+        return "coverage_guardrail_failed"
+    if coverage is not True and sample_coverage is not True:
+        return "coverage_guardrail_missing"
+    return None
+
+
+def _safety_requires_rollback(reason: Any) -> bool:
+    return reason in {
+        "constraint_guardrail_failed",
+        "sample_constraint_guardrail_failed",
+    }
 
 
 def _local_edit_proposal(
@@ -490,8 +566,19 @@ def _local_edit_proposal(
     if evaluation is None:
         raise RuntimeError("local editor requires completed batch evidence")
     metrics = _local_edit_evidence_metrics(evaluation.metrics)
+    revision = state.revision(context.candidate_revision_id)
     context_payload = {
         **context.to_dict(),
+        "current_candidate_state": _local_edit_current_state(revision),
+        "recent_edit_history": _recent_local_edit_history(
+            state, candidate.candidate_id, batch.batch_index
+        ),
+        "decision_policy": {
+            "prefer_smallest_effective_change": True,
+            "reject_exact_current_value": True,
+            "avoid_repeating_recent_rejected_operation": True,
+            "require_batch_evidence_for_structural_change": True,
+        },
         "batch_evidence": {
             "score": evaluation.score,
             "passed": evaluation.passed,
@@ -532,6 +619,79 @@ def _local_edit_proposal(
     return LocalEditProposal.from_dict(result)
 
 
+def _local_edit_current_state(revision: CandidateRevision) -> dict[str, Any]:
+    """Expose bounded current values so the editor can avoid no-op proposals."""
+
+    genome = EcologyEvolutionPluginGenome.from_dict(dict(revision.genome))
+    scientific = genome.scientific_program
+    execution = genome.agent_program["candidate_execution_program"]
+    roles = execution["role_profiles"]
+    result = {
+        "candidate_revision_id": revision.revision_id,
+        "genome_digest": genome.genome_digest,
+        "scientific_program": {
+            "predictor_id": scientific["predictor_ref"]["id"],
+            "feature_policy_id": scientific["feature_policy_ref"]["id"],
+            "fit_policy_id": scientific["fit_policy_ref"]["id"],
+            "uncertainty_policy_id": scientific["uncertainty_policy_ref"]["id"],
+            "parameter_values": scientific["parameter_overrides"],
+        },
+        "candidate_execution_program": {
+            "workflow_template_id": execution["workflow_template_ref"]["id"],
+            "workflow_parameters": execution["workflow_overrides"],
+            "roles": [
+                {
+                    "role": profile["role"],
+                    "instruction_template_id": profile["instruction_template_ref"][
+                        "id"
+                    ],
+                    "instruction_parameters": profile["instruction_parameters"],
+                    "enabled_tool_ids": profile["enabled_tool_ids"],
+                }
+                for profile in roles
+            ],
+        },
+    }
+    return deep_thaw_json(result)
+
+
+def _recent_local_edit_history(
+    state: Any,
+    candidate_id: str,
+    before_batch_index: int,
+) -> list[dict[str, Any]]:
+    """Return only bounded proposal outcomes from earlier batches in this lane."""
+
+    outcomes = {
+        int(item["batch_index"]): item
+        for item in state.local_edit_outcomes
+        if item.get("candidate_id") == candidate_id
+        and isinstance(item.get("batch_index"), int)
+        and not isinstance(item.get("batch_index"), bool)
+    }
+    rows: list[dict[str, Any]] = []
+    for batch_index in range(max(0, before_batch_index)):
+        proposal = state.local_edit_proposal_for(candidate_id, batch_index)
+        outcome = outcomes.get(batch_index)
+        if proposal is None or outcome is None:
+            continue
+        detail = proposal.get("proposal", proposal)
+        rows.append(
+            {
+                "batch_index": batch_index,
+                "decision": detail.get("decision"),
+                "operations": [
+                    dict(operation)
+                    for operation in detail.get("operations", ())
+                    if isinstance(operation, Mapping)
+                ][:5],
+                "outcome": outcome.get("outcome"),
+                "reason": outcome.get("reason"),
+            }
+        )
+    return deep_thaw_json(rows[-8:])
+
+
 def _local_edit_evidence_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     """Return detached aggregate evidence safe for the native JSON boundary.
 
@@ -545,13 +705,84 @@ def _local_edit_evidence_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     detached = deep_thaw_json(metrics)
     if not isinstance(detached, dict):
         raise TypeError("local edit metrics must be a JSON object")
-    for key in (
-        "sample_execution_records",
-        "sample_execution_trace_archive",
-        "prediction_preview",
-    ):
-        detached.pop(key, None)
-    return detached
+    scalar_keys = (
+        "objective_score",
+        "objective_weight_coverage",
+        "objective_aggregation_version",
+        "objective_target_weights",
+        "objective_horizons",
+        "constraint_violations",
+        "sample_execution_coverage",
+        "sample_execution_coverage_pass",
+        "scientific_pass",
+        "baseline_score",
+    )
+    safe: dict[str, Any] = {
+        key: detached[key] for key in scalar_keys if key in detached
+    }
+    sample = detached.get("sample_execution")
+    if isinstance(sample, Mapping):
+        safe["sample_execution"] = {
+            key: sample[key]
+            for key in (
+                "attempted_origin_samples",
+                "succeeded_origin_samples",
+                "failed_origin_samples",
+                "coverage",
+                "coverage_pass",
+                "failed_examples",
+                "scoring_fallback_examples",
+                "failure_counts",
+                "reason_code_counts",
+                "recovered_by_failure_class",
+                "critic_outcome_counts",
+            )
+            if key in sample
+        }
+    target_rows: list[dict[str, Any]] = []
+    targets = detached.get("targets")
+    if isinstance(targets, (list, tuple)):
+        for target in targets[:64]:
+            if not isinstance(target, Mapping):
+                continue
+            row = {
+                key: target[key]
+                for key in (
+                    "target",
+                    "horizon_hours",
+                    "skill_score",
+                    "coverage",
+                    "sample_execution_coverage",
+                    "sample_execution_coverage_pass",
+                )
+                if key in target
+            }
+            horizons = target.get("horizons")
+            if isinstance(horizons, (list, tuple)):
+                row["horizons"] = [
+                    {
+                        key: horizon[key]
+                        for key in (
+                            "hours",
+                            "horizon_hours",
+                            "skill",
+                            "skill_score",
+                            "coverage",
+                        )
+                        if key in horizon
+                    }
+                    for horizon in horizons[:32]
+                    if isinstance(horizon, Mapping)
+                ]
+            target_rows.append(row)
+    if target_rows:
+        safe["targets"] = target_rows
+    # Re-encode after projection to enforce JSON safety and a bounded native
+    # context; potentially large diagnostic previews never cross this boundary.
+    encoded = canonical_json(safe)
+    if len(encoded.encode("utf-8")) > 16 * 1024:
+        raise ValueError("aggregate local edit evidence exceeds 16KB")
+    return deep_thaw_json(safe)
 
 
 def execute_formal_trajectory(endpoint: Any, run_id: str, candidate_id: str) -> None:

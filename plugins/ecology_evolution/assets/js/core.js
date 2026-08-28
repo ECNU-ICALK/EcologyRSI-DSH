@@ -179,6 +179,7 @@
     runMonitorInFlight: false,
     runMonitorRetry: 0,
     runMonitorLastPollAt: 0,
+    structureHydrationStale: false,
     autoAdvanceLastDurationMs: null,
     autoAdvanceRoundsCompleted: 0,
     candidateBudgetManual: false,
@@ -604,9 +605,16 @@
       ? run.pause_reason.trim()
       : "";
   }
-  function runUsesSampleAgentTokenBudget(run) {
+  function runTokenBudgetScope(run) {
     var configuration = run && run.configuration && typeof run.configuration === "object" ? run.configuration : {};
-    return Boolean(run && (run.token_budget_scope || configuration.token_budget_scope) === "sample_agent_gateway_calls_only@1");
+    return String(run && (run.token_budget_scope || configuration.token_budget_scope) || "");
+  }
+  function runUsesSampleAgentTokenBudget(run) {
+    return runTokenBudgetScope(run) === "sample_agent_gateway_calls_only@1";
+  }
+  function tokenBudgetSubjectText(run) {
+    if (runUsesSampleAgentTokenBudget(run)) { return "逐样本智能体"; }
+    return "模型";
   }
   function tokenBudgetScopeText(run) {
     if (runUsesSampleAgentTokenBudget(run)) {
@@ -615,7 +623,7 @@
     return "历史运行未声明完整的 Token 计量范围";
   }
   function displayRunStatusText(run, events) {
-    if (runHasHardTokenPause(run)) { return "逐样本智能体 Token 预算已暂停"; }
+    if (runHasHardTokenPause(run)) { return tokenBudgetSubjectText(run) + " Token 预算已暂停"; }
     if (runHasRetryCircuitPause(run)) { return retryCircuitStatusText(run); }
     return runNeedsAdvanceAction(run, events) ? "等待推进" : runOutcomeText(run) || statusText(run && run.status);
   }

@@ -11,7 +11,7 @@ from ..core.trajectory import (
     HoldoutArm,
     HoldoutEvaluation,
 )
-from ..evolution.promotion import assess_promotion_improvement
+from .fitness import FitnessProfile, assess_generation_selection
 
 
 PROMOTION_CELL_REGRESSION_FLOOR = -0.01
@@ -156,6 +156,7 @@ def build_generation_comparison(
     cohort_digest: str,
     holdout_evaluations: Sequence[HoldoutEvaluation],
     incumbent_candidate_id: str | None = None,
+    fitness_profile: FitnessProfile | None = None,
 ) -> GenerationComparison:
     """Build one immutable three-arm comparison without model-authored ranking."""
 
@@ -180,29 +181,32 @@ def build_generation_comparison(
     incumbent = by_arm[HoldoutArm.INCUMBENT]
     if len({item.evaluator_digest for item in evaluations}) != 1:
         raise ValueError("holdout evaluations must share one evaluator digest")
+    profile = fitness_profile or FitnessProfile()
+    assessments = assess_generation_selection(
+        tuple(_promotion_view(item) for item in finalist_evaluations),
+        _promotion_view(incumbent),
+        profile,
+    )
+    assessment_by_candidate = {item.candidate_id: item for item in assessments}
     finalist_gates: dict[str, dict[str, Any]] = {}
     eligible_finalists = []
     for item in finalist_evaluations:
         scientific_gate = _gate(item)
         cell_gate = _cell_gate(item, incumbent)
-        improvement = assess_promotion_improvement(
-            _promotion_view(item), _promotion_view(incumbent)
-        )
-        interval = improvement.get("confidence_interval_95")
-        stability_floor = (
-            float(interval[0])
-            if isinstance(interval, (list, tuple)) and len(interval) == 2
-            else None
-        )
+        selection = assessment_by_candidate[item.scope.candidate_id]
+        stability_floor = selection.selection_stability_floor
         delta = item.score - incumbent.score
         eligible = bool(
             scientific_gate["eligible"]
             and cell_gate["complete"]
             and cell_gate["coverage_pass"]
             and cell_gate["no_regression"]
-            and improvement.get("comparable") is True
-            and improvement.get("improved") is True
-            and delta > 0.005
+            and selection.primary_selection_gate
+            # The shared max-T family controls uncertainty across siblings;
+            # retain the predeclared practical score delta as a separate
+            # effect-size gate so a statistically stable tiny gain is not
+            # promoted.
+            and delta > profile.selection_minimum_score_delta
         )
         gate = {
             **scientific_gate,
@@ -212,10 +216,19 @@ def build_generation_comparison(
             "no_cell_regression": cell_gate["no_regression"],
             "worst_cell_delta": cell_gate["worst_cell_delta"],
             "cell_deltas": cell_gate.get("cell_deltas", {}),
-            "promotion_assessment": improvement,
+            "promotion_assessment": selection.to_dict(),
             "stability_lower_bound": stability_floor,
             "failures": list(cell_gate.get("failures", ()))
-            + ([] if improvement.get("improved") else [str(improvement.get("reason_code") or "promotion_gate_failed")]),
+            + (
+                []
+                if selection.primary_selection_gate
+                and delta > profile.selection_minimum_score_delta
+                else [
+                    selection.status
+                    if not selection.primary_selection_gate
+                    else "below_practical_score_delta"
+                ]
+            ),
         }
         finalist_gates[item.scope.holdout_arm.value] = gate
         if eligible:
@@ -251,7 +264,8 @@ def build_generation_comparison(
         "incumbent_score": incumbent.score,
         "delta_to_incumbent": incumbent_delta,
         "incumbent_gate_pass": incumbent_gate["eligible"],
-        "selection_rule": "promotion_gate_then_stability_lower_bound_delta_worst_cell_candidate_revision_else_incumbent",
+        "fitness_profile_digest": profile.profile_digest,
+        "selection_rule": "shared_centered_max_t_then_scientific_cell_gates_then_stability_lower_bound_delta_worst_cell_candidate_revision_else_incumbent",
     }
     return GenerationComparison(
         comparison_id=f"generation-comparison:{run_id}:{generation}",

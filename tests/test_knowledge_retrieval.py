@@ -910,6 +910,35 @@ class KnowledgeRetrievalTests(unittest.TestCase):
         )
         ledger.close()
 
+    def test_terminal_run_rejects_in_flight_knowledge_retrieval_commit(self) -> None:
+        ledger = EventLedger()
+        director = EvolutionDirector(ledger, StrategyRouterDSHAdapter())
+        run_id = "run:knowledge-cancel-race"
+        director.start_evolution(_task(), run_id=run_id)
+
+        def cancel_while_retrieving(state, **kwargs):
+            snapshot = retrieve_generation_knowledge(state, **kwargs)
+            director.cancel_run(run_id, "cancelled during retrieval")
+            return snapshot
+
+        with mock.patch(
+            "ecologyrsi_dsh.evolution.batches.retrieve_generation_knowledge",
+            side_effect=cancel_while_retrieving,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "stopped or advanced"):
+                start_generation_batch(director, run_id)
+
+        events = director.state(run_id).events
+        terminal_seq = next(event.seq for event in events if event.kind == "RunCancelled")
+        self.assertFalse(
+            any(
+                event.kind == "GenerationKnowledgeRetrieved"
+                and event.seq > terminal_seq
+                for event in events
+            )
+        )
+        ledger.close()
+
     def test_online_failure_falls_back_without_stopping_the_round(self) -> None:
         ledger = EventLedger()
         director = EvolutionDirector(ledger, StrategyRouterDSHAdapter())

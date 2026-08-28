@@ -31,6 +31,7 @@ from typing import Any
 from ..core.models import RunStatus
 from ..core.models import digest
 from ..core.errors import (
+    FrozenRuntimeBindingDriftError,
     dsh_native_runtime_error_in_chain,
     dsh_native_runtime_retryable,
     find_exception,
@@ -79,6 +80,13 @@ class _PendingGatewayRetry:
     last_error_code: str
 
 
+@dataclass(frozen=True, slots=True)
+class _DeferredFailure:
+    reason: str
+    error_code: str
+    failure_context: dict[str, Any]
+
+
 def _run_incarnation(state: Any) -> int:
     events = tuple(getattr(state, "events", ()))
     if not events or getattr(events[0], "kind", None) != "RunCreated":
@@ -91,6 +99,106 @@ def auto_progress_enabled(state: Any) -> bool:
 
     metadata = getattr(getattr(state, "task_manifest", None), "metadata", {})
     return metadata.get(_AUTO_PROGRESS_METADATA_KEY) is True
+
+
+def _failure_diagnostics(
+    state: Any,
+    exc: BaseException,
+    *,
+    stage: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Return only host-owned, bounded failure classification and location."""
+
+    generation = int(state.run.generation)
+    adaptive = (
+        state.task_manifest.metadata.get("optimization_protocol")
+        == "top2_adaptive_epoch@1"
+    )
+    context: dict[str, Any] = {
+        "generation": generation,
+        "stage": str(stage or "generation")[:80],
+        "work_unit_kind": "generation",
+    }
+    if adaptive:
+        screening_count = sum(
+            int(event.payload.get("generation", -1)) == generation
+            for event in state.candidate_screening_events
+        )
+        if screening_count < 4:
+            context.update(stage="screening", work_unit_kind="candidate_screening")
+        else:
+            formal_total = sum(
+                item.scope.origin_count
+                for item in state.formal_batch_evaluations
+                if item.scope.generation == generation
+            )
+            schedule = state.task_manifest.metadata.get("optimization_schedule", {})
+            expected_formal = 2 * int(schedule.get("formal_origin_count_per_finalist", 500))
+            completed_trajectories = sum(
+                item.generation == generation
+                and getattr(item.status, "value", item.status) == "completed"
+                for item in state.formal_trajectories
+            )
+            if formal_total < expected_formal or completed_trajectories < 2:
+                batch = next(
+                    (
+                        item
+                        for item in reversed(state.formal_batches)
+                        if item.generation == generation
+                        and state.revision_activation_for(
+                            item.candidate_id, item.batch_index
+                        )
+                        is None
+                    ),
+                    None,
+                )
+                batch_evaluation = (
+                    state.batch_evaluation_for(
+                        batch.candidate_id, batch.batch_index
+                    )
+                    if batch is not None
+                    else None
+                )
+                context.update(
+                    stage="local_edit" if batch_evaluation is not None else "formal_batch",
+                    work_unit_kind=(
+                        "local_edit" if batch_evaluation is not None else "formal_batch"
+                    ),
+                )
+                if batch is not None:
+                    context.update(
+                        candidate_id=batch.candidate_id,
+                        batch_id=batch.batch_id,
+                        batch_index=batch.batch_index,
+                        batch_count=batch.batch_count,
+                    )
+            elif len(
+                [item for item in state.holdout_evaluations if item.scope.generation == generation]
+            ) < 3:
+                context.update(stage="holdout", work_unit_kind="selection_holdout")
+            else:
+                context.update(stage="decision", work_unit_kind="epoch_closeout")
+    # Preserve stable codes only for concrete Host-owned exception classes.
+    # Reading an arbitrary ``error_code`` attribute here would let an
+    # untrusted provider exception choose the public terminal classification.
+    binding_drift = find_exception(exc, FrozenRuntimeBindingDriftError)
+    if binding_drift is not None:
+        return FrozenRuntimeBindingDriftError.error_code, context
+    suffixes = {
+        ValueError: "host_value_error",
+        TypeError: "host_type_error",
+        KeyError: "host_key_error",
+        RuntimeError: "host_runtime_error",
+        TimeoutError: "host_timeout_error",
+    }
+    suffix = next(
+        (name for kind, name in suffixes.items() if isinstance(exc, kind)),
+        "unexpected_error",
+    )
+    safe_stage = "".join(
+        char if char.isalnum() else "_" for char in str(context["stage"]).lower()
+    ).strip("_") or "generation"
+    return f"auto_progress_{safe_stage}_{suffix}"[:120], context
 
 
 class AutoProgressManager:
@@ -116,7 +224,7 @@ class AutoProgressManager:
         # public reason in memory and let the FIFO worker retry only that
         # terminal transition.  A restart recovers the still-running durable run
         # through ``recover_running`` if the process exits before persistence.
-        self._deferred_failures: dict[_WorkItem, str] = {}
+        self._deferred_failures: dict[_WorkItem, _DeferredFailure] = {}
         # A request-local gateway retry may already have exhausted its small
         # transport budget while the provider is still queueing work.  Keep
         # the run alive and delay its next generation attempt instead of
@@ -655,11 +763,23 @@ class AutoProgressManager:
                         self._clear_terminal_retry_cooldown(work_item)
             except Exception as exc:  # noqa: BLE001 - isolate one queue item
                 if work_item is not None:
-                    self._defer_failure(
-                        work_item,
-                        "自动推进工作器异常："
-                        f"{public_exception_summary(exc)}",
-                    )
+                    try:
+                        failure_state = self._state_for_work_item(work_item)
+                        code, context = _failure_diagnostics(
+                            failure_state, exc, stage="worker"
+                        )
+                        self._defer_failure(
+                            work_item,
+                            _DeferredFailure(
+                                "自动推进工作器异常："
+                                f"{public_exception_summary(exc)}",
+                                code,
+                                context,
+                            ),
+                        )
+                    except (KeyError, ValueError):
+                        continue_running = False
+                        continue
                     # Put the failed item at the FIFO tail. Its next turn only
                     # persists the bounded terminal failure, while later work
                     # can proceed on this still-live worker.
@@ -742,11 +862,11 @@ class AutoProgressManager:
             with self._state_lock:
                 self._pending_gateway_retries.pop(work_item, None)
             return keep_running
-        deferred_reason = self._deferred_failure(work_item)
-        if deferred_reason is not None:
+        deferred_failure = self._deferred_failure(work_item)
+        if deferred_failure is not None:
             with self.server.mutation_lock:
                 retry_terminal_write = self._persist_run_failure(
-                    work_item, deferred_reason
+                    work_item, deferred_failure
                 )
             if not retry_terminal_write:
                 return False
@@ -824,17 +944,23 @@ class AutoProgressManager:
                             f"自动推进失败（{disposition}）："
                             f"{public_exception_summary(exc)}"
                         )
+                        failure_code, failure_context = _failure_diagnostics(
+                            state, exc, stage="preflight"
+                        )
+                        failure = _DeferredFailure(
+                            failure_reason, failure_code, failure_context
+                        )
                         try:
                             retry_terminal_write = self._persist_run_failure(
                                 work_item,
-                                failure_reason,
+                                failure,
                             )
                         except Exception:  # noqa: BLE001
                             # ``_persist_run_failure`` owns ordinary ledger and
                             # terminal-race handling.  If its in-memory recovery
                             # bookkeeping itself fails, retain the original
                             # bounded failure and keep the run queued.
-                            self._defer_failure(work_item, failure_reason)
+                            self._defer_failure(work_item, failure)
                             retry_terminal_write = True
 
             if terminal_failure:
@@ -976,6 +1102,15 @@ class AutoProgressManager:
                         f"自动推进失败（{disposition}）："
                         f"{public_exception_summary(exc)}"
                     )
+                    diagnostics_state = recovery_state or state
+                    failure_code, failure_context = _failure_diagnostics(
+                        diagnostics_state,
+                        exc,
+                        stage=recovery_stage,
+                    )
+                    failure = _DeferredFailure(
+                        failure_reason, failure_code, failure_context
+                    )
                 with self.server.mutation_lock:
                     try:
                         latest = self._state_for_work_item(work_item)
@@ -985,7 +1120,7 @@ class AutoProgressManager:
                             assert failure_reason is not None
                             retry_terminal_write = self._persist_run_failure(
                                 work_item,
-                                failure_reason,
+                                failure,
                             )
                     except KeyError:
                         self._clear_deferred_failure(work_item)
@@ -993,7 +1128,7 @@ class AutoProgressManager:
                     except Exception:  # noqa: BLE001
                         if terminal_failure:
                             assert failure_reason is not None
-                            self._defer_failure(work_item, failure_reason)
+                            self._defer_failure(work_item, failure)
                             retry_terminal_write = True
                 if terminal_failure:
                     if retry_terminal_write:
@@ -1017,7 +1152,7 @@ class AutoProgressManager:
 
     def _deferred_failure(
         self, work_item_or_run_id: _WorkItem | str
-    ) -> str | None:
+    ) -> _DeferredFailure | None:
         work_item: _WorkItem | None
         if isinstance(work_item_or_run_id, tuple):
             work_item = work_item_or_run_id
@@ -1030,9 +1165,11 @@ class AutoProgressManager:
         with self._state_lock:
             return self._deferred_failures.get(work_item)
 
-    def _defer_failure(self, work_item: _WorkItem, reason: str) -> None:
+    def _defer_failure(
+        self, work_item: _WorkItem, failure: _DeferredFailure
+    ) -> None:
         with self._state_lock:
-            self._deferred_failures[work_item] = str(reason)[:500]
+            self._deferred_failures[work_item] = failure
 
     def _defer_retry(
         self,
@@ -1407,7 +1544,9 @@ class AutoProgressManager:
         with self._state_lock:
             self._deferred_failures.pop(work_item, None)
 
-    def _persist_run_failure(self, work_item: _WorkItem, reason: str) -> bool:
+    def _persist_run_failure(
+        self, work_item: _WorkItem, failure: _DeferredFailure
+    ) -> bool:
         """Persist RunFailed, or return ``True`` to retry only that write later.
 
         A pause, cancellation, completion, or another failure may win between
@@ -1418,7 +1557,7 @@ class AutoProgressManager:
         projection and the failed generation is not replayed.
         """
 
-        bounded_reason = str(reason)[:500]
+        bounded_reason = str(failure.reason)[:500]
         run_id = work_item[0]
         try:
             latest = self._state_for_work_item(work_item)
@@ -1426,13 +1565,18 @@ class AutoProgressManager:
             self._clear_deferred_failure(work_item)
             return False
         except Exception:  # noqa: BLE001 - retry an unavailable ledger boundary
-            self._defer_failure(work_item, bounded_reason)
+            self._defer_failure(work_item, failure)
             return True
         if latest.run.status is not RunStatus.RUNNING:
             self._clear_deferred_failure(work_item)
             return False
         try:
-            self.server.director.fail_run(run_id, bounded_reason)
+            self.server.director.fail_run(
+                run_id,
+                bounded_reason,
+                error_code=failure.error_code,
+                failure_context=failure.failure_context,
+            )
         except Exception:  # noqa: BLE001 - distinguish race via durable reread
             try:
                 latest = self._state_for_work_item(work_item)
@@ -1440,12 +1584,12 @@ class AutoProgressManager:
                 self._clear_deferred_failure(work_item)
                 return False
             except Exception:  # noqa: BLE001 - ledger still unavailable
-                self._defer_failure(work_item, bounded_reason)
+                self._defer_failure(work_item, failure)
                 return True
             if latest.run.status is not RunStatus.RUNNING:
                 self._clear_deferred_failure(work_item)
                 return False
-            self._defer_failure(work_item, bounded_reason)
+            self._defer_failure(work_item, failure)
             return True
         self._clear_deferred_failure(work_item)
         return False

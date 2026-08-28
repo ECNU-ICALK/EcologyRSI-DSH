@@ -44,6 +44,21 @@
     $$('[data-panel]').forEach(function (panel) { var active = panel.dataset.panel === state.workspace; panel.classList.toggle("is-visible", active); panel.hidden = !active; });
   }
 
+  function contextGenerationText(run) {
+    if (!run) { return "0 / 0"; }
+    var total = Number(run.total_generations || 0);
+    var progress = run.execution_progress && typeof run.execution_progress === "object" ? run.execution_progress : {};
+    var projected = Number(progress.current_generation);
+    var status = String(run.status || "").toLowerCase();
+    var current = Number.isInteger(projected) && projected > 0
+      ? projected
+      : ["running", "paused", "starting", "preflight"].indexOf(status) >= 0
+        ? Number(run.generation || 0) + 1
+        : Number(run.generation || 0);
+    if (Number.isFinite(total) && total > 0) { current = Math.min(total, Math.max(0, current)); }
+    return formatNumber(current) + " / " + (total > 0 ? formatNumber(total) : "—");
+  }
+
   function renderContext() {
     var select = $("#run-select");
     var runs = visibleRuns();
@@ -69,7 +84,7 @@
     var autoAdvanceBlocked = Boolean(run && state.autoAdvanceBlockedRunId === run.id && state.autoAdvanceError);
     var contextStatus = autoAdvanceActive ? "自动推进中" : autoAdvanceBlocked ? "自动推进已暂停" : run ? displayRunStatusText(run, state.events) : "未创建";
     $("#run-status").textContent = run ? (run.archived ? "已归档 · " : "") + contextStatus : "未创建";
-    $("#generation-label").textContent = run ? run.generation + " / " + (run.total_generations || "—") : "0 / 0";
+    $("#generation-label").textContent = contextGenerationText(run);
     $("#candidate-count-label").textContent = run ? run.candidates_count + " / " + (run.max_candidates || "—") : "0 / 0";
     var online = state.usingDemo || state.connection === "online";
     var canControl = hasCapability("run.control");
@@ -84,10 +99,10 @@
     var executionPhase = String(run && run.execution_progress && run.execution_progress.phase || "").toLowerCase();
     var recoveringCurrentRound = run && run.status === "running" && executionPhase && executionPhase !== "waiting" && executionPhase !== "completed";
     $("#advance-button").disabled = state.busy || autoAdvanceActive || !online || !canAdvanceCapability || !canAdvanceStatus;
-    $("#advance-button").title = hardTokenPause ? "冻结的逐样本智能体 Token 硬预算已耗尽；请创建更高预算的新运行。" : retryCircuitPaused ? retryCircuitDetailText(run) : autoAdvanceActive ? "运行已进入自动连续推进；暂停后可人工干预。" : pausedAdvance ? "恢复运行后自动执行下一轮。" : waitingForAdvance ? "从已持久化的轮次进度继续执行。" : recoveringCurrentRound ? "继续当前未完成轮次。" : "";
+    $("#advance-button").title = hardTokenPause ? "冻结的" + tokenBudgetSubjectText(run) + " Token 硬预算已耗尽；请创建更高预算的新运行。" : retryCircuitPaused ? retryCircuitDetailText(run) : autoAdvanceActive ? "运行已进入自动连续推进；暂停后可人工干预。" : pausedAdvance ? "恢复运行后自动执行下一轮。" : waitingForAdvance ? "从已持久化的轮次进度继续执行。" : recoveringCurrentRound ? "继续当前未完成轮次。" : "";
     $("#pause-button").disabled = state.busy || !online || !canControl || !canPauseOrResume;
     $("#pause-button").textContent = state.pendingAction === "pause" ? "正在暂停" : state.pendingAction === "resume" ? "正在恢复" : hardTokenPause ? "预算已用尽" : retryCircuitPaused ? "恢复并重试检查点" : run && run.status === "paused" ? "恢复运行" : "暂停运行";
-    $("#pause-button").title = hardTokenPause ? "冻结的逐样本智能体 Token 硬预算已耗尽，直接恢复不会产生新进展。" : retryCircuitPaused ? retryCircuitDetailText(run) : "";
+    $("#pause-button").title = hardTokenPause ? "冻结的" + tokenBudgetSubjectText(run) + " Token 硬预算已耗尽，直接恢复不会产生新进展。" : retryCircuitPaused ? retryCircuitDetailText(run) : "";
     $("#advance-button").textContent = autoAdvanceActive ? "自动推进中" : state.pendingAction === "resume" ? "正在恢复" : state.pendingAction === "advance" || state.pendingAction === "auto-advance" ? "正在执行" : retryCircuitPaused ? "检查后重试当前检查点" : pausedAdvance && runHasContinuousAutoProgress(run) ? "恢复并自动推进" : pausedAdvance ? "恢复并执行下一轮" : waitingForAdvance && Number(run && run.generation || 0) === 0 ? "执行第一轮" : recoveringCurrentRound ? "继续当前轮次" : "执行下一轮";
     $("#cancel-button").disabled = state.busy || !online || !canControl || !canCancel;
     $("#cancel-button").textContent = state.pendingAction === "cancel" ? "正在取消" : "取消运行";

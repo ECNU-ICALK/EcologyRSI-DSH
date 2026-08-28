@@ -248,6 +248,30 @@ class LocalEditTests(unittest.TestCase):
         self.assertEqual(result.operations, proposal.operations)
         self.assertEqual(parent.to_dict(), before)
 
+    def test_exact_current_value_is_rejected_as_a_host_enforced_noop(self) -> None:
+        parent = _parent()
+        current = parent.scientific_program["parameter_overrides"]["ridge_alpha"]
+        proposal = LocalEditProposal(
+            decision="mutate",
+            operations=(
+                {
+                    "op": "set_bounded_parameter",
+                    "name": "ridge_alpha",
+                    "value": current,
+                },
+            ),
+            evidence_refs=("metric:overall",),
+            expected_effect_cells=(),
+            risk_cells=(),
+        )
+
+        result = apply_or_reject_local_edit_bundle(
+            parent, proposal, _context(parent), current_program_registry()
+        )
+
+        self.assertIs(result.outcome, LocalEditOutcome.REJECTED)
+        self.assertIsNone(result.child)
+
     def test_parent_identity_mismatch_is_never_downgraded_to_rejection(self) -> None:
         parent = _parent()
         context = _context(parent)

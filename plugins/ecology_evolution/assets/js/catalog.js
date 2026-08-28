@@ -530,8 +530,9 @@
     var sampleAgentBatchSize = Number($("#sample-agent-batch-size").value);
     var candidateConcurrency = Number($("#candidate-concurrency").value);
     var sampleConcurrency = Number($("#sample-concurrency").value);
+    var schedule = null;
     var scheduleReady = true;
-    try { optimizationScheduleFromControls(); } catch (_error) { scheduleReady = false; }
+    try { schedule = optimizationScheduleFromControls(); } catch (_error) { scheduleReady = false; }
     var executionParametersReady = Number($("#candidates-per-generation").value) === 4
       && Number.isInteger(candidateConcurrency) && candidateConcurrency >= 1 && candidateConcurrency <= 8
       && Number.isInteger(sampleAgentBatchSize) && sampleAgentBatchSize >= 1 && sampleAgentBatchSize <= 128
@@ -570,7 +571,7 @@
     return [
       { label: "配置目录已加载", ready: Boolean(catalogReady) },
       { label: "运行配置已完整选择", ready: selections },
-      { label: "入围候选 500-origin schedule、局部 batch 与轮末 holdout 参数有效", ready: scheduleReady },
+      { label: "入围候选 " + formatNumber(schedule && schedule.formal_origin_count_per_finalist || Number($("#formal-origin-count").value)) + "-origin schedule、局部 batch 与轮末 holdout 参数有效", ready: scheduleReady },
       { label: "固定 4 候选、候选并发、origin wave 与逐样本并发参数有效", ready: executionParametersReady },
       { label: "候选总预算可完整覆盖全部轮次（至少 " + formatNumber(budget.required_candidates) + " 个）", ready: budget.budget_sufficient },
       { label: capacityLabel, ready: capacityReady },

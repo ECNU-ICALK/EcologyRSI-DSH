@@ -2,6 +2,39 @@
 
 All notable changes to EcologyRSI-DSH are recorded in this file.
 
+## 0.3.47 - 2026-08-28
+
+### Adaptive decision safety
+
+- Give the local editor the exact current registered pipeline, bounded
+  parameters, workflow profiles, and eight most recent proposal outcomes;
+  reject mutations whose executable behavior is unchanged.
+- Roll back revisions after constraint-derived sample failures, keep the
+  current revision for infrastructure-only coverage loss, and expose each
+  safety decision as a distinct durable trajectory outcome.
+- Compare both finalists and the incumbent in one centered max-T family with a
+  practical-delta threshold, then recover holdout completion only from an exact
+  revision, cohort scope, and artifact binding.
+
+### Recovery and observability
+
+- Persist full local-edit proposals before child creation, recover terminal
+  command receipts only from matching command evidence, fence terminal
+  knowledge writes, and publish stable failure locations down to batch/work
+  unit scope.
+- Add rolling origin throughput, ETA, admission congestion, live adaptive batch
+  projections, and compact monitor responses with best-effort structural
+  hydration and event-tail degradation.
+
+### Budget semantics and delivery
+
+- Always expose de-duplicated DSH Session provider usage while removing the
+  hidden 100M-token native default. DSH-native manifests reject `token_limit`
+  because provider reports are telemetry rather than an atomic reservation
+  ledger; the separate sample-gateway hard budget is unchanged.
+- Align the Python package, browser plugin, Host plugin, lockfile, legal
+  metadata, and packed Host artifact at version 0.3.47.
+
 ## 0.3.46 - 2026-08-28
 
 ### Adaptive evolution

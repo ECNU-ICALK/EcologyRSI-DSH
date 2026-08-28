@@ -315,8 +315,11 @@ class ExecutionProjectionTests(unittest.TestCase):
             ),
         )
         screening_events = tuple(
-            SimpleNamespace(payload={"generation": 0, "origin_count": 64})
-            for _ in range(4)
+            SimpleNamespace(
+                payload={"generation": 0, "origin_count": 64},
+                created_at=f"2026-08-28T00:0{index}:00+00:00",
+            )
+            for index in range(4)
         )
         prior_formal = SimpleNamespace(
             scope=SimpleNamespace(
@@ -325,7 +328,8 @@ class ExecutionProjectionTests(unittest.TestCase):
                 batch_index=0,
                 cohort_digest="b" * 64,
                 origin_count=50,
-            )
+            ),
+            created_at="2026-08-28T00:04:00+00:00",
         )
         state = SimpleNamespace(
             task_manifest=SimpleNamespace(metadata={
@@ -350,7 +354,16 @@ class ExecutionProjectionTests(unittest.TestCase):
             events=events,
         )
 
-        progress = _adaptive_progress_projection(state)
+        progress = _adaptive_progress_projection(
+            state,
+            {
+                "limit": 64,
+                "adaptive_limit": 16,
+                "active": 16,
+                "waiting": 7,
+                "congestion_events": 3,
+            },
+        )
 
         self.assertEqual(progress["evaluation_phase"], "formal_batch")
         self.assertEqual(progress["completed_origins"], 307)
@@ -363,6 +376,12 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["awaiting_settlement_batches"], 1)
         self.assertEqual(progress["gateway_request_count"], 1)
         self.assertEqual(progress["updated_at"], events[-1].created_at)
+        self.assertGreater(progress["samples_per_minute"], 0)
+        self.assertGreater(progress["estimated_remaining_seconds"], 0)
+        self.assertEqual(progress["adaptive_admission_limit"], 16)
+        self.assertEqual(progress["admission_active"], 16)
+        self.assertEqual(progress["admission_waiting"], 7)
+        self.assertEqual(progress["admission_congestion_events"], 3)
 
     def test_dsh_activity_uses_unresolved_formal_child_without_stage_event(self) -> None:
         launch = SimpleNamespace(

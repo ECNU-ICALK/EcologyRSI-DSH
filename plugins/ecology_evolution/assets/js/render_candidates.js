@@ -545,7 +545,7 @@
     var parentScore = candidateParentScore(candidate, candidates);
     var candidateCohort = candidateEvaluationCohortDigest(run, candidate && candidate.id);
     var parentCohort = candidateEvaluationCohortDigest(run, candidate && candidate.parent_id);
-    if (candidateCohort && parentCohort && candidateCohort !== parentCohort) {
+    if (!candidateCohort || !parentCohort || candidateCohort !== parentCohort) {
       return { value: null, label: "跨窗口不可直接比较" };
     }
     return score != null && parentScore != null ? { value: score - parentScore, label: "相对父方案" } : { value: null, label: "相对基线改进" };
