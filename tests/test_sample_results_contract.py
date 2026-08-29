@@ -214,6 +214,24 @@ class SampleResultCodecTests(unittest.TestCase):
         payload = sample_results_event_payload(evaluation, rows, revision="revision:1")
         self.assertEqual(decode_sample_results(payload), rows)
 
+    def test_raw_prediction_and_clipping_provenance_round_trip(self) -> None:
+        source = _source_row(3)
+        source.update({"raw_predicted": 1.4, "prediction_clipped": True})
+        rows = build_sample_results(CANDIDATE_ID, [source])
+        self.assertEqual(rows[0]["raw_predicted"], 1.4)
+        self.assertTrue(rows[0]["prediction_clipped"])
+
+        evaluation = Evaluation(
+            evaluation_id="evaluation:clipping",
+            run_id=RUN_ID,
+            candidate_id=CANDIDATE_ID,
+            score=0.0,
+            passed=False,
+            partition="validation",
+        )
+        payload = sample_results_event_payload(evaluation, rows, revision="revision:clipping")
+        self.assertEqual(decode_sample_results(payload), rows)
+
     def test_corrupt_metadata_digest_base64_and_decompression_limit_fail_closed(self) -> None:
         rows = build_sample_results(CANDIDATE_ID, [_source_row(1)])
         evaluation = Evaluation(

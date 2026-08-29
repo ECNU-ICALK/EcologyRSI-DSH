@@ -9,6 +9,7 @@ from ecologyrsi_dsh.api.generation_execution import _model_token_budget_state
 from ecologyrsi_dsh.api.projection import (
     _adaptive_progress_projection,
     _adaptive_trajectory_projection,
+    _active_scoped_evaluation_progress,
     _dsh_activity_projection,
     _dsh_runtime_projection,
     _evaluation_progress_projection,
@@ -75,6 +76,74 @@ def _origin_members(label: str) -> list[str]:
 
 
 class ExecutionProjectionTests(unittest.TestCase):
+    def test_holdout_progress_uses_durable_batches_when_heartbeat_is_missing(self) -> None:
+        revision = "revision:holdout"
+        candidate_id = "candidate:holdout"
+        cohort_digest = "a" * 64
+        started = SimpleNamespace(
+            seq=10,
+            kind="HoldoutArmStarted",
+                payload={
+                    "candidate_id": candidate_id,
+                    "revision": revision,
+                    "checkpoint": {
+                    "evaluation_phase": "holdout",
+                    "formal_batch_index": None,
+                    "holdout_arm": "finalist_1",
+                    "candidate_revision_id": revision,
+                    "cohort_digest": cohort_digest,
+                },
+            },
+        )
+        events = (
+            started,
+            SimpleNamespace(
+                seq=11,
+                kind="EvaluationSampleResultsStarted",
+                payload={
+                    "candidate_id": candidate_id,
+                    "revision": revision,
+                    "checkpoint": {
+                        "evaluation_phase": "holdout",
+                        "formal_batch_index": None,
+                        "holdout_arm": "finalist_1",
+                        "candidate_revision_id": revision,
+                        "cohort_digest": cohort_digest,
+                    },
+                },
+            ),
+            SimpleNamespace(
+                seq=12,
+                kind="EvaluationSampleResultBatchRecorded",
+                payload={
+                    "candidate_id": candidate_id,
+                    "revision": revision,
+                    "record_count": 9,
+                },
+            ),
+        )
+        state = SimpleNamespace(
+            events=events,
+            task_manifest=SimpleNamespace(
+                metadata={"prediction_cells_per_origin": 9}
+            ),
+        )
+
+        progress = _active_scoped_evaluation_progress(
+            state,
+            started=started,
+            candidate_id=candidate_id,
+            evaluation_phase="holdout",
+            origin_total=2,
+            holdout_arm="finalist_1",
+            candidate_revision_id=revision,
+            cohort_digest=cohort_digest,
+        )
+
+        self.assertIsNotNone(progress)
+        self.assertEqual(progress["completed_samples"], 1)
+        self.assertEqual(progress["total_samples"], 2)
+
     def test_adaptive_events_have_stable_public_timeline_types(self) -> None:
         self.assertEqual(
             {

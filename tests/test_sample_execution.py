@@ -1175,6 +1175,67 @@ def _candidate(changes: dict) -> tuple[Candidate, Proposal]:
 
 
 class SampleExecutionTests(unittest.TestCase):
+    def test_strict_origin_malformed_reflection_is_recorded_as_host_fallback(self):
+        class MalformedReflectionAdapter:
+            adapter_id = "malformed-reflection"
+            adapter_version = "1"
+            sample_reflection_enabled = True
+
+            def plan_batch(self, context):
+                return {
+                    "plan_id": "strict-origin@4",
+                    "algorithm": context["algorithm_id"],
+                    "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                    "required_success_remote_roles": ["planner", "reflector"],
+                }
+
+            def predict_samples(self, requests, plans, *, attempts):
+                del plans, attempts
+                return tuple(
+                    SamplePredictionOutcome(
+                        sample_id=request.sample_id,
+                        result={
+                            "predicted": request.proposed_prediction,
+                            "agent_decisions": [{
+                                "role": "planner",
+                                "decision": "predict",
+                                "status": "completed",
+                            }],
+                            "tool_calls": [{
+                                "tool_id": "fake-tool",
+                                "version": "1",
+                                "status": "completed",
+                            }],
+                        },
+                    )
+                    for request in requests
+                )
+
+            def reflect_origin(self, requests, *, scored_cells):
+                del requests, scored_cells
+                raise ValueError("malformed remote reflection")
+
+        batch = CollaborativeSampleExecutor(
+            MalformedReflectionAdapter(), sleep=lambda _: None
+        ).execute(
+            [_rows()[0]],
+            context={
+                "candidate_id": "candidate:test",
+                "dataset_digest": "dataset:test",
+                "algorithm_id": "algorithm",
+                "algorithm_version": "1",
+            },
+            target_bounds={"x": {"unit": "u", "minimum": -100.0, "maximum": 100.0}},
+            algorithm_id="algorithm",
+            algorithm_version="1",
+        )
+
+        self.assertEqual(len(batch.scoring_rows), 1)
+        self.assertEqual(
+            batch.records[0]["sample_reflection"]["model_id"], "host-fallback"
+        )
+        self.assertEqual(batch.summary["reflection_outcome_counts"], {"failed": 1})
+
     def test_durable_result_batches_can_outnumber_gateway_requests(self):
         rows = [
             {"target": "air_temperature", "horizon_hours": 1}
@@ -1597,6 +1658,8 @@ class SampleExecutionTests(unittest.TestCase):
         self.assertTrue(batch.summary["coverage_pass"])
         self.assertEqual(len(batch.scoring_rows), 3)
         self.assertEqual(batch.scoring_rows[1]["predicted"], _rows()[1]["baseline"])
+        self.assertEqual(batch.scoring_rows[1]["raw_predicted"], _rows()[1]["predicted"])
+        self.assertFalse(batch.scoring_rows[1]["prediction_clipped"])
         self.assertEqual(
             batch.scoring_rows[1]["scoring_fallback"],
             "failure_non_improvement_penalty",
@@ -1851,6 +1914,8 @@ class SampleExecutionTests(unittest.TestCase):
             RegisteredToolCollaborationAdapter(), rows=[row], max_attempts=3
         )
         self.assertEqual(batch.scoring_rows[0]["predicted"], 3.0)
+        self.assertEqual(batch.scoring_rows[0]["raw_predicted"], 999.0)
+        self.assertTrue(batch.scoring_rows[0]["prediction_clipped"])
         self.assertEqual(batch.summary["repair_count"], 1)
         self.assertEqual(batch.summary["retry_count"], 2)
         self.assertEqual(batch.summary["exploration_failures"], 2)

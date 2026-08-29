@@ -2530,14 +2530,56 @@ def _active_scoped_evaluation_progress(
     ):
         return None
     progress = _evaluation_progress_projection(state, candidate_id)
-    if (
-        progress is None
-        or int(progress.get("event_seq") or 0) <= int(revision_start.seq)
+    if progress is not None and not (
+        int(progress.get("event_seq") or 0) <= int(revision_start.seq)
         or progress.get("revision") != revision_start.payload.get("revision")
         or int(progress.get("total_samples") or 0) != origin_total
     ):
+        return progress
+
+    # A process can die after the Host has durably written result batches but
+    # before the adapter emits its next planner heartbeat.  Those batches are
+    # already the authoritative settlement boundary; expose them as a
+    # conservative origin count instead of dropping back to zero.
+    metadata = getattr(getattr(state, "task_manifest", None), "metadata", {})
+    cells_per_origin = metadata.get("prediction_cells_per_origin", 1)
+    if (
+        isinstance(cells_per_origin, bool)
+        or not isinstance(cells_per_origin, int)
+        or cells_per_origin < 1
+    ):
         return None
-    return progress
+    batches = [
+        event
+        for event in events
+        if int(event.seq) > int(revision_start.seq)
+        and event.kind == "EvaluationSampleResultBatchRecorded"
+        and event.payload.get("candidate_id") == candidate_id
+        and event.payload.get("revision") == revision_start.payload.get("revision")
+        and isinstance(event.payload.get("record_count"), int)
+        and not isinstance(event.payload.get("record_count"), bool)
+        and int(event.payload["record_count"]) > 0
+        and int(event.payload["record_count"]) % cells_per_origin == 0
+    ]
+    if not batches:
+        return None
+    completed_origins = min(
+        origin_total,
+        sum(int(event.payload["record_count"]) for event in batches)
+        // cells_per_origin,
+    )
+    if completed_origins <= 0:
+        return None
+    latest = max(batches, key=lambda event: int(event.seq))
+    return {
+        "completed_samples": completed_origins,
+        "total_samples": origin_total,
+        "completed_origins": completed_origins,
+        "progress_kind": "settling",
+        "revision": revision_start.payload.get("revision"),
+        "event_seq": latest.seq,
+        "updated_at": getattr(latest, "created_at", None),
+    }
 
 
 def _merge_scoped_origin_progress(

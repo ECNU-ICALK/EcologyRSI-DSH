@@ -37,8 +37,10 @@ from ecologyrsi_dsh.core.models import (
 from ecologyrsi_dsh.data.splits import IndexRange
 from ecologyrsi_dsh.evaluators.registry import (
     _aggregate_greenhouse_objective,
+    _complete_scoring_rows,
     _select_feedback_update_cohort,
 )
+from ecologyrsi_dsh.evaluators.sample_execution import SampleExecutionBatch, _sample_id
 
 DATASET_ID = "agc_cucumber_2018"
 SPLIT_DIGEST = "s" * 64
@@ -283,6 +285,168 @@ def _nested_values(value):
 
 
 class GreenhouseEvaluationTests(unittest.TestCase):
+    def test_checkpoint_completion_preserves_sparse_frozen_sample_indices(self):
+        expected = [
+            {
+                "sample_index": 19,
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "origin_timestamp": 100,
+                "timestamp": 101,
+                "baseline": 20.0,
+            },
+            {
+                "sample_index": 20,
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "origin_timestamp": 101,
+                "timestamp": 102,
+                "baseline": 20.0,
+            },
+        ]
+        context = {"candidate_id": "candidate:sparse", "dataset_digest": "d" * 64}
+        returned = dict(expected[1])
+        returned["sample_id"] = _sample_id(
+            returned,
+            context,
+            target="air_temperature",
+            horizon=1,
+        )
+        returned["predicted"] = 20.5
+        returned["sample_execution_status"] = "succeeded"
+        completed = _complete_scoring_rows(
+            expected,
+            [returned],
+            context=context,
+            target_bounds={
+                "air_temperature": {
+                    "minimum": -40.0,
+                    "maximum": 80.0,
+                }
+            },
+        )
+        self.assertEqual([row["sample_index"] for row in completed], [19, 20])
+        self.assertEqual(
+            completed[1]["sample_id"],
+            returned["sample_id"],
+        )
+        self.assertEqual(completed[0]["sample_execution_failure"]["class"], "missing_sample_result")
+
+    def test_multihorizon_archives_failed_scoring_cells_for_checkpoint_completion(self):
+        """A failed sample is still durable evidence and must seal the cohort."""
+
+        class _Executor:
+            def execute(self, rows, **kwargs):
+                context = kwargs["context"]
+                projected = []
+                for index, source in enumerate(rows):
+                    row = dict(source)
+                    row["sample_index"] = index + 1
+                    row["sample_id"] = _sample_id(
+                        row,
+                        context,
+                        target=str(row["target"]),
+                        horizon=int(row["horizon_hours"]),
+                    )
+                    row["sample_execution_status"] = (
+                        "failed" if index == 0 else "succeeded"
+                    )
+                    row["sample_execution_attempts"] = 1
+                    row["sample_execution_retry_count"] = 0
+                    if index == 0:
+                        row["scoring_fallback"] = "failure_non_improvement_penalty"
+                        row["scoring_fallback_source"] = "registered_algorithm_prediction"
+                        row["sample_execution_failure"] = {"class": "synthetic_failure"}
+                    projected.append(row)
+                # Simulate a remote adapter that reports the failed attempt in
+                # its counters but omits the row from the returned result
+                # vector. The evaluator must repair that hole before sealing
+                # the durable checkpoint.
+                returned = projected[1:]
+                grouped = {}
+                for row in projected:
+                    key = (row["target"], row["horizon_hours"])
+                    grouped.setdefault(key, []).append(row)
+                tasks = [
+                    {
+                        "target": target,
+                        "horizon_hours": horizon,
+                        "attempted_examples": len(items),
+                        "succeeded_examples": sum(
+                            item["sample_execution_status"] == "succeeded"
+                            for item in items
+                        ),
+                        "failed_examples": sum(
+                            item["sample_execution_status"] == "failed"
+                            for item in items
+                        ),
+                    }
+                    for (target, horizon), items in sorted(grouped.items())
+                ]
+                succeeded = len(returned)
+                summary = {
+                    "attempted_examples": len(projected),
+                    "succeeded_examples": succeeded,
+                    "failed_examples": len(projected) - succeeded,
+                    "scoring_fallback_examples": len(projected) - succeeded,
+                    "coverage": succeeded / len(projected),
+                    "tasks": tasks,
+                    "strict_agent_chain_pass": True,
+                    "trace_digest": digest(projected),
+                }
+                return SampleExecutionBatch(
+                    successful_rows=tuple(
+                        row
+                        for row in projected
+                        if row["sample_execution_status"] == "succeeded"
+                    ),
+                    scoring_rows=tuple(returned),
+                    records=tuple(),
+                    summary=summary,
+                )
+
+        task_data = _task().to_dict()
+        task_data["metadata"] = {
+            **task_data["metadata"],
+            "prediction_model_id": EXOGENOUS_RIDGE_MODEL_ID,
+            "evaluator_id": GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
+        }
+        task = TaskManifest.from_dict(task_data)
+        registry = EvaluatorRegistry(  # type: ignore[arg-type]
+            _DatasetStub(_series()), sample_executor=_Executor()
+        )
+        published = []
+        candidate, _proposal = _candidate_and_proposal()
+        proposal = Proposal(
+            proposal_id="proposal:failed-archive",
+            run_id=candidate.run_id,
+            generation=candidate.generation,
+            title="failed archive regression",
+            changes={"history_steps": 3, "ridge_alpha": 0.1, "residual_scale": 1.0},
+        )
+        candidate = Candidate(
+            candidate_id=candidate.candidate_id,
+            run_id=candidate.run_id,
+            proposal_id=proposal.proposal_id,
+            generation=candidate.generation,
+        )
+        bundle = registry.evaluate_scientific(
+            task,
+            candidate,
+            proposal,
+            on_sample_results=lambda rows: published.extend(dict(row) for row in rows),
+        )
+
+        self.assertTrue(bundle.sample_results)
+        self.assertEqual(
+            len(bundle.sample_results),
+            bundle.evaluation.metrics["sample_execution"]["attempted_examples"],
+        )
+        self.assertEqual(bundle.evaluation.metrics["sample_execution"]["failed_examples"], 1)
+        self.assertEqual(bundle.evaluation.metrics["failed_cell_count"], 1)
+        self.assertTrue(any(row["status"] == "failed" for row in bundle.sample_results))
+        self.assertTrue(any(row.get("sample_execution_status") == "failed" for row in published))
+
     def test_weighted_objective_includes_non_equal_task_counts_and_missing_cells(self):
         rows = [
             {

@@ -275,6 +275,18 @@ def build_sample_results(
             "scoring_fallback_source": scoring_fallback_source,
             "failure_class": failure_class,
         }
+        if "raw_predicted" in source:
+            projected["raw_predicted"] = _finite_number(
+                source.get("raw_predicted"),
+                f"scoring_rows[{index}].raw_predicted",
+            )
+        if "prediction_clipped" in source:
+            prediction_clipped = source.get("prediction_clipped")
+            if not isinstance(prediction_clipped, bool):
+                raise ValueError(
+                    f"scoring_rows[{index}].prediction_clipped must be a boolean"
+                )
+            projected["prediction_clipped"] = prediction_clipped
         sample_agent_chain = _sample_agent_chain_attestation(
             source.get("sample_agent_chain"),
             sample_id=projected["sample_id"],

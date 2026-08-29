@@ -102,6 +102,7 @@ from .sample_execution import (
     RegisteredToolCollaborationAdapter,
     SampleExecutionPolicy,
     SamplePredictionRequest,
+    _sample_id,
     bounded_sample_execution_records,
     encode_sample_execution_trace,
     summarize_tool_performance,
@@ -821,6 +822,101 @@ def _apply_scoring_baseline(
             raise ValueError(f"scoring row {index} has no valid normalization scale")
         row["normalization_scale"] = float(scale)
     return result
+
+
+def _complete_scoring_rows(
+    expected_rows: Sequence[Mapping[str, Any]],
+    returned_rows: Sequence[Mapping[str, Any]],
+    *,
+    context: Mapping[str, Any],
+    target_bounds: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Close holes in an adapter result vector before durable checkpointing.
+
+    Remote sample adapters may report a failed origin in their counters while
+    omitting the corresponding prediction cells from the response.  The
+    cohort is still complete: synthesize an explicit, non-scoring failure row
+    for every omitted cell so the persisted archive can satisfy the frozen
+    checkpoint cardinality and the coverage gate can account for the loss.
+    """
+
+    expected_by_id: dict[str, dict[str, Any]] = {}
+    expected_order: list[str] = []
+    for index, source in enumerate(expected_rows, start=1):
+        row = dict(source)
+        # Preserve the frozen cohort's original sample index.  Selection and
+        # holdout cohorts are often sparse slices of the source dataset (for
+        # example 19, 20, ...), and changing those indices would change the
+        # deterministic sample_id of every already-persisted result.  Only
+        # synthetic/unit-test rows without an index use the executor ordinal.
+        sample_index = row.get("sample_index")
+        if (
+            isinstance(sample_index, bool)
+            or not isinstance(sample_index, int)
+            or sample_index < 1
+        ):
+            row["sample_index"] = index
+        target = str(row.get("target") or "").strip()
+        raw_horizon = row.get("horizon_hours")
+        if not target or isinstance(raw_horizon, bool) or not isinstance(raw_horizon, int):
+            raise ValueError("evaluation cohort contains an invalid sample identity")
+        sample_id = _sample_id(
+            row,
+            context,
+            target=target,
+            horizon=raw_horizon,
+        )
+        row["sample_id"] = sample_id
+        if sample_id in expected_by_id:
+            raise ValueError("evaluation cohort contains duplicate sample identities")
+        expected_by_id[sample_id] = row
+        expected_order.append(sample_id)
+
+    returned_by_id: dict[str, dict[str, Any]] = {}
+    for source in returned_rows:
+        row = dict(source)
+        sample_id = str(row.get("sample_id") or "").strip()
+        if not sample_id:
+            raise ValueError("sample executor returned a row without sample_id")
+        if sample_id not in expected_by_id:
+            raise ValueError("sample executor returned a row outside the frozen cohort")
+        if sample_id in returned_by_id:
+            raise ValueError("sample executor returned duplicate sample results")
+        returned_by_id[sample_id] = row
+
+    completed: list[dict[str, Any]] = []
+    for sample_id in expected_order:
+        row = returned_by_id.get(sample_id)
+        if row is not None:
+            completed.append(row)
+            continue
+        source = expected_by_id[sample_id]
+        target = str(source["target"])
+        bounds = target_bounds.get(target, {})
+        baseline = _finite_registry_number(source.get("baseline"))
+        if baseline is None:
+            minimum = _finite_registry_number(bounds.get("minimum"))
+            maximum = _finite_registry_number(bounds.get("maximum"))
+            if minimum is None or maximum is None:
+                raise ValueError("missing sample result has no finite fallback bounds")
+            baseline = min(maximum, max(minimum, (minimum + maximum) / 2.0))
+        completed.append(
+            {
+                **source,
+                "predicted": baseline,
+                "sample_execution_status": "failed",
+                "sample_execution_attempts": 0,
+                "sample_execution_retry_count": 0,
+                "sample_execution_failure": {
+                    "class": "missing_sample_result",
+                    "retryable": True,
+                    "error_type": "IncompleteSampleExecutorResponse",
+                },
+                "scoring_fallback": "missing_sample_result_penalty",
+                "scoring_fallback_source": "persistence_baseline",
+            }
+        )
+    return completed
 
 
 def _greenhouse_hard_gates() -> list[dict[str, Any]]:
@@ -2235,6 +2331,11 @@ class EvaluatorRegistry:
         sample_execution_summary = dict(sample_batch.summary)
         sample_execution_summary.update(
             {
+                "result_vector_expected_examples": len(raw_prediction_rows),
+                "result_vector_returned_examples": len(sample_batch.scoring_rows),
+                "result_vector_missing_examples": max(
+                    0, len(raw_prediction_rows) - len(sample_batch.scoring_rows)
+                ),
                 "adapter_attempt_coverage": sample_batch.summary["coverage"],
                 "eligible_examples": evaluation_eligible_examples,
                 "succeeded_examples": successful_examples,
@@ -2516,6 +2617,19 @@ class EvaluatorRegistry:
                 split_manifest_digest=series.split_manifest_digest_sha256,
             )
         )
+        generated_feedback_rows = [
+            {
+                **row,
+                "sample_index": (
+                    row.get("sample_index")
+                    if isinstance(row.get("sample_index"), int)
+                    and not isinstance(row.get("sample_index"), bool)
+                    and row.get("sample_index") >= 1
+                    else index
+                ),
+            }
+            for index, row in enumerate(generated_feedback_rows, start=1)
+        ]
         if feedback_update_cohort is not None:
             selected_task_counts = _cohort_task_counts(
                 feedback_update_cohort, "selected_count"
@@ -2679,7 +2793,32 @@ class EvaluatorRegistry:
             ),
             checkpoint_callback=on_sample_checkpoint,
         )
-        scoring_rows = finalize_scoring_rows(sample_batch.scoring_rows)
+        returned_sample_ids = {
+            str(row.get("sample_id"))
+            for row in sample_batch.scoring_rows
+            if isinstance(row.get("sample_id"), str)
+        }
+        completed_feedback_rows = _complete_scoring_rows(
+            generated_feedback_rows,
+            sample_batch.scoring_rows,
+            context={
+                "candidate_id": candidate.candidate_id,
+                "dataset_digest": series.digest,
+            },
+            target_bounds={
+                name: {"unit": unit, "minimum": minimum, "maximum": maximum}
+                for name, unit, minimum, maximum in _TARGETS
+            },
+        )
+        if on_sample_results is not None:
+            missing_result_rows = [
+                row
+                for row in completed_feedback_rows
+                if str(row.get("sample_id")) not in returned_sample_ids
+            ]
+            if missing_result_rows:
+                publish_scoring_rows(missing_result_rows)
+        scoring_rows = finalize_scoring_rows(completed_feedback_rows)
         promotion_block_evidence = build_promotion_block_evidence(
             scoring_rows,
             horizons=(1,),
@@ -2941,6 +3080,11 @@ class EvaluatorRegistry:
         )
         sample_execution_summary.update(
             {
+                "result_vector_expected_examples": len(generated_feedback_rows),
+                "result_vector_returned_examples": len(sample_batch.scoring_rows),
+                "result_vector_missing_examples": max(
+                    0, len(generated_feedback_rows) - len(sample_batch.scoring_rows)
+                ),
                 "adapter_attempt_coverage": sample_batch.summary["coverage"],
                 "eligible_examples": total_eligible_rows,
                 "succeeded_examples": int(
@@ -3254,6 +3398,19 @@ class EvaluatorRegistry:
                 split_manifest_digest=series.split_manifest_digest_sha256,
             )
         )
+        generated_feedback_rows = [
+            {
+                **row,
+                "sample_index": (
+                    row.get("sample_index")
+                    if isinstance(row.get("sample_index"), int)
+                    and not isinstance(row.get("sample_index"), bool)
+                    and row.get("sample_index") >= 1
+                    else index
+                ),
+            }
+            for index, row in enumerate(generated_feedback_rows, start=1)
+        ]
         selected_task_counts = _cohort_task_counts(
             feedback_update_cohort, "selected_count"
         )
@@ -3456,7 +3613,31 @@ class EvaluatorRegistry:
         # call first uses the model's declared persistence fallback. Scoring
         # then applies the fit-selected comparator and prevents a failed call
         # from receiving a positive reward.
-        scored_feedback_rows = finalize_scoring_rows(sample_batch.scoring_rows)
+        returned_sample_ids = {
+            str(row.get("sample_id"))
+            for row in sample_batch.scoring_rows
+            if isinstance(row.get("sample_id"), str)
+        }
+        completed_feedback_rows = _complete_scoring_rows(
+            generated_feedback_rows,
+            sample_batch.scoring_rows,
+            context={
+                "candidate_id": candidate.candidate_id,
+                "dataset_digest": series.digest,
+            },
+            target_bounds=target_metadata,
+        )
+        if on_sample_results is not None:
+            missing_result_rows = [
+                row
+                for row in completed_feedback_rows
+                if str(row.get("sample_id")) not in returned_sample_ids
+            ]
+            if missing_result_rows:
+                # Publish only the synthesized holes. Existing successful
+                # batches remain idempotent and are never duplicated.
+                publish_scoring_rows(missing_result_rows)
+        scored_feedback_rows = finalize_scoring_rows(completed_feedback_rows)
         promotion_block_evidence = build_promotion_block_evidence(
             scored_feedback_rows,
             horizons=horizons,
@@ -3484,6 +3665,9 @@ class EvaluatorRegistry:
         total_fit_rows = 0
         total_fit_missing_rows = 0
         constraint_violations = 0
+        failed_cell_count = 0
+        raw_out_of_range_count = 0
+        prediction_clipped_count = 0
         incomplete_prediction_tasks = 0
         evaluation_index_rows: list[dict[str, Any]] = []
         preview_per_task = max(
@@ -3538,6 +3722,27 @@ class EvaluatorRegistry:
                 failed_feedback_rows = [
                     row for row in feedback_rows_all if row not in feedback_rows
                 ]
+                failed_cell_count += len(failed_feedback_rows)
+                for failed_row in failed_feedback_rows:
+                    raw_prediction = _finite_registry_number(
+                        failed_row.get("raw_predicted")
+                    )
+                    if raw_prediction is not None and not (
+                        _minimum <= raw_prediction <= _maximum
+                    ):
+                        raw_out_of_range_count += 1
+                    if failed_row.get("prediction_clipped") is True:
+                        prediction_clipped_count += 1
+                for successful_row in feedback_rows:
+                    raw_prediction = _finite_registry_number(
+                        successful_row.get("raw_predicted")
+                    )
+                    if raw_prediction is not None and not (
+                        _minimum <= raw_prediction <= _maximum
+                    ):
+                        raw_out_of_range_count += 1
+                    if successful_row.get("prediction_clipped") is True:
+                        prediction_clipped_count += 1
                 if not fit_rows:
                     raise ValueError(
                         f"training_fit has no usable rows for {target_name} at {horizon}h"
@@ -3630,6 +3835,22 @@ class EvaluatorRegistry:
                             "deferred_rows": max(0, available_rows - eligible_rows),
                             "missing_or_nonfinite_rows": missing_rows,
                             "failed_rows": len(failed_feedback_rows),
+                            "raw_out_of_range_predictions": sum(
+                                _finite_registry_number(item.get("raw_predicted"))
+                                is not None
+                                and not (
+                                    _minimum
+                                    <= float(item["raw_predicted"])
+                                    <= _maximum
+                                )
+                                for item in feedback_rows_all
+                                if _finite_registry_number(item.get("raw_predicted"))
+                                is not None
+                            ),
+                            "prediction_clipped_count": sum(
+                                item.get("prediction_clipped") is True
+                                for item in feedback_rows_all
+                            ),
                             "normalization_scale": scale,
                             "mae": None,
                             "rmse": None,
@@ -3699,6 +3920,22 @@ class EvaluatorRegistry:
                         "deferred_rows": max(0, available_rows - eligible_rows),
                         "missing_or_nonfinite_rows": missing_rows,
                         "failed_rows": len(failed_feedback_rows),
+                        "raw_out_of_range_predictions": sum(
+                            _finite_registry_number(item.get("raw_predicted"))
+                            is not None
+                            and not (
+                                _minimum
+                                <= float(item["raw_predicted"])
+                                <= _maximum
+                            )
+                            for item in feedback_rows_all
+                            if _finite_registry_number(item.get("raw_predicted"))
+                            is not None
+                        ),
+                        "prediction_clipped_count": sum(
+                            item.get("prediction_clipped") is True
+                            for item in feedback_rows_all
+                        ),
                         "normalization_scale": scale,
                         "mae": candidate_mae,
                         "rmse": candidate_rmse,
@@ -3859,6 +4096,11 @@ class EvaluatorRegistry:
         )
         sample_execution_summary.update(
             {
+                "result_vector_expected_examples": len(generated_feedback_rows),
+                "result_vector_returned_examples": len(sample_batch.scoring_rows),
+                "result_vector_missing_examples": max(
+                    0, len(generated_feedback_rows) - len(sample_batch.scoring_rows)
+                ),
                 "adapter_attempt_coverage": sample_batch.summary["coverage"],
                 "eligible_examples": total_eligible_rows,
                 "succeeded_examples": int(
@@ -4010,6 +4252,9 @@ class EvaluatorRegistry:
                 sample_batch.summary["scoring_fallback_examples"]
             ),
             "constraint_violations": constraint_violations,
+            "failed_cell_count": failed_cell_count,
+            "raw_out_of_range_count": raw_out_of_range_count,
+            "prediction_clipped_count": prediction_clipped_count,
             "per_target_no_regression": per_task_no_regression,
             "scientific_pass": scientific_pass,
             "targets": task_results,

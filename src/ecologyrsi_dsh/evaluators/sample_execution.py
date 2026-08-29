@@ -1086,6 +1086,16 @@ class CollaborativeSampleExecutor:
                         0, int(attempt) - 1
                     )
                     finalized_row["scoring_fallback"] = None
+                    if request.proposed_prediction is not None:
+                        finalized_row["raw_predicted"] = float(
+                            request.proposed_prediction
+                        )
+                        finalized_row["prediction_clipped"] = not math.isclose(
+                            float(request.proposed_prediction),
+                            float(result["predicted"]),
+                            rel_tol=0.0,
+                            abs_tol=1e-12,
+                        )
                     finalized.append(finalized_row)
                     finalized_statuses[request.sample_id] = "succeeded"
                 if not finalized:
@@ -1960,6 +1970,14 @@ class CollaborativeSampleExecutor:
             executed_row["sample_execution_retry_count"] = attempts - 1
             executed_row["action_digest"] = action_digest
             executed_row["scoring_fallback"] = None
+            if request.proposed_prediction is not None:
+                executed_row["raw_predicted"] = float(request.proposed_prediction)
+                executed_row["prediction_clipped"] = not math.isclose(
+                    float(request.proposed_prediction),
+                    predicted,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
             if reflection is not None:
                 executed_row["sample_reflection"] = reflection
             if strict_agent_contract:
@@ -2668,8 +2686,17 @@ class CollaborativeSampleExecutor:
                     ],
                 }
             )
-        raw = reflector(bundle.requests, scored_cells=scored_cells)
-        reflection = _validated_origin_reflection(raw, bundle)
+        try:
+            raw = reflector(bundle.requests, scored_cells=scored_cells)
+            reflection = _validated_origin_reflection(raw, bundle)
+        except SampleExecutionControlError:
+            raise
+        except (SampleExecutionContractError, ValueError):
+            # A remote reflector is advisory after the Host has closed the
+            # vector.  If it returns malformed structured output, preserve the
+            # failed cells and continue with explicit local evidence instead
+            # of pausing the entire evolution at this durable boundary.
+            reflection = _fallback_origin_reflection(bundle, scored_cells)
         return {
             request.sample_id: reflection for request in bundle.requests
         }
@@ -3494,6 +3521,17 @@ def _checkpoint_scoring_row(
     origin_sample_id = resumed.get("origin_sample_id")
     if isinstance(origin_sample_id, str) and origin_sample_id.startswith("origin:"):
         projected["origin_sample_id"] = origin_sample_id
+    if "raw_predicted" in resumed:
+        projected["raw_predicted"] = _finite_float(
+            resumed.get("raw_predicted"), "checkpoint raw_predicted"
+        )
+    if "prediction_clipped" in resumed:
+        clipped = resumed.get("prediction_clipped")
+        if not isinstance(clipped, bool):
+            raise SampleExecutionContractError(
+                "checkpoint prediction_clipped must be a boolean"
+            )
+        projected["prediction_clipped"] = clipped
     return projected
 
 
@@ -3753,6 +3791,47 @@ def _validated_origin_reflection(
                 f"origin reflection {name} must be a SHA-256 digest"
             )
     return reflection
+
+
+def _fallback_origin_reflection(
+    bundle: _StrictOriginBundle,
+    scored_cells: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Create bounded local evidence when a failed origin cannot be reflected.
+
+    A malformed/omitted remote reflector response must not reopen a completed
+    prediction vector or make the whole epoch unfinishable.  The vector has
+    already been scored by the Host and its failed cells are explicitly
+    persisted; this fallback records that the optional remote explanation was
+    unavailable without pretending a model reflection occurred.
+    """
+
+    origin_sample_id = forecast_origin_sample_id(bundle.requests)
+    cell_sample_ids = [request.sample_id for request in bundle.requests]
+    payload = {
+        "origin_sample_id": origin_sample_id,
+        "cell_sample_ids": cell_sample_ids,
+        "status": "failed",
+        "failed_cell_count": sum(
+            str(cell.get("status") or "failed") != "succeeded"
+            for cell in scored_cells
+        ),
+    }
+    reflection_digest = digest(payload)
+    return {
+        "schema_version": "ecologyrsi-dsh.sample-origin-reflection/1",
+        "sample_id": origin_sample_id,
+        "origin_sample_id": origin_sample_id,
+        "cell_sample_ids": cell_sample_ids,
+        "outcome_class": "failed",
+        "error_source": "execution",
+        "next_action": "inspect",
+        "confidence": 0.0,
+        "summary": "remote origin reflection unavailable; host failure evidence retained",
+        "model_id": "host-fallback",
+        "response_digest": reflection_digest,
+        "wave_digest": digest({"fallback_for": reflection_digest}),
+    }
 
 
 def _run_sample_reflection(
@@ -4467,6 +4546,11 @@ def _fallback_scoring_row(
     )
     result["sample_id"] = request.sample_id
     result["predicted"] = penalty_prediction
+    if request.proposed_prediction is not None:
+        result["raw_predicted"] = float(request.proposed_prediction)
+        # A failed request uses a scoring penalty, not a physical clipping
+        # operation. Keep this flag separate from boundary repair provenance.
+        result["prediction_clipped"] = False
     result["sample_execution_status"] = "failed"
     result["sample_execution_attempts"] = int(record.get("attempts", 0))
     result["sample_execution_retry_count"] = int(record.get("retry_count", 0))

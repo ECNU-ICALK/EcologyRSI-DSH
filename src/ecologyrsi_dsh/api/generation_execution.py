@@ -2850,7 +2850,10 @@ def _execute_adaptive_holdout_arm(
             bundle.evaluation,
             score=evaluation.score,
             passed=evaluation.passed,
-            metrics=dict(evaluation.metrics),
+            # Recovered HoldoutEvaluation metrics are deeply frozen with
+            # MappingProxyType.  A shallow dict() leaves nested proxies in the
+            # new Evaluation and fails the JSON contract during resume.
+            metrics=deep_thaw_json(evaluation.metrics),
             evaluator_digest=evaluation.evaluator_digest,
             candidate_revision_id=binding["candidate_revision_id"],
             evaluation_scope=scope.to_dict(),
