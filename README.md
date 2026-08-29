@@ -641,6 +641,11 @@ PYTHONPATH=src python -m ecologyrsi_dsh summary run:demo --db /tmp/ecologyrsi-de
 
 发布前的人工验收项与安全边界见 `RELEASE-CHECKLIST.md`。
 
+## 0.3.55 交付更新
+
+- 自适应进度接口同时提供当前轮 `estimated_remaining_seconds` 与跨全部进化轮次的 `run_estimated_remaining_seconds`；页面优先显示“预计全程剩余”，并在有明显差异时附带当前阶段 ETA，避免多轮运行只按当前轮剩余量低估总耗时。
+- 吞吐率继续只使用 Host 已持久化的完整 prediction-origin 结算边界；进程恢复后按候选的恢复边界重置速率窗口，避免把停机时间算进 ETA。
+
 ## 0.3.52 交付更新
 
 - 实测故障来自上游 RPM 窗口，而不是“并发 64”参数本身：每个 planner 通常需要 Skill、预测工具、结构化输出三次模型 turn。新版保留宿主并发默认 64、最高 128，同时默认每 3 秒启动一个新 child，避免在首个反馈前用完 RPM。这是启动速率保护，不是把并发上限改成 8。

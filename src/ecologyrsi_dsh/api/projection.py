@@ -2779,6 +2779,13 @@ def _adaptive_progress_projection(
     except (KeyError, TypeError, ValueError):
         return None
     generation = state.run.generation
+    raw_total_generations = getattr(state.task_manifest, "max_generations", None)
+    if raw_total_generations is None:
+        raw_total_generations = metadata.get("max_generations", 1)
+    try:
+        total_generations = max(1, int(raw_total_generations))
+    except (TypeError, ValueError):
+        total_generations = 1
     runtime_events = tuple(getattr(state, "events", ()))
     generation_screening_events = tuple(
         event
@@ -3242,6 +3249,26 @@ def _adaptive_progress_projection(
         live_fields["provider_queued_requests"] = live_fields["queued_batches"]
     live_fields["samples_per_minute"] = rolling_rate
     live_fields["estimated_remaining_seconds"] = rolling_eta
+    # ``estimated_remaining_seconds`` is intentionally scoped to the current
+    # generation because its denominator is the current adaptive epoch.  The
+    # browser also needs a run-level estimate so a five-generation run does
+    # not appear nearly finished after the first epoch.  Use the same durable
+    # origin count and rolling rate, carrying completed work from prior
+    # generations into the numerator.  Keep the old field above for clients
+    # that need the current-stage ETA.
+    run_total_origins = total * total_generations
+    run_completed_origins = min(
+        run_total_origins,
+        max(0, int(generation)) * total + completed,
+    )
+    run_remaining_origins = max(0, run_total_origins - run_completed_origins)
+    run_rolling_eta = (
+        int(math.ceil(run_remaining_origins / rolling_rate * 60.0))
+        if rolling_rate is not None and rolling_rate > 0
+        else None
+    )
+    live_fields["run_remaining_origins"] = run_remaining_origins
+    live_fields["run_estimated_remaining_seconds"] = run_rolling_eta
     live_fields["throughput_semantics"] = (
         "host_settled_origins_rolling_32_durable_result_boundaries"
         if use_origin_boundaries

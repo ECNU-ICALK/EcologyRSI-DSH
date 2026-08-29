@@ -1756,8 +1756,17 @@
       : "";
     var causalWave = showLiveProgressDetail && Number(stageProgress.causal_wave_sample_count);
     var causalWaveText = Number.isInteger(causalWave) && causalWave > 0 ? " · 本波次 " + formatNumber(causalWave) : "";
-    var remainingSeconds = showLiveProgressDetail && Number(stageProgress.estimated_remaining_seconds);
-    var remainingText = Number.isFinite(remainingSeconds) && remainingSeconds > 0 ? compactDuration(remainingSeconds) : "";
+    var stageRemainingSeconds = showLiveProgressDetail && Number(stageProgress.estimated_remaining_seconds);
+    var runRemainingSeconds = showLiveProgressDetail && Number(stageProgress.run_estimated_remaining_seconds);
+    var remainingText = "";
+    if (Number.isFinite(runRemainingSeconds) && runRemainingSeconds > 0) {
+      remainingText = "预计全程剩余 " + compactDuration(runRemainingSeconds);
+      if (Number.isFinite(stageRemainingSeconds) && stageRemainingSeconds > 0 && Math.abs(runRemainingSeconds - stageRemainingSeconds) > 60) {
+        remainingText += "（当前阶段 " + compactDuration(stageRemainingSeconds) + "）";
+      }
+    } else if (Number.isFinite(stageRemainingSeconds) && stageRemainingSeconds > 0) {
+      remainingText = "预计剩余 " + compactDuration(stageRemainingSeconds);
+    }
     var outcomesVerified = Boolean(stageProgress && stageProgress.outcomes_verified === true);
     var succeeded = stageProgress && Number(stageProgress.succeeded_samples);
     var failedSamples = stageProgress && Number(stageProgress.failed_samples);
@@ -1772,7 +1781,7 @@
     var evidenceQualifierText = stageProgress && !stageProgress.live && stageProgress.evidence_qualifier ? " · " + stageProgress.evidence_qualifier : "";
     var phaseProgressText = executionAdaptivePhaseProgressText(stageProgress, progressUnitLabel);
     var skippedProgressText = executionAdaptiveSkippedProgressText(stageProgress);
-    sampleNode.textContent = stageProgress ? "全轮" + progressUnitLabel + "进度：" + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + (phaseProgressText ? " · " + phaseProgressText : "") + (skippedProgressText ? " · " + skippedProgressText : "") + settledText + verifiedOutcomeText + evidenceQualifierText + causalWaveText + admissionText + admissionWaitingText + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText + predictionPendingText + childFailureText + requestBreakdownText + repairWaveText + gatewayAttemptsText + sampleRateText + (remainingText ? " · 预计剩余 " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测评分单元：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
+    sampleNode.textContent = stageProgress ? "全轮" + progressUnitLabel + "进度：" + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + (phaseProgressText ? " · " + phaseProgressText : "") + (skippedProgressText ? " · " + skippedProgressText : "") + settledText + verifiedOutcomeText + evidenceQualifierText + causalWaveText + admissionText + admissionWaitingText + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText + predictionPendingText + childFailureText + requestBreakdownText + repairWaveText + gatewayAttemptsText + sampleRateText + (remainingText ? " · " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测评分单元：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
     if (tokenNode) {
       tokenNode.title = tokenBudgetScopeText(run);
       tokenNode.textContent = modelUsageTokenProgressText(run, stageProgress, candidate);

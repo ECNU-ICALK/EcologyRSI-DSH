@@ -551,7 +551,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
                 "prediction_cells_per_origin": 9,
-            }),
+            }, max_generations=5),
             run=SimpleNamespace(
                 generation=0,
                 status=SimpleNamespace(value="running"),
@@ -581,6 +581,10 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertIsNotNone(progress)
         self.assertGreater(progress["samples_per_minute"], 1.0)
         self.assertLess(progress["estimated_remaining_seconds"], 100_000)
+        self.assertGreater(
+            progress["run_estimated_remaining_seconds"],
+            progress["estimated_remaining_seconds"],
+        )
 
     def test_screening_progress_separates_sparse_repair_from_primary_origin(
         self,
