@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from ecologyrsi_dsh import EventLedger, EvolutionDirector, FakeDSHAdapter, TaskManifest
@@ -484,6 +485,102 @@ class ExecutionProjectionTests(unittest.TestCase):
             progress["throughput_semantics"],
             "host_settled_origins_rolling_32_durable_result_boundaries",
         )
+
+    def test_adaptive_rate_resets_after_restart_resume_boundary(self) -> None:
+        schedule = {
+            "screening_origin_count": 64,
+            "formal_origin_count_per_finalist": 500,
+            "selection_holdout_origin_count": 169,
+            "local_batch_origin_count": 50,
+        }
+        candidate_id = "candidate:restart-rate"
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+
+        def event(seq: int, kind: str, at: datetime, payload: dict) -> SimpleNamespace:
+            return SimpleNamespace(
+                seq=seq,
+                kind=kind,
+                payload=payload,
+                created_at=at.isoformat(),
+            )
+
+        events = (
+            event(
+                10,
+                "GenerationBatchStarted",
+                now - timedelta(hours=12, seconds=20),
+                {"generation": 0, "batch": {"generation": 0}},
+            ),
+            event(
+                11,
+                "EvaluationSampleResultBatchRecorded",
+                now - timedelta(hours=12, seconds=10),
+                {"generation": 0, "candidate_id": candidate_id, "record_count": 9},
+            ),
+            event(
+                12,
+                "EvaluationSampleResultBatchRecorded",
+                now - timedelta(hours=12),
+                {"generation": 0, "candidate_id": candidate_id, "record_count": 9},
+            ),
+            event(
+                13,
+                "EvaluationSampleResultsResumed",
+                now - timedelta(seconds=20),
+                {"generation": 0, "candidate_id": candidate_id, "record_count": 0},
+            ),
+            event(
+                14,
+                "EvaluationSampleResultBatchRecorded",
+                now - timedelta(seconds=10),
+                {"generation": 0, "candidate_id": candidate_id, "record_count": 9},
+            ),
+            event(
+                15,
+                "EvaluationSampleResultBatchRecorded",
+                now,
+                {"generation": 0, "candidate_id": candidate_id, "record_count": 9},
+            ),
+        )
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(metadata={
+                "optimization_protocol": "top2_adaptive_epoch@1",
+                "optimization_schedule": schedule,
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
+                "two_stage_evaluation_enabled": True,
+                "sample_reflection_policy": "candidate_aggregate_post_score@1",
+                "sample_concurrency": 64,
+                "prediction_cells_per_origin": 9,
+            }),
+            run=SimpleNamespace(
+                generation=0,
+                status=SimpleNamespace(value="running"),
+            ),
+            formal_batch_evaluations=(),
+            holdout_evaluations=(),
+            formal_batches=(),
+            candidate_screening_events=(
+                SimpleNamespace(
+                    payload={
+                        "generation": 0,
+                        "candidate_id": candidate_id,
+                        "origin_count": 0,
+                    },
+                    created_at=now.isoformat(),
+                ),
+            ),
+            candidates=tuple(
+                SimpleNamespace(candidate_id=item, generation=0)
+                for item in (candidate_id, "candidate:1", "candidate:2", "candidate:3")
+            ),
+            events=events,
+        )
+
+        progress = _adaptive_progress_projection(state)
+
+        self.assertIsNotNone(progress)
+        self.assertGreater(progress["samples_per_minute"], 1.0)
+        self.assertLess(progress["estimated_remaining_seconds"], 100_000)
 
     def test_screening_progress_separates_sparse_repair_from_primary_origin(
         self,

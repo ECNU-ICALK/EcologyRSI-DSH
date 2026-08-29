@@ -3009,10 +3009,40 @@ def _adaptive_progress_projection(
         and cells_per_origin > 0
         and current_candidate_ids
     ):
+        # A resumed candidate may have durable result batches from before a
+        # long process outage.  Those timestamps would make the live rolling
+        # rate look nearly zero until thirty-two new origins arrive.  The
+        # resume event is a per-candidate durable boundary, so discard older
+        # rows and restart the rate window from the first post-resume result.
+        resume_after_seq: dict[str, int] = {}
+        for event in runtime_events:
+            if event.kind != "EvaluationSampleResultsResumed":
+                continue
+            candidate_id = event.payload.get("candidate_id")
+            if candidate_id not in current_candidate_ids:
+                continue
+            if int(event.payload.get("generation", generation)) != generation:
+                continue
+            seq = getattr(event, "seq", None)
+            if isinstance(seq, int) and not isinstance(seq, bool):
+                resume_after_seq[candidate_id] = max(
+                    seq,
+                    resume_after_seq.get(candidate_id, -1),
+                )
         for event in runtime_events:
             if event.kind != "EvaluationSampleResultBatchRecorded":
                 continue
-            if event.payload.get("candidate_id") not in current_candidate_ids:
+            candidate_id = event.payload.get("candidate_id")
+            if candidate_id not in current_candidate_ids:
+                continue
+            resume_seq = resume_after_seq.get(candidate_id)
+            event_seq = getattr(event, "seq", None)
+            if (
+                resume_seq is not None
+                and isinstance(event_seq, int)
+                and not isinstance(event_seq, bool)
+                and event_seq <= resume_seq
+            ):
                 continue
             record_count = event.payload.get("record_count")
             if (
