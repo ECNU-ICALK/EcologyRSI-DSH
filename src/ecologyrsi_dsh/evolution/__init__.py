@@ -1,5 +1,12 @@
 """Candidate-generation strategies and bounded interventions."""
 
+from .champion_challenger import (
+    LOCAL_CELL_REGRESSION_TOLERANCE,
+    LOCAL_MINIMUM_SCORE_DELTA,
+    LocalChallengerAssessment,
+    assess_local_challenger,
+)
+
 from .genome import (
     EcologyEvolutionPluginGenome,
     FrozenRunInitialization,
@@ -21,6 +28,10 @@ from .schedule import (
 )
 
 __all__ = [
+    "LOCAL_CELL_REGRESSION_TOLERANCE",
+    "LOCAL_MINIMUM_SCORE_DELTA",
+    "LocalChallengerAssessment",
+    "assess_local_challenger",
     "EcologyEvolutionPluginGenome",
     "FrozenRunInitialization",
     "GenomeBindingSubset",
