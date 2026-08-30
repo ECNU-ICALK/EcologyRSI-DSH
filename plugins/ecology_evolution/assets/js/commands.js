@@ -227,14 +227,14 @@
     var holdout = strictInteger(input.selection_holdout_origin_count == null ? 169 : input.selection_holdout_origin_count, "轮末比较时点数", 169);
     if (formal % batch !== 0) { throw new Error("局部 batch 必须整除每个入围候选的更新时点数"); }
     return {
-      schema_version: "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
+      schema_version: "ecologyrsi-dsh.top2-adaptive-epoch-schedule/2",
       screening_origin_count: 64,
       finalist_count: 2,
       formal_origin_count_per_finalist: formal,
       local_batch_origin_count: batch,
       max_local_edits_per_batch: edits,
       selection_holdout_origin_count: holdout,
-      local_evaluation_mode: "prequential"
+      local_evaluation_mode: "paired_champion_challenger"
     };
   }
 

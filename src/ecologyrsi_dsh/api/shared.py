@@ -38,6 +38,7 @@ _EVENT_TYPE_ALIASES = {
     "CandidateScreenedOut": "candidate.screened_out",
     "FormalBatchStarted": "formal.batch_started",
     "FormalBatchEvaluated": "formal.batch_evaluated",
+    "FormalBatchCompared": "formal.batch_compared",
     "HoldoutArmStarted": "holdout.arm_started",
     "GenerationComparisonRecorded": "generation.comparison_recorded",
     "ArtifactRecorded": "artifact.recorded",

@@ -29,11 +29,11 @@ EcologyRSI-DSH 把模型放在“研究助理”的位置，把数据、评测�
 | 阶段 | 默认工作量 | 作用 |
 |---|---:|---|
 | 同窗初筛 | `4 × 64` candidate-origins | 四个候选使用同一批 64 个预测起点，确定 Top 2 |
-| 入围候选 adaptive epoch | `2 × 500` candidate-origins | 每个入围候选连续执行 `10 × 50` origins；每个 batch 结束后最多接受 2 处局部修改，下一批使用新 revision |
-| 轮末同 cohort 比较 | `3 × 169` candidate-origins | 两个 finalist 的最终 revision 与上一冠军在同一冻结 holdout 上重新评测 |
-| 单轮合计 | `1,763` candidate-origins | 对默认 3 个目标 × 3 个时距任务，等于 `15,867` 个评分单元 |
+| 入围候选 paired adaptive epoch | 最多 `1,900` candidate-origin execution occurrences | 共享 500 个 formal unique origins；每条 lane 的首批 50 origins 只评测初始冠军，后续 9 批在同一 50-origin cohort 上分别评测冠军与挑战者 |
+| 轮末同 cohort 比较 | `3 × 169` candidate-origins | 两个 finalist lane 的耐久冠军 revision 与上一冠军在同一冻结 holdout 上重新评测 |
+| 单轮合计 | 最多 `2,663` candidate-origin execution occurrences | 对默认 3 个目标 × 3 个时距任务，等于 `23,967` 个评分单元 |
 
-一个 prediction origin 是一个预测起点，不是一个“目标 × 时距”评分单元。默认温室任务的一次 origin 会同时产生温度、相对湿度和 CO₂ 在 1、6、24 小时的 9 个结果。500 因而表示每个入围候选的 500 次完整预测，而不是 500 个单独评分值。数据起点不足时，系统按可复现 occurrence 循环复用已用数据；每次使用仍记录窗口身份，不会把跨 cohort 原始分数直接比较。
+一个 prediction origin 是一个预测起点，不是一个“目标 × 时距”评分单元。默认温室任务的一次 origin 会同时产生温度、相对湿度和 CO₂ 在 1、6、24 小时的 9 个结果。500 表示 `10 × 50` 个 formal unique-origin 槽位，不是每个 finalist 各自新增 500 个独立源起点。两个 finalist lane 确定性复用同一组槽位；在后 9 个 paired batch 内，冠军和挑战者也在同一 cohort 上各执行一次。因此 formal 阶段的保守执行上限是 1,900 次 candidate-origin occurrences，但独立源数据容量不增加；若两臂 revision 相同，该批只执行一次。每个 origin occurrence 仍产生 9 个评分单元。数据起点不足时，系统按可复现 occurrence 循环复用已用数据；每次使用仍记录窗口身份，不会把跨 cohort 原始分数直接比较。
 
 默认候选并发为 4，逐样本并发为 64（可配置 1–128）；这表示同一 run 最多准入 64 条完整的预测时点链，不是把 64 个 origins 合并成一次模型请求。每个时点的 3 目标 × 3 时距固定作为 9 个向量单元原子提交。两条 finalist lane 可同时推进 50-origin batch，但始终共享 run 级准入预算；Provider 再通过独立的平滑启动门限避免 RPM 突发。
 
@@ -279,8 +279,8 @@ PYTHONPATH=src python -m ecologyrsi_dsh data fetch agc_tomato_2019
 2. Host 检索工具：宿主先执行模型检索词，再补充确定性的领域/弱点查询；读取内置核验目录，并在启用联网时查询 OpenAlex 元数据。网络失败只产生告警并回退内置目录。
 3. `generation.research-synthesis`：Researcher 只能引用本轮冻结证据，整理与候选槽位数量完全一致的多套、彼此不同、可由登记能力实现的优化方向。参数方向必须显式声明 `increase` 或 `decrease`，预测器/Planner Skill 方向声明 `select`；Host 会在整组方向上预分配互不重复的合法行为 witness，并拒绝藏在自由文本中的精确参数赋值。
 4. `candidate.propose`：每个候选槽位绑定其中一个方向，Candidate Proposer 输出初始 GenomeMutation；Host 将它编译成登记预测器、工具策略或工作流参数，同时校验目标、方向、范围和步长，拒绝任意代码、越界、无效变更和重复行为。
-5. 四个候选先在相同的 64-origin screening cohort 上完成严格向量链并确定 Top 2。两个 finalist 随后各自按 50-origin batch 执行 500-origin adaptive epoch；batch 反馈只用于候选内部诊断与生成下一 revision，每批最多接受 `max_local_edits_per_batch` 处有界修改。
-6. 两个 finalist 的最终 revision 与上一 incumbent 在同一 169-origin 冻结 holdout 上评测。Host 只依据这次同 cohort 结果、科学门禁、最小实用差异和配对稳定性决定是否更新 incumbent；`generation.reflect` 再读取显式绑定候选、direction digest、最终排名和改进/退化证据的结果映射，指导下一轮 synthesis。
+5. 四个候选先在相同的 64-origin screening cohort 上完成严格向量链并确定 Top 2。两个 finalist lane 随后各自进入 500-origin adaptive epoch：首个 50-origin batch 冻结初始冠军，后 9 批只从当前耐久冠军生成挑战者，并让冠军与挑战者在同一个 50-origin cohort 上配对评测。只有挑战者通过安全门禁、逐评分单元无退化门禁且 `score_delta > 0.005` 时才晋升；被拒证据会保留，但不会成为下一挑战者的父版本。
+6. 两个 finalist lane 的耐久冠军 revision 与上一 incumbent 在同一 169-origin 冻结 holdout 上评测。同一 batch 内的配对分数只决定该 lane 的冠军，禁止用不同 batch 的原始分数直接比较；Host 只依据轮末同 cohort holdout、科学门禁、最小实用差异和配对稳定性决定是否更新 global incumbent。`generation.reflect` 再读取显式绑定候选、direction digest、最终排名和改进/退化证据的结果映射，指导下一轮 synthesis。
 
 启动检索不是唯一检索时机。Researcher、Candidate Proposer、Sample Planner、Sample Critic、Generation Judge 和 Coordinator 在各自阶段加载必需 Skill 后，都可以在遇到证据缺口时调用零到三次同一个 `web_search`。模型只提交 1–4 条短查询和阶段内 `retrieval_key`，不能选择 provider：包装器先调用 DSH 内部 `ctx.web.search`；若 provider 不可用、出错，或结果少于 2 个不同 HTTPS 来源、少于 2 个有标题/摘要的证据来源、与查询没有词项重合，Python sidecar 才自动调用 OpenAlex 元数据回退。主结果与回退结果按 URL 去重、最多保留 8 个来源，并以 `DshRetrievalExecuted` 事件持久化；相同阶段检索在恢复时先重放，不重复联网。动态结果只作为推理参考，不能自行进入冻结 `evidence_ref`、改变预测向量、评分、门禁或晋级。
 
@@ -392,7 +392,7 @@ export ECOLOGYRSI_DSH_MODELS_JSON='[
 
 真实自主运行只使用 `dsh-strict-origin-bundle@4`。一个“智能体样本”表示一个预测起点：远程 Planner 在 DSH 子会话中选择登记的联合向量工具，Host 一次生成温度、相对湿度、CO₂ 在 1、6、24 小时的 9 个结果；不确定或失败时才进入远程 Critic 修复/拒绝路径，随后由 Host 逐单元评分。严格 checkpoint 只在整个向量和当前策略要求的角色动作完整后原子落盘，恢复时只复用能验证该冻结执行策略的 origin。候选级聚合反思可以读取评分后的结果，但无权改写已经持久化的预测。
 
-严格运行只有在冻结统计门槛满足，且已评测 origin 具有完整 Planner/工具证据以及条件触发时的 Critic 证据，才允许晋升。finalist 的 batch 得分只诊断当前局部方向，不承担跨 batch 晋升判断；每个 revision 的改动数受 `max_local_edits_per_batch` 限制，数值步长和所有结构变更仍受宿主信赖域及能力注册表约束。轮末必须把两个最终 revision 与 incumbent 放回同一 holdout，未显著改善时继续保留 incumbent，不用跨窗口原始分数制造“快速进化”。
+严格运行只有在冻结统计门槛满足，且已评测 origin 具有完整 Planner/工具证据以及条件触发时的 Critic 证据，才允许晋升。finalist 的冠军与挑战者只在同一个 batch cohort 内配对比较；这次比较决定 lane champion，但不同 batch 的原始分数不能直接比较。每个 revision 的改动数受 `max_local_edits_per_batch` 限制，数值步长和所有结构变更仍受宿主信赖域及能力注册表约束。轮末必须把两条 lane 的耐久冠军与 incumbent 放回同一 holdout，未显著改善时继续保留 incumbent，不用跨窗口原始分数制造“快速进化”。
 
 DSH-native 运行不接收 `token_limit`，上下文压缩和输出长度由 DSH Session 与模型路由统一管理。
 
@@ -513,14 +513,14 @@ sidecar 主前缀是 `/api`；浏览器通过 DSH 同源代理使用 `/api/ecolo
   "execution_protocol": "dsh_native_plugin_evolution@1",
   "optimization_protocol": "top2_adaptive_epoch@1",
   "optimization_schedule": {
-    "schema_version": "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
+    "schema_version": "ecologyrsi-dsh.top2-adaptive-epoch-schedule/2",
     "screening_origin_count": 64,
     "finalist_count": 2,
     "formal_origin_count_per_finalist": 500,
     "local_batch_origin_count": 50,
     "max_local_edits_per_batch": 2,
     "selection_holdout_origin_count": 169,
-    "local_evaluation_mode": "prequential"
+    "local_evaluation_mode": "paired_champion_challenger"
   },
   "strategy_model_id": "newapi-glm52-policy",
   "review_model_id": "newapi-glm52-judge",
@@ -541,17 +541,19 @@ sidecar 主前缀是 `/api`；浏览器通过 DSH 同源代理使用 `/api/ecolo
 }
 ```
 
+`ecologyrsi-dsh.top2-adaptive-epoch-schedule/1` 与 `prequential` 仅用于显式读取旧版运行和旧账本；新建运行固定使用上面的 v2 配对合同。
+
 自主运行使用 `auto_advance: true` 进入连续模式：服务端完成一轮后自动排入下一轮，直到达到轮数/候选预算、暂停、取消或失败；页面只轮询真实阶段事件，不需要反复点击“下一轮”。服务默认使用 4 个有界 worker 推进不同运行；同一运行始终只能持有一个世代租约，每执行一代就回到队尾。`ECOLOGYRSI_AUTO_PROGRESS_WORKERS` 可显式配置为 1–8。不同运行和同一运行内的候选可以并行；同一 provider 的 DSH stage 统一经过全局 FIFO 准入，物理在飞上限为 128，失败冷却对该 provider 的全部运行生效。服务重启后会从 SQLite 恢复未归档的连续运行，并在每轮开始前重新校验冻结的数据、预测器、策略、评测器和远程模型绑定；绑定发生漂移时以 `frozen_runtime_binding_drift` 停止运行并提示新建。
 
 默认界面固定使用每轮 4 个候选，5 轮对应 20 个候选总预算。每个提案都记录 `proposal_source`，投影分别统计远程成功、宿主种子和显式宿主回退，不把“未调用 API”显示成“调用完成”。
 
-新建运行不再接受含义含混的 `samples_per_update`；所有工作量都由 `optimization_schedule` 以 prediction origins 表示。外层固定先对 4 个候选各筛选 64 origins，再冻结 Top 2。每个 finalist 独立执行 500-origin adaptive epoch：默认分成 10 个 50-origin batch，每批完成后允许 Host 接受最多 2 处有界局部修改，并让下一批使用新 revision。epoch 结束后，两个最终 revision 与上一冠军在同一批 169-origin holdout 上重新评测。169 是 169 次完整预测；默认任务内部产生 `169 × 9 = 1,521` 个评分单元，但并不是 1,521 次独立模型请求。
+新建运行不再接受含义含混的 `samples_per_update`；所有工作量都由 `optimization_schedule` 以 prediction origins 表示。外层固定先对 4 个候选各筛选 64 origins，再冻结 Top 2。每个 finalist lane 的 500 个 formal unique-origin 槽位默认分成 10 个 50-origin batch：batch 0 只评测并冻结初始冠军；batch 1–9 从当前 selected champion 生成一个有界挑战者，并让两臂在同一 cohort 上分别执行。通过门禁的挑战者成为新冠军，未改善的挑战者被拒且下一次仍从原冠军生成；末批完成比较后不会再创建一个无法验证的 child。epoch 结束后，两条 lane 的耐久冠军与上一冠军在同一批 169-origin holdout 上重新评测。169 是 169 次完整预测；默认任务内部产生 `169 × 9 = 1,521` 个评分单元，但并不是 1,521 次独立模型请求。
 
-默认单轮预算为 `4 × 64 + 2 × 500 + 3 × 169 = 1,763 candidate-origins`，即 15,867 个评分单元。候选并发默认 4；逐样本并发默认 64、可配置 1–128；两条 finalist lane 可并行推进但共享 run 级逐样本并发，同一 provider 的物理在飞上限为 128。每轮按预测起点构造候选无关的确定性窗口；可用起点少于计划 occurrence 时会循环复用，但同一比较阶段仍冻结一致的 cohort 身份。
+默认 formal 执行上限为 `2 × [50 + 2 × (10 - 1) × 50] = 1,900` candidate-origin occurrences；默认单轮预算为 `4 × 64 + 1,900 + 3 × 169 = 2,663 candidate-origin occurrences`，即 `2,663 × 9 = 23,967` 个评分单元。五代所需的唯一源起点仍为 `500 + 5 × (64 + 169) = 1,665`，因为两条 lane 与 paired arms 复用同一组 formal unique-origin 槽位。候选并发默认 4；逐样本并发默认 64、可配置 1–128；两条 finalist lane 可并行推进但共享 run 级逐样本并发，同一 provider 的物理在飞上限为 128。每轮按预测起点构造候选无关的确定性窗口；可用起点少于计划 occurrence 时会循环复用，但同一比较阶段仍冻结一致的 cohort 身份。
 
 每个 origin 调用一次 Planner，由 Planner 在 DSH 子会话内选择并调用登记的联合向量预测工具；只有不确定或失败时才调用 Critic。Host 将 9 条评分记录原子持久化，候选完成后再执行聚合反思。岭回归可以完整扫描 `training_fit` 拟合参数，但只能作为 Planner 主动调用的注册工具，不能替代智能体决策阶段。
 
-单个 origin 耗尽重试预算不会终止整个候选，但评分后处理保证失败行相对冻结强基线的 reward 不大于 0，不能通过失败或丢样本提高分数。局部 batch 的分数只用于生成下一 revision；轮末 F1/F2/incumbent 使用同一 holdout 的 centered max-T 选择门禁，并同时要求 0.005 实用差异和一致的评分合同。跨代反思按完整 `behavior_digest` 防止失败行为的精确重放；相同科学参数但不同 agent 程序仍可继续探索。`execution_diagnostics` 分别给出物理分区行数、selected/deferred 评分单元和 origins、eligible/used/skipped 目标、累计候选工作量、拟合 pass、提案来源和轮次耗时。正式 `EvaluationRecorded` 到达前，页面只把可验证的 checkpoint 聚合标为部分进度。
+单个 origin 耗尽重试预算不会终止整个候选，但评分后处理保证失败行相对冻结强基线的 reward 不大于 0，不能通过失败或丢样本提高分数。同一 batch 内的配对分数用于 lane champion 选择，不同 batch 分数不直接比较；被拒挑战者只作为下一次受限提案的证据，不会成为父版本。轮末 F1/F2/incumbent 使用同一 holdout 的 centered max-T 选择门禁，并同时要求 0.005 实用差异和一致的评分合同。跨代反思按完整 `behavior_digest` 防止失败行为的精确重放；相同科学参数但不同 agent 程序仍可继续探索。`execution_diagnostics` 分别给出物理分区行数、selected/deferred 评分单元和 origins、eligible/used/skipped 目标、累计候选工作量、拟合 pass、提案来源和轮次耗时。正式 `EvaluationRecorded` 到达前，页面只把可验证的 checkpoint 聚合标为部分进度。
 
 创建合同以 `dataset_id` 为首要输入；策略模型 API、独立评审模型 API 和轮数是另外三个用户输入。Web 界面会提交目录已绑定的 `episode_id`；原始 API 省略时，服务端确定性选择首个可优化 episode。服务端根据数据集目录记录的 `domain_id`、适配器、许可和模型能力推导 `domain_pack` / `research_domain`，再由模型研究结果冻结预测模型、策略和评测器；这些内部绑定不由前端用户手工覆盖。
 

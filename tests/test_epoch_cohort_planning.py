@@ -147,10 +147,10 @@ class EpochCohortPlanningTests(unittest.TestCase):
         )
 
         self.assertEqual(report.required_unique_origins, 1665)
-        self.assertEqual(report.candidate_origin_executions_per_generation, 1763)
-        self.assertEqual(report.scoring_cells_per_generation, 15867)
-        self.assertEqual(report.candidate_origin_executions_for_run, 8815)
-        self.assertEqual(report.scoring_cells_for_run, 79335)
+        self.assertEqual(report.candidate_origin_executions_per_generation, 2663)
+        self.assertEqual(report.scoring_cells_per_generation, 23967)
+        self.assertEqual(report.candidate_origin_executions_for_run, 13315)
+        self.assertEqual(report.scoring_cells_for_run, 119835)
         self.assertGreaterEqual(report.available_eligible_origins, 1665)
         self.assertGreaterEqual(report.max_feasible_generations, 5)
         self.assertTrue(report.sufficient)
@@ -220,8 +220,8 @@ class EpochCohortPlanningTests(unittest.TestCase):
             seed=13,
         )
         self.assertEqual(report.required_unique_origins, 1392)
-        self.assertEqual(report.candidate_origin_executions_per_generation, 2056)
-        self.assertEqual(report.scoring_cells_per_generation, 18504)
+        self.assertEqual(report.candidate_origin_executions_per_generation, 3136)
+        self.assertEqual(report.scoring_cells_per_generation, 28224)
 
         gapped = estimate_epoch_capacity(
             dataset_fixture(3200, timestamp_gap_at=1700),

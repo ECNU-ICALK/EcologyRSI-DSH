@@ -533,7 +533,7 @@ class WorkUnitContractTests(unittest.TestCase):
         )
         progress = projection._adaptive_progress_projection(state)
         self.assertIsNotNone(progress)
-        self.assertEqual(progress["total_origins"], 1763)
+        self.assertEqual(progress["total_origins"], 2663)
         self.assertEqual(progress["completed_origins"], 406)
         self.assertEqual(progress["batch_index"], 3)
         self.assertEqual(progress["batch_count"], 10)

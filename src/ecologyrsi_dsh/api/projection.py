@@ -34,6 +34,11 @@ from ..evolution.analysis import (
     evaluation_cohort_digest,
     sample_update_windows_enabled,
 )
+from ..evolution.schedule import (
+    PAIRED_LOCAL_EVALUATION_MODE,
+    SCHEDULE_SCHEMA_VERSION,
+    OptimizationSchedule,
+)
 from ..integrations.model_bindings import HOST_PARAMETER_GENERATOR_ID, RULE_JUDGE_ID
 from ..presentation.reporting import (
     _EVOLUTION_STAGE_ORDER,
@@ -56,6 +61,33 @@ from .sample_admission import (
 
 _TWO_STAGE_SCREENING_ORIGINS = 64
 _HISTORICAL_PREDICTION_CELLS_PER_ORIGIN = 9
+
+
+def _paired_optimization_schedule(state: Any) -> OptimizationSchedule | None:
+    """Return only an exact schema-v2 paired schedule.
+
+    Historical projections often contain a partial schedule object or omit the
+    schedule altogether.  Those runs retain the prequential projection rather
+    than being reinterpreted from a coincidental field value.
+    """
+
+    task = getattr(state, "task_manifest", None)
+    metadata = getattr(task, "metadata", None)
+    if not isinstance(metadata, Mapping):
+        return None
+    raw_schedule = metadata.get("optimization_schedule")
+    if not isinstance(raw_schedule, Mapping):
+        return None
+    try:
+        schedule = OptimizationSchedule.from_dict(raw_schedule)
+    except (TypeError, ValueError):
+        return None
+    if (
+        schedule.schema_version != SCHEDULE_SCHEMA_VERSION
+        or schedule.local_evaluation_mode != PAIRED_LOCAL_EVALUATION_MODE
+    ):
+        return None
+    return schedule
 
 # The browser projection is intentionally a compact operational trace.  It is
 # not a model chain-of-thought export: only values already produced by the
@@ -2820,6 +2852,11 @@ def _adaptive_progress_projection(
         holdout_total = 3 * int(schedule["selection_holdout_origin_count"])
     except (KeyError, TypeError, ValueError):
         return None
+    paired_schedule = _paired_optimization_schedule(state)
+    if paired_schedule is not None:
+        formal_total = paired_schedule.generation_execution_budget(
+            cells_per_origin=1
+        )["formal_candidate_origins"]
     generation = state.run.generation
     raw_total_generations = getattr(state.task_manifest, "max_generations", None)
     if raw_total_generations is None:
@@ -3386,11 +3423,19 @@ def _adaptive_progress_projection(
 def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
     """Expose bounded, truthful formal-batch evidence for the process UI.
 
-    Each batch uses a different cohort window.  Scores are therefore retained
-    as diagnostics and explicitly marked non-comparable; promotion remains a
-    separate same-cohort holdout decision.
+    Schema-v2 compares the champion and challenger inside one frozen batch
+    cohort and uses that durable decision to select the lane champion. Scores
+    from different batch windows remain diagnostic-only, and the later
+    generation holdout still owns global promotion. Legacy schema-v1 retains
+    its prequential row fields and cross-batch comparability warning.
     """
 
+    paired = _paired_optimization_schedule(state) is not None
+    strategy_label = (
+        "同 cohort 冠军—挑战者配对策略"
+        if paired
+        else "旧版连续更新策略"
+    )
     proposals = {
         (str(item.get("candidate_id")), int(item.get("batch_index"))): item
         for item in state.local_edit_proposals
@@ -3426,6 +3471,12 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
         for batch in batches:
             key = (batch.candidate_id, batch.batch_index)
             evaluation = state.batch_evaluation_for(*key)
+            comparison = (
+                state.batch_comparison_for(*key)
+                if paired
+                and callable(getattr(state, "batch_comparison_for", None))
+                else None
+            )
             proposal = proposals.get(key)
             outcome = outcomes.get(key)
             activation = activations.get(key)
@@ -3466,67 +3517,160 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
                 and succeeded_origins is not None
                 else None
             )
-            rows.append(
-                {
-                    "batch_index": batch.batch_index + 1,
-                    "batch_count": batch.batch_count,
-                    "origin_count": batch.origin_count,
-                    "candidate_revision_id": batch.revision_id,
-                    "cohort_digest": batch.cohort_digest,
-                    "status": (
-                        "rolled_back"
-                        if activation is not None
-                        and activation_reason_value == "prequential_safety_rollback"
-                        else "safety_kept"
-                        if outcome is not None and outcome.get("reason")
-                        else
-                        "edited"
-                        if activation is not None
-                        else "evaluated"
-                        if evaluation is not None
-                        else "running"
-                    ),
-                    "score": evaluation.score if evaluation is not None else None,
-                    "passed": evaluation.passed if evaluation is not None else None,
-                    "coverage": coverage,
-                    "prediction_cell_coverage": coverage,
-                    "origin_success_rate": origin_success_rate,
-                    "coverage_pass": (
-                        metrics.get("sample_execution_coverage_pass")
-                        if isinstance(metrics, Mapping)
-                        else None
-                    ),
-                    "succeeded_origins": succeeded_origins,
-                    "failed_origins": _finite_number(
-                        sample.get("failed_origin_samples")
-                    ),
-                    "failed_scoring_cells": _finite_number(
-                        sample.get("failed_examples")
-                    ),
-                    "fallback_scoring_cells": _finite_number(
-                        sample.get("scoring_fallback_examples")
-                    ),
-                    "edit_decision": proposal_detail.get("decision") if isinstance(proposal_detail, Mapping) else None,
-                    "edit_outcome": outcome.get("outcome") if outcome else None,
-                    "edit_reason": outcome.get("reason") if outcome else proposal.get("safety_reason") if proposal else None,
-                    "operations": operations,
-                    "active_revision_id": (
-                        activation.to_revision_id
-                        if activation is not None
-                        else outcome.get("active_revision_id")
-                        if outcome is not None
-                        else batch.revision_id
-                    ),
-                    "created_at": (
-                        activation.created_at
-                        if activation is not None
-                        else evaluation.created_at
-                        if evaluation is not None
-                        else batch.created_at
-                    ),
-                    "score_comparability": "different_batch_cohort_diagnostic_only",
-                }
+            comparison_decision_raw = getattr(comparison, "decision", None)
+            comparison_decision = getattr(
+                comparison_decision_raw,
+                "value",
+                comparison_decision_raw,
             )
+            champion_after_revision_id = getattr(
+                comparison,
+                "champion_after_revision_id",
+                None,
+            )
+            has_next_challenger = bool(
+                paired
+                and comparison is not None
+                and activation is not None
+                and outcome is not None
+                and outcome.get("outcome") == "applied"
+                and activation.to_revision_id != champion_after_revision_id
+            )
+            legacy_status = (
+                "rolled_back"
+                if activation is not None
+                and activation_reason_value == "prequential_safety_rollback"
+                else "safety_kept"
+                if outcome is not None and outcome.get("reason")
+                else "edited"
+                if activation is not None
+                else "evaluated"
+                if evaluation is not None
+                else "running"
+            )
+            edit_decision = (
+                proposal_detail.get("decision")
+                if isinstance(proposal_detail, Mapping)
+                else None
+            )
+            edit_reason = (
+                outcome.get("reason")
+                if outcome
+                else proposal.get("safety_reason")
+                if proposal
+                else None
+            )
+            row = {
+                "batch_index": batch.batch_index + 1,
+                "batch_count": batch.batch_count,
+                "origin_count": batch.origin_count,
+                "candidate_revision_id": batch.revision_id,
+                "cohort_digest": batch.cohort_digest,
+                "status": (
+                    comparison_decision
+                    if paired and comparison_decision is not None
+                    else "evaluated"
+                    if paired and evaluation is not None
+                    else "running"
+                    if paired
+                    else legacy_status
+                ),
+                "score": evaluation.score if evaluation is not None else None,
+                "passed": evaluation.passed if evaluation is not None else None,
+                "coverage": coverage,
+                "prediction_cell_coverage": coverage,
+                "origin_success_rate": origin_success_rate,
+                "coverage_pass": (
+                    metrics.get("sample_execution_coverage_pass")
+                    if isinstance(metrics, Mapping)
+                    else None
+                ),
+                "succeeded_origins": succeeded_origins,
+                "failed_origins": _finite_number(
+                    sample.get("failed_origin_samples")
+                ),
+                "failed_scoring_cells": _finite_number(
+                    sample.get("failed_examples")
+                ),
+                "fallback_scoring_cells": _finite_number(
+                    sample.get("scoring_fallback_examples")
+                ),
+                "edit_decision": edit_decision,
+                "edit_outcome": outcome.get("outcome") if outcome else None,
+                "edit_reason": edit_reason,
+                "operations": operations,
+                "active_revision_id": (
+                    champion_after_revision_id
+                    if paired and comparison is not None
+                    else activation.to_revision_id
+                    if activation is not None
+                    else outcome.get("active_revision_id")
+                    if outcome is not None
+                    else batch.revision_id
+                ),
+                "created_at": (
+                    activation.created_at
+                    if activation is not None
+                    else evaluation.created_at
+                    if evaluation is not None
+                    else batch.created_at
+                ),
+                "score_comparability": (
+                    "same_batch_cohort_paired_comparison"
+                    if paired and comparison is not None
+                    else "different_batch_cohort_diagnostic_only"
+                ),
+            }
+            if paired:
+                row.update(
+                    {
+                        "champion_before_revision_id": getattr(
+                            comparison,
+                            "champion_before_revision_id",
+                            None,
+                        ),
+                        "challenger_revision_id": getattr(
+                            comparison,
+                            "challenger_revision_id",
+                            None,
+                        ),
+                        "champion_score": getattr(
+                            comparison,
+                            "champion_score",
+                            None,
+                        ),
+                        "challenger_score": getattr(
+                            comparison,
+                            "challenger_score",
+                            None,
+                        ),
+                        "score_delta": getattr(
+                            comparison, "score_delta", None
+                        ),
+                        "minimum_score_delta": getattr(
+                            comparison,
+                            "minimum_score_delta",
+                            None,
+                        ),
+                        "comparison_decision": comparison_decision,
+                        "comparison_reason": sanitize_public_value(
+                            getattr(comparison, "reason", None),
+                            text_limit=120,
+                        ),
+                        "champion_after_revision_id": (
+                            champion_after_revision_id
+                        ),
+                        "next_challenger_revision_id": (
+                            activation.to_revision_id
+                            if has_next_challenger
+                            else None
+                        ),
+                        "next_challenger_operations": (
+                            operations if has_next_challenger else []
+                        ),
+                    }
+                )
+            rows.append(row)
         lanes.append(
             {
                 "candidate_id": trajectory.candidate_id,
@@ -3536,10 +3680,20 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
                 "final_revision_id": trajectory.final_revision_id,
                 "batch_count": trajectory.batch_count,
                 "completed_batch_count": sum(
-                    row["edit_outcome"] is not None for row in rows
+                    (
+                        row["comparison_decision"] is not None
+                        if paired
+                        else row["edit_outcome"] is not None
+                    )
+                    for row in rows
                 ),
                 "batches": rows,
-                "score_comparability": "different_batch_cohort_diagnostic_only",
+                "strategy_label": strategy_label,
+                "score_comparability": (
+                    "same_batch_cohort_paired_comparison"
+                    if paired
+                    else "different_batch_cohort_diagnostic_only"
+                ),
             }
         )
     return lanes

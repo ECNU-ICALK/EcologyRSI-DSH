@@ -35,7 +35,13 @@ from ecologyrsi_dsh.core.sample_results import (
     build_sample_results,
     sample_result_batch_event_payload,
 )
+from ecologyrsi_dsh.core.trajectory import FormalBatchArm
 from ecologyrsi_dsh.data.toy import ToyCropSoilWater
+from ecologyrsi_dsh.evolution.schedule import (
+    LEGACY_SCHEDULE_SCHEMA_VERSION,
+    PREQUENTIAL_LOCAL_EVALUATION_MODE,
+    OptimizationSchedule,
+)
 from ecologyrsi_dsh.presentation.reporting import run_completion_outcome, run_summary
 
 
@@ -154,6 +160,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "CandidateScreenedOut",
                     "FormalBatchStarted",
                     "FormalBatchEvaluated",
+                    "FormalBatchCompared",
                     "HoldoutArmStarted",
                     "GenerationComparisonRecorded",
                 )
@@ -164,10 +171,63 @@ class ExecutionProjectionTests(unittest.TestCase):
                 "CandidateScreenedOut": "candidate.screened_out",
                 "FormalBatchStarted": "formal.batch_started",
                 "FormalBatchEvaluated": "formal.batch_evaluated",
+                "FormalBatchCompared": "formal.batch_compared",
                 "HoldoutArmStarted": "holdout.arm_started",
                 "GenerationComparisonRecorded": "generation.comparison_recorded",
             },
         )
+
+    def test_formal_batch_comparison_has_truthful_public_timeline_payload(self) -> None:
+        from ecologyrsi_dsh.api.events import EventEndpointsMixin
+
+        comparison = {
+            "comparison_id": "comparison:candidate:a:3",
+            "generation": 0,
+            "candidate_id": "candidate:a",
+            "batch_index": 3,
+            "cohort_digest": "a" * 64,
+            "champion_before_revision_id": "revision:a:champion",
+            "challenger_revision_id": "revision:a:challenger",
+            "champion_score": -0.4,
+            "challenger_score": -0.5,
+            "score_delta": -0.1,
+            "minimum_score_delta": 0.005,
+            "safety_gate_passed": True,
+            "cell_regression_gate_passed": True,
+            "decision": "champion_retained",
+            "champion_after_revision_id": "revision:a:champion",
+            "reason": "below_practical_delta",
+            "created_at": "private-comparison-timestamp",
+        }
+        event = SimpleNamespace(
+            seq=17,
+            event_id="event:formal-batch-compared",
+            run_id="run:projection",
+            kind="FormalBatchCompared",
+            payload={"comparison": comparison},
+            created_at="2026-08-30T00:00:00+00:00",
+        )
+
+        public_event = EventEndpointsMixin._event_json(event)
+
+        self.assertEqual(public_event["type"], "formal.batch_compared")
+        self.assertEqual(
+            public_event["payload"]["message"],
+            "同 cohort 冠军—挑战者比较已完成。",
+        )
+        self.assertEqual(
+            public_event["payload"]["decision"],
+            "champion_retained",
+        )
+        self.assertEqual(
+            public_event["payload"]["champion_after_revision_id"],
+            "revision:a:champion",
+        )
+        self.assertEqual(
+            public_event["payload"]["reason"],
+            "below_practical_delta",
+        )
+        self.assertNotIn("created_at", public_event["payload"])
 
     def test_failed_scoring_penalty_is_not_projected_as_model_output(self) -> None:
         state = SimpleNamespace(
@@ -434,12 +494,13 @@ class ExecutionProjectionTests(unittest.TestCase):
         }
         candidate_id = "candidate:screening-rate"
         revision = "revision:screening-rate"
+        now = datetime.now(timezone.utc).replace(microsecond=0)
         events = (
             SimpleNamespace(
                 seq=10,
                 kind="GenerationBatchStarted",
                 payload={"batch": {"generation": 0}},
-                created_at="2026-08-28T05:59:59+00:00",
+                created_at=(now - timedelta(seconds=42)).isoformat(),
             ),
             SimpleNamespace(
                 seq=11,
@@ -448,7 +509,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "candidate_id": candidate_id,
                     "revision": revision,
                 },
-                created_at="2026-08-28T06:00:00+00:00",
+                created_at=(now - timedelta(seconds=41)).isoformat(),
             ),
             SimpleNamespace(
                 seq=12,
@@ -458,7 +519,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "revision": revision,
                     "record_count": 9,
                 },
-                created_at="2026-08-28T06:00:10+00:00",
+                created_at=(now - timedelta(seconds=31)).isoformat(),
             ),
             SimpleNamespace(
                 seq=13,
@@ -481,7 +542,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "in_flight_batches": 0,
                     "queued_batches": 0,
                 },
-                created_at="2026-08-28T06:00:11+00:00",
+                created_at=(now - timedelta(seconds=30)).isoformat(),
             ),
             SimpleNamespace(
                 seq=14,
@@ -491,7 +552,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "revision": revision,
                     "record_count": 9,
                 },
-                created_at="2026-08-28T06:00:40+00:00",
+                created_at=(now - timedelta(seconds=1)).isoformat(),
             ),
             SimpleNamespace(
                 seq=15,
@@ -514,7 +575,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "in_flight_batches": 0,
                     "queued_batches": 0,
                 },
-                created_at="2026-08-28T06:00:41+00:00",
+                created_at=now.isoformat(),
             ),
         )
         state = SimpleNamespace(
@@ -1329,6 +1390,11 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(activity["role"], "candidate-proposer")
 
     def test_adaptive_trajectory_exposes_bounded_batch_and_edit_evidence(self) -> None:
+        legacy_schedule = OptimizationSchedule.default().to_dict()
+        legacy_schedule.update(
+            schema_version=LEGACY_SCHEDULE_SCHEMA_VERSION,
+            local_evaluation_mode=PREQUENTIAL_LOCAL_EVALUATION_MODE,
+        )
         evaluation = SimpleNamespace(
             score=-0.25,
             passed=False,
@@ -1364,6 +1430,9 @@ class ExecutionProjectionTests(unittest.TestCase):
             created_at="2026-08-28T00:00:03+00:00",
         )
         state = SimpleNamespace(
+            task_manifest=SimpleNamespace(
+                metadata={"optimization_schedule": legacy_schedule}
+            ),
             local_edit_proposals=({
                 "candidate_id": "candidate:a",
                 "batch_index": 0,
@@ -1402,7 +1471,177 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(row["edit_outcome"], "applied")
         self.assertEqual(row["active_revision_id"], "revision:a:1")
         self.assertEqual(row["score_comparability"], "different_batch_cohort_diagnostic_only")
+        self.assertEqual(lanes[0]["strategy_label"], "旧版连续更新策略")
+        for v2_only_field in (
+            "champion_before_revision_id",
+            "challenger_revision_id",
+            "champion_score",
+            "challenger_score",
+            "score_delta",
+            "minimum_score_delta",
+            "comparison_decision",
+            "comparison_reason",
+            "champion_after_revision_id",
+            "next_challenger_revision_id",
+            "next_challenger_operations",
+        ):
+            self.assertNotIn(v2_only_field, row)
         self.assertNotIn("sample_execution_records", str(row))
+
+    def test_paired_trajectory_projects_durable_comparison_and_next_challenger(self) -> None:
+        champion = SimpleNamespace(
+            score=-0.6,
+            passed=True,
+            created_at="2026-08-30T00:00:01+00:00",
+            metrics={"sample_execution_coverage": 1.0},
+        )
+        challenger = SimpleNamespace(
+            score=-0.4,
+            passed=True,
+            created_at="2026-08-30T00:00:02+00:00",
+            metrics={
+                "sample_execution_coverage": 1.0,
+                "sample_execution": {
+                    "attempted_origin_samples": 50,
+                    "succeeded_origin_samples": 50,
+                    "failed_origin_samples": 0,
+                    "failed_examples": 0,
+                    "scoring_fallback_examples": 0,
+                },
+            },
+        )
+        batch = SimpleNamespace(
+            generation=0,
+            candidate_id="candidate:paired",
+            batch_index=1,
+            batch_count=10,
+            origin_count=50,
+            revision_id="revision:paired:challenger-1",
+            cohort_digest="b" * 64,
+            created_at="2026-08-30T00:00:00+00:00",
+        )
+        comparison = SimpleNamespace(
+            decision=SimpleNamespace(value="challenger_promoted"),
+            reason="challenger_improved",
+            champion_before_revision_id="revision:paired:champion-0",
+            challenger_revision_id="revision:paired:challenger-1",
+            champion_score=-0.6,
+            challenger_score=-0.4,
+            score_delta=0.2,
+            minimum_score_delta=0.005,
+            safety_gate_passed=True,
+            cell_regression_gate_passed=True,
+            champion_after_revision_id="revision:paired:challenger-1",
+            created_at="2026-08-30T00:00:03+00:00",
+        )
+        activation = SimpleNamespace(
+            candidate_id="candidate:paired",
+            batch_index=1,
+            from_revision_id="revision:paired:challenger-1",
+            to_revision_id="revision:paired:challenger-2",
+            reason=SimpleNamespace(value="local_edit_applied"),
+            created_at="2026-08-30T00:00:04+00:00",
+        )
+
+        def evaluation_for(
+            _candidate_id: str,
+            _batch_index: int,
+            arm: FormalBatchArm | None = None,
+        ) -> SimpleNamespace:
+            return champion if arm is FormalBatchArm.CHAMPION else challenger
+
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(
+                metadata={
+                    "optimization_schedule": OptimizationSchedule.default().to_dict()
+                }
+            ),
+            local_edit_proposals=(
+                {
+                    "candidate_id": "candidate:paired",
+                    "batch_index": 1,
+                    "proposal": {
+                        "decision": "mutate",
+                        "operations": [
+                            {
+                                "op": "set_bounded_parameter",
+                                "name": "ridge_alpha",
+                                "value": 0.2,
+                            }
+                        ],
+                    },
+                },
+            ),
+            local_edit_outcomes=(
+                {
+                    "candidate_id": "candidate:paired",
+                    "batch_index": 1,
+                    "outcome": "applied",
+                    "active_revision_id": "revision:paired:challenger-2",
+                },
+            ),
+            trajectory_revision_activations=(activation,),
+            formal_batches=(batch,),
+            formal_trajectories=(
+                SimpleNamespace(
+                    generation=0,
+                    candidate_id="candidate:paired",
+                    status=SimpleNamespace(value="running"),
+                    initial_revision_id="revision:paired:champion-0",
+                    final_revision_id=None,
+                    batch_count=10,
+                ),
+            ),
+            batch_evaluation_for=evaluation_for,
+            batch_comparison_for=lambda candidate_id, batch_index: (
+                comparison
+                if candidate_id == "candidate:paired" and batch_index == 1
+                else None
+            ),
+        )
+
+        lanes = _adaptive_trajectory_projection(state)
+
+        self.assertEqual(lanes[0]["completed_batch_count"], 1)
+        self.assertEqual(
+            lanes[0]["strategy_label"],
+            "同 cohort 冠军—挑战者配对策略",
+        )
+        row = lanes[0]["batches"][0]
+        self.assertEqual(
+            row["champion_before_revision_id"],
+            "revision:paired:champion-0",
+        )
+        self.assertEqual(
+            row["challenger_revision_id"],
+            "revision:paired:challenger-1",
+        )
+        self.assertEqual(row["champion_score"], -0.6)
+        self.assertEqual(row["challenger_score"], -0.4)
+        self.assertEqual(row["score_delta"], 0.2)
+        self.assertEqual(row["minimum_score_delta"], 0.005)
+        self.assertEqual(row["comparison_decision"], "challenger_promoted")
+        self.assertEqual(row["comparison_reason"], "challenger_improved")
+        self.assertEqual(
+            row["champion_after_revision_id"],
+            "revision:paired:challenger-1",
+        )
+        self.assertEqual(
+            row["next_challenger_revision_id"],
+            "revision:paired:challenger-2",
+        )
+        self.assertEqual(
+            row["next_challenger_operations"][0]["name"],
+            "ridge_alpha",
+        )
+        self.assertEqual(
+            row["score_comparability"],
+            "same_batch_cohort_paired_comparison",
+        )
+        self.assertEqual(
+            lanes[0]["score_comparability"],
+            "same_batch_cohort_paired_comparison",
+        )
 
     def test_dsh_activity_ignores_unresolved_child_before_resume_boundary(self) -> None:
         launch = SimpleNamespace(

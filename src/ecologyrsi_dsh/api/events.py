@@ -99,6 +99,7 @@ class EventEndpointsMixin:
             "FormalTrajectoryStarted": "Top 2 候选的正式轨迹已启动。",
             "FormalBatchStarted": "正式轨迹的下一局部批次已启动。",
             "FormalBatchEvaluated": "局部批次评测已完成。",
+            "FormalBatchCompared": "同 cohort 冠军—挑战者比较已完成。",
             "LocalEditProposalRecorded": "局部小改动提案已记录。",
             "LocalEditDecided": "局部小改动的宿主决策已记录。",
             "TrajectoryRevisionAdvanced": "下一批次的有效修订已冻结。",
@@ -355,6 +356,47 @@ class EventEndpointsMixin:
                     "score": evaluation.get("score"),
                     "passed": evaluation.get("passed"),
                     "evaluator_digest": evaluation.get("evaluator_digest"),
+                }
+            )
+            if scope.get("formal_batch_arm") is not None:
+                public_payload["formal_batch_arm"] = scope.get(
+                    "formal_batch_arm"
+                )
+        elif event.kind == "FormalBatchCompared":
+            comparison = payload.get("comparison", {})
+            reason = redact_sensitive_text(
+                str(comparison.get("reason", "")), limit=120
+            )
+            public_payload.update(
+                {
+                    "comparison_id": comparison.get("comparison_id"),
+                    "generation": comparison.get("generation"),
+                    "candidate_id": comparison.get("candidate_id"),
+                    "batch_index": comparison.get("batch_index"),
+                    "cohort_digest": comparison.get("cohort_digest"),
+                    "champion_before_revision_id": comparison.get(
+                        "champion_before_revision_id"
+                    ),
+                    "challenger_revision_id": comparison.get(
+                        "challenger_revision_id"
+                    ),
+                    "champion_score": comparison.get("champion_score"),
+                    "challenger_score": comparison.get("challenger_score"),
+                    "score_delta": comparison.get("score_delta"),
+                    "minimum_score_delta": comparison.get(
+                        "minimum_score_delta"
+                    ),
+                    "safety_gate_passed": comparison.get(
+                        "safety_gate_passed"
+                    ),
+                    "cell_regression_gate_passed": comparison.get(
+                        "cell_regression_gate_passed"
+                    ),
+                    "decision": comparison.get("decision"),
+                    "champion_after_revision_id": comparison.get(
+                        "champion_after_revision_id"
+                    ),
+                    "reason": reason,
                 }
             )
         elif event.kind == "LocalEditProposalRecorded":

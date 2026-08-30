@@ -320,6 +320,28 @@ for (const [type, title, category] of [
   assert.equal(modelSandbox.eventTitle({type, payload: {}}, null), title);
   assert.equal(modelSandbox.eventCategory(type), category);
 }
+const pairedComparisonEvent = {
+  type: "formal.batch_compared",
+  payload: {
+    candidate_id: "candidate:paired",
+    champion_before_revision_id: "revision:champion",
+    challenger_revision_id: "revision:challenger",
+    champion_score: -0.4,
+    challenger_score: -0.5,
+    score_delta: -0.1,
+    minimum_score_delta: 0.005,
+    decision: "champion_retained",
+    champion_after_revision_id: "revision:champion",
+    reason: "below_practical_delta",
+  },
+};
+assert.equal(modelSandbox.eventTitle(pairedComparisonEvent, null), "挑战者未改善，继续使用原冠军");
+assert.equal(modelSandbox.eventCategory(pairedComparisonEvent.type), "评测");
+const pairedComparisonDetail = modelSandbox.eventDetail(pairedComparisonEvent, null);
+for (const evidence of ["冠军 -0.4000", "挑战者 -0.5000", "差值 -0.1000", "门槛 0.0050", "below_practical_delta"]) {
+  assert.ok(pairedComparisonDetail.includes(evidence), `paired event detail missing: ${evidence}`);
+}
+assert.equal(pairedComparisonDetail.includes("已应用"), false);
 assert.equal(modelSandbox.runRetainedScore(crossCohortProjection), 0.61);
 assert.equal(modelSandbox.runRawBestObservedScore(crossCohortProjection), 0.95);
 assert.equal(modelSandbox.trajectoryIncumbentScore(crossCohortProjection.trajectory[0]), 0.55);
@@ -432,8 +454,13 @@ const adaptiveTrajectoryNodes = {
 const adaptiveTrajectoryQuerySelector = modelSandbox.document.querySelector;
 modelSandbox.document.querySelector = (selector) => adaptiveTrajectoryNodes[selector] || adaptiveTrajectoryQuerySelector(selector);
 modelSandbox.renderAdaptiveTrajectories({
+  optimization_schedule: {
+    schema_version: "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
+    local_evaluation_mode: "prequential",
+  },
   adaptive_trajectories: [{
     candidate_id: "candidate:lane-a", generation: 0, status: "running",
+    strategy_label: "旧版连续更新策略",
     completed_batch_count: 0, batch_count: 10,
     batches: [
       {batch_index: 1, batch_count: 10, origin_count: 50, status: "running", candidate_revision_id: "revision:a", active_revision_id: "revision:a"},
@@ -451,8 +478,72 @@ assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includ
 assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("已应用，待后续批次/holdout验证"));
 assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("提案未通过宿主校验"));
 assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("安全门回退"));
+assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("旧版连续更新策略"));
 assert.equal(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("已应用局部修改"), false);
 assert.equal(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("本批未记录局部修改"), false);
+
+modelSandbox.renderAdaptiveTrajectories({
+  adaptive_trajectories: [{
+    candidate_id: "candidate:paired-lane", generation: 0, status: "running",
+    strategy_label: "同 cohort 冠军—挑战者配对策略",
+    score_comparability: "same_batch_cohort_paired_comparison",
+    completed_batch_count: 4, batch_count: 10,
+    batches: [
+      {
+        batch_index: 1, batch_count: 10, origin_count: 50, status: "edited",
+        champion_before_revision_id: "revision:champion-0", challenger_revision_id: "revision:champion-0",
+        champion_score: -0.6, challenger_score: -0.6, score_delta: 0, minimum_score_delta: 0.005,
+        comparison_decision: "initial_champion", comparison_reason: "initial_champion",
+        champion_after_revision_id: "revision:champion-0",
+        next_challenger_revision_id: "revision:challenger-1",
+        next_challenger_operations: [{name: "ridge_alpha", value: 0.2}],
+        edit_outcome: "applied",
+      },
+      {
+        batch_index: 2, batch_count: 10, origin_count: 50, status: "edited",
+        champion_before_revision_id: "revision:champion-0", challenger_revision_id: "revision:challenger-1",
+        champion_score: -0.6, challenger_score: -0.4, score_delta: 0.2, minimum_score_delta: 0.005,
+        comparison_decision: "challenger_promoted", comparison_reason: "challenger_improved",
+        champion_after_revision_id: "revision:challenger-1",
+      },
+      {
+        batch_index: 3, batch_count: 10, origin_count: 50, status: "evaluated",
+        champion_before_revision_id: "revision:challenger-1", challenger_revision_id: "revision:challenger-2",
+        champion_score: -0.4, challenger_score: -0.42, score_delta: -0.02, minimum_score_delta: 0.005,
+        comparison_decision: "champion_retained", comparison_reason: "below_practical_delta",
+        champion_after_revision_id: "revision:challenger-1",
+      },
+      {
+        batch_index: 4, batch_count: 10, origin_count: 50, status: "safety_kept",
+        champion_before_revision_id: "revision:challenger-1", challenger_revision_id: "revision:challenger-1",
+        champion_score: -0.4, challenger_score: -0.4, score_delta: 0, minimum_score_delta: 0.005,
+        comparison_decision: "champion_retained", comparison_reason: "same_revision",
+        champion_after_revision_id: "revision:challenger-1", edit_outcome: "rejected",
+        next_challenger_operations: [{name: "ridge_alpha", value: 999}],
+      },
+      {
+        batch_index: 5, batch_count: 10, origin_count: 50, status: "running",
+        champion_score: null, challenger_score: null, score_delta: null, minimum_score_delta: null,
+      },
+    ],
+  }],
+});
+const pairedTrajectoryHtml = adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML;
+for (const label of [
+  "初始冠军已冻结",
+  "挑战者已晋升为轨迹冠军",
+  "挑战者未改善，继续使用原冠军",
+  "下一挑战版本已生成，等待同 cohort 对照验证",
+  "局部提案未通过宿主校验",
+]) {
+  assert.ok(pairedTrajectoryHtml.includes(label), `paired trajectory missing: ${label}`);
+}
+for (const evidence of ["冠军 -0.4000", "挑战者 -0.4200", "差值 -0.0200", "门槛 0.0050"]) {
+  assert.ok(pairedTrajectoryHtml.includes(evidence), `paired trajectory evidence missing: ${evidence}`);
+}
+assert.equal(pairedTrajectoryHtml.includes("已应用"), false);
+assert.ok(pairedTrajectoryHtml.includes("冠军等待评测 · 挑战者等待评测"));
+assert.equal(pairedTrajectoryHtml.includes("冠军 0 · 挑战者 0"), false);
 modelSandbox.renderAdaptiveTrajectories({adaptive_trajectories: [{candidate_id: "candidate:lane-b", batches: []}]});
 assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("等待首个微批证据"));
 modelSandbox.document.querySelector = adaptiveTrajectoryQuerySelector;
@@ -990,6 +1081,25 @@ for (const configuredExecutionParameter of ["入围候选轨迹", "Top 2 各 10 
 }
 for (const holdoutDetail of ["轮末同 cohort 比较", "F1 / F2 / 上一冠军各 169 origins", "单轮执行预算", "1,763 candidate-origins"]) {
   assert.ok(processSummaryNode.innerHTML.includes(holdoutDetail));
+}
+const pairedWaitingSchedule = {
+  schema_version: "ecologyrsi-dsh.top2-adaptive-epoch-schedule/2",
+  screening_origin_count: 64, finalist_count: 2,
+  formal_origin_count_per_finalist: 500, local_batch_origin_count: 50,
+  max_local_edits_per_batch: 2, selection_holdout_origin_count: 169,
+  local_evaluation_mode: "paired_champion_challenger",
+};
+modelSandbox.renderProcessSummary({
+  ...waitingRun,
+  optimization_schedule: pairedWaitingSchedule,
+  configuration: {...waitingRun.configuration, optimization_schedule: pairedWaitingSchedule},
+});
+for (const pairedCapacityDetail of [
+  "正式配对上限", "1,900 candidate-origin occurrences",
+  "2,663 candidate-origin execution occurrences", "23,967 scoring cells",
+  "500 个 formal unique origins",
+]) {
+  assert.ok(processSummaryNode.innerHTML.includes(pairedCapacityDetail), `paired process capacity missing: ${pairedCapacityDetail}`);
 }
 modelSandbox.renderProcessSummary(crossCohortProjection);
 assert.ok(processSummaryNode.innerHTML.includes("当前保留得分"));
@@ -2214,14 +2324,14 @@ modelSandbox.request = async (path, options) => {
   assert.equal(Object.hasOwn(options.body.budget, "token_limit"), false);
   assert.equal(Object.hasOwn(options.body, "samples_per_update"), false);
   assert.equal(options.body.optimization_protocol, "top2_adaptive_epoch@1");
-  assert.equal(options.body.optimization_schedule.schema_version, "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1");
+  assert.equal(options.body.optimization_schedule.schema_version, "ecologyrsi-dsh.top2-adaptive-epoch-schedule/2");
   assert.equal(options.body.optimization_schedule.screening_origin_count, 64);
   assert.equal(options.body.optimization_schedule.finalist_count, 2);
   assert.equal(options.body.optimization_schedule.formal_origin_count_per_finalist, 500);
   assert.equal(options.body.optimization_schedule.local_batch_origin_count, 50);
   assert.equal(options.body.optimization_schedule.max_local_edits_per_batch, 2);
   assert.equal(options.body.optimization_schedule.selection_holdout_origin_count, 169);
-  assert.equal(options.body.optimization_schedule.local_evaluation_mode, "prequential");
+  assert.equal(options.body.optimization_schedule.local_evaluation_mode, "paired_champion_challenger");
   assert.equal(options.body.candidate_concurrency, 4);
   assert.equal(options.body.sample_agent_batch_size, 9);
   assert.equal(options.body.sample_concurrency, 64);
@@ -3051,10 +3161,12 @@ assert.equal(budgetNodes["#max-candidates"].value, "30");
 assert.match(budgetNodes["#max-candidates"].validationMessage, /至少 36/);
 assert.equal(budgetSandbox.candidateBudgetStatus().budget_sufficient, false);
 const defaultSchedule = budgetSandbox.optimizationScheduleFromControls();
+assert.equal(defaultSchedule.schema_version, "ecologyrsi-dsh.top2-adaptive-epoch-schedule/2");
 assert.equal(defaultSchedule.formal_origin_count_per_finalist, 500);
 assert.equal(defaultSchedule.local_batch_origin_count, 50);
 assert.equal(defaultSchedule.max_local_edits_per_batch, 2);
 assert.equal(defaultSchedule.selection_holdout_origin_count, 169);
+assert.equal(defaultSchedule.local_evaluation_mode, "paired_champion_challenger");
 for (const [patch, pattern] of [
   [{formal_origin_count: 500, local_batch_origin_count: 64}, /必须整除/],
   [{max_local_edits_per_batch: 6}, /不得大于 5/],
@@ -3097,8 +3209,9 @@ vm.runInContext(read("assets/js/render_shell.js"), parameterSandbox);
 parameterSandbox.renderParameters();
 assert.equal(parameterNodes["#parameter-summary-pill"].textContent, "每个入围候选 10 × 50");
 assert.equal(parameterNodes["#agent-update-scope"].textContent, "每个入围候选 10 × 50");
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("256 + 1,000 + 507 = 1,763 candidate-origins = 15,867 cells"));
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("8,815 candidate-origins / 79,335 cells；需要 1,665 个起点 occurrence"));
+assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("256 + 1,900 + 507 = 2,663 candidate-origin execution occurrences = 23,967 scoring cells"));
+assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("13,315 candidate-origin execution occurrences / 119,835 scoring cells；需要 1,665 个起点 occurrence"));
+assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("500 个 formal unique origins"));
 parameterNodes["#local-batch-origin-count"].value = "60";
 parameterSandbox.renderParameters();
 assert.equal(parameterNodes["#parameter-summary-pill"].textContent, "参数无效");

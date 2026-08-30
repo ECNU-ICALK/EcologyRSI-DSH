@@ -14,7 +14,7 @@
     return {
       run: "运行", generation: "轮次", knowledge: "知识", research: "研究",
       implementation: "编译", optimization: "优化", proposal: "提案", candidate: "候选",
-      artifact: "产物", evaluation: "反馈", promotion: "决策", intervention: "人工",
+      artifact: "产物", evaluation: "反馈", formal: "评测", promotion: "决策", intervention: "人工",
       expert_consultation: "专家", consultation: "专家", stage: "阶段", gateway: "网关",
       model: "模型", dsh: "DSH"
     }[value.split(".")[0]] || "系统";
@@ -143,6 +143,14 @@
       failed: "失败", paused: "已暂停", aborted: "已中止", not_recorded: "未封存"
     }[String(value || "").toLowerCase()] || "状态已更新";
   }
+  var pairedDecisionLabels = {
+    initial_champion: "初始冠军已冻结",
+    challenger_promoted: "挑战者已晋升为轨迹冠军",
+    champion_retained: "挑战者未改善，继续使用原冠军"
+  };
+  function pairedDecisionText(value) {
+    return pairedDecisionLabels[String(value || "").toLowerCase()] || "";
+  }
   function promotionDecisionTitle(event) {
     var decision = String(payloadOf(event).decision || "").toLowerCase();
     if (["approved", "accepted", "promoted", "pass", "passed", "true"].indexOf(decision) >= 0) { return "候选方案已在训练反馈搜索中保留（正式验证未开展）"; }
@@ -165,6 +173,9 @@
       var stagePayload = payloadOf(event);
       return (evolutionStageLabels[stagePayload.stage] || "进化阶段") + stageStatusText(executionStatusForRun(run, stagePayload.status));
     }
+    if (event.type === "formal.batch_compared") {
+      return pairedDecisionText(payloadOf(event).decision) || "同 cohort 冠军—挑战者比较已记录";
+    }
     if (event.type === "promotion.decided") { return promotionDecisionTitle(event); }
     if (event.type === "intervention.applied") {
       var payload = payloadOf(event);
@@ -176,6 +187,19 @@
   }
   function eventDetail(event, run) {
     var payload = payloadOf(event);
+    if (event.type === "formal.batch_compared") {
+      var championScore = Number(payload.champion_score);
+      var challengerScore = Number(payload.challenger_score);
+      var scoreDelta = Number(payload.score_delta);
+      var minimumDelta = Number(payload.minimum_score_delta);
+      return [
+        Number.isFinite(championScore) ? "冠军 " + formatNumber(championScore, 4) : "",
+        Number.isFinite(challengerScore) ? "挑战者 " + formatNumber(challengerScore, 4) : "",
+        Number.isFinite(scoreDelta) ? "差值 " + formatNumber(scoreDelta, 4) : "",
+        Number.isFinite(minimumDelta) ? "门槛 " + formatNumber(minimumDelta, 4) : "",
+        payload.reason ? "原因 " + compactTechnicalText(payload.reason) : ""
+      ].filter(Boolean).join(" · ");
+    }
     if (event.type === "evaluation.progress") {
       var completed = Number(payload.completed_samples);
       var total = Number(payload.total_samples);
@@ -1820,10 +1844,21 @@
     var value = item.value == null ? "" : " = " + executionSafeValue(item.value);
     return compactTechnicalText(name + target + value);
   }
-  function adaptiveTrajectoryDecisionText(batch) {
+  function adaptiveTrajectoryUsesPairedMode(run, lane) {
+    var configuration = run && run.configuration && typeof run.configuration === "object" ? run.configuration : {};
+    var schedule = run && run.optimization_schedule || configuration.optimization_schedule || {};
+    return String(schedule.local_evaluation_mode || lane && lane.local_evaluation_mode || "").toLowerCase() === "paired_champion_challenger"
+      || String(lane && lane.score_comparability || "").toLowerCase() === "same_batch_cohort_paired_comparison";
+  }
+  function adaptiveTrajectoryDecisionText(batch, paired) {
     var outcome = String(batch && batch.edit_outcome || "").toLowerCase();
     var decision = String(batch && batch.edit_decision || "").toLowerCase();
     var reason = String(batch && batch.edit_reason || "").toLowerCase();
+    if (paired) {
+      return pairedDecisionText(batch && batch.comparison_decision)
+        || (outcome === "rejected" ? "局部提案未通过宿主校验" : "")
+        || (String(batch && batch.status || "").toLowerCase() === "running" ? "同 cohort 对照评测中" : "等待同 cohort 对照验证");
+    }
     if (outcome === "rolled_back") { return "安全门回退"; }
     if (reason && outcome === "kept") { return "证据不足或安全门阻断，本批不改"; }
     return {
@@ -1851,6 +1886,7 @@
     table.innerHTML = rows.map(function (entry) {
       var lane = entry.lane;
       var batch = entry.batch;
+      var paired = adaptiveTrajectoryUsesPairedMode(run, lane);
       var score = batch.score == null || batch.score === "" ? NaN : Number(batch.score);
       var rawCoverage = batch.prediction_cell_coverage != null ? batch.prediction_cell_coverage : batch.coverage;
       var coverage = rawCoverage == null ? NaN : Number(rawCoverage);
@@ -1858,27 +1894,51 @@
       var originSuccessRate = batch.origin_success_rate == null ? NaN : Number(batch.origin_success_rate);
       var originSuccessText = Number.isFinite(originSuccessRate) ? formatNumber(originSuccessRate <= 1 ? originSuccessRate * 100 : originSuccessRate, 1) + "%" : "—";
       var originText = formatNumber(batch.origin_count || 0) + " origins";
-      var operations = Array.isArray(batch.operations) ? batch.operations : [];
+      var operations = paired
+        ? Array.isArray(batch.next_challenger_operations) ? batch.next_challenger_operations : []
+        : Array.isArray(batch.operations) ? batch.operations : [];
       var batchStatus = String(batch.status || "").toLowerCase();
       var editOutcome = String(batch.edit_outcome || "").toLowerCase();
       var editDecision = String(batch.edit_decision || "").toLowerCase();
-      var operationHtml = operations.length
-        ? operations.map(function (operation) { return "<span class=\"adaptive-trajectory-operation\">" + escapeHTML(adaptiveTrajectoryOperationText(operation)) + "</span>"; }).join("")
-        : editOutcome === "kept" || editDecision === "keep"
-          ? "<span>KEEP：保持当前修订</span>"
-          : batchStatus === "running" || !editOutcome && !editDecision
-            ? "<span>等待本批评测与局部决策</span>"
-            : "<span>已记录决策，未公开局部操作摘要</span>";
-      var outcome = adaptiveTrajectoryDecisionText(batch);
-      var outcomeTone = String(batch.edit_outcome || "").toLowerCase() === "applied" ? "pill-blue" : String(batch.edit_outcome || "").toLowerCase() === "rejected" ? "pill-amber" : String(batch.status || "").toLowerCase() === "running" ? "pill-blue" : "pill-neutral";
+      var operationDetails = operations.map(function (operation) { return "<span class=\"adaptive-trajectory-operation\">" + escapeHTML(adaptiveTrajectoryOperationText(operation)) + "</span>"; }).join("");
+      var operationHtml = paired
+        ? editOutcome === "rejected"
+          ? "<span>局部提案未通过宿主校验</span>" + operationDetails
+          : batch.next_challenger_revision_id
+            ? "<span>下一挑战版本已生成，等待同 cohort 对照验证</span>" + operationDetails
+            : batchStatus === "running" || !batch.comparison_decision
+              ? "<span>等待本批同 cohort 对照评测</span>"
+              : "<span>本批比较后未生成新挑战版本</span>"
+        : operations.length
+          ? operationDetails
+          : editOutcome === "kept" || editDecision === "keep"
+            ? "<span>KEEP：保持当前修订</span>"
+            : batchStatus === "running" || !editOutcome && !editDecision
+              ? "<span>等待本批评测与局部决策</span>"
+              : "<span>已记录决策，未公开局部操作摘要</span>";
+      var outcome = adaptiveTrajectoryDecisionText(batch, paired);
+      var comparisonDecision = String(batch.comparison_decision || "").toLowerCase();
+      var outcomeTone = paired
+        ? comparisonDecision === "challenger_promoted" ? "pill-green" : comparisonDecision === "initial_champion" || batchStatus === "running" ? "pill-blue" : "pill-neutral"
+        : editOutcome === "applied" ? "pill-blue" : editOutcome === "rejected" ? "pill-amber" : batchStatus === "running" ? "pill-blue" : "pill-neutral";
+      var revisionHtml = paired
+        ? "<small>原冠军</small><code title=\"" + escapeHTML(batch.champion_before_revision_id || "") + "\">" + escapeHTML(shortId(batch.champion_before_revision_id || "—")) + "</code><span>对照</span><code title=\"" + escapeHTML(batch.challenger_revision_id || "") + "\">" + escapeHTML(shortId(batch.challenger_revision_id || "—")) + "</code><small>比较后冠军</small><code title=\"" + escapeHTML(batch.champion_after_revision_id || "") + "\">" + escapeHTML(shortId(batch.champion_after_revision_id || "—")) + "</code>"
+        : "<code title=\"" + escapeHTML(batch.candidate_revision_id || "") + "\">" + escapeHTML(shortId(batch.candidate_revision_id || "—")) + "</code><span>→</span><code title=\"" + escapeHTML(batch.active_revision_id || "") + "\">" + escapeHTML(shortId(batch.active_revision_id || "—")) + "</code>";
+      var championScore = batch.champion_score == null || batch.champion_score === "" ? NaN : Number(batch.champion_score);
+      var challengerScore = batch.challenger_score == null || batch.challenger_score === "" ? NaN : Number(batch.challenger_score);
+      var scoreDelta = batch.score_delta == null || batch.score_delta === "" ? NaN : Number(batch.score_delta);
+      var minimumScoreDelta = batch.minimum_score_delta == null || batch.minimum_score_delta === "" ? NaN : Number(batch.minimum_score_delta);
+      var scoreHtml = paired
+        ? "<strong>" + escapeHTML(Number.isFinite(championScore) ? "冠军 " + formatNumber(championScore, 4) : "冠军等待评测") + " · " + escapeHTML(Number.isFinite(challengerScore) ? "挑战者 " + formatNumber(challengerScore, 4) : "挑战者等待评测") + "</strong><small>" + escapeHTML(Number.isFinite(scoreDelta) ? "差值 " + formatNumber(scoreDelta, 4) : "差值待计算") + " · " + escapeHTML(Number.isFinite(minimumScoreDelta) ? "门槛 " + formatNumber(minimumScoreDelta, 4) : "门槛待冻结") + "</small>"
+        : "<strong>得分 " + escapeHTML(Number.isFinite(score) ? formatNumber(score, 4) : "等待评测") + "</strong><small>origin 成功率 " + escapeHTML(originSuccessText) + " · 评分单元覆盖率 " + escapeHTML(coverageText) + "</small>";
       var executionCounts = [batch.succeeded_origins != null ? "成功 origins " + formatNumber(batch.succeeded_origins) : "", batch.failed_origins != null ? "失败 origins " + formatNumber(batch.failed_origins) : "", Number(batch.fallback_scoring_cells) > 0 ? "fallback cells " + formatNumber(batch.fallback_scoring_cells) : ""].filter(Boolean).join(" · ");
       return "<tr>"
-        + "<td><div class=\"adaptive-trajectory-cell\"><strong>第 " + escapeHTML(formatNumber(Number(lane.generation || 0) + 1)) + " 轮 · " + escapeHTML(shortId(lane.candidate_id)) + "</strong><small>轨迹 " + escapeHTML(formatNumber(lane.completed_batch_count || 0)) + " / " + escapeHTML(formatNumber(lane.batch_count || 0)) + "</small></div></td>"
+        + "<td><div class=\"adaptive-trajectory-cell\"><strong>第 " + escapeHTML(formatNumber(Number(lane.generation || 0) + 1)) + " 轮 · " + escapeHTML(shortId(lane.candidate_id)) + "</strong><small>轨迹 " + escapeHTML(formatNumber(lane.completed_batch_count || 0)) + " / " + escapeHTML(formatNumber(lane.batch_count || 0)) + "</small>" + (lane.strategy_label ? "<small>" + escapeHTML(lane.strategy_label) + "</small>" : "") + "</div></td>"
         + "<td><div class=\"adaptive-trajectory-cell\"><strong>微批 " + escapeHTML(formatNumber(batch.batch_index)) + " / " + escapeHTML(formatNumber(batch.batch_count || lane.batch_count || 0)) + "</strong><span>" + escapeHTML(originText) + "</span><code title=\"" + escapeHTML(batch.cohort_digest || "") + "\">cohort " + escapeHTML(shortId(batch.cohort_digest || "—")) + "</code></div></td>"
-        + "<td><div class=\"adaptive-trajectory-cell\"><code title=\"" + escapeHTML(batch.candidate_revision_id || "") + "\">" + escapeHTML(shortId(batch.candidate_revision_id || "—")) + "</code><span>→</span><code title=\"" + escapeHTML(batch.active_revision_id || "") + "\">" + escapeHTML(shortId(batch.active_revision_id || "—")) + "</code></div></td>"
-        + "<td><div class=\"adaptive-trajectory-cell\"><strong>得分 " + escapeHTML(Number.isFinite(score) ? formatNumber(score, 4) : "等待评测") + "</strong><small>origin 成功率 " + escapeHTML(originSuccessText) + " · 评分单元覆盖率 " + escapeHTML(coverageText) + "</small><small>" + escapeHTML(executionCounts || "批次执行统计待核验") + "</small><small class=\"adaptive-trajectory-warning\">不同 cohort 分数不可直接纵向归因</small></div></td>"
+        + "<td><div class=\"adaptive-trajectory-cell\">" + revisionHtml + "</div></td>"
+        + "<td><div class=\"adaptive-trajectory-cell\">" + scoreHtml + "<small>" + escapeHTML(executionCounts || "批次执行统计待核验") + "</small><small class=\"adaptive-trajectory-warning\">" + (paired ? "仅同批 cohort 冠军与挑战者可直接比较" : "不同 cohort 分数不可直接纵向归因") + "</small></div></td>"
         + "<td><div class=\"adaptive-trajectory-cell\">" + operationHtml + "</div></td>"
-        + "<td><div class=\"adaptive-trajectory-cell\"><span class=\"pill " + outcomeTone + "\">" + escapeHTML(outcome) + "</span><small>" + escapeHTML(formatDate(batch.created_at)) + "</small></div></td>"
+        + "<td><div class=\"adaptive-trajectory-cell\"><span class=\"pill " + outcomeTone + "\">" + escapeHTML(outcome) + "</span>" + (paired && batch.comparison_reason ? "<small>原因 " + escapeHTML(compactTechnicalText(batch.comparison_reason)) + "</small>" : "") + "<small>" + escapeHTML(formatDate(batch.created_at)) + "</small></div></td>"
         + "</tr>";
     }).join("");
   }
@@ -1904,22 +1964,37 @@
     var batchOrigins = Number(schedule.local_batch_origin_count || 0);
     var batchCount = formalOrigins > 0 && batchOrigins > 0 ? formalOrigins / batchOrigins : 0;
     var holdoutOrigins = Number(schedule.selection_holdout_origin_count || 0);
+    var pairedMode = String(schedule.local_evaluation_mode || "").toLowerCase() === "paired_champion_challenger";
+    var formalOriginsPerFinalist = pairedMode && batchCount > 0
+      ? batchOrigins + 2 * Math.max(0, batchCount - 1) * batchOrigins
+      : formalOrigins;
+    var formalCandidateOrigins = Number(schedule.finalist_count || 2) * formalOriginsPerFinalist;
     var fitnessProfile = configuration.fitness_profile && typeof configuration.fitness_profile === "object" ? configuration.fitness_profile : {};
     var vectorTargetCount = Array.isArray(fitnessProfile.expected_targets) ? fitnessProfile.expected_targets.length : 0;
     var vectorHorizonCount = Array.isArray(fitnessProfile.expected_horizons) ? fitnessProfile.expected_horizons.length : 0;
     var vectorCellCount = vectorTargetCount > 0 && vectorHorizonCount > 0 ? vectorTargetCount * vectorHorizonCount : null;
     var generationCandidateOrigins = formalOrigins > 0 && holdoutOrigins > 0
-      ? 4 * 64 + 2 * formalOrigins + 3 * holdoutOrigins
+      ? 4 * 64 + formalCandidateOrigins + 3 * holdoutOrigins
       : 0;
+    var generationScoringCells = generationCandidateOrigins > 0 && vectorCellCount != null ? generationCandidateOrigins * vectorCellCount : null;
     var values = [
       ["研究领域", catalogReferenceLabel("domain_packs", configuration.domain_pack_id, configuration.domain_pack_id || "未提供")],
       ["策略模型（API）", modelReferenceLabel(configuration.policy_model_id)],
       ["独立评审模型（API）", modelReferenceLabel(configuration.judge_model_id)],
       ["每轮候选", formatNumber(run.candidates_per_generation || 1) + " 个版本"],
       ["候选并发", Number(run.candidate_concurrency) > 0 ? formatNumber(run.candidate_concurrency) + " 个候选" : "历史运行按串行执行"],
-      ["入围候选轨迹", batchCount > 0 ? "Top 2 各 " + formatNumber(batchCount) + " × " + formatNumber(batchOrigins) + " origins；每批最多 " + formatNumber(schedule.max_local_edits_per_batch) + " 处改动" : "等待冻结 schedule"],
+      ["入围候选轨迹", batchCount > 0 ? pairedMode
+        ? "Top 2 各 1 个 warm-up 微批 + " + formatNumber(Math.max(0, batchCount - 1)) + " 个冠军/挑战者配对微批；两条 lane 共用 " + formatNumber(formalOrigins) + " 个 formal unique origins"
+        : "Top 2 各 " + formatNumber(batchCount) + " × " + formatNumber(batchOrigins) + " origins；每批最多 " + formatNumber(schedule.max_local_edits_per_batch) + " 处改动"
+        : "等待冻结 schedule"],
+      [pairedMode ? "正式配对上限" : "轨迹策略", pairedMode
+        ? formatNumber(formalCandidateOrigins) + " candidate-origin occurrences；同 cohort 双臂复用上述 " + formatNumber(formalOrigins) + " 个 formal unique origins，不是新的独立源数据"
+        : schedule.strategy_label || "旧版连续更新策略"],
       ["轮末同 cohort 比较", holdoutOrigins > 0 ? "F1 / F2 / 上一冠军各 " + formatNumber(holdoutOrigins) + " origins" : "等待冻结 holdout"],
-      ["单轮执行预算", generationCandidateOrigins > 0 ? formatNumber(generationCandidateOrigins) + " candidate-origins" : "等待冻结 schedule"],
+      ["单轮执行预算", generationCandidateOrigins > 0 ? pairedMode
+        ? formatNumber(generationCandidateOrigins) + " candidate-origin execution occurrences" + (generationScoringCells != null ? " = " + formatNumber(generationScoringCells) + " scoring cells" : "")
+        : formatNumber(generationCandidateOrigins) + " candidate-origins"
+        : "等待冻结 schedule"],
       ["单时点向量链", vectorCellCount != null ? formatNumber(vectorTargetCount) + " 目标 × " + formatNumber(vectorHorizonCount) + " 时距 = " + formatNumber(vectorCellCount) + " 评分单元原子提交" : "等待绑定"],
       ["逐样本并发", Number(run.sample_concurrency) > 0 ? formatNumber(run.sample_concurrency) + " 条预测时点链准入" : "历史运行未配置"],
       [nativeDshRuntime ? "DSH 上下文管理" : declaredTokenBudget ? tokenBudgetSubjectText(run) + " Token 硬预算" : "Token 账本（历史口径）", nativeDshRuntime ? "Session 压缩与输出长度由 DSH 统一管理" : Number(run.token_limit) > 0 ? formatNumber(run.token_limit) : "仅计量"],

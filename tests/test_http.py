@@ -20,7 +20,14 @@ from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
 from ecologyrsi_dsh.core.models import Evaluation, TaskManifest
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 from ecologyrsi_dsh.data.toy import ToyCropSoilWater
-from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
+from ecologyrsi_dsh.evolution.schedule import (
+    LEGACY_SCHEDULE_SCHEMA_VERSION,
+    OPTIMIZATION_PROTOCOL,
+    PREQUENTIAL_LOCAL_EVALUATION_MODE,
+    SCHEDULE_SCHEMA_VERSION,
+    PAIRED_LOCAL_EVALUATION_MODE,
+    OptimizationSchedule,
+)
 from ecologyrsi_dsh.integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 
 
@@ -140,9 +147,9 @@ class HTTPContractTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["required_unique_origins"], 1665)
         self.assertEqual(
-            payload["candidate_origin_executions_per_generation"], 1763
+            payload["candidate_origin_executions_per_generation"], 2663
         )
-        self.assertEqual(payload["scoring_cells_per_generation"], 15867)
+        self.assertEqual(payload["scoring_cells_per_generation"], 23967)
         # The synthetic toy series has no complete 1/6/24-hour origin
         # population; it remains intentionally ineligible for the strict
         # cohort planner even though toy run creation is not capacity-gated.
@@ -150,6 +157,52 @@ class HTTPContractTests(unittest.TestCase):
         self.assertEqual(payload["cohort_reuse_policy"], "cycle_after_exhaustion@1")
         self.assertGreaterEqual(payload["reused_origin_occurrences"], 0)
         self.assertFalse(payload["capacity_enforced_for_run_creation"])
+
+    def test_create_defaults_to_v2_and_explicit_legacy_schedule_round_trips(self) -> None:
+        base = {
+            "dataset_id": "generated-toy-series@1",
+            "optimization_protocol": OPTIMIZATION_PROTOCOL,
+            "rounds": 1,
+            "candidates_per_generation": 4,
+            "max_candidates": 4,
+            "auto_advance": 0,
+        }
+        status, created = self.request(
+            "/api/runs",
+            method="POST",
+            body={**base, "idempotency_key": "default-paired-schedule"},
+        )
+
+        self.assertEqual(status, 201, created)
+        default_schedule = created["projection"]["configuration"][
+            "optimization_schedule"
+        ]
+        self.assertEqual(default_schedule["schema_version"], SCHEDULE_SCHEMA_VERSION)
+        self.assertEqual(
+            default_schedule["local_evaluation_mode"],
+            PAIRED_LOCAL_EVALUATION_MODE,
+        )
+
+        legacy_schedule = OptimizationSchedule.default().to_dict()
+        legacy_schedule.update(
+            schema_version=LEGACY_SCHEDULE_SCHEMA_VERSION,
+            local_evaluation_mode=PREQUENTIAL_LOCAL_EVALUATION_MODE,
+        )
+        status, created = self.request(
+            "/api/runs",
+            method="POST",
+            body={
+                **base,
+                "optimization_schedule": legacy_schedule,
+                "idempotency_key": "explicit-legacy-schedule",
+            },
+        )
+
+        self.assertEqual(status, 201, created)
+        self.assertEqual(
+            created["projection"]["configuration"]["optimization_schedule"],
+            legacy_schedule,
+        )
 
     def _seed_test_partition_run(self, *, manifest_partition: str = "validation") -> str:
         """Write a deliberately out-of-scope run directly to the local ledger."""

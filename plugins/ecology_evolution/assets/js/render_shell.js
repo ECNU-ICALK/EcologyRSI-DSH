@@ -230,8 +230,13 @@
     var candidateConcurrency = optimizationControls.candidate_concurrency;
     var concurrency = optimizationControls.sample_concurrency;
     var budget = candidateBudgetStatus();
+    var batchCount = schedule.formal_origin_count_per_finalist / schedule.local_batch_origin_count;
+    var pairedMode = String(schedule.local_evaluation_mode || "").toLowerCase() === "paired_champion_challenger";
     var screeningCandidateOrigins = 4 * schedule.screening_origin_count;
-    var formalCandidateOrigins = schedule.finalist_count * schedule.formal_origin_count_per_finalist;
+    var formalOriginsPerFinalist = pairedMode
+      ? schedule.local_batch_origin_count + 2 * Math.max(0, batchCount - 1) * schedule.local_batch_origin_count
+      : schedule.formal_origin_count_per_finalist;
+    var formalCandidateOrigins = schedule.finalist_count * formalOriginsPerFinalist;
     var holdoutCandidateOrigins = (schedule.finalist_count + 1) * schedule.selection_holdout_origin_count;
     var generationCandidateOrigins = screeningCandidateOrigins + formalCandidateOrigins + holdoutCandidateOrigins;
     var generationScoringCells = generationCandidateOrigins * cellsPerOrigin;
@@ -242,8 +247,7 @@
     var capacityOriginText = capacity && capacity.sufficient === true && Number(capacity.reused_origin_occurrences || 0) > 0
       ? "计划 " + formatNumber(capacity.planned_origin_occurrences == null ? uniqueOrigins : capacity.planned_origin_occurrences) + " 个起点；不足部分按 occurrence 循环复用"
       : "需要 " + formatNumber(capacity && capacity.planned_origin_occurrences != null ? capacity.planned_origin_occurrences : uniqueOrigins) + " 个起点 occurrence";
-    var batchCount = schedule.formal_origin_count_per_finalist / schedule.local_batch_origin_count;
-    var maximumEdits = batchCount * schedule.max_local_edits_per_batch;
+    var maximumEdits = Math.max(0, batchCount - (pairedMode ? 1 : 0)) * schedule.max_local_edits_per_batch;
     $("#parameter-summary-pill").textContent = "每个入围候选 " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count);
     $("#agent-update-scope").textContent = "每个入围候选 " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count);
     var budgetState = $("#parameter-budget-state");
@@ -252,9 +256,11 @@
     budgetState.className = budget.budget_sufficient && capacitySufficient ? "" : "is-insufficient";
     var values = [
       ["迭代结构", formatNumber(budget.max_generations) + " 轮 · 每轮固定 4 个候选 · 同一 64 时点初筛后 Top 2"],
-      ["局部持续优化", "每个入围候选 " + formatNumber(schedule.formal_origin_count_per_finalist) + " origins = " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count) + "；最多 " + formatNumber(maximumEdits) + " 处局部改动"],
-      ["单轮执行预算", formatNumber(screeningCandidateOrigins) + " + " + formatNumber(formalCandidateOrigins) + " + " + formatNumber(holdoutCandidateOrigins) + " = " + formatNumber(generationCandidateOrigins) + " candidate-origins = " + formatNumber(generationScoringCells) + " cells"],
-      ["全程执行预算", formatNumber(runCandidateOrigins) + " candidate-origins / " + formatNumber(runScoringCells) + " cells；" + capacityOriginText],
+      ["局部持续优化", pairedMode
+        ? "两个入围候选共享并复用 " + formatNumber(schedule.formal_origin_count_per_finalist) + " 个 formal unique origins；每条 lane 包含 1 个 warm-up + " + formatNumber(Math.max(0, batchCount - 1)) + " 个同 cohort 冠军/挑战者配对微批；最多 " + formatNumber(maximumEdits) + " 处局部改动"
+        : "每个入围候选 " + formatNumber(schedule.formal_origin_count_per_finalist) + " origins = " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count) + "；最多 " + formatNumber(maximumEdits) + " 处局部改动"],
+      ["单轮执行预算", formatNumber(screeningCandidateOrigins) + " + " + formatNumber(formalCandidateOrigins) + " + " + formatNumber(holdoutCandidateOrigins) + " = " + formatNumber(generationCandidateOrigins) + (pairedMode ? " candidate-origin execution occurrences = " + formatNumber(generationScoringCells) + " scoring cells" : " candidate-origins = " + formatNumber(generationScoringCells) + " cells")],
+      ["全程执行预算", formatNumber(runCandidateOrigins) + (pairedMode ? " candidate-origin execution occurrences / " + formatNumber(runScoringCells) + " scoring cells；" : " candidate-origins / " + formatNumber(runScoringCells) + " cells；") + capacityOriginText],
       ["服务端因果容量", state.cohortCapacityLoading ? "正在核验" : capacity ? cohortCapacityLabel(capacity) : state.cohortCapacityError || "等待核验"],
       ["请求组织", "每个预测时点使用一条完整向量链 · " + formatNumber(microbatch) + " 个评分单元原子提交"],
       ["并发上限", formatNumber(candidateConcurrency) + " 个编排候选；两条 lane 共享 " + formatNumber(concurrency) + " 条 run 级预测时点链准入"],
