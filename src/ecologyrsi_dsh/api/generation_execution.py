@@ -3873,9 +3873,10 @@ def execute_generation(endpoint: Any, run_id: str) -> Any:
     if latest.run.status is not RunStatus.RUNNING:
         return latest
 
-    # Adaptive Top-2 generations have their own final barrier: both finalists
-    # must finish all 10 prequential batches, then all three arms are scored on
-    # one fresh holdout cohort before any promotion or generation advance.
+    # Adaptive Top-2 generations have their own final barrier: both finalist
+    # lanes must finish their frozen formal schedule and expose a durable final
+    # champion, then all three arms are scored on one fresh holdout cohort
+    # before any global promotion or generation advance.
     if _two_stage_screening_enabled(latest, current):
         analysis = _finalize_adaptive_generation(endpoint, run_id, batch)
         latest = endpoint.server.director.state(run_id)

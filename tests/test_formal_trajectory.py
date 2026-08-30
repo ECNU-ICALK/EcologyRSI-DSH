@@ -1109,6 +1109,347 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
                 )
             )
 
+    def test_paired_challenger_missing_strict_chain_evidence_fails_closed(self) -> None:
+        candidate_id = self.finalist.candidate_id
+        evaluate = self.evaluator.evaluate_scientific
+
+        def evaluate_without_challenger_chain(*args, scope, **kwargs):
+            bundle = evaluate(*args, scope=scope, **kwargs)
+            if (
+                scope.batch_index == 1
+                and scope.formal_batch_arm is FormalBatchArm.CHALLENGER
+            ):
+                bundle.evaluation.score = 0.6
+                bundle.evaluation.metrics["objective_score"] = 0.6
+                bundle.evaluation.metrics["targets"][0]["skill_score"] = 0.6
+                del bundle.evaluation.metrics["sample_execution"][
+                    "strict_agent_chain_pass"
+                ]
+            return bundle
+
+        patches = self._execution_patches(self._mutate_proposal())
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patch.object(
+                self.evaluator,
+                "evaluate_scientific",
+                side_effect=evaluate_without_challenger_chain,
+            ),
+        ):
+            self.assertTrue(
+                formal_trajectory.execute_next_formal_batch(
+                    self.endpoint,
+                    self.run_id,
+                    candidate_id,
+                )
+            )
+            self.assertTrue(
+                formal_trajectory.execute_next_formal_batch(
+                    self.endpoint,
+                    self.run_id,
+                    candidate_id,
+                )
+            )
+            self.assertTrue(
+                formal_trajectory.execute_next_local_edit(
+                    self.endpoint,
+                    self.run_id,
+                    candidate_id,
+                )
+            )
+            for _ in range(3):
+                self.assertTrue(
+                    formal_trajectory.execute_next_formal_batch(
+                        self.endpoint,
+                        self.run_id,
+                        candidate_id,
+                    )
+                )
+
+        comparison = self.director.state(self.run_id).batch_comparison_for(
+            candidate_id,
+            1,
+        )
+        self.assertEqual(comparison.challenger_score, 0.6)
+        self.assertFalse(comparison.safety_gate_passed)
+        self.assertEqual(
+            comparison.decision,
+            FormalBatchComparisonDecision.CHAMPION_RETAINED,
+        )
+        self.assertEqual(comparison.reason, "challenger_safety_gate_failed")
+
+    def test_resume_after_each_boundary_executes_only_missing_work(self) -> None:
+        """Every durable paired boundary is an idempotent resume point."""
+
+        class _InjectedCrash(RuntimeError):
+            pass
+
+        candidate_id = self.finalist.candidate_id
+        initial_id = self.revisions[candidate_id].revision_id
+        proposal = self._mutate_proposal()
+        authored_batch_indexes: list[int] = []
+        real_mutation = formal_trajectory._director_mutation
+
+        def author_local_edit(_endpoint, _state, _candidate, batch, _context):
+            authored_batch_indexes.append(batch.batch_index)
+            return proposal
+
+        def restart_from_ledger() -> None:
+            self.director = EvolutionDirector(
+                self.ledger,
+                FakeDSHAdapter(max_proposals=20),
+            )
+            self.endpoint.server.director = self.director
+
+        def crash_after(boundary: str, action) -> None:
+            boundary_reached = False
+
+            def commit_then_crash(endpoint, method_name, *args, **kwargs):
+                nonlocal boundary_reached
+                result = real_mutation(
+                    endpoint,
+                    method_name,
+                    *args,
+                    **kwargs,
+                )
+                if method_name == boundary:
+                    boundary_reached = True
+                    raise _InjectedCrash(boundary)
+                return result
+
+            with patch.object(
+                formal_trajectory,
+                "_director_mutation",
+                side_effect=commit_then_crash,
+            ):
+                with self.assertRaisesRegex(_InjectedCrash, boundary):
+                    action()
+            self.assertTrue(boundary_reached)
+            restart_from_ledger()
+
+        run_formal = lambda: formal_trajectory.execute_next_formal_batch(
+            self.endpoint,
+            self.run_id,
+            candidate_id,
+        )
+        run_local = lambda: formal_trajectory.execute_next_local_edit(
+            self.endpoint,
+            self.run_id,
+            candidate_id,
+        )
+        execution_patches = (
+            patch.object(
+                formal_trajectory,
+                "_phase_task_manifest",
+                return_value=object(),
+            ),
+            patch.object(
+                formal_trajectory,
+                "_revision_evaluation_inputs",
+                side_effect=self._revision_inputs,
+            ),
+            patch.object(
+                formal_trajectory,
+                "_ScopedEvaluationCallbacks",
+                _NoopScopedCallbacks,
+            ),
+            patch.object(
+                formal_trajectory,
+                "_local_edit_context",
+                side_effect=self._local_context,
+            ),
+            patch.object(
+                formal_trajectory,
+                "_local_edit_proposal",
+                side_effect=author_local_edit,
+            ),
+        )
+
+        with (
+            execution_patches[0],
+            execution_patches[1],
+            execution_patches[2],
+            execution_patches[3],
+            execution_patches[4],
+        ):
+            # Warmup evaluation and comparison both survive a lost response.
+            crash_after("record_formal_batch_evaluation", run_formal)
+            self.assertEqual(
+                self.evaluator.calls,
+                [(0, FormalBatchArm.CHAMPION.value, initial_id)],
+            )
+            crash_after("record_formal_batch_comparison", run_formal)
+            initial_comparison = self.director.state(
+                self.run_id
+            ).batch_comparison_for(candidate_id, 0)
+            initial_comparison_payload = initial_comparison.to_dict()
+            self.assertFalse(run_formal())
+            self.assertEqual(
+                self.director.state(self.run_id)
+                .batch_comparison_for(candidate_id, 0)
+                .to_dict(),
+                initial_comparison_payload,
+            )
+            self.assertEqual(len(self.evaluator.calls), 1)
+
+            # Proposal, child, decision, and activation are separate durable
+            # points. Each retry must consume the recorded work instead of
+            # asking the editor again or creating another child identity.
+            crash_after("record_local_edit_proposal", run_local)
+            self.assertEqual(authored_batch_indexes, [0])
+            self.assertIsNotNone(
+                self.director.state(self.run_id).local_edit_proposal_for(
+                    candidate_id,
+                    0,
+                )
+            )
+            crash_after("create_candidate_revision", run_local)
+            first_child_id = f"revision:{candidate_id}:batch:1"
+            first_child_payload = self.director.state(self.run_id).revision(
+                first_child_id
+            ).identity_dict()
+            self.assertEqual(authored_batch_indexes, [0])
+            crash_after("decide_local_edit", run_local)
+            self.assertEqual(
+                self.director.state(self.run_id)
+                .revision(first_child_id)
+                .identity_dict(),
+                first_child_payload,
+            )
+            self.assertEqual(authored_batch_indexes, [0])
+            crash_after("advance_trajectory_revision", run_local)
+            first_activation = self.director.state(
+                self.run_id
+            ).revision_activation_for(candidate_id, 0)
+            self.assertEqual(first_activation.to_revision_id, first_child_id)
+            self.assertFalse(run_local())
+            self.assertEqual(authored_batch_indexes, [0])
+
+            # The next same-cohort pair independently resumes after each arm,
+            # then preserves the exact comparison when its response is lost.
+            crash_after("record_formal_batch_evaluation", run_formal)
+            self.assertEqual(
+                self.evaluator.calls[-1],
+                (1, FormalBatchArm.CHAMPION.value, initial_id),
+            )
+            crash_after("record_formal_batch_evaluation", run_formal)
+            self.assertEqual(
+                self.evaluator.calls[-1],
+                (1, FormalBatchArm.CHALLENGER.value, first_child_id),
+            )
+            crash_after("record_formal_batch_comparison", run_formal)
+            retained_comparison = self.director.state(
+                self.run_id
+            ).batch_comparison_for(candidate_id, 1)
+            retained_comparison_payload = retained_comparison.to_dict()
+            self.assertFalse(run_formal())
+            self.assertEqual(
+                self.director.state(self.run_id)
+                .batch_comparison_for(candidate_id, 1)
+                .to_dict(),
+                retained_comparison_payload,
+            )
+            self.assertEqual(len(self.evaluator.calls), 3)
+
+            self.assertTrue(run_local())
+            second_child_id = f"revision:{candidate_id}:batch:2"
+            second_child_payload = self.director.state(self.run_id).revision(
+                second_child_id
+            ).identity_dict()
+            self.assertEqual(authored_batch_indexes, [0, 1])
+
+            # The final comparison may complete the trajectory, but schema v2
+            # must never author or activate an unvalidated post-final child.
+            self.assertTrue(run_formal())
+            self.assertTrue(run_formal())
+            crash_after("complete_formal_trajectory", run_formal)
+            completed_state = self.director.state(self.run_id)
+            final_comparison = completed_state.batch_comparison_for(
+                candidate_id,
+                2,
+            )
+            final_comparison_payload = final_comparison.to_dict()
+            self.assertIs(
+                completed_state.trajectory_for(candidate_id).status,
+                TrajectoryStatus.COMPLETED,
+            )
+            self.assertEqual(
+                completed_state.trajectory_for(candidate_id).final_revision_id,
+                second_child_id,
+            )
+            self.assertFalse(run_formal())
+            self.assertFalse(run_local())
+
+        final_state = self.director.state(self.run_id)
+        self.assertEqual(
+            self.evaluator.calls,
+            [
+                (0, FormalBatchArm.CHAMPION.value, initial_id),
+                (1, FormalBatchArm.CHAMPION.value, initial_id),
+                (1, FormalBatchArm.CHALLENGER.value, first_child_id),
+                (2, FormalBatchArm.CHAMPION.value, initial_id),
+                (2, FormalBatchArm.CHALLENGER.value, second_child_id),
+            ],
+        )
+        self.assertEqual(authored_batch_indexes, [0, 1])
+        self.assertEqual(
+            final_state.revision(second_child_id).identity_dict(),
+            second_child_payload,
+        )
+        self.assertEqual(
+            final_state.batch_comparison_for(candidate_id, 2).to_dict(),
+            final_comparison_payload,
+        )
+        self.assertEqual(
+            [
+                item.comparison_id
+                for item in final_state.formal_batch_comparisons
+                if item.candidate_id == candidate_id
+            ],
+            [
+                f"comparison:{candidate_id}:0",
+                f"comparison:{candidate_id}:1",
+                f"comparison:{candidate_id}:2",
+            ],
+        )
+        self.assertIsNone(final_state.local_edit_proposal_for(candidate_id, 2))
+        self.assertIsNone(final_state.revision_activation_for(candidate_id, 2))
+        self.assertFalse(
+            any(
+                revision.candidate_id == candidate_id
+                and revision.source_batch_index == 2
+                for revision in final_state.candidate_revisions
+            )
+        )
+        candidate_events = self.ledger.events(self.run_id)
+        self.assertEqual(
+            sum(
+                event.kind == "CandidateRevisionCreated"
+                and event.payload["revision"]["revision_id"] == first_child_id
+                for event in candidate_events
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                event.kind == "CandidateRevisionCreated"
+                and event.payload["revision"]["revision_id"] == second_child_id
+                for event in candidate_events
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                event.kind == "FormalTrajectoryCompleted"
+                for event in candidate_events
+            ),
+            1,
+        )
+
     def test_same_revision_pair_reuses_one_evaluation(self) -> None:
         candidate_id = self.finalist.candidate_id
         keep = LocalEditProposal(

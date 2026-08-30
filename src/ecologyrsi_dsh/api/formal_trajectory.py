@@ -24,6 +24,7 @@ from ..evolution.genome import EcologyEvolutionPluginGenome, deep_thaw_json
 from ..evolution.champion_challenger import (
     LOCAL_MINIMUM_SCORE_DELTA,
     assess_local_challenger,
+    local_challenger_safety_reason,
 )
 from ..evolution.local_edits import (
     LocalEditContext,
@@ -344,7 +345,7 @@ def _record_initial_champion(
     run_id: str,
     evaluation: BatchEvaluation,
 ) -> FormalBatchComparison:
-    safety_passed = _prequential_safety_reason(evaluation.metrics) is None
+    safety_passed = local_challenger_safety_reason(evaluation.metrics) is None
     assessment = assess_local_challenger(
         evaluation,
         evaluation,
@@ -391,7 +392,7 @@ def _record_challenger_comparison(
     champion: BatchEvaluation,
     challenger: BatchEvaluation,
 ) -> FormalBatchComparison:
-    safety_passed = _prequential_safety_reason(challenger.metrics) is None
+    safety_passed = local_challenger_safety_reason(challenger.metrics) is None
     assessment = assess_local_challenger(
         champion,
         challenger,

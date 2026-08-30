@@ -13,6 +13,9 @@ from ..evolution.analysis import (
     GenerationBatch,
     sample_update_windows_enabled,
 )
+from ..evolution.champion_challenger import (
+    validate_formal_batch_comparison,
+)
 from ..evolution.schedule import (
     OPTIMIZATION_PROTOCOL,
     PAIRED_LOCAL_EVALUATION_MODE,
@@ -1754,6 +1757,8 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
     ] = {}
     local_edit_proposals: dict[tuple[str, int], dict[str, Any]] = {}
     local_edit_outcomes: dict[tuple[str, int], dict[str, Any]] = {}
+    local_edit_proposal_events: dict[tuple[str, int], Event] = {}
+    local_edit_outcome_events: dict[tuple[str, int], Event] = {}
     trajectory_revision_activations: dict[
         tuple[str, int], TrajectoryRevisionActivation
     ] = {}
@@ -3133,6 +3138,72 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     parent = candidate_revisions.get(revision.parent_revision_id)
                     if parent is None or parent.candidate_id != revision.candidate_id:
                         raise ValueError("revision parent is missing or cross-candidate")
+                    schedule = OptimizationSchedule.from_dict(
+                        task.metadata["optimization_schedule"]
+                    )
+                    if (
+                        schedule.local_evaluation_mode
+                        == PAIRED_LOCAL_EVALUATION_MODE
+                    ):
+                        source_batch_index = revision.source_batch_index
+                        assert source_batch_index is not None
+                        trajectory = formal_trajectories.get(
+                            revision.candidate_id
+                        )
+                        if (
+                            trajectory is None
+                            or trajectory.status is not TrajectoryStatus.RUNNING
+                        ):
+                            raise ValueError(
+                                "paired local edit child requires a running trajectory"
+                            )
+                        if source_batch_index >= trajectory.batch_count - 1:
+                            raise ValueError(
+                                "paired final batch cannot create a local edit child"
+                            )
+                        comparison = formal_batch_comparisons.get(
+                            (revision.candidate_id, source_batch_index)
+                        )
+                        proposal = local_edit_proposals.get(
+                            (revision.candidate_id, source_batch_index)
+                        )
+                        if comparison is None or proposal is None:
+                            raise ValueError(
+                                "paired local edit child requires comparison and proposal"
+                            )
+                        if (
+                            revision.parent_revision_id
+                            != comparison.champion_after_revision_id
+                        ):
+                            raise ValueError(
+                                "paired local edit child must descend from selected champion"
+                            )
+                        if (
+                            proposal.get("decision")
+                            != LocalEditProposalDecision.MUTATE.value
+                        ):
+                            raise ValueError(
+                                "paired local edit child requires a mutate proposal"
+                            )
+                        local_key = (
+                            revision.candidate_id,
+                            source_batch_index,
+                        )
+                        if (
+                            local_key in local_edit_outcomes
+                            or local_key in trajectory_revision_activations
+                        ):
+                            raise ValueError(
+                                "paired local edit child must be created before local decision"
+                            )
+                        if any(
+                            item.candidate_id == revision.candidate_id
+                            and item.source_batch_index == source_batch_index
+                            for item in candidate_revisions.values()
+                        ):
+                            raise ValueError(
+                                "paired local edit batch can create only one challenger"
+                            )
                 candidate_revisions[revision.revision_id] = revision
         elif event.kind == "FormalTrajectoryStarted":
             if set(payload) != {"trajectory"}:
@@ -3320,6 +3391,11 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     "formal batch comparison evaluation digest, score, "
                     "revision, or cohort is invalid"
                 )
+            validate_formal_batch_comparison(
+                comparison,
+                champion_evaluation,
+                challenger_evaluation,
+            )
             existing = formal_batch_comparisons.get(key)
             if existing is not None and existing.to_dict() != comparison.to_dict():
                 raise ValueError("conflicting formal batch comparison")
@@ -3353,10 +3429,31 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             ):
                 raise ValueError("local edit proposal scope is invalid")
             key = (candidate_id, batch_index)
+            existing_event = local_edit_proposal_events.get(key)
+            if existing_event is not None:
+                if canonical_json(existing_event.payload) == canonical_json(payload):
+                    continue
+                raise ValueError("conflicting local edit proposal")
             evaluation = replay_batch_evaluation_for(candidate_id, batch_index)
             schedule = OptimizationSchedule.from_dict(
                 task.metadata["optimization_schedule"]
             )
+            if (
+                schedule.local_evaluation_mode
+                == PAIRED_LOCAL_EVALUATION_MODE
+            ):
+                trajectory = formal_trajectories.get(candidate_id)
+                if (
+                    trajectory is None
+                    or trajectory.status is not TrajectoryStatus.RUNNING
+                ):
+                    raise ValueError(
+                        "paired local edit requires a running trajectory"
+                    )
+                if batch_index >= trajectory.batch_count - 1:
+                    raise ValueError(
+                        "paired final batch cannot record a local edit proposal"
+                    )
             if "proposal" in payload:
                 from ..evolution.local_edits import LocalEditProposal
 
@@ -3375,7 +3472,9 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 )
                 or payload["evidence_scope_digest"] != evaluation.scope.scope_key
                 or not isinstance(operations, list)
+                or len(operations) > schedule.max_local_edits_per_batch
                 or (decision is LocalEditProposalDecision.KEEP and operations)
+                or (decision is LocalEditProposalDecision.MUTATE and not operations)
             ):
                 raise ValueError("local edit proposal evidence is invalid")
             if "safety_reason" in payload and (
@@ -3410,6 +3509,7 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             if existing is not None and canonical_json(existing) != canonical_json(normalized):
                 raise ValueError("conflicting local edit proposal")
             local_edit_proposals.setdefault(key, normalized)
+            local_edit_proposal_events.setdefault(key, event)
         elif event.kind == "LocalEditDecided":
             fields = {
                 "proposal_id",
@@ -3421,9 +3521,87 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             if set(payload) not in (fields, fields | {"reason"}):
                 raise ValueError("local edit outcome payload is invalid")
             key = (payload["candidate_id"], payload["batch_index"])
+            existing_event = local_edit_outcome_events.get(key)
+            if existing_event is not None:
+                if canonical_json(existing_event.payload) == canonical_json(payload):
+                    continue
+                raise ValueError("conflicting local edit outcome")
             proposal = local_edit_proposals.get(key)
             outcome = LocalEditOutcome(payload["outcome"])
             revision = candidate_revisions.get(payload["active_revision_id"])
+            schedule = OptimizationSchedule.from_dict(
+                task.metadata["optimization_schedule"]
+            )
+            if (
+                schedule.local_evaluation_mode
+                == PAIRED_LOCAL_EVALUATION_MODE
+            ):
+                trajectory = formal_trajectories.get(payload["candidate_id"])
+                if (
+                    trajectory is None
+                    or trajectory.status is not TrajectoryStatus.RUNNING
+                ):
+                    raise ValueError(
+                        "paired local edit requires a running trajectory"
+                    )
+                if payload["batch_index"] >= trajectory.batch_count - 1:
+                    raise ValueError(
+                        "paired final batch cannot record a local edit decision"
+                    )
+                comparison = formal_batch_comparisons.get(key)
+                if comparison is None:
+                    raise ValueError(
+                        "paired local edit decision requires a comparison"
+                    )
+                proposal_decision = (
+                    proposal.get("decision") if proposal is not None else None
+                )
+                if not (
+                    (
+                        proposal_decision
+                        == LocalEditProposalDecision.KEEP.value
+                        and outcome is LocalEditOutcome.KEPT
+                    )
+                    or (
+                        proposal_decision
+                        == LocalEditProposalDecision.MUTATE.value
+                        and outcome
+                        in (LocalEditOutcome.APPLIED, LocalEditOutcome.REJECTED)
+                    )
+                ):
+                    raise ValueError(
+                        "paired local edit outcome does not match proposal decision"
+                    )
+                selected_revision_id = comparison.champion_after_revision_id
+                children = [
+                    item
+                    for item in candidate_revisions.values()
+                    if item.candidate_id == payload["candidate_id"]
+                    and item.source_batch_index == payload["batch_index"]
+                ]
+                if outcome is LocalEditOutcome.APPLIED:
+                    if (
+                        proposal is None
+                        or proposal.get("decision")
+                        != LocalEditProposalDecision.MUTATE.value
+                        or revision is None
+                        or len(children) != 1
+                        or revision.revision_id != children[0].revision_id
+                        or revision.parent_revision_id != selected_revision_id
+                    ):
+                        raise ValueError(
+                            "paired applied edit must create one child from selected champion"
+                        )
+                elif (
+                    outcome is LocalEditOutcome.ROLLED_BACK
+                    or revision is None
+                    or revision.revision_id != selected_revision_id
+                    or children
+                ):
+                    raise ValueError(
+                        "paired retained edit must keep the selected champion "
+                        "without a child"
+                    )
             if (
                 proposal is None
                 or proposal["proposal_id"] != payload["proposal_id"]
@@ -3449,6 +3627,7 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             if existing is not None and canonical_json(existing) != canonical_json(normalized):
                 raise ValueError("conflicting local edit outcome")
             local_edit_outcomes.setdefault(key, normalized)
+            local_edit_outcome_events.setdefault(key, event)
         elif event.kind == "TrajectoryRevisionAdvanced":
             if set(payload) != {"activation"}:
                 raise ValueError("TrajectoryRevisionAdvanced payload is invalid")
@@ -3461,6 +3640,22 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 task.metadata["optimization_schedule"]
             )
             comparison = formal_batch_comparisons.get(key)
+            trajectory = formal_trajectories.get(activation.candidate_id)
+            if (
+                schedule.local_evaluation_mode
+                == PAIRED_LOCAL_EVALUATION_MODE
+            ):
+                if (
+                    trajectory is None
+                    or trajectory.status is not TrajectoryStatus.RUNNING
+                ):
+                    raise ValueError(
+                        "paired revision activation requires a running trajectory"
+                    )
+                if activation.batch_index >= trajectory.batch_count - 1:
+                    raise ValueError(
+                        "paired final batch cannot activate a local edit revision"
+                    )
             source_revision_id = (
                 comparison.champion_after_revision_id
                 if schedule.local_evaluation_mode
@@ -3541,14 +3736,104 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     (candidate_id, index)
                     for index in range(trajectory.batch_count - 1)
                 }
+                candidate_batches = {
+                    key for key in formal_batches if key[0] == candidate_id
+                }
+                candidate_comparisons = {
+                    key
+                    for key in formal_batch_comparisons
+                    if key[0] == candidate_id
+                }
+                candidate_proposals = {
+                    key for key in local_edit_proposals if key[0] == candidate_id
+                }
+                candidate_outcomes = {
+                    key for key in local_edit_outcomes if key[0] == candidate_id
+                }
+                candidate_activations = {
+                    key
+                    for key in trajectory_revision_activations
+                    if key[0] == candidate_id
+                }
+                local_bindings_are_exact = True
+                for key in local_required:
+                    comparison = formal_batch_comparisons.get(key)
+                    proposal = local_edit_proposals.get(key)
+                    outcome = local_edit_outcomes.get(key)
+                    activation = trajectory_revision_activations.get(key)
+                    children = [
+                        item
+                        for item in candidate_revisions.values()
+                        if item.candidate_id == candidate_id
+                        and item.source_batch_index == key[1]
+                    ]
+                    if (
+                        comparison is None
+                        or proposal is None
+                        or outcome is None
+                        or activation is None
+                    ):
+                        local_bindings_are_exact = False
+                        break
+                    selected_revision_id = (
+                        comparison.champion_after_revision_id
+                    )
+                    if outcome.get("outcome") == LocalEditOutcome.APPLIED.value:
+                        local_bindings_are_exact = (
+                            proposal.get("decision")
+                            == LocalEditProposalDecision.MUTATE.value
+                            and len(children) == 1
+                            and children[0].parent_revision_id
+                            == selected_revision_id
+                            and outcome.get("active_revision_id")
+                            == children[0].revision_id
+                            and activation.to_revision_id
+                            == children[0].revision_id
+                            and activation.reason
+                            is RevisionAdvanceReason.LOCAL_EDIT_APPLIED
+                        )
+                    else:
+                        expected = {
+                            LocalEditOutcome.KEPT.value: (
+                                LocalEditProposalDecision.KEEP.value,
+                                RevisionAdvanceReason.KEPT
+                            ),
+                            LocalEditOutcome.REJECTED.value: (
+                                LocalEditProposalDecision.MUTATE.value,
+                                RevisionAdvanceReason.LOCAL_EDIT_REJECTED,
+                            ),
+                        }.get(outcome.get("outcome"))
+                        local_bindings_are_exact = (
+                            not children
+                            and expected is not None
+                            and proposal.get("decision") == expected[0]
+                            and outcome.get("active_revision_id")
+                            == selected_revision_id
+                            and activation.to_revision_id
+                            == selected_revision_id
+                            and activation.reason is expected[1]
+                        )
+                    if not local_bindings_are_exact:
+                        break
+                has_post_final_child = any(
+                    item.candidate_id == candidate_id
+                    and item.source_batch_index is not None
+                    and item.source_batch_index >= trajectory.batch_count - 1
+                    for item in candidate_revisions.values()
+                )
                 if not (
-                    required <= set(formal_batches)
-                    and required <= set(formal_batch_comparisons)
-                    and local_required <= set(local_edit_proposals)
-                    and local_required <= set(local_edit_outcomes)
-                    and local_required <= set(trajectory_revision_activations)
+                    required == candidate_batches
+                    and required == candidate_comparisons
+                    and local_required == candidate_proposals
+                    and local_required == candidate_outcomes
+                    and local_required == candidate_activations
+                    and local_bindings_are_exact
+                    and not has_post_final_child
                 ):
-                    raise ValueError("formal trajectory has incomplete paired batches")
+                    raise ValueError(
+                        "formal trajectory has incomplete paired batches or invalid "
+                        "child/outcome binding"
+                    )
                 final_revision_id = formal_batch_comparisons[
                     (candidate_id, trajectory.batch_count - 1)
                 ].champion_after_revision_id
@@ -3600,6 +3885,22 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 revision = candidate_revisions.get(binding["candidate_revision_id"])
                 if revision is None or revision.candidate_id != binding["candidate_id"]:
                     raise ValueError("holdout arm revision binding is invalid")
+            completed_by_candidate = {
+                item.candidate_id: item for item in completed
+            }
+            for arm in (HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2):
+                binding = holdout.arm_bindings[arm.value]
+                trajectory = completed_by_candidate.get(
+                    binding["candidate_id"]
+                )
+                if (
+                    trajectory is None
+                    or binding["candidate_revision_id"]
+                    != trajectory.final_revision_id
+                ):
+                    raise ValueError(
+                        "holdout finalist arm must bind trajectory final revision"
+                    )
             existing = generation_holdouts.get(holdout.generation)
             if existing is not None and existing.to_dict() != holdout.to_dict():
                 raise ValueError("conflicting generation holdout")

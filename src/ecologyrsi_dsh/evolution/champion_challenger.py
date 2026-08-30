@@ -11,6 +11,7 @@ from ..core.trajectory import (
     BatchEvaluation,
     EvaluationPhase,
     FormalBatchArm,
+    FormalBatchComparison,
     FormalBatchComparisonDecision,
 )
 from .promotion import V2_MINIMUM_SCORE_DELTA
@@ -18,6 +19,7 @@ from .promotion import V2_MINIMUM_SCORE_DELTA
 
 LOCAL_MINIMUM_SCORE_DELTA = V2_MINIMUM_SCORE_DELTA
 LOCAL_CELL_REGRESSION_TOLERANCE = 1e-12
+
 
 @dataclass(frozen=True, slots=True)
 class LocalChallengerAssessment:
@@ -51,6 +53,95 @@ def _finite_number(value: Any) -> float | None:
         return None
     number = float(value)
     return number if math.isfinite(number) else None
+
+
+def local_challenger_safety_reason(metrics: Mapping[str, Any]) -> str | None:
+    """Derive the v2 challenger safety result from durable batch metrics."""
+
+    if not isinstance(metrics, Mapping):
+        return "batch_metrics_invalid"
+    if "constraint_violations" not in metrics:
+        return "constraint_guardrail_missing"
+    violations = metrics["constraint_violations"]
+    if isinstance(violations, bool) or not isinstance(violations, (int, float)):
+        return "constraint_guardrail_invalid"
+    if not math.isfinite(float(violations)) or float(violations) < 0:
+        return "constraint_guardrail_invalid"
+    if violations > 0:
+        return "constraint_guardrail_failed"
+
+    coverage = metrics.get("sample_execution_coverage_pass")
+    sample = metrics.get("sample_execution")
+    sample_coverage = (
+        sample.get("coverage_pass") if isinstance(sample, Mapping) else None
+    )
+    failures = sample.get("failure_counts") if isinstance(sample, Mapping) else None
+    rejected = (
+        failures.get("constraint_rejected", 0)
+        if isinstance(failures, Mapping)
+        else 0
+    )
+    constraint_rejected = bool(
+        not isinstance(rejected, bool)
+        and isinstance(rejected, (int, float))
+        and math.isfinite(float(rejected))
+        and rejected > 0
+    )
+    if isinstance(sample, Mapping):
+        strict_chain_pass = sample.get("strict_agent_chain_pass")
+        if strict_chain_pass is not True:
+            if constraint_rejected:
+                return "sample_constraint_guardrail_failed"
+            if strict_chain_pass is False:
+                return "strict_origin_chain_guardrail_failed"
+            if strict_chain_pass is None:
+                return "strict_origin_chain_guardrail_missing"
+            return "strict_origin_chain_guardrail_invalid"
+    if coverage is not None and not isinstance(coverage, bool):
+        return "coverage_guardrail_invalid"
+    if sample_coverage is not None and not isinstance(sample_coverage, bool):
+        return "coverage_guardrail_invalid"
+    if coverage is False or sample_coverage is False:
+        if constraint_rejected:
+            return "sample_constraint_guardrail_failed"
+        return "coverage_guardrail_failed"
+    if coverage is not True and sample_coverage is not True:
+        return "coverage_guardrail_missing"
+    if not isinstance(sample, Mapping):
+        return "strict_origin_chain_guardrail_missing"
+
+    required_counts = (
+        "attempted_origin_samples",
+        "succeeded_origin_samples",
+        "minimum_coverage",
+    )
+    if any(name not in sample for name in required_counts):
+        return "coverage_guardrail_missing"
+    attempted = sample["attempted_origin_samples"]
+    succeeded = sample["succeeded_origin_samples"]
+    minimum = sample["minimum_coverage"]
+    if (
+        isinstance(attempted, bool)
+        or not isinstance(attempted, (int, float))
+        or not math.isfinite(float(attempted))
+        or attempted <= 0
+        or isinstance(succeeded, bool)
+        or not isinstance(succeeded, (int, float))
+        or not math.isfinite(float(succeeded))
+        or not 0 <= float(succeeded) <= float(attempted)
+        or isinstance(minimum, bool)
+        or not isinstance(minimum, (int, float))
+        or not math.isfinite(float(minimum))
+        or not 0 <= float(minimum) <= 1
+    ):
+        return "coverage_guardrail_invalid"
+    if float(succeeded) / float(attempted) < float(minimum):
+        return (
+            "sample_constraint_guardrail_failed"
+            if constraint_rejected
+            else "origin_coverage_guardrail_failed"
+        )
+    return None
 
 
 def _metric_contract(evaluation: BatchEvaluation) -> dict[str, Any] | None:
@@ -258,9 +349,74 @@ def assess_local_challenger(
     )
 
 
+def validate_formal_batch_comparison(
+    comparison: FormalBatchComparison,
+    champion: BatchEvaluation,
+    challenger: BatchEvaluation,
+) -> None:
+    """Reject comparison fields that differ from Host-derived evidence."""
+
+    if not isinstance(comparison, FormalBatchComparison):
+        raise TypeError("comparison must be a FormalBatchComparison")
+    safety_gate_passed = (
+        local_challenger_safety_reason(challenger.metrics) is None
+    )
+    assessment = assess_local_challenger(
+        champion,
+        challenger,
+        challenger_safety_gate_passed=safety_gate_passed,
+    )
+    if comparison.batch_index == 0:
+        expected_decision = FormalBatchComparisonDecision.INITIAL_CHAMPION
+        expected_champion_after = champion.scope.candidate_revision_id
+        expected_reason = "initial_champion"
+    else:
+        expected_decision = assessment.decision
+        expected_champion_after = assessment.champion_after_revision_id
+        expected_reason = assessment.reason
+
+    invalid_fields: list[str] = []
+    if not math.isclose(
+        comparison.score_delta,
+        assessment.score_delta,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        invalid_fields.append("score_delta")
+    if comparison.comparison_contract_digest != assessment.comparison_contract_digest:
+        invalid_fields.append("comparison_contract_digest")
+    if comparison.safety_gate_passed is not assessment.safety_gate_passed:
+        invalid_fields.append("safety_gate_passed")
+    if (
+        comparison.cell_regression_gate_passed
+        is not assessment.cell_regression_gate_passed
+    ):
+        invalid_fields.append("cell_regression_gate_passed")
+    if not math.isclose(
+        comparison.minimum_score_delta,
+        LOCAL_MINIMUM_SCORE_DELTA,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        invalid_fields.append("minimum_score_delta")
+    if comparison.decision is not expected_decision:
+        invalid_fields.append("decision")
+    if comparison.champion_after_revision_id != expected_champion_after:
+        invalid_fields.append("champion_after_revision_id")
+    if comparison.reason != expected_reason:
+        invalid_fields.append("reason")
+    if invalid_fields:
+        raise ValueError(
+            "formal batch comparison host-owned assessment is invalid: "
+            + ", ".join(invalid_fields)
+        )
+
+
 __all__ = [
     "LOCAL_CELL_REGRESSION_TOLERANCE",
     "LOCAL_MINIMUM_SCORE_DELTA",
     "LocalChallengerAssessment",
     "assess_local_challenger",
+    "local_challenger_safety_reason",
+    "validate_formal_batch_comparison",
 ]

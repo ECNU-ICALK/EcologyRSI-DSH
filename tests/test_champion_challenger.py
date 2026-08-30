@@ -14,6 +14,7 @@ from ecologyrsi_dsh.evolution.champion_challenger import (
     LOCAL_CELL_REGRESSION_TOLERANCE,
     LOCAL_MINIMUM_SCORE_DELTA,
     assess_local_challenger,
+    local_challenger_safety_reason,
 )
 
 
@@ -74,6 +75,60 @@ def _evaluation(
 
 
 class ChampionChallengerSelectionTests(unittest.TestCase):
+    def test_v2_safety_requires_explicit_valid_execution_counts(self) -> None:
+        valid = {
+            "constraint_violations": 0,
+            "sample_execution_coverage_pass": True,
+            "sample_execution": {
+                "attempted_origin_samples": 50,
+                "succeeded_origin_samples": 50,
+                "minimum_coverage": 0.95,
+                "coverage_pass": True,
+                "strict_agent_chain_pass": True,
+            },
+        }
+        self.assertIsNone(local_challenger_safety_reason(valid))
+
+        invalid_cases = {
+            "missing_constraint_count": {
+                key: value
+                for key, value in valid.items()
+                if key != "constraint_violations"
+            },
+            "missing_attempted_count": {
+                **valid,
+                "sample_execution": {
+                    key: value
+                    for key, value in valid["sample_execution"].items()
+                    if key != "attempted_origin_samples"
+                },
+            },
+            "zero_attempted_count": {
+                **valid,
+                "sample_execution": {
+                    **valid["sample_execution"],
+                    "attempted_origin_samples": 0,
+                },
+            },
+            "succeeded_exceeds_attempted": {
+                **valid,
+                "sample_execution": {
+                    **valid["sample_execution"],
+                    "succeeded_origin_samples": 51,
+                },
+            },
+            "minimum_coverage_out_of_range": {
+                **valid,
+                "sample_execution": {
+                    **valid["sample_execution"],
+                    "minimum_coverage": 1.1,
+                },
+            },
+        }
+        for name, metrics in invalid_cases.items():
+            with self.subTest(name=name):
+                self.assertIsNotNone(local_challenger_safety_reason(metrics))
+
     def test_negative_challenger_can_replace_more_negative_champion(self) -> None:
         champion = _evaluation(
             arm=FormalBatchArm.CHAMPION,

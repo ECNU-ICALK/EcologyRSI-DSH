@@ -16,6 +16,9 @@ from ..evolution.analysis import (
     evaluation_cohort_digest,
     sample_update_windows_enabled,
 )
+from ..evolution.champion_challenger import (
+    validate_formal_batch_comparison,
+)
 from ..evolution.execution_plan import derive_execution_plan
 from ..evolution.genome import (
     FrozenRunInitialization,
@@ -2307,45 +2310,124 @@ class EvolutionDirector:
     ) -> CandidateRevision:
         if not isinstance(revision, CandidateRevision):
             raise TypeError("revision must be a CandidateRevision")
-        state = self.state(run_id)
-        self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
-        candidate = state.candidate(revision.candidate_id)
-        if (
-            revision.run_id != run_id
-            or revision.generation != candidate.generation
-        ):
-            raise ValueError("candidate revision ownership is invalid")
-        try:
-            existing = state.revision(revision.revision_id)
-        except KeyError:
-            existing = None
-        if existing is not None:
-            # ``created_at`` describes the successful durable insert, not the
-            # logical revision identity.  A process can stop after committing
-            # CandidateRevisionCreated but before the caller observes success;
-            # reconstructing that deterministic child on resume necessarily
-            # gives it a new local timestamp.  Preserve the original timestamp
-            # while still rejecting identity or lifecycle-status drift.
+        last_conflict: ConcurrentRunMutationError | None = None
+        for _ in range(_STATE_TRANSITION_RETRY_LIMIT):
+            state = self.state(run_id)
+            self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
+            candidate = state.candidate(revision.candidate_id)
             if (
-                existing.identity_dict() != revision.identity_dict()
-                or existing.status is not revision.status
+                revision.run_id != run_id
+                or revision.generation != candidate.generation
             ):
-                raise ValueError("revision_id already belongs to another revision")
-            return existing
-        if revision.parent_revision_id is None:
-            if state.initial_revision_for(revision.candidate_id) is not None:
-                raise ValueError("candidate already has an initial revision")
-        else:
-            parent = state.revision(revision.parent_revision_id)
-            if parent.candidate_id != revision.candidate_id:
-                raise ValueError("revision parent belongs to another candidate")
-        self.ledger.append(
-            run_id,
-            "CandidateRevisionCreated",
-            {"revision": revision.to_dict()},
-            event_id=f"{run_id}:revision:{revision.revision_id}",
-        )
-        return revision
+                raise ValueError("candidate revision ownership is invalid")
+            try:
+                existing = state.revision(revision.revision_id)
+            except KeyError:
+                existing = None
+            if existing is not None:
+                # ``created_at`` describes the successful durable insert, not the
+                # logical revision identity.  A process can stop after committing
+                # CandidateRevisionCreated but before the caller observes success;
+                # reconstructing that deterministic child on resume necessarily
+                # gives it a new local timestamp.  Preserve the original timestamp
+                # while still rejecting identity or lifecycle-status drift.
+                if (
+                    existing.identity_dict() != revision.identity_dict()
+                    or existing.status is not revision.status
+                ):
+                    raise ValueError(
+                        "revision_id already belongs to another revision"
+                    )
+                return existing
+            if revision.parent_revision_id is None:
+                if state.initial_revision_for(revision.candidate_id) is not None:
+                    raise ValueError("candidate already has an initial revision")
+            else:
+                parent = state.revision(revision.parent_revision_id)
+                if parent.candidate_id != revision.candidate_id:
+                    raise ValueError("revision parent belongs to another candidate")
+                schedule = OptimizationSchedule.from_dict(
+                    state.task_manifest.metadata["optimization_schedule"]
+                )
+                if (
+                    schedule.local_evaluation_mode
+                    == PAIRED_LOCAL_EVALUATION_MODE
+                ):
+                    source_batch_index = revision.source_batch_index
+                    assert source_batch_index is not None
+                    trajectory = state.trajectory_for(revision.candidate_id)
+                    if (
+                        trajectory is None
+                        or trajectory.status is not TrajectoryStatus.RUNNING
+                    ):
+                        raise ValueError(
+                            "paired local edit child requires a running trajectory"
+                        )
+                    if source_batch_index >= trajectory.batch_count - 1:
+                        raise ValueError(
+                            "paired final batch cannot create a local edit child"
+                        )
+                    comparison = state.batch_comparison_for(
+                        revision.candidate_id,
+                        source_batch_index,
+                    )
+                    proposal = state.local_edit_proposal_for(
+                        revision.candidate_id,
+                        source_batch_index,
+                    )
+                    if comparison is None or proposal is None:
+                        raise ValueError(
+                            "paired local edit child requires comparison and proposal"
+                        )
+                    if (
+                        revision.parent_revision_id
+                        != comparison.champion_after_revision_id
+                    ):
+                        raise ValueError(
+                            "paired local edit child must descend from selected champion"
+                        )
+                    if (
+                        proposal.get("decision")
+                        != LocalEditProposalDecision.MUTATE.value
+                    ):
+                        raise ValueError(
+                            "paired local edit child requires a mutate proposal"
+                        )
+                    local_key = (
+                        revision.candidate_id,
+                        source_batch_index,
+                    )
+                    if any(
+                        (item.get("candidate_id"), item.get("batch_index"))
+                        == local_key
+                        for item in state.local_edit_outcomes
+                    ) or state.revision_activation_for(*local_key) is not None:
+                        raise ValueError(
+                            "paired local edit child must be created before local decision"
+                        )
+                    if any(
+                        item.candidate_id == revision.candidate_id
+                        and item.source_batch_index == source_batch_index
+                        for item in state.candidate_revisions
+                    ):
+                        raise ValueError(
+                            "paired local edit batch can create only one challenger"
+                        )
+            try:
+                self.ledger.append(
+                    run_id,
+                    "CandidateRevisionCreated",
+                    {"revision": revision.to_dict()},
+                    event_id=f"{run_id}:revision:{revision.revision_id}",
+                    expected_run_seq=state.events[-1].seq,
+                )
+            except ConcurrentRunMutationError as exc:
+                last_conflict = exc
+                continue
+            return revision
+        if last_conflict is not None:
+            raise last_conflict
+        raise RuntimeError(f"run {run_id} candidate revision could not be persisted")
 
     def start_formal_trajectory(
         self,
@@ -2664,6 +2746,11 @@ class EvolutionDirector:
             )
         ):
             raise ValueError("formal batch comparison score is invalid")
+        validate_formal_batch_comparison(
+            comparison,
+            champion_evaluation,
+            challenger_evaluation,
+        )
         self.ledger.append(
             run_id,
             "FormalBatchCompared",
@@ -2702,6 +2789,20 @@ class EvolutionDirector:
         batch_index = payload["batch_index"]
         if isinstance(batch_index, bool) or not isinstance(batch_index, int):
             raise TypeError("batch_index must be an integer")
+        existing_event = next(
+            (
+                event
+                for event in state.events
+                if event.kind == "LocalEditProposalRecorded"
+                and event.payload.get("candidate_id") == candidate_id
+                and event.payload.get("batch_index") == batch_index
+            ),
+            None,
+        )
+        if existing_event is not None:
+            if canonical_json(existing_event.payload) == canonical_json(payload):
+                return existing_event
+            raise ValueError("conflicting local edit proposal")
         evaluation = state.batch_evaluation_for(candidate_id, batch_index)
         if "proposal" in payload:
             from ..evolution.local_edits import LocalEditProposal
@@ -2714,6 +2815,22 @@ class EvolutionDirector:
         schedule = OptimizationSchedule.from_dict(
             state.task_manifest.metadata["optimization_schedule"]
         )
+        if (
+            schedule.local_evaluation_mode
+            == PAIRED_LOCAL_EVALUATION_MODE
+        ):
+            trajectory = state.trajectory_for(candidate_id)
+            if (
+                trajectory is None
+                or trajectory.status is not TrajectoryStatus.RUNNING
+            ):
+                raise ValueError(
+                    "paired local edit requires a running trajectory"
+                )
+            if batch_index >= trajectory.batch_count - 1:
+                raise ValueError(
+                    "paired final batch cannot record a local edit proposal"
+                )
         if (
             evaluation is None
             or (
@@ -2755,42 +2872,143 @@ class EvolutionDirector:
         }
         if set(payload) not in (fields, fields | {"reason"}):
             raise ValueError("local edit decision payload is invalid")
-        state = self.state(run_id)
-        key = (payload["candidate_id"], payload["batch_index"])
-        proposal = next(
-            (
-                item
-                for item in state.local_edit_proposals
-                if (item["candidate_id"], item["batch_index"]) == key
-            ),
-            None,
-        )
-        outcome = LocalEditOutcome(payload["outcome"])
-        revision = state.revision(payload["active_revision_id"])
-        if (
-            proposal is None
-            or proposal["proposal_id"] != payload["proposal_id"]
-            or revision.candidate_id != payload["candidate_id"]
-            or (
-                proposal["decision"] == LocalEditProposalDecision.KEEP.value
-                and outcome is not LocalEditOutcome.KEPT
-                and not (
-                    outcome is LocalEditOutcome.ROLLED_BACK
-                    and payload.get("reason") == proposal.get("safety_reason")
-                )
+        last_conflict: ConcurrentRunMutationError | None = None
+        for _ in range(_STATE_TRANSITION_RETRY_LIMIT):
+            state = self.state(run_id)
+            key = (payload["candidate_id"], payload["batch_index"])
+            existing_event = next(
+                (
+                    event
+                    for event in state.events
+                    if event.kind == "LocalEditDecided"
+                    and (
+                        event.payload.get("candidate_id"),
+                        event.payload.get("batch_index"),
+                    )
+                    == key
+                ),
+                None,
             )
-        ):
-            raise ValueError("local edit decision is inconsistent")
-        if "reason" in payload and (
-            not isinstance(payload["reason"], str) or not payload["reason"].strip()
-        ):
-            raise ValueError("local edit decision reason must be non-empty text")
-        return self.ledger.append(
-            run_id,
-            "LocalEditDecided",
-            payload,
-            event_id=f"{run_id}:generation:{revision.generation}:trajectory:{revision.candidate_id}:batch:{payload['batch_index']}:local-decision",
-        )
+            if existing_event is not None:
+                if canonical_json(existing_event.payload) == canonical_json(payload):
+                    return existing_event
+                raise ValueError("conflicting local edit outcome")
+            proposal = next(
+                (
+                    item
+                    for item in state.local_edit_proposals
+                    if (item["candidate_id"], item["batch_index"]) == key
+                ),
+                None,
+            )
+            outcome = LocalEditOutcome(payload["outcome"])
+            revision = state.revision(payload["active_revision_id"])
+            schedule = OptimizationSchedule.from_dict(
+                state.task_manifest.metadata["optimization_schedule"]
+            )
+            if (
+                schedule.local_evaluation_mode
+                == PAIRED_LOCAL_EVALUATION_MODE
+            ):
+                trajectory = state.trajectory_for(payload["candidate_id"])
+                if (
+                    trajectory is None
+                    or trajectory.status is not TrajectoryStatus.RUNNING
+                ):
+                    raise ValueError(
+                        "paired local edit requires a running trajectory"
+                    )
+                if payload["batch_index"] >= trajectory.batch_count - 1:
+                    raise ValueError(
+                        "paired final batch cannot record a local edit decision"
+                    )
+                comparison = state.batch_comparison_for(*key)
+                if comparison is None:
+                    raise ValueError(
+                        "paired local edit decision requires a comparison"
+                    )
+                proposal_decision = (
+                    proposal.get("decision") if proposal is not None else None
+                )
+                if not (
+                    (
+                        proposal_decision
+                        == LocalEditProposalDecision.KEEP.value
+                        and outcome is LocalEditOutcome.KEPT
+                    )
+                    or (
+                        proposal_decision
+                        == LocalEditProposalDecision.MUTATE.value
+                        and outcome
+                        in (LocalEditOutcome.APPLIED, LocalEditOutcome.REJECTED)
+                    )
+                ):
+                    raise ValueError(
+                        "paired local edit outcome does not match proposal decision"
+                    )
+                selected_revision_id = comparison.champion_after_revision_id
+                children = [
+                    item
+                    for item in state.candidate_revisions
+                    if item.candidate_id == payload["candidate_id"]
+                    and item.source_batch_index == payload["batch_index"]
+                ]
+                if outcome is LocalEditOutcome.APPLIED:
+                    if (
+                        proposal is None
+                        or proposal.get("decision")
+                        != LocalEditProposalDecision.MUTATE.value
+                        or len(children) != 1
+                        or revision.revision_id != children[0].revision_id
+                        or revision.parent_revision_id != selected_revision_id
+                    ):
+                        raise ValueError(
+                            "paired applied edit must create one child from selected champion"
+                        )
+                elif (
+                    outcome is LocalEditOutcome.ROLLED_BACK
+                    or revision.revision_id != selected_revision_id
+                    or children
+                ):
+                    raise ValueError(
+                        "paired retained edit must keep the selected champion "
+                        "without a child"
+                    )
+            if (
+                proposal is None
+                or proposal["proposal_id"] != payload["proposal_id"]
+                or revision.candidate_id != payload["candidate_id"]
+                or (
+                    proposal["decision"] == LocalEditProposalDecision.KEEP.value
+                    and outcome is not LocalEditOutcome.KEPT
+                    and not (
+                        outcome is LocalEditOutcome.ROLLED_BACK
+                        and payload.get("reason") == proposal.get("safety_reason")
+                    )
+                )
+            ):
+                raise ValueError("local edit decision is inconsistent")
+            if "reason" in payload and (
+                not isinstance(payload["reason"], str)
+                or not payload["reason"].strip()
+            ):
+                raise ValueError(
+                    "local edit decision reason must be non-empty text"
+                )
+            try:
+                return self.ledger.append(
+                    run_id,
+                    "LocalEditDecided",
+                    payload,
+                    event_id=f"{run_id}:generation:{revision.generation}:trajectory:{revision.candidate_id}:batch:{payload['batch_index']}:local-decision",
+                    expected_run_seq=state.events[-1].seq,
+                )
+            except ConcurrentRunMutationError as exc:
+                last_conflict = exc
+                continue
+        if last_conflict is not None:
+            raise last_conflict
+        raise RuntimeError(f"run {run_id} local edit decision could not be persisted")
 
     def advance_trajectory_revision(
         self,
@@ -2811,6 +3029,22 @@ class EvolutionDirector:
         schedule = OptimizationSchedule.from_dict(
             state.task_manifest.metadata["optimization_schedule"]
         )
+        trajectory = state.trajectory_for(candidate_id)
+        if (
+            schedule.local_evaluation_mode
+            == PAIRED_LOCAL_EVALUATION_MODE
+        ):
+            if (
+                trajectory is None
+                or trajectory.status is not TrajectoryStatus.RUNNING
+            ):
+                raise ValueError(
+                    "paired revision activation requires a running trajectory"
+                )
+            if batch_index >= trajectory.batch_count - 1:
+                raise ValueError(
+                    "paired final batch cannot activate a local edit revision"
+                )
         comparison = state.batch_comparison_for(candidate_id, batch_index)
         outcome = next(
             (
@@ -2915,14 +3149,113 @@ class EvolutionDirector:
                 candidate_id,
                 trajectory.batch_count - 1,
             )
+            expected_local_indexes = set(range(trajectory.batch_count - 1))
+            proposal_indexes = {
+                int(item["batch_index"])
+                for item in state.local_edit_proposals
+                if item.get("candidate_id") == candidate_id
+            }
+            outcome_indexes = {
+                int(item["batch_index"])
+                for item in state.local_edit_outcomes
+                if item.get("candidate_id") == candidate_id
+            }
+            activation_indexes = {
+                item.batch_index for item in activations
+            }
+            local_bindings_are_exact = True
+            for batch_index in expected_local_indexes:
+                comparison = state.batch_comparison_for(
+                    candidate_id,
+                    batch_index,
+                )
+                proposal = state.local_edit_proposal_for(
+                    candidate_id,
+                    batch_index,
+                )
+                outcome = next(
+                    (
+                        item
+                        for item in state.local_edit_outcomes
+                        if item.get("candidate_id") == candidate_id
+                        and item.get("batch_index") == batch_index
+                    ),
+                    None,
+                )
+                activation = state.revision_activation_for(
+                    candidate_id,
+                    batch_index,
+                )
+                children = [
+                    item
+                    for item in state.candidate_revisions
+                    if item.candidate_id == candidate_id
+                    and item.source_batch_index == batch_index
+                ]
+                if (
+                    comparison is None
+                    or proposal is None
+                    or outcome is None
+                    or activation is None
+                ):
+                    local_bindings_are_exact = False
+                    break
+                selected_revision_id = comparison.champion_after_revision_id
+                if outcome.get("outcome") == LocalEditOutcome.APPLIED.value:
+                    local_bindings_are_exact = (
+                        proposal.get("decision")
+                        == LocalEditProposalDecision.MUTATE.value
+                        and len(children) == 1
+                        and children[0].parent_revision_id == selected_revision_id
+                        and outcome.get("active_revision_id")
+                        == children[0].revision_id
+                        and activation.to_revision_id == children[0].revision_id
+                        and activation.reason
+                        is RevisionAdvanceReason.LOCAL_EDIT_APPLIED
+                    )
+                else:
+                    expected = {
+                        LocalEditOutcome.KEPT.value: (
+                            LocalEditProposalDecision.KEEP.value,
+                            RevisionAdvanceReason.KEPT,
+                        ),
+                        LocalEditOutcome.REJECTED.value: (
+                            LocalEditProposalDecision.MUTATE.value,
+                            RevisionAdvanceReason.LOCAL_EDIT_REJECTED,
+                        ),
+                    }.get(outcome.get("outcome"))
+                    local_bindings_are_exact = (
+                        not children
+                        and expected is not None
+                        and proposal.get("decision") == expected[0]
+                        and outcome.get("active_revision_id")
+                        == selected_revision_id
+                        and activation.to_revision_id == selected_revision_id
+                        and activation.reason is expected[1]
+                    )
+                if not local_bindings_are_exact:
+                    break
+            has_post_final_child = any(
+                item.candidate_id == candidate_id
+                and item.source_batch_index is not None
+                and item.source_batch_index >= trajectory.batch_count - 1
+                for item in state.candidate_revisions
+            )
             if (
                 len(comparisons) != trajectory.batch_count
-                or len(activations) != trajectory.batch_count - 1
+                or proposal_indexes != expected_local_indexes
+                or outcome_indexes != expected_local_indexes
+                or activation_indexes != expected_local_indexes
+                or not local_bindings_are_exact
+                or has_post_final_child
                 or final_comparison is None
                 or final_comparison.champion_after_revision_id
                 != final_revision_id
             ):
-                raise ValueError("formal trajectory has incomplete paired batches")
+                raise ValueError(
+                    "formal trajectory has incomplete paired batches or invalid "
+                    "child/outcome binding"
+                )
         elif (
             len(activations) != trajectory.batch_count
             or state.revision_activation_for(
@@ -2986,6 +3319,36 @@ class EvolutionDirector:
         ]
         if len(completed) != 2:
             raise ValueError("holdout requires two completed trajectories")
+        formal = state.formal_selection_for(generation)
+        finalist_bindings = {
+            arm: holdout.arm_bindings[arm.value]
+            for arm in (HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2)
+        }
+        finalist_candidate_ids = {
+            binding["candidate_id"]
+            for binding in finalist_bindings.values()
+        }
+        if formal is None or finalist_candidate_ids != set(
+            formal.payload["selected_candidate_ids"]
+        ):
+            raise ValueError("holdout finalist arms do not match frozen Top 2")
+        completed_by_candidate = {
+            item.candidate_id: item for item in completed
+        }
+        for binding in holdout.arm_bindings.values():
+            revision = state.revision(binding["candidate_revision_id"])
+            if revision.candidate_id != binding["candidate_id"]:
+                raise ValueError("holdout arm revision binding is invalid")
+        for binding in finalist_bindings.values():
+            trajectory = completed_by_candidate.get(binding["candidate_id"])
+            if (
+                trajectory is None
+                or binding["candidate_revision_id"]
+                != trajectory.final_revision_id
+            ):
+                raise ValueError(
+                    "holdout finalist arm must bind trajectory final revision"
+                )
         self.ledger.append(
             run_id,
             "GenerationHoldoutFrozen",

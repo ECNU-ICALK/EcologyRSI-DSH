@@ -33,7 +33,11 @@ from ecologyrsi_dsh.evaluators.greenhouse_prediction import (
     fit_predict_exogenous_ridge,
 )
 from ecologyrsi_dsh.evaluators.registry import _select_planned_evaluation_cohort
-from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
+from ecologyrsi_dsh.evolution.schedule import (
+    LEGACY_SCHEDULE_SCHEMA_VERSION,
+    PREQUENTIAL_LOCAL_EVALUATION_MODE,
+    OptimizationSchedule,
+)
 
 
 def _sha(label: str) -> str:
@@ -49,8 +53,10 @@ class ScopedSampleExecutionTests(unittest.TestCase):
         self.schedule = OptimizationSchedule.from_dict(
             {
                 **OptimizationSchedule.default().to_dict(),
+                "schema_version": LEGACY_SCHEDULE_SCHEMA_VERSION,
                 "formal_origin_count_per_finalist": 100,
                 "local_batch_origin_count": 10,
+                "local_evaluation_mode": PREQUENTIAL_LOCAL_EVALUATION_MODE,
             }
         )
         task = TaskManifest(
