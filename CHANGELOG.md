@@ -4,6 +4,31 @@ All notable changes to EcologyRSI-DSH are recorded in this file.
 
 ## 0.3.55 - 2026-08-28
 
+### Durable champion–challenger adaptive trajectories
+
+- Evaluate each schema-v2 local challenger against the current lane champion
+  on the same frozen 50-origin cohort. Persist both evaluation arms, their
+  score delta and gates, and the resulting lane champion so a negative score
+  can improve a more-negative champion without treating a worse challenger as
+  accepted.
+- Generate the next bounded proposal from the durable champion. Rejected
+  challengers remain reflection evidence but never become mutation parents;
+  the final batch creates no unvalidated child, and generation holdout binds
+  only the two final lane champions plus the global incumbent.
+- Re-derive every host-owned comparison gate during both event writes and
+  ledger replay, fail closed when strict-chain or execution-count evidence is
+  missing, and reject forged ancestry, post-final local artifacts, or holdout
+  bindings that do not name the completed trajectory revision.
+- Keep explicit schedule-v1 `prequential` runs replayable while making
+  schedule-v2 `paired_champion_challenger` the default for new runs. Report the
+  paired formal upper bound as 1,900 candidate-origin occurrences and the full
+  default generation as 2,663 occurrences / 23,967 scoring cells without
+  inflating the 500 formal unique-origin source capacity.
+- Expose durable comparison decisions in public events and trajectory rows.
+  The browser now distinguishes frozen, promoted, retained, pending-next, and
+  Host-rejected states instead of labeling schema-v2 challenger creation as
+  generic “已应用”.
+
 ### Origin-scoped recovery and truthful live progress
 
 - Keep a terminal outcome scoped to the single forecast origin that produced
