@@ -25,6 +25,17 @@ class EvaluationPhase(str, Enum):
     HOLDOUT = "holdout"
 
 
+class FormalBatchArm(str, Enum):
+    CHAMPION = "champion"
+    CHALLENGER = "challenger"
+
+
+class FormalBatchComparisonDecision(str, Enum):
+    INITIAL_CHAMPION = "initial_champion"
+    CHALLENGER_PROMOTED = "challenger_promoted"
+    CHAMPION_RETAINED = "champion_retained"
+
+
 class RevisionStatus(str, Enum):
     CREATED = "created"
     ACTIVE = "active"
@@ -118,6 +129,7 @@ class EvaluationScope:
     origin_count: int
     batch_index: int | None = None
     holdout_arm: HoldoutArm | None = None
+    formal_batch_arm: FormalBatchArm | None = None
 
     def __post_init__(self) -> None:
         for name in ("run_id", "candidate_id", "candidate_revision_id"):
@@ -148,9 +160,26 @@ class EvaluationScope:
                 "holdout_arm",
                 _enum(self.holdout_arm, HoldoutArm, "holdout_arm"),
             )
+        if self.formal_batch_arm is not None:
+            object.__setattr__(
+                self,
+                "formal_batch_arm",
+                _enum(
+                    self.formal_batch_arm,
+                    FormalBatchArm,
+                    "formal_batch_arm",
+                ),
+            )
         if self.phase is EvaluationPhase.SCREENING:
-            if self.batch_index is not None or self.holdout_arm is not None:
-                raise ValueError("screening scope cannot have batch_index or holdout_arm")
+            if (
+                self.batch_index is not None
+                or self.holdout_arm is not None
+                or self.formal_batch_arm is not None
+            ):
+                raise ValueError(
+                    "screening scope cannot have batch_index, holdout_arm, "
+                    "or formal_batch_arm"
+                )
         elif self.phase is EvaluationPhase.FORMAL_BATCH:
             if self.batch_index is None:
                 raise ValueError("formal_batch scope requires batch_index")
@@ -161,13 +190,15 @@ class EvaluationScope:
                 raise ValueError("holdout scope requires holdout_arm")
             if self.batch_index is not None:
                 raise ValueError("holdout scope cannot have batch_index")
+            if self.formal_batch_arm is not None:
+                raise ValueError("holdout scope cannot have formal_batch_arm")
 
     @property
     def scope_key(self) -> str:
         return digest(self.to_dict())
 
     def to_dict(self) -> JsonObject:
-        return {
+        value: JsonObject = {
             "run_id": self.run_id,
             "generation": self.generation,
             "candidate_id": self.candidate_id,
@@ -180,6 +211,9 @@ class EvaluationScope:
                 self.holdout_arm.value if self.holdout_arm is not None else None
             ),
         }
+        if self.formal_batch_arm is not None:
+            value["formal_batch_arm"] = self.formal_batch_arm.value
+        return value
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "EvaluationScope":
@@ -440,8 +474,157 @@ class BatchEvaluation:
             "created_at": self.created_at,
         }
 
+    @property
+    def evaluation_digest(self) -> str:
+        return digest(self.to_dict())
+
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "BatchEvaluation":
+        return cls(**dict(value))
+
+
+@dataclass(frozen=True, slots=True)
+class FormalBatchComparison:
+    comparison_id: str
+    run_id: str
+    generation: int
+    candidate_id: str
+    batch_index: int
+    cohort_digest: str
+    champion_before_revision_id: str
+    challenger_revision_id: str
+    champion_evaluation_id: str
+    challenger_evaluation_id: str
+    champion_evaluation_digest: str
+    challenger_evaluation_digest: str
+    champion_score: float
+    challenger_score: float
+    score_delta: float
+    comparison_contract_digest: str
+    safety_gate_passed: bool
+    cell_regression_gate_passed: bool
+    minimum_score_delta: float
+    decision: FormalBatchComparisonDecision
+    champion_after_revision_id: str
+    reason: str
+    created_at: str = field(default_factory=utc_now)
+
+    def __post_init__(self) -> None:
+        for name in (
+            "comparison_id",
+            "run_id",
+            "candidate_id",
+            "champion_before_revision_id",
+            "challenger_revision_id",
+            "champion_evaluation_id",
+            "challenger_evaluation_id",
+            "champion_after_revision_id",
+            "reason",
+            "created_at",
+        ):
+            object.__setattr__(self, name, _text(getattr(self, name), name))
+        object.__setattr__(
+            self,
+            "generation",
+            _integer(self.generation, "generation", minimum=0),
+        )
+        object.__setattr__(
+            self,
+            "batch_index",
+            _integer(self.batch_index, "batch_index", minimum=0),
+        )
+        for name in (
+            "cohort_digest",
+            "champion_evaluation_digest",
+            "challenger_evaluation_digest",
+            "comparison_contract_digest",
+        ):
+            object.__setattr__(self, name, _sha256(getattr(self, name), name))
+        for name in ("champion_score", "challenger_score", "score_delta"):
+            object.__setattr__(self, name, _score(getattr(self, name)))
+        object.__setattr__(
+            self,
+            "minimum_score_delta",
+            _score(self.minimum_score_delta),
+        )
+        if self.minimum_score_delta < 0:
+            raise ValueError("minimum_score_delta must be non-negative")
+        for name in ("safety_gate_passed", "cell_regression_gate_passed"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be a bool")
+        object.__setattr__(
+            self,
+            "decision",
+            _enum(
+                self.decision,
+                FormalBatchComparisonDecision,
+                "decision",
+            ),
+        )
+        expected_delta = self.challenger_score - self.champion_score
+        if not math.isclose(
+            self.score_delta,
+            expected_delta,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("score_delta must equal challenger_score - champion_score")
+        if self.decision is FormalBatchComparisonDecision.INITIAL_CHAMPION:
+            if self.batch_index != 0:
+                raise ValueError("initial_champion comparison must use batch 0")
+            if not (
+                self.champion_before_revision_id == self.challenger_revision_id
+                == self.champion_after_revision_id
+                and self.champion_evaluation_id == self.challenger_evaluation_id
+                and self.champion_evaluation_digest
+                == self.challenger_evaluation_digest
+                and self.champion_score == self.challenger_score
+                and self.score_delta == 0.0
+            ):
+                raise ValueError(
+                    "initial_champion must reuse one revision and evaluation"
+                )
+        elif self.decision is FormalBatchComparisonDecision.CHALLENGER_PROMOTED:
+            if self.champion_after_revision_id != self.challenger_revision_id:
+                raise ValueError(
+                    "challenger_promoted champion_after must be the challenger"
+                )
+            if self.champion_before_revision_id == self.challenger_revision_id:
+                raise ValueError("challenger_promoted requires a distinct challenger")
+        elif self.champion_after_revision_id != self.champion_before_revision_id:
+            raise ValueError(
+                "champion_retained champion_after must be the original champion"
+            )
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "comparison_id": self.comparison_id,
+            "run_id": self.run_id,
+            "generation": self.generation,
+            "candidate_id": self.candidate_id,
+            "batch_index": self.batch_index,
+            "cohort_digest": self.cohort_digest,
+            "champion_before_revision_id": self.champion_before_revision_id,
+            "challenger_revision_id": self.challenger_revision_id,
+            "champion_evaluation_id": self.champion_evaluation_id,
+            "challenger_evaluation_id": self.challenger_evaluation_id,
+            "champion_evaluation_digest": self.champion_evaluation_digest,
+            "challenger_evaluation_digest": self.challenger_evaluation_digest,
+            "champion_score": self.champion_score,
+            "challenger_score": self.challenger_score,
+            "score_delta": self.score_delta,
+            "comparison_contract_digest": self.comparison_contract_digest,
+            "safety_gate_passed": self.safety_gate_passed,
+            "cell_regression_gate_passed": self.cell_regression_gate_passed,
+            "minimum_score_delta": self.minimum_score_delta,
+            "decision": self.decision.value,
+            "champion_after_revision_id": self.champion_after_revision_id,
+            "reason": self.reason,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "FormalBatchComparison":
         return cls(**dict(value))
 
 

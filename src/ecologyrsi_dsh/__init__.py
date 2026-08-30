@@ -7,6 +7,11 @@ all mutations are persisted as events before a projection is returned.
 
 from .core.director import EvolutionDirector, RunState
 from .core.ledger import Event, EventLedger
+from .core.trajectory import (
+    FormalBatchArm,
+    FormalBatchComparison,
+    FormalBatchComparisonDecision,
+)
 from .core.models import (
     Candidate,
     CandidateStatus,
@@ -52,6 +57,9 @@ __all__ = [
     "EventLedger",
     "EvolutionDirector",
     "FakeDSHAdapter",
+    "FormalBatchArm",
+    "FormalBatchComparison",
+    "FormalBatchComparisonDecision",
     "GatewayConfigurationError",
     "GatewayResponseError",
     "ModelConnection",

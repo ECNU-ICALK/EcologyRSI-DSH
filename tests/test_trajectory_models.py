@@ -9,6 +9,9 @@ from ecologyrsi_dsh.core.trajectory import (
     EvaluationPhase,
     EvaluationScope,
     FormalBatch,
+    FormalBatchArm,
+    FormalBatchComparison,
+    FormalBatchComparisonDecision,
     GenerationComparison,
     GenerationHoldout,
     HoldoutArm,
@@ -47,6 +50,7 @@ def _scope(
     cohort: str | None = None,
     batch_index: int | None = None,
     arm: HoldoutArm | None = HoldoutArm.FINALIST_1,
+    formal_arm: FormalBatchArm | None = None,
 ) -> EvaluationScope:
     return EvaluationScope(
         run_id="run:1",
@@ -58,7 +62,74 @@ def _scope(
         origin_count=169 if phase is EvaluationPhase.HOLDOUT else 50,
         batch_index=batch_index,
         holdout_arm=arm,
+        formal_batch_arm=formal_arm,
     )
+
+
+def _batch_evaluation(
+    *,
+    evaluation_id: str,
+    revision_id: str,
+    arm: FormalBatchArm,
+    score: float,
+) -> BatchEvaluation:
+    return BatchEvaluation(
+        evaluation_id=evaluation_id,
+        scope=_scope(
+            revision_id=revision_id,
+            phase=EvaluationPhase.FORMAL_BATCH,
+            batch_index=1,
+            arm=None,
+            formal_arm=arm,
+        ),
+        score=score,
+        passed=True,
+        metrics={"targets": []},
+        evaluator_digest=_sha("evaluator"),
+        created_at="2026-08-30T00:00:00Z",
+    )
+
+
+def _comparison(**patch: object) -> FormalBatchComparison:
+    champion = _batch_evaluation(
+        evaluation_id="evaluation:champion",
+        revision_id="revision:champion",
+        arm=FormalBatchArm.CHAMPION,
+        score=0.2,
+    )
+    challenger = _batch_evaluation(
+        evaluation_id="evaluation:challenger",
+        revision_id="revision:challenger",
+        arm=FormalBatchArm.CHALLENGER,
+        score=0.3,
+    )
+    value = {
+        "comparison_id": "comparison:candidate:a:1",
+        "run_id": "run:1",
+        "generation": 0,
+        "candidate_id": "candidate:a",
+        "batch_index": 1,
+        "cohort_digest": _sha("cohort"),
+        "champion_before_revision_id": "revision:champion",
+        "challenger_revision_id": "revision:challenger",
+        "champion_evaluation_id": champion.evaluation_id,
+        "challenger_evaluation_id": challenger.evaluation_id,
+        "champion_evaluation_digest": champion.evaluation_digest,
+        "challenger_evaluation_digest": challenger.evaluation_digest,
+        "champion_score": champion.score,
+        "challenger_score": challenger.score,
+        "score_delta": 0.1,
+        "comparison_contract_digest": _sha("comparison-contract"),
+        "safety_gate_passed": True,
+        "cell_regression_gate_passed": True,
+        "minimum_score_delta": 0.005,
+        "decision": FormalBatchComparisonDecision.CHALLENGER_PROMOTED,
+        "champion_after_revision_id": "revision:challenger",
+        "reason": "challenger_improved",
+        "created_at": "2026-08-30T00:00:01Z",
+    }
+    value.update(patch)
+    return FormalBatchComparison(**value)
 
 
 def _holdout_evaluation(
@@ -121,6 +192,25 @@ class TrajectoryModelTests(unittest.TestCase):
             _scope(phase=EvaluationPhase.HOLDOUT, arm=None)
         with self.assertRaisesRegex(TypeError, "batch_index"):
             _scope(phase=EvaluationPhase.FORMAL_BATCH, arm=None, batch_index=True)
+
+    def test_formal_batch_scope_round_trips_arm(self) -> None:
+        scope = _scope(
+            phase=EvaluationPhase.FORMAL_BATCH,
+            arm=None,
+            batch_index=1,
+            formal_arm=FormalBatchArm.CHALLENGER,
+        )
+
+        self.assertEqual(scope.to_dict()["formal_batch_arm"], "challenger")
+        self.assertEqual(EvaluationScope.from_dict(scope.to_dict()), scope)
+
+    def test_non_formal_scope_rejects_formal_batch_arm(self) -> None:
+        with self.assertRaisesRegex(ValueError, "formal_batch_arm"):
+            _scope(
+                phase=EvaluationPhase.SCREENING,
+                arm=None,
+                formal_arm=FormalBatchArm.CHAMPION,
+            )
 
     def test_scope_rejects_non_sha_cohort_digest(self) -> None:
         with self.assertRaisesRegex(ValueError, "SHA-256"):
@@ -225,6 +315,79 @@ class TrajectoryModelTests(unittest.TestCase):
                 passed=True,
                 metrics={},
                 evaluator_digest=_sha("evaluator"),
+            )
+
+    def test_batch_evaluation_digest_covers_immutable_payload(self) -> None:
+        evaluation = _batch_evaluation(
+            evaluation_id="evaluation:challenger",
+            revision_id="revision:challenger",
+            arm=FormalBatchArm.CHALLENGER,
+            score=0.3,
+        )
+
+        self.assertEqual(evaluation.evaluation_digest, digest(evaluation.to_dict()))
+
+    def test_formal_comparison_round_trips_promoted_challenger(self) -> None:
+        comparison = _comparison()
+
+        self.assertEqual(
+            comparison.decision,
+            FormalBatchComparisonDecision.CHALLENGER_PROMOTED,
+        )
+        self.assertEqual(
+            FormalBatchComparison.from_dict(comparison.to_dict()),
+            comparison,
+        )
+
+    def test_comparison_rejects_inconsistent_champion_after(self) -> None:
+        with self.assertRaisesRegex(ValueError, "champion_after"):
+            _comparison(champion_after_revision_id="revision:champion")
+
+    def test_initial_comparison_requires_batch_zero_and_reused_evaluation(self) -> None:
+        shared = _batch_evaluation(
+            evaluation_id="evaluation:initial",
+            revision_id="revision:initial",
+            arm=FormalBatchArm.CHAMPION,
+            score=-0.4,
+        )
+        initial = {
+            "batch_index": 0,
+            "champion_before_revision_id": "revision:initial",
+            "challenger_revision_id": "revision:initial",
+            "champion_evaluation_id": shared.evaluation_id,
+            "challenger_evaluation_id": shared.evaluation_id,
+            "champion_evaluation_digest": shared.evaluation_digest,
+            "challenger_evaluation_digest": shared.evaluation_digest,
+            "champion_score": -0.4,
+            "challenger_score": -0.4,
+            "score_delta": 0.0,
+            "decision": FormalBatchComparisonDecision.INITIAL_CHAMPION,
+            "champion_after_revision_id": "revision:initial",
+            "reason": "initial_champion",
+        }
+
+        comparison = _comparison(**initial)
+
+        self.assertEqual(comparison.batch_index, 0)
+        with self.assertRaisesRegex(ValueError, "batch 0"):
+            _comparison(**{**initial, "batch_index": 1})
+
+    def test_retained_comparison_requires_original_champion_after(self) -> None:
+        retained = _comparison(
+            decision=FormalBatchComparisonDecision.CHAMPION_RETAINED,
+            champion_after_revision_id="revision:champion",
+            reason="below_practical_delta",
+        )
+
+        self.assertEqual(
+            retained.champion_after_revision_id,
+            retained.champion_before_revision_id,
+        )
+        with self.assertRaisesRegex(ValueError, "champion_after"):
+            _comparison(
+                decision=FormalBatchComparisonDecision.CHAMPION_RETAINED,
+                champion_after_revision_id="revision:challenger",
+                reason="below_practical_delta",
             )
 
     def test_artifact_and_evaluation_bind_revision_scope(self) -> None:
