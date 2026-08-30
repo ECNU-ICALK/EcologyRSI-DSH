@@ -3457,9 +3457,27 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             batch = formal_batches.get(key)
             outcome = local_edit_outcomes.get(key)
             destination = candidate_revisions.get(activation.to_revision_id)
+            schedule = OptimizationSchedule.from_dict(
+                task.metadata["optimization_schedule"]
+            )
+            comparison = formal_batch_comparisons.get(key)
+            source_revision_id = (
+                comparison.champion_after_revision_id
+                if schedule.local_evaluation_mode
+                == PAIRED_LOCAL_EVALUATION_MODE
+                and comparison is not None
+                else batch.revision_id
+                if batch is not None
+                else None
+            )
             if (
                 batch is None
                 or outcome is None
+                or (
+                    schedule.local_evaluation_mode
+                    == PAIRED_LOCAL_EVALUATION_MODE
+                    and comparison is None
+                )
                 or replay_batch_evaluation_for(
                     activation.candidate_id,
                     activation.batch_index,
@@ -3467,7 +3485,7 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 is None
                 or activation.run_id != batch.run_id
                 or activation.generation != batch.generation
-                or activation.from_revision_id != batch.revision_id
+                or activation.from_revision_id != source_revision_id
                 or destination is None
                 or destination.candidate_id != activation.candidate_id
                 or outcome["active_revision_id"] != activation.to_revision_id
@@ -3483,14 +3501,23 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             }[outcome["outcome"]]
             if activation.reason is not expected_reason:
                 raise ValueError("trajectory revision activation reason is inconsistent")
+            if (
+                schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE
+                and activation.reason
+                is RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK
+            ):
+                raise ValueError("paired trajectory cannot use prequential rollback")
             if activation.reason is RevisionAdvanceReason.LOCAL_EDIT_APPLIED:
-                if destination.source_batch_index != activation.batch_index:
+                if (
+                    destination.source_batch_index != activation.batch_index
+                    or destination.parent_revision_id != source_revision_id
+                ):
                     raise ValueError("new revision source batch is inconsistent")
             elif activation.reason is RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK:
                 source = candidate_revisions.get(batch.revision_id)
                 if source is None or source.parent_revision_id != activation.to_revision_id:
                     raise ValueError("safety rollback must activate the batch revision parent")
-            elif activation.to_revision_id != activation.from_revision_id:
+            elif activation.to_revision_id != source_revision_id:
                 raise ValueError("kept/rejected edit cannot change active revision")
             existing = trajectory_revision_activations.get(key)
             if existing is not None and existing.to_dict() != activation.to_dict():

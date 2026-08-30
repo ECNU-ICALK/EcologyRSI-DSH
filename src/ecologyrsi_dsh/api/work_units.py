@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Mapping
 from threading import Lock
 from typing import Any
 
 from ..core.models import RunStatus
 from ..core.trajectory import TrajectoryStatus
-from ..evolution.schedule import OPTIMIZATION_PROTOCOL
+from ..evolution.schedule import (
+    OPTIMIZATION_PROTOCOL,
+    PAIRED_LOCAL_EVALUATION_MODE,
+    OptimizationSchedule,
+)
 
 
 def _formal_lane_priority(
@@ -28,16 +33,29 @@ def _formal_lane_priority(
     trajectory = state.trajectory_for(candidate_id)
     if trajectory is not None and trajectory.status is TrajectoryStatus.COMPLETED:
         return None
+    raw_schedule = getattr(state.task_manifest, "metadata", {}).get(
+        "optimization_schedule"
+    )
+    paired = False
+    if isinstance(raw_schedule, Mapping):
+        paired = (
+            OptimizationSchedule.from_dict(raw_schedule).local_evaluation_mode
+            == PAIRED_LOCAL_EVALUATION_MODE
+        )
     completed_pairs = 0
     if trajectory is not None:
-        for batch_index in range(trajectory.batch_count):
+        transition_count = (
+            trajectory.batch_count - 1 if paired else trajectory.batch_count
+        )
+        for batch_index in range(transition_count):
             if state.revision_activation_for(candidate_id, batch_index) is None:
                 break
             completed_pairs += 1
+    current_batch_index = completed_pairs
     in_flight = (
         trajectory is not None
-        and completed_pairs < trajectory.batch_count
-        and state.formal_batch_for(candidate_id, completed_pairs) is not None
+        and current_batch_index < trajectory.batch_count
+        and state.formal_batch_for(candidate_id, current_batch_index) is not None
     )
     return (0 if in_flight else 1, completed_pairs, selection_index)
 

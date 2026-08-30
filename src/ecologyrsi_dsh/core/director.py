@@ -2808,6 +2808,10 @@ class EvolutionDirector:
             return existing
         batch = state.formal_batch_for(candidate_id, batch_index)
         evaluation = state.batch_evaluation_for(candidate_id, batch_index)
+        schedule = OptimizationSchedule.from_dict(
+            state.task_manifest.metadata["optimization_schedule"]
+        )
+        comparison = state.batch_comparison_for(candidate_id, batch_index)
         outcome = next(
             (
                 item
@@ -2818,7 +2822,16 @@ class EvolutionDirector:
             None,
         )
         destination = state.revision(revision_id)
-        if batch is None or evaluation is None or outcome is None:
+        if (
+            batch is None
+            or evaluation is None
+            or outcome is None
+            or (
+                schedule.local_evaluation_mode
+                == PAIRED_LOCAL_EVALUATION_MODE
+                and comparison is None
+            )
+        ):
             raise ValueError("batch must be evaluated and locally decided before advance")
         if destination.candidate_id != candidate_id:
             raise ValueError("active revision belongs to another candidate")
@@ -2832,17 +2845,36 @@ class EvolutionDirector:
         }[outcome["outcome"]]
         if reason != expected_reason or outcome["active_revision_id"] != revision_id:
             raise ValueError("revision activation differs from local decision")
+        source_revision_id = (
+            comparison.champion_after_revision_id
+            if schedule.local_evaluation_mode
+            == PAIRED_LOCAL_EVALUATION_MODE
+            else batch.revision_id
+        )
+        if (
+            schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE
+            and reason is RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK
+        ):
+            raise ValueError("paired trajectory cannot use prequential rollback")
         if reason is RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK:
             parent_revision_id = state.revision(batch.revision_id).parent_revision_id
             if parent_revision_id is None or revision_id != parent_revision_id:
                 raise ValueError("safety rollback must activate the batch revision parent")
+        elif reason is RevisionAdvanceReason.LOCAL_EDIT_APPLIED:
+            if (
+                destination.parent_revision_id != source_revision_id
+                or destination.source_batch_index != batch_index
+            ):
+                raise ValueError("local edit child must descend from selected champion")
+        elif revision_id != source_revision_id:
+            raise ValueError("kept/rejected edit must retain selected revision")
         activation = TrajectoryRevisionActivation(
             activation_id=f"activation:{candidate_id}:{batch_index}",
             run_id=run_id,
             generation=batch.generation,
             candidate_id=candidate_id,
             batch_index=batch_index,
-            from_revision_id=batch.revision_id,
+            from_revision_id=source_revision_id,
             to_revision_id=revision_id,
             reason=reason,
         )

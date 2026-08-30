@@ -44,6 +44,10 @@ from ..evaluators.sample_execution import (
     SampleResultCallbackError,
 )
 from ..evolution.batches import ResearchResponseContractError
+from ..evolution.schedule import (
+    PAIRED_LOCAL_EVALUATION_MODE,
+    OptimizationSchedule,
+)
 from ..integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 from ..integrations.model_gateway import gateway_error_in_chain
 from .generation_execution import complete_if_budget_exhausted, execute_generation
@@ -154,14 +158,22 @@ def _failure_diagnostics(
                 for item in state.formal_batch_evaluations
                 if item.scope.generation == generation
             )
-            schedule = state.task_manifest.metadata.get("optimization_schedule", {})
-            expected_formal = 2 * int(schedule.get("formal_origin_count_per_finalist", 500))
+            schedule = OptimizationSchedule.from_dict(
+                state.task_manifest.metadata["optimization_schedule"]
+            )
+            expected_formal = schedule.generation_execution_budget(
+                cells_per_origin=1
+            )["formal_candidate_origins"]
+            context.update(
+                formal_origin_occurrences_completed=formal_total,
+                formal_origin_occurrences_upper_bound=expected_formal,
+            )
             completed_trajectories = sum(
                 item.generation == generation
                 and getattr(item.status, "value", item.status) == "completed"
                 for item in state.formal_trajectories
             )
-            if formal_total < expected_formal or completed_trajectories < 2:
+            if completed_trajectories < 2:
                 batch = next(
                     (
                         item
@@ -181,10 +193,32 @@ def _failure_diagnostics(
                     if batch is not None
                     else None
                 )
+                comparison = (
+                    state.batch_comparison_for(
+                        batch.candidate_id,
+                        batch.batch_index,
+                    )
+                    if batch is not None
+                    and callable(getattr(state, "batch_comparison_for", None))
+                    else None
+                )
+                paired = (
+                    schedule.local_evaluation_mode
+                    == PAIRED_LOCAL_EVALUATION_MODE
+                )
+                needs_local_edit = bool(
+                    batch is not None
+                    and batch.batch_index < batch.batch_count - 1
+                    and (
+                        comparison is not None
+                        if paired
+                        else batch_evaluation is not None
+                    )
+                )
                 context.update(
-                    stage="local_edit" if batch_evaluation is not None else "formal_batch",
+                    stage="local_edit" if needs_local_edit else "formal_batch",
                     work_unit_kind=(
-                        "local_edit" if batch_evaluation is not None else "formal_batch"
+                        "local_edit" if needs_local_edit else "formal_batch"
                     ),
                 )
                 if batch is not None:

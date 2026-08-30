@@ -12,12 +12,19 @@ from ..core.trajectory import (
     CandidateRevision,
     EvaluationPhase,
     EvaluationScope,
+    FormalBatchArm,
+    FormalBatchComparison,
+    FormalBatchComparisonDecision,
     LocalEditOutcome,
     RevisionAdvanceReason,
     RevisionStatus,
     TrajectoryStatus,
 )
 from ..evolution.genome import EcologyEvolutionPluginGenome, deep_thaw_json
+from ..evolution.champion_challenger import (
+    LOCAL_MINIMUM_SCORE_DELTA,
+    assess_local_challenger,
+)
 from ..evolution.local_edits import (
     LocalEditContext,
     LocalEditProposal,
@@ -28,7 +35,10 @@ from ..evolution.strategies import (
     _genome_parameter_boundary,
     _registered_mutation_targets,
 )
-from ..evolution.schedule import OptimizationSchedule
+from ..evolution.schedule import (
+    PAIRED_LOCAL_EVALUATION_MODE,
+    OptimizationSchedule,
+)
 from ..evolution.workflow_ir import resolve_candidate_agent_profile
 from ..knowledge.algorithms import AlgorithmSpec, compile_algorithm_spec
 from ..knowledge.program_registry import current_program_registry
@@ -111,7 +121,14 @@ def ensure_formal_trajectory(endpoint: Any, run_id: str, candidate_id: str):
     )
 
 
-def _scope_for_batch(state: Any, candidate: Candidate, revision_id: str, batch: Any):
+def _scope_for_batch(
+    state: Any,
+    candidate: Candidate,
+    revision_id: str,
+    batch: Any,
+    *,
+    arm: FormalBatchArm | None = None,
+):
     return EvaluationScope(
         run_id=state.run.run_id,
         generation=candidate.generation,
@@ -121,6 +138,7 @@ def _scope_for_batch(state: Any, candidate: Candidate, revision_id: str, batch: 
         cohort_digest=batch.cohort_digest,
         origin_count=batch.origin_count,
         batch_index=batch.batch_index,
+        formal_batch_arm=arm,
     )
 
 
@@ -166,7 +184,98 @@ def _durable_batch_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def execute_next_formal_batch(endpoint: Any, run_id: str, candidate_id: str) -> bool:
+def _evaluate_formal_batch_arm(
+    endpoint: Any,
+    run_id: str,
+    candidate_id: str,
+    revision_id: str,
+    formal_batch: Any,
+    *,
+    arm: FormalBatchArm | None,
+) -> BatchEvaluation:
+    state = endpoint.server.director.state(run_id)
+    candidate = state.candidate(candidate_id)
+    adaptation = state.run_adaptation_cohort
+    if adaptation is None:
+        raise RuntimeError("formal evaluation requires frozen adaptation cohorts")
+    planned_batch = adaptation.batches[formal_batch.batch_index]
+    scope = _scope_for_batch(
+        state,
+        candidate,
+        revision_id,
+        formal_batch,
+        arm=arm,
+    )
+    task = _phase_task_manifest(state.task_manifest, candidate.generation, "formal")
+    _revision, proposal, compiled = _revision_evaluation_inputs(
+        state,
+        candidate,
+        revision_id,
+        task,
+    )
+    callbacks = _ScopedEvaluationCallbacks(
+        endpoint,
+        run_id=run_id,
+        generation=candidate.generation,
+        proposal_id=proposal.proposal_id,
+        candidate_id=candidate_id,
+        scope=scope,
+    )
+    if isinstance(endpoint.server.evaluators, EvaluatorRegistry):
+        bundle = endpoint.server.evaluators.evaluate_scientific(
+            task,
+            candidate,
+            proposal,
+            scope=scope,
+            cohort=planned_batch.cohort,
+            algorithm_spec=compiled,
+            **callbacks.evaluation_kwargs(),
+        )
+    else:
+        bundle = endpoint.server.evaluators.evaluate_scientific(
+            task,
+            candidate,
+            proposal,
+            scope=scope,
+            cohort=planned_batch.cohort,
+            **callbacks.evaluation_kwargs(),
+        )
+    metrics = dict(bundle.evaluation.metrics)
+    summary = metrics.get("sample_execution")
+    if not isinstance(summary, Mapping) or int(
+        summary.get("attempted_origin_samples", 0)
+    ) < scope.origin_count:
+        raise RuntimeError("formal batch did not complete its frozen origin cohort")
+    suffix = f":{arm.value}" if arm is not None else ""
+    evaluation = BatchEvaluation(
+        evaluation_id=(
+            f"formal-evaluation:{candidate_id}:{formal_batch.batch_index}{suffix}"
+        ),
+        scope=scope,
+        score=bundle.evaluation.score,
+        passed=bundle.evaluation.passed,
+        metrics=_durable_batch_metrics(metrics),
+        evaluator_digest=digest(
+            {"evaluator": bundle.evaluation.evaluator_digest}
+        ),
+    )
+    return _director_mutation(
+        endpoint,
+        "record_formal_batch_evaluation",
+        run_id,
+        evaluation,
+        sample_results=callbacks.completion_payload(
+            evaluation.evaluation_id,
+            bundle.sample_results,
+        ),
+    )
+
+
+def _execute_next_prequential_formal_batch(
+    endpoint: Any,
+    run_id: str,
+    candidate_id: str,
+) -> bool:
     state = endpoint.server.director.state(run_id)
     trajectory = ensure_formal_trajectory(endpoint, run_id, candidate_id)
     if trajectory.status is TrajectoryStatus.COMPLETED:
@@ -208,7 +317,6 @@ def execute_next_formal_batch(endpoint: Any, run_id: str, candidate_id: str) -> 
         if batch_index == 0
         else state.revision_activation_for(candidate_id, batch_index - 1).to_revision_id
     )
-    planned_batch = adaptation.batches[batch_index]
     formal_batch = _director_mutation(
         endpoint,
         "start_formal_batch",
@@ -220,66 +328,279 @@ def execute_next_formal_batch(endpoint: Any, run_id: str, candidate_id: str) -> 
     state = endpoint.server.director.state(run_id)
     if state.batch_evaluation_for(candidate_id, batch_index) is not None:
         return False
-    candidate = state.candidate(candidate_id)
-    scope = _scope_for_batch(state, candidate, active_revision_id, formal_batch)
-    task = _phase_task_manifest(state.task_manifest, candidate.generation, "formal")
-    _revision, proposal, compiled = _revision_evaluation_inputs(
-        state, candidate, active_revision_id, task
-    )
-
-    callbacks = _ScopedEvaluationCallbacks(
+    _evaluate_formal_batch_arm(
         endpoint,
-        run_id=run_id,
-        generation=candidate.generation,
-        proposal_id=proposal.proposal_id,
-        candidate_id=candidate_id,
-        scope=scope,
-    )
-
-    if isinstance(endpoint.server.evaluators, EvaluatorRegistry):
-        bundle = endpoint.server.evaluators.evaluate_scientific(
-            task,
-            candidate,
-            proposal,
-            scope=scope,
-            cohort=planned_batch.cohort,
-            algorithm_spec=compiled,
-            **callbacks.evaluation_kwargs(),
-        )
-    else:
-        bundle = endpoint.server.evaluators.evaluate_scientific(
-            task,
-            candidate,
-            proposal,
-            scope=scope,
-            cohort=planned_batch.cohort,
-            **callbacks.evaluation_kwargs(),
-        )
-    metrics = dict(bundle.evaluation.metrics)
-    summary = metrics.get("sample_execution")
-    if not isinstance(summary, Mapping) or int(
-        summary.get("attempted_origin_samples", 0)
-    ) < scope.origin_count:
-        raise RuntimeError("formal batch did not complete its frozen origin cohort")
-    batch_evaluation = BatchEvaluation(
-        evaluation_id=f"formal-evaluation:{candidate_id}:{batch_index}",
-        scope=scope,
-        score=bundle.evaluation.score,
-        passed=bundle.evaluation.passed,
-        metrics=_durable_batch_metrics(metrics),
-        evaluator_digest=digest({"evaluator": bundle.evaluation.evaluator_digest}),
-    )
-    _director_mutation(
-        endpoint,
-        "record_formal_batch_evaluation",
         run_id,
-        batch_evaluation,
-        sample_results=callbacks.completion_payload(
-            batch_evaluation.evaluation_id,
-            bundle.sample_results,
-        ),
+        candidate_id,
+        active_revision_id,
+        formal_batch,
+        arm=None,
     )
     return True
+
+
+def _record_initial_champion(
+    endpoint: Any,
+    run_id: str,
+    evaluation: BatchEvaluation,
+) -> FormalBatchComparison:
+    safety_passed = _prequential_safety_reason(evaluation.metrics) is None
+    assessment = assess_local_challenger(
+        evaluation,
+        evaluation,
+        challenger_safety_gate_passed=safety_passed,
+    )
+    scope = evaluation.scope
+    comparison = FormalBatchComparison(
+        comparison_id=(
+            f"comparison:{scope.candidate_id}:{scope.batch_index}"
+        ),
+        run_id=run_id,
+        generation=scope.generation,
+        candidate_id=scope.candidate_id,
+        batch_index=int(scope.batch_index),
+        cohort_digest=scope.cohort_digest,
+        champion_before_revision_id=scope.candidate_revision_id,
+        challenger_revision_id=scope.candidate_revision_id,
+        champion_evaluation_id=evaluation.evaluation_id,
+        challenger_evaluation_id=evaluation.evaluation_id,
+        champion_evaluation_digest=evaluation.evaluation_digest,
+        challenger_evaluation_digest=evaluation.evaluation_digest,
+        champion_score=evaluation.score,
+        challenger_score=evaluation.score,
+        score_delta=0.0,
+        comparison_contract_digest=assessment.comparison_contract_digest,
+        safety_gate_passed=safety_passed,
+        cell_regression_gate_passed=assessment.cell_regression_gate_passed,
+        minimum_score_delta=LOCAL_MINIMUM_SCORE_DELTA,
+        decision=FormalBatchComparisonDecision.INITIAL_CHAMPION,
+        champion_after_revision_id=scope.candidate_revision_id,
+        reason="initial_champion",
+    )
+    return _director_mutation(
+        endpoint,
+        "record_formal_batch_comparison",
+        run_id,
+        comparison,
+    )
+
+
+def _record_challenger_comparison(
+    endpoint: Any,
+    run_id: str,
+    champion: BatchEvaluation,
+    challenger: BatchEvaluation,
+) -> FormalBatchComparison:
+    safety_passed = _prequential_safety_reason(challenger.metrics) is None
+    assessment = assess_local_challenger(
+        champion,
+        challenger,
+        challenger_safety_gate_passed=safety_passed,
+    )
+    scope = challenger.scope
+    comparison = FormalBatchComparison(
+        comparison_id=(
+            f"comparison:{scope.candidate_id}:{scope.batch_index}"
+        ),
+        run_id=run_id,
+        generation=scope.generation,
+        candidate_id=scope.candidate_id,
+        batch_index=int(scope.batch_index),
+        cohort_digest=scope.cohort_digest,
+        champion_before_revision_id=(
+            champion.scope.candidate_revision_id
+        ),
+        challenger_revision_id=challenger.scope.candidate_revision_id,
+        champion_evaluation_id=champion.evaluation_id,
+        challenger_evaluation_id=challenger.evaluation_id,
+        champion_evaluation_digest=champion.evaluation_digest,
+        challenger_evaluation_digest=challenger.evaluation_digest,
+        champion_score=champion.score,
+        challenger_score=challenger.score,
+        score_delta=assessment.score_delta,
+        comparison_contract_digest=assessment.comparison_contract_digest,
+        safety_gate_passed=assessment.safety_gate_passed,
+        cell_regression_gate_passed=(
+            assessment.cell_regression_gate_passed
+        ),
+        minimum_score_delta=LOCAL_MINIMUM_SCORE_DELTA,
+        decision=assessment.decision,
+        champion_after_revision_id=(
+            assessment.champion_after_revision_id
+        ),
+        reason=assessment.reason,
+    )
+    return _director_mutation(
+        endpoint,
+        "record_formal_batch_comparison",
+        run_id,
+        comparison,
+    )
+
+
+def _execute_next_paired_formal_batch(
+    endpoint: Any,
+    run_id: str,
+    candidate_id: str,
+) -> bool:
+    trajectory = ensure_formal_trajectory(endpoint, run_id, candidate_id)
+    if trajectory.status is TrajectoryStatus.COMPLETED:
+        return False
+    state = endpoint.server.director.state(run_id)
+    candidate = state.candidate(candidate_id)
+    if (
+        state.run_adaptation_cohort is None
+        or state.generation_cohort_for(candidate.generation) is None
+    ):
+        raise RuntimeError(
+            "formal batch requires frozen adaptation and generation cohorts"
+        )
+    for batch_index in range(trajectory.batch_count):
+        state = endpoint.server.director.state(run_id)
+        trajectory = state.trajectory_for(candidate_id)
+        comparison = state.batch_comparison_for(candidate_id, batch_index)
+        batch = state.formal_batch_for(candidate_id, batch_index)
+        if comparison is not None:
+            if batch_index == trajectory.batch_count - 1:
+                if trajectory.status is not TrajectoryStatus.COMPLETED:
+                    _director_mutation(
+                        endpoint,
+                        "complete_formal_trajectory",
+                        run_id,
+                        candidate_id,
+                        comparison.champion_after_revision_id,
+                    )
+                    return True
+                return False
+            if state.revision_activation_for(candidate_id, batch_index) is None:
+                return False
+            continue
+        if batch is None:
+            if batch_index == 0:
+                challenger_revision_id = trajectory.initial_revision_id
+            else:
+                activation = state.revision_activation_for(
+                    candidate_id,
+                    batch_index - 1,
+                )
+                if activation is None:
+                    return False
+                challenger_revision_id = activation.to_revision_id
+            batch = _director_mutation(
+                endpoint,
+                "start_formal_batch",
+                run_id,
+                candidate_id,
+                challenger_revision_id,
+                batch_index,
+            )
+            state = endpoint.server.director.state(run_id)
+        if batch_index == 0:
+            warmup = state.batch_evaluation_for(
+                candidate_id,
+                batch_index,
+                FormalBatchArm.CHAMPION,
+            )
+            if warmup is None:
+                _evaluate_formal_batch_arm(
+                    endpoint,
+                    run_id,
+                    candidate_id,
+                    trajectory.initial_revision_id,
+                    batch,
+                    arm=FormalBatchArm.CHAMPION,
+                )
+                return True
+            _record_initial_champion(endpoint, run_id, warmup)
+            if batch_index == trajectory.batch_count - 1:
+                _director_mutation(
+                    endpoint,
+                    "complete_formal_trajectory",
+                    run_id,
+                    candidate_id,
+                    trajectory.initial_revision_id,
+                )
+            return True
+
+        prior_comparison = state.batch_comparison_for(
+            candidate_id,
+            batch_index - 1,
+        )
+        if prior_comparison is None:
+            raise RuntimeError("paired batch requires prior champion comparison")
+        champion_revision_id = prior_comparison.champion_after_revision_id
+        challenger_revision_id = batch.revision_id
+        champion_evaluation = state.batch_evaluation_for(
+            candidate_id,
+            batch_index,
+            FormalBatchArm.CHAMPION,
+        )
+        if champion_evaluation is None:
+            _evaluate_formal_batch_arm(
+                endpoint,
+                run_id,
+                candidate_id,
+                champion_revision_id,
+                batch,
+                arm=FormalBatchArm.CHAMPION,
+            )
+            return True
+        if challenger_revision_id == champion_revision_id:
+            challenger_evaluation = champion_evaluation
+        else:
+            challenger_evaluation = state.batch_evaluation_for(
+                candidate_id,
+                batch_index,
+                FormalBatchArm.CHALLENGER,
+            )
+            if challenger_evaluation is None:
+                _evaluate_formal_batch_arm(
+                    endpoint,
+                    run_id,
+                    candidate_id,
+                    challenger_revision_id,
+                    batch,
+                    arm=FormalBatchArm.CHALLENGER,
+                )
+                return True
+        comparison = _record_challenger_comparison(
+            endpoint,
+            run_id,
+            champion_evaluation,
+            challenger_evaluation,
+        )
+        if batch_index == trajectory.batch_count - 1:
+            _director_mutation(
+                endpoint,
+                "complete_formal_trajectory",
+                run_id,
+                candidate_id,
+                comparison.champion_after_revision_id,
+            )
+        return True
+    return False
+
+
+def execute_next_formal_batch(
+    endpoint: Any,
+    run_id: str,
+    candidate_id: str,
+) -> bool:
+    state = endpoint.server.director.state(run_id)
+    schedule = OptimizationSchedule.from_dict(
+        state.task_manifest.metadata["optimization_schedule"]
+    )
+    if schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
+        return _execute_next_paired_formal_batch(
+            endpoint,
+            run_id,
+            candidate_id,
+        )
+    return _execute_next_prequential_formal_batch(
+        endpoint,
+        run_id,
+        candidate_id,
+    )
 
 
 def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRevision, batch: Any) -> LocalEditContext:
@@ -361,7 +682,11 @@ def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRev
     )
 
 
-def execute_next_local_edit(endpoint: Any, run_id: str, candidate_id: str) -> bool:
+def _execute_next_prequential_local_edit(
+    endpoint: Any,
+    run_id: str,
+    candidate_id: str,
+) -> bool:
     state = endpoint.server.director.state(run_id)
     candidate = state.candidate(candidate_id)
     trajectory = state.trajectory_for(candidate_id)
@@ -581,6 +906,209 @@ def execute_next_local_edit(endpoint: Any, run_id: str, candidate_id: str) -> bo
     return True
 
 
+def _execute_next_paired_local_edit(
+    endpoint: Any,
+    run_id: str,
+    candidate_id: str,
+) -> bool:
+    state = endpoint.server.director.state(run_id)
+    candidate = state.candidate(candidate_id)
+    trajectory = state.trajectory_for(candidate_id)
+    if trajectory is None:
+        raise RuntimeError("local edit requires a formal trajectory")
+    if trajectory.status is TrajectoryStatus.COMPLETED:
+        return False
+    recovery = next(
+        (
+            (batch, outcome)
+            for batch in state.formal_batches
+            if batch.candidate_id == candidate_id
+            and batch.batch_index < trajectory.batch_count - 1
+            and state.batch_comparison_for(candidate_id, batch.batch_index)
+            is not None
+            and state.revision_activation_for(candidate_id, batch.batch_index)
+            is None
+            for outcome in state.local_edit_outcomes
+            if outcome.get("candidate_id") == candidate_id
+            and outcome.get("batch_index") == batch.batch_index
+        ),
+        None,
+    )
+    if recovery is not None:
+        batch, outcome = recovery
+        reason = {
+            LocalEditOutcome.KEPT.value: RevisionAdvanceReason.KEPT,
+            LocalEditOutcome.APPLIED.value: (
+                RevisionAdvanceReason.LOCAL_EDIT_APPLIED
+            ),
+            LocalEditOutcome.REJECTED.value: (
+                RevisionAdvanceReason.LOCAL_EDIT_REJECTED
+            ),
+        }[outcome["outcome"]]
+        _director_mutation(
+            endpoint,
+            "advance_trajectory_revision",
+            run_id,
+            candidate_id,
+            batch.batch_index,
+            outcome["active_revision_id"],
+            reason,
+        )
+        return True
+    pending = next(
+        (
+            batch
+            for batch in state.formal_batches
+            if batch.candidate_id == candidate_id
+            and batch.batch_index < trajectory.batch_count - 1
+            and state.batch_comparison_for(candidate_id, batch.batch_index)
+            is not None
+            and next(
+                (
+                    item
+                    for item in state.local_edit_outcomes
+                    if item.get("candidate_id") == candidate_id
+                    and item.get("batch_index") == batch.batch_index
+                ),
+                None,
+            )
+            is None
+        ),
+        None,
+    )
+    if pending is None:
+        return False
+    comparison = state.batch_comparison_for(
+        candidate_id,
+        pending.batch_index,
+    )
+    revision = state.revision(comparison.champion_after_revision_id)
+    context = _local_edit_context(state, candidate, revision, pending)
+    recorded = state.local_edit_proposal_for(candidate_id, pending.batch_index)
+    proposal = (
+        _local_edit_proposal(endpoint, state, candidate, pending, context)
+        if recorded is None
+        else LocalEditProposal.from_dict(recorded["proposal"])
+    )
+    policy_rejection_reason = _local_edit_policy_rejection_reason(
+        state,
+        candidate_id,
+        pending.batch_index,
+        revision.revision_id,
+        proposal,
+    )
+    if recorded is None:
+        _director_mutation(
+            endpoint,
+            "record_local_edit_proposal",
+            run_id,
+            {
+                "proposal_id": (
+                    f"local-edit:{candidate_id}:{pending.batch_index}"
+                ),
+                "candidate_id": candidate_id,
+                "batch_index": pending.batch_index,
+                "evidence_scope_digest": context.evidence_scope_digest,
+                "proposal": proposal.to_dict(),
+            },
+        )
+    if policy_rejection_reason is not None:
+        validated = LocalEditResult(
+            outcome=LocalEditOutcome.REJECTED,
+            operations=tuple(proposal.operations),
+            child=None,
+            proposal_digest=digest(proposal.to_dict()),
+        )
+    else:
+        validated = apply_or_reject_local_edit_bundle(
+            EcologyEvolutionPluginGenome.from_dict(dict(revision.genome)),
+            proposal,
+            context,
+            current_program_registry(),
+        )
+    active_revision_id = revision.revision_id
+    advance_reason = RevisionAdvanceReason.KEPT
+    if validated.child is not None:
+        child = validated.child
+        child_revision = CandidateRevision(
+            revision_id=(
+                f"revision:{candidate_id}:batch:{pending.batch_index + 1}"
+            ),
+            run_id=run_id,
+            generation=candidate.generation,
+            candidate_id=candidate_id,
+            genome=child.to_dict(),
+            genome_digest=child.genome_digest,
+            behavior_digest=child.behavior_digest,
+            mutation_digest=str(child.lineage["mutation_digest"]),
+            parent_revision_id=revision.revision_id,
+            source_batch_index=pending.batch_index,
+            status=RevisionStatus.ACTIVE,
+        )
+        _director_mutation(
+            endpoint,
+            "create_candidate_revision",
+            run_id,
+            child_revision,
+        )
+        active_revision_id = child_revision.revision_id
+        advance_reason = RevisionAdvanceReason.LOCAL_EDIT_APPLIED
+    elif validated.outcome is LocalEditOutcome.REJECTED:
+        advance_reason = RevisionAdvanceReason.LOCAL_EDIT_REJECTED
+    _director_mutation(
+        endpoint,
+        "decide_local_edit",
+        run_id,
+        {
+            "proposal_id": f"local-edit:{candidate_id}:{pending.batch_index}",
+            "candidate_id": candidate_id,
+            "batch_index": pending.batch_index,
+            "outcome": validated.outcome.value,
+            "active_revision_id": active_revision_id,
+            **(
+                {"reason": policy_rejection_reason}
+                if policy_rejection_reason is not None
+                else {}
+            ),
+        },
+    )
+    _director_mutation(
+        endpoint,
+        "advance_trajectory_revision",
+        run_id,
+        candidate_id,
+        pending.batch_index,
+        active_revision_id,
+        advance_reason,
+    )
+    return True
+
+
+def execute_next_local_edit(
+    endpoint: Any,
+    run_id: str,
+    candidate_id: str,
+) -> bool:
+    state = endpoint.server.director.state(run_id)
+    metadata = getattr(getattr(state, "task_manifest", None), "metadata", {})
+    raw_schedule = metadata.get("optimization_schedule")
+    if (
+        isinstance(raw_schedule, Mapping)
+        and OptimizationSchedule.from_dict(raw_schedule).local_evaluation_mode
+        == PAIRED_LOCAL_EVALUATION_MODE
+    ):
+        return _execute_next_paired_local_edit(
+            endpoint,
+            run_id,
+            candidate_id,
+        )
+    return _execute_next_prequential_local_edit(
+        endpoint,
+        run_id,
+        candidate_id,
+    )
+
+
 def _prequential_safety_reason(metrics: Mapping[str, Any]) -> str | None:
     """Return a durable reason when a batch is unsafe to adapt from."""
 
@@ -709,6 +1237,60 @@ def _local_edit_proposal(
             "scope_digest": evaluation.scope.scope_key,
         },
     }
+    comparison = state.batch_comparison_for(
+        candidate.candidate_id,
+        batch.batch_index,
+    )
+    if comparison is not None:
+        evaluations = tuple(
+            item
+            for item in state.formal_batch_evaluations
+            if item.scope.candidate_id == candidate.candidate_id
+            and item.scope.batch_index == batch.batch_index
+        )
+        champion_evaluation = next(
+            (
+                item
+                for item in evaluations
+                if item.evaluation_id == comparison.champion_evaluation_id
+            ),
+            None,
+        )
+        challenger_evaluation = next(
+            (
+                item
+                for item in evaluations
+                if item.evaluation_id == comparison.challenger_evaluation_id
+            ),
+            None,
+        )
+        if champion_evaluation is None or challenger_evaluation is None:
+            raise RuntimeError("local editor comparison evidence is incomplete")
+        context_payload["paired_batch_evidence"] = {
+            "champion_before_revision_id": (
+                comparison.champion_before_revision_id
+            ),
+            "challenger_revision_id": comparison.challenger_revision_id,
+            "champion_score": comparison.champion_score,
+            "challenger_score": comparison.challenger_score,
+            "score_delta": comparison.score_delta,
+            "minimum_score_delta": comparison.minimum_score_delta,
+            "decision": comparison.decision.value,
+            "reason": comparison.reason,
+            "champion_after_revision_id": (
+                comparison.champion_after_revision_id
+            ),
+            "safety_gate_passed": comparison.safety_gate_passed,
+            "cell_regression_gate_passed": (
+                comparison.cell_regression_gate_passed
+            ),
+            "champion_metrics": _local_edit_evidence_metrics(
+                champion_evaluation.metrics
+            ),
+            "challenger_metrics": _local_edit_evidence_metrics(
+                challenger_evaluation.metrics
+            ),
+        }
     try:
         result = DshStructuredRoleRuntime(runtime, admission=admission).run(
             run_id=state.run.run_id,
@@ -794,6 +1376,17 @@ def _recent_local_edit_history(
         and isinstance(getattr(item, "revision_id", None), str)
         and str(item.revision_id).strip()
     }
+    for activation in getattr(state, "trajectory_revision_activations", ()):
+        if (
+            getattr(activation, "candidate_id", None) == candidate_id
+            and isinstance(getattr(activation, "batch_index", None), int)
+            and not isinstance(getattr(activation, "batch_index", None), bool)
+            and isinstance(getattr(activation, "from_revision_id", None), str)
+            and str(activation.from_revision_id).strip()
+        ):
+            revision_ids[int(activation.batch_index)] = str(
+                activation.from_revision_id
+            )
     outcomes = {
         int(item["batch_index"]): item
         for item in state.local_edit_outcomes

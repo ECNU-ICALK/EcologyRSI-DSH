@@ -7,6 +7,13 @@ import zlib
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import Mock, patch
 
+from ecologyrsi_dsh import (
+    EventLedger,
+    EvolutionDirector,
+    FakeDSHAdapter,
+    TaskManifest,
+)
+from ecologyrsi_dsh.api import formal_trajectory
 from ecologyrsi_dsh.api.formal_trajectory import (
     _durable_batch_metrics,
     _local_edit_bundle_signature,
@@ -20,7 +27,22 @@ from ecologyrsi_dsh.api.formal_trajectory import (
     _safety_requires_rollback,
     execute_next_local_edit,
 )
-from ecologyrsi_dsh.core.trajectory import LocalEditOutcome, RevisionAdvanceReason
+from ecologyrsi_dsh.core.models import digest
+from ecologyrsi_dsh.core.screening import screening_cohort_digest
+from ecologyrsi_dsh.core.trajectory import (
+    CandidateRevision,
+    FormalBatchArm,
+    FormalBatchComparisonDecision,
+    LocalEditOutcome,
+    RevisionAdvanceReason,
+    RevisionStatus,
+    TrajectoryStatus,
+)
+from ecologyrsi_dsh.data.splits import IndexRange
+from ecologyrsi_dsh.evaluators.epoch_cohorts import (
+    plan_generation_selection_cohorts,
+    plan_run_adaptation_cohort,
+)
 from ecologyrsi_dsh.evaluators.sample_execution import (
     encode_sample_execution_trace,
 )
@@ -30,6 +52,70 @@ from ecologyrsi_dsh.evolution.local_edits import (
     LocalEditResult,
 )
 from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
+
+
+class _NoopScopedCallbacks:
+    def __init__(self, *_args, **_kwargs) -> None:
+        pass
+
+    def evaluation_kwargs(self) -> dict:
+        return {}
+
+    def completion_payload(self, _evaluation_id, _sample_results):
+        return None
+
+
+class _PairedLaneEvaluator:
+    def __init__(self, initial_revision_id: str) -> None:
+        self.initial_revision_id = initial_revision_id
+        self.calls: list[tuple[int, str, str]] = []
+
+    def evaluate_scientific(self, _task, _candidate, _proposal, *, scope, **_kwargs):
+        revision_id = scope.candidate_revision_id
+        batch_index = int(scope.batch_index)
+        arm = scope.formal_batch_arm.value
+        self.calls.append((batch_index, arm, revision_id))
+        if batch_index == 0:
+            score = 0.2
+        elif batch_index == 1:
+            score = 0.4 if revision_id == self.initial_revision_id else 0.3
+        else:
+            score = 0.4 if revision_id == self.initial_revision_id else 0.55
+        metrics = {
+            "objective_score": score,
+            "objective_aggregation_version": "paired-test-objective@1",
+            "objective_target_weights": {"air_temperature": 1.0},
+            "objective_horizons": [1],
+            "baseline_profile_digest": "b" * 64,
+            "evaluation_index_digest": digest({"batch": batch_index}),
+            "dataset_digest": "d" * 64,
+            "split_manifest_digest_sha256": "e" * 64,
+            "constraint_violations": 0,
+            "sample_execution_coverage_pass": True,
+            "sample_execution": {
+                "attempted_origin_samples": scope.origin_count,
+                "succeeded_origin_samples": scope.origin_count,
+                "failed_origin_samples": 0,
+                "coverage": 1.0,
+                "coverage_pass": True,
+                "minimum_coverage": 0.95,
+                "strict_agent_chain_pass": True,
+            },
+            "targets": [
+                {
+                    "target": "air_temperature",
+                    "horizon_hours": 1,
+                    "skill_score": score,
+                }
+            ],
+        }
+        evaluation = SimpleNamespace(
+            score=score,
+            passed=True,
+            metrics=metrics,
+            evaluator_digest="paired-lane-evaluator@1",
+        )
+        return SimpleNamespace(evaluation=evaluation, sample_results=())
 
 
 class FormalTrajectoryTests(unittest.TestCase):
@@ -710,6 +796,380 @@ class FormalTrajectoryTests(unittest.TestCase):
         self.assertEqual(calls[1][3]["active_revision_id"], "revision:guard:r0")
         self.assertEqual(calls[2][1], "advance_trajectory_revision")
         self.assertEqual(calls[2][6], RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK)
+
+
+class PairedFormalTrajectoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests.test_local_edits import _parent
+
+        self.ledger = EventLedger()
+        self.director = EvolutionDirector(
+            self.ledger,
+            FakeDSHAdapter(max_proposals=20),
+        )
+        self.schedule = OptimizationSchedule.from_dict(
+            {
+                **OptimizationSchedule.default().to_dict(),
+                "formal_origin_count_per_finalist": 30,
+                "local_batch_origin_count": 10,
+            }
+        )
+        task = TaskManifest(
+            task_id="paired-formal-trajectory",
+            objective="exercise champion challenger state machine",
+            domain_pack="crop-soil-water@toy",
+            visible_datasets=("generated-toy-series@1",),
+            budget={
+                "max_generations": 1,
+                "candidates_per_generation": 4,
+                "max_candidates": 4,
+            },
+            seed=23,
+            metadata={
+                "episode_id": "episode:paired-formal",
+                "optimization_protocol": "top2_adaptive_epoch@1",
+                "optimization_schedule": self.schedule.to_dict(),
+                "prediction_cells_per_origin": 1,
+            },
+        )
+        self.run_id = "run:paired-formal"
+        self.director.start_evolution(task, run_id=self.run_id)
+        self.candidates = tuple(
+            self.director.propose_and_spawn(self.run_id) for _ in range(4)
+        )
+        parent = _parent()
+        self.revisions: dict[str, CandidateRevision] = {}
+        for index, candidate in enumerate(self.candidates):
+            revision = CandidateRevision(
+                revision_id=f"revision:paired-formal:{index}:r0",
+                run_id=self.run_id,
+                generation=0,
+                candidate_id=candidate.candidate_id,
+                genome=parent.to_dict(),
+                genome_digest=parent.genome_digest,
+                behavior_digest=parent.behavior_digest,
+                mutation_digest=digest({"seed-mutation": index}),
+                status=RevisionStatus.ACTIVE,
+            )
+            self.director.create_candidate_revision(self.run_id, revision)
+            self.revisions[candidate.candidate_id] = revision
+        dataset = SimpleNamespace(
+            dataset_id="generated-toy-series@1",
+            episode_id="episode:paired-formal",
+            timestamps=tuple(range(1200)),
+            partitions={"model_selection": IndexRange(0, 1200)},
+        )
+        adaptation = plan_run_adaptation_cohort(
+            dataset,
+            schedule=self.schedule,
+            seed=23,
+        )
+        cohorts = plan_generation_selection_cohorts(
+            dataset,
+            schedule=self.schedule,
+            generation=0,
+            adaptation=adaptation,
+            seed=23,
+        )
+        self.director.freeze_run_adaptation_cohort(self.run_id, adaptation)
+        self.director.freeze_generation_selection_cohorts(
+            self.run_id,
+            cohorts,
+        )
+        for candidate in self.candidates:
+            self.director.record_candidate_screening(
+                self.run_id,
+                candidate_id=candidate.candidate_id,
+                generation=0,
+                score=1.0 - candidate.slot_index * 0.1,
+                passed=True,
+                constraint_violations=0,
+                origin_count=64,
+                prediction_cell_count=64,
+                cohort_digest=cohorts.screening.cohort_digest,
+            )
+        screening = [
+            event.payload
+            for event in self.director.state(self.run_id).candidate_screening_events
+        ]
+        self.finalist = self.candidates[0]
+        self.director.freeze_formal_selection_cohort(
+            self.run_id,
+            generation=0,
+            selected_candidate_ids=[
+                self.candidates[0].candidate_id,
+                self.candidates[1].candidate_id,
+            ],
+            screening_digest=screening_cohort_digest(screening),
+        )
+        initial = self.revisions[self.finalist.candidate_id]
+        self.evaluator = _PairedLaneEvaluator(initial.revision_id)
+        self.endpoint = SimpleNamespace(
+            server=SimpleNamespace(
+                director=self.director,
+                ledger=self.ledger,
+                evaluators=self.evaluator,
+            )
+        )
+
+    def tearDown(self) -> None:
+        self.ledger.close()
+
+    @staticmethod
+    def _revision_inputs(state, candidate, revision_id, _task):
+        return (
+            state.revision(revision_id),
+            SimpleNamespace(proposal_id=candidate.proposal_id),
+            object(),
+        )
+
+    @staticmethod
+    def _local_context(state, candidate, revision, batch):
+        from ecologyrsi_dsh.evolution.local_edits import LocalEditContext
+
+        evaluation = state.batch_evaluation_for(
+            candidate.candidate_id,
+            batch.batch_index,
+        )
+        return LocalEditContext(
+            run_id=state.run.run_id,
+            generation=candidate.generation,
+            candidate_id=candidate.candidate_id,
+            candidate_revision_id=revision.revision_id,
+            batch_index=batch.batch_index,
+            evidence_scope_digest=evaluation.scope.scope_key,
+            parent_genome_digest=revision.genome_digest,
+            maximum_operations=1,
+            allowed_mutation_targets={
+                "scientific_parameter": ("ridge_alpha",),
+            },
+            allowed_evidence_refs=("batch:score",),
+            allowed_effect_cells=("air_temperature@1h",),
+            parameter_schemas={
+                "ridge_alpha": {"minimum": 0.0001, "maximum": 1.0},
+            },
+        )
+
+    @staticmethod
+    def _mutate_proposal() -> LocalEditProposal:
+        return LocalEditProposal(
+            decision="mutate",
+            operations=(
+                {
+                    "op": "set_bounded_parameter",
+                    "name": "ridge_alpha",
+                    "value": 0.2,
+                },
+            ),
+            evidence_refs=("batch:score",),
+            expected_effect_cells=("air_temperature@1h",),
+            risk_cells=(),
+        )
+
+    def _execution_patches(self, proposal: LocalEditProposal):
+        return (
+            patch.object(
+                formal_trajectory,
+                "_phase_task_manifest",
+                return_value=object(),
+            ),
+            patch.object(
+                formal_trajectory,
+                "_revision_evaluation_inputs",
+                side_effect=self._revision_inputs,
+            ),
+            patch.object(
+                formal_trajectory,
+                "_ScopedEvaluationCallbacks",
+                _NoopScopedCallbacks,
+            ),
+            patch.object(
+                formal_trajectory,
+                "_local_edit_context",
+                side_effect=self._local_context,
+            ),
+            patch.object(
+                formal_trajectory,
+                "_local_edit_proposal",
+                return_value=proposal,
+            ),
+        )
+
+    def test_retained_champion_parents_next_challenger_and_final_has_no_edit(self) -> None:
+        candidate_id = self.finalist.candidate_id
+        initial_id = self.revisions[candidate_id].revision_id
+        patches = self._execution_patches(self._mutate_proposal())
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            self.assertTrue(
+                formal_trajectory.execute_next_formal_batch(
+                    self.endpoint,
+                    self.run_id,
+                    candidate_id,
+                )
+            )
+            self.assertTrue(
+                formal_trajectory.execute_next_formal_batch(
+                    self.endpoint,
+                    self.run_id,
+                    candidate_id,
+                )
+            )
+            state = self.director.state(self.run_id)
+            warmup = state.batch_comparison_for(candidate_id, 0)
+            self.assertEqual(
+                warmup.decision,
+                FormalBatchComparisonDecision.INITIAL_CHAMPION,
+            )
+            self.assertEqual(len(self.evaluator.calls), 1)
+
+            self.assertTrue(
+                formal_trajectory.execute_next_local_edit(
+                    self.endpoint,
+                    self.run_id,
+                    candidate_id,
+                )
+            )
+            first_challenger = self.director.state(self.run_id).revision_activation_for(
+                candidate_id,
+                0,
+            ).to_revision_id
+            self.assertNotEqual(first_challenger, initial_id)
+
+            for _ in range(3):
+                self.assertTrue(
+                    formal_trajectory.execute_next_formal_batch(
+                        self.endpoint,
+                        self.run_id,
+                        candidate_id,
+                    )
+                )
+            state = self.director.state(self.run_id)
+            retained = state.batch_comparison_for(candidate_id, 1)
+            self.assertEqual(
+                retained.decision,
+                FormalBatchComparisonDecision.CHAMPION_RETAINED,
+            )
+            self.assertEqual(retained.champion_after_revision_id, initial_id)
+
+            self.assertTrue(
+                formal_trajectory.execute_next_local_edit(
+                    self.endpoint,
+                    self.run_id,
+                    candidate_id,
+                )
+            )
+            state = self.director.state(self.run_id)
+            second_challenger_id = state.revision_activation_for(
+                candidate_id,
+                1,
+            ).to_revision_id
+            second_challenger = state.revision(second_challenger_id)
+            self.assertEqual(second_challenger.parent_revision_id, initial_id)
+
+            for _ in range(3):
+                self.assertTrue(
+                    formal_trajectory.execute_next_formal_batch(
+                        self.endpoint,
+                        self.run_id,
+                        candidate_id,
+                    )
+                )
+            state = self.director.state(self.run_id)
+            trajectory = state.trajectory_for(candidate_id)
+            final_comparison = state.batch_comparison_for(candidate_id, 2)
+            self.assertIs(trajectory.status, TrajectoryStatus.COMPLETED)
+            self.assertEqual(
+                trajectory.final_revision_id,
+                final_comparison.champion_after_revision_id,
+            )
+            self.assertEqual(trajectory.final_revision_id, second_challenger_id)
+            self.assertFalse(
+                formal_trajectory.execute_next_local_edit(
+                    self.endpoint,
+                    self.run_id,
+                    candidate_id,
+                )
+            )
+            self.assertEqual(
+                len(
+                    [
+                        item
+                        for item in state.local_edit_outcomes
+                        if item["candidate_id"] == candidate_id
+                    ]
+                ),
+                2,
+            )
+            self.assertIsNone(state.revision_activation_for(candidate_id, 2))
+            self.assertFalse(
+                any(
+                    item.candidate_id == candidate_id
+                    and item.source_batch_index == 2
+                    for item in state.candidate_revisions
+                )
+            )
+
+    def test_same_revision_pair_reuses_one_evaluation(self) -> None:
+        candidate_id = self.finalist.candidate_id
+        keep = LocalEditProposal(
+            decision="keep",
+            operations=(),
+            evidence_refs=("batch:score",),
+            expected_effect_cells=(),
+            risk_cells=(),
+        )
+        patches = self._execution_patches(keep)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            self.assertTrue(
+                formal_trajectory.execute_next_formal_batch(
+                    self.endpoint,
+                    self.run_id,
+                    candidate_id,
+                )
+            )
+            self.assertTrue(
+                formal_trajectory.execute_next_formal_batch(
+                    self.endpoint,
+                    self.run_id,
+                    candidate_id,
+                )
+            )
+            self.assertTrue(
+                formal_trajectory.execute_next_local_edit(
+                    self.endpoint,
+                    self.run_id,
+                    candidate_id,
+                )
+            )
+            self.assertTrue(
+                formal_trajectory.execute_next_formal_batch(
+                    self.endpoint,
+                    self.run_id,
+                    candidate_id,
+                )
+            )
+            call_count = len(self.evaluator.calls)
+            self.assertTrue(
+                formal_trajectory.execute_next_formal_batch(
+                    self.endpoint,
+                    self.run_id,
+                    candidate_id,
+                )
+            )
+
+        comparison = self.director.state(self.run_id).batch_comparison_for(
+            candidate_id,
+            1,
+        )
+        self.assertEqual(len(self.evaluator.calls), call_count)
+        self.assertEqual(
+            comparison.champion_evaluation_id,
+            comparison.challenger_evaluation_id,
+        )
+        self.assertEqual(
+            comparison.decision,
+            FormalBatchComparisonDecision.CHAMPION_RETAINED,
+        )
 
 
 if __name__ == "__main__":
