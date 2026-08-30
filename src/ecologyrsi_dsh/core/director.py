@@ -114,6 +114,8 @@ from .trajectory import (
     EvaluationPhase,
     EvaluationScope,
     FormalBatch,
+    FormalBatchArm,
+    FormalBatchComparison,
     FormalTrajectory,
     GenerationComparison,
     GenerationHoldout,
@@ -125,7 +127,11 @@ from .trajectory import (
     TrajectoryRevisionActivation,
     TrajectoryStatus,
 )
-from ..evolution.schedule import OPTIMIZATION_PROTOCOL, OptimizationSchedule
+from ..evolution.schedule import (
+    OPTIMIZATION_PROTOCOL,
+    PAIRED_LOCAL_EVALUATION_MODE,
+    OptimizationSchedule,
+)
 from ..evaluators.epoch_cohorts import GenerationCohorts, RunAdaptationCohort
 
 _AGGREGATE_EVALUATION_METRICS = frozenset(
@@ -2467,7 +2473,16 @@ class EvolutionDirector:
         state = self.state(run_id)
         key_candidate = evaluation.scope.candidate_id
         key_index = int(evaluation.scope.batch_index)
-        existing = state.batch_evaluation_for(key_candidate, key_index)
+        arm = evaluation.scope.formal_batch_arm
+        schedule = OptimizationSchedule.from_dict(
+            state.task_manifest.metadata["optimization_schedule"]
+        )
+        if schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
+            if arm is None:
+                raise ValueError("paired formal batch evaluation requires an arm")
+        elif arm is not None:
+            raise ValueError("prequential formal evaluation cannot have an arm")
+        existing = state.batch_evaluation_for(key_candidate, key_index, arm)
         if existing is not None:
             if existing.to_dict() != evaluation.to_dict():
                 raise ValueError("formal batch already has a different evaluation")
@@ -2489,9 +2504,26 @@ class EvolutionDirector:
         batch = state.formal_batch_for(key_candidate, key_index)
         if batch is None:
             raise ValueError("formal batch has not started")
+        expected_revision_id = batch.revision_id
+        if schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
+            if key_index == 0:
+                if arm is not FormalBatchArm.CHAMPION:
+                    raise ValueError("paired batch 0 only accepts the champion arm")
+            elif arm is FormalBatchArm.CHAMPION:
+                prior_comparison = state.batch_comparison_for(
+                    key_candidate,
+                    key_index - 1,
+                )
+                if prior_comparison is None:
+                    raise ValueError(
+                        "paired champion evaluation requires prior comparison"
+                    )
+                expected_revision_id = (
+                    prior_comparison.champion_after_revision_id
+                )
         if (
             evaluation.scope.run_id != run_id
-            or evaluation.scope.candidate_revision_id != batch.revision_id
+            or evaluation.scope.candidate_revision_id != expected_revision_id
             or evaluation.scope.cohort_digest != batch.cohort_digest
             or evaluation.scope.origin_count != batch.origin_count
         ):
@@ -2517,7 +2549,8 @@ class EvolutionDirector:
             "FormalBatchEvaluated",
             {"evaluation": evaluation.to_dict()},
             f"{run_id}:generation:{batch.generation}:trajectory:"
-            f"{key_candidate}:batch:{key_index}:evaluated",
+            f"{key_candidate}:batch:{key_index}:evaluated"
+            + (f":{arm.value}" if arm is not None else ""),
         )
         self.ledger.append_many(
             run_id,
@@ -2527,6 +2560,121 @@ class EvolutionDirector:
             ),
         )
         return evaluation
+
+    def record_formal_batch_comparison(
+        self,
+        run_id: str,
+        comparison: FormalBatchComparison,
+    ) -> FormalBatchComparison:
+        if not isinstance(comparison, FormalBatchComparison):
+            raise TypeError("comparison must be a FormalBatchComparison")
+        state = self.state(run_id)
+        schedule = OptimizationSchedule.from_dict(
+            state.task_manifest.metadata["optimization_schedule"]
+        )
+        if schedule.local_evaluation_mode != PAIRED_LOCAL_EVALUATION_MODE:
+            raise ValueError("formal batch comparison requires paired schedule")
+        existing = state.batch_comparison_for(
+            comparison.candidate_id,
+            comparison.batch_index,
+        )
+        if existing is not None:
+            if existing.to_dict() != comparison.to_dict():
+                raise ValueError("formal batch already has a different comparison")
+            return existing
+        batch = state.formal_batch_for(
+            comparison.candidate_id,
+            comparison.batch_index,
+        )
+        trajectory = state.trajectory_for(comparison.candidate_id)
+        if batch is None or trajectory is None:
+            raise ValueError("formal batch comparison requires an active batch")
+        if (
+            comparison.run_id != run_id
+            or comparison.generation != batch.generation
+            or comparison.cohort_digest != batch.cohort_digest
+        ):
+            raise ValueError("formal batch comparison cohort or ownership is invalid")
+        prior_comparison = state.batch_comparison_for(
+            comparison.candidate_id,
+            comparison.batch_index - 1,
+        )
+        expected_champion_id = (
+            trajectory.initial_revision_id
+            if comparison.batch_index == 0
+            else prior_comparison.champion_after_revision_id
+            if prior_comparison is not None
+            else None
+        )
+        if (
+            comparison.champion_before_revision_id != expected_champion_id
+            or comparison.challenger_revision_id != batch.revision_id
+        ):
+            raise ValueError("formal batch comparison revision binding is invalid")
+        evaluations = tuple(
+            item
+            for item in state.formal_batch_evaluations
+            if item.scope.candidate_id == comparison.candidate_id
+            and item.scope.batch_index == comparison.batch_index
+        )
+        champion_evaluation = next(
+            (
+                item
+                for item in evaluations
+                if item.evaluation_id == comparison.champion_evaluation_id
+            ),
+            None,
+        )
+        challenger_evaluation = next(
+            (
+                item
+                for item in evaluations
+                if item.evaluation_id == comparison.challenger_evaluation_id
+            ),
+            None,
+        )
+        if (
+            champion_evaluation is None
+            or challenger_evaluation is None
+            or champion_evaluation.scope.candidate_revision_id
+            != comparison.champion_before_revision_id
+            or challenger_evaluation.scope.candidate_revision_id
+            != comparison.challenger_revision_id
+        ):
+            raise ValueError("formal batch comparison evaluation binding is invalid")
+        if (
+            champion_evaluation.evaluation_digest
+            != comparison.champion_evaluation_digest
+            or challenger_evaluation.evaluation_digest
+            != comparison.challenger_evaluation_digest
+        ):
+            raise ValueError("formal batch comparison evaluation digest is invalid")
+        if not (
+            math.isclose(
+                champion_evaluation.score,
+                comparison.champion_score,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            and math.isclose(
+                challenger_evaluation.score,
+                comparison.challenger_score,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        ):
+            raise ValueError("formal batch comparison score is invalid")
+        self.ledger.append(
+            run_id,
+            "FormalBatchCompared",
+            {"comparison": comparison.to_dict()},
+            event_id=(
+                f"{run_id}:generation:{comparison.generation}:trajectory:"
+                f"{comparison.candidate_id}:batch:"
+                f"{comparison.batch_index}:compared"
+            ),
+        )
+        return comparison
 
     def record_local_edit_proposal(
         self, run_id: str, proposal_payload: Mapping[str, Any]
@@ -2568,6 +2716,11 @@ class EvolutionDirector:
         )
         if (
             evaluation is None
+            or (
+                schedule.local_evaluation_mode
+                == PAIRED_LOCAL_EVALUATION_MODE
+                and state.batch_comparison_for(candidate_id, batch_index) is None
+            )
             or payload["evidence_scope_digest"] != evaluation.scope.scope_key
             or not isinstance(operations, list)
             or len(operations) > schedule.max_local_edits_per_batch
@@ -2717,7 +2870,28 @@ class EvolutionDirector:
             for item in state.trajectory_revision_activations
             if item.candidate_id == candidate_id
         ]
-        if (
+        schedule = OptimizationSchedule.from_dict(
+            state.task_manifest.metadata["optimization_schedule"]
+        )
+        if schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
+            comparisons = [
+                item
+                for item in state.formal_batch_comparisons
+                if item.candidate_id == candidate_id
+            ]
+            final_comparison = state.batch_comparison_for(
+                candidate_id,
+                trajectory.batch_count - 1,
+            )
+            if (
+                len(comparisons) != trajectory.batch_count
+                or len(activations) != trajectory.batch_count - 1
+                or final_comparison is None
+                or final_comparison.champion_after_revision_id
+                != final_revision_id
+            ):
+                raise ValueError("formal trajectory has incomplete paired batches")
+        elif (
             len(activations) != trajectory.batch_count
             or state.revision_activation_for(
                 candidate_id, trajectory.batch_count - 1

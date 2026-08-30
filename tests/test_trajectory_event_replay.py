@@ -14,6 +14,9 @@ from ecologyrsi_dsh.core.trajectory import (
     CandidateRevision,
     EvaluationPhase,
     EvaluationScope,
+    FormalBatchArm,
+    FormalBatchComparison,
+    FormalBatchComparisonDecision,
     GenerationComparison,
     HoldoutArm,
     HoldoutEvaluation,
@@ -40,13 +43,14 @@ class TrajectoryEventReplayTests(unittest.TestCase):
         self.director = EvolutionDirector(
             self.ledger, FakeDSHAdapter(max_proposals=20)
         )
-        schedule = OptimizationSchedule.from_dict(
-            {
-                **OptimizationSchedule.default().to_dict(),
-                "formal_origin_count_per_finalist": 100,
-                "local_batch_origin_count": 10,
-            }
+        schedule_value = OptimizationSchedule.default().to_dict()
+        schedule_value.update(
+            schema_version="ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
+            local_evaluation_mode="prequential",
+            formal_origin_count_per_finalist=100,
+            local_batch_origin_count=10,
         )
+        schedule = OptimizationSchedule.from_dict(schedule_value)
         self.schedule = schedule
         task = TaskManifest(
             task_id="trajectory-replay",
@@ -774,6 +778,342 @@ class TrajectoryEventReplayTests(unittest.TestCase):
                 revision.revision_id,
                 1,
             )
+
+    def test_paired_evaluations_and_comparison_replay_by_explicit_arm(self) -> None:
+        run_id = "run:paired-replay"
+        schedule = OptimizationSchedule.from_dict(
+            {
+                **OptimizationSchedule.default().to_dict(),
+                "formal_origin_count_per_finalist": 20,
+                "local_batch_origin_count": 10,
+            }
+        )
+        task = TaskManifest(
+            task_id="paired-replay",
+            objective="exercise paired comparison replay",
+            domain_pack="crop-soil-water@toy",
+            visible_datasets=("generated-toy-series@1",),
+            budget={
+                "max_generations": 1,
+                "candidates_per_generation": 4,
+                "max_candidates": 4,
+            },
+            seed=17,
+            metadata={
+                "episode_id": "episode:paired-replay",
+                "optimization_protocol": "top2_adaptive_epoch@1",
+                "optimization_schedule": schedule.to_dict(),
+                "prediction_cells_per_origin": 9,
+            },
+        )
+        self.director.start_evolution(task, run_id=run_id)
+        candidates = tuple(
+            self.director.propose_and_spawn(run_id) for _ in range(4)
+        )
+        revisions = []
+        for index, candidate in enumerate(candidates):
+            revision = CandidateRevision(
+                revision_id=f"revision:paired:{index}:0",
+                run_id=run_id,
+                generation=0,
+                candidate_id=candidate.candidate_id,
+                genome={"parameters": {"slot": index}},
+                genome_digest=_sha(f"paired-genome:{index}"),
+                behavior_digest=_sha(f"paired-behavior:{index}"),
+                mutation_digest=_sha(f"paired-mutation:{index}"),
+                status=RevisionStatus.ACTIVE,
+            )
+            self.director.create_candidate_revision(run_id, revision)
+            revisions.append(revision)
+        dataset = SimpleNamespace(
+            dataset_id="generated-toy-series@1",
+            episode_id="episode:paired-replay",
+            timestamps=tuple(range(1200)),
+            partitions={"model_selection": IndexRange(0, 1200)},
+        )
+        adaptation = plan_run_adaptation_cohort(
+            dataset,
+            schedule=schedule,
+            seed=17,
+        )
+        cohorts = plan_generation_selection_cohorts(
+            dataset,
+            schedule=schedule,
+            generation=0,
+            adaptation=adaptation,
+            seed=17,
+        )
+        self.director.freeze_run_adaptation_cohort(run_id, adaptation)
+        self.director.freeze_generation_selection_cohorts(run_id, cohorts)
+        for candidate in candidates:
+            self.director.record_candidate_screening(
+                run_id,
+                candidate_id=candidate.candidate_id,
+                generation=0,
+                score=1.0 - candidate.slot_index * 0.1,
+                passed=True,
+                constraint_violations=0,
+                origin_count=64,
+                prediction_cell_count=64,
+                cohort_digest=cohorts.screening.cohort_digest,
+            )
+        screening_records = [
+            event.payload
+            for event in self.director.state(run_id).candidate_screening_events
+        ]
+        finalists = candidates[:2]
+        self.director.freeze_formal_selection_cohort(
+            run_id,
+            generation=0,
+            selected_candidate_ids=[item.candidate_id for item in finalists],
+            screening_digest=screening_cohort_digest(screening_records),
+        )
+
+        candidate = finalists[0]
+        initial = revisions[0]
+        self.director.start_formal_trajectory(
+            run_id,
+            candidate.candidate_id,
+            initial.revision_id,
+            schedule.batch_count,
+        )
+        batch0 = self.director.start_formal_batch(
+            run_id,
+            candidate.candidate_id,
+            initial.revision_id,
+            0,
+        )
+        warmup = BatchEvaluation(
+            evaluation_id="evaluation:paired:warmup",
+            scope=EvaluationScope(
+                run_id=run_id,
+                generation=0,
+                candidate_id=candidate.candidate_id,
+                candidate_revision_id=initial.revision_id,
+                phase=EvaluationPhase.FORMAL_BATCH,
+                cohort_digest=batch0.cohort_digest,
+                origin_count=batch0.origin_count,
+                batch_index=0,
+                formal_batch_arm=FormalBatchArm.CHAMPION,
+            ),
+            score=0.2,
+            passed=True,
+            metrics={"targets": []},
+            evaluator_digest=_sha("paired-evaluator"),
+        )
+        self.director.record_formal_batch_evaluation(run_id, warmup)
+        initial_comparison = FormalBatchComparison(
+            comparison_id=f"comparison:{candidate.candidate_id}:0",
+            run_id=run_id,
+            generation=0,
+            candidate_id=candidate.candidate_id,
+            batch_index=0,
+            cohort_digest=batch0.cohort_digest,
+            champion_before_revision_id=initial.revision_id,
+            challenger_revision_id=initial.revision_id,
+            champion_evaluation_id=warmup.evaluation_id,
+            challenger_evaluation_id=warmup.evaluation_id,
+            champion_evaluation_digest=warmup.evaluation_digest,
+            challenger_evaluation_digest=warmup.evaluation_digest,
+            champion_score=warmup.score,
+            challenger_score=warmup.score,
+            score_delta=0.0,
+            comparison_contract_digest=_sha("paired-contract"),
+            safety_gate_passed=True,
+            cell_regression_gate_passed=True,
+            minimum_score_delta=0.005,
+            decision=FormalBatchComparisonDecision.INITIAL_CHAMPION,
+            champion_after_revision_id=initial.revision_id,
+            reason="initial_champion",
+        )
+        self.director.record_formal_batch_comparison(run_id, initial_comparison)
+
+        proposal_id = f"local:{candidate.candidate_id}:0"
+        self.director.record_local_edit_proposal(
+            run_id,
+            {
+                "proposal_id": proposal_id,
+                "candidate_id": candidate.candidate_id,
+                "batch_index": 0,
+                "evidence_scope_digest": warmup.scope.scope_key,
+                "decision": "mutate",
+                "operations": [
+                    {
+                        "op": "set_bounded_parameter",
+                        "name": "ridge_alpha",
+                        "value": 0.5,
+                    }
+                ],
+            },
+        )
+        challenger = CandidateRevision(
+            revision_id=f"revision:{candidate.candidate_id}:challenger:1",
+            run_id=run_id,
+            generation=0,
+            candidate_id=candidate.candidate_id,
+            parent_revision_id=initial.revision_id,
+            source_batch_index=0,
+            genome={"parameters": {"slot": 100}},
+            genome_digest=_sha("paired-child-genome"),
+            behavior_digest=_sha("paired-child-behavior"),
+            mutation_digest=_sha("paired-child-mutation"),
+            status=RevisionStatus.ACTIVE,
+        )
+        self.director.create_candidate_revision(run_id, challenger)
+        self.director.decide_local_edit(
+            run_id,
+            {
+                "proposal_id": proposal_id,
+                "candidate_id": candidate.candidate_id,
+                "batch_index": 0,
+                "outcome": "applied",
+                "active_revision_id": challenger.revision_id,
+            },
+        )
+        self.director.advance_trajectory_revision(
+            run_id,
+            candidate.candidate_id,
+            0,
+            challenger.revision_id,
+            RevisionAdvanceReason.LOCAL_EDIT_APPLIED,
+        )
+
+        batch1 = self.director.start_formal_batch(
+            run_id,
+            candidate.candidate_id,
+            challenger.revision_id,
+            1,
+        )
+        champion_evaluation = BatchEvaluation(
+            evaluation_id="evaluation:paired:champion:1",
+            scope=EvaluationScope(
+                run_id=run_id,
+                generation=0,
+                candidate_id=candidate.candidate_id,
+                candidate_revision_id=initial.revision_id,
+                phase=EvaluationPhase.FORMAL_BATCH,
+                cohort_digest=batch1.cohort_digest,
+                origin_count=batch1.origin_count,
+                batch_index=1,
+                formal_batch_arm=FormalBatchArm.CHAMPION,
+            ),
+            score=0.4,
+            passed=True,
+            metrics={"targets": []},
+            evaluator_digest=_sha("paired-evaluator"),
+        )
+        challenger_evaluation = BatchEvaluation(
+            evaluation_id="evaluation:paired:challenger:1",
+            scope=EvaluationScope(
+                run_id=run_id,
+                generation=0,
+                candidate_id=candidate.candidate_id,
+                candidate_revision_id=challenger.revision_id,
+                phase=EvaluationPhase.FORMAL_BATCH,
+                cohort_digest=batch1.cohort_digest,
+                origin_count=batch1.origin_count,
+                batch_index=1,
+                formal_batch_arm=FormalBatchArm.CHALLENGER,
+            ),
+            score=0.3,
+            passed=True,
+            metrics={"targets": []},
+            evaluator_digest=_sha("paired-evaluator"),
+        )
+        self.director.record_formal_batch_evaluation(
+            run_id,
+            champion_evaluation,
+        )
+        self.director.record_formal_batch_evaluation(
+            run_id,
+            challenger_evaluation,
+        )
+        comparison = FormalBatchComparison(
+            comparison_id=f"comparison:{candidate.candidate_id}:1",
+            run_id=run_id,
+            generation=0,
+            candidate_id=candidate.candidate_id,
+            batch_index=1,
+            cohort_digest=batch1.cohort_digest,
+            champion_before_revision_id=initial.revision_id,
+            challenger_revision_id=challenger.revision_id,
+            champion_evaluation_id=champion_evaluation.evaluation_id,
+            challenger_evaluation_id=challenger_evaluation.evaluation_id,
+            champion_evaluation_digest=champion_evaluation.evaluation_digest,
+            challenger_evaluation_digest=challenger_evaluation.evaluation_digest,
+            champion_score=champion_evaluation.score,
+            challenger_score=challenger_evaluation.score,
+            score_delta=-0.1,
+            comparison_contract_digest=_sha("paired-contract"),
+            safety_gate_passed=True,
+            cell_regression_gate_passed=False,
+            minimum_score_delta=0.005,
+            decision=FormalBatchComparisonDecision.CHAMPION_RETAINED,
+            champion_after_revision_id=initial.revision_id,
+            reason="challenger_cell_regression",
+        )
+        mismatched = FormalBatchComparison.from_dict(
+            {**comparison.to_dict(), "cohort_digest": _sha("wrong-cohort")}
+        )
+        with self.assertRaisesRegex(ValueError, "cohort"):
+            self.director.record_formal_batch_comparison(run_id, mismatched)
+        bad_digest = FormalBatchComparison.from_dict(
+            {
+                **comparison.to_dict(),
+                "champion_evaluation_digest": _sha("wrong-evaluation"),
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "digest"):
+            self.director.record_formal_batch_comparison(run_id, bad_digest)
+
+        recorded = self.director.record_formal_batch_comparison(
+            run_id,
+            comparison,
+        )
+        recovered = self.director.record_formal_batch_comparison(
+            run_id,
+            comparison,
+        )
+        self.assertEqual(recovered, recorded)
+        conflicting = FormalBatchComparison.from_dict(
+            {**comparison.to_dict(), "reason": "below_practical_delta"}
+        )
+        with self.assertRaisesRegex(ValueError, "different comparison"):
+            self.director.record_formal_batch_comparison(run_id, conflicting)
+
+        replayed = self.director.replay(run_id)
+        self.assertEqual(
+            replayed.batch_evaluation_for(
+                candidate.candidate_id,
+                1,
+                FormalBatchArm.CHAMPION,
+            ),
+            champion_evaluation,
+        )
+        self.assertEqual(
+            replayed.batch_evaluation_for(
+                candidate.candidate_id,
+                1,
+                FormalBatchArm.CHALLENGER,
+            ),
+            challenger_evaluation,
+        )
+        self.assertEqual(
+            replayed.batch_evaluation_for(candidate.candidate_id, 1),
+            challenger_evaluation,
+        )
+        self.assertEqual(
+            replayed.batch_comparison_for(candidate.candidate_id, 1),
+            comparison,
+        )
+        self.assertEqual(
+            replayed.trajectory_champion_revision_id(candidate.candidate_id),
+            initial.revision_id,
+        )
+        self.assertEqual(
+            sum(event.kind == "FormalBatchCompared" for event in replayed.events),
+            2,
+        )
 
 
 if __name__ == "__main__":
