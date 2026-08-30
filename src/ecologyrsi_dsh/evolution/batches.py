@@ -40,7 +40,11 @@ from .analysis import (
     sample_update_windows_enabled,
 )
 from .genome import EcologyEvolutionPluginGenome, deep_thaw_json
-from .schedule import OPTIMIZATION_PROTOCOL
+from .schedule import (
+    OPTIMIZATION_PROTOCOL,
+    PAIRED_LOCAL_EVALUATION_MODE,
+    OptimizationSchedule,
+)
 
 
 _EXPERT_PENDING_CONTEXT_LIMIT = 16
@@ -1003,6 +1007,120 @@ def _canonical_candidate_outcomes(
     return tuple(outcomes)
 
 
+def _adaptive_trajectory_comparison_evidence(
+    ranking: tuple[Mapping[str, Any], ...],
+) -> list[dict[str, Any]]:
+    """Whitelist bounded lane decisions for the generation reflector."""
+
+    comparison_fields = (
+        "batch_index",
+        "decision",
+        "reason",
+        "score_delta",
+        "minimum_score_delta",
+        "safety_gate_passed",
+        "cell_regression_gate_passed",
+        "champion_before_revision_id",
+        "challenger_revision_id",
+        "champion_after_revision_id",
+        "challenger_operation_category",
+        "challenger_operation_targets",
+        "rejected_operation_category",
+        "rejected_operation_targets",
+        "next_mutation_parent_revision_id",
+        "next_challenger_revision_id",
+    )
+    lanes: list[dict[str, Any]] = []
+    for candidate in ranking:
+        local_evidence = candidate.get("local_edit_evidence")
+        if not isinstance(local_evidence, Mapping):
+            continue
+        raw_comparisons = local_evidence.get("recent_comparisons")
+        if not isinstance(raw_comparisons, (list, tuple)):
+            continue
+        comparisons = [
+            {
+                name: item.get(name)
+                for name in comparison_fields
+            }
+            for item in raw_comparisons[-10:]
+            if isinstance(item, Mapping)
+        ]
+        if not comparisons:
+            continue
+        lanes.append(
+            {
+                "candidate_id": candidate.get("candidate_id"),
+                "final_revision_id": local_evidence.get("final_revision_id"),
+                "recent_comparisons": comparisons,
+            }
+        )
+    return lanes
+
+
+def _adaptive_candidate_result_evidence(
+    ranking: tuple[Mapping[str, Any], ...],
+) -> list[dict[str, Any]]:
+    """Project fixed aggregate fields and omit detailed lane histories."""
+
+    candidate_fields = (
+        "rank",
+        "candidate_id",
+        "slot_index",
+        "score",
+        "eligible",
+        "scientific_pass",
+        "constraint_violations",
+        "classification",
+        "primary_selection_gate",
+        "selection_status",
+        "selection_reason",
+        "judge_available",
+        "judge_accepted",
+        "holdout_arm",
+        "delta_to_incumbent",
+        "failure_reasons",
+        "final_revision_id",
+        "final_revision_digest",
+        "final_genome_digest",
+        "final_behavior_digest",
+        "comparison_gate",
+        "outer_mutation_evidence",
+    )
+    local_fields = (
+        "kind",
+        "local_evaluation_mode",
+        "batch_count",
+        "local_edit_decision_count",
+        "included_batch_count",
+        "truncated_batch_count",
+        "comparison_count",
+        "included_comparison_count",
+        "truncated_comparison_count",
+        "initial_revision_id",
+        "final_revision_id",
+        "revision_chain",
+        "outcome_counts",
+        "operation_category_counts",
+    )
+    results: list[dict[str, Any]] = []
+    for candidate in ranking:
+        result = {
+            name: candidate.get(name)
+            for name in candidate_fields
+            if name in candidate
+        }
+        local_evidence = candidate.get("local_edit_evidence")
+        if isinstance(local_evidence, Mapping):
+            result["local_edit_evidence"] = {
+                name: local_evidence.get(name)
+                for name in local_fields
+                if name in local_evidence
+            }
+        results.append(result)
+    return json.loads(canonical_json(results))
+
+
 def _adaptive_reflection_analysis(
     state: Any,
     analysis: GenerationAnalysis,
@@ -1016,6 +1134,14 @@ def _adaptive_reflection_analysis(
         != OPTIMIZATION_PROTOCOL
     ):
         return reflection_analysis
+    schedule_value = state.task_manifest.metadata.get("optimization_schedule")
+    paired_mode = bool(
+        isinstance(schedule_value, Mapping)
+        and OptimizationSchedule.from_dict(schedule_value).local_evaluation_mode
+        == PAIRED_LOCAL_EVALUATION_MODE
+    )
+    if paired_mode:
+        reflection_analysis.pop("created_at", None)
     comparison = state.comparison_for(analysis.generation)
     if comparison is None:
         raise RuntimeError("adaptive reflection is missing generation comparison")
@@ -1044,7 +1170,12 @@ def _adaptive_reflection_analysis(
         and item.scope.candidate_revision_id == comparison.selected_revision_id
     )
     gate_results = comparison.gate_results
-    reflection_analysis["adaptive_epoch_evidence"] = {
+    candidate_results = (
+        _adaptive_candidate_result_evidence(analysis.ranking)
+        if paired_mode
+        else json.loads(canonical_json(list(analysis.ranking)))
+    )
+    adaptive_evidence = {
         "schema_version": "ecologyrsi-dsh.adaptive-reflection-evidence/1",
         "generation": analysis.generation,
         "comparison_digest": comparison.comparison_digest,
@@ -1061,8 +1192,13 @@ def _adaptive_reflection_analysis(
         # These are Host-authored aggregate rows.  Their two distinct evidence
         # blocks make the once-per-generation outer mutation and the ten
         # within-candidate batch edits impossible to conflate during reflection.
-        "candidate_results": json.loads(canonical_json(list(analysis.ranking))),
+        "candidate_results": candidate_results,
     }
+    if paired_mode:
+        adaptive_evidence["trajectory_comparisons"] = (
+            _adaptive_trajectory_comparison_evidence(analysis.ranking)
+        )
+    reflection_analysis["adaptive_epoch_evidence"] = adaptive_evidence
     return reflection_analysis
 
 

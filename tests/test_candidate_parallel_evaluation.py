@@ -15,8 +15,11 @@ from ecologyrsi_dsh.core.models import Evaluation, ModelArtifact, RunStatus
 from ecologyrsi_dsh.core.trajectory import (
     EvaluationPhase,
     EvaluationScope,
+    FormalBatchComparisonDecision,
     HoldoutArm,
+    TrajectoryStatus,
 )
+from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
 
 
 _FIXTURE_DIR = Path(__file__).with_name("fixtures")
@@ -51,6 +54,66 @@ class _Director:
 
 
 class CandidateParallelEvaluationTests(unittest.TestCase):
+    def test_paired_holdout_uses_retained_final_champion(self) -> None:
+        retained_champion_id = "revision:finalist:champion"
+        rejected_challenger_id = "revision:finalist:challenger"
+        trajectory = SimpleNamespace(
+            candidate_id="candidate:finalist",
+            status=TrajectoryStatus.COMPLETED,
+            batch_count=10,
+            initial_revision_id="revision:finalist:r0",
+            final_revision_id=retained_champion_id,
+        )
+        final_comparison = SimpleNamespace(
+            decision=FormalBatchComparisonDecision.CHAMPION_RETAINED,
+            challenger_revision_id=rejected_challenger_id,
+            champion_after_revision_id=retained_champion_id,
+        )
+        state = SimpleNamespace(
+            batch_comparison_for=lambda candidate_id, batch_index: (
+                final_comparison
+                if candidate_id == trajectory.candidate_id and batch_index == 9
+                else None
+            )
+        )
+
+        revision_id = generation_execution._trajectory_holdout_revision_id(
+            state,
+            trajectory,
+            OptimizationSchedule.default(),
+        )
+
+        self.assertEqual(revision_id, retained_champion_id)
+        self.assertNotEqual(revision_id, rejected_challenger_id)
+
+        mismatched = SimpleNamespace(
+            **{
+                **vars(trajectory),
+                "final_revision_id": rejected_challenger_id,
+            }
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "paired trajectory final revision is not the durable champion",
+        ):
+            generation_execution._trajectory_holdout_revision_id(
+                state,
+                mismatched,
+                OptimizationSchedule.default(),
+            )
+        missing_comparison_state = SimpleNamespace(
+            batch_comparison_for=lambda _candidate_id, _batch_index: None
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "paired trajectory final revision is not the durable champion",
+        ):
+            generation_execution._trajectory_holdout_revision_id(
+                missing_comparison_state,
+                trajectory,
+                OptimizationSchedule.default(),
+            )
+
     def test_hot_control_callbacks_use_constant_size_status_query_only(self) -> None:
         director = Mock()
         director.run_status.return_value = RunStatus.RUNNING

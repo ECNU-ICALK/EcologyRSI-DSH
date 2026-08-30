@@ -43,6 +43,7 @@ from ..core.trajectory import (
     CandidateRevision,
     EvaluationPhase,
     EvaluationScope,
+    FormalBatchComparisonDecision,
     GenerationComparison,
     HoldoutArm,
     HoldoutEvaluation,
@@ -74,7 +75,11 @@ from ..evolution.analysis import (
 )
 from ..evolution.context import safe_aggregate_feedback
 from ..evolution.genome import deep_thaw_json
-from ..evolution.schedule import OPTIMIZATION_PROTOCOL, OptimizationSchedule
+from ..evolution.schedule import (
+    OPTIMIZATION_PROTOCOL,
+    PAIRED_LOCAL_EVALUATION_MODE,
+    OptimizationSchedule,
+)
 from ..integrations.dsh_native_runtime import (
     DSH_NATIVE_EXECUTION_PROTOCOL,
     DshNativeRuntimeUnavailableError,
@@ -2949,6 +2954,41 @@ def _bounded_operation_categories(operations: Any) -> list[str]:
     return categories
 
 
+def _bounded_operation_targets(operations: Any) -> list[str]:
+    """Return registered target identities without values or free-form prose."""
+
+    if isinstance(operations, (str, bytes)) or not isinstance(
+        operations, Sequence
+    ):
+        return []
+    targets: list[str] = []
+    for operation in operations:
+        if not isinstance(operation, Mapping):
+            continue
+        role = str(operation.get("role") or "").strip()[:80]
+        target = next(
+            (
+                str(operation.get(name) or "").strip()[:120]
+                for name in (
+                    "name",
+                    "predictor_id",
+                    "program_id",
+                    "instruction_template_id",
+                    "workflow_template_id",
+                )
+                if str(operation.get(name) or "").strip()
+            ),
+            role,
+        )
+        if role and target and role != target:
+            target = f"{role}:{target}"[:200]
+        if target and target not in targets:
+            targets.append(target)
+        if len(targets) >= 5:
+            break
+    return targets
+
+
 def _outer_mutation_evidence(state: Any, candidate: Candidate) -> dict[str, Any]:
     """Describe the once-per-generation mutation separately from local edits."""
 
@@ -3087,8 +3127,20 @@ def _local_edit_trajectory_evidence(
         ),
         key=lambda item: item.batch_index,
     )
-    if len(formal_batches) != trajectory.batch_count:
+    if (
+        len(formal_batches) != trajectory.batch_count
+        or [item.batch_index for item in formal_batches]
+        != list(range(trajectory.batch_count))
+    ):
         raise RuntimeError("adaptive finalist batch history is incomplete")
+    schedule_value = getattr(state.task_manifest, "metadata", {}).get(
+        "optimization_schedule"
+    )
+    paired_mode = bool(
+        isinstance(schedule_value, Mapping)
+        and OptimizationSchedule.from_dict(schedule_value).local_evaluation_mode
+        == PAIRED_LOCAL_EVALUATION_MODE
+    )
     proposal_by_batch = {
         int(item["batch_index"]): item
         for item in getattr(state, "local_edit_proposals", ())
@@ -3108,14 +3160,16 @@ def _local_edit_trajectory_evidence(
         for item in getattr(state, "trajectory_revision_activations", ())
         if item.candidate_id == candidate_id
     }
-    batch_rows: list[dict[str, Any]] = []
-    revision_chain = [trajectory.initial_revision_id]
     outcome_counts: dict[str, int] = {}
     operation_category_counts: dict[str, int] = {}
-    for batch in formal_batches:
-        proposal = proposal_by_batch.get(batch.batch_index)
-        outcome = outcome_by_batch.get(batch.batch_index)
-        activation = activation_by_batch.get(batch.batch_index)
+    local_rows: dict[int, dict[str, Any]] = {}
+    local_edit_count = (
+        trajectory.batch_count - 1 if paired_mode else trajectory.batch_count
+    )
+    for batch_index in range(local_edit_count):
+        proposal = proposal_by_batch.get(batch_index)
+        outcome = outcome_by_batch.get(batch_index)
+        activation = activation_by_batch.get(batch_index)
         if proposal is None or outcome is None or activation is None:
             raise RuntimeError("adaptive finalist local-edit history is incomplete")
         detail = proposal.get("proposal", proposal)
@@ -3124,6 +3178,8 @@ def _local_edit_trajectory_evidence(
         )
         categories = _bounded_operation_categories(operations)
         category = "|".join(categories) if categories else "none"
+        targets = _bounded_operation_targets(operations)
+        target = "|".join(targets) if targets else "none"
         outcome_name = str(outcome.get("outcome") or "unknown")[:120]
         outcome_counts[outcome_name] = outcome_counts.get(outcome_name, 0) + 1
         for item in categories:
@@ -3131,36 +3187,193 @@ def _local_edit_trajectory_evidence(
                 operation_category_counts.get(item, 0) + 1
             )
         reason = getattr(activation.reason, "value", activation.reason)
+        local_rows[batch_index] = {
+            "batch_index": batch_index,
+            "batch_number": batch_index + 1,
+            "decision": (
+                detail.get("decision") if isinstance(detail, Mapping) else None
+            ),
+            # Scalars keep the aggregate reflection envelope within its strict
+            # depth bound and intentionally omit mutation values.
+            "operation_category": category,
+            "operation_targets": target,
+            "operation_count": min(
+                len(operations)
+                if isinstance(operations, Sequence)
+                and not isinstance(operations, (str, bytes))
+                else 0,
+                5,
+            ),
+            "outcome": outcome_name,
+            "outcome_reason": str(outcome.get("reason") or "")[:240] or None,
+            "mutation_parent_revision_id": activation.from_revision_id,
+            "generated_challenger_revision_id": activation.to_revision_id,
+            "advance_reason": str(reason)[:120],
+        }
+
+    if paired_mode:
+        if any(
+            batch_index in proposal_by_batch
+            or batch_index in outcome_by_batch
+            or batch_index in activation_by_batch
+            for batch_index in range(local_edit_count, trajectory.batch_count)
+        ):
+            raise RuntimeError("paired finalist final batch cannot contain a local edit")
+        comparisons = sorted(
+            (
+                item
+                for item in getattr(state, "formal_batch_comparisons", ())
+                if item.candidate_id == candidate_id
+            ),
+            key=lambda item: item.batch_index,
+        )
+        if (
+            len(comparisons) != trajectory.batch_count
+            or [item.batch_index for item in comparisons]
+            != list(range(trajectory.batch_count))
+            or comparisons[-1].champion_after_revision_id != final_revision_id
+        ):
+            raise RuntimeError("adaptive finalist comparison history is incomplete")
+        batch_rows: list[dict[str, Any]] = []
+        revision_chain = [trajectory.initial_revision_id]
+        for comparison in comparisons:
+            prior_local = local_rows.get(comparison.batch_index - 1)
+            next_local = local_rows.get(comparison.batch_index)
+            distinct_challenger = (
+                comparison.challenger_revision_id
+                != comparison.champion_before_revision_id
+            )
+            prior_challenger_edit = (
+                prior_local
+                if prior_local is not None
+                and prior_local["outcome"] == "applied"
+                and prior_local["generated_challenger_revision_id"]
+                == comparison.challenger_revision_id
+                else None
+            )
+            if distinct_challenger and prior_challenger_edit is None:
+                raise RuntimeError(
+                    "adaptive finalist challenger operation history is incomplete"
+                )
+            if (
+                next_local is not None
+                and next_local["mutation_parent_revision_id"]
+                != comparison.champion_after_revision_id
+            ):
+                raise RuntimeError(
+                    "adaptive finalist mutation parent is not the durable champion"
+                )
+            decision = getattr(comparison.decision, "value", comparison.decision)
+            challenger_was_rejected = bool(
+                decision
+                == FormalBatchComparisonDecision.CHAMPION_RETAINED.value
+                and distinct_challenger
+            )
+            batch_rows.append(
+                {
+                    "batch_index": comparison.batch_index,
+                    "batch_number": comparison.batch_index + 1,
+                    "decision": str(decision)[:120],
+                    "reason": str(comparison.reason)[:160],
+                    "score_delta": comparison.score_delta,
+                    "minimum_score_delta": comparison.minimum_score_delta,
+                    "safety_gate_passed": comparison.safety_gate_passed,
+                    "cell_regression_gate_passed": (
+                        comparison.cell_regression_gate_passed
+                    ),
+                    "champion_before_revision_id": (
+                        comparison.champion_before_revision_id
+                    ),
+                    "challenger_revision_id": comparison.challenger_revision_id,
+                    "champion_after_revision_id": (
+                        comparison.champion_after_revision_id
+                    ),
+                    "challenger_operation_category": (
+                        prior_challenger_edit["operation_category"]
+                        if prior_challenger_edit is not None
+                        else "none"
+                    ),
+                    "challenger_operation_targets": (
+                        prior_challenger_edit["operation_targets"]
+                        if prior_challenger_edit is not None
+                        else "none"
+                    ),
+                    "rejected_operation_category": (
+                        prior_challenger_edit["operation_category"]
+                        if challenger_was_rejected
+                        and prior_challenger_edit is not None
+                        else None
+                    ),
+                    "rejected_operation_targets": (
+                        prior_challenger_edit["operation_targets"]
+                        if challenger_was_rejected
+                        and prior_challenger_edit is not None
+                        else None
+                    ),
+                    "next_mutation_parent_revision_id": (
+                        next_local["mutation_parent_revision_id"]
+                        if next_local is not None
+                        else None
+                    ),
+                    "next_challenger_revision_id": (
+                        next_local["generated_challenger_revision_id"]
+                        if next_local is not None
+                        else None
+                    ),
+                }
+            )
+            revision_chain.append(comparison.champion_after_revision_id)
+        included_comparisons = batch_rows[-_ADAPTIVE_REFLECTION_BATCH_LIMIT:]
+        included_local_edits = [
+            local_rows[index]
+            for index in sorted(local_rows)[-_ADAPTIVE_REFLECTION_BATCH_LIMIT:]
+        ]
+        return {
+            "kind": "batch_local_edits",
+            "local_evaluation_mode": PAIRED_LOCAL_EVALUATION_MODE,
+            "batch_count": trajectory.batch_count,
+            "local_edit_decision_count": local_edit_count,
+            "included_batch_count": len(included_local_edits),
+            "truncated_batch_count": max(
+                0, local_edit_count - len(included_local_edits)
+            ),
+            "comparison_count": len(batch_rows),
+            "included_comparison_count": len(included_comparisons),
+            "truncated_comparison_count": max(
+                0, len(batch_rows) - len(included_comparisons)
+            ),
+            "initial_revision_id": trajectory.initial_revision_id,
+            "final_revision_id": final_revision_id,
+            "revision_chain": revision_chain[
+                -(_ADAPTIVE_REFLECTION_BATCH_LIMIT + 1) :
+            ],
+            "outcome_counts": outcome_counts,
+            "operation_category_counts": operation_category_counts,
+            "batches": included_local_edits,
+            "recent_comparisons": included_comparisons,
+        }
+
+    batch_rows = []
+    revision_chain = [trajectory.initial_revision_id]
+    formal_by_index = {item.batch_index: item for item in formal_batches}
+    for batch_index in range(trajectory.batch_count):
+        local = local_rows[batch_index]
         batch_rows.append(
             {
-                "batch_index": batch.batch_index,
-                "batch_number": batch.batch_index + 1,
-                "evaluated_revision_id": batch.revision_id,
-                "decision": (
-                    detail.get("decision")
-                    if isinstance(detail, Mapping)
-                    else None
-                ),
-                # A scalar keeps the aggregate reflection envelope within its
-                # strict depth bound while retaining the operation category.
-                "operation_category": category,
-                "operation_count": min(
-                    len(operations)
-                    if isinstance(operations, Sequence)
-                    and not isinstance(operations, (str, bytes))
-                    else 0,
-                    5,
-                ),
-                "outcome": outcome_name,
-                "outcome_reason": (
-                    str(outcome.get("reason") or "")[:240] or None
-                ),
-                "from_revision_id": activation.from_revision_id,
-                "active_revision_id": activation.to_revision_id,
-                "advance_reason": str(reason)[:120],
+                "batch_index": local["batch_index"],
+                "batch_number": local["batch_number"],
+                "evaluated_revision_id": formal_by_index[batch_index].revision_id,
+                "decision": local["decision"],
+                "operation_category": local["operation_category"],
+                "operation_count": local["operation_count"],
+                "outcome": local["outcome"],
+                "outcome_reason": local["outcome_reason"],
+                "from_revision_id": local["mutation_parent_revision_id"],
+                "active_revision_id": local["generated_challenger_revision_id"],
+                "advance_reason": local["advance_reason"],
             }
         )
-        revision_chain.append(activation.to_revision_id)
+        revision_chain.append(local["generated_challenger_revision_id"])
     included = batch_rows[:_ADAPTIVE_REFLECTION_BATCH_LIMIT]
     return {
         "kind": "batch_local_edits",
@@ -3421,9 +3634,42 @@ def _build_adaptive_analysis(
     )
 
 
+def _trajectory_holdout_revision_id(
+    state: Any,
+    trajectory: Any,
+    schedule: OptimizationSchedule,
+) -> str:
+    """Resolve a finalist holdout revision from completed durable evidence."""
+
+    final_revision_id = trajectory.final_revision_id
+    if (
+        trajectory.status is not TrajectoryStatus.COMPLETED
+        or not isinstance(final_revision_id, str)
+        or not final_revision_id
+    ):
+        raise ValueError("holdout requires a completed trajectory final revision")
+    if schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
+        final_comparison = state.batch_comparison_for(
+            trajectory.candidate_id,
+            trajectory.batch_count - 1,
+        )
+        if (
+            final_comparison is None
+            or final_revision_id
+            != final_comparison.champion_after_revision_id
+        ):
+            raise ValueError(
+                "paired trajectory final revision is not the durable champion"
+            )
+    return final_revision_id
+
+
 def _finalize_adaptive_generation(endpoint: Any, run_id: str, batch: Any) -> Any:
     state = endpoint.server.director.state(run_id)
     generation = batch.generation
+    schedule = OptimizationSchedule.from_dict(
+        state.task_manifest.metadata["optimization_schedule"]
+    )
     formal = state.formal_selection_for(generation)
     if formal is None:
         raise RuntimeError("adaptive generation is missing Top-2 formal selection")
@@ -3432,6 +3678,11 @@ def _finalize_adaptive_generation(endpoint: Any, run_id: str, batch: Any) -> Any
     trajectories = tuple(state.trajectory_for(item) for item in finalist_ids)
     if any(item is None or item.status is not TrajectoryStatus.COMPLETED for item in trajectories):
         return None
+    finalist_revision_ids = tuple(
+        _trajectory_holdout_revision_id(state, item, schedule)
+        for item in trajectories
+        if item is not None
+    )
     cohorts = state.generation_cohort_for(generation)
     if cohorts is None:
         raise RuntimeError("adaptive generation is missing frozen holdout cohort")
@@ -3459,11 +3710,11 @@ def _finalize_adaptive_generation(endpoint: Any, run_id: str, batch: Any) -> Any
     bindings = {
         HoldoutArm.FINALIST_1.value: {
             "candidate_id": finalist_ids[0],
-            "candidate_revision_id": trajectories[0].final_revision_id or trajectories[0].initial_revision_id,
+            "candidate_revision_id": finalist_revision_ids[0],
         },
         HoldoutArm.FINALIST_2.value: {
             "candidate_id": finalist_ids[1],
-            "candidate_revision_id": trajectories[1].final_revision_id or trajectories[1].initial_revision_id,
+            "candidate_revision_id": finalist_revision_ids[1],
         },
         HoldoutArm.INCUMBENT.value: {
             "candidate_id": incumbent_id,

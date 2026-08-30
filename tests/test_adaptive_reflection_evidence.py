@@ -3,12 +3,16 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from ecologyrsi_dsh.api.generation_execution import _build_adaptive_analysis
-from ecologyrsi_dsh.core.models import CandidateStatus, digest
+from ecologyrsi_dsh.api.generation_execution import (
+    _build_adaptive_analysis,
+    _local_edit_trajectory_evidence,
+)
+from ecologyrsi_dsh.core.models import CandidateStatus, canonical_json, digest
 from ecologyrsi_dsh.core.trajectory import (
     CandidateRevision,
     EvaluationPhase,
     EvaluationScope,
+    FormalBatchComparisonDecision,
     GenerationComparison,
     HoldoutArm,
     HoldoutEvaluation,
@@ -20,11 +24,104 @@ from ecologyrsi_dsh.evolution.batches import (
     _canonical_candidate_outcomes,
 )
 from ecologyrsi_dsh.evolution.context import safe_aggregate_feedback
-from ecologyrsi_dsh.evolution.schedule import OPTIMIZATION_PROTOCOL
+from ecologyrsi_dsh.evolution.schedule import (
+    LEGACY_SCHEDULE_SCHEMA_VERSION,
+    OPTIMIZATION_PROTOCOL,
+    PREQUENTIAL_LOCAL_EVALUATION_MODE,
+    OptimizationSchedule,
+)
 
 
 class AdaptiveReflectionEvidenceTests(unittest.TestCase):
     maxDiff = None
+
+    def test_legacy_prequential_reflection_shape_is_unchanged(self) -> None:
+        candidate_id = "candidate:legacy"
+        final_revision_id = "revision:legacy:r1"
+        schedule = OptimizationSchedule.default().to_dict()
+        schedule.update(
+            schema_version=LEGACY_SCHEDULE_SCHEMA_VERSION,
+            local_evaluation_mode=PREQUENTIAL_LOCAL_EVALUATION_MODE,
+        )
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(
+                metadata={"optimization_schedule": schedule}
+            ),
+            formal_batches=(
+                SimpleNamespace(
+                    candidate_id=candidate_id,
+                    batch_index=0,
+                    revision_id="revision:legacy:r0",
+                ),
+            ),
+            local_edit_proposals=(
+                {
+                    "candidate_id": candidate_id,
+                    "batch_index": 0,
+                    "proposal": {
+                        "decision": "mutate",
+                        "operations": [
+                            {
+                                "op": "set_bounded_parameter",
+                                "name": "ridge_alpha",
+                                "value": 0.2,
+                            }
+                        ],
+                    },
+                },
+            ),
+            local_edit_outcomes=(
+                {
+                    "candidate_id": candidate_id,
+                    "batch_index": 0,
+                    "outcome": "applied",
+                    "active_revision_id": final_revision_id,
+                },
+            ),
+            trajectory_revision_activations=(
+                SimpleNamespace(
+                    candidate_id=candidate_id,
+                    batch_index=0,
+                    from_revision_id="revision:legacy:r0",
+                    to_revision_id=final_revision_id,
+                    reason=RevisionAdvanceReason.LOCAL_EDIT_APPLIED,
+                ),
+            ),
+            trajectory_for=lambda requested_id: (
+                SimpleNamespace(
+                    initial_revision_id="revision:legacy:r0",
+                    final_revision_id=final_revision_id,
+                    batch_count=1,
+                )
+                if requested_id == candidate_id
+                else None
+            ),
+        )
+
+        evidence = _local_edit_trajectory_evidence(
+            state,
+            candidate_id,
+            final_revision_id,
+        )
+
+        self.assertNotIn("local_evaluation_mode", evidence)
+        self.assertNotIn("recent_comparisons", evidence)
+        self.assertEqual(
+            set(evidence["batches"][0]),
+            {
+                "batch_index",
+                "batch_number",
+                "evaluated_revision_id",
+                "decision",
+                "operation_category",
+                "operation_count",
+                "outcome",
+                "outcome_reason",
+                "from_revision_id",
+                "active_revision_id",
+                "advance_reason",
+            },
+        )
 
     def _revision(self, candidate_id: str, revision_id: str, marker: str) -> CandidateRevision:
         genome = {"schema_version": "test@1", "marker": marker}
@@ -123,28 +220,69 @@ class AdaptiveReflectionEvidenceTests(unittest.TestCase):
         local_edit_proposals = []
         local_edit_outcomes = []
         activations = []
+        formal_batch_comparisons = []
         trajectories = {}
         for candidate_id in finalist_ids:
             final_revision_id = finalist_revisions[candidate_id].revision_id
-            current_revision_id = f"revision:{candidate_id}:r0"
+            initial_revision_id = f"revision:{candidate_id}:r0"
+            champion_revision_id = initial_revision_id
+            scheduled_revision_id = initial_revision_id
             trajectories[candidate_id] = SimpleNamespace(
-                initial_revision_id=current_revision_id,
+                initial_revision_id=initial_revision_id,
                 final_revision_id=final_revision_id,
                 batch_count=10,
             )
             for batch_index in range(10):
-                next_revision_id = (
-                    final_revision_id
-                    if batch_index == 9
-                    else f"revision:{candidate_id}:r{batch_index + 1}"
-                )
                 formal_batches.append(
                     SimpleNamespace(
                         candidate_id=candidate_id,
                         batch_index=batch_index,
-                        revision_id=current_revision_id,
+                        revision_id=scheduled_revision_id,
                     )
                 )
+                champion_before_revision_id = champion_revision_id
+                if batch_index == 0:
+                    decision = FormalBatchComparisonDecision.INITIAL_CHAMPION
+                    reason = "initial_champion"
+                    score_delta = 0.0
+                elif batch_index == 2:
+                    decision = FormalBatchComparisonDecision.CHAMPION_RETAINED
+                    reason = "below_practical_delta"
+                    score_delta = -0.01
+                else:
+                    decision = FormalBatchComparisonDecision.CHALLENGER_PROMOTED
+                    reason = "challenger_improved"
+                    score_delta = 0.02
+                    champion_revision_id = scheduled_revision_id
+                formal_batch_comparisons.append(
+                    SimpleNamespace(
+                        candidate_id=candidate_id,
+                        batch_index=batch_index,
+                        champion_before_revision_id=champion_before_revision_id,
+                        challenger_revision_id=scheduled_revision_id,
+                        champion_after_revision_id=champion_revision_id,
+                        decision=decision,
+                        reason=reason,
+                        score_delta=score_delta,
+                        minimum_score_delta=0.005,
+                        safety_gate_passed=True,
+                        cell_regression_gate_passed=True,
+                        # These fields emulate data that must never enter the
+                        # bounded generation-reflection envelope.
+                        raw_predictions=[0.1, 0.2],
+                        labels=[0.0, 1.0],
+                        created_at="2026-08-30T00:00:00Z",
+                        rationale="unbounded model-authored prose",
+                    )
+                )
+                if batch_index == 9:
+                    continue
+                next_revision_id = (
+                    final_revision_id
+                    if batch_index == 8
+                    else f"revision:{candidate_id}:challenger:{batch_index + 1}"
+                )
+                operation_name = "history_steps" if batch_index == 1 else "ridge_alpha"
                 local_edit_proposals.append(
                     {
                         "candidate_id": candidate_id,
@@ -154,8 +292,12 @@ class AdaptiveReflectionEvidenceTests(unittest.TestCase):
                             "operations": [
                                 {
                                     "op": "set_bounded_parameter",
-                                    "name": "ridge_alpha",
-                                    "value": 0.2 + batch_index / 100,
+                                    "name": operation_name,
+                                    "value": (
+                                        "secret-rejected-operation-value"
+                                        if batch_index == 1
+                                        else 0.2 + batch_index / 100
+                                    ),
                                 }
                             ],
                         },
@@ -173,12 +315,12 @@ class AdaptiveReflectionEvidenceTests(unittest.TestCase):
                     SimpleNamespace(
                         candidate_id=candidate_id,
                         batch_index=batch_index,
-                        from_revision_id=current_revision_id,
+                        from_revision_id=champion_revision_id,
                         to_revision_id=next_revision_id,
                         reason=RevisionAdvanceReason.LOCAL_EDIT_APPLIED,
                     )
                 )
-                current_revision_id = next_revision_id
+                scheduled_revision_id = next_revision_id
 
         failed_holdout = self._holdout(
             HoldoutArm.FINALIST_1,
@@ -287,10 +429,14 @@ class AdaptiveReflectionEvidenceTests(unittest.TestCase):
         state = SimpleNamespace(
             run=SimpleNamespace(run_id="run:adaptive-reflection"),
             task_manifest=SimpleNamespace(
-                metadata={"optimization_protocol": OPTIMIZATION_PROTOCOL}
+                metadata={
+                    "optimization_protocol": OPTIMIZATION_PROTOCOL,
+                    "optimization_schedule": OptimizationSchedule.default().to_dict(),
+                }
             ),
             candidates=candidates,
             formal_batches=tuple(formal_batches),
+            formal_batch_comparisons=tuple(formal_batch_comparisons),
             local_edit_proposals=tuple(local_edit_proposals),
             local_edit_outcomes=tuple(local_edit_outcomes),
             trajectory_revision_activations=tuple(activations),
@@ -337,9 +483,32 @@ class AdaptiveReflectionEvidenceTests(unittest.TestCase):
         self.assertEqual(len(winner["comparison_gate"]["cell_deltas"]), 9)
         self.assertEqual(winner["outer_mutation_evidence"]["kind"], "outer_generation_mutation")
         self.assertEqual(winner["local_edit_evidence"]["kind"], "batch_local_edits")
-        self.assertEqual(winner["local_edit_evidence"]["included_batch_count"], 10)
-        self.assertEqual(len(winner["local_edit_evidence"]["batches"]), 10)
+        self.assertEqual(winner["local_edit_evidence"]["included_batch_count"], 9)
+        self.assertEqual(len(winner["local_edit_evidence"]["batches"]), 9)
+        self.assertEqual(winner["local_edit_evidence"]["comparison_count"], 10)
         self.assertEqual(len(winner["local_edit_evidence"]["revision_chain"]), 11)
+        comparison_history = winner["local_edit_evidence"]["recent_comparisons"]
+        self.assertEqual(len(comparison_history), 10)
+        accepted = next(item for item in comparison_history if item["batch_index"] == 1)
+        rejected = next(item for item in comparison_history if item["batch_index"] == 2)
+        self.assertEqual(accepted["decision"], "challenger_promoted")
+        self.assertEqual(accepted["reason"], "challenger_improved")
+        self.assertEqual(rejected["decision"], "champion_retained")
+        self.assertEqual(rejected["reason"], "below_practical_delta")
+        self.assertEqual(rejected["score_delta"], -0.01)
+        self.assertIn("history_steps", rejected["rejected_operation_targets"])
+        self.assertEqual(
+            rejected["champion_before_revision_id"],
+            rejected["champion_after_revision_id"],
+        )
+        self.assertNotEqual(
+            rejected["challenger_revision_id"],
+            rejected["champion_after_revision_id"],
+        )
+        self.assertEqual(
+            rejected["next_mutation_parent_revision_id"],
+            rejected["champion_after_revision_id"],
+        )
         self.assertEqual(failed["rank"], None)
         self.assertEqual(failed["score"], 0.54)
         self.assertFalse(failed["eligible"])
@@ -370,11 +539,63 @@ class AdaptiveReflectionEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["selected"]["revision_id"], "revision:winner:final")
         self.assertEqual(evidence["incumbent"]["revision_id"], "revision:incumbent")
         self.assertEqual(len(evidence["candidate_results"]), 4)
+        reflected_lane = next(
+            item
+            for item in evidence["trajectory_comparisons"]
+            if item["candidate_id"] == candidates[3].candidate_id
+        )
+        reflected_rejection = next(
+            item
+            for item in reflected_lane["recent_comparisons"]
+            if item["batch_index"] == 2
+        )
+        self.assertEqual(reflected_rejection["reason"], "below_practical_delta")
+        self.assertEqual(reflected_rejection["score_delta"], -0.01)
+        self.assertIn(
+            "history_steps",
+            reflected_rejection["rejected_operation_targets"],
+        )
+        serialized_reflection = canonical_json(reflection)
+        for forbidden_field in (
+            "raw_predictions",
+            "labels",
+            "created_at",
+            "timestamps",
+            "rationale",
+        ):
+            self.assertNotIn(f'"{forbidden_field}"', serialized_reflection)
+        self.assertNotIn("secret-rejected-operation-value", serialized_reflection)
+        self.assertNotIn("unbounded model-authored prose", serialized_reflection)
         self.assertIsNotNone(
             safe_aggregate_feedback(
                 reflection,
                 name="adaptive reflection test evidence",
             )
+        )
+        legacy_schedule = OptimizationSchedule.default().to_dict()
+        legacy_schedule.update(
+            schema_version=LEGACY_SCHEDULE_SCHEMA_VERSION,
+            local_evaluation_mode=PREQUENTIAL_LOCAL_EVALUATION_MODE,
+        )
+        legacy_reflection_state = SimpleNamespace(
+            **{
+                **vars(state),
+                "task_manifest": SimpleNamespace(
+                    metadata={
+                        "optimization_protocol": OPTIMIZATION_PROTOCOL,
+                        "optimization_schedule": legacy_schedule,
+                    }
+                ),
+            }
+        )
+        legacy_reflection = _adaptive_reflection_analysis(
+            legacy_reflection_state,
+            analysis,
+        )
+        self.assertIn("created_at", legacy_reflection)
+        self.assertNotIn(
+            "trajectory_comparisons",
+            legacy_reflection["adaptive_epoch_evidence"],
         )
 
         incumbent_gate_results = {
@@ -426,6 +647,11 @@ class AdaptiveReflectionEvidenceTests(unittest.TestCase):
             no_improvement.search_parent_candidate_id,
             incumbent_revision.candidate_id,
         )
+        self.assertEqual(
+            no_improvement.incumbent_after_candidate_id,
+            incumbent_revision.candidate_id,
+        )
+        self.assertIsNone(no_improvement.champion_candidate_id)
         self.assertIn("incumbent", no_improvement.next_search_direction[0])
         self.assertNotIn("冠军", no_improvement.next_search_direction[0])
         self.assertTrue(all(row["rank"] is None for row in no_improvement.ranking))
