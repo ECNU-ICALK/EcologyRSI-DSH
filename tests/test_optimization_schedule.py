@@ -6,15 +6,59 @@ from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
 
 
 class OptimizationScheduleTests(unittest.TestCase):
-    def test_default_schedule_uses_origin_units(self) -> None:
+    def test_default_schedule_uses_paired_champion_challenger_budget(self) -> None:
         schedule = OptimizationSchedule.default()
 
+        self.assertEqual(
+            schedule.schema_version,
+            "ecologyrsi-dsh.top2-adaptive-epoch-schedule/2",
+        )
+        self.assertEqual(
+            schedule.local_evaluation_mode,
+            "paired_champion_challenger",
+        )
         self.assertEqual(schedule.formal_origin_count_per_finalist, 500)
         self.assertEqual(schedule.local_batch_origin_count, 50)
         self.assertEqual(schedule.batch_count, 10)
         self.assertEqual(schedule.max_local_edits_per_batch, 2)
-        self.assertEqual(schedule.max_local_edits_per_finalist, 20)
+        self.assertEqual(schedule.max_local_edit_decisions_per_finalist, 9)
+        self.assertEqual(schedule.max_local_edits_per_finalist, 18)
         self.assertEqual(schedule.selection_holdout_origin_count, 169)
+        self.assertEqual(
+            schedule.generation_execution_budget(cells_per_origin=9),
+            {
+                "screening_candidate_origins": 256,
+                "formal_candidate_origins": 1900,
+                "holdout_candidate_origins": 507,
+                "total_candidate_origins": 2663,
+                "total_scoring_cells": 23967,
+            },
+        )
+        self.assertEqual(
+            schedule.run_execution_budget(5, cells_per_origin=9)[
+                "total_candidate_origins"
+            ],
+            13315,
+        )
+        self.assertEqual(
+            schedule.run_execution_budget(5, cells_per_origin=9)[
+                "total_scoring_cells"
+            ],
+            119835,
+        )
+        self.assertEqual(schedule.required_unique_origins(5), 1665)
+
+    def test_legacy_schedule_keeps_prequential_budget(self) -> None:
+        value = OptimizationSchedule.default().to_dict()
+        value.update(
+            schema_version="ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
+            local_evaluation_mode="prequential",
+        )
+
+        schedule = OptimizationSchedule.from_dict(value)
+
+        self.assertEqual(schedule.max_local_edit_decisions_per_finalist, 10)
+        self.assertEqual(schedule.max_local_edits_per_finalist, 20)
         self.assertEqual(
             schedule.generation_execution_budget(cells_per_origin=9),
             {
@@ -24,18 +68,6 @@ class OptimizationScheduleTests(unittest.TestCase):
                 "total_candidate_origins": 1763,
                 "total_scoring_cells": 15867,
             },
-        )
-        self.assertEqual(
-            schedule.run_execution_budget(5, cells_per_origin=9)[
-                "total_candidate_origins"
-            ],
-            8815,
-        )
-        self.assertEqual(
-            schedule.run_execution_budget(5, cells_per_origin=9)[
-                "total_scoring_cells"
-            ],
-            79335,
         )
         self.assertEqual(schedule.required_unique_origins(5), 1665)
 
@@ -70,6 +102,29 @@ class OptimizationScheduleTests(unittest.TestCase):
             with self.subTest(field=field):
                 with self.assertRaisesRegex(ValueError, field):
                     OptimizationSchedule.from_dict({**default, field: changed})
+
+        for schema_version, local_evaluation_mode in (
+            (
+                "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
+                "paired_champion_challenger",
+            ),
+            (
+                "ecologyrsi-dsh.top2-adaptive-epoch-schedule/2",
+                "prequential",
+            ),
+        ):
+            with self.subTest(
+                schema_version=schema_version,
+                local_evaluation_mode=local_evaluation_mode,
+            ):
+                with self.assertRaisesRegex(ValueError, "local_evaluation_mode"):
+                    OptimizationSchedule.from_dict(
+                        {
+                            **default,
+                            "schema_version": schema_version,
+                            "local_evaluation_mode": local_evaluation_mode,
+                        }
+                    )
 
     def test_budget_inputs_reject_bool_and_non_positive_values(self) -> None:
         schedule = OptimizationSchedule.default()

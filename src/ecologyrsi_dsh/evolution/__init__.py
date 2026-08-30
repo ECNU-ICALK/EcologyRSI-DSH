@@ -12,7 +12,10 @@ from .genome import (
     materialize_seed_genome,
 )
 from .schedule import (
+    LEGACY_SCHEDULE_SCHEMA_VERSION,
     OPTIMIZATION_PROTOCOL,
+    PAIRED_LOCAL_EVALUATION_MODE,
+    PREQUENTIAL_LOCAL_EVALUATION_MODE,
     SCHEDULE_SCHEMA_VERSION,
     OptimizationSchedule,
 )
@@ -27,7 +30,10 @@ __all__ = [
     "deep_freeze_json",
     "deep_thaw_json",
     "materialize_seed_genome",
+    "LEGACY_SCHEDULE_SCHEMA_VERSION",
     "OPTIMIZATION_PROTOCOL",
+    "PAIRED_LOCAL_EVALUATION_MODE",
+    "PREQUENTIAL_LOCAL_EVALUATION_MODE",
     "SCHEDULE_SCHEMA_VERSION",
     "OptimizationSchedule",
 ]

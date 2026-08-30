@@ -6,8 +6,18 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 
-SCHEDULE_SCHEMA_VERSION = "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1"
+LEGACY_SCHEDULE_SCHEMA_VERSION = (
+    "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1"
+)
+SCHEDULE_SCHEMA_VERSION = "ecologyrsi-dsh.top2-adaptive-epoch-schedule/2"
 OPTIMIZATION_PROTOCOL = "top2_adaptive_epoch@1"
+PREQUENTIAL_LOCAL_EVALUATION_MODE = "prequential"
+PAIRED_LOCAL_EVALUATION_MODE = "paired_champion_challenger"
+
+_SCHEDULE_MODES = {
+    LEGACY_SCHEDULE_SCHEMA_VERSION: PREQUENTIAL_LOCAL_EVALUATION_MODE,
+    SCHEDULE_SCHEMA_VERSION: PAIRED_LOCAL_EVALUATION_MODE,
+}
 
 _FIELDS = frozenset(
     {
@@ -45,16 +55,21 @@ class OptimizationSchedule:
     local_evaluation_mode: str
 
     def __post_init__(self) -> None:
-        if self.schema_version != SCHEDULE_SCHEMA_VERSION:
+        expected_mode = _SCHEDULE_MODES.get(self.schema_version)
+        if expected_mode is None:
             raise ValueError(
-                f"schema_version must be {SCHEDULE_SCHEMA_VERSION!r}"
+                "schema_version must be one of "
+                f"{tuple(_SCHEDULE_MODES)!r}"
             )
         if self.screening_origin_count != 64:
             raise ValueError("screening_origin_count must be 64")
         if self.finalist_count != 2:
             raise ValueError("finalist_count must be 2")
-        if self.local_evaluation_mode != "prequential":
-            raise ValueError("local_evaluation_mode must be 'prequential'")
+        if self.local_evaluation_mode != expected_mode:
+            raise ValueError(
+                "local_evaluation_mode must be "
+                f"{expected_mode!r} for schema_version {self.schema_version!r}"
+            )
         formal = _positive_integer(
             self.formal_origin_count_per_finalist,
             "formal_origin_count_per_finalist",
@@ -90,7 +105,7 @@ class OptimizationSchedule:
             local_batch_origin_count=50,
             max_local_edits_per_batch=2,
             selection_holdout_origin_count=169,
-            local_evaluation_mode="prequential",
+            local_evaluation_mode=PAIRED_LOCAL_EVALUATION_MODE,
         )
 
     @classmethod
@@ -133,14 +148,31 @@ class OptimizationSchedule:
 
     @property
     def max_local_edits_per_finalist(self) -> int:
-        return self.batch_count * self.max_local_edits_per_batch
+        return (
+            self.max_local_edit_decisions_per_finalist
+            * self.max_local_edits_per_batch
+        )
+
+    @property
+    def max_local_edit_decisions_per_finalist(self) -> int:
+        if self.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
+            return self.batch_count - 1
+        return self.batch_count
 
     def generation_execution_budget(
         self, *, cells_per_origin: int
     ) -> dict[str, int]:
         cells = _positive_integer(cells_per_origin, "cells_per_origin")
         screening = self.screening_origin_count * 4
-        formal = self.formal_origin_count_per_finalist * self.finalist_count
+        if self.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
+            formal_per_finalist = self.local_batch_origin_count + (
+                2
+                * (self.batch_count - 1)
+                * self.local_batch_origin_count
+            )
+            formal = formal_per_finalist * self.finalist_count
+        else:
+            formal = self.formal_origin_count_per_finalist * self.finalist_count
         holdout = self.selection_holdout_origin_count * (
             self.finalist_count + 1
         )
