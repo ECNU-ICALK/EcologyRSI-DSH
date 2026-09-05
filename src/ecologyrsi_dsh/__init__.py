@@ -11,6 +11,7 @@ from .core.trajectory import (
     FormalBatchArm,
     FormalBatchComparison,
     FormalBatchComparisonDecision,
+    OriginOccurrence,
 )
 from .core.models import (
     Candidate,
@@ -68,6 +69,7 @@ __all__ = [
     "ModelGateway",
     "ModelArtifact",
     "Observation",
+    "OriginOccurrence",
     "Promotion",
     "PromotionDecision",
     "Proposal",

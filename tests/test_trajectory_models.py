@@ -16,6 +16,7 @@ from ecologyrsi_dsh.core.trajectory import (
     GenerationHoldout,
     HoldoutArm,
     HoldoutEvaluation,
+    OriginOccurrence,
     RevisionStatus,
 )
 
@@ -156,6 +157,33 @@ def _holdout_evaluation(
 
 
 class TrajectoryModelTests(unittest.TestCase):
+    def test_origin_occurrence_identity_distinguishes_cycles_and_context(self) -> None:
+        occurrence = OriginOccurrence.from_source(
+            source_origin_id=_sha("source"),
+            cycle_index=2,
+            origin_timestamp=48,
+            maturity_digest=_sha("maturity"),
+            cohort_role="formal_batch",
+            generation=3,
+            candidate_id="candidate:a",
+            revision_id="revision:a",
+        )
+        replayed = OriginOccurrence.from_dict(occurrence.to_dict())
+        self.assertEqual(replayed, occurrence)
+        self.assertNotEqual(
+            occurrence.occurrence_id,
+            OriginOccurrence.from_source(
+                source_origin_id=occurrence.source_origin_id,
+                cycle_index=3,
+                origin_timestamp=48,
+                maturity_digest=occurrence.maturity_digest,
+                cohort_role=occurrence.cohort_role,
+                generation=occurrence.generation,
+                candidate_id=occurrence.candidate_id,
+                revision_id=occurrence.revision_id,
+            ).occurrence_id,
+        )
+
     def test_revision_identity_covers_parent_genome_and_source_batch(self) -> None:
         revision = _revision()
 

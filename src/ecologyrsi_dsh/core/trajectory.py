@@ -119,6 +119,92 @@ def _score(value: Any) -> float:
 
 
 @dataclass(frozen=True, slots=True)
+class OriginOccurrence:
+    """One executable forecast-origin occurrence.
+
+    A source origin may be reused after the eligible population is exhausted;
+    ``cycle_index`` makes that repeat explicit so it can never be mistaken for
+    an additional independent observation.
+    """
+
+    occurrence_id: str
+    source_origin_id: str
+    cycle_index: int
+    origin_timestamp: int
+    maturity_digest: str
+    cohort_role: str
+    generation: int
+    candidate_id: str
+    revision_id: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "occurrence_id", _sha256(self.occurrence_id, "occurrence_id"))
+        object.__setattr__(self, "source_origin_id", _text(self.source_origin_id, "source_origin_id"))
+        object.__setattr__(self, "cycle_index", _integer(self.cycle_index, "cycle_index", minimum=0))
+        object.__setattr__(self, "origin_timestamp", _integer(self.origin_timestamp, "origin_timestamp"))
+        object.__setattr__(self, "maturity_digest", _sha256(self.maturity_digest, "maturity_digest"))
+        object.__setattr__(self, "cohort_role", _text(self.cohort_role, "cohort_role"))
+        object.__setattr__(self, "generation", _integer(self.generation, "generation", minimum=0))
+        object.__setattr__(self, "candidate_id", _text(self.candidate_id, "candidate_id"))
+        object.__setattr__(self, "revision_id", _text(self.revision_id, "revision_id"))
+
+    @classmethod
+    def from_source(
+        cls,
+        *,
+        source_origin_id: str,
+        cycle_index: int,
+        origin_timestamp: int,
+        maturity_digest: str,
+        cohort_role: str,
+        generation: int,
+        candidate_id: str,
+        revision_id: str,
+    ) -> "OriginOccurrence":
+        identity = {
+            "source_origin_id": source_origin_id,
+            "cycle_index": cycle_index,
+            "origin_timestamp": origin_timestamp,
+            "maturity_digest": maturity_digest,
+            "cohort_role": cohort_role,
+            "generation": generation,
+            "candidate_id": candidate_id,
+            "revision_id": revision_id,
+        }
+        return cls(occurrence_id=digest(identity), **identity)
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "occurrence_id": self.occurrence_id,
+            "source_origin_id": self.source_origin_id,
+            "cycle_index": self.cycle_index,
+            "origin_timestamp": self.origin_timestamp,
+            "maturity_digest": self.maturity_digest,
+            "cohort_role": self.cohort_role,
+            "generation": self.generation,
+            "candidate_id": self.candidate_id,
+            "revision_id": self.revision_id,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "OriginOccurrence":
+        result = cls(**dict(value))
+        expected = cls.from_source(
+            source_origin_id=result.source_origin_id,
+            cycle_index=result.cycle_index,
+            origin_timestamp=result.origin_timestamp,
+            maturity_digest=result.maturity_digest,
+            cohort_role=result.cohort_role,
+            generation=result.generation,
+            candidate_id=result.candidate_id,
+            revision_id=result.revision_id,
+        ).occurrence_id
+        if result.occurrence_id != expected:
+            raise ValueError("occurrence_id does not match occurrence identity")
+        return result
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationScope:
     run_id: str
     generation: int
