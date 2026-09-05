@@ -505,7 +505,10 @@ class DshToolService:
             tuple[str, int, str], DshPredictionToolBinding
         ] = {}
         self._prediction_lock = Lock()
-        self._launch_lock = Lock()
+        # Reservation mutations are serialized per deterministic key.  A
+        # bounded stripe set avoids a process-wide bottleneck and does not
+        # retain one lock per unbounded stream of requests.
+        self._launch_locks = tuple(Lock() for _ in range(32))
         self._retrieval_lock = Lock()
         self._retrieval_fallback = retrieval_fallback or search_openalex_metadata
         self._monotonic_ms = monotonic_ms or (
@@ -542,6 +545,9 @@ class DshToolService:
 
     def _event_by_id(self, run_id: str, event_id: str) -> Any | None:
         return self.ledger.event_by_id(event_id, run_id=run_id)
+
+    def _launch_lock_for(self, key: str) -> Lock:
+        return self._launch_locks[int(digest(key)[:8], 16) % len(self._launch_locks)]
 
     @contextmanager
     def bind_prediction_tool(
@@ -809,7 +815,7 @@ class DshToolService:
             frozen_deadline = fence.deadline_monotonic_ms
         if frozen_deadline is None:  # pragma: no cover - guarded assignment above
             raise RuntimeError("structured admission deadline was not armed")
-        if not self.ledger.events(run_id):
+        if self.ledger.latest_run_seq(run_id) == 0:
             raise DshToolAuthorizationError("unknown child reservation run")
         event_id = f"{run_id}:dsh-child-reservation:{digest({'request_id': request['request_id']})}"
         business_key_digest = digest(
@@ -822,9 +828,8 @@ class DshToolService:
             }
         )
         request_contract_digest = digest(dict(request))
-        with self._launch_lock:
+        with self._launch_lock_for(business_key_digest):
             while True:
-                events = self.ledger.events(run_id)
                 prior = self._event_by_id(run_id, event_id)
                 if prior is not None:
                     if (
@@ -848,10 +853,10 @@ class DshToolService:
                     )
                 matching = [
                     event.payload["launch"]
-                    for event in events
-                    if event.kind == "DshChildLaunchReserved"
-                    and event.payload.get("business_key_digest")
-                    == business_key_digest
+                    for event in self.ledger.events_by_kind(
+                        run_id, "DshChildLaunchReserved"
+                    )
+                    if event.payload.get("business_key_digest") == business_key_digest
                 ]
                 launch_attempt = max(
                     (int(item["launch_attempt"]) for item in matching),
@@ -913,7 +918,7 @@ class DshToolService:
                             "launch": launch,
                         },
                         event_id=event_id,
-                        expected_run_seq=events[-1].seq,
+                        expected_run_seq=self.ledger.latest_run_seq(run_id),
                         commit_guard=commit_guard,
                     )
                 except ConcurrentRunMutationError:
@@ -938,15 +943,24 @@ class DshToolService:
         if len(error_code) > 80 or not error_code.replace("_", "").isalnum():
             raise ValueError("child failure error_code must be normalized text")
         run_id = str(request["run_id"])
-        with self._launch_lock:
+        lock_key = digest(
+            {
+                "run_id": run_id,
+                "stage": request["stage"],
+                "idempotency_key": request["idempotency_key"],
+            }
+        )
+        with self._launch_lock_for(lock_key):
             while True:
-                events = self.ledger.events(run_id)
                 launch_event = next(
                     (
                         event
-                        for event in reversed(events)
-                        if event.kind == "DshChildLaunchReserved"
-                        and isinstance(event.payload.get("launch"), Mapping)
+                        for event in reversed(
+                            self.ledger.events_by_kind(
+                                run_id, "DshChildLaunchReserved"
+                            )
+                        )
+                        if isinstance(event.payload.get("launch"), Mapping)
                         and event.payload["launch"].get("stage") == request["stage"]
                         and event.payload["launch"].get("idempotency_key")
                         == request["idempotency_key"]
@@ -957,20 +971,14 @@ class DshToolService:
                     return {"accepted": False, "reason": "launch_not_found"}
                 launch = launch_event.payload["launch"]
                 reservation_id = str(launch.get("reservation_id") or "")
+                settled_events = self.ledger.events_by_kind(
+                    run_id, "DshStructuredResultAccepted"
+                ) + self.ledger.events_by_kind(run_id, "DshChildExecutionFailed")
                 if any(
-                    (
-                        event.kind == "DshStructuredResultAccepted"
-                        and isinstance(event.payload.get("identity"), Mapping)
-                        and event.payload["identity"].get("child_reservation_id")
-                        == reservation_id
-                    )
-                    or (
-                        event.kind == "DshChildExecutionFailed"
-                        and isinstance(event.payload.get("identity"), Mapping)
-                        and event.payload["identity"].get("child_reservation_id")
-                        == reservation_id
-                    )
-                    for event in events
+                    isinstance(event.payload.get("identity"), Mapping)
+                    and event.payload["identity"].get("child_reservation_id")
+                    == reservation_id
+                    for event in settled_events
                 ):
                     return {"accepted": True, "already_settled": True}
                 event_id = (
@@ -993,7 +1001,7 @@ class DshToolService:
                             "error_code": error_code,
                         },
                         event_id=event_id,
-                        expected_run_seq=events[-1].seq,
+                        expected_run_seq=self.ledger.latest_run_seq(run_id),
                     )
                 except ConcurrentRunMutationError:
                     # Sample completions and sibling failures can append at

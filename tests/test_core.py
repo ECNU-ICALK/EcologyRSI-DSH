@@ -98,6 +98,29 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(delta), 1)
         self.assertEqual(delta[0].seq, second.seq)
 
+    def test_event_kind_queries_are_bounded_and_indexed(self) -> None:
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        ledger.append("run:kinds", "Noise", {"value": 1})
+        first = ledger.append(
+            "run:kinds", "DshChildLaunchReserved", {"launch": {"launch_attempt": 1}}
+        )
+        second = ledger.append("run:kinds", "Noise", {"value": 2})
+        latest = ledger.append(
+            "run:kinds", "DshChildLaunchReserved", {"launch": {"launch_attempt": 2}}
+        )
+
+        events = ledger.events_by_kind("run:kinds", "DshChildLaunchReserved")
+        self.assertEqual(tuple(event.seq for event in events), (first.seq, latest.seq))
+        self.assertEqual(
+            ledger.latest_event_by_kind("run:kinds", "DshChildLaunchReserved"),
+            latest,
+        )
+        self.assertEqual(
+            ledger.events_by_kind("run:kinds", "DshChildLaunchReserved", after_seq=second.seq),
+            (latest,),
+        )
+
     def test_lifecycle_tail_is_covered_and_ignores_non_lifecycle_history(self) -> None:
         ledger = EventLedger()
         self.addCleanup(ledger.close)

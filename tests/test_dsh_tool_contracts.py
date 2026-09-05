@@ -383,6 +383,24 @@ class DshToolServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.ledger.close()
 
+    def test_child_reservation_does_not_materialize_full_run_history(self) -> None:
+        fence = self.service.open_admission(
+            "run:tool-test",
+            3,
+            2,
+            role="researcher",
+            stage="generation.research",
+            idempotency_key="deadline-result",
+        )
+        request = _reservation_request(fence.admission_id)
+        with patch.object(
+            self.ledger,
+            "events",
+            side_effect=AssertionError("reservation path must use indexed reads"),
+        ):
+            result = self.service.allocate_child_reservation(request)
+        self.assertTrue(result["accepted"])
+
     def test_role_surface_and_idempotency_are_fail_closed(self) -> None:
         executions = 0
 

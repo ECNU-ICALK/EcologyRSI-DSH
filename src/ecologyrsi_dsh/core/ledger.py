@@ -113,6 +113,12 @@ class EventLedger:
                 "CREATE INDEX IF NOT EXISTS idx_evolution_events_run_seq "
                 "ON evolution_events(run_id, seq)"
             )
+            # DSH reservation and settlement lookups are scoped by event kind;
+            # keep those queries independent of the size of the run history.
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_evolution_events_run_kind_seq "
+                "ON evolution_events(run_id, kind, seq DESC)"
+            )
             # Lifecycle checks run once per sample admission/control decision.
             # Keep that path independent of run history size: the partial index
             # contains only status-changing events and covers the tail query.
@@ -715,6 +721,55 @@ class EventLedger:
                     """,
                     (event_id, run_id),
                 ).fetchone()
+        return self._row_to_event(row) if row is not None else None
+
+    def events_by_kind(
+        self,
+        run_id: str,
+        kind: str,
+        *,
+        after_seq: int = 0,
+        limit: int | None = None,
+    ) -> tuple[Event, ...]:
+        """Read only events of one kind from a run, optionally bounded."""
+
+        run_id = self._required_text(run_id, "run_id")
+        kind = self._required_text(kind, "kind")
+        if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
+            raise ValueError("after_seq must be a non-negative integer")
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+        ):
+            raise ValueError("limit must be a positive integer when provided")
+        query = """
+            SELECT seq, event_id, run_id, kind, payload_json, created_at
+            FROM evolution_events
+            WHERE run_id = ? AND kind = ? AND seq > ?
+            ORDER BY seq
+        """
+        params: list[object] = [run_id, kind, after_seq]
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        with self._lock:
+            rows = self._connection.execute(query, tuple(params)).fetchall()
+        return tuple(self._row_to_event(row) for row in rows)
+
+    def latest_event_by_kind(self, run_id: str, kind: str) -> Event | None:
+        """Return the newest event of one kind without loading the run stream."""
+
+        run_id = self._required_text(run_id, "run_id")
+        kind = self._required_text(kind, "kind")
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT seq, event_id, run_id, kind, payload_json, created_at
+                FROM evolution_events
+                WHERE run_id = ? AND kind = ?
+                ORDER BY seq DESC LIMIT 1
+                """,
+                (run_id, kind),
+            ).fetchone()
         return self._row_to_event(row) if row is not None else None
 
     def count(self, run_id: str | None = None) -> int:
