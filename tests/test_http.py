@@ -485,6 +485,19 @@ class HTTPContractTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(manifest["recommended_dsh_proxy_base"], "/api/ecology-evolution")
 
+    def test_health_live_and_ready_expose_operational_checks(self) -> None:
+        status, live = self.request("/health/live")
+        self.assertEqual(status, 200, live)
+        self.assertEqual(live["status"], "live")
+        self.assertTrue(live["ok"])
+
+        status, ready = self.request("/health/ready")
+        self.assertEqual(status, 200, ready)
+        self.assertEqual(ready["status"], "ready")
+        self.assertTrue(ready["ok"])
+        self.assertEqual(ready["checks"]["sqlite_integrity"], "ok")
+        self.assertTrue(ready["checks"]["plugin_manifest"])
+
     def test_plugin_root_uses_install_data_directory_as_fallback(self) -> None:
         with (
             patch.dict(os.environ, {"ECOLOGYRSI_PLUGIN_DIR": ""}),

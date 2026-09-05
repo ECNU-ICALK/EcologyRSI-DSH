@@ -968,6 +968,49 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
             lease._reservations = 0
             lease._retiring = False
 
+    def health_liveness_payload(self) -> dict[str, Any]:
+        """Return a process-local liveness signal without touching dependencies."""
+
+        return {
+            "ok": True,
+            "status": "live",
+            "service": "ecologyrsi-dsh",
+            "package_version": __version__,
+        }
+
+    def health_readiness_payload(self) -> tuple[bool, dict[str, Any]]:
+        """Check the local dependencies required before accepting new work."""
+
+        checks: dict[str, Any] = {
+            "sqlite_integrity": "unknown",
+            "plugin_manifest": False,
+            "director": False,
+            "dsh_runtime": "not_configured",
+        }
+        try:
+            checks["sqlite_integrity"] = self.ledger.integrity_check()
+        except Exception:
+            checks["sqlite_integrity"] = "error"
+        checks["plugin_manifest"] = (
+            isinstance(PLUGIN_MANIFEST, Mapping)
+            and PLUGIN_MANIFEST.get("version") == __version__
+        )
+        checks["director"] = getattr(self, "director", None) is not None
+        if self.dsh_native_runtime is not None:
+            checks["dsh_runtime"] = "configured"
+        ready = (
+            checks["sqlite_integrity"] == "ok"
+            and checks["plugin_manifest"] is True
+            and checks["director"] is True
+        )
+        return ready, {
+            "ok": ready,
+            "status": "ready" if ready else "not_ready",
+            "service": "ecologyrsi-dsh",
+            "package_version": __version__,
+            "checks": checks,
+        }
+
     def close(self) -> None:
         worker_stopped = self.auto_progress.close()
         # A urllib request cannot be interrupted safely. If shutdown reaches
@@ -1020,6 +1063,13 @@ class EvolutionRequestHandler(
         if not self._authorize_api():
             return
         path = self._route()
+        if path == ["health", "live"]:
+            self._send(HTTPStatus.OK, self.server.health_liveness_payload())
+            return
+        if path == ["health", "ready"]:
+            ready, payload = self.server.health_readiness_payload()
+            self._send(HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE, payload)
+            return
         if path == ["health"]:
             self._send(HTTPStatus.OK, self.server.health_payload)
             return
