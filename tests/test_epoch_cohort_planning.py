@@ -170,6 +170,12 @@ class EpochCohortPlanningTests(unittest.TestCase):
         self.assertEqual(
             small_report.cohort_reuse_policy, "cycle_after_exhaustion@1"
         )
+        serialized = small_report.to_dict()
+        self.assertEqual(
+            serialized["reused_occurrence_count"],
+            small_report.reused_origin_occurrences,
+        )
+        self.assertEqual(serialized["cycle_count"], 2)
 
         # A run with fewer eligible origins than the requested five epochs is
         # still executable. Origins are consumed in deterministic order and

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Protocol, Sequence
 
@@ -544,6 +545,18 @@ class CohortCapacityReport:
                     self.reused_origin_occurrences / self.required_unique_origins
                     if self.required_unique_origins
                     else 0.0
+                ),
+                # A cycle is a complete pass over the eligible source pool.
+                # Keeping this explicit makes reuse auditable without
+                # treating repeated occurrences as independent origins.
+                "reused_occurrence_count": self.reused_origin_occurrences,
+                "cycle_count": (
+                    math.ceil(
+                        self.required_unique_origins
+                        / self.available_eligible_origins
+                    )
+                    if self.available_eligible_origins
+                    else 0
                 ),
             }
         )
