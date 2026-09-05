@@ -29,10 +29,12 @@ test("provider stage gate admits the configured 128-request provider window imme
     active: 128,
     queued: 1,
     draining: 0,
+    planned: 129,
     lifecycle_counts: {
       provider_queued: 1,
       provider_active: 128,
       draining: 0,
+      planned: 129,
     },
     cooldownRemainingMs: 0,
   });

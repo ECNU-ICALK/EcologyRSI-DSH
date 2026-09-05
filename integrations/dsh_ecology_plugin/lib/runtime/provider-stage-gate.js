@@ -433,12 +433,18 @@ export class ProviderStageGate {
       else if (record.status === "active") lifecycleCounts.provider_active += 1;
       else if (record.status === "draining") lifecycleCounts.draining += 1;
     }
+    lifecycleCounts.planned = (
+      lifecycleCounts.provider_queued
+      + lifecycleCounts.provider_active
+      + lifecycleCounts.draining
+    );
     return Object.freeze({
       maxInFlight: this.maxInFlight,
       effectiveMaxInFlight: this.#effectiveLimit(key),
       active: this.active.get(key) || 0,
       queued: this.queues.get(key)?.length || 0,
       draining: lifecycleCounts.draining,
+      planned: lifecycleCounts.planned,
       lifecycle_counts: Object.freeze(lifecycleCounts),
       cooldownRemainingMs: Math.max(
         0,
