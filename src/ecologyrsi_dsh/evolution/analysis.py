@@ -11,6 +11,7 @@ from statistics import fmean, median
 from typing import Any
 
 from ..core.models import (
+    CandidateRole,
     CandidateStatus,
     Evaluation,
     JsonObject,
@@ -292,7 +293,11 @@ def generation_control_evaluations(
     carriers: list[Any] = []
     current_evaluations: list[Evaluation] = []
     for candidate in state.candidates:
-        if candidate.generation != batch.generation:
+        if (
+            candidate.generation != batch.generation
+            or getattr(candidate, "role", CandidateRole.SEARCH)
+            not in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
+        ):
             continue
         evaluation = state.evaluation_for(candidate.candidate_id)
         if evaluation is None:
@@ -576,6 +581,8 @@ class GenerationAnalysis:
     next_generation_focus: str = ""
     selection_reason: str = ""
     insufficient_evidence: bool = False
+    replan_required: bool = False
+    consecutive_exploration_generations: int = 0
     algorithm_failures: tuple[Mapping[str, Any], ...] = ()
     sample_failures: tuple[Mapping[str, Any], ...] = ()
     created_at: str = field(default_factory=utc_now)
@@ -613,6 +620,18 @@ class GenerationAnalysis:
             object.__setattr__(self, name, _text_rows(getattr(self, name), name))
         if not isinstance(self.insufficient_evidence, bool):
             raise TypeError("insufficient_evidence must be a bool")
+        if not isinstance(self.replan_required, bool):
+            raise TypeError("replan_required must be a bool")
+        object.__setattr__(
+            self,
+            "consecutive_exploration_generations",
+            _integer(
+                self.consecutive_exploration_generations,
+                "consecutive_exploration_generations",
+            ),
+        )
+        if self.replan_required and self.consecutive_exploration_generations < 2:
+            raise ValueError("replan_required needs at least two exploration generations")
         if not isinstance(self.next_generation_focus, str):
             raise TypeError("next_generation_focus must be a string")
         if not isinstance(self.selection_reason, str):
@@ -654,6 +673,11 @@ class GenerationAnalysis:
             ]
         if self.sample_failures:
             result["sample_failures"] = [dict(item) for item in self.sample_failures]
+        if self.replan_required or self.consecutive_exploration_generations:
+            result["replan_required"] = self.replan_required
+            result["consecutive_exploration_generations"] = (
+                self.consecutive_exploration_generations
+            )
         return result
 
     @property
@@ -3349,6 +3373,8 @@ def _historical_scored_configurations(
             digest_value
             for candidate in state.candidates
             if candidate.generation == generation
+            if getattr(candidate, "role", CandidateRole.SEARCH)
+            in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
             if (evaluation := state.evaluation_for(candidate.candidate_id)) is not None
             if (digest_value := evaluation_cohort_digest(evaluation)) is not None
         }
@@ -3358,7 +3384,13 @@ def _historical_scored_configurations(
 
     grouped: dict[str, tuple[Any, list[float]]] = {}
     candidates = sorted(
-        (item for item in state.candidates if item.generation <= generation),
+        (
+            item
+            for item in state.candidates
+            if item.generation <= generation
+            and getattr(item, "role", CandidateRole.SEARCH)
+            in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
+        ),
         key=lambda item: (item.generation, item.slot_index, item.candidate_id),
     )
     for candidate in candidates:
@@ -3455,7 +3487,13 @@ def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationA
         == "diagnostic_smoke"
     )
     candidates = sorted(
-        (item for item in state.candidates if item.generation == batch.generation),
+        (
+            item
+            for item in state.candidates
+            if item.generation == batch.generation
+            and getattr(item, "role", CandidateRole.SEARCH)
+            in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
+        ),
         key=lambda item: item.slot_index,
     )
     if len(candidates) != batch.batch_size:

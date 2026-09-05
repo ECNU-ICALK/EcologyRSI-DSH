@@ -2957,7 +2957,10 @@ class StrategyRouterDSHAdapter:
             title=f"DSH plugin genome mutation {slot_index + 1}",
             changes=dict(child.scientific_program["parameter_overrides"]),
             parent_candidate_id=parent_candidate_id,
-            rationale="DSH structured GenomeMutation applied by the Host registry.",
+            rationale=(
+                "DSH structured GenomeMutation materialized as an isolated candidate "
+                "by the Host registry; this is not a global-champion promotion."
+            ),
             metadata={
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "proposal_source": "dsh_native_agent",

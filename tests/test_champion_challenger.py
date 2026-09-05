@@ -8,13 +8,16 @@ from ecologyrsi_dsh.core.trajectory import (
     EvaluationPhase,
     EvaluationScope,
     FormalBatchArm,
+    FormalBatchComparison,
     FormalBatchComparisonDecision,
 )
 from ecologyrsi_dsh.evolution.champion_challenger import (
     LOCAL_CELL_REGRESSION_TOLERANCE,
     LOCAL_MINIMUM_SCORE_DELTA,
+    POSITIVE_DELTA_MINIMUM_SCORE_DELTA,
     assess_local_challenger,
     local_challenger_safety_reason,
+    validate_formal_batch_comparison,
 )
 
 
@@ -75,6 +78,140 @@ def _evaluation(
 
 
 class ChampionChallengerSelectionTests(unittest.TestCase):
+    def test_positive_delta_protocol_rejects_tampered_persisted_threshold(self) -> None:
+        champion = _evaluation(
+            arm=FormalBatchArm.CHAMPION,
+            revision_id="revision:champion",
+            score=-0.4,
+            skill=0.2,
+        )
+        challenger_metrics = _metrics(0.3)
+        challenger_metrics.update(
+            {
+                "constraint_violations": 0,
+                "sample_execution_coverage_pass": True,
+                "sample_execution": {
+                    "attempted_origin_samples": 50,
+                    "succeeded_origin_samples": 50,
+                    "minimum_coverage": 0.95,
+                    "coverage_pass": True,
+                    "strict_agent_chain_pass": True,
+                },
+            }
+        )
+        challenger = _evaluation(
+            arm=FormalBatchArm.CHALLENGER,
+            revision_id="revision:challenger",
+            score=-0.3,
+            skill=0.3,
+            metrics=challenger_metrics,
+        )
+        assessment = assess_local_challenger(
+            champion,
+            challenger,
+            challenger_safety_gate_passed=True,
+            minimum_score_delta=POSITIVE_DELTA_MINIMUM_SCORE_DELTA,
+            cell_regression_blocks=False,
+        )
+
+        for tampered_threshold in (0.0, 2e-12):
+            with self.subTest(tampered_threshold=tampered_threshold):
+                comparison = FormalBatchComparison(
+                    comparison_id=f"comparison:{tampered_threshold}",
+                    run_id=champion.scope.run_id,
+                    generation=champion.scope.generation,
+                    candidate_id=champion.scope.candidate_id,
+                    batch_index=champion.scope.batch_index,
+                    cohort_digest=champion.scope.cohort_digest,
+                    champion_before_revision_id=champion.scope.candidate_revision_id,
+                    challenger_revision_id=challenger.scope.candidate_revision_id,
+                    champion_evaluation_id=champion.evaluation_id,
+                    challenger_evaluation_id=challenger.evaluation_id,
+                    champion_evaluation_digest=champion.evaluation_digest,
+                    challenger_evaluation_digest=challenger.evaluation_digest,
+                    champion_score=champion.score,
+                    challenger_score=challenger.score,
+                    score_delta=assessment.score_delta,
+                    comparison_contract_digest=assessment.comparison_contract_digest,
+                    safety_gate_passed=assessment.safety_gate_passed,
+                    cell_regression_gate_passed=assessment.cell_regression_gate_passed,
+                    minimum_score_delta=tampered_threshold,
+                    decision=assessment.decision,
+                    champion_after_revision_id=assessment.champion_after_revision_id,
+                    reason=assessment.reason,
+                )
+
+                with self.assertRaisesRegex(ValueError, "minimum_score_delta"):
+                    validate_formal_batch_comparison(
+                        comparison,
+                        champion,
+                        challenger,
+                        minimum_score_delta=POSITIVE_DELTA_MINIMUM_SCORE_DELTA,
+                        cell_regression_blocks=False,
+                    )
+
+    def test_positive_delta_policy_promotes_small_gain_and_keeps_cell_risk_diagnostic(
+        self,
+    ) -> None:
+        champion = _evaluation(
+            arm=FormalBatchArm.CHAMPION,
+            revision_id="revision:champion",
+            score=-0.4,
+            skill=0.2,
+        )
+        challenger_metrics = _metrics(0.3)
+        challenger_metrics["targets"][0]["skill_score"] = 0.1
+        challenger = _evaluation(
+            arm=FormalBatchArm.CHALLENGER,
+            revision_id="revision:challenger",
+            score=-0.399999,
+            skill=0.3,
+            metrics=challenger_metrics,
+        )
+
+        result = assess_local_challenger(
+            champion,
+            challenger,
+            challenger_safety_gate_passed=True,
+            minimum_score_delta=POSITIVE_DELTA_MINIMUM_SCORE_DELTA,
+            cell_regression_blocks=False,
+        )
+
+        self.assertEqual(
+            result.decision,
+            FormalBatchComparisonDecision.CHALLENGER_PROMOTED,
+        )
+        self.assertFalse(result.cell_regression_gate_passed)
+        self.assertEqual(result.reason, "challenger_improved")
+
+    def test_positive_delta_policy_requires_strictly_more_than_epsilon(self) -> None:
+        champion = _evaluation(
+            arm=FormalBatchArm.CHAMPION,
+            revision_id="revision:champion",
+            score=0.0,
+            skill=0.2,
+        )
+        challenger = _evaluation(
+            arm=FormalBatchArm.CHALLENGER,
+            revision_id="revision:challenger",
+            score=POSITIVE_DELTA_MINIMUM_SCORE_DELTA,
+            skill=0.3,
+        )
+
+        result = assess_local_challenger(
+            champion,
+            challenger,
+            challenger_safety_gate_passed=True,
+            minimum_score_delta=POSITIVE_DELTA_MINIMUM_SCORE_DELTA,
+            cell_regression_blocks=False,
+        )
+
+        self.assertEqual(
+            result.decision,
+            FormalBatchComparisonDecision.CHAMPION_RETAINED,
+        )
+        self.assertEqual(result.reason, "no_positive_score_delta")
+
     def test_v2_safety_requires_explicit_valid_execution_counts(self) -> None:
         valid = {
             "constraint_violations": 0,

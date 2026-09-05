@@ -22,6 +22,10 @@ from ..core.sample_results import (
     MAX_SAMPLE_RESULTS_RECORDS,
     SAMPLE_REWARD_DEFINITION_V1,
 )
+from ..core.state import (
+    uses_global_incumbent_protocol,
+    uses_positive_delta_search_protocol,
+)
 from ..evaluators.registry import (
     EXOGENOUS_RIDGE_MODEL_ID,
     GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
@@ -61,6 +65,33 @@ from .sample_admission import (
 
 _TWO_STAGE_SCREENING_ORIGINS = 64
 _HISTORICAL_PREDICTION_CELLS_PER_ORIGIN = 9
+_FINAL_VALIDATION_RESERVATION_SCHEMA_V1 = (
+    "ecologyrsi-dsh.final-validation-reservation/1"
+)
+
+
+def _final_validation_reservation_projection(value: Any) -> dict[str, str] | None:
+    """Expose a reservation only when its lock state is explicit and bounded."""
+
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_version",
+        "status",
+        "reservation_id",
+    }:
+        return None
+    reservation_id = value.get("reservation_id")
+    if (
+        value.get("schema_version") != _FINAL_VALIDATION_RESERVATION_SCHEMA_V1
+        or value.get("status") != "locked"
+        or not isinstance(reservation_id, str)
+        or not reservation_id.strip()
+    ):
+        return None
+    return {
+        "schema_version": _FINAL_VALIDATION_RESERVATION_SCHEMA_V1,
+        "status": "locked",
+        "reservation_id": reservation_id.strip(),
+    }
 
 
 def _paired_optimization_schedule(state: Any) -> OptimizationSchedule | None:
@@ -314,6 +345,35 @@ def _effective_candidate_status(
     return default
 
 
+def _candidate_selection_disposition(
+    *,
+    candidate_id: str,
+    incumbent_id: str | None,
+    promotion_decision: str | None,
+    search_parent_id: str | None,
+    candidate_status: str,
+) -> str:
+    """Classify a candidate's role without conflating search and promotion.
+
+    ``status`` describes the candidate lifecycle.  This separate field answers
+    the operational question the UI needs: is this the current baseline, the
+    parent used for the next search, an older approved version, or an outcome
+    that was not eligible for promotion?
+    """
+
+    if candidate_id == incumbent_id:
+        return "incumbent"
+    if candidate_status in {"failed", "duplicate", "screened_out", "rejected"}:
+        return candidate_status
+    if candidate_id == search_parent_id:
+        return "search_parent"
+    if promotion_decision == "approved" or candidate_status == "promoted":
+        return "promoted_historical"
+    if candidate_status == "spawned":
+        return "pending"
+    return "evaluated_not_selected"
+
+
 def _rounds_projection(state: Any) -> list[dict[str, Any]]:
     """Apply operational run lifecycle semantics to the audit-derived rounds."""
 
@@ -386,7 +446,12 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
     )
     remote_strategy_calls += remote_research_calls
     remote_strategy_successes += remote_research_successes
+    search_proposal_ids = {
+        candidate.proposal_id for candidate in _search_candidates(state)
+    }
     for proposal in state.proposals:
+        if proposal.proposal_id not in search_proposal_ids:
+            continue
         metadata = proposal.metadata if isinstance(proposal.metadata, Mapping) else {}
         fallback = metadata.get("host_fallback") if isinstance(metadata, Mapping) else None
         if isinstance(fallback, Mapping) and fallback.get("applied") is True:
@@ -560,7 +625,7 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
     partial_evaluation_retained_candidate_count = 0
     partial_evaluation_aborted_candidate_count = 0
     partial_evaluation_sources: set[str] = set()
-    for candidate in tuple(getattr(state, "candidates", ())):
+    for candidate in _search_candidates(state):
         if candidate.candidate_id in evaluated_candidate_ids:
             continue
         progress = _evaluation_progress_projection(state, candidate.candidate_id)
@@ -1783,7 +1848,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     generation = int(state.run.generation)
     candidates = tuple(
         candidate
-        for candidate in state.candidates
+        for candidate in _search_candidates(state)
         if int(candidate.generation) == generation
     )
     if len(candidates) <= 2:
@@ -2887,13 +2952,29 @@ def _adaptive_progress_projection(
     screening_failed = 0
     screening_outcome_counted = 0
     screening_candidate_progress: list[dict[str, Any]] = []
-    for candidate in tuple(getattr(state, "candidates", ())):
+    for candidate in _search_candidates(state):
         if int(candidate.generation) != generation:
             continue
         raw_candidate_id = getattr(candidate, "candidate_id", None)
         if not isinstance(raw_candidate_id, str) or not raw_candidate_id:
             continue
         candidate_id = raw_candidate_id
+        latest_candidate_start = next(
+            (
+                event
+                for event in reversed(runtime_events)
+                if event.kind == "EvaluationSampleResultsStarted"
+                and event.payload.get("candidate_id") == candidate_id
+            ),
+            None,
+        )
+        if latest_candidate_start is not None:
+            checkpoint = latest_candidate_start.payload.get("checkpoint")
+            if (
+                isinstance(checkpoint, Mapping)
+                and checkpoint.get("evaluation_phase") != "screening"
+            ):
+                continue
         progress = _evaluation_progress_projection(state, candidate_id)
         if progress is None:
             continue
@@ -3083,7 +3164,7 @@ def _adaptive_progress_projection(
     cells_per_origin = metadata.get("prediction_cells_per_origin")
     current_candidate_ids = {
         str(candidate.candidate_id)
-        for candidate in tuple(getattr(state, "candidates", ()))
+        for candidate in _search_candidates(state)
         if int(candidate.generation) == generation
         and isinstance(getattr(candidate, "candidate_id", None), str)
         and candidate.candidate_id
@@ -3597,7 +3678,10 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
                 ),
                 "edit_decision": edit_decision,
                 "edit_outcome": outcome.get("outcome") if outcome else None,
-                "edit_reason": edit_reason,
+                "edit_reason": sanitize_public_value(
+                    edit_reason,
+                    text_limit=300,
+                ),
                 "operations": operations,
                 "active_revision_id": (
                     champion_after_revision_id
@@ -3699,6 +3783,378 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
     return lanes
 
 
+def _candidate_role(candidate: Any) -> str:
+    role = getattr(candidate, "role", "search")
+    return str(getattr(role, "value", role))
+
+
+def _search_candidates(state: Any) -> tuple[Any, ...]:
+    """Keep the seed incumbent control out of search-budget/UI counts."""
+
+    return tuple(
+        candidate
+        for candidate in getattr(state, "candidates", ())
+        if _candidate_role(candidate) != "incumbent_control"
+    )
+
+
+def _evolution_evidence_projection(state: Any) -> dict[str, Any]:
+    """Project the bounded evidence needed to explain global promotion.
+
+    Raw scores from different generations are not compared here.  Each
+    decision contains exactly the three evaluations from its frozen holdout
+    cohort, while ``global_champion`` follows the latest durable selection.
+    """
+
+    task_manifest = getattr(state, "task_manifest", None)
+    metadata = getattr(task_manifest, "metadata", {})
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    raw_capacity = metadata.get("cohort_capacity_report")
+    capacity_report = raw_capacity if isinstance(raw_capacity, Mapping) else {}
+    reused = capacity_report.get("reused_origin_occurrences", 0)
+    if isinstance(reused, bool) or not isinstance(reused, (int, float)):
+        reused = 0
+    sufficient = capacity_report.get("sufficient") is True
+    capacity = {
+        name: sanitize_public_value(capacity_report.get(name))
+        for name in (
+            "planned_generations",
+            "required_unique_origins",
+            "planned_origin_occurrences",
+            "available_eligible_origins",
+            "available_source_origins",
+            "effective_source_count",
+            "reused_origin_occurrences",
+            "reuse_fraction",
+            "max_feasible_generations",
+            "sufficient",
+            "candidate_origin_executions_per_generation",
+            "scoring_cells_per_generation",
+        )
+        if name in capacity_report
+    }
+    capacity.update(
+        {
+            "available": bool(capacity_report),
+            "final_validation_reservation": (
+                _final_validation_reservation_projection(
+                    metadata.get("final_validation_reservation")
+                )
+            ),
+            "evidence_scope": (
+                "independent_origin_evidence"
+                if sufficient and float(reused) == 0.0
+                else "engineering_exploration_with_reused_origins"
+                if capacity_report
+                else "capacity_not_reported"
+            ),
+        }
+    )
+
+    control_candidate_ids = {
+        candidate.candidate_id
+        for candidate in getattr(state, "candidates", ())
+        if _candidate_role(candidate) == "incumbent_control"
+    }
+    champion_events = {
+        int(event.payload["generation"]): event.payload
+        for event in getattr(state, "events", ())
+        if event.kind == "GenerationChampionSelected"
+        and isinstance(event.payload, Mapping)
+        and isinstance(event.payload.get("generation"), int)
+        and not isinstance(event.payload.get("generation"), bool)
+    }
+
+    def committed_selection(comparison: Any) -> bool:
+        effective = (
+            state.effective_revision_for(comparison.generation)
+            if callable(getattr(state, "effective_revision_for", None))
+            else None
+        )
+        event = champion_events.get(comparison.generation)
+        return bool(
+            effective == comparison.selected_revision_id
+            and isinstance(event, Mapping)
+            and event.get("selected_candidate_id")
+            == comparison.selected_candidate_id
+            and event.get("selected_revision_id")
+            == comparison.selected_revision_id
+        )
+
+    def revision_for(revision_id: str | None) -> Any | None:
+        if not isinstance(revision_id, str) or not callable(
+            getattr(state, "revision", None)
+        ):
+            return None
+        try:
+            return state.revision(revision_id)
+        except (KeyError, ValueError):
+            return None
+
+    def verified_seed_control(candidate_id: str, revision_id: str | None) -> bool:
+        if candidate_id not in control_candidate_ids:
+            return False
+        initial = (
+            state.initial_revision_for(candidate_id)
+            if callable(getattr(state, "initial_revision_for", None))
+            else None
+        )
+        revision = revision_for(revision_id)
+        if (
+            initial is None
+            or revision is None
+            or initial.revision_id != revision_id
+        ):
+            return False
+        seed_getter = getattr(state, "materialized_seed_genome", None)
+        if not callable(seed_getter):
+            return False
+        try:
+            seed = seed_getter()
+        except (KeyError, RuntimeError, ValueError):
+            return False
+        return bool(
+            revision.genome_digest == seed.genome_digest
+            and revision.behavior_digest == seed.behavior_digest
+        )
+
+    decisions: list[dict[str, Any]] = []
+    selected_evaluations: list[tuple[Any, Any, str | None]] = []
+    certified_evaluations: list[tuple[Any, Any, str | None]] = []
+    comparisons = sorted(
+        getattr(state, "generation_comparisons", ()),
+        key=lambda item: item.generation,
+    )
+    for comparison in comparisons:
+        gate_results = (
+            comparison.gate_results
+            if isinstance(comparison.gate_results, Mapping)
+            else {}
+        )
+        gates = gate_results.get("arms")
+        if not isinstance(gates, Mapping):
+            gates = {}
+        formal = (
+            state.formal_selection_for(comparison.generation)
+            if callable(getattr(state, "formal_selection_for", None))
+            else None
+        )
+        formal_payload = getattr(formal, "payload", {})
+        if not isinstance(formal_payload, Mapping):
+            formal_payload = {}
+        exploration_only = formal_payload.get("exploration_only") is True
+        consecutive = formal_payload.get("consecutive_exploration_generations", 0)
+        if isinstance(consecutive, bool) or not isinstance(consecutive, int):
+            consecutive = 0
+
+        evaluations_by_arm: dict[str, Any] = {}
+        for evaluation in comparison.holdout_evaluations:
+            raw_arm = getattr(evaluation.scope, "holdout_arm", None)
+            arm = getattr(raw_arm, "value", raw_arm)
+            if isinstance(arm, str):
+                evaluations_by_arm[arm] = evaluation
+        incumbent = evaluations_by_arm.get("incumbent")
+        incumbent_score = _finite_number(getattr(incumbent, "score", None))
+        arms: list[dict[str, Any]] = []
+        for arm in ("finalist_1", "finalist_2", "incumbent"):
+            evaluation = evaluations_by_arm.get(arm)
+            if evaluation is None:
+                continue
+            gate = gates.get(arm)
+            if not isinstance(gate, Mapping):
+                gate = {}
+            score = _finite_number(getattr(evaluation, "score", None))
+            failures = gate.get("failures")
+            if not isinstance(failures, (list, tuple)):
+                failures = ()
+            arms.append(
+                {
+                    "arm": arm,
+                    "candidate_id": evaluation.scope.candidate_id,
+                    "candidate_revision_id": evaluation.scope.candidate_revision_id,
+                    "absolute_score": score,
+                    "holdout_delta": (
+                        score - incumbent_score
+                        if score is not None and incumbent_score is not None
+                        else None
+                    ),
+                    "passed": bool(evaluation.passed),
+                    "eligible": gate.get("eligible") is True,
+                    "search_eligible": gate.get(
+                        "search_eligible", gate.get("eligible")
+                    )
+                    is True,
+                    "certification_eligible": gate.get(
+                        "certification_eligible", gate.get("eligible")
+                    )
+                    is True,
+                    "strict_agent_chain_pass": gate.get(
+                        "strict_agent_chain_pass"
+                    ),
+                    "worst_cell_delta": _finite_number(
+                        gate.get("worst_cell_delta")
+                    ),
+                    "failures": [str(item) for item in failures[:8]],
+                    "search_failures": [
+                        str(item)
+                        for item in list(gate.get("search_failures", ()))[:8]
+                    ],
+                    "certification_failures": [
+                        str(item)
+                        for item in list(
+                            gate.get("certification_failures", ())
+                        )[:8]
+                    ],
+                }
+            )
+
+        selected = next(
+            (
+                evaluation
+                for evaluation in comparison.holdout_evaluations
+                if evaluation.scope.candidate_id == comparison.selected_candidate_id
+                and evaluation.scope.candidate_revision_id
+                == comparison.selected_revision_id
+            ),
+            None,
+        )
+        selected_arm = gate_results.get("selected_arm")
+        if not isinstance(selected_arm, str) and selected is not None:
+            raw_arm = selected.scope.holdout_arm
+            selected_arm = getattr(raw_arm, "value", raw_arm)
+        committed = committed_selection(comparison)
+        if selected is not None and committed:
+            selected_evaluations.append((comparison, selected, selected_arm))
+        certification_selected_arm = gate_results.get(
+            "certification_selected_arm"
+        )
+        certified = evaluations_by_arm.get(certification_selected_arm)
+        if certified is not None and committed:
+            certified_evaluations.append(
+                (comparison, certified, certification_selected_arm)
+            )
+        analysis = (
+            state.analysis_for(comparison.generation)
+            if callable(getattr(state, "analysis_for", None))
+            else None
+        )
+        decisions.append(
+            {
+                "generation": comparison.generation + 1,
+                "cohort_digest": comparison.cohort_digest,
+                "same_cohort": len(arms) == 3
+                and all(
+                    evaluation.scope.cohort_digest == comparison.cohort_digest
+                    for evaluation in comparison.holdout_evaluations
+                ),
+                "screening_pass_count": formal_payload.get(
+                    "screening_pass_count"
+                ),
+                "exploration_only": exploration_only,
+                "consecutive_exploration_generations": consecutive,
+                "replan_required": (
+                    bool(getattr(analysis, "replan_required"))
+                    if isinstance(getattr(analysis, "replan_required", None), bool)
+                    else exploration_only and consecutive >= 2
+                ),
+                "challenger_promotion_allowed": gate_results.get(
+                    "challenger_promotion_allowed"
+                )
+                is not False,
+                "selected_arm": selected_arm,
+                "selected_candidate_id": comparison.selected_candidate_id,
+                "selected_revision_id": comparison.selected_revision_id,
+                "selection_policy": gate_results.get("selection_policy"),
+                "certification_selected_arm": certification_selected_arm,
+                "selected_search_certification_status": gate_results.get(
+                    "selected_search_certification_status"
+                ),
+                "committed": committed,
+                "decision_reason": getattr(analysis, "selection_reason", None),
+                "arms": arms,
+            }
+        )
+
+    global_champion: dict[str, Any] | None = None
+    if selected_evaluations:
+        comparison, selected, selected_arm = selected_evaluations[-1]
+        source_comparison = next(
+            item_comparison
+            for item_comparison, item_selected, _item_arm in selected_evaluations
+            if item_selected.scope.candidate_revision_id
+            == selected.scope.candidate_revision_id
+        )
+        revision = revision_for(selected.scope.candidate_revision_id)
+        is_seed = verified_seed_control(
+            selected.scope.candidate_id,
+            selected.scope.candidate_revision_id,
+        )
+        global_champion = {
+            "candidate_id": selected.scope.candidate_id,
+            "candidate_revision_id": selected.scope.candidate_revision_id,
+            "generation": 0 if is_seed else source_comparison.generation + 1,
+            "source": "materialized_seed" if is_seed else "generation_holdout",
+            "is_initial_seed": is_seed,
+            "genome_digest": getattr(revision, "genome_digest", None),
+            "absolute_score": _finite_number(selected.score),
+        }
+    elif control_candidate_ids:
+        candidate_id = sorted(control_candidate_ids)[0]
+        revision = (
+            state.initial_revision_for(candidate_id)
+            if callable(getattr(state, "initial_revision_for", None))
+            else None
+        )
+        revision_id = getattr(revision, "revision_id", None)
+        if verified_seed_control(candidate_id, revision_id):
+            global_champion = {
+                "candidate_id": candidate_id,
+                "candidate_revision_id": revision_id,
+                "generation": 0,
+                "source": "materialized_seed",
+                "is_initial_seed": True,
+                "genome_digest": getattr(revision, "genome_digest", None),
+                "absolute_score": None,
+            }
+
+    certified_version: dict[str, Any] | None = None
+    if certified_evaluations:
+        comparison, certified, _certified_arm = certified_evaluations[-1]
+        revision = revision_for(certified.scope.candidate_revision_id)
+        certified_version = {
+            "candidate_id": certified.scope.candidate_id,
+            "candidate_revision_id": certified.scope.candidate_revision_id,
+            "generation": comparison.generation + 1,
+            "source": "generation_holdout_certification",
+            "is_initial_seed": False,
+            "genome_digest": getattr(revision, "genome_digest", None),
+            "absolute_score": _finite_number(certified.score),
+        }
+
+    positive_delta_protocol = bool(
+        task_manifest is not None
+        and uses_positive_delta_search_protocol(task_manifest)
+    )
+
+    return {
+        "schema_version": "ecologyrsi-dsh.evolution-evidence/1",
+        "protocol_scope": (
+            "positive_delta_search_v3"
+            if positive_delta_protocol
+            else "global_incumbent_v2"
+            if task_manifest is not None
+            and uses_global_incumbent_protocol(task_manifest)
+            else "legacy_audit"
+        ),
+        "global_champion": global_champion,
+        "search_version": global_champion,
+        "certified_version": certified_version,
+        "generation_decisions": decisions,
+        "capacity": capacity,
+    }
+
+
 def _run_execution_progress(
     state: Any,
     admission_snapshot: Mapping[str, Any] | None = None,
@@ -3714,11 +4170,12 @@ def _run_execution_progress(
     total_steps = target_candidates * len(_EVOLUTION_STAGE_ORDER)
     completed_steps = 0
     terminal_candidates = 0
+    search_candidates = _search_candidates(state)
     current_candidates = [
-        item for item in state.candidates if item.generation == state.run.generation
+        item for item in search_candidates if item.generation == state.run.generation
     ]
     current_stage_rows: list[tuple[Any, dict[str, str]]] = []
-    for candidate in state.candidates:
+    for candidate in search_candidates:
         proposal = state.proposal(candidate.proposal_id)
         evaluation = state.evaluation_for(candidate.candidate_id)
         promotion = state.promotion_for(candidate.candidate_id)
@@ -4171,6 +4628,21 @@ def _candidate_projection(state: Any, candidate: Any) -> dict[str, Any]:
         ),
         None,
     ) if analysis is not None else None
+    run = state.run
+    incumbent_id = (
+        getattr(run, "selection_incumbent_id", None)
+        or getattr(run, "best_candidate_id", None)
+    )
+    search_parent_id = (
+        getattr(analysis, "search_parent_candidate_id", None)
+        if analysis is not None
+        else None
+    )
+    promotion_decision = (
+        promotion.decision.value
+        if promotion is not None and hasattr(promotion.decision, "value")
+        else None
+    )
     result: dict[str, Any] = {
         "id": candidate.candidate_id,
         "candidate_id": candidate.candidate_id,
@@ -4179,6 +4651,13 @@ def _candidate_projection(state: Any, candidate: Any) -> dict[str, Any]:
         "generation": candidate.generation + 1,
         "slot_index": candidate.slot_index,
         "status": status,
+        "selection_disposition": _candidate_selection_disposition(
+            candidate_id=candidate.candidate_id,
+            incumbent_id=incumbent_id,
+            promotion_decision=promotion_decision,
+            search_parent_id=search_parent_id,
+            candidate_status=candidate.status.value,
+        ),
         "created_at": candidate.created_at,
         "title": proposal.title,
         "rationale": proposal.rationale,
@@ -4189,6 +4668,145 @@ def _candidate_projection(state: Any, candidate: Any) -> dict[str, Any]:
             else None
         ),
     }
+    task_manifest = getattr(state, "task_manifest", None)
+    if (
+        task_manifest is not None
+        and uses_positive_delta_search_protocol(task_manifest)
+    ):
+        comparison = (
+            state.comparison_for(candidate.generation)
+            if callable(getattr(state, "comparison_for", None))
+            else None
+        )
+        gate_results = (
+            comparison.gate_results
+            if comparison is not None
+            and isinstance(comparison.gate_results, Mapping)
+            else {}
+        )
+        gates = gate_results.get("arms")
+        if not isinstance(gates, Mapping):
+            gates = {}
+        candidate_holdout = next(
+            (
+                item
+                for item in getattr(comparison, "holdout_evaluations", ())
+                if item.scope.candidate_id == candidate.candidate_id
+            ),
+            None,
+        )
+        candidate_arm = (
+            candidate_holdout.scope.holdout_arm.value
+            if candidate_holdout is not None
+            and candidate_holdout.scope.holdout_arm is not None
+            else None
+        )
+        candidate_gate = (
+            gates.get(candidate_arm)
+            if isinstance(candidate_arm, str)
+            and isinstance(gates.get(candidate_arm), Mapping)
+            else {}
+        )
+        effective_revision = (
+            state.effective_revision_for(candidate.generation)
+            if comparison is not None
+            and callable(getattr(state, "effective_revision_for", None))
+            else None
+        )
+        generation_committed = bool(
+            comparison is not None
+            and effective_revision == comparison.selected_revision_id
+        )
+        generation_search_selected = bool(
+            generation_committed
+            and comparison.selected_candidate_id == candidate.candidate_id
+            and candidate_arm in {"finalist_1", "finalist_2"}
+        )
+        generation_certification_selected = bool(
+            generation_committed
+            and candidate_arm == gate_results.get("certification_selected_arm")
+            and candidate_gate.get("certification_eligible") is True
+        )
+        committed_comparisons = [
+            item
+            for item in getattr(state, "generation_comparisons", ())
+            if callable(getattr(state, "effective_revision_for", None))
+            and state.effective_revision_for(item.generation)
+            == item.selected_revision_id
+        ]
+        latest_search = (
+            max(committed_comparisons, key=lambda item: item.generation)
+            if committed_comparisons
+            else None
+        )
+        certified_comparisons = [
+            item
+            for item in committed_comparisons
+            if isinstance(item.gate_results, Mapping)
+            and isinstance(
+                item.gate_results.get("certification_selected_arm"),
+                str,
+            )
+        ]
+        latest_certification = (
+            max(certified_comparisons, key=lambda item: item.generation)
+            if certified_comparisons
+            else None
+        )
+        latest_certification_candidate_id = None
+        if latest_certification is not None:
+            certification_arm = latest_certification.gate_results.get(
+                "certification_selected_arm"
+            )
+            latest_certification_evaluation = next(
+                (
+                    item
+                    for item in latest_certification.holdout_evaluations
+                    if item.scope.holdout_arm is not None
+                    and item.scope.holdout_arm.value == certification_arm
+                ),
+                None,
+            )
+            latest_certification_candidate_id = (
+                latest_certification_evaluation.scope.candidate_id
+                if latest_certification_evaluation is not None
+                else None
+            )
+        search_version_selected = bool(
+            latest_search is not None
+            and latest_search.selected_candidate_id == candidate.candidate_id
+        )
+        certification_selected = bool(
+            latest_certification is not None
+            and latest_certification_candidate_id == candidate.candidate_id
+        )
+        certification_eligible = bool(
+            candidate_gate.get("certification_eligible") is True
+        )
+        result.update(
+            {
+                "search_version_selected": search_version_selected,
+                "generation_search_selected": generation_search_selected,
+                "certification_eligible": certification_eligible,
+                "certification_selected": certification_selected,
+                "generation_certification_selected": (
+                    generation_certification_selected
+                ),
+                "certification_status": (
+                    "strictly_certified"
+                    if certification_selected
+                    else "search_version_not_certified"
+                    if search_version_selected
+                    else "historical_certified_version"
+                    if generation_certification_selected
+                    else "historical_search_version"
+                    if generation_search_selected
+                    else "eligible_not_selected"
+                    if certification_eligible
+                    else "not_certified"
+                ),
+            }
+        )
     result["execution"] = _candidate_execution_projection(
         state, candidate, proposal, evaluation, promotion
     )
@@ -4745,10 +5363,15 @@ def _projection_json(
                 "partition": acceptable_evaluation.partition,
             }
         )
-    visible_pass = any(item.passed for item in state.evaluations)
-    all_evaluated = bool(state.candidates) and all(
+    search_candidates = _search_candidates(state)
+    search_candidate_ids = {item.candidate_id for item in search_candidates}
+    visible_pass = any(
+        item.passed and item.candidate_id in search_candidate_ids
+        for item in state.evaluations
+    )
+    all_evaluated = bool(search_candidates) and all(
         item.status.value in {"evaluated", "promoted", "rejected", "failed", "duplicate"}
-        for item in state.candidates
+        for item in search_candidates
     )
     dataset_id = task.visible_datasets[0] if task.visible_datasets else None
     metadata = dict(task.metadata)
@@ -4764,7 +5387,7 @@ def _projection_json(
         else "observation_only_full_cohort"
     )
     ordered_candidates = sorted(
-        state.candidates,
+        search_candidates,
         key=lambda item: (item.generation, item.slot_index, item.candidate_id),
     )
     for candidate in ordered_candidates:
@@ -4857,6 +5480,7 @@ def _projection_json(
         ),
         "cohort_capacity_report": metadata.get("cohort_capacity_report"),
         "cohort_capacity_enforced": metadata.get("cohort_capacity_enforced"),
+        "host_runtime_build": metadata.get("host_runtime_build"),
         "domain_pack_id": task.domain_pack,
         "dataset_id": dataset_id,
         "episode_id": metadata.get("episode_id"),
@@ -4990,7 +5614,7 @@ def _projection_json(
         "updated_at": latest_event,
         "generation": run.generation,
         "total_generations": _max_generations(task),
-        "candidates_count": len(state.candidates),
+        "candidates_count": len(search_candidates),
         "max_candidates": task.max_candidates,
         "candidates_per_generation": task.candidates_per_generation,
         "optimization_protocol": metadata.get("optimization_protocol"),
@@ -5086,6 +5710,7 @@ def _projection_json(
         },
         "trajectory": trajectory,
         "adaptive_trajectories": _adaptive_trajectory_projection(state),
+        "evolution_evidence": _evolution_evidence_projection(state),
         "execution_progress": execution_progress,
         "execution_diagnostics": execution_diagnostics,
         "rounds": _rounds_projection(state),
@@ -5127,7 +5752,10 @@ def _projection_json(
         "best_observed_score": selected.score if selected is not None else None,
         "best_observed_score_scope": observed_score_scope,
         "best_observed_drives_current_metrics": False,
-        "candidates": [_candidate_projection(state, item) for item in reversed(state.candidates)],
+        "candidates": [
+            _candidate_projection(state, item)
+            for item in reversed(search_candidates)
+        ],
     }
 
 
@@ -5149,6 +5777,7 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
         else None
     )
     dataset_id = task.visible_datasets[0] if task.visible_datasets else None
+    search_candidates = _search_candidates(state)
     configuration = {
         "dataset_id": dataset_id,
         "optimization_protocol": metadata.get("optimization_protocol"),
@@ -5159,6 +5788,7 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
         ),
         "cohort_capacity_report": metadata.get("cohort_capacity_report"),
         "cohort_capacity_enforced": metadata.get("cohort_capacity_enforced"),
+        "host_runtime_build": metadata.get("host_runtime_build"),
         "episode_id": metadata.get("episode_id"),
         "strategy_model_id": metadata.get(
             "strategy_model_id",
@@ -5214,7 +5844,7 @@ def _run_summary_projection(state: Any) -> dict[str, Any]:
         "projection_revision": state.events[-1].seq if state.events else 0,
         "generation": run.generation,
         "total_generations": _max_generations(task),
-        "candidates_count": len(state.candidates),
+        "candidates_count": len(search_candidates),
         "max_candidates": task.max_candidates,
         "candidates_per_generation": task.candidates_per_generation,
         "optimization_protocol": metadata.get("optimization_protocol"),
@@ -5285,6 +5915,7 @@ def _monitor_payload(
         task, metadata, model_usage, dsh_runtime
     )
     latest_at = state.events[-1].created_at if state.events else state.run.created_at
+    search_candidates = _search_candidates(state)
     return {
         "schema_version": "ecologyrsi-dsh.browser-run-monitor/1",
         "projection": {
@@ -5303,7 +5934,7 @@ def _monitor_payload(
             "projection_revision": state.events[-1].seq if state.events else 0,
             "generation": state.run.generation,
             "total_generations": _max_generations(task),
-            "candidates_count": len(state.candidates),
+            "candidates_count": len(search_candidates),
             "max_candidates": task.max_candidates,
             "execution_progress": _run_execution_progress(
                 state, admission_snapshot
@@ -5312,6 +5943,7 @@ def _monitor_payload(
             # generation), so the batch table can stay live without returning
             # candidate metrics or per-origin evidence on every poll.
             "adaptive_trajectories": _adaptive_trajectory_projection(state),
+            "evolution_evidence": _evolution_evidence_projection(state),
             "token_usage_available": run_wide_usage["available"],
             "tokens_used": run_wide_usage["tokens_used"],
             "token_limit": run_wide_usage["token_limit"],
@@ -5321,3 +5953,20 @@ def _monitor_payload(
             "dsh_runtime": dsh_runtime,
         },
     }
+
+
+def _control_payload(
+    state: Any,
+    admission_snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the compact state acknowledged by a lifecycle control.
+
+    Control requests must not serialize candidates, per-origin evidence, or
+    training assets.  Keeping this shape aligned with the monitor projection
+    also lets clients merge an acknowledgement into an already hydrated run
+    without discarding its detail collections.
+    """
+
+    payload = _monitor_payload(state, admission_snapshot)
+    payload["schema_version"] = "ecologyrsi-dsh.browser-run-control/1"
+    return payload

@@ -652,7 +652,7 @@
     // supplementary tail and must not prevent a fresh projection from being
     // accepted when that endpoint has a transient failure.
     return Promise.all([
-      request("/runs/" + encodeURIComponent(runId) + "?view=monitor"),
+      request("/runs/" + encodeURIComponent(runId) + "?view=monitor", {timeout: dataRequestTimeout}),
       request(eventRequestPath(runId, false)).catch(function () { return null; })
     ]).then(function (results) {
       if (requestId !== state.runReadRequest || contextEpoch !== state.contextEpoch) { return false; }
@@ -664,8 +664,9 @@
         throw new Error("运行监视响应返回了其他运行的数据。");
       }
       // Candidate collections remain intentionally absent from monitor
-      // responses. Hydrate the full projection only at structural boundaries;
-      // per-batch progress and adaptive trajectories stay on the compact path.
+      // responses. Structural changes mark the retained detail as stale; full
+      // candidates and training assets are read only when a user opens the run
+      // detail or explicitly refreshes it.
       var structuralChange = (
         Number.isFinite(Number(compactProjection.candidates_count))
         && Number(compactProjection.candidates_count) !== Number(previousRun.candidates_count)
@@ -713,21 +714,11 @@
         }
         return true;
       }
-      // Commit the compact authority immediately. A structural detail request
-      // is best-effort and must never hide a fresh pause/failure/terminal state
-      // merely because the much larger candidate projection is slow.
+      // Commit compact authority immediately. Never turn a heartbeat into an
+      // implicit full-detail read merely because the run crossed a boundary.
       return Promise.resolve(commitProjection(compactProjection)).then(function (committed) {
-        if (!committed || !structuralChange) { return committed; }
-        return request("/runs/" + encodeURIComponent(runId)).then(function (payload) {
-          var detail = payload && (payload.projection || payload.run_projection) || payload || {};
-          state.structureHydrationStale = false;
-          return commitProjection(Object.assign({}, detail, compactProjection));
-        }).catch(function () {
-          if (requestId === state.runReadRequest && contextEpoch === state.contextEpoch) {
-            state.structureHydrationStale = true;
-          }
-          return true;
-        });
+        if (committed && structuralChange) { state.structureHydrationStale = true; }
+        return committed;
       });
     }).catch(function (error) {
       if (requestId !== state.runReadRequest || contextEpoch !== state.contextEpoch) { return false; }

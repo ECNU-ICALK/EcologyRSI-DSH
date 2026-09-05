@@ -1,0 +1,36 @@
+{
+  "schema_version": "ecologyrsi-dsh.preset-manifest/1",
+  "protocol": "dsh_native_plugin_evolution@1",
+  "presets": [
+    {
+      "preset_id": "ecology-coordinator-v4",
+      "tool_profile": "dynamic-retrieval-v1",
+      "required_tools": ["skill", "web_search"]
+    },
+    {
+      "preset_id": "ecology-researcher-v7",
+      "tool_profile": "dynamic-retrieval-v1",
+      "required_tools": ["skill", "web_search"]
+    },
+    {
+      "preset_id": "ecology-candidate-proposer-v4",
+      "tool_profile": "dynamic-retrieval-v1",
+      "required_tools": ["skill", "web_search"]
+    },
+    {
+      "preset_id": "ecology-sample-planner-v5",
+      "tool_profile": "dynamic-retrieval-v1",
+      "required_tools": ["ecology_execute_prediction_tool", "skill", "web_search"]
+    },
+    {
+      "preset_id": "ecology-sample-critic-v4",
+      "tool_profile": "dynamic-retrieval-v1",
+      "required_tools": ["skill", "web_search"]
+    },
+    {
+      "preset_id": "ecology-generation-judge-v7",
+      "tool_profile": "dynamic-retrieval-v1",
+      "required_tools": ["skill", "web_search"]
+    }
+  ]
+}

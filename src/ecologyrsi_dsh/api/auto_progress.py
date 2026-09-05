@@ -1276,7 +1276,7 @@ class AutoProgressManager:
                                 "研究响应已用尽本轮语义修复预算："
                                 f"{validation_detail}"
                             )[:500],
-                            code="research_contract_retry_exhausted",
+                            code="research_contract_fallback_unavailable",
                         ),
                     )
                 retryable = _progress_failure_retryable(

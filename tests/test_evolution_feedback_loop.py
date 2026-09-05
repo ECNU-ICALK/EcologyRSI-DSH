@@ -8,6 +8,7 @@ from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import (
     Candidate,
+    CandidateRole,
     CandidateStatus,
     Evaluation,
     HumanIntervention,
@@ -118,6 +119,47 @@ def _parent_context(*, score: float, improvement: float) -> dict:
 
 
 class EvolutionFeedbackLoopTests(unittest.TestCase):
+    def test_incumbent_control_is_isolated_from_analysis_advance_and_next_batch_budget(
+        self,
+    ) -> None:
+        ledger = EventLedger()
+        director = EvolutionDirector(ledger, FakeDSHAdapter())
+        try:
+            run_id = director.start_evolution(
+                _batched_task(), run_id="run:budget-neutral-control"
+            ).run.run_id
+            control_proposal = Proposal(
+                proposal_id="proposal:budget-neutral-control",
+                run_id=run_id,
+                generation=0,
+                title="budget-neutral control",
+                changes={"alpha": 0.25},
+                metadata={"candidate_role": CandidateRole.INCUMBENT_CONTROL.value},
+            )
+            director.submit_proposal(control_proposal)
+            director.spawn_candidate(
+                run_id,
+                control_proposal,
+                candidate_id="candidate:budget-neutral-control",
+                role=CandidateRole.INCUMBENT_CONTROL,
+            )
+
+            batch, _candidates = self._record_batch(
+                director,
+                run_id,
+                (0.3, 0.2),
+                judge_acceptances=(False, False),
+            )
+            analysis = finalize_generation_batch(director, run_id)
+
+            self.assertEqual(batch.batch_size, 2)
+            self.assertEqual(analysis.candidate_count, 2)
+            director.advance_generation(run_id)
+            next_batch = start_generation_batch(director, run_id)
+            self.assertEqual(next_batch.batch_size, 2)
+        finally:
+            ledger.close()
+
     def test_exploratory_evaluated_row_sorts_ahead_of_unevaluated_duplicate(
         self,
     ) -> None:

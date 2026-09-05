@@ -38,7 +38,10 @@ from ecologyrsi_dsh.knowledge.algorithms import (
     compile_algorithm_spec,
     resolve_predictor_adoption,
 )
-from ecologyrsi_dsh.knowledge.research_iteration import ResearchIteration
+from ecologyrsi_dsh.knowledge.research_iteration import (
+    ResearchIteration,
+    build_deterministic_research_fallback_plan,
+)
 from ecologyrsi_dsh.knowledge.retrieval import retrieve_generation_knowledge
 from ecologyrsi_dsh.api.projection import _projection_json
 
@@ -377,6 +380,72 @@ def _guardrail_analysis(
 
 
 class ResearchIterationTests(unittest.TestCase):
+    def test_deterministic_fallback_plan_is_bounded_and_digest_stable(self) -> None:
+        current_plan = {
+            "prediction_model": {"id": "toy-rolling-water@1"},
+            "unbounded_old_detail": "x" * 30_000,
+        }
+        first = build_deterministic_research_fallback_plan(
+            current_plan=current_plan,
+            validation_detail="research iteration plan exceeds the bounded contract",
+            source_analysis_digest="a" * 64,
+            source_reflection_digest="b" * 64,
+            search_plan_digest="c" * 64,
+        )
+        second = build_deterministic_research_fallback_plan(
+            current_plan=current_plan,
+            validation_detail="research iteration plan exceeds the bounded contract",
+            source_analysis_digest="a" * 64,
+            source_reflection_digest="b" * 64,
+            search_plan_digest="c" * 64,
+        )
+
+        self.assertEqual(first, second)
+        self.assertLess(len(canonical_json(first)), 24_000)
+        self.assertEqual(
+            first["prediction_model"]["id"], "toy-rolling-water@1"
+        )
+        self.assertNotIn("unbounded_old_detail", first)
+
+    def test_runtime_v3_contract_failure_records_host_fallback_and_continues(
+        self,
+    ) -> None:
+        task_data = _task(candidates_per_generation=1).to_dict()
+        task_data["metadata"] = {
+            **task_data["metadata"],
+            "host_runtime_build": {
+                "evolution_runtime_schema": "ecologyrsi-dsh.evolution-runtime/3"
+            },
+        }
+        task = TaskManifest.from_dict(task_data)
+        adapter = StrategyRouterDSHAdapter(gateway=_ResearchGateway())  # type: ignore[arg-type]
+        invalid_result = {
+            "status": "model_generated",
+            "model_id": "research-model",
+            "plan": {"implementation": {"code": "not executable"}},
+        }
+        with EventLedger() as ledger:
+            director = EvolutionDirector(ledger, adapter)
+            run_id = "run:runtime-v3-research-fallback"
+            director.start_evolution(task, run_id=run_id)
+            with patch.object(
+                adapter,
+                "research_iteration",
+                return_value=invalid_result,
+            ):
+                start_generation_batch(director, run_id)
+                first = director.state(run_id).research_iteration_for(0)
+                start_generation_batch(director, run_id)
+                second = director.state(run_id).research_iteration_for(0)
+
+        self.assertIsNotNone(first)
+        self.assertEqual(first.status, "host_fallback")
+        self.assertEqual(first.iteration_digest, second.iteration_digest)
+        self.assertEqual(
+            first.plan["fallback_diagnostics"]["reason_code"],
+            "research_response_contract_invalid",
+        )
+
     def test_model_plan_contract_failure_is_retryable_boundary(self) -> None:
         gateway = _ResearchGateway()
         with EventLedger() as ledger:

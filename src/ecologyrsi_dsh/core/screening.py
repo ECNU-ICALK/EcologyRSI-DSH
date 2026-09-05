@@ -12,6 +12,7 @@ SCREENING_SCHEMA_V1 = "ecologyrsi-dsh.candidate-screening/1"
 SCREENING_SCHEMA_V2 = "ecologyrsi-dsh.candidate-screening/2"
 FORMAL_SELECTION_SCHEMA_V1 = "ecologyrsi-dsh.formal-selection-cohort/1"
 FORMAL_SELECTION_SCHEMA_V2 = "ecologyrsi-dsh.formal-selection-cohort/2"
+FORMAL_SELECTION_SCHEMA_V3 = "ecologyrsi-dsh.formal-selection-cohort/3"
 SCREENED_OUT_SCHEMA_V1 = "ecologyrsi-dsh.candidate-screened-out/1"
 
 
@@ -40,6 +41,7 @@ def screening_cohort_digest(records: Sequence[Mapping[str, Any]]) -> str:
 __all__ = [
     "FORMAL_SELECTION_SCHEMA_V1",
     "FORMAL_SELECTION_SCHEMA_V2",
+    "FORMAL_SELECTION_SCHEMA_V3",
     "SCREENED_OUT_SCHEMA_V1",
     "SCREENING_SCHEMA_V1",
     "SCREENING_SCHEMA_V2",

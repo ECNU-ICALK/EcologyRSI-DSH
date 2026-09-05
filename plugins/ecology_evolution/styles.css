@@ -388,6 +388,27 @@ tbody tr:hover { background: #f8faf9; }
 .execution-diagnostic.is-warning { background: var(--amber-soft); }
 .execution-diagnostic.is-muted > strong { color: var(--muted); }
 .adaptive-trajectory-panel { margin-top: 12px; }
+.evolution-evidence-panel { margin-top: 12px; }
+.evolution-capacity-note { margin: 0; padding: 9px 14px; border-bottom: 1px solid var(--line); color: var(--muted); background: var(--amber-soft); font-size: 10px; line-height: 1.5; }
+.evolution-capacity-note strong { color: var(--ink); }
+.global-champion-card { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); border-bottom: 1px solid var(--line); background: #f5faf7; }
+.global-champion-card > div:not(.empty-state) { display: grid; gap: 3px; min-width: 0; padding: 12px 14px; border-right: 1px solid var(--line); }
+.global-champion-card > div:last-child { border-right: 0; }
+.global-champion-card span, .global-champion-card small { color: var(--subtle); font-size: 9px; overflow-wrap: anywhere; }
+.global-champion-card strong { color: #285c49; font-size: 14px; overflow-wrap: anywhere; }
+.generation-decision-list { display: grid; gap: 10px; padding: 12px 14px; }
+.generation-evidence-card { min-width: 0; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.generation-evidence-card > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+.generation-evidence-card > header > div { display: grid; gap: 2px; }
+.generation-evidence-card > header span { color: var(--subtle); font-size: 9px; }
+.generation-evidence-card > header strong { color: var(--ink); font-size: 11px; }
+.generation-evidence-arms { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.generation-evidence-arm { display: grid; gap: 3px; min-width: 0; padding: 10px; border-right: 1px solid var(--line); }
+.generation-evidence-arm:last-child { border-right: 0; }
+.generation-evidence-arm.is-selected { box-shadow: inset 0 3px 0 #4d8b72; background: #f5faf7; }
+.generation-evidence-arm span, .generation-evidence-arm small { color: var(--subtle); font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; }
+.generation-evidence-arm strong { color: var(--ink); font-size: 11px; font-variant-numeric: tabular-nums; }
+.generation-evidence-replan { margin: 0; padding: 8px 10px; border-top: 1px solid #ead8aa; color: #835d08; background: #fff8e8; font-size: 10px; line-height: 1.5; }
 .adaptive-trajectory-note { margin: 0; padding: 9px 14px; border-bottom: 1px solid var(--line); color: var(--muted); background: var(--amber-soft); font-size: 10px; line-height: 1.5; }
 .adaptive-trajectory-note strong { color: var(--ink); }
 .adaptive-trajectory-table { min-width: 1020px; }
@@ -1221,6 +1242,12 @@ tbody tr:hover { background: #f8faf9; }
   .execution-monitor-grid { grid-template-columns: minmax(0, 1fr); }
   .execution-monitor-column, .execution-monitor-column:nth-child(2), .execution-monitor-column:last-child { grid-column: auto; border-right: 0; border-top: 1px solid var(--line); }
   .execution-monitor-column:first-child { border-top: 0; }
+  .global-champion-card { grid-template-columns: minmax(0, 1fr); }
+  .global-champion-card > div:not(.empty-state) { border-right: 0; border-bottom: 1px solid var(--line); }
+  .global-champion-card > div:last-child { border-bottom: 0; }
+  .generation-evidence-arms { grid-template-columns: minmax(0, 1fr); }
+  .generation-evidence-arm { border-right: 0; border-bottom: 1px solid var(--line); }
+  .generation-evidence-arm:last-child { border-bottom: 0; }
   .training-trajectory-section { padding-inline: 11px; }
   .training-trajectory-section > header { flex-direction: column; gap: 3px; }
   .training-trajectory-section > header strong { text-align: left; }

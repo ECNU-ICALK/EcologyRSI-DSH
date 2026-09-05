@@ -148,6 +148,38 @@ class CoreTests(unittest.TestCase):
             with self.assertRaisesRegex(KeyError, "unknown run"):
                 director.run_status("run:missing")
 
+    def test_state_replay_is_cached_until_run_tail_changes(self) -> None:
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        director = EvolutionDirector(ledger)
+        run_id = "run:state-cache"
+        director.create_run(manifest(1), run_id=run_id)
+
+        with patch(
+            "ecologyrsi_dsh.core.director.project_run_state",
+            wraps=__import__(
+                "ecologyrsi_dsh.core.state", fromlist=["project_run_state"]
+            ).project_run_state,
+        ) as replay:
+            first = director.state(run_id)
+            second = director.state(run_id)
+
+        self.assertIs(first, second)
+        self.assertEqual(replay.call_count, 1)
+
+        with patch(
+            "ecologyrsi_dsh.core.director.project_run_state",
+            wraps=__import__(
+                "ecologyrsi_dsh.core.state", fromlist=["project_run_state"]
+            ).project_run_state,
+        ) as replay_after_append:
+            director.start_run(run_id)
+            updated = director.state(run_id)
+
+        self.assertIsNot(updated, first)
+        self.assertEqual(replay_after_append.call_count, 1)
+        self.assertIs(updated.run.status, RunStatus.RUNNING)
+
     def test_candidate_identity_source_has_one_durable_spawn_event(self) -> None:
         ledger = EventLedger()
         self.addCleanup(ledger.close)

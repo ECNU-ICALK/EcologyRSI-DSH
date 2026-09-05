@@ -10,9 +10,16 @@ from unittest.mock import Mock, patch
 
 from ecologyrsi_dsh import EventLedger, EvolutionDirector, FakeDSHAdapter, TaskManifest
 from ecologyrsi_dsh.api import formal_trajectory, generation_execution
-from ecologyrsi_dsh.core.models import digest
-from ecologyrsi_dsh.core.screening import screening_cohort_digest
-from ecologyrsi_dsh.core.state import project_run_state
+from ecologyrsi_dsh.core.models import CandidateRole, digest
+from ecologyrsi_dsh.core.screening import (
+    screening_cohort_digest,
+    screening_record_digest,
+)
+from ecologyrsi_dsh.core.state import (
+    project_run_state,
+    uses_global_incumbent_protocol,
+    uses_positive_delta_search_protocol,
+)
 from ecologyrsi_dsh.core.trajectory import (
     BatchEvaluation,
     CandidateRevision,
@@ -170,6 +177,32 @@ class TrajectoryEventReplayTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.ledger.close()
+
+    def test_runtime_v2_and_v3_freeze_distinct_search_policies(self) -> None:
+        base = self.director.state(self.run_id).task_manifest.to_dict()
+        metadata = {
+            **dict(base["metadata"]),
+            "execution_protocol": "dsh_native_plugin_evolution@1",
+            "host_runtime_build": {
+                "package_version": "0.3.55",
+                "evolution_runtime_schema": "ecologyrsi-dsh.evolution-runtime/2",
+                "generation_comparison_schema": (
+                    "ecologyrsi-dsh.generation-comparison/1"
+                ),
+                "projection_schema": "ecologyrsi-dsh.execution-projection/2",
+            },
+        }
+        runtime_v2 = TaskManifest.from_dict({**base, "metadata": metadata})
+        self.assertTrue(uses_global_incumbent_protocol(runtime_v2))
+        self.assertFalse(uses_positive_delta_search_protocol(runtime_v2))
+
+        metadata["host_runtime_build"] = {
+            **metadata["host_runtime_build"],
+            "evolution_runtime_schema": "ecologyrsi-dsh.evolution-runtime/3",
+        }
+        runtime_v3 = TaskManifest.from_dict({**base, "metadata": metadata})
+        self.assertTrue(uses_global_incumbent_protocol(runtime_v3))
+        self.assertTrue(uses_positive_delta_search_protocol(runtime_v3))
 
     def test_adaptive_screening_requires_initial_revision_r0(self) -> None:
         run_id = "run:trajectory-missing-r0"
@@ -583,6 +616,13 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             comparison.selected_revision_id,
             comparison.comparison_digest,
         )
+        with self.assertRaisesRegex(ValueError, "comparison digest"):
+            self.director.select_generation_champion(
+                self.run_id,
+                0,
+                comparison.selected_revision_id,
+                _sha("different-comparison"),
+            )
 
         state = self.director.replay(self.run_id)
         self.assertEqual(
@@ -599,6 +639,178 @@ class TrajectoryEventReplayTests(unittest.TestCase):
         )
         self.assertEqual(
             state.effective_revision_for(0), comparison.selected_revision_id
+        )
+
+    def test_closeout_resumes_after_three_durable_holdout_arms_without_rerun(
+        self,
+    ) -> None:
+        """A crash after holdout must only append the missing decision events."""
+
+        class _InjectedCrash(RuntimeError):
+            pass
+
+        finalists = self._freeze_top2()
+        for candidate in finalists:
+            self._complete_lane(candidate)
+        incumbent = self.candidates[2]
+        bindings = {
+            HoldoutArm.FINALIST_1.value: {
+                "candidate_id": finalists[0].candidate_id,
+                "candidate_revision_id": self.revisions[
+                    finalists[0].candidate_id
+                ].revision_id,
+            },
+            HoldoutArm.FINALIST_2.value: {
+                "candidate_id": finalists[1].candidate_id,
+                "candidate_revision_id": self.revisions[
+                    finalists[1].candidate_id
+                ].revision_id,
+            },
+            HoldoutArm.INCUMBENT.value: {
+                "candidate_id": incumbent.candidate_id,
+                "candidate_revision_id": self.revisions[
+                    incumbent.candidate_id
+                ].revision_id,
+            },
+        }
+        holdout = self.director.freeze_generation_holdout(
+            self.run_id,
+            0,
+            self.generation_cohorts.holdout.cohort_digest,
+            bindings,
+        )
+        evaluations = []
+        for arm in HoldoutArm:
+            binding = bindings[arm.value]
+            evaluation = HoldoutEvaluation(
+                evaluation_id=f"holdout-evaluation:{arm.value}",
+                scope=EvaluationScope(
+                    run_id=self.run_id,
+                    generation=0,
+                    candidate_id=binding["candidate_id"],
+                    candidate_revision_id=binding["candidate_revision_id"],
+                    phase=EvaluationPhase.HOLDOUT,
+                    cohort_digest=holdout.cohort_digest,
+                    origin_count=holdout.origin_count,
+                    holdout_arm=arm,
+                ),
+                score=0.4,
+                passed=False,
+                metrics={"constraint_violations": 0},
+                evaluator_digest=_sha("closeout-evaluator"),
+            )
+            self.director.record_holdout_evaluation(self.run_id, evaluation)
+            evaluations.append(evaluation)
+        comparison = GenerationComparison(
+            comparison_id="comparison:closeout-resume",
+            run_id=self.run_id,
+            generation=0,
+            cohort_digest=holdout.cohort_digest,
+            holdout_evaluations=tuple(evaluations),
+            selected_candidate_id=incumbent.candidate_id,
+            selected_revision_id=self.revisions[incumbent.candidate_id].revision_id,
+            gate_results={"host_gates_passed": False},
+        )
+        endpoint = SimpleNamespace(
+            server=SimpleNamespace(director=self.director, ledger=self.ledger)
+        )
+        real_mutation = generation_execution._director_mutation
+
+        def commit_selection_then_crash(endpoint, method_name, *args, **kwargs):
+            result = real_mutation(endpoint, method_name, *args, **kwargs)
+            if method_name == "select_generation_champion":
+                raise _InjectedCrash("after durable champion selection")
+            return result
+
+        with (
+            patch.object(
+                generation_execution,
+                "_execute_adaptive_holdout_arm",
+                side_effect=lambda *_args: self.director.state(
+                    self.run_id
+                ).holdout_evaluation_for(0, _args[3]),
+            ) as execute_holdout,
+            patch.object(
+                generation_execution,
+                "build_generation_comparison",
+                return_value=comparison,
+            ),
+            patch.object(
+                generation_execution,
+                "_director_mutation",
+                side_effect=commit_selection_then_crash,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                _InjectedCrash,
+                "after durable champion selection",
+            ):
+                generation_execution._finalize_adaptive_generation(
+                    endpoint,
+                    self.run_id,
+                    SimpleNamespace(generation=0),
+                )
+
+        self.assertEqual(execute_holdout.call_count, 3)
+        first_state = self.director.replay(self.run_id)
+        self.assertEqual(len(first_state.holdout_evaluations), 3)
+        self.assertEqual(
+            sum(
+                event.kind == "GenerationComparisonRecorded"
+                for event in first_state.events
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                event.kind == "GenerationChampionSelected"
+                for event in first_state.events
+            ),
+            1,
+        )
+
+        self.director = EvolutionDirector(
+            self.ledger,
+            FakeDSHAdapter(max_proposals=20),
+        )
+        endpoint.server.director = self.director
+        with (
+            patch.object(
+                generation_execution,
+                "_execute_adaptive_holdout_arm",
+                side_effect=lambda *_args: self.director.state(
+                    self.run_id
+                ).holdout_evaluation_for(0, _args[3]),
+            ) as retry_holdout,
+            patch.object(
+                generation_execution,
+                "_build_adaptive_analysis",
+                side_effect=_InjectedCrash("stop after closeout"),
+            ),
+        ):
+            with self.assertRaisesRegex(_InjectedCrash, "stop after closeout"):
+                generation_execution._finalize_adaptive_generation(
+                    endpoint,
+                    self.run_id,
+                    SimpleNamespace(generation=0),
+                )
+
+        replayed = self.director.replay(self.run_id)
+        self.assertEqual(retry_holdout.call_count, 3)
+        self.assertEqual(len(replayed.holdout_evaluations), 3)
+        self.assertEqual(
+            sum(
+                event.kind == "GenerationComparisonRecorded"
+                for event in replayed.events
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                event.kind == "GenerationChampionSelected"
+                for event in replayed.events
+            ),
+            1,
         )
 
     def test_holdout_finalists_must_bind_completed_trajectory_revisions(self) -> None:
@@ -677,6 +889,414 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             for event in self.ledger.events(self.run_id)
         )
         with self.assertRaisesRegex(ValueError, "trajectory final revision"):
+            project_run_state(forged_events)
+
+    def test_runtime_v2_generation_zero_holdout_requires_materialized_seed_control(
+        self,
+    ) -> None:
+        finalists = self._freeze_top2()
+        for candidate in finalists:
+            self._complete_lane(candidate)
+        incumbent = self.candidates[2]
+        bindings = {
+            HoldoutArm.FINALIST_1.value: {
+                "candidate_id": finalists[0].candidate_id,
+                "candidate_revision_id": self.revisions[
+                    finalists[0].candidate_id
+                ].revision_id,
+            },
+            HoldoutArm.FINALIST_2.value: {
+                "candidate_id": finalists[1].candidate_id,
+                "candidate_revision_id": self.revisions[
+                    finalists[1].candidate_id
+                ].revision_id,
+            },
+            HoldoutArm.INCUMBENT.value: {
+                "candidate_id": incumbent.candidate_id,
+                "candidate_revision_id": self.revisions[
+                    incumbent.candidate_id
+                ].revision_id,
+            },
+        }
+        state = self.director.state(self.run_id)
+        task = TaskManifest.from_dict(
+            {
+                **state.task_manifest.to_dict(),
+                "metadata": {
+                    **dict(state.task_manifest.metadata),
+                    "execution_protocol": "dsh_native_plugin_evolution@1",
+                    "host_runtime_build": {
+                        "package_version": "0.3.55",
+                        "evolution_runtime_schema": (
+                            "ecologyrsi-dsh.evolution-runtime/2"
+                        ),
+                        "generation_comparison_schema": (
+                            "ecologyrsi-dsh.generation-comparison/1"
+                        ),
+                        "projection_schema": (
+                            "ecologyrsi-dsh.execution-projection/2"
+                        ),
+                    },
+                },
+            }
+        )
+        v2_state = Mock(wraps=state)
+        v2_state.task_manifest = task
+        v2_state.formal_trajectories = state.formal_trajectories
+        v2_state.candidates = state.candidates
+        v2_state.candidate_revisions = state.candidate_revisions
+        v2_state.materialized_seed_genome_canonical_json = None
+        v2_state.generation_holdout_for = state.generation_holdout_for
+        v2_state.formal_selection_for = state.formal_selection_for
+        v2_state.revision = state.revision
+
+        with patch.object(self.director, "state", return_value=v2_state):
+            with self.assertRaisesRegex(ValueError, "seed incumbent control"):
+                self.director.freeze_generation_holdout(
+                    self.run_id,
+                    0,
+                    _sha("runtime-v2-seed-binding"),
+                    bindings,
+                )
+
+        legacy_holdout = self.director.freeze_generation_holdout(
+            self.run_id,
+            0,
+            _sha("runtime-v2-seed-binding"),
+            bindings,
+        )
+        self.assertEqual(legacy_holdout.generation, 0)
+
+    def test_runtime_v2_later_holdout_requires_prior_effective_champion(self) -> None:
+        state = self.director.state(self.run_id)
+        task = TaskManifest.from_dict(
+            {
+                **state.task_manifest.to_dict(),
+                "metadata": {
+                    **dict(state.task_manifest.metadata),
+                    "execution_protocol": "dsh_native_plugin_evolution@1",
+                    "host_runtime_build": {
+                        "package_version": "0.3.55",
+                        "evolution_runtime_schema": (
+                            "ecologyrsi-dsh.evolution-runtime/2"
+                        ),
+                        "generation_comparison_schema": (
+                            "ecologyrsi-dsh.generation-comparison/1"
+                        ),
+                        "projection_schema": (
+                            "ecologyrsi-dsh.execution-projection/2"
+                        ),
+                    },
+                },
+            }
+        )
+        finalists = tuple(
+            SimpleNamespace(
+                candidate_id=f"candidate:g1:{index}",
+                generation=1,
+                role=CandidateRole.SEARCH,
+            )
+            for index in range(2)
+        )
+        finalist_revisions = tuple(
+            CandidateRevision(
+                revision_id=f"revision:g1:{index}",
+                run_id=self.run_id,
+                generation=1,
+                candidate_id=candidate.candidate_id,
+                genome={"slot": index},
+                genome_digest=_sha(f"g1-genome:{index}"),
+                behavior_digest=_sha(f"g1-behavior:{index}"),
+                mutation_digest=_sha(f"g1-mutation:{index}"),
+                status=RevisionStatus.FINAL,
+            )
+            for index, candidate in enumerate(finalists)
+        )
+        trajectories = tuple(
+            SimpleNamespace(
+                generation=1,
+                candidate_id=candidate.candidate_id,
+                status=TrajectoryStatus.COMPLETED,
+                final_revision_id=revision.revision_id,
+            )
+            for candidate, revision in zip(finalists, finalist_revisions)
+        )
+        prior_revision = self.revisions[self.candidates[0].candidate_id]
+        wrong_incumbent = self.candidates[2]
+        wrong_revision = self.revisions[wrong_incumbent.candidate_id]
+        all_candidates = (*state.candidates, *finalists)
+        all_revisions = (*state.candidate_revisions, *finalist_revisions)
+        revision_by_id = {item.revision_id: item for item in all_revisions}
+        v2_state = SimpleNamespace(
+            task_manifest=task,
+            generation_holdout_for=lambda _generation: None,
+            formal_trajectories=trajectories,
+            formal_selection_for=lambda _generation: SimpleNamespace(
+                payload={
+                    "selected_candidate_ids": [
+                        item.candidate_id for item in finalists
+                    ]
+                }
+            ),
+            revision=lambda revision_id: revision_by_id[revision_id],
+            candidates=all_candidates,
+            candidate_revisions=all_revisions,
+            materialized_seed_genome_canonical_json=None,
+            effective_revision_for=lambda generation: (
+                prior_revision.revision_id if generation == 0 else None
+            ),
+            events=(
+                SimpleNamespace(
+                    kind="GenerationChampionSelected",
+                    payload={"generation": 0},
+                ),
+            ),
+        )
+        bindings = {
+            HoldoutArm.FINALIST_1.value: {
+                "candidate_id": finalists[0].candidate_id,
+                "candidate_revision_id": finalist_revisions[0].revision_id,
+            },
+            HoldoutArm.FINALIST_2.value: {
+                "candidate_id": finalists[1].candidate_id,
+                "candidate_revision_id": finalist_revisions[1].revision_id,
+            },
+            HoldoutArm.INCUMBENT.value: {
+                "candidate_id": wrong_incumbent.candidate_id,
+                "candidate_revision_id": wrong_revision.revision_id,
+            },
+        }
+
+        with patch.object(self.director, "state", return_value=v2_state):
+            with self.assertRaisesRegex(ValueError, "prior effective champion"):
+                self.director.freeze_generation_holdout(
+                    self.run_id,
+                    1,
+                    _sha("generation-one-holdout"),
+                    bindings,
+                )
+
+    def test_exploration_comparison_must_durably_retain_incumbent(self) -> None:
+        finalists = self._freeze_top2()
+        for candidate in finalists:
+            self._complete_lane(candidate)
+        incumbent = self.candidates[2]
+        bindings = {
+            HoldoutArm.FINALIST_1.value: {
+                "candidate_id": finalists[0].candidate_id,
+                "candidate_revision_id": self.revisions[
+                    finalists[0].candidate_id
+                ].revision_id,
+            },
+            HoldoutArm.FINALIST_2.value: {
+                "candidate_id": finalists[1].candidate_id,
+                "candidate_revision_id": self.revisions[
+                    finalists[1].candidate_id
+                ].revision_id,
+            },
+            HoldoutArm.INCUMBENT.value: {
+                "candidate_id": incumbent.candidate_id,
+                "candidate_revision_id": self.revisions[
+                    incumbent.candidate_id
+                ].revision_id,
+            },
+        }
+        holdout = self.director.freeze_generation_holdout(
+            self.run_id,
+            0,
+            _sha("exploration-comparison"),
+            bindings,
+        )
+        evaluations = []
+        for arm in HoldoutArm:
+            binding = bindings[arm.value]
+            evaluation = HoldoutEvaluation(
+                evaluation_id=f"evaluation:exploration:{arm.value}",
+                scope=EvaluationScope(
+                    run_id=self.run_id,
+                    generation=0,
+                    candidate_id=binding["candidate_id"],
+                    candidate_revision_id=binding["candidate_revision_id"],
+                    phase=EvaluationPhase.HOLDOUT,
+                    cohort_digest=holdout.cohort_digest,
+                    origin_count=holdout.origin_count,
+                    holdout_arm=arm,
+                ),
+                score=0.7 if arm is HoldoutArm.FINALIST_1 else 0.5,
+                passed=True,
+                metrics={"constraint_violations": 0},
+                evaluator_digest=_sha("exploration-evaluator"),
+            )
+            self.director.record_holdout_evaluation(self.run_id, evaluation)
+            evaluations.append(evaluation)
+        invalid = GenerationComparison(
+            comparison_id="comparison:forged-exploration",
+            run_id=self.run_id,
+            generation=0,
+            cohort_digest=holdout.cohort_digest,
+            holdout_evaluations=tuple(evaluations),
+            selected_candidate_id=finalists[0].candidate_id,
+            selected_revision_id=self.revisions[
+                finalists[0].candidate_id
+            ].revision_id,
+            gate_results={
+                "selected_arm": HoldoutArm.FINALIST_1.value,
+                "challenger_promotion_allowed": True,
+            },
+        )
+        changed_evaluations = list(evaluations)
+        changed_evaluations[0] = HoldoutEvaluation.from_dict(
+            {
+                **changed_evaluations[0].to_dict(),
+                "score": changed_evaluations[0].score + 0.01,
+            }
+        )
+        changed_score = GenerationComparison(
+            comparison_id="comparison:changed-score",
+            run_id=self.run_id,
+            generation=0,
+            cohort_digest=holdout.cohort_digest,
+            holdout_evaluations=tuple(changed_evaluations),
+            selected_candidate_id=incumbent.candidate_id,
+            selected_revision_id=self.revisions[incumbent.candidate_id].revision_id,
+            gate_results={"selected_arm": HoldoutArm.INCUMBENT.value},
+        )
+        with self.assertRaisesRegex(ValueError, "durable holdout evidence"):
+            self.director.record_generation_comparison(
+                self.run_id,
+                changed_score,
+            )
+
+        other_run_evaluations = tuple(
+            HoldoutEvaluation.from_dict(
+                {
+                    **evaluation.to_dict(),
+                    "scope": {
+                        **evaluation.scope.to_dict(),
+                        "run_id": "run:other",
+                    },
+                }
+            )
+            for evaluation in evaluations
+        )
+        cross_run = GenerationComparison(
+            comparison_id="comparison:cross-run",
+            run_id="run:other",
+            generation=0,
+            cohort_digest=holdout.cohort_digest,
+            holdout_evaluations=other_run_evaluations,
+            selected_candidate_id=other_run_evaluations[-1].scope.candidate_id,
+            selected_revision_id=(
+                other_run_evaluations[-1].scope.candidate_revision_id
+            ),
+            gate_results={"selected_arm": HoldoutArm.INCUMBENT.value},
+        )
+        with self.assertRaisesRegex(ValueError, "another run"):
+            self.director.record_generation_comparison(self.run_id, cross_run)
+
+        last = self.ledger.events(self.run_id)[-1]
+        forged_changed_event = replace(
+            last,
+            seq=last.seq + 1,
+            event_id="forged:changed-score-comparison",
+            kind="GenerationComparisonRecorded",
+            payload={"comparison": changed_score.to_dict()},
+        )
+        with self.assertRaisesRegex(ValueError, "durable holdout evidence"):
+            project_run_state((*self.ledger.events(self.run_id), forged_changed_event))
+
+        state = self.director.state(self.run_id)
+        v2_task = TaskManifest.from_dict(
+            {
+                **state.task_manifest.to_dict(),
+                "metadata": {
+                    **dict(state.task_manifest.metadata),
+                    "execution_protocol": "dsh_native_plugin_evolution@1",
+                    "host_runtime_build": {
+                        "package_version": "0.3.55",
+                        "evolution_runtime_schema": (
+                            "ecologyrsi-dsh.evolution-runtime/2"
+                        ),
+                        "generation_comparison_schema": (
+                            "ecologyrsi-dsh.generation-comparison/1"
+                        ),
+                        "projection_schema": (
+                            "ecologyrsi-dsh.execution-projection/2"
+                        ),
+                    },
+                },
+            }
+        )
+        canonical_state = Mock(wraps=state)
+        canonical_state.task_manifest = v2_task
+        canonical_state.comparison_for = state.comparison_for
+        canonical_state.generation_holdout_for = state.generation_holdout_for
+        canonical_state.holdout_evaluation_for = state.holdout_evaluation_for
+        canonical_state.formal_selection_for = state.formal_selection_for
+        with patch.object(self.director, "state", return_value=canonical_state):
+            with self.assertRaisesRegex(ValueError, "deterministic Host comparison"):
+                self.director.record_generation_comparison(self.run_id, invalid)
+
+        exploration_state = Mock(wraps=state)
+        exploration_state.formal_selection_for = lambda _generation: SimpleNamespace(
+            payload={
+                "schema_version": "ecologyrsi-dsh.formal-selection-cohort/3",
+                "screening_pass_count": 0,
+                "exploration_only": True,
+                "consecutive_exploration_generations": 1,
+            }
+        )
+
+        with patch.object(self.director, "state", return_value=exploration_state):
+            with self.assertRaisesRegex(ValueError, "exploration comparison"):
+                self.director.record_generation_comparison(self.run_id, invalid)
+
+        self.ledger.append(
+            self.run_id,
+            "GenerationComparisonRecorded",
+            {"comparison": invalid.to_dict()},
+            event_id=f"{self.run_id}:generation:0:comparison",
+        )
+        events = list(self.ledger.events(self.run_id))
+        screening_payloads = []
+        for event in events:
+            if event.kind == "CandidateScreeningRecorded":
+                screening_payload = {**event.payload, "passed": False}
+                if "record_digest" in screening_payload:
+                    screening_payload["record_digest"] = screening_record_digest(
+                        screening_payload
+                    )
+                screening_payloads.append(screening_payload)
+        forged_screening_digest = screening_cohort_digest(screening_payloads)
+        screening_by_candidate = {
+            str(payload["candidate_id"]): payload
+            for payload in screening_payloads
+        }
+        forged_events = tuple(
+            replace(
+                event,
+                payload=screening_by_candidate[str(event.payload["candidate_id"])],
+            )
+            if event.kind == "CandidateScreeningRecorded"
+            else replace(
+                event,
+                payload={
+                    "schema_version": "ecologyrsi-dsh.formal-selection-cohort/3",
+                    "generation": 0,
+                    "selected_candidate_ids": list(
+                        event.payload["selected_candidate_ids"]
+                    ),
+                    "screening_digest": forged_screening_digest,
+                    "screening_pass_count": 0,
+                    "exploration_only": True,
+                    "consecutive_exploration_generations": 1,
+                },
+            )
+            if event.kind == "FormalSelectionCohortFrozen"
+            else event
+            for event in events
+        )
+        with self.assertRaisesRegex(ValueError, "exploration comparison"):
             project_run_state(forged_events)
 
     def test_holdout_arm_started_is_idempotent_across_real_state_replay(self) -> None:

@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import Any, Mapping
 
 from ..core.models import Candidate, canonical_json, digest
+from ..core.state import uses_positive_delta_search_protocol
 from ..core.trajectory import (
     BatchEvaluation,
     CandidateRevision,
@@ -20,9 +21,14 @@ from ..core.trajectory import (
     RevisionStatus,
     TrajectoryStatus,
 )
-from ..evolution.genome import EcologyEvolutionPluginGenome, deep_thaw_json
+from ..evolution.genome import (
+    EcologyEvolutionPluginGenome,
+    deep_thaw_json,
+    parameter_trust_region_neighborhood,
+)
 from ..evolution.champion_challenger import (
     LOCAL_MINIMUM_SCORE_DELTA,
+    POSITIVE_DELTA_MINIMUM_SCORE_DELTA,
     assess_local_challenger,
     local_challenger_safety_reason,
 )
@@ -340,16 +346,29 @@ def _execute_next_prequential_formal_batch(
     return True
 
 
+def _local_challenger_policy(endpoint: Any, run_id: str) -> tuple[float, bool]:
+    task = endpoint.server.director.state(run_id).task_manifest
+    if uses_positive_delta_search_protocol(task):
+        return POSITIVE_DELTA_MINIMUM_SCORE_DELTA, False
+    return LOCAL_MINIMUM_SCORE_DELTA, True
+
+
 def _record_initial_champion(
     endpoint: Any,
     run_id: str,
     evaluation: BatchEvaluation,
 ) -> FormalBatchComparison:
+    minimum_score_delta, cell_regression_blocks = _local_challenger_policy(
+        endpoint,
+        run_id,
+    )
     safety_passed = local_challenger_safety_reason(evaluation.metrics) is None
     assessment = assess_local_challenger(
         evaluation,
         evaluation,
         challenger_safety_gate_passed=safety_passed,
+        minimum_score_delta=minimum_score_delta,
+        cell_regression_blocks=cell_regression_blocks,
     )
     scope = evaluation.scope
     comparison = FormalBatchComparison(
@@ -373,7 +392,7 @@ def _record_initial_champion(
         comparison_contract_digest=assessment.comparison_contract_digest,
         safety_gate_passed=safety_passed,
         cell_regression_gate_passed=assessment.cell_regression_gate_passed,
-        minimum_score_delta=LOCAL_MINIMUM_SCORE_DELTA,
+        minimum_score_delta=minimum_score_delta,
         decision=FormalBatchComparisonDecision.INITIAL_CHAMPION,
         champion_after_revision_id=scope.candidate_revision_id,
         reason="initial_champion",
@@ -392,11 +411,17 @@ def _record_challenger_comparison(
     champion: BatchEvaluation,
     challenger: BatchEvaluation,
 ) -> FormalBatchComparison:
+    minimum_score_delta, cell_regression_blocks = _local_challenger_policy(
+        endpoint,
+        run_id,
+    )
     safety_passed = local_challenger_safety_reason(challenger.metrics) is None
     assessment = assess_local_challenger(
         champion,
         challenger,
         challenger_safety_gate_passed=safety_passed,
+        minimum_score_delta=minimum_score_delta,
+        cell_regression_blocks=cell_regression_blocks,
     )
     scope = challenger.scope
     comparison = FormalBatchComparison(
@@ -424,7 +449,7 @@ def _record_challenger_comparison(
         cell_regression_gate_passed=(
             assessment.cell_regression_gate_passed
         ),
-        minimum_score_delta=LOCAL_MINIMUM_SCORE_DELTA,
+        minimum_score_delta=minimum_score_delta,
         decision=assessment.decision,
         champion_after_revision_id=(
             assessment.champion_after_revision_id
@@ -881,8 +906,23 @@ def _execute_next_prequential_local_edit(
             ),
             "active_revision_id": active_revision_id,
             **(
-                {"reason": safety_reason or policy_rejection_reason}
-                if safety_reason is not None or policy_rejection_reason is not None
+                {
+                    "reason": (
+                        safety_reason
+                        or policy_rejection_reason
+                        or (
+                            validated.rejection_reason
+                            if validated is not None
+                            else None
+                        )
+                    )
+                }
+                if safety_reason is not None
+                or policy_rejection_reason is not None
+                or (
+                    validated is not None
+                    and validated.rejection_reason is not None
+                )
                 else {}
             ),
         },
@@ -1067,8 +1107,13 @@ def _execute_next_paired_local_edit(
             "outcome": validated.outcome.value,
             "active_revision_id": active_revision_id,
             **(
-                {"reason": policy_rejection_reason}
+                {
+                    "reason": (
+                        policy_rejection_reason or validated.rejection_reason
+                    )
+                }
                 if policy_rejection_reason is not None
+                or validated.rejection_reason is not None
                 else {}
             ),
         },
@@ -1222,6 +1267,10 @@ def _local_edit_proposal(
     context_payload = {
         **context.to_dict(),
         "current_candidate_state": _local_edit_current_state(revision),
+        "legal_parameter_neighborhoods": _legal_parameter_neighborhoods(
+            revision,
+            context,
+        ),
         "recent_edit_history": _recent_local_edit_history(
             state, candidate.candidate_id, batch.batch_index
         ),
@@ -1358,6 +1407,29 @@ def _local_edit_current_state(revision: CandidateRevision) -> dict[str, Any]:
             ],
         },
     }
+    return deep_thaw_json(result)
+
+
+def _legal_parameter_neighborhoods(
+    revision: CandidateRevision,
+    context: LocalEditContext,
+) -> dict[str, dict[str, Any]]:
+    """Expose exact legal one-step ranges without altering authored values."""
+
+    genome = EcologyEvolutionPluginGenome.from_dict(dict(revision.genome))
+    values = genome.scientific_program["parameter_overrides"]
+    result: dict[str, dict[str, Any]] = {}
+    allowed = set(
+        context.allowed_mutation_targets.get("scientific_parameter", ())
+    )
+    for name, contract in sorted(context.parameter_schemas.items()):
+        if name not in allowed or name not in values:
+            continue
+        result[name] = parameter_trust_region_neighborhood(
+            name=name,
+            previous=values[name],
+            contract=contract,
+        )
     return deep_thaw_json(result)
 
 

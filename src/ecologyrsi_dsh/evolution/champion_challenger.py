@@ -18,6 +18,7 @@ from .promotion import V2_MINIMUM_SCORE_DELTA
 
 
 LOCAL_MINIMUM_SCORE_DELTA = V2_MINIMUM_SCORE_DELTA
+POSITIVE_DELTA_MINIMUM_SCORE_DELTA = 1e-12
 LOCAL_CELL_REGRESSION_TOLERANCE = 1e-12
 
 
@@ -278,6 +279,8 @@ def assess_local_challenger(
     challenger: BatchEvaluation,
     *,
     challenger_safety_gate_passed: bool,
+    minimum_score_delta: float = LOCAL_MINIMUM_SCORE_DELTA,
+    cell_regression_blocks: bool = True,
 ) -> LocalChallengerAssessment:
     """Select a challenger only from complete, paired, Host-owned evidence."""
 
@@ -287,6 +290,15 @@ def assess_local_challenger(
         raise TypeError("challenger must be a BatchEvaluation")
     if not isinstance(challenger_safety_gate_passed, bool):
         raise TypeError("challenger_safety_gate_passed must be a bool")
+    if (
+        isinstance(minimum_score_delta, bool)
+        or not isinstance(minimum_score_delta, (int, float))
+        or not math.isfinite(float(minimum_score_delta))
+        or float(minimum_score_delta) < 0
+    ):
+        raise ValueError("minimum_score_delta must be a finite non-negative number")
+    if not isinstance(cell_regression_blocks, bool):
+        raise TypeError("cell_regression_blocks must be a bool")
 
     score_delta = challenger.score - champion.score
     contract_matches, contract_digest, contract = _comparison_contract(
@@ -322,10 +334,19 @@ def assess_local_challenger(
         reason = "challenger_evaluation_incomplete"
     elif not challenger_safety_gate_passed:
         reason = "challenger_safety_gate_failed"
-    elif not cell_regression_gate_passed:
+    elif cell_regression_blocks and not cell_regression_gate_passed:
         reason = "challenger_cell_regression"
-    elif score_delta <= LOCAL_MINIMUM_SCORE_DELTA:
-        reason = "below_practical_delta"
+    elif score_delta <= float(minimum_score_delta):
+        reason = (
+            "no_positive_score_delta"
+            if math.isclose(
+                float(minimum_score_delta),
+                POSITIVE_DELTA_MINIMUM_SCORE_DELTA,
+                rel_tol=0.0,
+                abs_tol=0.0,
+            )
+            else "below_practical_delta"
+        )
     else:
         reason = "challenger_improved"
 
@@ -353,6 +374,9 @@ def validate_formal_batch_comparison(
     comparison: FormalBatchComparison,
     champion: BatchEvaluation,
     challenger: BatchEvaluation,
+    *,
+    minimum_score_delta: float = LOCAL_MINIMUM_SCORE_DELTA,
+    cell_regression_blocks: bool = True,
 ) -> None:
     """Reject comparison fields that differ from Host-derived evidence."""
 
@@ -365,6 +389,8 @@ def validate_formal_batch_comparison(
         champion,
         challenger,
         challenger_safety_gate_passed=safety_gate_passed,
+        minimum_score_delta=minimum_score_delta,
+        cell_regression_blocks=cell_regression_blocks,
     )
     if comparison.batch_index == 0:
         expected_decision = FormalBatchComparisonDecision.INITIAL_CHAMPION
@@ -392,12 +418,10 @@ def validate_formal_batch_comparison(
         is not assessment.cell_regression_gate_passed
     ):
         invalid_fields.append("cell_regression_gate_passed")
-    if not math.isclose(
-        comparison.minimum_score_delta,
-        LOCAL_MINIMUM_SCORE_DELTA,
-        rel_tol=0.0,
-        abs_tol=1e-12,
-    ):
+    # This value is a frozen policy constant, not a noisy measurement.  An
+    # approximate comparison would let the entire v3 epsilon (1e-12) disappear
+    # from, or be doubled in, durable audit evidence without replay noticing.
+    if comparison.minimum_score_delta != float(minimum_score_delta):
         invalid_fields.append("minimum_score_delta")
     if comparison.decision is not expected_decision:
         invalid_fields.append("decision")
@@ -415,6 +439,7 @@ def validate_formal_batch_comparison(
 __all__ = [
     "LOCAL_CELL_REGRESSION_TOLERANCE",
     "LOCAL_MINIMUM_SCORE_DELTA",
+    "POSITIVE_DELTA_MINIMUM_SCORE_DELTA",
     "LocalChallengerAssessment",
     "assess_local_challenger",
     "local_challenger_safety_reason",

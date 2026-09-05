@@ -42,6 +42,8 @@ for (const [id, value] of [
 ]) {
   assert.match(html, new RegExp(`id="${id}"[^>]*value="${value}"`));
 }
+assert.match(html, /id="max-generations"[^>]*value="1"/);
+assert.match(html, /默认先运行 1 轮受控验证/);
 assert.doesNotMatch(html, /id="samples-per-update"/);
 assert.match(commandsSource, /function normalizedOptimizationSchedule\(values\)/);
 assert.match(commandsSource, /optimization_protocol: "top2_adaptive_epoch@1"/);
@@ -342,6 +344,12 @@ for (const evidence of ["冠军 -0.4000", "挑战者 -0.5000", "差值 -0.1000",
   assert.ok(pairedComparisonDetail.includes(evidence), `paired event detail missing: ${evidence}`);
 }
 assert.equal(pairedComparisonDetail.includes("已应用"), false);
+const seedControlSpawnEvent = {
+  type: "candidate.spawned",
+  payload: {candidate_id: "candidate:seed-control", role: "incumbent_control"},
+};
+assert.equal(modelSandbox.eventTitle(seedControlSpawnEvent, null), "初始种子对照已冻结");
+assert.ok(modelSandbox.eventDetail(seedControlSpawnEvent, null).includes("不占候选预算"));
 assert.equal(modelSandbox.runRetainedScore(crossCohortProjection), 0.61);
 assert.equal(modelSandbox.runRawBestObservedScore(crossCohortProjection), 0.95);
 assert.equal(modelSandbox.trajectoryIncumbentScore(crossCohortProjection.trajectory[0]), 0.55);
@@ -366,6 +374,65 @@ const crossCohortOverview = modelSandbox.renderCandidateOverview(crossCohortProj
 assert.ok(crossCohortOverview.includes("当前保留得分"));
 assert.ok(crossCohortOverview.includes("原始最高观测（跨窗口不可直接比较）"));
 assert.equal(crossCohortOverview.includes("当前最高分"), false);
+const v3SearchOnlyCandidate = {
+  id: "candidate:v3-search",
+  generation: 1,
+  status: "rejected",
+  score: 0.21,
+  search_version_selected: true,
+  certification_eligible: false,
+  certification_selected: false,
+};
+const v3CertifiedCandidate = {
+  id: "candidate:v3-certified",
+  generation: 1,
+  status: "retained",
+  score: 0.20,
+  search_version_selected: false,
+  certification_eligible: true,
+  certification_selected: true,
+};
+const v3DualVersionRun = {
+  status: "completed",
+  candidates: [v3SearchOnlyCandidate, v3CertifiedCandidate],
+  evolution_evidence: {
+    protocol_scope: "positive_delta_search_v3",
+    search_version: {candidate_id: v3SearchOnlyCandidate.id},
+    certified_version: {candidate_id: v3CertifiedCandidate.id},
+  },
+};
+assert.equal(
+  modelSandbox.candidateOutcome(v3SearchOnlyCandidate, v3DualVersionRun).text,
+  "下一轮搜索版本（未认证）",
+);
+assert.equal(
+  modelSandbox.candidateOutcome(v3CertifiedCandidate, v3DualVersionRun).text,
+  "稳健认证版本",
+);
+const v3DualVersionOverview = modelSandbox.renderCandidateOverview(
+  v3DualVersionRun,
+  v3DualVersionRun.candidates,
+);
+assert.ok(v3DualVersionOverview.includes("下一轮搜索版本"));
+assert.ok(v3DualVersionOverview.includes("稳健认证版本"));
+assert.equal(v3DualVersionOverview.includes("当前保留"), false);
+const v3InitialSeedOverview = modelSandbox.renderCandidateOverview({
+  status: "running",
+  candidates: [],
+  evolution_evidence: {
+    protocol_scope: "positive_delta_search_v3",
+    search_version: {
+      candidate_id: "candidate:seed-control",
+      candidate_revision_id: "revision:seed-control:0",
+      is_initial_seed: true,
+      absolute_score: null,
+    },
+    certified_version: null,
+  },
+}, []);
+assert.ok(v3InitialSeedOverview.includes("初始种子基线"));
+assert.ok(v3InitialSeedOverview.includes("#seed-con"));
+assert.equal(v3InitialSeedOverview.includes("下一轮搜索版本</span><strong>尚未产生"), false);
 assert.equal(
   modelSandbox.generationOutcomeText("no_improvement", {
     candidates: [{selection_reason: "cohort_changed_search_parent_only"}],
@@ -475,7 +542,7 @@ assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includ
 assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("得分 等待评测"));
 assert.equal(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("得分 0.0000"), false);
 assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("KEEP：保持当前修订"));
-assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("已应用，待后续批次/holdout验证"));
+assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("已生成下一尝试，尚未同批验证"));
 assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("提案未通过宿主校验"));
 assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("安全门回退"));
 assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("旧版连续更新策略"));
@@ -547,6 +614,146 @@ assert.equal(pairedTrajectoryHtml.includes("冠军 0 · 挑战者 0"), false);
 modelSandbox.renderAdaptiveTrajectories({adaptive_trajectories: [{candidate_id: "candidate:lane-b", batches: []}]});
 assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("等待首个微批证据"));
 modelSandbox.document.querySelector = adaptiveTrajectoryQuerySelector;
+
+const evolutionEvidenceNodes = {
+  "#evolution-evidence-status": {textContent: "", className: ""},
+  "#global-champion-card": {innerHTML: ""},
+  "#generation-decision-list": {innerHTML: ""},
+  "#evolution-capacity-note": {innerHTML: ""},
+};
+const evolutionEvidenceQuerySelector = modelSandbox.document.querySelector;
+modelSandbox.document.querySelector = (selector) => evolutionEvidenceNodes[selector] || evolutionEvidenceQuerySelector(selector);
+const evidenceRun = modelSandbox.normalizeRun({
+  run_id: "run:evidence", status: "completed",
+  evolution_evidence: {
+    protocol_scope: "global_incumbent_v2",
+    global_champion: {
+      candidate_id: "candidate:seed", candidate_revision_id: "revision:seed:0",
+      generation: 1, source: "materialized_seed", is_initial_seed: true,
+      absolute_score: -0.4,
+    },
+    generation_decisions: [{
+      generation: 1, cohort_digest: "c".repeat(64), same_cohort: true,
+      exploration_only: true, consecutive_exploration_generations: 2,
+      replan_required: true, challenger_promotion_allowed: false,
+      selected_arm: "incumbent", selected_candidate_id: "candidate:seed",
+      arms: [
+        {arm: "finalist_1", candidate_id: "candidate:a", absolute_score: -0.42, holdout_delta: -0.02, passed: true, eligible: false, failures: ["screening_exploration_only"]},
+        {arm: "finalist_2", candidate_id: "candidate:b", absolute_score: -0.55, holdout_delta: -0.15, passed: false, eligible: false, failures: ["cell_regression"]},
+        {arm: "incumbent", candidate_id: "candidate:seed", absolute_score: -0.4, holdout_delta: 0, passed: true, eligible: true, failures: []},
+      ],
+    }],
+    capacity: {
+      available: true, evidence_scope: "engineering_exploration_with_reused_origins",
+      available_eligible_origins: 754, required_unique_origins: 1665,
+      reused_origin_occurrences: 911, reuse_fraction: 911 / 1665,
+    },
+  },
+});
+assert.equal(evidenceRun.evolution_evidence.global_champion.candidate_id, "candidate:seed");
+modelSandbox.renderEvolutionEvidence(evidenceRun);
+assert.equal(evolutionEvidenceNodes["#evolution-evidence-status"].textContent, "上一冠军继续保留");
+assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("旧版严格 paired 门禁"));
+assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("全局最优"));
+assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("初始种子基线"));
+const generationDecisionHtml = evolutionEvidenceNodes["#generation-decision-list"].innerHTML;
+for (const evidence of ["同一 holdout cohort", "绝对分 -0.4200", "相对上一冠军 -0.0200", "仅探索，禁止晋升", "连续 2 代无候选通过初筛，下一代必须重新规划"]) {
+  assert.ok(generationDecisionHtml.includes(evidence), `generation evidence missing: ${evidence}`);
+}
+assert.ok(evolutionEvidenceNodes["#evolution-capacity-note"].innerHTML.includes("工程探索证据"));
+assert.ok(evolutionEvidenceNodes["#evolution-capacity-note"].innerHTML.includes("911 次复用"));
+assert.ok(evolutionEvidenceNodes["#evolution-capacity-note"].innerHTML.includes("尚未锁定独立最终验证集"));
+evidenceRun.evolution_evidence.capacity.final_validation_reservation = {reserved: false};
+modelSandbox.renderEvolutionEvidence(evidenceRun);
+assert.ok(evolutionEvidenceNodes["#evolution-capacity-note"].innerHTML.includes("尚未锁定独立最终验证集"));
+evidenceRun.evolution_evidence.capacity.final_validation_reservation = {
+  schema_version: "ecologyrsi-dsh.final-validation-reservation/1",
+  status: "locked",
+  reservation_id: "reservation:external-final-validation",
+};
+modelSandbox.renderEvolutionEvidence(evidenceRun);
+assert.ok(evolutionEvidenceNodes["#evolution-capacity-note"].innerHTML.includes("已记录独立最终验证集预留"));
+
+const positiveDeltaEvidenceRun = modelSandbox.normalizeRun({
+  run_id: "run:positive-delta-evidence", status: "completed",
+  evolution_evidence: {
+    protocol_scope: "positive_delta_search_v3",
+    search_version: {
+      candidate_id: "candidate:search", candidate_revision_id: "revision:search:9",
+      generation: 1, source: "generation_holdout", is_initial_seed: false,
+      absolute_score: -0.39,
+    },
+    global_champion: {
+      candidate_id: "candidate:search", candidate_revision_id: "revision:search:9",
+      generation: 1, source: "generation_holdout", is_initial_seed: false,
+      absolute_score: -0.39,
+    },
+    certified_version: null,
+    generation_decisions: [{
+      generation: 1, committed: true, same_cohort: true,
+      selection_policy: "positive_delta_search@1",
+      selected_arm: "finalist_1", selected_candidate_id: "candidate:search",
+      selected_search_certification_status: "search_only",
+      certification_selected_arm: null,
+      arms: [
+        {arm: "finalist_1", candidate_id: "candidate:search", absolute_score: -0.39, holdout_delta: 0.01, search_eligible: true, certification_eligible: false, worst_cell_delta: -0.03, search_failures: [], certification_failures: ["cell_regression", "scientific_gate_failed"]},
+        {arm: "incumbent", candidate_id: "candidate:seed", absolute_score: -0.4, holdout_delta: 0, search_eligible: true, certification_eligible: true, search_failures: [], certification_failures: []},
+      ],
+    }],
+    capacity: {available: false},
+  },
+});
+modelSandbox.renderEvolutionEvidence(positiveDeltaEvidenceRun);
+assert.equal(evolutionEvidenceNodes["#evolution-evidence-status"].textContent, "搜索版本已推进，尚未通过严格认证");
+assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("正向增益搜索 + 独立稳健认证"));
+for (const evidence of ["下一轮搜索版本", "严格认证尚未通过", "搜索资格：通过", "严格认证：未通过", "逐 cell 风险", "宿主同批增益 +0.0100"]) {
+  const rendered = evolutionEvidenceNodes["#global-champion-card"].innerHTML + evolutionEvidenceNodes["#generation-decision-list"].innerHTML;
+  assert.ok(rendered.includes(evidence), `positive-delta evidence missing: ${evidence}`);
+}
+
+const uncommittedEvidenceRun = modelSandbox.normalizeRun({
+  run_id: "run:uncommitted-evidence", status: "running",
+  evolution_evidence: {
+    global_champion: {
+      candidate_id: "candidate:seed", candidate_revision_id: "revision:seed:0",
+      generation: 0, source: "materialized_seed", is_initial_seed: true,
+      absolute_score: -0.4,
+    },
+    generation_decisions: [{
+      generation: 1, committed: false, cohort_digest: "d".repeat(64), same_cohort: true,
+      selected_arm: "finalist_1", selected_candidate_id: "candidate:a",
+      arms: [
+        {arm: "finalist_1", candidate_id: "candidate:a", absolute_score: -0.3, holdout_delta: 0.1, passed: true, eligible: true, failures: []},
+        {arm: "incumbent", candidate_id: "candidate:seed", absolute_score: -0.4, holdout_delta: 0, passed: true, eligible: true, failures: []},
+      ],
+    }],
+  },
+});
+modelSandbox.renderEvolutionEvidence(uncommittedEvidenceRun);
+assert.equal(evolutionEvidenceNodes["#evolution-evidence-status"].textContent, "初始基线已冻结");
+assert.ok(evolutionEvidenceNodes["#generation-decision-list"].innerHTML.includes("比较已计算，等待固化"));
+assert.ok(evolutionEvidenceNodes["#generation-decision-list"].innerHTML.includes("尚未写入全局冠军"));
+assert.equal(evolutionEvidenceNodes["#generation-decision-list"].innerHTML.includes("挑战者已晋升"), false);
+
+const legacyEvidenceRun = modelSandbox.normalizeRun({
+  run_id: "run:legacy-evidence", status: "completed",
+  evolution_evidence: {
+    protocol_scope: "legacy_audit",
+    global_champion: {
+      candidate_id: "candidate:legacy", candidate_revision_id: "revision:legacy:0",
+      generation: 0, source: "legacy_projection", is_initial_seed: false,
+      absolute_score: -0.2,
+    },
+    generation_decisions: [],
+  },
+});
+modelSandbox.renderEvolutionEvidence(legacyEvidenceRun);
+assert.equal(evolutionEvidenceNodes["#evolution-evidence-status"].textContent, "旧协议审计");
+assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("旧版连续更新审计，跨 cohort 不可归因"));
+assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("旧协议保留结果"));
+assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("不按 v2 全局冠军解释"));
+assert.equal(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("全局最优"), false);
+modelSandbox.document.querySelector = evolutionEvidenceQuerySelector;
 
 assert.equal(
   modelSandbox.supersededSampleRevisionText({
@@ -1097,10 +1304,11 @@ modelSandbox.renderProcessSummary({
 for (const pairedCapacityDetail of [
   "正式配对上限", "1,900 candidate-origin occurrences",
   "2,663 candidate-origin execution occurrences", "23,967 scoring cells",
-  "500 个 formal unique origins",
+  "500 个 formal origin occurrences", "500 个 shared cohort occurrences",
 ]) {
   assert.ok(processSummaryNode.innerHTML.includes(pairedCapacityDetail), `paired process capacity missing: ${pairedCapacityDetail}`);
 }
+assert.equal(processSummaryNode.innerHTML.includes("formal unique origins"), false);
 modelSandbox.renderProcessSummary(crossCohortProjection);
 assert.ok(processSummaryNode.innerHTML.includes("当前保留得分"));
 assert.ok(processSummaryNode.innerHTML.includes("原始最高观测（跨窗口不可直接比较）"));
@@ -2526,10 +2734,36 @@ assert.equal(modelSandbox.state.activeRun.candidates[0].id, "candidate:preserved
 assert.equal(modelSandbox.state.activeRun.rounds[0].generation, 1);
 assert.equal(modelSandbox.state.events[0].id, "event:newer");
 assert.equal(modelSandbox.state.loadState, "ready");
-// A structural boundary commits the compact terminal authority even when the
-// larger candidate projection cannot be hydrated.
+
+// A busy evaluation can delay the compact projection beyond the host
+// adapter's 8-second default. The monitor must use the shared 30-second data
+// read budget so one slow heartbeat does not mark a healthy service offline.
+modelSandbox.state.loadState = "ready";
+modelSandbox.state.lastError = null;
+modelSandbox.request = async (path, options) => {
+  if (path.includes("/events")) { return {events: []}; }
+  const effectiveTimeout = Number(options && options.timeout || 8000);
+  if (effectiveTimeout <= 9000) {
+    const error = new Error("simulated slow projection");
+    error.name = "AbortError";
+    throw error;
+  }
+  return {schema_version: "ecologyrsi-dsh.browser-run-monitor/1", projection: {
+    run_id: raceRun.id, status: "running", projection_revision: 5,
+    generation: raceRun.generation, total_generations: raceRun.total_generations,
+    execution_progress: {phase: "evaluation", current_generation: 1},
+    updated_at: "2026-08-18T08:00:30Z",
+  }};
+};
+assert.equal(await modelSandbox.refreshProgressForRun(raceRun.id), true);
+assert.equal(modelSandbox.state.loadState, "ready");
+assert.equal(modelSandbox.state.lastError, null);
+
+// A structural boundary commits the compact terminal authority without
+// automatically requesting the larger candidate/training-asset projection.
 modelSandbox.state.activeRun.candidates_count = 1;
 modelSandbox.state.structureHydrationStale = false;
+let automaticDetailRequestCount = 0;
 modelSandbox.request = async (path) => {
   if (path.includes("/events")) { return {events: []}; }
   if (path.endsWith("?view=monitor")) {
@@ -2540,12 +2774,14 @@ modelSandbox.request = async (path) => {
       updated_at: "2026-08-18T08:01:00Z",
     }};
   }
-  throw new Error("detail projection temporarily unavailable");
+  automaticDetailRequestCount += 1;
+  throw new Error("monitor must not automatically read full detail");
 };
 assert.equal(await modelSandbox.refreshProgressForRun(raceRun.id), true);
 assert.equal(modelSandbox.state.activeRun.status, "paused");
 assert.equal(modelSandbox.state.activeRun.projection_revision, 5);
 assert.equal(modelSandbox.state.structureHydrationStale, true);
+assert.equal(automaticDetailRequestCount, 0);
 assert.equal(modelSandbox.state.loadState, "ready");
 modelSandbox.request = async () => { throw new Error("projection temporarily unavailable"); };
 assert.equal(await modelSandbox.refreshProgressForRun(raceRun.id), false);
@@ -2722,6 +2958,83 @@ assert.deepEqual(
   Array.from(modelSandbox.state.events.map((event) => event.type)),
   ["run.resumed"],
 );
+
+// A large paused run may finish resuming after the browser's control request
+// times out. Reconcile with the same idempotency key plus the compact monitor,
+// preserve already loaded details, and report the durable outcome as success.
+const resumeTimeoutRequests = [];
+const resumeTimeoutToasts = [];
+modelSandbox.state.usingDemo = false;
+modelSandbox.state.catalog.dsh.capabilities = ["run.control", "evolution.projection.read"];
+modelSandbox.state.commandKeys = {};
+modelSandbox.state.busy = false;
+modelSandbox.state.commandError = null;
+modelSandbox.state.activeRun = modelSandbox.normalizeRun({
+  ...waitingBetweenRounds,
+  id: "run:large-resume-timeout",
+  run_id: "run:large-resume-timeout",
+  status: "paused",
+  projection_revision: 40,
+  candidates: Array.from({length: 200}, (_, index) => ({
+    id: "candidate:large:" + index,
+    status: "evaluated",
+    score: index / 1000,
+  })),
+  rounds: [{generation: 1, candidates: ["candidate:large:0"]}],
+  training_assets: [{id: "training:large", examples: 100000}],
+  trajectory: [{generation: 1, candidate_id: "candidate:large:0", score: 0.1}],
+});
+modelSandbox.state.runs = [modelSandbox.state.activeRun];
+modelSandbox.showToast = (message) => resumeTimeoutToasts.push(message);
+modelSandbox.renderAll = () => {};
+modelSandbox.refreshEventsForRun = async () => true;
+modelSandbox.reconcileVisibleRunSelection = () => false;
+modelSandbox.ensureAutoAdvanceForRun = () => true;
+let resumeControlAttempts = 0;
+modelSandbox.request = async (path, options) => {
+  resumeTimeoutRequests.push({path, options});
+  if (path.endsWith("/control")) {
+    resumeControlAttempts += 1;
+    const error = new Error(resumeControlAttempts === 1
+      ? "control request timed out"
+      : "control response remained unavailable");
+    error.name = resumeControlAttempts === 1 ? "AbortError" : "TypeError";
+    throw error;
+  }
+  if (path.endsWith("?view=monitor")) {
+    return {schema_version: "ecologyrsi-dsh.browser-run-monitor/1", projection: {
+      run_id: "run:large-resume-timeout",
+      status: "running",
+      projection_revision: 41,
+      generation: 1,
+      candidates_count: 200,
+      execution_progress: {phase: "waiting", current_generation: 1},
+      updated_at: "2026-08-31T08:00:00Z",
+    }};
+  }
+  return {events: []};
+};
+const resumeTimeoutResult = await modelSandbox.controlRun("resume");
+assert.equal(resumeTimeoutResult, true, JSON.stringify({
+  requests: resumeTimeoutRequests.map((entry) => entry.path),
+  toasts: resumeTimeoutToasts,
+  commandError: modelSandbox.state.commandError,
+  status: modelSandbox.state.activeRun && modelSandbox.state.activeRun.status,
+}));
+const repeatedControlRequests = resumeTimeoutRequests.filter((entry) => entry.path.endsWith("/control"));
+assert.equal(repeatedControlRequests.length, 2);
+assert.equal(
+  repeatedControlRequests[0].options.body.idempotency_key,
+  repeatedControlRequests[1].options.body.idempotency_key,
+);
+assert.equal(modelSandbox.state.activeRun.status, "running");
+assert.equal(modelSandbox.state.activeRun.candidates.length, 200);
+assert.equal(modelSandbox.state.activeRun.training_assets[0].id, "training:large");
+assert.equal(modelSandbox.state.activeRun.rounds[0].generation, 1);
+assert.equal(modelSandbox.state.activeRun.trajectory[0].candidate_id, "candidate:large:0");
+assert.equal(modelSandbox.state.commandError, null);
+assert.ok(resumeTimeoutToasts.some((message) => message === "恢复成功。"));
+assert.equal(resumeTimeoutToasts.some((message) => message.includes("控制失败")), false);
 
 const cleanupRequests = [];
 modelSandbox.state.usingDemo = false;
@@ -3211,7 +3524,8 @@ assert.equal(parameterNodes["#parameter-summary-pill"].textContent, "每个入�
 assert.equal(parameterNodes["#agent-update-scope"].textContent, "每个入围候选 10 × 50");
 assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("256 + 1,900 + 507 = 2,663 candidate-origin execution occurrences = 23,967 scoring cells"));
 assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("13,315 candidate-origin execution occurrences / 119,835 scoring cells；需要 1,665 个起点 occurrence"));
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("500 个 formal unique origins"));
+assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("500 个 formal origin occurrences"));
+assert.equal(parameterNodes["#parameter-summary"].innerHTML.includes("formal unique origins"), false);
 parameterNodes["#local-batch-origin-count"].value = "60";
 parameterSandbox.renderParameters();
 assert.equal(parameterNodes["#parameter-summary-pill"].textContent, "参数无效");
@@ -3449,15 +3763,12 @@ const presetDirectories = fs.readdirSync(
   path.resolve(root, "../../integrations/dsh_ecology_plugin/presets"),
   {withFileTypes: true},
 ).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
-// The runtime controller is authoritative for the active preset contract.
-const activePresetDirectories = [
-  "ecology-coordinator-v4",
-  "ecology-researcher-v7",
-  "ecology-candidate-proposer-v4",
-  "ecology-sample-planner-v5",
-  "ecology-sample-critic-v4",
-  "ecology-generation-judge-v7",
-];
+const presetManifest = JSON.parse(fs.readFileSync(
+  path.resolve(root, "../../integrations/dsh_ecology_plugin/presets/preset-manifest.json"),
+  "utf8",
+));
+assert.equal(presetManifest.schema_version, "ecologyrsi-dsh.preset-manifest/1");
+const activePresetDirectories = presetManifest.presets.map((item) => item.preset_id);
 assert.deepEqual(presetDirectories.sort(), activePresetDirectories.sort());
 for (const field of ["rounds", "candidates_per_generation", "formal_origin_count", "local_batch_origin_count", "max_local_edits_per_batch", "selection_holdout_origin_count", "candidate_concurrency", "sample_agent_batch_size", "sample_concurrency", "max_candidates", "fixed_seed", "knowledge_online_enabled"]) {
   assert.match(html, new RegExp(`name="${field}"[^>]*form="start-form"|form="start-form"[^>]*name="${field}"`));
@@ -3638,6 +3949,7 @@ assert.doesNotMatch(app, /"model\.connection\.verify":/);
 assert.match(app, /function isBlank\(value\)/);
 assert.match(app, /function displayText\(value, fallback\)/);
 assert.match(app, /function humanizeTechnicalText\(value\)/);
+assert.match(app, /编译为隔离候选；这不表示已晋级为全局最优/);
 assert.match(app, /humanizeTechnicalText\(round\.next_generation_focus/);
 assert.match(app, /var fieldGroupOrder = \["target", "control", "environment", "crop", "resource", "other"\]/);
 assert.match(app, /function coreSchema\(schema\)/);

@@ -912,6 +912,58 @@ def _validate_trust_region_parameter_step(
         )
 
 
+def parameter_trust_region_neighborhood(
+    *,
+    name: str,
+    previous: Any,
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the exact Host-valid one-step interval for a bounded parameter."""
+
+    minimum = float(
+        _finite_number(contract.get("minimum"), f"parameter {name} minimum")
+    )
+    maximum = float(
+        _finite_number(contract.get("maximum"), f"parameter {name} maximum")
+    )
+    current = float(_finite_number(previous, f"parent parameter {name}"))
+    if maximum <= minimum:
+        raise ValueError(f"parameter {name} has invalid trust-region bounds")
+    if not minimum <= current <= maximum:
+        raise ValueError(f"parent parameter {name} is outside trust-region bounds")
+    logarithmic = bool(
+        minimum > 0 and maximum / minimum >= 100 and current > 0
+    )
+    if logarithmic:
+        lower_coordinate = math.log(minimum)
+        upper_coordinate = math.log(maximum)
+        current_coordinate = math.log(current)
+        extent = (
+            upper_coordinate - lower_coordinate
+        ) * TRUST_REGION_MAX_NORMALIZED_STEP
+        lower = math.exp(max(lower_coordinate, current_coordinate - extent))
+        upper = math.exp(min(upper_coordinate, current_coordinate + extent))
+    else:
+        extent = (maximum - minimum) * TRUST_REGION_MAX_NORMALIZED_STEP
+        lower = max(minimum, current - extent)
+        upper = min(maximum, current + extent)
+    parameter_type = str(contract.get("type") or "number")
+    if parameter_type == "integer":
+        lower_value: int | float = math.ceil(lower)
+        upper_value: int | float = math.floor(upper)
+    else:
+        lower_value = lower
+        upper_value = upper
+    return {
+        "current": previous,
+        "minimum": lower_value,
+        "maximum": upper_value,
+        "type": parameter_type,
+        "scale": "logarithmic" if logarithmic else "linear",
+        "maximum_normalized_step": TRUST_REGION_MAX_NORMALIZED_STEP,
+    }
+
+
 def apply_genome_mutation(
     parent: EcologyEvolutionPluginGenome,
     accepted_mutation: Mapping[str, Any],
@@ -1199,4 +1251,5 @@ __all__ = [
     "deep_freeze_json",
     "deep_thaw_json",
     "materialize_seed_genome",
+    "parameter_trust_region_neighborhood",
 ]

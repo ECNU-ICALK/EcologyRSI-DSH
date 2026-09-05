@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..core.models import digest
+from ..core.models import CandidateRole, digest
 from ..evolution.context import safe_aggregate_feedback
 from ..integrations.model_bindings import (
     HOST_PARAMETER_GENERATOR_ID,
@@ -680,7 +680,13 @@ def rounds(state: Any) -> list[dict[str, Any]]:
         generation_reflection = state.reflection_for(generation)
         knowledge_assessment = state.knowledge_assessment_for(generation)
         candidates = sorted(
-            (item for item in state.candidates if item.generation == generation),
+            (
+                item
+                for item in state.candidates
+                if item.generation == generation
+                and getattr(item, "role", CandidateRole.SEARCH)
+                in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
+            ),
             key=lambda item: item.slot_index,
         )
         candidate_rows = []
@@ -983,7 +989,15 @@ def run_summary(state: Any) -> dict[str, Any]:
     evaluations = tuple(state.evaluations)
     approved = sum(1 for item in state.promotions if item.decision.value == "approved")
     rejected = sum(1 for item in state.promotions if item.decision.value == "rejected")
-    failed = sum(1 for item in state.candidates if item.status.value == "failed")
+    search_candidates = tuple(
+        item
+        for item in state.candidates
+        if getattr(item, "role", CandidateRole.SEARCH)
+        in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
+    )
+    failed = sum(
+        1 for item in search_candidates if item.status.value == "failed"
+    )
     partitions = sorted({item.partition for item in evaluations})
     policy_model_id = metadata.get(
         "policy_model_id", HOST_PARAMETER_GENERATOR_ID
@@ -1035,7 +1049,7 @@ def run_summary(state: Any) -> dict[str, Any]:
         ),
         "evaluation_partition": partitions or [metadata.get("evaluation_partition", "unspecified")],
         "generation": state.run.generation,
-        "candidate_count": len(state.candidates),
+        "candidate_count": len(search_candidates),
         "candidates_per_generation": task.candidates_per_generation,
         "generation_analysis_count": len(state.generation_analyses),
         "knowledge_snapshot_count": len(state.knowledge_snapshots),
@@ -1043,7 +1057,7 @@ def run_summary(state: Any) -> dict[str, Any]:
         "artifact_count": len(state.artifacts),
         "evaluation_count": len(evaluations),
         "intervention_count": len(state.interventions),
-        "training_asset_count": len(state.candidates),
+        "training_asset_count": len(search_candidates),
         "round_count": len(rounds(state)),
         "approved_count": approved,
         "rejected_count": rejected,

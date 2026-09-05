@@ -12,6 +12,7 @@ from ecologyrsi_dsh.evolution.analysis import GenerationAnalysis
 from ecologyrsi_dsh.evolution.batches import (
     _canonical_candidate_outcomes,
     _ensure_generation_reflection,
+    _validate_required_search_replan,
     start_generation_batch,
 )
 from ecologyrsi_dsh.evolution.strategies import (
@@ -26,6 +27,7 @@ from ecologyrsi_dsh.knowledge.autonomous_cycle import (
     AUTONOMOUS_RESEARCH_PROTOCOL,
     CandidateDirection,
     GenerationReflection,
+    GenerationSearchPlan,
     validate_research_synthesis,
 )
 from ecologyrsi_dsh.knowledge.retrieval import retrieve_generation_knowledge
@@ -365,6 +367,57 @@ class _UnrealizableResearchDirectionRuntime(_CycleRuntime):
 
 
 class AutonomousSearchReflectionCycleTests(unittest.TestCase):
+    def test_repeated_exploration_requires_a_machine_visible_search_replan(
+        self,
+    ) -> None:
+        previous = GenerationAnalysis(
+            run_id="run:replan",
+            generation=1,
+            candidate_count=4,
+            eligible_count=0,
+            outcome="exploration_only",
+            selection_reason="two exploration generations",
+            replan_required=True,
+            consecutive_exploration_generations=2,
+        )
+        prior_plan = GenerationSearchPlan(
+            run_id="run:replan",
+            generation=1,
+            search_queries=("greenhouse humidity lag",),
+            focus_areas=("humidity",),
+            rationale="local humidity direction",
+        )
+        state = SimpleNamespace(
+            run=SimpleNamespace(generation=2),
+            analysis_for=lambda generation: previous if generation == 1 else None,
+            search_plan_for=lambda generation: prior_plan if generation == 1 else None,
+        )
+        repeated = GenerationSearchPlan(
+            run_id="run:replan",
+            generation=2,
+            search_queries=prior_plan.search_queries,
+            focus_areas=prior_plan.focus_areas,
+            rationale="repeat the same local direction",
+            source_analysis_digest=previous.analysis_digest,
+        )
+        with self.assertRaisesRegex(ValueError, "must change"):
+            _validate_required_search_replan(state, repeated)
+
+        changed = GenerationSearchPlan(
+            run_id="run:replan",
+            generation=2,
+            search_queries=("greenhouse co2 thermal coupling",),
+            focus_areas=("cross-target coupling",),
+            rationale="replan away from the repeated local direction",
+            source_analysis_digest=previous.analysis_digest,
+        )
+        _validate_required_search_replan(state, changed)
+        self.assertTrue(previous.to_dict()["replan_required"])
+        self.assertEqual(
+            previous.to_dict()["consecutive_exploration_generations"],
+            2,
+        )
+
     def setUp(self) -> None:
         self.ledger = EventLedger(":memory:")
         self.addCleanup(self.ledger.close)

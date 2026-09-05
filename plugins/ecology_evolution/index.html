@@ -124,7 +124,7 @@
                 <div class="panel-heading"><div><span>运行超参数</span><h2 id="parameter-form-title">更新与执行预算</h2></div><strong>应用于下次创建</strong></div>
                 <div class="parameter-groups">
                   <section class="parameter-group" data-group="outer-search"><header><strong>外层搜索</strong><span>固定 4 → 同一 64 时点 → Top 2</span></header><div class="form-grid parameter-grid">
-                    <label><span>最大进化轮数</span><input id="max-generations" name="rounds" form="start-form" type="number" min="1" max="50" value="5" required><small>每轮完成 4 个候选初筛、两条持续优化轨迹和一次轮末冠军比较。</small></label>
+                    <label><span>最大进化轮数</span><input id="max-generations" name="rounds" form="start-form" type="number" min="1" max="50" value="1" required><small>默认先运行 1 轮受控验证；多轮时需核对 origin 复用率和独立最终验证集。</small></label>
                     <label><span>每轮生成方案数</span><input id="candidates-per-generation" name="candidates_per_generation" form="start-form" type="number" value="4" readonly aria-readonly="true" required><small>固定为 4；Top 2 选择规则、排序和 tie-break 保持不变。</small></label>
                     <label><span>候选总预算</span><input id="max-candidates" name="max_candidates" form="start-form" type="number" min="4" max="256" value="20" aria-describedby="max-candidates-help" required><small id="max-candidates-help">默认随轮数同步；当前完整预算需要 20 个候选。</small></label>
                   </div></section>
@@ -223,9 +223,15 @@
                 </section>
               </div>
             </section>
+            <section class="panel evolution-evidence-panel" aria-labelledby="evolution-evidence-title">
+              <div class="panel-heading"><div><span>搜索版本与独立认证</span><h2 id="evolution-evidence-title">进化决策证据</h2></div><span id="evolution-evidence-status" class="pill pill-neutral">等待运行</span></div>
+              <p id="evolution-capacity-note" class="evolution-capacity-note">尚无数据容量评估。</p>
+              <div id="global-champion-card" class="global-champion-card" aria-live="polite"><div class="empty-state">启动运行后，这里会分别显示下一轮搜索版本与严格认证状态。</div></div>
+              <div id="generation-decision-list" class="generation-decision-list" aria-live="polite"><div class="empty-state">完成首轮 holdout 后显示三臂同批决策证据。</div></div>
+            </section>
             <section class="panel adaptive-trajectory-panel" aria-labelledby="adaptive-trajectory-title">
               <div class="panel-heading"><div><span>候选内持续优化</span><h2 id="adaptive-trajectory-title">微批优化轨迹</h2></div><span id="adaptive-trajectory-count" class="technical-value">等待正式候选</span></div>
-              <p class="adaptive-trajectory-note"><strong>诊断口径：</strong>每个微批使用自己的 cohort，批次得分仅用于该批诊断，不可跨 cohort 直接纵向归因；轮末晋升仍以同 cohort 的冻结 holdout 比较为准。</p>
+              <p class="adaptive-trajectory-note"><strong>诊断口径：</strong>每个微批只比较同一 cohort 的当前版本与挑战版本；总体得分严格提高即可成为后续搜索版本，逐 cell 退化会作为认证风险单独保留。不同 cohort 分数不可直接纵向归因。</p>
               <div class="table-wrap" tabindex="0" aria-label="微批优化轨迹诊断表，可横向滚动"><table class="adaptive-trajectory-table"><thead><tr><th>轮次／候选</th><th>微批／origins</th><th>修订迁移</th><th>本批诊断</th><th>局部修改</th><th>结果</th></tr></thead><tbody id="adaptive-trajectory-table"></tbody></table></div>
             </section>
             <section class="panel chart-panel">

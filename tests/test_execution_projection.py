@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from ecologyrsi_dsh import EventLedger, EvolutionDirector, FakeDSHAdapter, TaskManifest
 from ecologyrsi_dsh.api.generation_execution import _model_token_budget_state
@@ -12,8 +13,10 @@ from ecologyrsi_dsh.api.projection import (
     _active_scoped_evaluation_progress,
     _dsh_activity_projection,
     _dsh_runtime_projection,
+    _evolution_evidence_projection,
     _evaluation_progress_projection,
     _evaluation_progress_rates,
+    _execution_diagnostics,
     _gateway_retry_projection,
     _model_usage_summary,
     _projection_json,
@@ -24,6 +27,7 @@ from ecologyrsi_dsh.api.projection import (
 )
 from ecologyrsi_dsh.api.shared import _event_type
 from ecologyrsi_dsh.core.models import (
+    CandidateRole,
     Evaluation,
     ModelArtifact,
     Promotion,
@@ -82,6 +86,502 @@ def _origin_members(label: str) -> list[str]:
 
 
 class ExecutionProjectionTests(unittest.TestCase):
+    def test_seed_control_holdout_progress_is_not_recounted_as_screening(
+        self,
+    ) -> None:
+        candidate_id = "candidate:seed-control"
+        revision_id = "revision:seed-control:0"
+        cohort_digest = "c" * 64
+        events = (
+            SimpleNamespace(
+                seq=100,
+                kind="HoldoutArmStarted",
+                payload={
+                    "generation": 0,
+                    "holdout_arm": "incumbent",
+                    "candidate_id": candidate_id,
+                    "candidate_revision_id": revision_id,
+                    "cohort_digest": cohort_digest,
+                    "origin_count": 169,
+                },
+                created_at="2026-08-30T01:00:00+00:00",
+            ),
+            SimpleNamespace(
+                seq=101,
+                kind="EvaluationSampleResultsStarted",
+                payload={
+                    "candidate_id": candidate_id,
+                    "revision": "sample-results:seed-holdout",
+                    "checkpoint": {
+                        "evaluation_phase": "holdout",
+                        "formal_batch_index": None,
+                        "holdout_arm": "incumbent",
+                        "candidate_revision_id": revision_id,
+                        "cohort_digest": cohort_digest,
+                        "sample_count": 169,
+                    },
+                },
+                created_at="2026-08-30T01:00:01+00:00",
+            ),
+            SimpleNamespace(
+                seq=102,
+                kind="EvaluationProgressRecorded",
+                payload={
+                    "schema_version": "ecologyrsi-dsh.evaluation-progress/3",
+                    "candidate_id": candidate_id,
+                    "role": "planner",
+                    "revision": "sample-results:seed-holdout",
+                    "progress_id": 1,
+                    "completed_samples": 12,
+                    "total_samples": 169,
+                    "succeeded_samples": 12,
+                    "failed_samples": 0,
+                },
+                created_at="2026-08-30T01:00:02+00:00",
+            ),
+        )
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(
+                metadata={
+                    "optimization_protocol": "top2_adaptive_epoch@1",
+                    "optimization_schedule": {
+                        "screening_origin_count": 64,
+                        "formal_origin_count_per_finalist": 500,
+                        "selection_holdout_origin_count": 169,
+                        "local_batch_origin_count": 50,
+                    },
+                    "prediction_cells_per_origin": 9,
+                },
+                max_generations=1,
+            ),
+            run=SimpleNamespace(
+                run_id="run:seed-holdout-progress",
+                generation=0,
+                status=SimpleNamespace(value="running"),
+            ),
+            candidate_screening_events=(),
+            formal_batch_evaluations=(),
+            holdout_evaluations=(),
+            formal_batches=(),
+            candidates=(
+                SimpleNamespace(
+                    candidate_id=candidate_id,
+                    generation=0,
+                    role=CandidateRole.INCUMBENT_CONTROL,
+                ),
+            ),
+            events=events,
+        )
+
+        progress = _adaptive_progress_projection(state)
+
+        self.assertIsNotNone(progress)
+        self.assertEqual(progress["evaluation_phase"], "holdout")
+        self.assertEqual(progress["screening_completed_origins"], 0)
+        self.assertEqual(progress["holdout_completed_origins"], 12)
+        self.assertEqual(progress["current_candidate_id"], candidate_id)
+
+    def test_seed_control_holdout_is_adaptive_evidence_not_partial_candidate_work(
+        self,
+    ) -> None:
+        control = SimpleNamespace(
+            candidate_id="candidate:seed-control",
+            proposal_id="proposal:seed-control",
+            role=CandidateRole.INCUMBENT_CONTROL,
+            status=SimpleNamespace(value="spawned"),
+        )
+        holdout = SimpleNamespace(
+            scope=SimpleNamespace(origin_count=169),
+            metrics={
+                "sample_execution": {
+                    "succeeded_origin_samples": 169,
+                    "failed_origin_samples": 0,
+                    "failed_examples": 0,
+                }
+            },
+        )
+        state = SimpleNamespace(
+            artifacts=(),
+            evaluations=(),
+            formal_batch_evaluations=(),
+            holdout_evaluations=(holdout,),
+            events=(),
+            proposals=(
+                SimpleNamespace(
+                    proposal_id=control.proposal_id,
+                    metadata={"proposal_source": "seed_incumbent_control"},
+                ),
+            ),
+            candidates=(control,),
+            task_manifest=SimpleNamespace(
+                metadata={},
+                max_generations=1,
+                budget={"max_generations": 1},
+            ),
+            run=SimpleNamespace(
+                status=SimpleNamespace(value="completed"),
+                generation=1,
+            ),
+        )
+
+        with patch(
+            "ecologyrsi_dsh.api.projection._adaptive_progress_projection",
+            return_value=None,
+        ):
+            diagnostics = _execution_diagnostics(state)
+
+        self.assertEqual(diagnostics["proposal_sources"], {})
+        self.assertEqual(diagnostics["live_evaluation_candidate_count"], 0)
+        self.assertEqual(diagnostics["adaptive_evaluation_count"], 1)
+        self.assertEqual(diagnostics["execution_evidence_status"], "recorded")
+
+    def test_evolution_evidence_projects_global_champion_three_arms_and_capacity(
+        self,
+    ) -> None:
+        def holdout(
+            arm: str,
+            candidate_id: str,
+            revision_id: str,
+            score: float,
+            passed: bool,
+        ) -> SimpleNamespace:
+            return SimpleNamespace(
+                scope=SimpleNamespace(
+                    holdout_arm=SimpleNamespace(value=arm),
+                    candidate_id=candidate_id,
+                    candidate_revision_id=revision_id,
+                    cohort_digest="c" * 64,
+                ),
+                score=score,
+                passed=passed,
+            )
+
+        comparison = SimpleNamespace(
+            generation=0,
+            cohort_digest="c" * 64,
+            selected_candidate_id="candidate:seed",
+            selected_revision_id="revision:seed:0",
+            holdout_evaluations=(
+                holdout("finalist_1", "candidate:a", "revision:a:9", -0.42, True),
+                holdout("finalist_2", "candidate:b", "revision:b:9", -0.55, False),
+                holdout("incumbent", "candidate:seed", "revision:seed:0", -0.40, True),
+            ),
+            gate_results={
+                "selected_arm": "incumbent",
+                "challenger_promotion_allowed": False,
+                "arms": {
+                    "finalist_1": {
+                        "eligible": False,
+                        "worst_cell_delta": -0.03,
+                        "failures": ["screening_exploration_only"],
+                    },
+                    "finalist_2": {
+                        "eligible": False,
+                        "worst_cell_delta": -0.12,
+                        "failures": ["cell_regression"],
+                    },
+                    "incumbent": {"eligible": True, "failures": []},
+                },
+            },
+        )
+        formal = SimpleNamespace(
+            payload={
+                "screening_pass_count": 0,
+                "exploration_only": True,
+                "consecutive_exploration_generations": 2,
+            }
+        )
+        seed_revision = SimpleNamespace(
+            revision_id="revision:seed:0",
+            genome_digest="g" * 64,
+            behavior_digest="b" * 64,
+        )
+        seed_candidate = SimpleNamespace(
+            candidate_id="candidate:seed",
+            role=CandidateRole.INCUMBENT_CONTROL,
+        )
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(
+                metadata={
+                    "execution_protocol": "dsh_native_plugin_evolution@1",
+                    "host_runtime_build": {
+                        "evolution_runtime_schema": (
+                            "ecologyrsi-dsh.evolution-runtime/2"
+                        )
+                    },
+                    "cohort_capacity_report": {
+                        "required_unique_origins": 1_665,
+                        "available_eligible_origins": 754,
+                        "reused_origin_occurrences": 911,
+                        "reuse_fraction": 911 / 1_665,
+                        "max_feasible_generations": 0,
+                        "sufficient": False,
+                    }
+                }
+            ),
+            generation_comparisons=(comparison,),
+            formal_selection_for=lambda generation: formal if generation == 0 else None,
+            analysis_for=lambda generation: SimpleNamespace(
+                selection_reason="exploration_generation_retained_incumbent"
+            ),
+            candidates=(seed_candidate,),
+            initial_revision_for=lambda candidate_id: (
+                seed_revision if candidate_id == seed_candidate.candidate_id else None
+            ),
+            revision=lambda revision_id: seed_revision,
+            materialized_seed_genome=lambda: SimpleNamespace(
+                genome_digest=seed_revision.genome_digest,
+                behavior_digest=seed_revision.behavior_digest,
+            ),
+            effective_revision_for=lambda generation: (
+                seed_revision.revision_id if generation == 0 else None
+            ),
+            events=(
+                SimpleNamespace(
+                    kind="GenerationChampionSelected",
+                    payload={
+                        "generation": 0,
+                        "selected_candidate_id": seed_candidate.candidate_id,
+                        "selected_revision_id": seed_revision.revision_id,
+                    },
+                ),
+            ),
+        )
+
+        evidence = _evolution_evidence_projection(state)
+
+        self.assertEqual(evidence["global_champion"]["candidate_id"], "candidate:seed")
+        self.assertEqual(evidence["protocol_scope"], "global_incumbent_v2")
+        self.assertEqual(evidence["global_champion"]["absolute_score"], -0.40)
+        self.assertEqual(evidence["global_champion"]["genome_digest"], "g" * 64)
+        decision = evidence["generation_decisions"][0]
+        self.assertTrue(decision["committed"])
+        self.assertTrue(decision["same_cohort"])
+        self.assertEqual(len(decision["arms"]), 3)
+        self.assertAlmostEqual(decision["arms"][0]["holdout_delta"], -0.02)
+        self.assertTrue(decision["exploration_only"])
+        self.assertTrue(decision["replan_required"])
+        self.assertEqual(decision["selected_arm"], "incumbent")
+        self.assertEqual(
+            evidence["capacity"]["evidence_scope"],
+            "engineering_exploration_with_reused_origins",
+        )
+        self.assertEqual(evidence["capacity"]["reused_origin_occurrences"], 911)
+        self.assertIsNone(evidence["capacity"]["final_validation_reservation"])
+
+        state.task_manifest.metadata["final_validation_reservation"] = {
+            "reserved": False
+        }
+        invalid_reservation = _evolution_evidence_projection(state)
+        self.assertIsNone(
+            invalid_reservation["capacity"]["final_validation_reservation"]
+        )
+
+        state.task_manifest.metadata["final_validation_reservation"] = {
+            "schema_version": (
+                "ecologyrsi-dsh.final-validation-reservation/1"
+            ),
+            "status": "locked",
+            "reservation_id": "reservation:external-final-validation",
+        }
+        locked_reservation = _evolution_evidence_projection(state)["capacity"][
+            "final_validation_reservation"
+        ]
+        self.assertEqual(locked_reservation["status"], "locked")
+        self.assertEqual(
+            locked_reservation["reservation_id"],
+            "reservation:external-final-validation",
+        )
+
+        finalist_revision = SimpleNamespace(
+            revision_id="revision:a:9",
+            genome_digest="a" * 64,
+            behavior_digest="f" * 64,
+        )
+        comparison.selected_candidate_id = "candidate:a"
+        comparison.selected_revision_id = finalist_revision.revision_id
+        comparison.holdout_evaluations[0].score = -0.39
+        comparison.gate_results.update(
+            {
+                "selected_arm": "finalist_1",
+                "selection_policy": "positive_delta_search@1",
+                "certification_selected_arm": None,
+                "selected_search_certification_status": "search_only",
+            }
+        )
+        comparison.gate_results["arms"]["finalist_1"].update(
+            {
+                "eligible": True,
+                "search_eligible": True,
+                "certification_eligible": False,
+                "search_failures": [],
+                "certification_failures": ["scientific_gate_failed"],
+                "strict_agent_chain_pass": True,
+            }
+        )
+        state.task_manifest.metadata["host_runtime_build"][
+            "evolution_runtime_schema"
+        ] = "ecologyrsi-dsh.evolution-runtime/3"
+        state.revision = lambda revision_id: (
+            finalist_revision
+            if revision_id == finalist_revision.revision_id
+            else seed_revision
+        )
+        state.effective_revision_for = lambda generation: (
+            finalist_revision.revision_id if generation == 0 else None
+        )
+        state.events = (
+            SimpleNamespace(
+                kind="GenerationChampionSelected",
+                payload={
+                    "generation": 0,
+                    "selected_candidate_id": "candidate:a",
+                    "selected_revision_id": finalist_revision.revision_id,
+                },
+            ),
+        )
+
+        v3_evidence = _evolution_evidence_projection(state)
+        self.assertEqual(v3_evidence["protocol_scope"], "positive_delta_search_v3")
+        self.assertEqual(
+            v3_evidence["search_version"]["candidate_id"], "candidate:a"
+        )
+        self.assertIsNone(v3_evidence["certified_version"])
+        v3_decision = v3_evidence["generation_decisions"][0]
+        self.assertEqual(
+            v3_decision["selection_policy"], "positive_delta_search@1"
+        )
+        self.assertEqual(
+            v3_decision["selected_search_certification_status"],
+            "search_only",
+        )
+        self.assertTrue(v3_decision["arms"][0]["search_eligible"])
+        self.assertFalse(v3_decision["arms"][0]["certification_eligible"])
+
+    def test_evolution_evidence_does_not_publish_uncommitted_or_legacy_seed_champion(
+        self,
+    ) -> None:
+        incumbent = SimpleNamespace(
+            scope=SimpleNamespace(
+                holdout_arm=SimpleNamespace(value="incumbent"),
+                candidate_id="candidate:legacy-incumbent",
+                candidate_revision_id="revision:legacy-incumbent",
+                cohort_digest="c" * 64,
+            ),
+            score=0.1,
+            passed=True,
+        )
+        comparison = SimpleNamespace(
+            generation=0,
+            cohort_digest="c" * 64,
+            selected_candidate_id=incumbent.scope.candidate_id,
+            selected_revision_id=incumbent.scope.candidate_revision_id,
+            holdout_evaluations=(incumbent,),
+            gate_results={"selected_arm": "incumbent", "arms": {}},
+        )
+        base = dict(
+            task_manifest=SimpleNamespace(metadata={}),
+            generation_comparisons=(comparison,),
+            formal_selection_for=lambda _generation: None,
+            analysis_for=lambda _generation: None,
+            candidates=(),
+            initial_revision_for=lambda _candidate_id: None,
+            revision=lambda _revision_id: SimpleNamespace(
+                genome_digest="l" * 64,
+                behavior_digest="m" * 64,
+            ),
+        )
+        crash_state = SimpleNamespace(
+            **base,
+            effective_revision_for=lambda _generation: None,
+            events=(),
+        )
+
+        crash_evidence = _evolution_evidence_projection(crash_state)
+
+        self.assertIsNone(crash_evidence["global_champion"])
+        self.assertFalse(crash_evidence["generation_decisions"][0]["committed"])
+
+        legacy_state = SimpleNamespace(
+            **base,
+            effective_revision_for=lambda generation: (
+                incumbent.scope.candidate_revision_id if generation == 0 else None
+            ),
+            events=(
+                SimpleNamespace(
+                    kind="GenerationChampionSelected",
+                    payload={
+                        "generation": 0,
+                        "selected_candidate_id": incumbent.scope.candidate_id,
+                        "selected_revision_id": incumbent.scope.candidate_revision_id,
+                    },
+                ),
+            ),
+        )
+
+        legacy_evidence = _evolution_evidence_projection(legacy_state)
+
+        self.assertFalse(legacy_evidence["global_champion"]["is_initial_seed"])
+        self.assertEqual(legacy_evidence["protocol_scope"], "legacy_audit")
+        self.assertEqual(
+            legacy_evidence["global_champion"]["source"],
+            "generation_holdout",
+        )
+
+    def test_retained_incumbent_keeps_its_original_promotion_generation(self) -> None:
+        def retained(generation: int, score: float) -> SimpleNamespace:
+            evaluation = SimpleNamespace(
+                scope=SimpleNamespace(
+                    holdout_arm=SimpleNamespace(value="incumbent"),
+                    candidate_id="candidate:champion",
+                    candidate_revision_id="revision:champion",
+                    cohort_digest=("a" if generation == 0 else "b") * 64,
+                ),
+                score=score,
+                passed=True,
+            )
+            return SimpleNamespace(
+                generation=generation,
+                cohort_digest=evaluation.scope.cohort_digest,
+                selected_candidate_id=evaluation.scope.candidate_id,
+                selected_revision_id=evaluation.scope.candidate_revision_id,
+                holdout_evaluations=(evaluation,),
+                gate_results={"selected_arm": "incumbent", "arms": {}},
+            )
+
+        comparisons = (retained(0, 0.2), retained(1, 0.3))
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(metadata={}),
+            generation_comparisons=comparisons,
+            formal_selection_for=lambda _generation: None,
+            analysis_for=lambda _generation: None,
+            candidates=(),
+            initial_revision_for=lambda _candidate_id: None,
+            revision=lambda _revision_id: SimpleNamespace(
+                genome_digest="g" * 64,
+                behavior_digest="b" * 64,
+            ),
+            effective_revision_for=lambda generation: (
+                "revision:champion" if generation in {0, 1} else None
+            ),
+            events=tuple(
+                SimpleNamespace(
+                    kind="GenerationChampionSelected",
+                    payload={
+                        "generation": generation,
+                        "selected_candidate_id": "candidate:champion",
+                        "selected_revision_id": "revision:champion",
+                    },
+                )
+                for generation in (0, 1)
+            ),
+        )
+
+        evidence = _evolution_evidence_projection(state)
+
+        self.assertEqual(evidence["global_champion"]["generation"], 1)
+        self.assertEqual(evidence["global_champion"]["absolute_score"], 0.3)
+
     def test_holdout_progress_uses_durable_batches_when_heartbeat_is_missing(self) -> None:
         revision = "revision:holdout"
         candidate_id = "candidate:holdout"

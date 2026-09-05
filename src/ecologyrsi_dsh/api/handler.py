@@ -40,7 +40,11 @@ from ..core.models import (
 from ..core.protocols import is_strict_origin_protocol
 from ..core.redaction import safe_error_code
 from ..core.sample_results import MAX_SAMPLE_RESULTS_UNCOMPRESSED_BYTES
-from ..core.state import validate_identity_binding
+from ..core.state import (
+    EVOLUTION_RUNTIME_SCHEMA_V2,
+    EVOLUTION_RUNTIME_SCHEMA_V3,
+    validate_identity_binding,
+)
 from ..data.registry import DatasetRegistry
 from ..evaluators.epoch_cohorts import estimate_epoch_capacity
 from ..evaluators.registry import (
@@ -67,7 +71,7 @@ from ..knowledge.program_registry import current_program_registry
 from ..version import __version__
 from .auto_progress import AutoProgressManager
 from .dsh_tools import DshStructuredResultPersistenceError, DshToolService
-from .projection import _state_payload
+from .projection import _control_payload, _state_payload
 from .sample_admission import (
     DEFAULT_SAMPLE_CONCURRENCY,
     RunSampleAdmission,
@@ -91,6 +95,11 @@ _DEFAULT_REAL_RUN_TOKEN_LIMIT = 100_000_000
 _REAL_RUN_TOKEN_RESERVATION_PER_CALL = 262_144
 _SAMPLE_TOKEN_BUDGET_POLICY = "hard_gateway_call_reservation@1"
 _SAMPLE_TOKEN_BUDGET_SCOPE = "sample_agent_gateway_calls_only@1"
+_HOST_RUNTIME_COMPATIBILITY = {
+    "evolution_runtime_schema": EVOLUTION_RUNTIME_SCHEMA_V3,
+    "generation_comparison_schema": "ecologyrsi-dsh.generation-comparison/1",
+    "projection_schema": "ecologyrsi-dsh.execution-projection/2",
+}
 _DEFAULT_REAL_CANDIDATE_CONCURRENCY = 4
 _MAX_REAL_CANDIDATE_CONCURRENCY = 8
 _DSH_SIDECAR_PUBLIC_ERROR_CODES = frozenset(
@@ -272,6 +281,34 @@ def _request_boolean(value: Any, name: str) -> bool:
         if normalized in {"false", "0", "no", "off", "否"}:
             return False
     raise ValueError(f"{name} must be a boolean")
+
+
+def _host_runtime_build() -> dict[str, str]:
+    """Return the auditable build plus the explicitly compatible schemas."""
+
+    return {
+        "package_version": __version__,
+        **_HOST_RUNTIME_COMPATIBILITY,
+    }
+
+
+def _runtime_build_compatible(value: Any) -> bool:
+    """Allow package rebuilds only when every persisted protocol stays compatible."""
+
+    if not isinstance(value, Mapping):
+        return False
+    if value.get("evolution_runtime_schema") not in {
+        EVOLUTION_RUNTIME_SCHEMA_V2,
+        EVOLUTION_RUNTIME_SCHEMA_V3,
+    }:
+        return False
+    return all(
+        value.get(field) == expected
+        for field, expected in _HOST_RUNTIME_COMPATIBILITY.items()
+        if field != "evolution_runtime_schema"
+    ) and isinstance(value.get("package_version"), str) and bool(
+        value["package_version"].strip()
+    )
 
 
 def _mark_auto_progress_task(
@@ -2797,8 +2834,17 @@ class EvolutionRequestHandler(
         runtime_component_catalog["selected_prediction_model_id"] = (
             prediction_model_id
         )
+        supplied_runtime_build = metadata.get("host_runtime_build")
+        if (
+            supplied_runtime_build is not None
+            and not _runtime_build_compatible(supplied_runtime_build)
+        ):
+            raise ValueError(
+                "任务清单中的 Host 进化运行协议与当前服务不兼容"
+            )
         metadata.update(
             {
+                "host_runtime_build": _host_runtime_build(),
                 "strategy_id": strategy_id,
                 "strategy_digest": strategy_digest,
                 "evaluator_id": evaluator_id,
@@ -3205,6 +3251,14 @@ class EvolutionRequestHandler(
         if dataset_id is None:
             raise ValueError("运行缺少冻结数据集")
         metadata = task.metadata
+        frozen_runtime_build = metadata.get("host_runtime_build")
+        # Historical runs predate this field and keep their already-frozen
+        # schedule semantics. New runs fail closed only when an explicitly
+        # persisted compatibility schema no longer matches this Host.
+        if frozen_runtime_build is not None and not _runtime_build_compatible(
+            frozen_runtime_build
+        ):
+            raise FrozenRuntimeBindingDriftError("Host evolution runtime")
         dataset_digest = metadata.get("dataset_digest")
         split_digest = metadata.get("split_manifest_digest")
         if not isinstance(dataset_digest, str) or not dataset_digest.strip():
@@ -3493,7 +3547,10 @@ class EvolutionRequestHandler(
             and state.run.status.value == target_status
             and not resumes_durable_native_quiescence
         ):
-            payload = _state_payload(state)
+            payload = _control_payload(
+                state,
+                self.server.sample_admission.snapshot(run_id),
+            )
             self._complete_command(cache_key, payload)
             self._send(HTTPStatus.OK, payload)
             return
@@ -3610,7 +3667,10 @@ class EvolutionRequestHandler(
             native_request["ledger_expected_revision"] = (
                 self.server.ledger.latest_seq()
             )
-            accepted_payload = _state_payload(accepted_state)
+            accepted_payload = _control_payload(
+                accepted_state,
+                self.server.sample_admission.snapshot(run_id),
+            )
             accepted_payload.update(
                 {
                     "command_id": cache_key,
@@ -3695,7 +3755,10 @@ class EvolutionRequestHandler(
                 raise RuntimeError("run generation quiescence barrier is unavailable")
             generation_barrier.release()
         resulting_state = director.state(run_id)
-        payload = _state_payload(resulting_state)
+        payload = _control_payload(
+            resulting_state,
+            self.server.sample_admission.snapshot(run_id),
+        )
         self._complete_command(cache_key, payload)
         if action in {"start", "resume"}:
             # A paused autonomous run resumes at the next generation boundary;
@@ -3788,7 +3851,10 @@ class EvolutionRequestHandler(
             error_code = safe_error_code(getattr(exc, "error_code", None)) or type(exc).__name__
             error_message = _public_http_error(exc)
         try:
-            payload = _state_payload(self.server.director.state(run_id))
+            payload = _control_payload(
+                self.server.director.state(run_id),
+                self.server.sample_admission.snapshot(run_id),
+            )
             payload.update(
                 {
                     "command_id": cache_key,

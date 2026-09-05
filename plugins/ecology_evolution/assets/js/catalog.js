@@ -143,6 +143,7 @@
       var selectedEvents = normalizeEvents(results[1]);
       commitRunSelection(runId, previousRunId);
       state.activeRun = selectedRun;
+      state.structureHydrationStale = false;
       resetEventStream(runId, selectedEvents, results[1]);
       syncSelectedRunAlerts(state.activeRun, state.events);
       state.showAllEvents = false;

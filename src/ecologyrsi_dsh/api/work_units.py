@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from threading import Lock
 from typing import Any
 
-from ..core.models import RunStatus
+from ..core.models import CandidateRole, RunStatus
 from ..core.trajectory import TrajectoryStatus
 from ..evolution.schedule import (
     OPTIMIZATION_PROTOCOL,
@@ -105,6 +105,8 @@ def execute_next_adaptive_work_unit(endpoint: Any, run_id: str) -> bool:
             item
             for item in state.candidates
             if item.generation == batch.generation
+            and getattr(item, "role", CandidateRole.SEARCH)
+            in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
         )
         inputs_complete = (
             len(generation_candidates) == batch.batch_size
@@ -130,6 +132,8 @@ def execute_next_adaptive_work_unit(endpoint: Any, run_id: str) -> bool:
                 item
                 for item in state.candidates
                 if item.generation == batch.generation
+                and getattr(item, "role", CandidateRole.SEARCH)
+                in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
             ),
             key=lambda item: item.slot_index,
         )

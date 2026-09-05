@@ -257,7 +257,7 @@
     var values = [
       ["迭代结构", formatNumber(budget.max_generations) + " 轮 · 每轮固定 4 个候选 · 同一 64 时点初筛后 Top 2"],
       ["局部持续优化", pairedMode
-        ? "两个入围候选共享并复用 " + formatNumber(schedule.formal_origin_count_per_finalist) + " 个 formal unique origins；每条 lane 包含 1 个 warm-up + " + formatNumber(Math.max(0, batchCount - 1)) + " 个同 cohort 冠军/挑战者配对微批；最多 " + formatNumber(maximumEdits) + " 处局部改动"
+        ? "两个入围候选共享并复用 " + formatNumber(schedule.formal_origin_count_per_finalist) + " 个 formal origin occurrences；每条 lane 包含 1 个 warm-up + " + formatNumber(Math.max(0, batchCount - 1)) + " 个同 cohort 当前版本/挑战版本配对微批；总体正增益推进搜索，认证风险单独记录；最多 " + formatNumber(maximumEdits) + " 处局部改动"
         : "每个入围候选 " + formatNumber(schedule.formal_origin_count_per_finalist) + " origins = " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count) + "；最多 " + formatNumber(maximumEdits) + " 处局部改动"],
       ["单轮执行预算", formatNumber(screeningCandidateOrigins) + " + " + formatNumber(formalCandidateOrigins) + " + " + formatNumber(holdoutCandidateOrigins) + " = " + formatNumber(generationCandidateOrigins) + (pairedMode ? " candidate-origin execution occurrences = " + formatNumber(generationScoringCells) + " scoring cells" : " candidate-origins = " + formatNumber(generationScoringCells) + " cells")],
       ["全程执行预算", formatNumber(runCandidateOrigins) + (pairedMode ? " candidate-origin execution occurrences / " + formatNumber(runScoringCells) + " scoring cells；" : " candidate-origins / " + formatNumber(runScoringCells) + " cells；") + capacityOriginText],

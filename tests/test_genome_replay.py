@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.api.dsh_tools import DshToolService
+from ecologyrsi_dsh.api.projection import _candidate_projection
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.state import RunState
 from ecologyrsi_dsh.core.models import (
@@ -27,6 +29,13 @@ from ecologyrsi_dsh.evolution.workflow_ir import resolve_candidate_agent_profile
 from ecologyrsi_dsh.evolution.analysis import (
     GenerationAnalysis,
     build_cross_generation_experience,
+)
+from ecologyrsi_dsh.core.trajectory import (
+    EvaluationPhase,
+    EvaluationScope,
+    GenerationComparison,
+    HoldoutArm,
+    HoldoutEvaluation,
 )
 from ecologyrsi_dsh.evolution.batches import (
     _generation_parent_candidate_id,
@@ -504,6 +513,207 @@ class GenomeReplayTests(unittest.TestCase):
             self.director.state(run_id).run.best_candidate_id,
             second.candidate_id,
         )
+
+    def test_runtime_v3_approval_allows_certified_champion_to_differ_from_search_version(
+        self,
+    ) -> None:
+        run_id = self._start_new("run:v3-split-search-and-certification")
+        search_candidate = self._spawn(run_id, slot_index=0)
+        certified_candidate = self._spawn(run_id, slot_index=1)
+        artifact = ModelArtifact(
+            artifact_id="artifact:v3-certified",
+            run_id=run_id,
+            candidate_id=certified_candidate.candidate_id,
+            model_id="greenhouse-horizon-targetwise-ridge@1",
+            dataset_digest="2" * 64,
+            training_partition="training_fit",
+            training_rows=10,
+        )
+        self.director.record_artifact(artifact)
+        self.director.record_evaluation(
+            Evaluation(
+                evaluation_id="evaluation:v3-certified",
+                run_id=run_id,
+                candidate_id=certified_candidate.candidate_id,
+                score=0.3,
+                passed=True,
+                evaluator_digest="6" * 64,
+                artifact_digest=artifact.digest,
+            )
+        )
+        cohort_digest = digest({"cohort": "v3-split"})
+
+        def holdout(
+            arm: HoldoutArm,
+            candidate_id: str,
+            revision_id: str,
+            score: float,
+        ) -> HoldoutEvaluation:
+            return HoldoutEvaluation(
+                evaluation_id=f"holdout:v3:{arm.value}",
+                scope=EvaluationScope(
+                    run_id=run_id,
+                    generation=0,
+                    candidate_id=candidate_id,
+                    candidate_revision_id=revision_id,
+                    phase=EvaluationPhase.HOLDOUT,
+                    cohort_digest=cohort_digest,
+                    origin_count=10,
+                    holdout_arm=arm,
+                ),
+                score=score,
+                passed=True,
+                metrics={"constraint_violations": 0},
+                evaluator_digest="6" * 64,
+            )
+
+        search_holdout = holdout(
+            HoldoutArm.FINALIST_1,
+            search_candidate.candidate_id,
+            "revision:v3:search",
+            0.31,
+        )
+        certified_holdout = holdout(
+            HoldoutArm.FINALIST_2,
+            certified_candidate.candidate_id,
+            "revision:v3:certified",
+            0.30,
+        )
+        incumbent_holdout = holdout(
+            HoldoutArm.INCUMBENT,
+            "candidate:v3:incumbent",
+            "revision:v3:incumbent",
+            0.20,
+        )
+        comparison = GenerationComparison(
+            comparison_id="comparison:v3-split",
+            run_id=run_id,
+            generation=0,
+            cohort_digest=cohort_digest,
+            holdout_evaluations=(
+                search_holdout,
+                certified_holdout,
+                incumbent_holdout,
+            ),
+            selected_candidate_id=search_candidate.candidate_id,
+            selected_revision_id=search_holdout.scope.candidate_revision_id,
+            gate_results={
+                "selection_policy": "positive_delta_search@1",
+                "selected_arm": HoldoutArm.FINALIST_1.value,
+                "certification_selected_arm": HoldoutArm.FINALIST_2.value,
+                "arms": {
+                    HoldoutArm.FINALIST_1.value: {
+                        "search_eligible": True,
+                        "certification_eligible": False,
+                    },
+                    HoldoutArm.FINALIST_2.value: {
+                        "search_eligible": True,
+                        "certification_eligible": True,
+                    },
+                    HoldoutArm.INCUMBENT.value: {
+                        "search_eligible": True,
+                        "certification_eligible": True,
+                    },
+                },
+            },
+        )
+        analysis = GenerationAnalysis(
+            run_id=run_id,
+            generation=0,
+            candidate_count=2,
+            eligible_count=2,
+            outcome="promoted",
+            selected_candidate_id=search_candidate.candidate_id,
+            champion_candidate_id=certified_candidate.candidate_id,
+            incumbent_after_candidate_id=certified_candidate.candidate_id,
+            search_parent_candidate_id=search_candidate.candidate_id,
+            ranking=(
+                {
+                    "candidate_id": search_candidate.candidate_id,
+                    "search_eligible": True,
+                    "certification_eligible": False,
+                    "primary_selection_gate": False,
+                },
+                {
+                    "candidate_id": certified_candidate.candidate_id,
+                    "search_eligible": True,
+                    "certification_eligible": True,
+                    "primary_selection_gate": True,
+                },
+            ),
+        )
+        real_state = self.director.state(run_id)
+        runtime_v3_task = TaskManifest.from_dict(
+            {
+                **real_state.task_manifest.to_dict(),
+                "metadata": {
+                    **dict(real_state.task_manifest.metadata),
+                    "host_runtime_build": {
+                        "package_version": "0.3.55",
+                        "evolution_runtime_schema": (
+                            "ecologyrsi-dsh.evolution-runtime/3"
+                        ),
+                        "generation_comparison_schema": (
+                            "ecologyrsi-dsh.generation-comparison/1"
+                        ),
+                        "projection_schema": (
+                            "ecologyrsi-dsh.execution-projection/2"
+                        ),
+                    },
+                },
+            }
+        )
+        v3_state = Mock(wraps=real_state)
+        v3_state.task_manifest = runtime_v3_task
+        v3_state.run = real_state.run
+        v3_state.candidates = real_state.candidates
+        v3_state.promotions = real_state.promotions
+        v3_state.events = real_state.events
+        v3_state.generation_comparisons = (comparison,)
+        v3_state.analysis_for = lambda generation: analysis if generation == 0 else None
+        v3_state.comparison_for = (
+            lambda generation: comparison if generation == 0 else None
+        )
+        v3_state.effective_revision_for = lambda generation: (
+            comparison.selected_revision_id if generation == 0 else None
+        )
+
+        search_projection = _candidate_projection(v3_state, search_candidate)
+        certified_projection = _candidate_projection(v3_state, certified_candidate)
+        self.assertTrue(search_projection["search_version_selected"])
+        self.assertFalse(search_projection["certification_selected"])
+        self.assertEqual(
+            search_projection["certification_status"],
+            "search_version_not_certified",
+        )
+        self.assertFalse(certified_projection["search_version_selected"])
+        self.assertTrue(certified_projection["certification_selected"])
+
+        with patch.object(self.director, "state", return_value=v3_state):
+            with self.assertRaisesRegex(
+                ValueError,
+                "strict-certification decision",
+            ):
+                self.director.decide_promotion(
+                    Promotion(
+                        promotion_id="promotion:v3-certified:tampered-rejection",
+                        run_id=run_id,
+                        candidate_id=certified_candidate.candidate_id,
+                        decision=PromotionDecision.REJECTED,
+                        reason="tampered ledger decision must fail closed",
+                    )
+                )
+            promotion = self.director.decide_promotion(
+                Promotion(
+                    promotion_id="promotion:v3-certified",
+                    run_id=run_id,
+                    candidate_id=certified_candidate.candidate_id,
+                    decision=PromotionDecision.APPROVED,
+                    reason="strict certification winner may differ from search parent",
+                )
+            )
+
+        self.assertIs(promotion.decision, PromotionDecision.APPROVED)
 
     def _record_artifact_and_evaluation(self, run_id: str, candidate_id: str):
         artifact = ModelArtifact(

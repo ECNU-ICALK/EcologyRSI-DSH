@@ -307,7 +307,12 @@
     return unitLabels[raw] || raw || "未提供";
   }
   function compactTechnicalText(value) {
-    return String(value == null ? "" : value).replace(/(?:candidate|artifact|proposal|intervention):[0-9a-z:-]{24,}/gi, function (match) { return shortId(match); });
+    return String(value == null ? "" : value)
+      .replace(
+        "DSH structured GenomeMutation applied by the Host registry.",
+        "DSH 宿主已将结构化 GenomeMutation 编译为隔离候选；这不表示已晋级为全局最优。"
+      )
+      .replace(/(?:candidate|artifact|proposal|intervention):[0-9a-z:-]{24,}/gi, function (match) { return shortId(match); });
   }
   function humanizeTechnicalText(value) {
     var text = compactTechnicalText(value);
@@ -1012,6 +1017,7 @@
       dataset: item.dataset && typeof item.dataset === "object" ? item.dataset : {},
       trajectory: trajectory,
       adaptive_trajectories: Array.isArray(item.adaptive_trajectories) ? item.adaptive_trajectories : [],
+      evolution_evidence: item.evolution_evidence && typeof item.evolution_evidence === "object" ? item.evolution_evidence : {},
       artifacts: Array.isArray(item.artifacts) ? item.artifacts : [],
       interventions: Array.isArray(item.interventions) ? item.interventions : [],
       expert_consultations: Array.isArray(item.expert_consultations) ? item.expert_consultations.map(normalizeExpertConsultation) : [],
@@ -1022,6 +1028,11 @@
       gate: item.gate && typeof item.gate === "object" ? item.gate : {},
       metrics: item.metrics && typeof item.metrics === "object" ? item.metrics : {}
     });
+  }
+  function mergeRunProjection(existingRun, payload) {
+    var envelope = payload && payload.response || payload;
+    var projection = envelope && (envelope.projection || envelope.run_projection) || envelope || {};
+    return normalizeRun(Object.assign({}, existingRun || {}, projection));
   }
   function listFrom(data, key) {
     if (Array.isArray(data)) { return data; }

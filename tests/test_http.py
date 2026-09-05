@@ -645,6 +645,61 @@ class HTTPContractTests(unittest.TestCase):
             self.assertNotIn(omitted, projection)
         self.assertLess(len(json.dumps(monitor)), len(json.dumps(detail)))
 
+    def test_control_responses_and_command_receipts_remain_compact(self) -> None:
+        run_id, _created = self._create_running_run_for_boundary(
+            "large-control-response"
+        )
+        encoded_run_id = quote(run_id, safe="")
+        status, detail = self.request(f"/api/runs/{encoded_run_id}")
+        self.assertEqual(status, 200, detail)
+
+        controls = (
+            ("pause", "paused", "large-control-pause"),
+            ("resume", "running", "large-control-resume"),
+        )
+        for action, expected_status, idempotency_key in controls:
+            with self.subTest(action=action):
+                status, payload = self.request(
+                    f"/api/runs/{encoded_run_id}/control",
+                    "POST",
+                    {
+                        "action": action,
+                        "idempotency_key": idempotency_key,
+                    },
+                )
+                self.assertEqual(status, 200, payload)
+                self.assertEqual(
+                    payload["schema_version"],
+                    "ecologyrsi-dsh.browser-run-control/1",
+                )
+                self.assertEqual(payload["projection"]["status"], expected_status)
+                for omitted in (
+                    "candidates",
+                    "rounds",
+                    "trajectory",
+                    "training_assets",
+                ):
+                    self.assertNotIn(omitted, payload["projection"])
+                self.assertLess(len(json.dumps(payload)), len(json.dumps(detail)))
+
+                command_id = f"{run_id}:{idempotency_key}"
+                status, receipt = self.request(
+                    "/api/commands/" + quote(command_id, safe="")
+                )
+                self.assertEqual(status, 200, receipt)
+                self.assertEqual(receipt["status"], "completed")
+                self.assertEqual(
+                    receipt["response"]["schema_version"],
+                    "ecologyrsi-dsh.browser-run-control/1",
+                )
+                for omitted in (
+                    "candidates",
+                    "rounds",
+                    "trajectory",
+                    "training_assets",
+                ):
+                    self.assertNotIn(omitted, receipt["response"]["projection"])
+
     def test_negative_cursor_and_non_integer_steps_are_rejected_before_claim(self) -> None:
         run_id, _created = self._create_running_run_for_boundary("cursor-step-boundary")
         path = "/api/runs/" + quote(run_id, safe="")

@@ -405,6 +405,95 @@
     }).catch(function () { return null; });
   }
 
+  function controlExpectedStatus(action) {
+    return {
+      start: "running",
+      pause: "paused",
+      resume: "running",
+      cancel: "cancelled",
+      complete: "completed"
+    }[action] || null;
+  }
+
+  function controlSuccessMessage(action) {
+    return {
+      start: "启动成功。",
+      pause: "暂停成功。",
+      resume: "恢复成功。",
+      cancel: "取消成功。",
+      complete: "运行已完成。"
+    }[action] || "运行状态已更新。";
+  }
+
+  function mergeControlResponse(runId, data) {
+    var envelope = data && data.response || data;
+    var projection = envelope && (envelope.projection || envelope.run_projection) || envelope || {};
+    var responseRunId = projection.run_id || projection.id;
+    if (!responseRunId) { return null; }
+    if (String(responseRunId) !== String(runId)) {
+      throw new Error("运行控制响应返回了其他运行的数据。");
+    }
+    if (!state.activeRun || String(state.activeRun.id) !== String(runId)) { return null; }
+    var refreshed = mergeRunProjection(state.activeRun, projection);
+    if (refreshed.projection_revision < state.activeRun.projection_revision) {
+      return state.activeRun;
+    }
+    state.activeRun = refreshed;
+    state.runs = state.runs.map(function (run) { return run.id === runId ? refreshed : run; });
+    return refreshed;
+  }
+
+  function controlStatusConfirmed(action, run) {
+    var expected = controlExpectedStatus(action);
+    return Boolean(expected && run && String(run.status).toLowerCase() === expected);
+  }
+
+  function controlRequestTimedOut(error) {
+    return Boolean(error && (error.name === "AbortError" || /请求超时|timed out|timeout/i.test(String(error.message || ""))));
+  }
+
+  function reconcileTimedOutControl(runId, action, body) {
+    var path = "/runs/" + encodeURIComponent(runId) + "/control";
+    var retryAccepted = false;
+    return request(path, { method: "POST", body: body, timeout: 5000 }).then(function (data) {
+      retryAccepted = Boolean(data && (
+        data.accepted === true
+        || data.command_status === "pending"
+        || data.status === "pending"
+        || data.command_status === "completed"
+        || data.status === "completed"
+      ));
+      var refreshed = mergeControlResponse(runId, data);
+      return controlStatusConfirmed(action, refreshed)
+        ? { confirmed: true, accepted: true }
+        : null;
+    }).catch(function () { return null; }).then(function (result) {
+      if (result && result.confirmed) { return result; }
+      return request("/runs/" + encodeURIComponent(runId) + "?view=monitor", { timeout: dataRequestTimeout }).then(function (monitor) {
+        var refreshed = mergeControlResponse(runId, monitor);
+        return {
+          confirmed: controlStatusConfirmed(action, refreshed),
+          accepted: retryAccepted
+        };
+      }).catch(function () {
+        return { confirmed: false, accepted: retryAccepted };
+      });
+    });
+  }
+
+  function finishControlUi(action, runId, message) {
+    state.lastUpdated = new Date().toISOString();
+    showToast(message);
+    return refreshEventsForRun(runId).then(function () {
+      var selectionChanged = reconcileVisibleRunSelection();
+      if (selectionChanged && state.activeRun) { return selectRun(state.activeRun.id, false); }
+      if (action === "resume" && state.activeRun && state.activeRun.status === "running") {
+        ensureAutoAdvanceForRun(runId);
+      }
+      return true;
+    });
+  }
+
   function controlRun(action) {
     if (!state.activeRun || state.busy) { return Promise.resolve(false); }
     if (!hasCapability("run.control")) { showToast("当前 DSH 会话未授予运行控制能力。"); return Promise.resolve(false); }
@@ -437,30 +526,37 @@
         state.activeRun.projection_revision += 1;
         state.events.unshift({ id: "演示事件-" + Date.now(), type: "run." + (action === "pause" ? "paused" : action === "resume" ? "resumed" : "cancelled"), occurred_at: new Date().toISOString(), payload: { message: "演示控制命令已应用。" } });
       } else {
-        state.activeRun = normalizeRun(data);
-        state.runs = state.runs.map(function (run) { return run.id === runId ? state.activeRun : run; });
-        if (data && data.command_status === "pending" && data.command_id) {
+        if (!mergeControlResponse(runId, data)) {
+          throw new Error("运行控制响应缺少可核验状态。");
+        }
+        var commandStatus = data && (data.command_status || data.status);
+        if (commandStatus === "pending" && data.command_id) {
           // The Host boundary is already durable; continue observing the
           // remote DSH drain without keeping the button request open.
           pollCommand(data.command_id, runId, 60).then(function (completed) {
-            if (!completed || !completed.projection) { return; }
-            var refreshed = normalizeRun(completed);
-            state.activeRun = refreshed;
-            state.runs = state.runs.map(function (run) { return run.id === runId ? refreshed : run; });
+            if (!completed) { return; }
+            var refreshed = mergeControlResponse(runId, completed);
+            if (!refreshed) { return; }
             state.lastUpdated = new Date().toISOString();
             renderAll();
           });
         }
       }
-      state.lastUpdated = new Date().toISOString();
-      showToast("运行状态已更新为“" + statusText(state.activeRun.status) + "”。");
-      return refreshEventsForRun(runId).then(function () {
-        var selectionChanged = reconcileVisibleRunSelection();
-        if (selectionChanged && state.activeRun) { return selectRun(state.activeRun.id, false); }
-        if (action === "resume" && state.activeRun && state.activeRun.status === "running") {
-          ensureAutoAdvanceForRun(runId);
-        }
-        return true;
+      state.commandError = null;
+      return finishControlUi(action, runId, controlSuccessMessage(action));
+    }).catch(function (error) {
+      if (!controlRequestTimedOut(error) || state.usingDemo) { throw error; }
+      return reconcileTimedOutControl(runId, action, body).then(function (result) {
+        if (!result.confirmed && !result.accepted) { throw error; }
+        clearCommandKey("control");
+        state.commandError = null;
+        return finishControlUi(
+          action,
+          runId,
+          result.confirmed
+            ? controlSuccessMessage(action)
+            : (action === "resume" ? "恢复请求已接收，正在核验运行状态。" : "控制请求已接收，正在核验运行状态。")
+        );
       });
     }).catch(function (error) {
       state.commandError = "控制失败：" + errorMessage(error);

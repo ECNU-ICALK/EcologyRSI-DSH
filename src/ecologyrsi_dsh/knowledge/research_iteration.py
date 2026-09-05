@@ -129,6 +129,53 @@ def _bounded_plan(value: Any) -> dict[str, Any]:
     return result
 
 
+def build_deterministic_research_fallback_plan(
+    *,
+    current_plan: Mapping[str, Any],
+    validation_detail: str,
+    source_analysis_digest: str | None = None,
+    source_reflection_digest: str | None = None,
+    search_plan_digest: str | None = None,
+) -> dict[str, Any]:
+    """Build a small Host-owned plan from durable identifiers only."""
+
+    plan: dict[str, Any] = {
+        "fallback_diagnostics": {
+            "reason_code": "research_response_contract_invalid",
+            "validation_detail": " ".join(str(validation_detail).split())[:500]
+            or "host contract validation failed",
+            "policy": "durable_evidence_host_fallback@1",
+            "model_request_repeated": False,
+        },
+        "search_policy": {
+            "registered_host_capabilities_only": True,
+            "preserve_bounded_mutation_catalog": True,
+            "continue_from_durable_search_version": True,
+        },
+    }
+    prediction_model = current_plan.get("prediction_model")
+    if isinstance(prediction_model, Mapping):
+        predictor_id = prediction_model.get("id")
+        if isinstance(predictor_id, str) and predictor_id.strip():
+            plan["prediction_model"] = {"id": predictor_id.strip()[:500]}
+    evidence = {
+        name: value
+        for name, value in (
+            ("source_analysis_digest", source_analysis_digest),
+            ("source_reflection_digest", source_reflection_digest),
+            ("search_plan_digest", search_plan_digest),
+        )
+        if isinstance(value, str) and value.strip()
+    }
+    if evidence:
+        plan["durable_evidence"] = evidence
+    if isinstance(search_plan_digest, str) and search_plan_digest.strip():
+        plan["generation_search_plan"] = {
+            "search_plan_digest": search_plan_digest.strip()
+        }
+    return _bounded_plan(plan)
+
+
 def _historical_provenance(value: Any) -> dict[str, Any] | None:
     """Freeze only the host-owned aggregate lineage for prior-run lessons."""
 
@@ -334,4 +381,8 @@ class ResearchIteration:
         return cls(**data)
 
 
-__all__ = ["RESEARCH_ITERATION_VERSION", "ResearchIteration"]
+__all__ = [
+    "RESEARCH_ITERATION_VERSION",
+    "ResearchIteration",
+    "build_deterministic_research_fallback_plan",
+]

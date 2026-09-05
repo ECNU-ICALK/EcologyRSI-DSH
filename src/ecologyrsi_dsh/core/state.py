@@ -14,6 +14,8 @@ from ..evolution.analysis import (
     sample_update_windows_enabled,
 )
 from ..evolution.champion_challenger import (
+    LOCAL_MINIMUM_SCORE_DELTA,
+    POSITIVE_DELTA_MINIMUM_SCORE_DELTA,
     validate_formal_batch_comparison,
 )
 from ..evolution.schedule import (
@@ -32,6 +34,7 @@ from ..knowledge.research_iteration import ResearchIteration
 from .ledger import Event
 from .models import (
     Candidate,
+    CandidateRole,
     CandidateStatus,
     Evaluation,
     ExpertConsultation,
@@ -60,6 +63,7 @@ from .sample_budget import complete_origin_count
 from .screening import (
     FORMAL_SELECTION_SCHEMA_V1,
     FORMAL_SELECTION_SCHEMA_V2,
+    FORMAL_SELECTION_SCHEMA_V3,
     SCREENED_OUT_SCHEMA_V1,
     SCREENING_SCHEMA_V1,
     SCREENING_SCHEMA_V2,
@@ -85,6 +89,8 @@ from .trajectory import (
 )
 
 DSH_NATIVE_EVOLUTION_PROTOCOL = "dsh_native_plugin_evolution@1"
+EVOLUTION_RUNTIME_SCHEMA_V2 = "ecologyrsi-dsh.evolution-runtime/2"
+EVOLUTION_RUNTIME_SCHEMA_V3 = "ecologyrsi-dsh.evolution-runtime/3"
 
 _DSH_STAGE_SKILLS: dict[str, frozenset[str]] = {
     "generation.research": frozenset({"autonomous-ecology-research"}),
@@ -406,6 +412,336 @@ def _validate_dsh_retrieval_event(value: Any, *, run_id: str) -> None:
 
 def is_dsh_native_protocol(task: TaskManifest) -> bool:
     return task.metadata.get("execution_protocol") == DSH_NATIVE_EVOLUTION_PROTOCOL
+
+
+def uses_global_incumbent_protocol(task: TaskManifest) -> bool:
+    """Return whether a frozen run opted into the explicit global incumbent."""
+
+    runtime = task.metadata.get("host_runtime_build")
+    return is_dsh_native_protocol(task) and isinstance(runtime, Mapping) and (
+        runtime.get("evolution_runtime_schema")
+        in {EVOLUTION_RUNTIME_SCHEMA_V2, EVOLUTION_RUNTIME_SCHEMA_V3}
+    )
+
+
+def uses_positive_delta_search_protocol(task: TaskManifest) -> bool:
+    """Return whether the frozen run advances on any comparable positive delta."""
+
+    runtime = task.metadata.get("host_runtime_build")
+    return is_dsh_native_protocol(task) and isinstance(runtime, Mapping) and (
+        runtime.get("evolution_runtime_schema") == EVOLUTION_RUNTIME_SCHEMA_V3
+    )
+
+
+def validate_generation_zero_incumbent_binding(
+    task: TaskManifest,
+    generation: int,
+    arm_bindings: Mapping[str, Mapping[str, str]],
+    *,
+    candidates: Mapping[str, Candidate],
+    revisions: Mapping[str, CandidateRevision],
+    materialized_seed_canonical: str | None,
+    prior_effective_revision_id: str | None = None,
+    prior_champion_selected: bool = False,
+) -> None:
+    """Fail closed unless every runtime-v2 incumbent continues the champion."""
+
+    if not uses_global_incumbent_protocol(task):
+        return
+    binding = arm_bindings.get(HoldoutArm.INCUMBENT.value)
+    if not isinstance(binding, Mapping):
+        raise ValueError("runtime-v2 holdout requires the global incumbent")
+    candidate = candidates.get(str(binding.get("candidate_id")))
+    revision = revisions.get(str(binding.get("candidate_revision_id")))
+    if generation > 0:
+        expected_revision = revisions.get(str(prior_effective_revision_id))
+        if (
+            not prior_champion_selected
+            or prior_effective_revision_id is None
+            or expected_revision is None
+            or candidate is None
+            or revision is None
+            or revision.revision_id != prior_effective_revision_id
+            or candidate.candidate_id != expected_revision.candidate_id
+            or revision.candidate_id != expected_revision.candidate_id
+        ):
+            raise ValueError(
+                "runtime-v2 incumbent must bind the prior effective champion revision"
+            )
+        return
+    if (
+        candidate is None
+        or candidate.generation != 0
+        or candidate.role is not CandidateRole.INCUMBENT_CONTROL
+        or revision is None
+        or revision.candidate_id != candidate.candidate_id
+        or revision.generation != 0
+        or revision.parent_revision_id is not None
+        or revision.source_batch_index is not None
+        or materialized_seed_canonical is None
+    ):
+        raise ValueError("runtime-v2 holdout requires the seed incumbent control R0")
+    import json
+
+    from ..evolution.genome import EcologyEvolutionPluginGenome
+
+    seed = EcologyEvolutionPluginGenome.from_dict(
+        json.loads(materialized_seed_canonical)
+    )
+    if (
+        revision.genome_digest != seed.genome_digest
+        or revision.behavior_digest != seed.behavior_digest
+        or canonical_json(revision.identity_dict()["genome"])
+        != canonical_json(seed.to_dict())
+    ):
+        raise ValueError("runtime-v2 seed incumbent control R0 differs from materialized seed")
+
+
+def validate_exploration_generation_comparison(
+    task: TaskManifest,
+    formal: Any,
+    comparison: GenerationComparison,
+) -> None:
+    """Ensure an exploration-only generation cannot durably promote a challenger."""
+
+    payload = getattr(formal, "payload", formal)
+    if uses_positive_delta_search_protocol(task):
+        return
+    if not isinstance(payload, Mapping) or (
+        payload.get("schema_version") != FORMAL_SELECTION_SCHEMA_V3
+        or payload.get("exploration_only") is not True
+    ):
+        return
+    incumbent = next(
+        (
+            evaluation
+            for evaluation in comparison.holdout_evaluations
+            if evaluation.scope.holdout_arm is HoldoutArm.INCUMBENT
+        ),
+        None,
+    )
+    gates = comparison.gate_results
+    if (
+        incumbent is None
+        or gates.get("challenger_promotion_allowed") is not False
+        or gates.get("selected_arm") != HoldoutArm.INCUMBENT.value
+        or comparison.selected_candidate_id != incumbent.scope.candidate_id
+        or comparison.selected_revision_id
+        != incumbent.scope.candidate_revision_id
+    ):
+        raise ValueError(
+            "exploration comparison must retain the incumbent and disable promotion"
+        )
+
+
+def validate_runtime_promotion_decision(
+    task: TaskManifest,
+    candidate: Candidate,
+    promotion: Promotion,
+    comparison: GenerationComparison | None,
+    analysis: GenerationAnalysis | None,
+) -> None:
+    """Bind a runtime-v2/v3 decision to the frozen generation authority."""
+
+    if not uses_global_incumbent_protocol(task):
+        return
+    if comparison is None or analysis is None:
+        raise ValueError(
+            "runtime promotion requires the recorded generation comparison and analysis"
+        )
+    if (
+        comparison.generation != candidate.generation
+        or analysis.generation != candidate.generation
+        or comparison.run_id != candidate.run_id
+        or analysis.run_id != candidate.run_id
+    ):
+        raise ValueError("runtime promotion generation binding is invalid")
+
+    gate_results = comparison.gate_results
+    arms = gate_results.get("arms")
+    if not isinstance(arms, Mapping):
+        raise ValueError("runtime promotion comparison gates are missing")
+
+    if uses_positive_delta_search_protocol(task):
+        selected_arm = gate_results.get("selected_arm")
+        selected_evaluation = next(
+            (
+                item
+                for item in comparison.holdout_evaluations
+                if item.scope.holdout_arm is not None
+                and item.scope.holdout_arm.value == selected_arm
+            ),
+            None,
+        )
+        expected_analysis_selected = (
+            selected_evaluation.scope.candidate_id
+            if selected_evaluation is not None
+            and selected_evaluation.scope.holdout_arm
+            in {HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2}
+            else None
+        )
+        certification_arm = gate_results.get("certification_selected_arm")
+        certification_evaluation = next(
+            (
+                item
+                for item in comparison.holdout_evaluations
+                if item.scope.holdout_arm is not None
+                and item.scope.holdout_arm.value == certification_arm
+            ),
+            None,
+        )
+        certification_gate = (
+            arms.get(certification_arm)
+            if isinstance(certification_arm, str)
+            else None
+        )
+        certified_candidate_id = (
+            certification_evaluation.scope.candidate_id
+            if certification_evaluation is not None
+            and certification_evaluation.scope.holdout_arm
+            in {HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2}
+            and isinstance(certification_gate, Mapping)
+            and certification_gate.get("certification_eligible") is True
+            else None
+        )
+        expected_approved = candidate.candidate_id == certified_candidate_id
+        actual_approved = promotion.decision is PromotionDecision.APPROVED
+        champion_row = next(
+            (
+                row
+                for row in analysis.ranking
+                if row.get("candidate_id") == certified_candidate_id
+            ),
+            None,
+        )
+        valid_analysis = bool(
+            selected_evaluation is not None
+            and comparison.selected_candidate_id
+            == selected_evaluation.scope.candidate_id
+            and analysis.selected_candidate_id == expected_analysis_selected
+            and analysis.search_parent_candidate_id
+            == comparison.selected_candidate_id
+            and (
+                certified_candidate_id is None
+                and analysis.outcome != "promoted"
+                and analysis.champion_candidate_id is None
+                or certified_candidate_id is not None
+                and analysis.outcome == "promoted"
+                and analysis.champion_candidate_id == certified_candidate_id
+                and analysis.incumbent_after_candidate_id
+                == certified_candidate_id
+                and isinstance(champion_row, Mapping)
+                and champion_row.get("certification_eligible") is True
+                and champion_row.get("primary_selection_gate") is True
+            )
+        )
+        if not valid_analysis or actual_approved is not expected_approved:
+            raise ValueError(
+                "runtime-v3 promotion differs from the strict-certification decision"
+            )
+        return
+
+    selected_is_finalist = any(
+        item.scope.candidate_id == comparison.selected_candidate_id
+        and item.scope.holdout_arm
+        in {HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2}
+        for item in comparison.holdout_evaluations
+    )
+    expected_approved = bool(
+        selected_is_finalist
+        and candidate.candidate_id == comparison.selected_candidate_id
+    )
+    if (promotion.decision is PromotionDecision.APPROVED) is not expected_approved:
+        raise ValueError(
+            "runtime-v2 promotion differs from the recorded generation champion"
+        )
+    if expected_approved:
+        champion_row = next(
+            (
+                row
+                for row in analysis.ranking
+                if row.get("candidate_id") == candidate.candidate_id
+            ),
+            None,
+        )
+        if (
+            analysis.outcome != "promoted"
+            or analysis.selected_candidate_id != candidate.candidate_id
+            or analysis.champion_candidate_id != candidate.candidate_id
+            or analysis.incumbent_after_candidate_id != candidate.candidate_id
+            or champion_row is None
+            or champion_row.get("primary_selection_gate") is not True
+        ):
+            raise ValueError(
+                "runtime-v2 approval is not bound to the generation analysis"
+            )
+
+
+def validate_generation_comparison_binding(
+    task: TaskManifest,
+    run_id: str,
+    holdout: GenerationHoldout,
+    formal: Any,
+    comparison: GenerationComparison,
+    *,
+    persisted_evaluations: Mapping[HoldoutArm, HoldoutEvaluation],
+) -> None:
+    """Bind a comparison to this run's exact durable evidence and Host gates."""
+
+    if holdout.run_id != run_id or comparison.run_id != run_id:
+        raise ValueError("generation comparison belongs to another run")
+    if (
+        comparison.generation != holdout.generation
+        or comparison.cohort_digest != holdout.cohort_digest
+    ):
+        raise ValueError("generation comparison holdout is missing")
+    embedded = {
+        item.scope.holdout_arm: item for item in comparison.holdout_evaluations
+    }
+    if set(embedded) != set(HoldoutArm) or set(persisted_evaluations) != set(
+        HoldoutArm
+    ):
+        raise ValueError("generation comparison requires all three holdout arms")
+    if any(
+        embedded[arm].to_dict() != persisted_evaluations[arm].to_dict()
+        for arm in HoldoutArm
+    ):
+        raise ValueError(
+            "generation comparison evaluations differ from durable holdout evidence"
+        )
+    validate_exploration_generation_comparison(task, formal, comparison)
+    if not uses_global_incumbent_protocol(task):
+        return
+
+    from ..evaluators.fitness import FitnessProfile
+    from ..evaluators.generation_comparison import build_generation_comparison
+
+    formal_payload = getattr(formal, "payload", formal)
+    exploration_only = bool(
+        isinstance(formal_payload, Mapping)
+        and formal_payload.get("exploration_only") is True
+    )
+    legacy_runtime_v2_shape = bool(
+        not uses_positive_delta_search_protocol(task)
+        and "selection_policy" not in comparison.gate_results
+    )
+    expected = build_generation_comparison(
+        run_id=run_id,
+        generation=comparison.generation,
+        cohort_digest=comparison.cohort_digest,
+        holdout_evaluations=comparison.holdout_evaluations,
+        incumbent_candidate_id=holdout.arm_bindings[
+            HoldoutArm.INCUMBENT.value
+        ]["candidate_id"],
+        fitness_profile=FitnessProfile.from_task(task),
+        challenger_promotion_allowed=not exploration_only,
+        positive_delta_search=uses_positive_delta_search_protocol(task),
+        legacy_runtime_v2_shape=legacy_runtime_v2_shape,
+    )
+    if comparison.identity_dict() != expected.identity_dict():
+        raise ValueError(
+            "generation comparison differs from deterministic Host comparison"
+        )
 
 
 def persisted_genome_from_proposal(proposal: Proposal):
@@ -2038,6 +2374,19 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 run = replace(run, status=RunStatus.COMPLETED)
         elif event.kind == "GenerationAdvanced":
             if run.status not in _TERMINAL_RUN_STATUSES:
+                next_generation = payload.get("generation")
+                if uses_global_incumbent_protocol(task) and (
+                    isinstance(next_generation, bool)
+                    or not isinstance(next_generation, int)
+                    or next_generation != run.generation + 1
+                    or run.generation not in generation_comparisons
+                    or run.generation not in effective_revision_bindings
+                    or run.generation not in champion_generations
+                ):
+                    raise ValueError(
+                        "runtime-v2 generation advance requires the sequential "
+                        "global incumbent decision"
+                    )
                 run = replace(run, generation=int(payload["generation"]))
         elif event.kind == "ProposalSubmitted":
             if is_dsh_native_protocol(task) and formal_stage_started:
@@ -2048,12 +2397,37 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 if genome is None:
                     raise ValueError("DSH-native proposal is missing its genome")
                 lineage = dict(genome.lineage)
-                if (
+                seed_control = (
+                    item.metadata.get("candidate_role")
+                    == CandidateRole.INCUMBENT_CONTROL.value
+                )
+                if seed_control:
+                    if materialized_seed_canonical is None:
+                        raise ValueError("seed incumbent cannot precede seed materialization")
+                    import json
+
+                    from ..evolution.genome import EcologyEvolutionPluginGenome
+
+                    seed = EcologyEvolutionPluginGenome.from_dict(
+                        json.loads(materialized_seed_canonical)
+                    )
+                    if (
+                        item.generation != 0
+                        or item.parent_candidate_id is not None
+                        or genome.genome_digest != seed.genome_digest
+                        or lineage["origin_kind"] != "seed_catalog"
+                        or lineage["generation"] is not None
+                        or lineage["slot_index"] is not None
+                    ):
+                        raise ValueError(
+                            "seed incumbent proposal does not match materialized seed"
+                        )
+                elif (
                     lineage["generation"] != item.generation
                     or lineage["parent_candidate_id"] != item.parent_candidate_id
                 ):
                     raise ValueError("proposal scope does not match genome lineage")
-                if item.generation == 0:
+                if item.generation == 0 and not seed_control:
                     if materialized_seed_canonical is None:
                         raise ValueError("proposal cannot precede seed materialization")
                     import json
@@ -2065,7 +2439,7 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     )
                     if lineage["parent_genome_digest"] != seed.genome_digest:
                         raise ValueError("first-generation proposal parent genome mismatch")
-                elif item.parent_candidate_id is None:
+                elif not seed_control and item.parent_candidate_id is None:
                     raise ValueError("later DSH-native proposal requires a parent candidate")
             proposals[item.proposal_id] = item
         elif event.kind == "CandidateSpawned":
@@ -2082,7 +2456,37 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 if genome is None:
                     raise ValueError("candidate proposal is missing its genome")
                 lineage = dict(genome.lineage)
-                if (
+                if item.role is CandidateRole.INCUMBENT_CONTROL:
+                    if materialized_seed_canonical is None:
+                        raise ValueError("incumbent control cannot precede seed")
+                    import json
+
+                    from ..evolution.genome import EcologyEvolutionPluginGenome
+
+                    seed = EcologyEvolutionPluginGenome.from_dict(
+                        json.loads(materialized_seed_canonical)
+                    )
+                    if (
+                        item.proposal_id
+                        != f"proposal:{run.run_id}:seed-incumbent-control"
+                        or item.candidate_id
+                        != f"candidate:{run.run_id}:seed-incumbent-control"
+                        or item.slot_index != 0
+                        or any(
+                            candidate.role is CandidateRole.INCUMBENT_CONTROL
+                            for candidate in candidates.values()
+                        )
+                        or
+                        proposal.metadata.get("candidate_role") != item.role.value
+                        or genome.genome_digest != seed.genome_digest
+                        or lineage["origin_kind"] != "seed_catalog"
+                        or lineage["generation"] is not None
+                        or lineage["slot_index"] is not None
+                    ):
+                        raise ValueError(
+                            "deterministic seed control does not match materialized seed"
+                        )
+                elif (
                     item.generation != lineage["generation"]
                     or item.slot_index != lineage["slot_index"]
                 ):
@@ -2134,6 +2538,7 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             generation_candidates = [
                 item for item in candidates.values()
                 if item.generation == planned.generation
+                and item.role is CandidateRole.SEARCH
             ]
             if run_adaptation_cohort is None:
                 raise ValueError("generation cohorts require run adaptation cohort")
@@ -2217,6 +2622,8 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 raise ValueError("screening candidate is missing")
             if candidate.generation != generation:
                 raise ValueError("screening generation does not match candidate")
+            if candidate.role is not CandidateRole.SEARCH:
+                raise ValueError("incumbent control cannot enter candidate screening")
             if (
                 task.metadata.get("optimization_protocol")
                 == OPTIMIZATION_PROTOCOL
@@ -2314,12 +2721,24 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             if payload.get("schema_version") not in {
                 FORMAL_SELECTION_SCHEMA_V1,
                 FORMAL_SELECTION_SCHEMA_V2,
-            } or set(payload) != {
+                FORMAL_SELECTION_SCHEMA_V3,
+            }:
+                raise ValueError("formal selection payload is invalid")
+            expected_formal_fields = {
                 "schema_version",
                 "generation",
                 "selected_candidate_ids",
                 "screening_digest",
-            }:
+            }
+            if payload.get("schema_version") == FORMAL_SELECTION_SCHEMA_V3:
+                expected_formal_fields.update(
+                    {
+                        "screening_pass_count",
+                        "exploration_only",
+                        "consecutive_exploration_generations",
+                    }
+                )
+            if set(payload) != expected_formal_fields:
                 raise ValueError("formal selection payload is invalid")
             generation = payload["generation"]
             selected = payload["selected_candidate_ids"]
@@ -2335,7 +2754,11 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 raise ValueError("formal selected candidate count is invalid")
             for candidate_id in selected:
                 candidate = candidates.get(candidate_id)
-                if candidate is None or candidate.generation != generation:
+                if (
+                    candidate is None
+                    or candidate.generation != generation
+                    or candidate.role is not CandidateRole.SEARCH
+                ):
                     raise ValueError("formal selected candidate is outside generation")
                 if (generation, candidate_id) not in candidate_screening_events:
                     raise ValueError("formal selection is missing screening evidence")
@@ -2356,6 +2779,39 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             ]
             if screening_digest != screening_cohort_digest(generation_records):
                 raise ValueError("formal screening digest does not match screening cohort")
+            if payload.get("schema_version") == FORMAL_SELECTION_SCHEMA_V3:
+                pass_count = sum(
+                    record.get("passed") is True for record in generation_records
+                )
+                exploration_only = pass_count == 0
+                consecutive = payload["consecutive_exploration_generations"]
+                expected_consecutive = 0
+                if exploration_only:
+                    expected_consecutive = 1
+                    expected_generation = generation - 1
+                    while expected_generation >= 0:
+                        prior = formal_selection_events.get(expected_generation)
+                        if (
+                            prior is None
+                            or prior.payload.get("schema_version")
+                            != FORMAL_SELECTION_SCHEMA_V3
+                            or prior.payload.get("exploration_only") is not True
+                        ):
+                            break
+                        expected_consecutive += 1
+                        expected_generation -= 1
+                supplied_pass_count = payload["screening_pass_count"]
+                if (
+                    isinstance(consecutive, bool)
+                    or not isinstance(consecutive, int)
+                    or consecutive < 0
+                    or isinstance(supplied_pass_count, bool)
+                    or not isinstance(supplied_pass_count, int)
+                    or supplied_pass_count != pass_count
+                    or payload["exploration_only"] is not exploration_only
+                    or consecutive != expected_consecutive
+                ):
+                    raise ValueError("formal exploration state is invalid")
             existing = formal_selection_events.get(generation)
             if existing is not None:
                 if canonical_json(existing.payload) != canonical_json(payload):
@@ -2477,6 +2933,16 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     raise ValueError("promotion evaluation digest mismatch")
                 if payload.get("artifact_digest") != artifact.digest:
                     raise ValueError("promotion artifact digest mismatch")
+                candidate = candidates.get(item.candidate_id)
+                if candidate is None:
+                    raise ValueError("promotion candidate is missing")
+                validate_runtime_promotion_decision(
+                    task,
+                    candidate,
+                    item,
+                    generation_comparisons.get(candidate.generation),
+                    generation_analyses.get(candidate.generation),
+                )
             existing = promotions.get(item.promotion_id)
             if existing is not None and existing.to_dict() != item.to_dict():
                 raise ValueError("promotion_id belongs to multiple candidates")
@@ -2564,6 +3030,15 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 else None
             ):
                 raise ValueError("generation search plan previous reflection mismatch")
+            if previous is not None and previous.replan_required:
+                prior_plan = generation_search_plans.get(item.generation - 1)
+                if prior_plan is not None and (
+                    item.search_queries == prior_plan.search_queries
+                    and item.focus_areas == prior_plan.focus_areas
+                ):
+                    raise ValueError(
+                        "required search replan must change queries or focus areas"
+                    )
             existing = generation_search_plans.get(item.generation)
             if existing is not None and existing.to_dict() != item.to_dict():
                 raise ValueError("generation has multiple search plans")
@@ -2572,6 +3047,33 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             if expected_seed_canonical is not None and materialized_seed_canonical is None:
                 raise ValueError("generation batch cannot precede seed materialization")
             item = GenerationBatch.from_dict(payload["batch"])
+            if (
+                item.run_id != run.run_id
+                or item.generation != run.generation
+                or item.task_manifest_digest != task.digest
+            ):
+                raise ValueError("generation batch scope differs from the active run")
+            frozen_interventions = []
+            expected_pending_intervention_ids = tuple(
+                intervention.intervention_id
+                for intervention in interventions.values()
+                if intervention.applied_proposal_id is None
+            )
+            if item.intervention_ids != expected_pending_intervention_ids:
+                raise ValueError(
+                    "generation batch intervention set differs from pending guidance"
+                )
+            for intervention_id in item.intervention_ids:
+                intervention = interventions.get(intervention_id)
+                if (
+                    intervention is None
+                    or intervention.run_id != run.run_id
+                    or intervention.applied_proposal_id is not None
+                ):
+                    raise ValueError(
+                        "generation batch intervention set is not pending and frozen"
+                    )
+                frozen_interventions.append(intervention)
             if is_dsh_native_protocol(task):
                 if item.parent_genome_canonical_json is None:
                     raise ValueError("DSH-native batch is missing its parent genome")
@@ -2586,19 +3088,94 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     parent_candidate = candidates.get(item.parent_candidate_id)
                     if parent_candidate is None:
                         raise ValueError("generation parent candidate is missing")
-                    parent_proposal = proposals.get(parent_candidate.proposal_id)
-                    if parent_proposal is None:
-                        raise ValueError("generation parent proposal is missing")
-                    parent_genome = persisted_genome_from_proposal(parent_proposal)
+                    parent_overrides = [
+                        intervention
+                        for intervention in frozen_interventions
+                        if intervention.kind is InterventionKind.PARENT_SELECTION
+                    ]
+                    parent_override = (
+                        parent_overrides[-1] if parent_overrides else None
+                    )
                     if (
-                        parent_genome is None
-                        or canonical_json(parent_genome.to_dict())
-                        != item.parent_genome_canonical_json
+                        parent_override is not None
+                        and parent_override.target_candidate_id
+                        != item.parent_candidate_id
                     ):
-                        raise ValueError("generation parent genome binding mismatch")
-            generation_batches[item.generation] = item
+                        raise ValueError(
+                            "generation parent differs from the frozen parent-selection "
+                            "intervention"
+                        )
+                    if (
+                        uses_global_incumbent_protocol(task)
+                        and parent_override is None
+                    ):
+                        prior_binding = effective_revision_bindings.get(
+                            item.generation - 1
+                        )
+                        prior_revision = (
+                            candidate_revisions.get(
+                                str(prior_binding.get("selected_revision_id"))
+                            )
+                            if isinstance(prior_binding, Mapping)
+                            else None
+                        )
+                        if (
+                            prior_revision is None
+                            or prior_binding.get("selected_candidate_id")
+                            != item.parent_candidate_id
+                            or prior_revision.candidate_id
+                            != item.parent_candidate_id
+                            or prior_revision.genome_digest
+                            != item.parent_genome_digest
+                            or canonical_json(prior_revision.identity_dict()["genome"])
+                            != item.parent_genome_canonical_json
+                        ):
+                            raise ValueError(
+                                "runtime generation parent differs from the prior "
+                                "effective revision"
+                            )
+                    else:
+                        parent_proposal = proposals.get(parent_candidate.proposal_id)
+                        if parent_proposal is None:
+                            raise ValueError("generation parent proposal is missing")
+                        parent_genome = persisted_genome_from_proposal(parent_proposal)
+                        if (
+                            parent_genome is None
+                            or canonical_json(parent_genome.to_dict())
+                            != item.parent_genome_canonical_json
+                        ):
+                            raise ValueError("generation parent genome binding mismatch")
+            existing_batch = generation_batches.get(item.generation)
+            if existing_batch is not None and existing_batch.to_dict() != item.to_dict():
+                raise ValueError("generation has multiple conflicting batches")
+            generation_batches.setdefault(item.generation, item)
         elif event.kind == "GenerationAnalyzed":
             item = GenerationAnalysis.from_dict(payload["analysis"])
+            if item.run_id != run.run_id:
+                raise ValueError("generation analysis belongs to another run")
+            formal = formal_selection_events.get(item.generation)
+            formal_payload = getattr(formal, "payload", {})
+            if (
+                isinstance(formal_payload, Mapping)
+                and formal_payload.get("schema_version")
+                == FORMAL_SELECTION_SCHEMA_V3
+            ):
+                exploration_only = formal_payload.get("exploration_only") is True
+                consecutive = int(
+                    formal_payload.get("consecutive_exploration_generations") or 0
+                )
+                if (
+                    item.consecutive_exploration_generations
+                    != (consecutive if exploration_only else 0)
+                    or item.replan_required
+                    is not (exploration_only and consecutive >= 2)
+                ):
+                    raise ValueError(
+                        "generation analysis exploration replan state is invalid"
+                    )
+            existing = generation_analyses.get(item.generation)
+            if existing is not None and existing.to_dict() != item.to_dict():
+                raise ValueError("generation has multiple analyses")
             generation_analyses[item.generation] = item
         elif event.kind == "GenerationReflected":
             reflection_payload = payload["reflection"]
@@ -3123,6 +3700,21 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 or candidate.generation != revision.generation
             ):
                 raise ValueError("candidate revision ownership is invalid")
+            if (
+                candidate.role is CandidateRole.INCUMBENT_CONTROL
+                and is_dsh_native_protocol(task)
+                and (
+                candidate.candidate_id
+                != f"candidate:{run.run_id}:seed-incumbent-control"
+                or revision.revision_id
+                != f"revision:{candidate.candidate_id}:r0"
+                or revision.parent_revision_id is not None
+                or revision.source_batch_index is not None
+                )
+            ):
+                raise ValueError(
+                    "incumbent control must use the deterministic seed control R0"
+                )
             existing = candidate_revisions.get(revision.revision_id)
             if existing is not None and existing.to_dict() != revision.to_dict():
                 raise ValueError("conflicting candidate revision")
@@ -3395,6 +3987,14 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                 comparison,
                 champion_evaluation,
                 challenger_evaluation,
+                minimum_score_delta=(
+                    POSITIVE_DELTA_MINIMUM_SCORE_DELTA
+                    if uses_positive_delta_search_protocol(task)
+                    else LOCAL_MINIMUM_SCORE_DELTA
+                ),
+                cell_regression_blocks=not uses_positive_delta_search_protocol(
+                    task
+                ),
             )
             existing = formal_batch_comparisons.get(key)
             if existing is not None and existing.to_dict() != comparison.to_dict():
@@ -3864,6 +4464,8 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             if set(payload) != {"holdout"}:
                 raise ValueError("GenerationHoldoutFrozen payload is invalid")
             holdout = GenerationHoldout.from_dict(payload["holdout"])
+            if holdout.run_id != run.run_id:
+                raise ValueError("generation holdout belongs to another run")
             completed = [
                 item
                 for item in formal_trajectories.values()
@@ -3901,6 +4503,28 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
                     raise ValueError(
                         "holdout finalist arm must bind trajectory final revision"
                     )
+            validate_generation_zero_incumbent_binding(
+                task,
+                holdout.generation,
+                holdout.arm_bindings,
+                candidates=candidates,
+                revisions=candidate_revisions,
+                materialized_seed_canonical=materialized_seed_canonical,
+                prior_effective_revision_id=(
+                    str(
+                        effective_revision_bindings[holdout.generation - 1][
+                            "selected_revision_id"
+                        ]
+                    )
+                    if holdout.generation > 0
+                    and holdout.generation - 1 in effective_revision_bindings
+                    else None
+                ),
+                prior_champion_selected=(
+                    holdout.generation == 0
+                    or holdout.generation - 1 in champion_generations
+                ),
+            )
             existing = generation_holdouts.get(holdout.generation)
             if existing is not None and existing.to_dict() != holdout.to_dict():
                 raise ValueError("conflicting generation holdout")
@@ -3974,15 +4598,23 @@ def project_run_state(events: tuple[Event, ...]) -> RunState:
             if holdout is None or holdout.cohort_digest != comparison.cohort_digest:
                 raise ValueError("generation comparison holdout is missing")
             persisted = {
-                holdout_evaluations.get((comparison.generation, arm)).evaluation_id
-                if holdout_evaluations.get((comparison.generation, arm)) is not None
-                else None
+                arm: holdout_evaluations.get((comparison.generation, arm))
                 for arm in HoldoutArm
             }
-            if persisted != {
-                item.evaluation_id for item in comparison.holdout_evaluations
-            }:
+            if any(item is None for item in persisted.values()):
                 raise ValueError("generation comparison requires all three holdout arms")
+            validate_generation_comparison_binding(
+                task,
+                run.run_id,
+                holdout,
+                formal_selection_events.get(comparison.generation),
+                comparison,
+                persisted_evaluations={
+                    arm: item
+                    for arm, item in persisted.items()
+                    if item is not None
+                },
+            )
             existing = generation_comparisons.get(comparison.generation)
             if existing is not None and existing.to_dict() != comparison.to_dict():
                 raise ValueError("conflicting generation comparison")

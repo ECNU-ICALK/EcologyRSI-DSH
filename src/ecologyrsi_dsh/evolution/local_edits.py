@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from ..core.models import canonical_json, digest
+from ..core.redaction import redact_sensitive_text
 from ..core.trajectory import LocalEditOutcome, LocalEditProposalDecision
 from .genome import (
     LOCAL_EDIT_MUTATION_OPERATOR_ID,
@@ -172,6 +173,7 @@ class LocalEditResult:
     operations: tuple[Mapping[str, Any], ...]
     child: EcologyEvolutionPluginGenome | None
     proposal_digest: str
+    rejection_reason: str | None = None
 
 
 def _operation_target(operation: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -334,7 +336,7 @@ def apply_or_reject_local_edit_bundle(
         raise ValueError("local edit parent genome digest mismatch")
     try:
         return apply_local_edit_bundle(parent, proposal, context, registry)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
         proposal_data = (
             proposal.to_dict()
             if isinstance(proposal, LocalEditProposal)
@@ -353,6 +355,13 @@ def apply_or_reject_local_edit_bundle(
             operations=operations,
             child=None,
             proposal_digest=digest(proposal_data),
+            rejection_reason=(
+                "proposal_host_validation_failed: "
+                + redact_sensitive_text(
+                    " ".join(str(exc).split()),
+                    limit=240,
+                )
+            ),
         )
 
 

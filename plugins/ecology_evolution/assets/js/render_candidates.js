@@ -521,7 +521,30 @@
     }
     return null;
   }
+  function candidateVersionOutcome(candidate) {
+    if (candidate && candidate.certification_selected === true) { return { text: "稳健认证版本", className: "pill-green" }; }
+    if (candidate && candidate.search_version_selected === true) { return { text: "下一轮搜索版本（未认证）", className: "pill-blue" }; }
+    if (candidate && candidate.generation_certification_selected === true) { return { text: "历史稳健认证版本", className: "pill-neutral" }; }
+    if (candidate && candidate.generation_search_selected === true) { return { text: "历史搜索版本", className: "pill-neutral" }; }
+    if (candidate && candidate.certification_eligible === true) { return { text: "认证候选（未选中）", className: "pill-amber" }; }
+    return null;
+  }
+  function candidateSelectionDispositionText(value) {
+    return {
+      incumbent: "当前基线（实际保留）",
+      search_parent: "下一轮搜索父方案",
+      promoted_historical: "历史已批准版本",
+      evaluated_not_selected: "已评测，未选中",
+      pending: "等待评测",
+      failed: "执行失败",
+      rejected: "未通过门禁",
+      duplicate: "重复候选",
+      screened_out: "初筛淘汰"
+    }[String(value || "").toLowerCase()] || "角色未记录";
+  }
   function candidateOutcome(candidate, run) {
+    var versionOutcome = candidateVersionOutcome(candidate);
+    if (versionOutcome) { return versionOutcome; }
     if (run && run.best_candidate_id && candidate.id === run.best_candidate_id) { return { text: "当前保留", className: "pill-green" }; }
     if (run && run.best_observed_candidate_id && candidate.id === run.best_observed_candidate_id) { return { text: "原始最高观测", className: "pill-blue" }; }
     if (String(candidate.status || "").toLowerCase() === "failed") { return { text: "执行失败", className: "pill-red" }; }
@@ -578,7 +601,26 @@
     var retainedScoreText = retainedScore == null ? "—" : formatNumber(retainedScore, 3);
     var observedScoreText = rawObservedScore == null ? "—" : formatNumber(rawObservedScore, 3);
     var roundText = rounds.length ? formatNumber(rounds.length) + " 轮" : "尚未开始";
-    var summary = [
+    var evidence = run && run.evolution_evidence && typeof run.evolution_evidence === "object" ? run.evolution_evidence : {};
+    var positiveDeltaV3 = String(evidence.protocol_scope || "") === "positive_delta_search_v3";
+    var searchVersionEvidence = positiveDeltaV3 && evidence.search_version && typeof evidence.search_version === "object" ? evidence.search_version : null;
+    var certifiedVersionEvidence = positiveDeltaV3 && evidence.certified_version && typeof evidence.certified_version === "object" ? evidence.certified_version : null;
+    var searchVersion = searchVersionEvidence ? values.find(function (candidate) { return candidate.id === searchVersionEvidence.candidate_id; }) : null;
+    var certifiedVersion = certifiedVersionEvidence ? values.find(function (candidate) { return candidate.id === certifiedVersionEvidence.candidate_id; }) : null;
+    var searchIsInitialSeed = Boolean(searchVersionEvidence && searchVersionEvidence.is_initial_seed);
+    var searchVersionId = searchVersion ? searchVersion.id : searchVersionEvidence && searchVersionEvidence.candidate_id;
+    var certifiedVersionId = certifiedVersion ? certifiedVersion.id : certifiedVersionEvidence && certifiedVersionEvidence.candidate_id;
+    var searchVersionScore = searchVersion && candidateScoreValue(searchVersion) != null
+      ? candidateScoreValue(searchVersion)
+      : searchVersionEvidence && searchVersionEvidence.absolute_score != null
+      ? Number(searchVersionEvidence.absolute_score)
+      : null;
+    var summary = positiveDeltaV3 ? [
+      candidateSummaryCard("下一轮搜索版本", searchIsInitialSeed ? "初始种子基线" : searchVersionId ? candidateListId(searchVersionId) : "尚未产生", searchIsInitialSeed ? candidateListId(searchVersionId) + " · 运行开始时已冻结" : searchVersion ? (searchVersion.certification_selected ? "同时通过稳健认证" : "正增益，尚未通过稳健认证") : "等待同留出集正增益", searchVersionId ? "is-winner" : "is-pending"),
+      candidateSummaryCard("稳健认证版本", certifiedVersionId ? candidateListId(certifiedVersionId) : "尚未产生", certifiedVersionId ? "已通过严格认证门禁" : "当前搜索版本不等于已认证", certifiedVersionId ? "is-winner" : "is-pending"),
+      candidateSummaryCard("搜索版本得分", Number.isFinite(searchVersionScore) ? formatNumber(searchVersionScore, 3) : "—", searchIsInitialSeed ? "等待首轮同批 holdout" : "本代冻结 holdout 得分", searchVersionId ? "has-value" : "is-pending"),
+      candidateSummaryCard("评测进度", formatNumber(evaluated.length) + " / " + formatNumber(values.length), pending.length ? formatNumber(pending.length) + " 个等待反馈" : roundText, pending.length ? "is-pending" : "has-value")
+    ] : [
       candidateSummaryCard("当前保留", retained ? shortId(retained.id) : "尚未产生", retained ? "训练反馈搜索保留" : "正式验证未开展", retained ? "is-winner" : "is-pending"),
       candidateSummaryCard("当前保留得分", retainedScoreText, retainedScore == null ? "尚未记录晋升得分" : "实际晋升序列", retainedScore != null ? "has-value" : "is-pending"),
       candidateSummaryCard("原始最高观测（跨窗口不可直接比较）", observedScoreText, observed ? shortId(observed.id) : "暂无已完成评测", rawObservedScore != null ? "has-value" : "is-pending"),
@@ -815,7 +857,7 @@
     var sampleCount = candidateMetricValue(candidate, "n");
     var constraints = candidateMetricValue(candidate, "constraint_violations");
     var outcome = candidateOutcome(candidate, run);
-    var statusClass = candidateStatusClass(candidate.status);
+    var statusClass = outcome.className;
     var scoreClass = score == null ? "is-pending" : score >= 0 ? "is-positive" : "is-negative";
     var keyMetricKeys = ["score", "skill_score", "improvement", "rmse", "normalized_rmse", "n", "constraint_violations", "water_balance_error"];
     var judgeCompleted = String(candidateMetrics.judge_status || "").toLowerCase() === "completed";
@@ -842,7 +884,7 @@
       "<section class=\"detail-section candidate-section\"><div class=\"candidate-section-heading\"><h3>分目标表现</h3><span>每个目标单独计算，避免单位混淆</span></div><div class=\"target-results\">" + renderCandidateTargets(targets) + "</div></section>",
       "<details class=\"detail-section candidate-evidence\"><summary>查看预测效果预览 <span>" + escapeHTML(predictionRows.length ? formatNumber(predictionRows.length) + " 条记录" : "暂无记录") + "</span></summary>" + predictionTable + "</details>",
       secondaryMetrics.length ? "<details class=\"detail-section candidate-evidence candidate-metrics-evidence\"><summary>查看全部训练反馈指标 <span>" + escapeHTML(formatNumber(secondaryMetrics.length)) + " 项</span></summary><div class=\"detail-grid\">" + secondaryMetrics.map(function (key) { return "<div class=\"detail-value\"><span>" + escapeHTML(metricLabel(key)) + "</span><strong title=\"" + escapeHTML(String(candidateMetrics[key])) + "\">" + escapeHTML(metricValue(key, candidateMetrics[key])) + "</strong></div>"; }).join("") + "</div></details>" : "",
-      "<section class=\"detail-section candidate-section candidate-decision-section\"><div class=\"candidate-section-heading\"><h3>轮末结论</h3><span>训练反馈搜索范围内</span></div><div class=\"candidate-decision-grid\"><div class=\"detail-value\"><span>选择结果</span><strong><span class=\"pill " + outcome.className + "\">" + escapeHTML(gateText(promotion.decision || candidate.status)) + "</span></strong></div><div class=\"detail-value\"><span>选择依据</span><strong title=\"" + escapeHTML(decisionReason) + "\">" + escapeHTML(compactTechnicalText(selectionReasonText(decisionReason || candidate.selection_reason))) + "</strong></div><div class=\"detail-value\"><span>正式验证</span><strong>未开展</strong></div></div></section>",
+      "<section class=\"detail-section candidate-section candidate-decision-section\"><div class=\"candidate-section-heading\"><h3>轮末结论</h3><span>训练反馈搜索范围内</span></div><div class=\"candidate-decision-grid\"><div class=\"detail-value\"><span>选择结果</span><strong><span class=\"pill " + outcome.className + "\">" + escapeHTML(outcome.text) + "</span></strong></div><div class=\"detail-value\"><span>版本角色</span><strong>" + escapeHTML(candidateSelectionDispositionText(candidate.selection_disposition)) + "</strong></div><div class=\"detail-value\"><span>选择依据</span><strong title=\"" + escapeHTML(decisionReason) + "\">" + escapeHTML(compactTechnicalText(selectionReasonText(decisionReason || candidate.selection_reason))) + "</strong></div><div class=\"detail-value\"><span>正式验证</span><strong>" + escapeHTML(candidate.certification_selected ? "已通过稳健认证" : "尚未通过") + "</strong></div></div></section>",
       "<details class=\"detail-section candidate-evidence candidate-rationale\"><summary>查看生成依据 <span>模型提案与知识依据</span></summary><p title=\"" + escapeHTML(candidate.rationale || "") + "\">" + escapeHTML(rationale) + "</p></details>",
       "<details class=\"detail-section candidate-evidence\"><summary>查看训练产物与可复现信息</summary>" + artifactSection + "</details>"
     ].filter(Boolean);
@@ -854,11 +896,17 @@
     var candidates = run ? run.candidates : [];
     syncCandidateSelection(run);
     var body = $("#candidate-table");
-    var acceptableText = run && run.best_candidate_id ? "训练反馈搜索保留候选：" + shortId(run.best_candidate_id) + "（正式验证未开展）" : "训练反馈搜索保留候选：尚未产生（正式验证未开展）";
+    var evidence = run && run.evolution_evidence && typeof run.evolution_evidence === "object" ? run.evolution_evidence : {};
+    var positiveDeltaV3 = String(evidence.protocol_scope || "") === "positive_delta_search_v3";
+    var searchVersionId = positiveDeltaV3 && evidence.search_version ? evidence.search_version.candidate_id : null;
+    var certifiedVersionId = positiveDeltaV3 && evidence.certified_version ? evidence.certified_version.candidate_id : null;
+    var acceptableText = positiveDeltaV3
+      ? "下一轮搜索版本：" + (searchVersionId ? shortId(searchVersionId) : "尚未产生") + "；稳健认证版本：" + (certifiedVersionId ? shortId(certifiedVersionId) : "尚未产生")
+      : run && run.best_candidate_id ? "训练反馈搜索保留候选：" + shortId(run.best_candidate_id) + "（正式验证未开展）" : "训练反馈搜索保留候选：尚未产生（正式验证未开展）";
     var observedText = rawBestObservedSummary(run);
-    if (run && runOutcomeCode(run) === "budget_exhausted_without_acceptable_candidate") { acceptableText = "已完成预设进化规模，尚无候选通过全部评测门控（正式验证未开展）"; }
+    if (!positiveDeltaV3 && run && runOutcomeCode(run) === "budget_exhausted_without_acceptable_candidate") { acceptableText = "已完成预设进化规模，尚无候选通过全部评测门控（正式验证未开展）"; }
     $("#best-candidate-label").textContent = acceptableText + "；" + observedText;
-    $("#best-candidate-label").title = run ? [run.best_candidate_id, run.best_observed_candidate_id].filter(Boolean).join("\n") : "";
+    $("#best-candidate-label").title = run ? [searchVersionId, certifiedVersionId, run.best_candidate_id, run.best_observed_candidate_id].filter(Boolean).join("\n") : "";
     $("#export-button").disabled = state.busy || !run;
     updateCandidateOverview(run, candidates);
     if (!candidates.length) { body.innerHTML = "<tr><td colspan=\"11\" class=\"empty-state\">暂无候选方案。</td></tr>"; renderCandidateDetail(null); renderCandidateSamples(); return; }
@@ -870,11 +918,12 @@
       var judge = candidateJudgeDescriptor(candidate, run);
       var constraints = candidateFiniteNumber(metrics.constraint_violations);
       var outcome = candidateOutcome(candidate, run);
+      var displayStatus = candidateVersionOutcome(candidate) || { text: candidateStatusText(candidate.status), className: candidateStatusClass(candidate.status) };
       var selected = candidate.id === state.selectedCandidateId;
       var winner = run && run.best_candidate_id === candidate.id;
       var scoreText = score == null ? "待评测" : formatNumber(score, 3);
       var deltaText = delta.value == null ? "—" : signedNumber(delta.value, 3);
-      return "<tr class=\"candidate-row " + (selected ? "is-selected " : "") + (winner ? "is-winner " : "") + "\" data-candidate-state=\"" + escapeHTML(String(candidate.status || "pending")) + "\"><td data-label=\"候选编号\"><button class=\"candidate-select-button candidate-select-button--rich\" type=\"button\" data-candidate-id=\"" + escapeHTML(candidate.id) + "\" aria-pressed=\"" + String(selected) + "\" aria-label=\"查看候选方案 " + escapeHTML(candidate.id) + "\" title=\"" + escapeHTML(candidate.id) + "\"><span class=\"candidate-identity\"><strong>" + escapeHTML(candidateListId(candidate.id)) + "</strong><small>" + escapeHTML(winner ? "当前保留" : outcome.text) + "</small></span></button></td><td data-label=\"进化轮次\"><span class=\"candidate-round-cell\"><strong>第 " + escapeHTML(candidate.generation || "—") + " 轮</strong><small>槽位 " + escapeHTML(Number(candidate.slot_index || 0) + 1) + "</small></span></td><td data-label=\"轮内槽位\"><span class=\"candidate-slot-badge\">" + escapeHTML(Number(candidate.slot_index || 0) + 1) + "</span></td><td data-label=\"父方案\" title=\"" + escapeHTML(candidate.parent_id || "") + "\"><span class=\"candidate-parent-cell\">" + escapeHTML(shortId(candidate.parent_id || "基线")) + "</span></td><td data-label=\"轮内排名\"><span class=\"candidate-rank-badge\">" + escapeHTML(candidate.generation_rank == null ? "—" : candidate.generation_rank) + "</span></td><td data-label=\"状态\"><span class=\"pill " + candidateStatusClass(candidate.status) + "\">" + escapeHTML(candidateStatusText(candidate.status)) + "</span></td><td data-label=\"科学门禁\"><span class=\"pill " + scientific.className + "\">" + escapeHTML(scientific.text) + "</span></td><td data-label=\"独立评审\"><span class=\"pill " + judge.className + "\">" + escapeHTML(judge.text) + "</span></td><td data-label=\"约束违规\"><span class=\"candidate-constraint-value " + (constraints != null && constraints > 0 ? "is-warning" : "") + "\">" + escapeHTML(constraints == null ? "待评测" : formatNumber(constraints)) + "</span></td><td data-label=\"综合得分\"><span class=\"candidate-score-cell " + (score == null ? "is-pending" : "") + "\"><strong>" + escapeHTML(scoreText) + "</strong><small>" + escapeHTML(delta.label) + " " + escapeHTML(deltaText) + "</small></span></td><td data-label=\"选择结论\" title=\"" + escapeHTML(selectionReasonText(candidate.selection_reason)) + "\"><span class=\"candidate-decision-cell\"><strong class=\"pill " + outcome.className + "\">" + escapeHTML(outcome.text) + "</strong><small>" + escapeHTML(compactTechnicalText(selectionReasonText(candidate.selection_reason))) + "</small></span></td></tr>";
+      return "<tr class=\"candidate-row " + (selected ? "is-selected " : "") + (winner ? "is-winner " : "") + "\" data-candidate-state=\"" + escapeHTML(String(candidate.status || "pending")) + "\"><td data-label=\"候选编号\"><button class=\"candidate-select-button candidate-select-button--rich\" type=\"button\" data-candidate-id=\"" + escapeHTML(candidate.id) + "\" aria-pressed=\"" + String(selected) + "\" aria-label=\"查看候选方案 " + escapeHTML(candidate.id) + "\" title=\"" + escapeHTML(candidate.id) + "\"><span class=\"candidate-identity\"><strong>" + escapeHTML(candidateListId(candidate.id)) + "</strong><small>" + escapeHTML(outcome.text) + "</small></span></button></td><td data-label=\"进化轮次\"><span class=\"candidate-round-cell\"><strong>第 " + escapeHTML(candidate.generation || "—") + " 轮</strong><small>槽位 " + escapeHTML(Number(candidate.slot_index || 0) + 1) + "</small></span></td><td data-label=\"轮内槽位\"><span class=\"candidate-slot-badge\">" + escapeHTML(Number(candidate.slot_index || 0) + 1) + "</span></td><td data-label=\"父方案\" title=\"" + escapeHTML(candidate.parent_id || "") + "\"><span class=\"candidate-parent-cell\">" + escapeHTML(shortId(candidate.parent_id || "基线")) + "</span></td><td data-label=\"轮内排名\"><span class=\"candidate-rank-badge\">" + escapeHTML(candidate.generation_rank == null ? "—" : candidate.generation_rank) + "</span></td><td data-label=\"状态\"><span class=\"pill " + displayStatus.className + "\">" + escapeHTML(displayStatus.text) + "</span></td><td data-label=\"科学门禁\"><span class=\"pill " + scientific.className + "\">" + escapeHTML(scientific.text) + "</span></td><td data-label=\"独立评审\"><span class=\"pill " + judge.className + "\">" + escapeHTML(judge.text) + "</span></td><td data-label=\"约束违规\"><span class=\"candidate-constraint-value " + (constraints != null && constraints > 0 ? "is-warning" : "") + "\">" + escapeHTML(constraints == null ? "待评测" : formatNumber(constraints)) + "</span></td><td data-label=\"综合得分\"><span class=\"candidate-score-cell " + (score == null ? "is-pending" : "") + "\"><strong>" + escapeHTML(scoreText) + "</strong><small>" + escapeHTML(delta.label) + " " + escapeHTML(deltaText) + "</small></span></td><td data-label=\"选择结论\" title=\"" + escapeHTML(selectionReasonText(candidate.selection_reason)) + "\"><span class=\"candidate-decision-cell\"><strong class=\"pill " + outcome.className + "\">" + escapeHTML(outcome.text) + "</strong><small>" + escapeHTML(compactTechnicalText(selectionReasonText(candidate.selection_reason))) + "</small></span></td></tr>";
     }).join("");
     renderCandidateDetail(candidates.find(function (candidate) { return candidate.id === state.selectedCandidateId; }), run, candidates);
     renderCandidateSamples();

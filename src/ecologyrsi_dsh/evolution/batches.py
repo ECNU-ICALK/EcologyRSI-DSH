@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import Any
 
 from ..core.models import (
+    CandidateRole,
     CandidateStatus,
     ExpertConsultation,
     InterventionKind,
@@ -20,7 +21,10 @@ from ..core.models import (
 from ..core.redaction import public_error_summary
 from .workflow_ir import DEFAULT_COMPILER_SEMANTIC_DIGEST
 from ..knowledge.algorithms import AlgorithmCompileError, resolve_predictor_adoption
-from ..knowledge.research_iteration import ResearchIteration
+from ..knowledge.research_iteration import (
+    ResearchIteration,
+    build_deterministic_research_fallback_plan,
+)
 from ..knowledge.autonomous_cycle import (
     AUTONOMOUS_RESEARCH_PROTOCOL,
     GenerationReflection,
@@ -307,6 +311,30 @@ def _next_stage_attempt(state: Any, stage: str) -> int:
     return max(attempts, default=0) + 1
 
 
+def _validate_required_search_replan(
+    state: Any,
+    search_plan: GenerationSearchPlan,
+) -> None:
+    """Require a machine-visible direction change after repeated exploration."""
+
+    generation = state.run.generation
+    if generation < 1:
+        return
+    previous = state.analysis_for(generation - 1)
+    if previous is None or getattr(previous, "replan_required", False) is not True:
+        return
+    if search_plan.source_analysis_digest != previous.analysis_digest:
+        raise ValueError("required search replan must bind the triggering analysis")
+    prior_plan = state.search_plan_for(generation - 1)
+    if prior_plan is not None and (
+        search_plan.search_queries == prior_plan.search_queries
+        and search_plan.focus_areas == prior_plan.focus_areas
+    ):
+        raise ValueError(
+            "required search replan must change queries or focus areas"
+        )
+
+
 def _ensure_generation_search_plan(
     director: Any,
     state: Any,
@@ -319,6 +347,7 @@ def _ensure_generation_search_plan(
         return None
     existing = state.search_plan_for(state.run.generation)
     if existing is not None:
+        _validate_required_search_replan(state, existing)
         return existing
     planner = getattr(director.dsh, "plan_generation_search", None)
     if not callable(planner):
@@ -361,6 +390,7 @@ def _ensure_generation_search_plan(
         )
         if not isinstance(search_plan, GenerationSearchPlan):
             raise TypeError("generation search planner must return GenerationSearchPlan")
+        _validate_required_search_replan(state, search_plan)
         recorded = director.record_generation_search_plan(search_plan)
     except Exception:
         director.record_evolution_stage(
@@ -400,6 +430,15 @@ def _latest_research_plan(state: Any, generation: int) -> dict[str, Any]:
         return dict(previous_proposals[0].metadata["plan"])
     frozen = state.task_manifest.metadata.get("autonomous_plan")
     return dict(frozen) if isinstance(frozen, Mapping) else {}
+
+
+def _research_contract_fallback_enabled(state: Any) -> bool:
+    runtime = state.task_manifest.metadata.get("host_runtime_build")
+    return bool(
+        isinstance(runtime, Mapping)
+        and runtime.get("evolution_runtime_schema")
+        == "ecologyrsi-dsh.evolution-runtime/3"
+    )
 
 
 def _historical_experience_states(director: Any, state: Any) -> tuple[Any, ...]:
@@ -489,6 +528,9 @@ def _ensure_generation_research_iteration(
         else None
     )
     current_plan = _latest_research_plan(state, generation)
+    previous_reflection = (
+        state.reflection_for(generation - 1) if generation > 0 else None
+    )
     history_cutoff_seq = (
         state.events[0].seq
         if state.events and state.events[0].kind == "RunCreated"
@@ -504,6 +546,35 @@ def _ensure_generation_research_iteration(
     visible_pending_ids: tuple[str, ...] = ()
     consumed_answer_ids: tuple[str, ...] = ()
     expert_consultation: ExpertConsultation | None = None
+
+    def fallback_result(validation_detail: str) -> dict[str, Any]:
+        nonlocal model_id, visible_pending_ids, consumed_answer_ids
+        nonlocal expert_consultation
+        model_id = None
+        visible_pending_ids = ()
+        consumed_answer_ids = ()
+        expert_consultation = None
+        return {
+            "status": "host_fallback",
+            "model_id": None,
+            "plan": build_deterministic_research_fallback_plan(
+                current_plan=current_plan,
+                validation_detail=validation_detail,
+                source_analysis_digest=(
+                    previous.analysis_digest if previous is not None else None
+                ),
+                source_reflection_digest=(
+                    previous_reflection.reflection_digest
+                    if previous_reflection is not None
+                    else None
+                ),
+                search_plan_digest=(
+                    search_plan.search_plan_digest
+                    if search_plan is not None
+                    else None
+                ),
+            ),
+        }
 
     def record_research_failure(public_error: str) -> None:
         if research_attempt is None:
@@ -568,9 +639,8 @@ def _ensure_generation_research_iteration(
                         search_plan.to_dict() if search_plan is not None else None
                     ),
                     "previous_generation_reflection": (
-                        state.reflection_for(generation - 1).to_dict()
-                        if generation > 0
-                        and state.reflection_for(generation - 1) is not None
+                        previous_reflection.to_dict()
+                        if previous_reflection is not None
                         else None
                     ),
                 }
@@ -597,10 +667,13 @@ def _ensure_generation_research_iteration(
                 record_research_failure(
                     "远程研究计划响应未通过宿主契约校验。"
                 )
-                raise ResearchResponseContractError(
-                    "research response failed host contract validation",
-                    validation_detail=str(exc),
-                ) from exc
+                if _research_contract_fallback_enabled(state):
+                    raw_result = fallback_result(str(exc))
+                else:
+                    raise ResearchResponseContractError(
+                        "research response failed host contract validation",
+                        validation_detail=str(exc),
+                    ) from exc
             except Exception:
                 record_research_failure(
                     "远程研究计划请求失败；运行将按既定重试与失败策略处理。"
@@ -630,25 +703,42 @@ def _ensure_generation_research_iteration(
                 record_research_failure(
                     "远程研究计划响应未通过宿主契约校验。"
                 )
-                raise ResearchResponseContractError(
-                    "research response failed host contract validation",
-                    validation_detail=str(exc),
-                ) from exc
+                if _research_contract_fallback_enabled(state):
+                    fallback = fallback_result(str(exc))
+                    plan = dict(fallback["plan"])
+                    status = "host_fallback"
+                else:
+                    raise ResearchResponseContractError(
+                        "research response failed host contract validation",
+                        validation_detail=str(exc),
+                    ) from exc
         else:
             plan = current_plan
             status = "host_fallback"
 
     try:
         adoption = resolve_predictor_adoption(state.task_manifest, plan)
-    except AlgorithmCompileError:
+    except AlgorithmCompileError as exc:
         record_research_failure("宿主冻结的预测器配置未通过校验。")
-        raise
+        if _research_contract_fallback_enabled(state):
+            fallback = fallback_result(str(exc))
+            plan = dict(fallback["plan"])
+            status = "host_fallback"
+            adoption = resolve_predictor_adoption(state.task_manifest, plan)
+        else:
+            raise
     except (TypeError, ValueError) as exc:
         record_research_failure("远程研究计划响应未通过宿主契约校验。")
-        raise ResearchResponseContractError(
-            "research response failed host contract validation",
-            validation_detail=str(exc),
-        ) from exc
+        if _research_contract_fallback_enabled(state):
+            fallback = fallback_result(str(exc))
+            plan = dict(fallback["plan"])
+            status = "host_fallback"
+            adoption = resolve_predictor_adoption(state.task_manifest, plan)
+        else:
+            raise ResearchResponseContractError(
+                "research response failed host contract validation",
+                validation_detail=str(exc),
+            ) from exc
     except Exception:
         record_research_failure("研究计划的宿主解析过程失败。")
         raise
@@ -668,10 +758,24 @@ def _ensure_generation_research_iteration(
         )
     except (TypeError, ValueError) as exc:
         record_research_failure("远程研究计划响应未通过宿主契约校验。")
-        raise ResearchResponseContractError(
-            "research response failed host contract validation",
-            validation_detail=str(exc),
-        ) from exc
+        if not _research_contract_fallback_enabled(state):
+            raise ResearchResponseContractError(
+                "research response failed host contract validation",
+                validation_detail=str(exc),
+            ) from exc
+        fallback = fallback_result(str(exc))
+        plan = dict(fallback["plan"])
+        status = "host_fallback"
+        adoption = resolve_predictor_adoption(state.task_manifest, plan)
+        response_contract = ResearchIteration(
+            run_id="research-response-contract",
+            generation=0,
+            status=status,
+            plan=plan,
+            prediction_model_adoption=adoption.to_dict(),
+            knowledge_snapshot_digest="research-response-contract",
+            model_id=None,
+        )
 
     try:
         iteration = ResearchIteration(
@@ -741,10 +845,16 @@ def start_generation_batch(director: Any, run_id: str) -> GenerationBatch:
             search_plan=search_plan,
         )
         return existing
-    current_count = sum(
-        item.generation == state.run.generation for item in state.candidates
+    search_candidates = tuple(
+        item
+        for item in state.candidates
+        if getattr(item, "role", CandidateRole.SEARCH)
+        in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
     )
-    remaining = state.task_manifest.max_candidates - len(state.candidates)
+    current_count = sum(
+        item.generation == state.run.generation for item in search_candidates
+    )
+    remaining = state.task_manifest.max_candidates - len(search_candidates)
     if remaining < 1 and current_count < 1:
         raise RuntimeError("run candidate budget exhausted")
     requested = state.task_manifest.candidates_per_generation
@@ -891,7 +1001,11 @@ def _validate_frozen_evidence(state: Any, batch: GenerationBatch) -> None:
             raise RuntimeError("generation batch knowledge snapshot changed")
     evaluations = []
     for candidate in state.candidates:
-        if candidate.generation != batch.generation:
+        if (
+            candidate.generation != batch.generation
+            or getattr(candidate, "role", CandidateRole.SEARCH)
+            not in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
+        ):
             continue
         evaluation = state.evaluation_for(candidate.candidate_id)
         if evaluation is not None:
@@ -961,6 +1075,8 @@ def _canonical_candidate_outcomes(
         item.candidate_id: item
         for item in state.candidates
         if item.generation == generation
+        and getattr(item, "role", CandidateRole.SEARCH)
+        in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
     }
     rows: dict[str, Mapping[str, Any]] = {}
     for row in analysis.ranking:

@@ -7,7 +7,12 @@ from ecologyrsi_dsh.api.generation_execution import (
     _build_adaptive_analysis,
     _local_edit_trajectory_evidence,
 )
-from ecologyrsi_dsh.core.models import CandidateStatus, canonical_json, digest
+from ecologyrsi_dsh.core.models import (
+    CandidateRole,
+    CandidateStatus,
+    canonical_json,
+    digest,
+)
 from ecologyrsi_dsh.core.trajectory import (
     CandidateRevision,
     EvaluationPhase,
@@ -216,6 +221,15 @@ class AdaptiveReflectionEvidenceTests(unittest.TestCase):
             )
             for candidate in candidates
         }
+        control = SimpleNamespace(
+            candidate_id="candidate:seed-control",
+            proposal_id="proposal:seed-control",
+            generation=0,
+            slot_index=0,
+            status=CandidateStatus.SPAWNED,
+            role=CandidateRole.INCUMBENT_CONTROL,
+        )
+        proposals[control.proposal_id] = SimpleNamespace(metadata={})
         formal_batches = []
         local_edit_proposals = []
         local_edit_outcomes = []
@@ -434,7 +448,7 @@ class AdaptiveReflectionEvidenceTests(unittest.TestCase):
                     "optimization_schedule": OptimizationSchedule.default().to_dict(),
                 }
             ),
-            candidates=candidates,
+            candidates=(*candidates, control),
             formal_batches=tuple(formal_batches),
             formal_batch_comparisons=tuple(formal_batch_comparisons),
             local_edit_proposals=tuple(local_edit_proposals),
@@ -598,6 +612,67 @@ class AdaptiveReflectionEvidenceTests(unittest.TestCase):
             legacy_reflection["adaptive_epoch_evidence"],
         )
 
+        search_only_gate = {
+            **gate_results["arms"][HoldoutArm.FINALIST_2.value],
+            "eligible": True,
+            "search_eligible": True,
+            "certification_eligible": False,
+            "search_failures": [],
+            "certification_failures": ["scientific_gate_failed"],
+        }
+        search_only_comparison = GenerationComparison(
+            comparison_id="comparison:adaptive-reflection:search-only",
+            run_id="run:adaptive-reflection",
+            generation=0,
+            cohort_digest="c" * 64,
+            holdout_evaluations=(
+                failed_holdout,
+                winner_holdout,
+                incumbent_holdout,
+            ),
+            selected_candidate_id=winner_holdout.scope.candidate_id,
+            selected_revision_id=winner_holdout.scope.candidate_revision_id,
+            gate_results={
+                **gate_results,
+                "selection_policy": "positive_delta_search@1",
+                "certification_selected_arm": None,
+                "selected_search_certification_status": "search_only",
+                "arms": {
+                    **gate_results["arms"],
+                    HoldoutArm.FINALIST_2.value: search_only_gate,
+                },
+            },
+        )
+        search_only_state = SimpleNamespace(
+            **{
+                **vars(state),
+                "comparison_for": lambda generation: (
+                    search_only_comparison if generation == 0 else None
+                ),
+            }
+        )
+        search_only = _build_adaptive_analysis(
+            search_only_state,
+            0,
+            search_only_comparison,
+            (candidates[0], candidates[3]),
+            incumbent_revision.candidate_id,
+        )
+        self.assertEqual(search_only.outcome, "search_version_advanced")
+        self.assertEqual(
+            search_only.selected_candidate_id,
+            winner_holdout.scope.candidate_id,
+        )
+        self.assertIsNone(search_only.champion_candidate_id)
+        self.assertEqual(
+            search_only.incumbent_after_candidate_id,
+            incumbent_revision.candidate_id,
+        )
+        self.assertEqual(
+            search_only.ranking[0]["selection_reason"],
+            "next_round_search_version",
+        )
+
         incumbent_gate_results = {
             **gate_results,
             "arms": {
@@ -677,6 +752,97 @@ class AdaptiveReflectionEvidenceTests(unittest.TestCase):
             ],
             incumbent_revision.revision_id,
         )
+
+        exploration_comparison = GenerationComparison(
+            comparison_id="comparison:adaptive-reflection:exploration",
+            run_id="run:adaptive-reflection",
+            generation=0,
+            cohort_digest="c" * 64,
+            holdout_evaluations=(
+                failed_holdout,
+                winner_holdout,
+                incumbent_holdout,
+            ),
+            selected_candidate_id=incumbent_holdout.scope.candidate_id,
+            selected_revision_id=incumbent_holdout.scope.candidate_revision_id,
+            gate_results={
+                **incumbent_gate_results,
+                "challenger_promotion_allowed": False,
+            },
+        )
+        exploration_state = SimpleNamespace(
+            **{
+                **vars(state),
+                "comparison_for": lambda generation: (
+                    exploration_comparison if generation == 0 else None
+                ),
+                "formal_selection_for": lambda generation: (
+                    SimpleNamespace(
+                        payload={
+                            "schema_version": (
+                                "ecologyrsi-dsh.formal-selection-cohort/3"
+                            ),
+                            "exploration_only": True,
+                            "consecutive_exploration_generations": 2,
+                        }
+                    )
+                    if generation == 0
+                    else None
+                ),
+            }
+        )
+        exploration = _build_adaptive_analysis(
+            exploration_state,
+            0,
+            exploration_comparison,
+            (candidates[0], candidates[3]),
+            incumbent_revision.candidate_id,
+        )
+        self.assertEqual(exploration.outcome, "exploration_only")
+        self.assertTrue(exploration.replan_required)
+        self.assertEqual(exploration.consecutive_exploration_generations, 2)
+        self.assertTrue(exploration.to_dict()["replan_required"])
+
+        positive_exploration_comparison = GenerationComparison(
+            comparison_id="comparison:adaptive-reflection:positive-exploration",
+            run_id="run:adaptive-reflection",
+            generation=0,
+            cohort_digest="c" * 64,
+            holdout_evaluations=(
+                failed_holdout,
+                winner_holdout,
+                incumbent_holdout,
+            ),
+            selected_candidate_id=winner_holdout.scope.candidate_id,
+            selected_revision_id=winner_holdout.scope.candidate_revision_id,
+            gate_results={
+                **search_only_comparison.to_dict()["gate_results"],
+                "challenger_promotion_allowed": False,
+            },
+        )
+        positive_exploration_state = SimpleNamespace(
+            **{
+                **vars(exploration_state),
+                "comparison_for": lambda generation: (
+                    positive_exploration_comparison if generation == 0 else None
+                ),
+            }
+        )
+        positive_exploration = _build_adaptive_analysis(
+            positive_exploration_state,
+            0,
+            positive_exploration_comparison,
+            (candidates[0], candidates[3]),
+            incumbent_revision.candidate_id,
+        )
+        self.assertEqual(
+            positive_exploration.search_parent_candidate_id,
+            winner_holdout.scope.candidate_id,
+        )
+        self.assertTrue(positive_exploration.replan_required)
+        self.assertIn("重新生成候选方向", positive_exploration.next_generation_focus)
+        self.assertIn("下一轮搜索版本", positive_exploration.selection_reason)
+        self.assertNotIn("仅保留探索证据", positive_exploration.selection_reason)
 
 
 if __name__ == "__main__":

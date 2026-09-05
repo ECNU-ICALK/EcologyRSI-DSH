@@ -232,6 +232,92 @@ class ScreeningReplayTests(unittest.TestCase):
             "ecologyrsi-dsh.candidate-screened-out/1",
         )
 
+    def test_all_failed_screening_is_frozen_as_an_exploration_generation(self) -> None:
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        director = EvolutionDirector(ledger, FakeDSHAdapter(max_proposals=4))
+        run_id = "run:screening-exploration"
+        director.start_evolution(
+            TaskManifest(
+                task_id="screening-exploration",
+                objective="classify an all-failed screening generation",
+                domain_pack="crop-soil-water@toy",
+                budget={"max_candidates": 4, "candidates_per_generation": 4},
+            ),
+            run_id=run_id,
+        )
+        candidates = tuple(director.propose_and_spawn(run_id) for _ in range(4))
+        screening_events = tuple(
+            director.record_candidate_screening(
+                run_id,
+                candidate_id=candidate.candidate_id,
+                generation=0,
+                score=-0.2 - index * 0.1,
+                passed=False,
+                constraint_violations=0,
+                origin_count=64,
+                prediction_cell_count=192,
+                cohort_digest=digest({"candidate": candidate.candidate_id}),
+            )
+            for index, candidate in enumerate(candidates)
+        )
+        formal = director.freeze_formal_selection_cohort(
+            run_id,
+            generation=0,
+            selected_candidate_ids=[
+                candidates[0].candidate_id,
+                candidates[1].candidate_id,
+            ],
+            screening_digest=digest(
+                [
+                    event.payload
+                    for event in sorted(
+                        screening_events,
+                        key=lambda item: str(item.payload["candidate_id"]),
+                    )
+                ]
+            ),
+            include_exploration_state=True,
+        )
+
+        self.assertEqual(
+            formal.payload["schema_version"],
+            "ecologyrsi-dsh.formal-selection-cohort/3",
+        )
+        self.assertEqual(formal.payload["screening_pass_count"], 0)
+        self.assertTrue(formal.payload["exploration_only"])
+        self.assertEqual(formal.payload["consecutive_exploration_generations"], 1)
+        replayed = director.replay(run_id).formal_selection_for(0)
+        self.assertEqual(replayed.payload, formal.payload)
+
+        events = ledger.events(run_id)
+        inflated = tuple(
+            replace(
+                event,
+                payload={
+                    **event.payload,
+                    "consecutive_exploration_generations": 2,
+                },
+            )
+            if event.event_id == formal.event_id
+            else event
+            for event in events
+        )
+        with self.assertRaisesRegex(ValueError, "exploration state"):
+            project_run_state(inflated)
+
+        boolean_count = tuple(
+            replace(
+                event,
+                payload={**event.payload, "screening_pass_count": False},
+            )
+            if event.event_id == formal.event_id
+            else event
+            for event in events
+        )
+        with self.assertRaisesRegex(ValueError, "exploration state"):
+            project_run_state(boolean_count)
+
     def test_normal_replay_preserves_selected_ids_and_failed_diagnostic(self) -> None:
         state = project_run_state(self.events)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 import selectors
 import subprocess
@@ -22,13 +23,16 @@ from ecologyrsi_dsh.core.errors import (
 )
 from ecologyrsi_dsh.api import generation_execution as generation_execution_module
 from ecologyrsi_dsh.api.dsh_tools import DshToolAdmissionClosedError
-from ecologyrsi_dsh.core.models import TaskManifest, digest
+from ecologyrsi_dsh.core.models import TaskManifest, canonical_json, digest
+from ecologyrsi_dsh.core.state import project_run_state
 from ecologyrsi_dsh.integrations.dsh_native_runtime import (
     DSH_NATIVE_EXECUTION_PROTOCOL,
     DshNativeAgentRuntimeClient,
     configured_stage_timeout,
 )
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
+from ecologyrsi_dsh.presentation.reporting import run_summary
+from ecologyrsi_dsh.presentation.training_assets import training_assets
 
 
 class _RealNodeRuntime:
@@ -661,13 +665,43 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             state.task_manifest.metadata["minimum_selection_samples_per_update"],
             169,
         )
+        self.assertEqual(
+            state.task_manifest.metadata["host_runtime_build"],
+            {
+                "package_version": "0.3.55",
+                "evolution_runtime_schema": (
+                    "ecologyrsi-dsh.evolution-runtime/3"
+                ),
+                "generation_comparison_schema": (
+                    "ecologyrsi-dsh.generation-comparison/1"
+                ),
+                "projection_schema": "ecologyrsi-dsh.execution-projection/2",
+            },
+        )
         self.server.validate_frozen_runtime_bindings(state.task_manifest)
+
+        runtime_v2_data = state.task_manifest.to_dict()
+        runtime_v2_data["metadata"]["host_runtime_build"][
+            "evolution_runtime_schema"
+        ] = "ecologyrsi-dsh.evolution-runtime/2"
+        self.server.validate_frozen_runtime_bindings(
+            TaskManifest.from_dict(runtime_v2_data)
+        )
 
         tampered_data = state.task_manifest.to_dict()
         tampered_data["metadata"]["fitness_profile_digest"] = "0" * 64
         with self.assertRaises(FrozenRuntimeBindingDriftError):
             self.server.validate_frozen_runtime_bindings(
                 TaskManifest.from_dict(tampered_data)
+            )
+
+        incompatible_data = state.task_manifest.to_dict()
+        incompatible_data["metadata"]["host_runtime_build"][
+            "evolution_runtime_schema"
+        ] = "ecologyrsi-dsh.evolution-runtime/999"
+        with self.assertRaises(FrozenRuntimeBindingDriftError):
+            self.server.validate_frozen_runtime_bindings(
+                TaskManifest.from_dict(incompatible_data)
             )
 
     def test_native_provider_token_limit_is_rejected_before_runtime_creation(self) -> None:
@@ -754,6 +788,151 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertEqual(started["projection"]["status"], "running")
         self.assertEqual(len(runtime.activated), 1)
         self.assertEqual(runtime.activated[0]["run_id"], run_id)
+
+    def test_seed_incumbent_control_is_durable_distinct_and_budget_neutral(
+        self,
+    ) -> None:
+        runtime = _FakeNativeRuntime()
+        self.server.dsh_native_runtime = runtime
+        run_id = "run:native-seed-incumbent"
+        status, created = self._post(
+            {
+                "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                "run_id": run_id,
+                "domain_pack_id": "crop_soil_water",
+                "dataset_id": "generated-toy-series@1",
+                "strategy_model_id": "dsh/strategy",
+                "review_model_id": "dsh/review",
+                "start": True,
+                "auto_advance": 0,
+                "idempotency_key": "native-seed-incumbent-create",
+                "budget": {
+                    "max_generations": 1,
+                    "candidates_per_generation": 4,
+                    "max_candidates": 4,
+                },
+            }
+        )
+        self.assertEqual(status, 201, created)
+
+        first = self.server.director.ensure_seed_incumbent_control(run_id)
+        recovered = self.server.director.ensure_seed_incumbent_control(run_id)
+
+        self.assertEqual(recovered, first)
+        self.assertEqual(first.role.value, "incumbent_control")
+        state = self.server.director.replay(run_id)
+        seed = state.materialized_seed_genome()
+        revision = state.initial_revision_for(first.candidate_id)
+        self.assertIsNotNone(revision)
+        self.assertEqual(revision.genome_digest, seed.genome_digest)
+        self.assertEqual(
+            canonical_json(revision.identity_dict()["genome"]),
+            canonical_json(seed.to_dict()),
+        )
+        self.assertEqual(
+            [
+                item.candidate_id
+                for item in state.candidates
+                if item.role.value == "incumbent_control"
+            ],
+            [first.candidate_id],
+        )
+        self.assertEqual(
+            [item for item in state.candidates if item.role.value == "search"],
+            [],
+        )
+        self.assertEqual(
+            sum(event.kind == "ProposalSubmitted" for event in state.events),
+            1,
+        )
+        self.assertEqual(
+            sum(event.kind == "CandidateSpawned" for event in state.events),
+            1,
+        )
+        self.assertEqual(
+            sum(event.kind == "CandidateRevisionCreated" for event in state.events),
+            1,
+        )
+        proposal = state.proposal(first.proposal_id)
+        with self.assertRaisesRegex(ValueError, "deterministic seed control"):
+            self.server.director.spawn_candidate(
+                run_id,
+                proposal,
+                candidate_id="candidate:forged-seed-control",
+                role=first.role,
+            )
+        forged_revision_data = revision.to_dict()
+        forged_revision_data["revision_id"] = "revision:forged-seed-control:r0"
+        forged_revision_data.pop("revision_digest", None)
+        with self.assertRaisesRegex(ValueError, "deterministic seed control R0"):
+            self.server.director.create_candidate_revision(
+                run_id,
+                type(revision).from_dict(forged_revision_data),
+            )
+
+        spawn_event = next(
+            event
+            for event in state.events
+            if event.kind == "CandidateSpawned"
+            and event.payload["candidate"]["candidate_id"] == first.candidate_id
+        )
+        forged_candidate_event = replace(
+            state.events[-1],
+            seq=state.events[-1].seq + 1,
+            event_id="event:forged-seed-control",
+            kind="CandidateSpawned",
+            payload={
+                **spawn_event.payload,
+                "candidate": replace(
+                    first,
+                    candidate_id="candidate:forged-seed-control",
+                ).to_dict(),
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "deterministic seed control"):
+            project_run_state((*state.events, forged_candidate_event))
+
+        forged_revision_event = replace(
+            state.events[-1],
+            seq=state.events[-1].seq + 1,
+            event_id="event:forged-seed-control-r0",
+            kind="CandidateRevisionCreated",
+            payload={
+                "revision": type(revision)
+                .from_dict(forged_revision_data)
+                .to_dict()
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "deterministic seed control R0"):
+            project_run_state((*state.events, forged_revision_event))
+        status, projected = self._get(f"/runs/{run_id}")
+        self.assertEqual(status, 200, projected)
+        projection = projected["projection"]
+        self.assertEqual(projection["candidates_count"], 0)
+        self.assertEqual(projection["candidates"], [])
+        self.assertEqual(projection["rounds"][0]["candidate_count"], 0)
+        self.assertEqual(projection["rounds"][0]["candidates"], [])
+        self.assertEqual(training_assets(state), [])
+        summary = run_summary(state)
+        self.assertEqual(summary["candidate_count"], 0)
+        self.assertEqual(summary["training_asset_count"], 0)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "global incumbent decision",
+        ):
+            self.server.director.advance_generation(run_id)
+
+        self.server.ledger.append(
+            run_id,
+            "GenerationAdvanced",
+            {"generation": 1},
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "global incumbent decision",
+        ):
+            self.server.director.replay(run_id)
 
     def test_native_start_from_paused_resumes_instead_of_reactivating(self) -> None:
         runtime = _FakeNativeRuntime()

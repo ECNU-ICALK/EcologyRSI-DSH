@@ -70,6 +70,9 @@ where = ["src"]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/schemas" = [
     "integrations/dsh_ecology_plugin/schemas/*.json",
 ]
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets" = [
+    "integrations/dsh_ecology_plugin/presets/preset-manifest.json",
+]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4" = [
     "integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4/*.yml",
 ]

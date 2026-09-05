@@ -83,6 +83,38 @@ class TrajectoryPublicEventTests(unittest.TestCase):
         self.assertEqual(evaluation["origin_count"], 50)
         self.assertEqual(proposal["operation_count"], 1)
 
+    def test_candidate_spawn_exposes_only_the_bounded_role(self) -> None:
+        control = self._project(
+            "CandidateSpawned",
+            {
+                "candidate": {
+                    "candidate_id": "candidate:seed-control",
+                    "role": "incumbent_control",
+                    "private_genome": "SECRET",
+                }
+            },
+        )
+        unknown = self._project(
+            "CandidateSpawned",
+            {
+                "candidate": {
+                    "candidate_id": "candidate:unknown-role",
+                    "role": "untrusted-role",
+                }
+            },
+        )
+
+        self.assertEqual(
+            control,
+            {
+                "candidate_id": "candidate:seed-control",
+                "role": "incumbent_control",
+                "message": "候选方案已生成。",
+            },
+        )
+        self.assertEqual(unknown["role"], "search")
+        self.assertNotIn("SECRET", json.dumps(control))
+
     def test_holdout_and_champion_events_expose_only_audit_summary(self) -> None:
         holdout = self._project(
             "GenerationHoldoutFrozen",
@@ -119,7 +151,13 @@ class TrajectoryPublicEventTests(unittest.TestCase):
                     "cohort_digest": "cohort-digest",
                     "selected_candidate_id": "candidate:1",
                     "selected_revision_id": "revision:1",
-                    "gate_results": {"private_reasoning": "SECRET-GATE"},
+                    "gate_results": {
+                        "private_reasoning": "SECRET-GATE",
+                        "selection_policy": "positive_delta_search@1",
+                        "certification_selected_arm": None,
+                        "selected_search_certification_status": "search_only",
+                        "delta_to_incumbent": 0.01,
+                    },
                     "holdout_evaluations": [{"metrics": "SECRET-HOLDOUT"}],
                 }
             },
@@ -140,6 +178,12 @@ class TrajectoryPublicEventTests(unittest.TestCase):
         self.assertNotIn("SECRET-HOLDOUT", projected)
         self.assertNotIn("gate_results", comparison)
         self.assertNotIn("holdout_evaluations", comparison)
+        self.assertEqual(
+            comparison["selection_policy"], "positive_delta_search@1"
+        )
+        self.assertEqual(
+            comparison["selected_search_certification_status"], "search_only"
+        )
         self.assertEqual(holdout["arm_count"], 3)
         self.assertEqual(champion["selected_revision_id"], "revision:1")
 

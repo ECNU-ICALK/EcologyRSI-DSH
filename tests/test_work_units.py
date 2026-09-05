@@ -10,7 +10,12 @@ from ecologyrsi_dsh.api import work_units
 from ecologyrsi_dsh.api import formal_trajectory
 from ecologyrsi_dsh.api import generation_execution
 from ecologyrsi_dsh.api import projection
-from ecologyrsi_dsh.core.models import RunStatus
+from ecologyrsi_dsh.core.models import (
+    CandidateRole,
+    CandidateStatus,
+    RunStatus,
+    digest,
+)
 from ecologyrsi_dsh.core.trajectory import TrajectoryStatus
 from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
 
@@ -140,6 +145,266 @@ class WorkUnitContractTests(unittest.TestCase):
 
         spawn.assert_called_once_with(endpoint, "run:x", batch)
         freeze.assert_called_once_with(endpoint, "run:x", 0)
+
+    def test_incumbent_control_is_not_counted_as_generation_work(self):
+        batch = SimpleNamespace(generation=0, batch_size=4)
+        search = tuple(
+            SimpleNamespace(
+                candidate_id=f"candidate:search:{index}",
+                generation=0,
+                slot_index=index,
+                role=CandidateRole.SEARCH,
+            )
+            for index in range(4)
+        )
+        control = SimpleNamespace(
+            candidate_id="candidate:seed-control",
+            generation=0,
+            slot_index=0,
+            role=CandidateRole.INCUMBENT_CONTROL,
+        )
+        state = SimpleNamespace(
+            run=SimpleNamespace(status=RunStatus.RUNNING, generation=0),
+            batch_for=lambda _generation: batch,
+            candidates=(*search, control),
+            task_manifest=SimpleNamespace(
+                metadata={
+                    "optimization_protocol": "top2_adaptive_epoch@1",
+                    "cohort_capacity_enforced": True,
+                }
+            ),
+            initial_revision_for=lambda _candidate_id: object(),
+            run_adaptation_cohort=object(),
+            generation_cohort_for=lambda _generation: object(),
+            formal_selection_for=lambda _generation: None,
+        )
+        endpoint = SimpleNamespace(
+            server=SimpleNamespace(
+                director=SimpleNamespace(state=lambda _run_id: state)
+            )
+        )
+
+        with (
+            patch.object(
+                generation_execution,
+                "_spawn_generation_candidates",
+            ) as spawn,
+            patch.object(
+                generation_execution,
+                "_freeze_adaptive_generation_inputs",
+            ) as freeze,
+            patch.object(
+                generation_execution,
+                "_two_stage_screening_enabled",
+                return_value=False,
+            ),
+        ):
+            self.assertFalse(
+                work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+            )
+
+        spawn.assert_not_called()
+        freeze.assert_not_called()
+
+    def test_legacy_generation_zero_does_not_inject_seed_control(self):
+        schedule = OptimizationSchedule.default()
+        candidates = tuple(
+            SimpleNamespace(
+                candidate_id=f"candidate:legacy:{index}",
+                generation=0,
+                slot_index=index,
+                role=CandidateRole.SEARCH,
+            )
+            for index in range(4)
+        )
+        state = SimpleNamespace(
+            candidates=candidates,
+            task_manifest=SimpleNamespace(
+                visible_datasets=("dataset:legacy",),
+                max_generations=1,
+                seed=7,
+                metadata={
+                    "optimization_protocol": "top2_adaptive_epoch@1",
+                    "optimization_schedule": schedule.to_dict(),
+                    "cohort_capacity_enforced": True,
+                    "cohort_capacity_report": {"planner_digest": "planner"},
+                    "prediction_cells_per_origin": 1,
+                },
+            ),
+            initial_revision_for=lambda _candidate_id: object(),
+        )
+        endpoint = SimpleNamespace(
+            server=SimpleNamespace(
+                director=SimpleNamespace(state=lambda _run_id: state),
+                datasets=SimpleNamespace(selection_view=lambda *_args, **_kwargs: object()),
+            )
+        )
+        mutations: list[str] = []
+
+        def record_mutation(_endpoint, method_name, *_args, **_kwargs):
+            mutations.append(method_name)
+            return object()
+
+        with (
+            patch.object(
+                generation_execution,
+                "_director_mutation",
+                side_effect=record_mutation,
+            ),
+            patch.object(
+                generation_execution,
+                "estimate_epoch_capacity",
+                return_value=SimpleNamespace(planner_digest="planner"),
+            ),
+            patch.object(
+                generation_execution,
+                "plan_run_adaptation_cohort",
+                return_value=object(),
+            ),
+            patch.object(
+                generation_execution,
+                "plan_generation_selection_cohorts",
+                return_value=object(),
+            ),
+        ):
+            generation_execution._freeze_adaptive_generation_inputs(
+                endpoint,
+                "run:legacy",
+                0,
+            )
+
+        self.assertNotIn("ensure_seed_incumbent_control", mutations)
+        self.assertEqual(
+            mutations,
+            [
+                "freeze_run_adaptation_cohort",
+                "freeze_generation_selection_cohorts",
+            ],
+        )
+
+        mutations.clear()
+        state.task_manifest.metadata["host_runtime_build"] = {
+            "package_version": "0.3.55",
+            "evolution_runtime_schema": "ecologyrsi-dsh.evolution-runtime/2",
+            "generation_comparison_schema": (
+                "ecologyrsi-dsh.generation-comparison/1"
+            ),
+            "projection_schema": "ecologyrsi-dsh.execution-projection/2",
+        }
+        with (
+            patch.object(
+                generation_execution,
+                "_director_mutation",
+                side_effect=record_mutation,
+            ),
+            patch.object(
+                generation_execution,
+                "estimate_epoch_capacity",
+                return_value=SimpleNamespace(planner_digest="planner"),
+            ),
+            patch.object(
+                generation_execution,
+                "plan_run_adaptation_cohort",
+                return_value=object(),
+            ),
+            patch.object(
+                generation_execution,
+                "plan_generation_selection_cohorts",
+                return_value=object(),
+            ),
+        ):
+            generation_execution._freeze_adaptive_generation_inputs(
+                endpoint,
+                "run:host-only-adaptive",
+                0,
+            )
+        self.assertNotIn("ensure_seed_incumbent_control", mutations)
+
+    def test_legacy_screening_recovery_keeps_formal_selection_v2(self):
+        candidates = tuple(
+            SimpleNamespace(
+                candidate_id=f"candidate:legacy-screening:{index}",
+                generation=0,
+                slot_index=index,
+                status=CandidateStatus.SPAWNED,
+            )
+            for index in range(4)
+        )
+        screening = {
+            candidate.candidate_id: SimpleNamespace(
+                payload={
+                    "generation": 0,
+                    "candidate_id": candidate.candidate_id,
+                    "score": 1.0 - candidate.slot_index * 0.1,
+                    "passed": False,
+                    "constraint_violations": 0,
+                    "origin_count": 64,
+                    "prediction_cell_count": 64,
+                    "cohort_digest": digest(
+                        {"candidate_id": candidate.candidate_id}
+                    ),
+                }
+            )
+            for candidate in candidates
+        }
+        state = SimpleNamespace(
+            run=SimpleNamespace(status=RunStatus.RUNNING),
+            candidates=candidates,
+            task_manifest=SimpleNamespace(
+                metadata={
+                    "optimization_protocol": "top2_adaptive_epoch@1",
+                    "cohort_capacity_enforced": True,
+                }
+            ),
+            formal_selection_for=lambda _generation: None,
+            screening_for=lambda _generation, candidate_id: screening[candidate_id],
+            candidate=lambda candidate_id: next(
+                item for item in candidates if item.candidate_id == candidate_id
+            ),
+        )
+        endpoint = SimpleNamespace(
+            server=SimpleNamespace(
+                director=SimpleNamespace(state=lambda _run_id: state)
+            )
+        )
+        freeze_kwargs = None
+
+        def mutation(_endpoint, method_name, *_args, **kwargs):
+            nonlocal freeze_kwargs
+            if method_name == "freeze_formal_selection_cohort":
+                freeze_kwargs = kwargs
+                return SimpleNamespace(
+                    event_id="formal:legacy",
+                    payload={
+                        "selected_candidate_ids": [
+                            candidates[0].candidate_id,
+                            candidates[1].candidate_id,
+                        ]
+                    },
+                )
+            return object()
+
+        with (
+            patch.object(
+                generation_execution,
+                "run_candidate_evaluations",
+            ),
+            patch.object(
+                generation_execution,
+                "_director_mutation",
+                side_effect=mutation,
+            ),
+        ):
+            finalists = generation_execution._prepare_formal_finalists(
+                endpoint,
+                "run:legacy",
+                candidates,
+                max_concurrency=1,
+            )
+
+        self.assertEqual(len(finalists), 2)
+        self.assertIsNotNone(freeze_kwargs)
+        self.assertFalse(freeze_kwargs["include_exploration_state"])
 
     def test_incomplete_batch_without_capacity_gate_does_not_claim_progress(self):
         batch = SimpleNamespace(generation=0, batch_size=4)

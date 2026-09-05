@@ -99,6 +99,11 @@ class CandidateStatus(str, Enum):
     SCREENED_OUT = "screened_out"
 
 
+class CandidateRole(str, Enum):
+    SEARCH = "search"
+    INCUMBENT_CONTROL = "incumbent_control"
+
+
 class PromotionDecision(str, Enum):
     APPROVED = "approved"
     REJECTED = "rejected"
@@ -382,6 +387,7 @@ class Candidate:
     proposal_id: str
     generation: int
     slot_index: int = 0
+    role: CandidateRole = CandidateRole.SEARCH
     status: CandidateStatus = CandidateStatus.SPAWNED
     evaluation_id: str | None = None
     promotion_id: str | None = None
@@ -392,6 +398,7 @@ class Candidate:
             object.__setattr__(self, name, _text(getattr(self, name), name))
         object.__setattr__(self, "generation", _integer(self.generation, "generation", minimum=0))
         object.__setattr__(self, "slot_index", _integer(self.slot_index, "slot_index", minimum=0))
+        object.__setattr__(self, "role", _enum(self.role, CandidateRole, "role"))
         object.__setattr__(self, "status", _enum(self.status, CandidateStatus, "status"))
         for name in ("evaluation_id", "promotion_id"):
             value = getattr(self, name)
@@ -400,7 +407,7 @@ class Candidate:
         object.__setattr__(self, "created_at", _text(self.created_at, "created_at"))
 
     def to_dict(self) -> JsonObject:
-        return {
+        result = {
             "candidate_id": self.candidate_id,
             "run_id": self.run_id,
             "proposal_id": self.proposal_id,
@@ -411,6 +418,10 @@ class Candidate:
             "promotion_id": self.promotion_id,
             "created_at": self.created_at,
         }
+        # Preserve the historical search-candidate payload byte-for-byte.
+        if self.role is not CandidateRole.SEARCH:
+            result["role"] = self.role.value
+        return result
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "Candidate":

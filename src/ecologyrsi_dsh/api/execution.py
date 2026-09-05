@@ -9,6 +9,7 @@ from ..core.ledger import CommandInProgressError, CommandReceipt
 from ..core.redaction import safe_error_code
 from ..integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 from .generation_execution import complete_if_budget_exhausted, execute_generation
+from .projection import _control_payload
 from .shared import (
     _assert_http_scope,
     _evaluation_partition,
@@ -56,7 +57,13 @@ class ExecutionEndpointsMixin:
             run_id = receipt.resource_run_id or (None if receipt.command_kind == "create_run" else receipt.run_id)
             if run_id:
                 try:
-                    payload["response"] = self._run_payload(run_id)
+                    if receipt.command_kind.startswith("control:"):
+                        payload["response"] = _control_payload(
+                            self.server.director.replay(run_id),
+                            self.server.sample_admission.snapshot(run_id),
+                        )
+                    else:
+                        payload["response"] = self._run_payload(run_id)
                 except (KeyError, RuntimeError, TypeError, ValueError):
                     # The command may be in the Host→DSH binding gap.  Keep the
                     # receipt visible without leaking internal exception text.

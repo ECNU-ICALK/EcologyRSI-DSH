@@ -62,6 +62,7 @@
   },
   "files": [
     "lib/**/*.js",
+    "presets/preset-manifest.json",
     "presets/**/*.yml",
     "presets/**/*.md",
     "schemas/*.json",

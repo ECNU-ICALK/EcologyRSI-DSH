@@ -15,7 +15,7 @@ from ..integrations.model_bindings import (
     RULE_JUDGE_ID,
     builtin_model_configuration_digest,
 )
-from ..core.models import digest
+from ..core.models import CandidateRole, digest
 from ..core.redaction import sanitize_public_value
 from .trajectory import build_training_trajectory
 
@@ -255,6 +255,11 @@ def training_assets(state: Any) -> list[dict[str, Any]]:
     metadata = dict(task.metadata)
     result: list[dict[str, Any]] = []
     for candidate in state.candidates:
+        if getattr(candidate, "role", CandidateRole.SEARCH) not in {
+            CandidateRole.SEARCH,
+            CandidateRole.SEARCH.value,
+        }:
+            continue
         proposal = state.proposal(candidate.proposal_id)
         artifact = state.artifact_for(candidate.candidate_id)
         evaluation = state.evaluation_for(candidate.candidate_id)

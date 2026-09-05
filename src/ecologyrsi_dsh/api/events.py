@@ -94,7 +94,7 @@ class EventEndpointsMixin:
             "GenerationResearchIterated": "本代研究模型已结合上一轮反馈更新并冻结研究计划。",
             "GenerationAnalyzed": "本轮候选结果与弱点已统一分析。",
             "GenerationReflected": "反思模型已基于本轮聚合结果生成下一轮多套方向。",
-            "GenerationChampionSelected": "本轮单一冠军选择已完成。",
+            "GenerationChampionSelected": "本轮下一轮有效搜索版本已冻结。",
             "CandidateRevisionCreated": "候选方案修订已冻结。",
             "FormalTrajectoryStarted": "Top 2 候选的正式轨迹已启动。",
             "FormalBatchStarted": "正式轨迹的下一局部批次已启动。",
@@ -417,6 +417,7 @@ class EventEndpointsMixin:
                 }
             )
         elif event.kind == "LocalEditDecided":
+            raw_reason = payload.get("reason")
             public_payload.update(
                 {
                     "proposal_id": payload.get("proposal_id"),
@@ -424,7 +425,11 @@ class EventEndpointsMixin:
                     "batch_index": payload.get("batch_index"),
                     "outcome": payload.get("outcome"),
                     "active_revision_id": payload.get("active_revision_id"),
-                    "reason": payload.get("reason"),
+                    "reason": (
+                        redact_sensitive_text(str(raw_reason), limit=300)
+                        if raw_reason is not None
+                        else None
+                    ),
                 }
             )
         elif event.kind == "TrajectoryRevisionAdvanced":
@@ -493,6 +498,9 @@ class EventEndpointsMixin:
             )
         elif event.kind == "GenerationComparisonRecorded":
             comparison = payload.get("comparison", {})
+            gates = comparison.get("gate_results", {})
+            if not isinstance(gates, dict):
+                gates = {}
             public_payload.update(
                 {
                     "comparison_id": comparison.get("comparison_id"),
@@ -503,6 +511,14 @@ class EventEndpointsMixin:
                         "selected_candidate_id"
                     ),
                     "selected_revision_id": comparison.get("selected_revision_id"),
+                    "selection_policy": gates.get("selection_policy"),
+                    "certification_selected_arm": gates.get(
+                        "certification_selected_arm"
+                    ),
+                    "selected_search_certification_status": gates.get(
+                        "selected_search_certification_status"
+                    ),
+                    "delta_to_incumbent": gates.get("delta_to_incumbent"),
                 }
             )
         elif event.kind == "CandidateEffectiveRevisionFrozen":
@@ -561,7 +577,17 @@ class EventEndpointsMixin:
             )
         elif event.kind == "CandidateSpawned":
             candidate = payload.get("candidate", {})
-            public_payload["candidate_id"] = candidate.get("candidate_id")
+            role = str(candidate.get("role") or "search")
+            public_payload.update(
+                {
+                    "candidate_id": candidate.get("candidate_id"),
+                    "role": (
+                        role
+                        if role in {"search", "incumbent_control"}
+                        else "search"
+                    ),
+                }
+            )
         elif event.kind == "CandidateFailed":
             public_payload.update(
                 {

@@ -829,7 +829,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         self.assertEqual(delay, 15.0)
 
-    def test_exhausted_research_contract_pauses_without_outer_retry(self) -> None:
+    def test_unrecoverable_research_contract_pauses_without_outer_retry(self) -> None:
         status, created = self.request(
             "/runs",
             "POST",
@@ -896,7 +896,10 @@ class AutoProgressHTTPTests(unittest.TestCase):
             any(event.kind == "GatewayRetryScheduled" for event in state.events)
         )
         paused = next(event for event in reversed(state.events) if event.kind == "RunPaused")
-        self.assertEqual(paused.payload["code"], "research_contract_retry_exhausted")
+        self.assertEqual(
+            paused.payload["code"],
+            "research_contract_fallback_unavailable",
+        )
         self.assertIn("candidate direction d1", paused.payload["reason"])
 
     def test_gateway_retry_delay_saturates_before_large_exponent(self) -> None:

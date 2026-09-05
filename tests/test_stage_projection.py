@@ -13,7 +13,10 @@ from ecologyrsi_dsh.knowledge.algorithms import resolve_predictor_adoption
 from ecologyrsi_dsh.knowledge.research_iteration import ResearchIteration
 from ecologyrsi_dsh.knowledge.retrieval import retrieve_generation_knowledge
 from ecologyrsi_dsh.presentation.reporting import rounds, run_summary, training_assets
-from ecologyrsi_dsh.api.projection import _projection_json
+from ecologyrsi_dsh.api.projection import (
+    _candidate_selection_disposition,
+    _projection_json,
+)
 
 
 def task() -> TaskManifest:
@@ -40,6 +43,65 @@ def stage_payload(*, stage: str = "proposal", status: str = "started") -> dict:
 
 
 class EvolutionStageProjectionTests(unittest.TestCase):
+    def test_candidate_projection_exposes_selection_disposition(self) -> None:
+        with EventLedger() as ledger:
+            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            run_id = "run:candidate-selection-disposition"
+            director.start_evolution(task(), run_id=run_id)
+            candidate = director.propose_and_spawn(run_id)
+            projection = _projection_json(director.state(run_id))
+
+        projected = next(
+            item
+            for item in projection["candidates"]
+            if item["candidate_id"] == candidate.candidate_id
+        )
+        self.assertEqual(projected["selection_disposition"], "pending")
+
+    def test_candidate_selection_disposition_separates_incumbent_and_search_roles(
+        self,
+    ) -> None:
+        self.assertEqual(
+            _candidate_selection_disposition(
+                candidate_id="c-current",
+                incumbent_id="c-current",
+                promotion_decision="approved",
+                search_parent_id="c-parent",
+                candidate_status="promoted",
+            ),
+            "incumbent",
+        )
+        self.assertEqual(
+            _candidate_selection_disposition(
+                candidate_id="c-parent",
+                incumbent_id="c-current",
+                promotion_decision=None,
+                search_parent_id="c-parent",
+                candidate_status="evaluated",
+            ),
+            "search_parent",
+        )
+        self.assertEqual(
+            _candidate_selection_disposition(
+                candidate_id="c-old",
+                incumbent_id="c-current",
+                promotion_decision="approved",
+                search_parent_id=None,
+                candidate_status="promoted",
+            ),
+            "promoted_historical",
+        )
+        self.assertEqual(
+            _candidate_selection_disposition(
+                candidate_id="c-failed",
+                incumbent_id="c-current",
+                promotion_decision=None,
+                search_parent_id=None,
+                candidate_status="failed",
+            ),
+            "failed",
+        )
+
     def test_round_projects_completed_native_dsh_research_and_reflection(
         self,
     ) -> None:

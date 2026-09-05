@@ -19,9 +19,11 @@ from ecologyrsi_dsh.api.formal_trajectory import (
     _local_edit_bundle_signature,
     _local_edit_context,
     _local_edit_current_state,
+    _legal_parameter_neighborhoods,
     _local_edit_evidence_metrics,
     _local_edit_policy_rejection_reason,
     _local_edit_proposal,
+    _local_challenger_policy,
     _prequential_safety_reason,
     _recent_local_edit_history,
     _safety_requires_rollback,
@@ -119,6 +121,32 @@ class _PairedLaneEvaluator:
 
 
 class FormalTrajectoryTests(unittest.TestCase):
+    def test_runtime_v3_selects_positive_delta_local_policy(self) -> None:
+        task = TaskManifest(
+            task_id="runtime-v3-local-policy",
+            objective="verify local search policy",
+            domain_pack="crop-soil-water@toy",
+            metadata={
+                "execution_protocol": "dsh_native_plugin_evolution@1",
+                "host_runtime_build": {
+                    "evolution_runtime_schema": (
+                        "ecologyrsi-dsh.evolution-runtime/3"
+                    )
+                },
+            },
+        )
+        state = SimpleNamespace(task_manifest=task)
+        endpoint = SimpleNamespace(
+            server=SimpleNamespace(
+                director=SimpleNamespace(state=lambda _run_id: state)
+            )
+        )
+
+        self.assertEqual(
+            _local_challenger_policy(endpoint, "run:v3"),
+            (1e-12, False),
+        )
+
     def test_durable_batch_metrics_keep_one_auditable_compressed_trace(self) -> None:
         trace_records = [
             {
@@ -208,6 +236,30 @@ class FormalTrajectoryTests(unittest.TestCase):
         self.assertEqual(
             current["scientific_program"]["parameter_values"]["ridge_alpha"],
             parent.scientific_program["parameter_overrides"]["ridge_alpha"],
+        )
+        neighborhoods = _legal_parameter_neighborhoods(
+            SimpleNamespace(
+                revision_id="revision:local-edit:r0",
+                genome=parent.to_dict(),
+            ),
+            SimpleNamespace(
+                allowed_mutation_targets={
+                    "scientific_parameter": (
+                        "co2_concentration_1h_residual_scale",
+                    )
+                },
+                parameter_schemas={
+                    "co2_concentration_1h_residual_scale": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                    }
+                }
+            ),
+        )
+        self.assertEqual(
+            neighborhoods["co2_concentration_1h_residual_scale"]["maximum"],
+            0.15,
         )
 
         proposals = {

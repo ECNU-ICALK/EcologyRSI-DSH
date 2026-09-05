@@ -7,6 +7,7 @@ from ecologyrsi_dsh.core.trajectory import LocalEditOutcome
 from ecologyrsi_dsh.evolution.genome import (
     FrozenRunInitialization,
     materialize_seed_genome,
+    parameter_trust_region_neighborhood,
 )
 from ecologyrsi_dsh.evolution.local_edits import (
     LocalEditContext,
@@ -71,6 +72,79 @@ def _context(parent, maximum: int = 2) -> LocalEditContext:
 
 
 class LocalEditTests(unittest.TestCase):
+    def test_host_rejection_redacts_model_controlled_secret_text(self) -> None:
+        parent = _parent()
+        proposal = LocalEditProposal(
+            decision="mutate",
+            operations=(
+                {
+                    "op": "set_bounded_parameter",
+                    "name": "password=super-secret-value",
+                    "value": 0.5,
+                },
+            ),
+            evidence_refs=("metric:overall",),
+            expected_effect_cells=("co2_concentration@24h",),
+            risk_cells=(),
+        )
+
+        result = apply_or_reject_local_edit_bundle(
+            parent,
+            proposal,
+            _context(parent),
+            current_program_registry(),
+        )
+
+        self.assertIs(result.outcome, LocalEditOutcome.REJECTED)
+        self.assertNotIn("super-secret-value", result.rejection_reason)
+        self.assertIn("[REDACTED]", result.rejection_reason)
+
+    def test_host_rejection_preserves_trust_region_reason_and_legal_neighborhood(
+        self,
+    ) -> None:
+        parent = _parent()
+        context_data = _context(parent).to_dict()
+        context_data["allowed_mutation_targets"]["scientific_parameter"].append(
+            "co2_concentration_1h_residual_scale"
+        )
+        context_data["parameter_schemas"][
+            "co2_concentration_1h_residual_scale"
+        ] = {"type": "number", "minimum": 0.0, "maximum": 1.0}
+        context = LocalEditContext(**context_data)
+        proposal = LocalEditProposal(
+            decision="mutate",
+            operations=(
+                {
+                    "op": "set_bounded_parameter",
+                    "name": "co2_concentration_1h_residual_scale",
+                    "value": 0.8,
+                },
+            ),
+            evidence_refs=("metric:overall",),
+            expected_effect_cells=("co2_concentration@24h",),
+            risk_cells=(),
+        )
+
+        result = apply_or_reject_local_edit_bundle(
+            parent,
+            proposal,
+            context,
+            current_program_registry(),
+        )
+        neighborhood = parameter_trust_region_neighborhood(
+            name="co2_concentration_1h_residual_scale",
+            previous=0.0,
+            contract=context.parameter_schemas[
+                "co2_concentration_1h_residual_scale"
+            ],
+        )
+
+        self.assertIs(result.outcome, LocalEditOutcome.REJECTED)
+        self.assertIn("0.8", result.rejection_reason)
+        self.assertIn("0.15", result.rejection_reason)
+        self.assertEqual(neighborhood["minimum"], 0.0)
+        self.assertEqual(neighborhood["maximum"], 0.15)
+
     def test_keep_is_valid_and_does_not_create_revision(self) -> None:
         parent = _parent()
         result = apply_local_edit_bundle(

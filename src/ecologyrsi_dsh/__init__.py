@@ -14,6 +14,7 @@ from .core.trajectory import (
 )
 from .core.models import (
     Candidate,
+    CandidateRole,
     CandidateStatus,
     Evaluation,
     ExpertConsultation,
@@ -45,6 +46,7 @@ from .version import __version__
 
 __all__ = [
     "Candidate",
+    "CandidateRole",
     "CandidateStatus",
     "DSHAdapter",
     "Evaluation",

@@ -13,6 +13,7 @@ from ..core.errors import (
 )
 from ..core.models import (
     Candidate,
+    CandidateRole,
     CandidateStatus,
     Evaluation,
     Promotion,
@@ -25,6 +26,10 @@ from ..core.models import (
 from ..core.protocols import (
     is_strict_origin_protocol,
     supports_two_stage_screening,
+)
+from ..core.state import (
+    uses_global_incumbent_protocol,
+    uses_positive_delta_search_protocol,
 )
 from ..core.redaction import (
     public_error_summary,
@@ -55,6 +60,7 @@ from ..evaluators.epoch_cohorts import (
     plan_generation_selection_cohorts,
     plan_run_adaptation_cohort,
 )
+from ..evaluators.fitness import FitnessProfile
 from ..evaluators.registry import RULE_JUDGE_ID, EvaluationBundle, EvaluatorRegistry
 from ..evaluators.generation_comparison import build_generation_comparison
 from ..evaluators.gateway_sample_adapter import ModelTokenBudgetExhaustedError
@@ -113,6 +119,15 @@ _FORMAL_FINALIST_COUNT = 2
 _ADAPTIVE_REFLECTION_BATCH_LIMIT = 10
 _ADAPTIVE_CELL_LIMIT = 16
 _ADAPTIVE_FAILURE_LIMIT = 16
+
+
+def _is_search_candidate(candidate: Any) -> bool:
+    """Keep legacy/mocked candidates searchable while excluding controls."""
+
+    return getattr(candidate, "role", CandidateRole.SEARCH) in {
+        CandidateRole.SEARCH,
+        CandidateRole.SEARCH.value,
+    }
 
 
 def _sample_run_control(director: Any, run_id: str) -> str:
@@ -210,11 +225,19 @@ def _freeze_adaptive_generation_inputs(
     ):
         return
     schedule = OptimizationSchedule.from_dict(metadata["optimization_schedule"])
+    if generation == 0 and uses_global_incumbent_protocol(state.task_manifest):
+        _director_mutation(
+            endpoint,
+            "ensure_seed_incumbent_control",
+            run_id,
+        )
+        state = endpoint.server.director.state(run_id)
     candidates = sorted(
         (
             item
             for item in state.candidates
             if item.generation == generation
+            and _is_search_candidate(item)
         ),
         key=lambda item: (item.slot_index, item.candidate_id),
     )
@@ -502,6 +525,9 @@ def _prepare_formal_finalists(
             generation=generation,
             selected_candidate_ids=selected_ids,
             screening_digest=screening_cohort_digest(tuple(screening.values())),
+            include_exploration_state=uses_global_incumbent_protocol(
+                state.task_manifest
+            ),
         )
         state = endpoint.server.director.state(run_id)
     selected_ids = tuple(frozen.payload["selected_candidate_ids"])
@@ -1179,6 +1205,7 @@ def _spawn_generation_candidates(endpoint: Any, run_id: str, batch: Any) -> bool
             item.slot_index: item
             for item in state.candidates
             if item.generation == batch.generation
+            and _is_search_candidate(item)
         }
         if slot_index in by_slot:
             continue
@@ -1291,6 +1318,7 @@ def _spawn_generation_candidates(endpoint: Any, run_id: str, batch: Any) -> bool
                 item
                 for item in state.candidates
                 if item.candidate_id != candidate.candidate_id
+                and _is_search_candidate(item)
                 and item.status is not CandidateStatus.DUPLICATE
                 and _candidate_signature(state, state.proposal(item.proposal_id))
                 == signature
@@ -2323,6 +2351,7 @@ def _generation_all_duplicates(state: Any, generation: int) -> bool:
         candidate
         for candidate in state.candidates
         if candidate.generation == generation
+        and _is_search_candidate(candidate)
     )
     if not candidates:
         return False
@@ -2403,10 +2432,14 @@ def complete_if_budget_exhausted(
     generation_exhausted = state.run.generation >= max_generations
     current_generation_has_candidates = any(
         candidate.generation == int(state.run.generation)
+        and _is_search_candidate(candidate)
         for candidate in state.candidates
     )
+    search_candidate_count = sum(
+        _is_search_candidate(candidate) for candidate in state.candidates
+    )
     candidate_exhausted = (
-        len(state.candidates) >= int(state.task_manifest.max_candidates)
+        search_candidate_count >= int(state.task_manifest.max_candidates)
         and _has_advanced_to_current_generation(state)
         # A retry can re-enter this preflight after the final candidate slot
         # has been spawned but before its evaluation and generation decision
@@ -2459,6 +2492,7 @@ def _generation_evidence_failure(state: Any, generation: int) -> str | None:
         evaluation
         for candidate in state.candidates
         if candidate.generation == generation
+        and _is_search_candidate(candidate)
         if (evaluation := state.evaluation_for(candidate.candidate_id)) is not None
     )
     if not evaluations:
@@ -2606,6 +2640,7 @@ def _generation_judges_should_retry(state: Any, generation: int) -> bool:
         evaluation
         for candidate in state.candidates
         if candidate.generation == generation
+        and _is_search_candidate(candidate)
         if (evaluation := state.evaluation_for(candidate.candidate_id)) is not None
     )
     return bool(evaluations) and all(
@@ -3024,13 +3059,18 @@ def _adaptive_gate_failures(gate: Mapping[str, Any]) -> list[str]:
         ):
             failures.append(text)
 
-    raw_failures = gate.get("failures")
+    positive_search_gate = "search_eligible" in gate
+    raw_failures = (
+        gate.get("search_failures")
+        if positive_search_gate
+        else gate.get("failures")
+    )
     if isinstance(raw_failures, Sequence) and not isinstance(
         raw_failures, (str, bytes)
     ):
         for item in raw_failures:
             add(item)
-    if gate.get("passed") is not True:
+    if not positive_search_gate and gate.get("passed") is not True:
         add("scientific_gate_failed")
     constraint_violations = gate.get("constraint_violations")
     if (
@@ -3043,10 +3083,10 @@ def _adaptive_gate_failures(gate: Mapping[str, Any]) -> list[str]:
         add("objective_grid_incomplete")
     if gate.get("coverage_pass") is False:
         add("coverage_failed")
-    if gate.get("no_cell_regression") is False:
+    if not positive_search_gate and gate.get("no_cell_regression") is False:
         add("cell_regression")
     assessment = gate.get("promotion_assessment")
-    if isinstance(assessment, Mapping) and assessment.get(
+    if not positive_search_gate and isinstance(assessment, Mapping) and assessment.get(
         "primary_selection_gate"
     ) is not True:
         add(assessment.get("status") or "primary_selection_gate_failed")
@@ -3090,6 +3130,8 @@ def _bounded_comparison_gate(gate: Mapping[str, Any]) -> dict[str, Any]:
     return deep_thaw_json(
         {
             "eligible": gate.get("eligible") is True,
+            "search_eligible": gate.get("search_eligible"),
+            "certification_eligible": gate.get("certification_eligible"),
             "scientific_pass": gate.get("passed") is True,
             "constraint_violations": gate.get("constraint_violations"),
             "overall_coverage": gate.get("overall_coverage"),
@@ -3099,8 +3141,13 @@ def _bounded_comparison_gate(gate: Mapping[str, Any]) -> dict[str, Any]:
             "worst_cell_delta": gate.get("worst_cell_delta"),
             "cell_deltas": bounded_cells,
             "stability_lower_bound": gate.get("stability_lower_bound"),
+            "strict_agent_chain_pass": gate.get("strict_agent_chain_pass"),
             "promotion_assessment": bounded_assessment,
             "failures": _adaptive_gate_failures(gate),
+            "search_failures": list(gate.get("search_failures", ()))[:8],
+            "certification_failures": list(
+                gate.get("certification_failures", ())
+            )[:8],
         }
     )
 
@@ -3398,6 +3445,24 @@ def _build_adaptive_analysis(
 ) -> Any:
     """Create one gate-derived analysis with bounded adaptive lineage evidence."""
 
+    formal_selection_getter = getattr(state, "formal_selection_for", None)
+    formal_selection = (
+        formal_selection_getter(generation)
+        if callable(formal_selection_getter)
+        else None
+    )
+    formal_payload = getattr(formal_selection, "payload", {})
+    if not isinstance(formal_payload, Mapping):
+        formal_payload = {}
+    exploration_only = formal_payload.get("exploration_only") is True
+    raw_consecutive = formal_payload.get("consecutive_exploration_generations", 0)
+    consecutive_exploration = (
+        raw_consecutive
+        if isinstance(raw_consecutive, int) and not isinstance(raw_consecutive, bool)
+        else 0
+    )
+    force_replan = exploration_only and consecutive_exploration >= 2
+
     finalist_evaluations = {
         item.scope.candidate_id: item
         for item in comparison.holdout_evaluations
@@ -3409,6 +3474,9 @@ def _build_adaptive_analysis(
         if item.scope.holdout_arm is HoldoutArm.INCUMBENT
     )
     gate_results = comparison.gate_results
+    positive_delta_search = (
+        gate_results.get("selection_policy") == "positive_delta_search@1"
+    )
     arms = gate_results.get("arms")
     if not isinstance(arms, Mapping):
         raise RuntimeError("adaptive comparison is missing arm gate results")
@@ -3431,6 +3499,18 @@ def _build_adaptive_analysis(
         if selected_arm
         in {HoldoutArm.FINALIST_1.value, HoldoutArm.FINALIST_2.value}
         else None
+    )
+    certification_selected_arm = gate_results.get("certification_selected_arm")
+    certification_selected = next(
+        (
+            item.scope.candidate_id
+            for item in comparison.holdout_evaluations
+            if item.scope.holdout_arm is not None
+            and item.scope.holdout_arm.value == certification_selected_arm
+            and item.scope.holdout_arm
+            in {HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2}
+        ),
+        None,
     )
     finalist_gate_by_candidate: dict[str, Mapping[str, Any]] = {}
     for candidate_id, evaluation in finalist_evaluations.items():
@@ -3468,7 +3548,11 @@ def _build_adaptive_analysis(
     ranking: list[dict[str, Any]] = []
     screening = _screening_records(state, generation)
     generation_candidates = sorted(
-        (item for item in state.candidates if item.generation == generation),
+        (
+            item
+            for item in state.candidates
+            if item.generation == generation and _is_search_candidate(item)
+        ),
         key=lambda item: (item.slot_index, item.candidate_id),
     )
     for candidate in generation_candidates:
@@ -3479,11 +3563,16 @@ def _build_adaptive_analysis(
                 raise RuntimeError("adaptive finalist holdout arm is missing")
             gate = finalist_gate_by_candidate[candidate.candidate_id]
             eligible = gate.get("eligible") is True
+            certification_eligible = gate.get("certification_eligible") is True
             is_selected = candidate.candidate_id == selected
             failures = _adaptive_gate_failures(gate)
             if is_selected:
                 selection_status = "selected"
-                selection_reason = "generation_holdout_winner"
+                selection_reason = (
+                    "next_round_search_version"
+                    if positive_delta_search
+                    else "generation_holdout_winner"
+                )
                 classification = "selected"
             elif eligible:
                 selection_status = "eligible_not_selected"
@@ -3508,6 +3597,8 @@ def _build_adaptive_analysis(
                     "slot_index": candidate.slot_index,
                     "score": holdout.score,
                     "eligible": eligible,
+                    "search_eligible": gate.get("search_eligible", eligible) is True,
+                    "certification_eligible": certification_eligible,
                     "scientific_pass": gate.get("passed") is True,
                     "constraint_violations": int(
                         gate.get("constraint_violations") or 0
@@ -3599,7 +3690,20 @@ def _build_adaptive_analysis(
             row["candidate_id"],
         )
     )
-    outcome = "promoted" if selected is not None else "no_improvement"
+    # Replanning the research direction and advancing the next search parent
+    # are independent decisions in runtime v3.  A positive-delta finalist may
+    # become the parent while two consecutive exploration-only generations
+    # still require new queries, hypotheses, and focus areas.
+    force_replan = bool(force_replan)
+    outcome = (
+        "promoted"
+        if certification_selected is not None
+        else "search_version_advanced"
+        if positive_delta_search and selected is not None
+        else "exploration_only"
+        if exploration_only
+        else "no_improvement"
+    )
     return GenerationAnalysis(
         run_id=state.run.run_id,
         generation=generation,
@@ -3607,13 +3711,25 @@ def _build_adaptive_analysis(
         eligible_count=len(eligible_finalist_ids),
         outcome=outcome,
         selected_candidate_id=selected,
-        champion_candidate_id=selected,
+        champion_candidate_id=(
+            certification_selected if positive_delta_search else selected
+        ),
         incumbent_before_candidate_id=incumbent_candidate_id,
-        incumbent_after_candidate_id=selected or incumbent_candidate_id,
+        incumbent_after_candidate_id=(
+            certification_selected or incumbent_candidate_id
+            if positive_delta_search
+            else selected or incumbent_candidate_id
+        ),
         search_parent_candidate_id=selected or incumbent_candidate_id,
         ranking=tuple(ranking),
         next_search_direction=(
-            "围绕留出比较选中候选的最终 revision 继续有界局部搜索"
+            "连续探索轮未通过初筛，强制重新规划搜索方向与假设"
+            if force_replan
+            else "保留严格认证版本，并把本轮正增益版本作为下一轮搜索起点"
+            if positive_delta_search and selected
+            else "保留全局 incumbent，并把本轮结果仅作为探索证据"
+            if exploration_only
+            else "围绕留出比较选中候选的最终 revision 继续有界局部搜索"
             if selected
             else (
                 "保留 incumbent 的最终 revision，针对 finalist "
@@ -3621,17 +3737,85 @@ def _build_adaptive_analysis(
             ),
         ),
         next_generation_focus=(
-            "保持 Top-2 结构，围绕留出比较选中候选继续批次局部更新"
+            "重新生成候选方向，避免继续沿用连续失败的局部搜索路径"
+            if force_replan
+            else "围绕正增益搜索版本继续优化，并单独修复认证风险"
+            if positive_delta_search and selected
+            else "修复初筛失败原因后再寻求全局晋升"
+            if exploration_only
+            else "保持 Top-2 结构，围绕留出比较选中候选继续批次局部更新"
             if selected
             else "保持 Top-2 结构，修复本轮 finalist 的留出门禁失败"
         ),
         selection_reason=(
-            f"候选 {selected} 在冻结 169-origin 三臂留出比较中胜出。"
+            (
+                f"本代虽无候选通过初筛，候选 {selected} 在同一冻结 "
+                "holdout 上取得正增益，成为下一轮搜索版本；"
+                "严格认证版本不变，且下一轮必须重新规划搜索方向。"
+            )
+            if positive_delta_search and exploration_only and selected
+            else (
+                f"候选 {selected} 在同一冻结 holdout 上取得正增益，"
+                "成为下一轮搜索版本；严格认证状态单独保留。"
+            )
+            if positive_delta_search and selected
+            else "本代无候选通过初筛，仅保留探索证据；全局 incumbent 不变。"
+            if exploration_only
+            else f"候选 {selected} 在冻结 169-origin 三臂留出比较中胜出。"
             if selected
             else "两个 finalist 均未通过留出集门禁，保留 incumbent。"
         ),
         insufficient_evidence=False,
+        replan_required=force_replan,
+        consecutive_exploration_generations=(
+            consecutive_exploration if exploration_only else 0
+        ),
     )
+
+
+def _runtime_v3_promotion_reason(
+    comparison: GenerationComparison,
+    finalist: Candidate,
+    *,
+    approved: bool,
+) -> str:
+    """Explain certification without attributing the search winner to it."""
+
+    evaluation = next(
+        (
+            item
+            for item in comparison.holdout_evaluations
+            if item.scope.candidate_id == finalist.candidate_id
+        ),
+        None,
+    )
+    arm = (
+        evaluation.scope.holdout_arm.value
+        if evaluation is not None and evaluation.scope.holdout_arm is not None
+        else None
+    )
+    arms = comparison.gate_results.get("arms")
+    gate = arms.get(arm) if isinstance(arms, Mapping) and arm is not None else None
+    if not isinstance(gate, Mapping):
+        gate = {}
+    if approved:
+        return "候选通过同一冻结 holdout 的严格认证门禁，成为稳健认证版本。"
+    failures = gate.get("certification_failures")
+    failure_codes = (
+        [str(item) for item in failures[:8]]
+        if isinstance(failures, (list, tuple))
+        else []
+    )
+    detail = ",".join(failure_codes) or (
+        "lower_deterministic_certification_rank"
+        if gate.get("certification_eligible") is True
+        else "strict_certification_gate_failed"
+    )
+    if finalist.candidate_id == comparison.selected_candidate_id:
+        return (
+            "候选已成为下一轮搜索版本，但未获严格认证：" + detail
+        )[:500]
+    return ("候选未获严格认证：" + detail)[:500]
 
 
 def _trajectory_holdout_revision_id(
@@ -3695,9 +3879,38 @@ def _finalize_adaptive_generation(endpoint: Any, run_id: str, batch: Any) -> Any
         if incumbent_revision_id is not None
         else state.run.best_candidate_id
     )
+    if generation == 0 and incumbent_revision_id is None:
+        seed_control = next(
+            (
+                item
+                for item in state.candidates
+                if getattr(item, "role", CandidateRole.SEARCH)
+                is CandidateRole.INCUMBENT_CONTROL
+            ),
+            None,
+        )
+        if seed_control is not None:
+            seed_revision = state.initial_revision_for(seed_control.candidate_id)
+            if seed_revision is None:
+                raise RuntimeError("adaptive seed incumbent is missing R0")
+            incumbent_id = seed_control.candidate_id
+            incumbent_revision_id = seed_revision.revision_id
+        elif uses_global_incumbent_protocol(state.task_manifest):
+            raise RuntimeError(
+                "runtime-v2 generation zero requires the materialized seed incumbent"
+            )
     if incumbent_id is None or incumbent_revision_id is None:
+        # Legacy prequential runs predate the explicit seed control. Preserve
+        # their historical audit/recovery semantics without silently applying
+        # this fallback to new paired runs.
         fallback = next(
-            (item for item in state.candidates if item.generation == generation and item.candidate_id not in finalist_ids),
+            (
+                item
+                for item in state.candidates
+                if item.generation == generation
+                and _is_search_candidate(item)
+                and item.candidate_id not in finalist_ids
+            ),
             None,
         )
         if fallback is None:
@@ -3755,6 +3968,12 @@ def _finalize_adaptive_generation(endpoint: Any, run_id: str, batch: Any) -> Any
             holdout_evaluations=tuple(item for item in evaluations if item is not None),
             incumbent_candidate_id=incumbent_id,
             fitness_profile=FitnessProfile.from_task(state.task_manifest),
+            challenger_promotion_allowed=(
+                formal.payload.get("exploration_only") is not True
+            ),
+            positive_delta_search=uses_positive_delta_search_protocol(
+                state.task_manifest
+            ),
         )
         _director_mutation(endpoint, "record_generation_comparison", run_id, comparison)
     _director_mutation(
@@ -3781,7 +4000,33 @@ def _finalize_adaptive_generation(endpoint: Any, run_id: str, batch: Any) -> Any
     for finalist in finalists:
         if state.promotion_for(finalist.candidate_id) is not None:
             continue
-        approved = finalist.candidate_id == comparison.selected_candidate_id
+        certification_selected_arm = comparison.gate_results.get(
+            "certification_selected_arm"
+        )
+        approved = bool(
+            certification_selected_arm is not None
+            and next(
+                (
+                    item.scope.candidate_id
+                    for item in comparison.holdout_evaluations
+                    if item.scope.holdout_arm is not None
+                    and item.scope.holdout_arm.value == certification_selected_arm
+                ),
+                None,
+            )
+            == finalist.candidate_id
+        )
+        if not uses_positive_delta_search_protocol(state.task_manifest):
+            approved = finalist.candidate_id == comparison.selected_candidate_id
+        reason = (
+            _runtime_v3_promotion_reason(
+                comparison,
+                finalist,
+                approved=approved,
+            )
+            if uses_positive_delta_search_protocol(state.task_manifest)
+            else analysis.selection_reason
+        )
         # ``record_evaluation`` above makes the finalists eligible for the
         # existing DSH identity/artifact promotion fence.
         _director_mutation(
@@ -3792,7 +4037,7 @@ def _finalize_adaptive_generation(endpoint: Any, run_id: str, batch: Any) -> Any
                 run_id=run_id,
                 candidate_id=finalist.candidate_id,
                 decision=(PromotionDecision.APPROVED if approved else PromotionDecision.REJECTED),
-                reason=analysis.selection_reason,
+                reason=reason,
             ),
         )
     if state.task_manifest.metadata.get("autonomous_research_protocol"):
@@ -3864,7 +4109,11 @@ def execute_generation(endpoint: Any, run_id: str) -> Any:
 
     state = endpoint.server.director.state(run_id)
     current = sorted(
-        (item for item in state.candidates if item.generation == batch.generation),
+        (
+            item
+            for item in state.candidates
+            if item.generation == batch.generation and _is_search_candidate(item)
+        ),
         key=lambda item: item.slot_index,
     )
     _freeze_adaptive_generation_inputs(endpoint, run_id, batch.generation)

@@ -1,24 +1,31 @@
 import { isDeepStrictEqual } from "node:util";
+import { readFileSync } from "node:fs";
 
 import { RuntimeRunRegistry } from "./run-registry.js";
 import { runtimeCapabilities } from "./capabilities.js";
 import { RoleAgentManager } from "./agents.js";
 import { NativeStageRunner } from "./stage-runner.js";
 
-const DEFAULT_PRESETS = Object.freeze([
-  "ecology-coordinator-v4",
-  "ecology-researcher-v7",
-  "ecology-candidate-proposer-v4",
-  "ecology-sample-planner-v5",
-  "ecology-sample-critic-v4",
-  "ecology-generation-judge-v7",
-].map((preset_id) => ({
-  preset_id,
-  tool_profile: "dynamic-retrieval-v1",
-  required_tools: preset_id === "ecology-sample-planner-v5"
-    ? ["ecology_execute_prediction_tool", "skill", "web_search"]
-    : ["skill", "web_search"],
-})));
+const PRESET_MANIFEST = Object.freeze(JSON.parse(readFileSync(
+  new URL("../../presets/preset-manifest.json", import.meta.url),
+  "utf8",
+)));
+if (
+  PRESET_MANIFEST.schema_version !== "ecologyrsi-dsh.preset-manifest/1"
+  || !Array.isArray(PRESET_MANIFEST.presets)
+  || PRESET_MANIFEST.presets.length === 0
+) {
+  throw new Error("preset-manifest.json is invalid");
+}
+const DEFAULT_PRESETS = Object.freeze(PRESET_MANIFEST.presets.map((item) => (
+  Object.freeze({
+    preset_id: String(item.preset_id),
+    tool_profile: String(item.tool_profile),
+    required_tools: Object.freeze([...item.required_tools].map(String)),
+  })
+)));
+
+export const CURRENT_PRESET_MANIFEST = PRESET_MANIFEST;
 
 const START_OPEN_STATUSES = Object.freeze(["created", "running"]);
 const TERMINAL_START_STATUSES = Object.freeze(["cancelling", "cancelled"]);
