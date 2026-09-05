@@ -71,6 +71,7 @@ from ..knowledge.program_registry import current_program_registry
 from ..version import __version__
 from .auto_progress import AutoProgressManager
 from .dsh_tools import DshStructuredResultPersistenceError, DshToolService
+from .errors import public_error_payload
 from .projection import _control_payload, _state_payload
 from .sample_admission import (
     DEFAULT_SAMPLE_CONCURRENCY,
@@ -114,20 +115,20 @@ _DSH_SIDECAR_PUBLIC_ERROR_CODES = frozenset(
 
 
 def _dsh_sidecar_error(exc: BaseException) -> dict[str, str]:
+    payload = public_error_payload(exc)
     if isinstance(exc, DshStructuredResultPersistenceError):
         # Do not make storage-driver or filesystem text observable to the DSH
         # process. The stable machine code is sufficient for its bounded retry.
-        return {
-            "error": "structured result persistence is temporarily unavailable",
-            "error_code": exc.error_code,
-        }
-    payload = {"error": _public_http_error(exc)}
-    error_code = getattr(exc, "error_code", None)
-    if (
-        isinstance(error_code, str)
-        and error_code in _DSH_SIDECAR_PUBLIC_ERROR_CODES
-    ):
-        payload["error_code"] = error_code
+        payload["error"] = "structured result persistence is temporarily unavailable"
+    # Sidecar exposes only allow-listed provider codes; unknown implementation
+    # exceptions remain the stable internal error contract.
+    error_code = payload.get("error_code")
+    if error_code not in _DSH_SIDECAR_PUBLIC_ERROR_CODES:
+        # Preserve the established sidecar contract for unapproved provider
+        # codes: detailed implementation failures are intentionally generic
+        # and do not advertise a machine code to the DSH process.
+        payload.pop("error_code", None)
+        payload["error"] = "internal server error"
     return payload
 
 
@@ -1100,7 +1101,9 @@ class EvolutionRequestHandler(
         if len(path) == 3 and path[0] == "runs" and path[2] == "samples":
             self._call(lambda: self._sample_results_payload(path[1]))
             return
-        self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        self._send(HTTPStatus.NOT_FOUND, public_error_payload(
+            FileNotFoundError("not found"), status=HTTPStatus.NOT_FOUND
+        ))
 
     def do_POST(self) -> None:  # noqa: N802
         raw_path = urlparse(self.path).path
@@ -1156,9 +1159,9 @@ class EvolutionRequestHandler(
                     {"found": result is not None, "result": result},
                 )
             except PermissionError as exc:
-                self._send(HTTPStatus.FORBIDDEN, {"error": _public_http_error(exc)})
+                self._send(HTTPStatus.FORBIDDEN, public_error_payload(exc, status=HTTPStatus.FORBIDDEN))
             except (RuntimeError, TypeError, ValueError) as exc:
-                self._send(HTTPStatus.CONFLICT, {"error": _public_http_error(exc)})
+                self._send(HTTPStatus.CONFLICT, public_error_payload(exc, status=HTTPStatus.CONFLICT))
             return
         if raw_path == "/api/ecology-agent-sidecar/v1/retrievals/complete":
             if not self._authorize_dsh_tool():
@@ -1167,16 +1170,18 @@ class EvolutionRequestHandler(
                 result = self.server.dsh_tools.complete_retrieval(self._body())
                 self._send(HTTPStatus.OK, result)
             except PermissionError as exc:
-                self._send(HTTPStatus.FORBIDDEN, {"error": _public_http_error(exc)})
+                self._send(HTTPStatus.FORBIDDEN, public_error_payload(exc, status=HTTPStatus.FORBIDDEN))
             except (RuntimeError, TypeError, ValueError) as exc:
-                self._send(HTTPStatus.CONFLICT, {"error": _public_http_error(exc)})
+                self._send(HTTPStatus.CONFLICT, public_error_payload(exc, status=HTTPStatus.CONFLICT))
             return
         if raw_path.startswith(tool_prefix):
             if not self._authorize_dsh_tool():
                 return
             tool_name = raw_path[len(tool_prefix):]
             if not tool_name or "/" in tool_name:
-                self._send(HTTPStatus.NOT_FOUND, {"error": "unknown DSH role tool"})
+                self._send(HTTPStatus.NOT_FOUND, public_error_payload(
+                    FileNotFoundError("unknown DSH role tool"), status=HTTPStatus.NOT_FOUND
+                ))
                 return
             try:
                 result = self.server.dsh_tools.execute(tool_name, self._body())
@@ -1250,7 +1255,9 @@ class EvolutionRequestHandler(
                 if len(path) == 2 and path[0] == "runs":
                     self._delete_run(path[1], body)
                     return
-                self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                self._send(HTTPStatus.NOT_FOUND, public_error_payload(
+                    FileNotFoundError("not found"), status=HTTPStatus.NOT_FOUND
+                ))
         except CommandInProgressError as exc:
             self._send_post_error(HTTPStatus.CONFLICT, exc)
         except KeyError as exc:
@@ -1308,7 +1315,9 @@ class EvolutionRequestHandler(
         ):
             self._answer_expert_consultation(path[1], path[3], body)
             return
-        self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        self._send(HTTPStatus.NOT_FOUND, public_error_payload(
+            FileNotFoundError("not found"), status=HTTPStatus.NOT_FOUND
+        ))
 
     def _evolution_capacity(self, body: dict[str, Any]) -> None:
         fields = {

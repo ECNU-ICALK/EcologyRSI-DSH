@@ -8,6 +8,7 @@ from http import HTTPStatus
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from .errors import public_error_payload
 from .shared import _PLUGIN_FILES, _plugin_root, _public_http_error
 
 
@@ -30,39 +31,49 @@ class TransportMixin:
         supplied = header[7:].strip() if header.startswith("Bearer ") else ""
         if supplied and hmac.compare_digest(supplied, expected):
             return True
-        self._send(HTTPStatus.UNAUTHORIZED, {"error": "DSH 能力令牌无效或缺失"})
+        self._send(HTTPStatus.UNAUTHORIZED, public_error_payload(
+            PermissionError("DSH 能力令牌无效或缺失"), status=HTTPStatus.UNAUTHORIZED,
+        ))
         return False
 
     def _authorize_dsh_tool(self) -> bool:
         expected = self.server.dsh_tool_token
         if expected is None:
-            self._send(
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                {"error": "DSH role-tool boundary is not configured"},
-            )
+            self._send(HTTPStatus.SERVICE_UNAVAILABLE, public_error_payload(
+                RuntimeError("DSH role-tool boundary is not configured"),
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            ))
             return False
         header = self.headers.get("Authorization", "")
         supplied = header[7:].strip() if header.startswith("Bearer ") else ""
         if supplied and hmac.compare_digest(supplied, expected):
             return True
-        self._send(HTTPStatus.UNAUTHORIZED, {"error": "invalid DSH role-tool token"})
+        self._send(HTTPStatus.UNAUTHORIZED, public_error_payload(
+            PermissionError("invalid DSH role-tool token"), status=HTTPStatus.UNAUTHORIZED,
+        ))
         return False
 
     def _serve_plugin(self, raw_path: str) -> None:
         prefix = "/plugins/ecology/evolution"
         relative = raw_path[len(prefix):].lstrip("/") or "index.html"
         if relative not in _PLUGIN_FILES:
-            self._send(HTTPStatus.NOT_FOUND, {"error": "plugin file not found"})
+            self._send(HTTPStatus.NOT_FOUND, public_error_payload(
+                FileNotFoundError("plugin file not found"), status=HTTPStatus.NOT_FOUND
+            ))
             return
         root = _plugin_root()
         target = (root / relative).resolve()
         try:
             target.relative_to(root)
         except ValueError:
-            self._send(HTTPStatus.NOT_FOUND, {"error": "plugin file not found"})
+            self._send(HTTPStatus.NOT_FOUND, public_error_payload(
+                FileNotFoundError("plugin file not found"), status=HTTPStatus.NOT_FOUND
+            ))
             return
         if not target.is_file():
-            self._send(HTTPStatus.NOT_FOUND, {"error": "plugin file not found"})
+            self._send(HTTPStatus.NOT_FOUND, public_error_payload(
+                FileNotFoundError("plugin file not found"), status=HTTPStatus.NOT_FOUND
+            ))
             return
         body = target.read_bytes()
         self.send_response(HTTPStatus.OK)
@@ -89,13 +100,13 @@ class TransportMixin:
         try:
             self._send(HTTPStatus.OK, callback())
         except PermissionError as exc:
-            self._send(HTTPStatus.FORBIDDEN, {"error": _public_http_error(exc)})
+            self._send(HTTPStatus.FORBIDDEN, public_error_payload(exc, status=HTTPStatus.FORBIDDEN))
         except FileNotFoundError as exc:
-            self._send(HTTPStatus.NOT_FOUND, {"error": _public_http_error(exc)})
+            self._send(HTTPStatus.NOT_FOUND, public_error_payload(exc, status=HTTPStatus.NOT_FOUND))
         except KeyError as exc:
-            self._send(HTTPStatus.NOT_FOUND, {"error": _public_http_error(exc)})
+            self._send(HTTPStatus.NOT_FOUND, public_error_payload(exc, status=HTTPStatus.NOT_FOUND))
         except (RuntimeError, TypeError, ValueError) as exc:
-            self._send(HTTPStatus.BAD_REQUEST, {"error": _public_http_error(exc)})
+            self._send(HTTPStatus.BAD_REQUEST, public_error_payload(exc, status=HTTPStatus.BAD_REQUEST))
 
     def _body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))

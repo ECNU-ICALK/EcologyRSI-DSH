@@ -9,6 +9,7 @@ from ..core.ledger import CommandInProgressError, CommandReceipt
 from ..core.redaction import safe_error_code
 from ..integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 from .command_receipts import compact_command_receipt_payload
+from .errors import public_error_payload
 from .generation_execution import complete_if_budget_exhausted, execute_generation
 from .projection import _control_payload
 from .shared import (
@@ -325,11 +326,11 @@ class ExecutionEndpointsMixin:
         return any(event.kind == expected_event for event in events)
 
     def _send_post_error(self, status: HTTPStatus, exc: BaseException) -> None:
-        payload: dict[str, Any] = {"error": _public_http_error(exc)}
-        error_code = safe_error_code(getattr(exc, "error_code", None))
-        if error_code is not None:
-            payload["error_code"] = error_code
         active = getattr(self, "_active_command", None)
+        command_id = active["key"] if active is not None else None
+        payload: dict[str, Any] = public_error_payload(
+            exc, status=status, command_id=command_id
+        )
         if active is not None:
             has_progress = self._active_command_has_progress(active)
             if active["new_claim"] and has_progress is False:
