@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Mapping, Protocol, Sequence
 
 from ..core.models import digest
+from ..core.trajectory import OriginOccurrence
 from ..data.splits import IndexRange
 from ..evolution.schedule import OptimizationSchedule
 from .greenhouse_prediction import MAX_EXOGENOUS_RIDGE_HISTORY_STEPS
@@ -136,6 +137,27 @@ class PlannedOrigin:
             "maturity_digest": self.maturity_digest,
             "reuse_index": self.reuse_index,
         }
+
+    def occurrence(
+        self,
+        *,
+        cohort_role: str,
+        generation: int,
+        candidate_id: str,
+        revision_id: str,
+    ) -> OriginOccurrence:
+        """Bind this planned source to one executable run occurrence."""
+
+        return OriginOccurrence.from_source(
+            source_origin_id=self.origin_id,
+            cycle_index=self.reuse_index,
+            origin_timestamp=self.origin_timestamp,
+            maturity_digest=self.maturity_digest,
+            cohort_role=cohort_role,
+            generation=generation,
+            candidate_id=candidate_id,
+            revision_id=revision_id,
+        )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "PlannedOrigin":

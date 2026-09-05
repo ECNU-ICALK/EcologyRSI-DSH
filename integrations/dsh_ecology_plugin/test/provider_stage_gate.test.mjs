@@ -28,6 +28,12 @@ test("provider stage gate admits the configured 128-request provider window imme
     effectiveMaxInFlight: 128,
     active: 128,
     queued: 1,
+    draining: 0,
+    lifecycle_counts: {
+      provider_queued: 1,
+      provider_active: 128,
+      draining: 0,
+    },
     cooldownRemainingMs: 0,
   });
 
