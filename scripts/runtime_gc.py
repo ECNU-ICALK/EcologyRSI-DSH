@@ -47,6 +47,17 @@ def _protected(path: Path) -> bool:
     return path.name in PROTECTED_NAMES or path.suffix.lower() in PROTECTED_SUFFIXES
 
 
+def _manifest_target(root: Path, manifest_path: Path | None) -> Path:
+    target = root / "runtime-gc-manifest.json" if manifest_path is None else Path(manifest_path)
+    root_abs = Path(os.path.abspath(root))
+    target_abs = Path(os.path.abspath(target))
+    try:
+        target_abs.relative_to(root_abs)
+    except ValueError as exc:
+        raise ValueError("manifest path must stay inside the .runtime root") from exc
+    return target_abs
+
+
 def plan_cleanup(root: Path, *, older_than_days: float = 7, keep: int = 10) -> list[dict[str, Any]]:
     """Return deletions without changing the filesystem."""
     root = _runtime_root(root)
@@ -93,9 +104,7 @@ def run_cleanup(
                 raise RuntimeError(f"refusing to remove changed runtime entry: {target}")
             target.unlink()
             manifest["deleted"].append(item["path"])
-    if manifest_path is None:
-        manifest_path = root / "runtime-gc-manifest.json"
-    manifest_path = Path(manifest_path)
+    manifest_path = _manifest_target(root, manifest_path)
     if manifest_path.is_symlink():
         raise RuntimeError(f"manifest path is a symlink: {manifest_path}")
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

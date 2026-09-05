@@ -42,6 +42,13 @@ class RuntimeGcTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 plan_cleanup(root, older_than_days=0, keep=0)
 
+    def test_manifest_cannot_escape_runtime_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".runtime"
+            root.mkdir()
+            with self.assertRaises(ValueError):
+                run_cleanup(root, manifest_path=root.parent / "manifest.json")
+
 
 if __name__ == "__main__":
     unittest.main()
