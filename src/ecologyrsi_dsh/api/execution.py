@@ -8,6 +8,7 @@ from typing import Any
 from ..core.ledger import CommandInProgressError, CommandReceipt
 from ..core.redaction import safe_error_code
 from ..integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
+from .command_receipts import compact_command_receipt_payload
 from .generation_execution import complete_if_budget_exhausted, execute_generation
 from .projection import _control_payload
 from .shared import (
@@ -43,14 +44,7 @@ class ExecutionEndpointsMixin:
         receipt = self.server.ledger.command_receipt(key)
         if receipt is None:
             raise KeyError(f"unknown command: {key}")
-        payload: dict[str, Any] = {
-            "command_id": receipt.command_key,
-            "status": receipt.status,
-            "command_kind": receipt.command_kind,
-            "run_id": receipt.resource_run_id or receipt.run_id,
-            "created_at": receipt.created_at,
-            "completed_at": receipt.completed_at,
-        }
+        payload = compact_command_receipt_payload(receipt)
         if receipt.response is not None:
             payload["response"] = dict(receipt.response)
         else:
