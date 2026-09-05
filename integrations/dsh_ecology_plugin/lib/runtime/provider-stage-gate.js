@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 export const MAX_STRUCTURED_STAGE_IN_FLIGHT = 128;
 
 function boundedDelay(value, name) {
@@ -154,6 +156,7 @@ export class ProviderStageGate {
       rejectCaller = reject;
     });
     const record = {
+      requestId: randomUUID(),
       runId,
       providerKey,
       operation,
@@ -166,6 +169,10 @@ export class ProviderStageGate {
       deadline,
       queueTimer: null,
       deadlineTimer: null,
+      queuedAt: this.now(),
+      admittedAt: null,
+      startedAt: null,
+      finishedAt: null,
     };
     const remaining = deadlineRemainingMs(deadline, this.now);
     if (remaining <= 0) {
@@ -267,6 +274,8 @@ export class ProviderStageGate {
         }
         queue.shift();
         record.status = "active";
+        record.admittedAt = this.now();
+        record.startedAt = record.admittedAt;
         this.active.set(providerKey, (this.active.get(providerKey) || 0) + 1);
         this.nextAllowedAt.set(
           providerKey,
@@ -293,7 +302,8 @@ export class ProviderStageGate {
         );
         const release = (succeeded) => {
           if (record.deadlineTimer !== null) clearTimeout(record.deadlineTimer);
-          record.status = "completed";
+          record.status = succeeded ? "completed" : "failed";
+          record.finishedAt = this.now();
           this.records.delete(record);
           const currentLimit = this.#effectiveLimit(providerKey);
           const activeBeforeRelease = this.active.get(providerKey) || 0;
@@ -412,11 +422,24 @@ export class ProviderStageGate {
 
   snapshot(provider) {
     const key = String(provider || "default");
+    const lifecycleCounts = {
+      provider_queued: 0,
+      provider_active: 0,
+      draining: 0,
+    };
+    for (const record of this.records) {
+      if (record.providerKey !== key) continue;
+      if (record.status === "queued") lifecycleCounts.provider_queued += 1;
+      else if (record.status === "active") lifecycleCounts.provider_active += 1;
+      else if (record.status === "draining") lifecycleCounts.draining += 1;
+    }
     return Object.freeze({
       maxInFlight: this.maxInFlight,
       effectiveMaxInFlight: this.#effectiveLimit(key),
       active: this.active.get(key) || 0,
       queued: this.queues.get(key)?.length || 0,
+      draining: lifecycleCounts.draining,
+      lifecycle_counts: Object.freeze(lifecycleCounts),
       cooldownRemainingMs: Math.max(
         0,
         (this.nextAllowedAt.get(key) || 0) - this.now(),
