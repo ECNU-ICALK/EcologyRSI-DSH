@@ -661,6 +661,37 @@ class EventLedger:
                 ).fetchall()
         return tuple(self._row_to_event(row) for row in rows)
 
+    def events_after(
+        self,
+        run_id: str,
+        after_seq: int = 0,
+        *,
+        limit: int | None = None,
+    ) -> tuple[Event, ...]:
+        """Read a bounded run-scoped event delta without materializing history."""
+
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("run_id must be a non-empty string")
+        if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
+            raise ValueError("after_seq must be a non-negative integer")
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+        ):
+            raise ValueError("limit must be a positive integer when provided")
+        query = """
+            SELECT seq, event_id, run_id, kind, payload_json, created_at
+            FROM evolution_events
+            WHERE run_id = ? AND seq > ?
+            ORDER BY seq
+        """
+        params: list[object] = [run_id.strip(), after_seq]
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        with self._lock:
+            rows = self._connection.execute(query, tuple(params)).fetchall()
+        return tuple(self._row_to_event(row) for row in rows)
+
     def event_by_id(self, event_id: str, *, run_id: str | None = None) -> Event | None:
         """Return one indexed event, optionally requiring its run identity."""
 

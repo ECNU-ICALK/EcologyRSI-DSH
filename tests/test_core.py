@@ -86,6 +86,18 @@ class CoreTests(unittest.TestCase):
 
         self.assertLess(first.seq, latest_a.seq)
 
+    def test_events_after_supports_bounded_incremental_reads(self) -> None:
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        first = ledger.append("run:delta", "Example", {"value": 1})
+        second = ledger.append("run:delta", "Example", {"value": 2})
+        ledger.append("run:delta", "Example", {"value": 3})
+
+        delta = ledger.events_after("run:delta", first.seq, limit=1)
+
+        self.assertEqual(len(delta), 1)
+        self.assertEqual(delta[0].seq, second.seq)
+
     def test_lifecycle_tail_is_covered_and_ignores_non_lifecycle_history(self) -> None:
         ledger = EventLedger()
         self.addCleanup(ledger.close)
