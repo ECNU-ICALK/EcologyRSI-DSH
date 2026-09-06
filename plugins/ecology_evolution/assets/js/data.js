@@ -636,9 +636,6 @@
     if (incomingStatus !== "failed") { return false; }
     var previousStatus = String(previousRun && previousRun.status || "").toLowerCase();
     state.commandError = "后台进化失败：" + runFailureMessage(incomingRun, events);
-    if (state.autoAdvanceRunId === incomingRun.id && typeof stopAutoAdvance === "function") {
-      stopAutoAdvance(incomingRun.id, { clearError: false });
-    }
     if (previousStatus !== "failed") { showToast(state.commandError); }
     return previousStatus !== "failed";
   }
@@ -709,9 +706,6 @@
         }
         // A read-only poll is also the recovery hook after a page reload or a
         // DSH reconnect. The scheduler itself remains the only writer.
-        if (state.activeRun && state.activeRun.id === runId && typeof ensureAutoAdvanceForRun === "function") {
-          ensureAutoAdvanceForRun(runId);
-        }
         return true;
       }
       // Commit compact authority immediately. Never turn a heartbeat into an

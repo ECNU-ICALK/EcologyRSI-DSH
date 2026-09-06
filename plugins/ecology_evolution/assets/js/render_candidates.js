@@ -393,7 +393,7 @@
     var remainingBatches = candidateFiniteNumber(liveProgress && liveProgress.remaining_batches);
     var remainingParts = [];
     if (remainingSamples != null) { remainingParts.push("剩余 " + formatNumber(remainingSamples) + " 个" + progressUnit); }
-    if (remainingBatches != null) { remainingParts.push(formatNumber(remainingBatches) + " 个微批"); }
+    if (remainingBatches != null) { remainingParts.push(formatNumber(remainingBatches) + " 个批次"); }
     var sampleStageNote = liveProgress
       ? (progressPaused ? "恢复后继续" : "训练反馈分区") + (remainingParts.length ? " · " + remainingParts.join("、") : "")
       : attempted == null ? "训练反馈分区" : originBundleProtocol && attemptedOrigins != null ? formatNumber(attemptedOrigins) + " 个预测时点 / " + formatNumber(predictionCells == null ? attempted : predictionCells) + " 个评分单元" : formatNumber(attempted) + " 个可评测样本";
@@ -450,7 +450,7 @@
       scientific_gate_failed: "未通过固定科学门禁",
       judge_rejected: "科学门禁通过，独立评审未接受",
       judge_unavailable: "独立评审不可用，未作正式晋升",
-      not_selected_by_screening_top_k: "初筛未进入 Top 2，不参加正式评测",
+      not_selected_by_screening_top_k: "初筛未入围，不参加正式评测",
       execution_failed: "训练或评测失败",
       duplicate: "参数重复，未重复评测"
     }[String(value || "")] || String(value || "等待轮末统一选择");
@@ -548,7 +548,7 @@
     if (run && run.best_candidate_id && candidate.id === run.best_candidate_id) { return { text: "当前保留", className: "pill-green" }; }
     if (run && run.best_observed_candidate_id && candidate.id === run.best_observed_candidate_id) { return { text: "原始最高观测", className: "pill-blue" }; }
     if (String(candidate.status || "").toLowerCase() === "failed") { return { text: "执行失败", className: "pill-red" }; }
-    if (String(candidate.status || "").toLowerCase() === "screened_out") { return { text: "初筛未进入 Top 2", className: "pill-neutral" }; }
+    if (String(candidate.status || "").toLowerCase() === "screened_out") { return { text: "初筛未入围", className: "pill-neutral" }; }
     if (String(candidate.status || "").toLowerCase() === "rejected") { return { text: "未保留", className: "pill-red" }; }
     if (String(candidate.status || "").toLowerCase() === "duplicate") { return { text: "重复跳过", className: "pill-neutral" }; }
     return { text: candidateStatusText(candidate.status), className: candidateStatusClass(candidate.status) };
@@ -621,7 +621,7 @@
       candidateSummaryCard("搜索版本得分", Number.isFinite(searchVersionScore) ? formatNumber(searchVersionScore, 3) : "—", searchIsInitialSeed ? "等待首轮同批 holdout" : "本代冻结 holdout 得分", searchVersionId ? "has-value" : "is-pending"),
       candidateSummaryCard("评测进度", formatNumber(evaluated.length) + " / " + formatNumber(values.length), pending.length ? formatNumber(pending.length) + " 个等待反馈" : roundText, pending.length ? "is-pending" : "has-value")
     ] : [
-      candidateSummaryCard("当前保留", retained ? shortId(retained.id) : "尚未产生", retained ? "训练反馈搜索保留" : "正式验证未开展", retained ? "is-winner" : "is-pending"),
+      candidateSummaryCard("当前保留", retained ? shortId(retained.id) : "尚未产生", retained ? "保留用于优化" : "正式验证未开展", retained ? "is-winner" : "is-pending"),
       candidateSummaryCard("当前保留得分", retainedScoreText, retainedScore == null ? "尚未记录晋升得分" : "实际晋升序列", retainedScore != null ? "has-value" : "is-pending"),
       candidateSummaryCard("原始最高观测（跨窗口不可直接比较）", observedScoreText, observed ? shortId(observed.id) : "暂无已完成评测", rawObservedScore != null ? "has-value" : "is-pending"),
       candidateSummaryCard("评测进度", formatNumber(evaluated.length) + " / " + formatNumber(values.length), pending.length ? formatNumber(pending.length) + " 个等待反馈" : roundText, pending.length ? "is-pending" : "has-value")
@@ -902,9 +902,9 @@
     var certifiedVersionId = positiveDeltaV3 && evidence.certified_version ? evidence.certified_version.candidate_id : null;
     var acceptableText = positiveDeltaV3
       ? "下一轮搜索版本：" + (searchVersionId ? shortId(searchVersionId) : "尚未产生") + "；稳健认证版本：" + (certifiedVersionId ? shortId(certifiedVersionId) : "尚未产生")
-      : run && run.best_candidate_id ? "训练反馈搜索保留候选：" + shortId(run.best_candidate_id) + "（正式验证未开展）" : "训练反馈搜索保留候选：尚未产生（正式验证未开展）";
+      : run && run.best_candidate_id ? "保留用于优化候选：" + shortId(run.best_candidate_id) + "（正式验证未开展）" : "保留用于优化候选：尚未产生（正式验证未开展）";
     var observedText = rawBestObservedSummary(run);
-    if (!positiveDeltaV3 && run && runOutcomeCode(run) === "budget_exhausted_without_acceptable_candidate") { acceptableText = "已完成预设进化规模，尚无候选通过全部评测门控（正式验证未开展）"; }
+    if (!positiveDeltaV3 && run && runOutcomeCode(run) === "budget_exhausted_without_acceptable_candidate") { acceptableText = "本次运行未产生新的保留方案；请查看各方案的评测与选择原因。"; }
     $("#best-candidate-label").textContent = acceptableText + "；" + observedText;
     $("#best-candidate-label").title = run ? [searchVersionId, certifiedVersionId, run.best_candidate_id, run.best_observed_candidate_id].filter(Boolean).join("\n") : "";
     $("#export-button").disabled = state.busy || !run;

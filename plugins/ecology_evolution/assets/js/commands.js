@@ -1,199 +1,5 @@
 "use strict";
 
-  // A generation is a durable transaction on the service.  The browser only
-  // schedules the next transaction after the previous request has returned
-  // and the projection is back at its waiting boundary.  This keeps retries
-  // serial and prevents duplicate candidate batches when a user refreshes or
-  // a DSH host sends a second context message.
-  var autoAdvanceDelayMs = 450;
-  var autoAdvancePollMs = 1200;
-  var autoAdvanceRetryLimit = 3;
-
-  function clearAutoAdvanceTimer() {
-    if (state.autoAdvanceTimer != null) {
-      window.clearTimeout(state.autoAdvanceTimer);
-      state.autoAdvanceTimer = null;
-    }
-  }
-
-  function stopAutoAdvance(runId, options) {
-    var activeRunId = state.autoAdvanceRunId;
-    if (runId && activeRunId && activeRunId !== runId) { return; }
-    clearAutoAdvanceTimer();
-    state.autoAdvanceRunId = null;
-    state.autoAdvanceContextEpoch = null;
-    state.autoAdvanceRoundStartedAt = null;
-    state.autoAdvanceRetry = 0;
-    var settings = options || {};
-    if (settings.resetTiming === true) { state.autoAdvanceLastDurationMs = null; }
-    if (settings.block === true) {
-      state.autoAdvanceBlockedRunId = runId || activeRunId || null;
-      state.autoAdvanceError = settings.message || state.commandError || "自动推进已暂停，请检查运行事件后重试。";
-    } else if (settings.clearError !== false) {
-      state.autoAdvanceBlockedRunId = null;
-      state.autoAdvanceError = null;
-    }
-  }
-
-  function queueAutoAdvance(runId, delay) {
-    if (!runId || state.autoAdvanceRunId !== runId || state.autoAdvanceContextEpoch !== state.contextEpoch || !state.autoAdvanceEnabled) { return false; }
-    clearAutoAdvanceTimer();
-    state.autoAdvanceTimer = window.setTimeout(function () {
-      state.autoAdvanceTimer = null;
-      autoAdvanceTick(runId);
-    }, Math.max(0, Number(delay) || 0));
-    return true;
-  }
-
-  function autoAdvanceWaiting(run) {
-    // New servers own continuous runs in a durable background worker.  Their
-    // queued/waiting boundary is a read-only observation point; the browser
-    // must never race that worker with a second advance command.
-    if (serverAutoProgressEnabled(run)) { return false; }
-    return Boolean(run) && runNeedsAdvanceAction(run, state.events);
-  }
-
-  function serverAutoProgressEnabled(run) {
-    return runHasContinuousAutoProgress(run);
-  }
-
-  function autoAdvanceTerminalOrPaused(run) {
-    if (!run) { return true; }
-    var status = String(run.status || "").toLowerCase();
-    return status !== "running" || runIsTerminal(run);
-  }
-
-  function autoAdvanceFailure(runId) {
-    if (state.autoAdvanceRunId !== runId) { return; }
-    state.autoAdvanceRetry = Number(state.autoAdvanceRetry || 0) + 1;
-    var detail = state.commandError || "服务未完成本轮推进。";
-    if (state.autoAdvanceRetry <= autoAdvanceRetryLimit) {
-      var delay = Math.min(8000, autoAdvancePollMs * Math.pow(2, state.autoAdvanceRetry - 1));
-      showToast("本轮推进未完成，" + Math.ceil(delay / 1000) + " 秒后自动重试（第 " + state.autoAdvanceRetry + " 次）。");
-      queueAutoAdvance(runId, delay);
-      return;
-    }
-    stopAutoAdvance(runId, { block: true, message: "自动推进已暂停：" + detail + " 可检查事件后手动重试。" });
-    showToast(state.autoAdvanceError);
-    renderAll();
-  }
-
-  function autoAdvanceTick(runId) {
-    if (state.autoAdvanceRunId !== runId || state.autoAdvanceContextEpoch !== state.contextEpoch || !state.autoAdvanceEnabled) { return; }
-    if (!state.activeRun || state.activeRun.id !== runId) {
-      stopAutoAdvance(runId);
-      renderAll();
-      return;
-    }
-    var run = state.activeRun;
-    if (autoAdvanceTerminalOrPaused(run)) {
-      stopAutoAdvance(runId);
-      renderAll();
-      return;
-    }
-    if (!serverAutoProgressEnabled(run) && !hasCapability("evolution.run.advance")) {
-      stopAutoAdvance(runId, { block: true, message: "自动推进已暂停：当前 DSH 会话未授予进化推进能力。" });
-      renderAll();
-      return;
-    }
-    if (state.busy || state.refreshing) {
-      queueAutoAdvance(runId, autoAdvancePollMs);
-      return;
-    }
-    // A stage may still be running even though the last request returned.  A
-    // read-only poll lets the service finish its durable barrier before the
-    // next advance command is issued.
-    if (serverAutoProgressEnabled(run) || !autoAdvanceWaiting(run)) {
-      refreshProgressForRun(runId).then(function () {
-        if (state.autoAdvanceRunId !== runId) { return; }
-        var current = state.activeRun;
-        if (autoAdvanceTerminalOrPaused(current)) {
-          stopAutoAdvance(runId);
-          renderAll();
-        } else if (serverAutoProgressEnabled(current)) {
-          queueAutoAdvance(runId, autoAdvancePollMs);
-        } else if (autoAdvanceWaiting(current)) {
-          queueAutoAdvance(runId, autoAdvanceDelayMs);
-        } else {
-          queueAutoAdvance(runId, autoAdvancePollMs);
-        }
-      }).catch(function () { queueAutoAdvance(runId, autoAdvancePollMs); });
-      return;
-    }
-    state.autoAdvanceRoundStartedAt = Date.now();
-    state.pendingAction = "auto-advance";
-    renderAll();
-    advanceRun({ automatic: true }).then(function (ok) {
-      if (state.autoAdvanceRunId !== runId) { return; }
-      if (!ok) {
-        autoAdvanceFailure(runId);
-        return;
-      }
-      if (state.autoAdvanceRoundStartedAt != null) {
-        state.autoAdvanceLastDurationMs = Math.max(0, Date.now() - state.autoAdvanceRoundStartedAt);
-      }
-      state.autoAdvanceRoundStartedAt = null;
-      state.autoAdvanceRetry = 0;
-      state.autoAdvanceRoundsCompleted = Number(state.autoAdvanceRoundsCompleted || 0) + 1;
-      var current = state.activeRun;
-      if (autoAdvanceTerminalOrPaused(current)) {
-        stopAutoAdvance(runId);
-        renderAll();
-        return;
-      }
-      // Leave a small observable boundary between rounds.  This is not a
-      // fake training delay; it gives the host projection and event ledger a
-      // chance to settle and makes an unexpectedly empty round diagnosable.
-      queueAutoAdvance(runId, autoAdvanceDelayMs);
-      renderAll();
-    }).catch(function () { autoAdvanceFailure(runId); });
-  }
-
-  function ensureAutoAdvanceForRun(runId) {
-    if (!state.autoAdvanceEnabled) { return false; }
-    var run = state.activeRun;
-    var targetId = runId || run && run.id;
-    if (!targetId || !run || run.id !== targetId) { return false; }
-    if (state.autoAdvanceOptOutRunIds[targetId] === true) { return false; }
-    if (state.autoAdvanceBlockedRunId === targetId) { return false; }
-    if (autoAdvanceTerminalOrPaused(run)) {
-      stopAutoAdvance(targetId);
-      return false;
-    }
-    if (!serverAutoProgressEnabled(run) && !hasCapability("evolution.run.advance")) { return false; }
-    if (serverAutoProgressEnabled(run)) {
-      // The durable server worker owns every write for continuous runs. The
-      // run monitor already polls their projection, so starting the legacy
-      // browser scheduler as a second read loop only doubles ledger replay
-      // load without advancing anything.
-      if (state.autoAdvanceRunId && state.autoAdvanceRunId !== targetId) {
-        stopAutoAdvance(state.autoAdvanceRunId);
-      }
-      clearAutoAdvanceTimer();
-      state.autoAdvanceRunId = targetId;
-      state.autoAdvanceContextEpoch = state.contextEpoch;
-      state.autoAdvanceBlockedRunId = null;
-      state.autoAdvanceError = null;
-      if (typeof startRunMonitor === "function") { startRunMonitor(targetId); }
-      return true;
-    }
-    if (state.autoAdvanceRunId && state.autoAdvanceRunId !== targetId) {
-      stopAutoAdvance(state.autoAdvanceRunId);
-    }
-    if (state.autoAdvanceRunId === targetId) {
-      if (state.autoAdvanceTimer == null && !state.busy) { queueAutoAdvance(targetId, autoAdvancePollMs); }
-      return true;
-    }
-    state.autoAdvanceRunId = targetId;
-    state.autoAdvanceContextEpoch = state.contextEpoch;
-    state.autoAdvanceBlockedRunId = null;
-    state.autoAdvanceError = null;
-    state.autoAdvanceRetry = 0;
-    queueAutoAdvance(targetId, 0);
-    renderAll();
-    return true;
-  }
-
   function normalizedEvolutionBudget(generationsValue, candidatesValue, maximumValue) {
     var generations = Math.max(1, Math.floor(Number(generationsValue) || 1));
     var candidatesPerGeneration = Math.max(1, Math.floor(Number(candidatesValue) || 1));
@@ -349,8 +155,6 @@
     return operation.then(function (data) {
       clearCommandKey("create");
       var run = normalizeRun(data);
-      if (body.auto_advance === 0) { state.autoAdvanceOptOutRunIds[run.id] = true; }
-      else { delete state.autoAdvanceOptOutRunIds[run.id]; }
       state.runs = [run].concat(state.runs.filter(function (item) { return item.id !== run.id; }));
       state.activeRun = run;
       state.lastSelectedRunId = run.id;
@@ -370,7 +174,6 @@
           state.commandError = state.createStatus.message;
         }
         showToast(state.createStatus.message);
-        if (body.auto_advance > 0 && !runIsTerminal(state.activeRun || run)) { ensureAutoAdvanceForRun(run.id); }
         return run;
       });
     }).catch(function (error) {
@@ -420,7 +223,7 @@
       start: "启动成功。",
       pause: "暂停成功。",
       resume: "恢复成功。",
-      cancel: "取消成功。",
+      cancel: "运行已停止。",
       complete: "运行已完成。"
     }[action] || "运行状态已更新。";
   }
@@ -450,6 +253,17 @@
 
   function controlRequestTimedOut(error) {
     return Boolean(error && (error.name === "AbortError" || /请求超时|timed out|timeout/i.test(String(error.message || ""))));
+  }
+
+  function setControlNotice(runId, action, mode) {
+    var label = {start: "启动", pause: "暂停", resume: "恢复", cancel: "停止", complete: "结束"}[action] || "操作";
+    var message = mode === "verifying"
+      ? label + "请求等待较久，正在核对后台状态，请勿重复操作。"
+      : mode === "pending"
+        ? label + "请求已接收，等待后台确认；页面会自动更新。"
+        : label + "结果尚未确认，不代表操作失败。请刷新状态；再次操作会使用同一请求标识。";
+    state.controlNotice = {runId: runId, action: action, mode: mode, message: message};
+    return message;
   }
 
   function reconcileTimedOutControl(runId, action, body) {
@@ -488,7 +302,6 @@
       var selectionChanged = reconcileVisibleRunSelection();
       if (selectionChanged && state.activeRun) { return selectRun(state.activeRun.id, false); }
       if (action === "resume" && state.activeRun && state.activeRun.status === "running") {
-        ensureAutoAdvanceForRun(runId);
       }
       return true;
     });
@@ -506,21 +319,18 @@
       // A user control action is an explicit hand-off from the autonomous
       // scheduler.  Do not let a queued timer issue another advance after the
       // pause/cancel command has been accepted.
-      stopAutoAdvance(runId);
     }
     if (action === "resume") {
-      state.autoAdvanceBlockedRunId = null;
-      state.autoAdvanceError = null;
     }
     var signature = JSON.stringify({ run_id: runId, action: action });
     var body = { action: action, idempotency_key: commandKey("control", signature) };
     state.busy = true;
     state.pendingAction = action;
     state.commandError = null;
+    state.controlNotice = null;
     renderAll();
     var operation = state.usingDemo ? Promise.resolve(null) : request("/runs/" + encodeURIComponent(runId) + "/control", { method: "POST", body: body, timeout: 30000 });
     return operation.then(function (data) {
-      clearCommandKey("control");
       if (state.usingDemo) {
         state.activeRun.status = action === "pause" ? "paused" : action === "resume" ? "running" : "cancelled";
         state.activeRun.projection_revision += 1;
@@ -543,19 +353,31 @@
         }
       }
       state.commandError = null;
-      return finishControlUi(action, runId, controlSuccessMessage(action));
+      var confirmed = controlStatusConfirmed(action, state.activeRun);
+      if (confirmed) { clearCommandKey("control"); }
+      return finishControlUi(action, runId, confirmed
+        ? controlSuccessMessage(action)
+        : setControlNotice(runId, action, "pending"));
     }).catch(function (error) {
       if (!controlRequestTimedOut(error) || state.usingDemo) { throw error; }
+      setControlNotice(runId, action, "verifying");
+      renderAll();
       return reconcileTimedOutControl(runId, action, body).then(function (result) {
-        if (!result.confirmed && !result.accepted) { throw error; }
-        clearCommandKey("control");
         state.commandError = null;
+        if (!result.confirmed && !result.accepted) {
+          showToast(setControlNotice(runId, action, "unknown"));
+          return false;
+        }
+        if (result.confirmed) {
+          clearCommandKey("control");
+          state.controlNotice = null;
+        }
         return finishControlUi(
           action,
           runId,
           result.confirmed
             ? controlSuccessMessage(action)
-            : (action === "resume" ? "恢复请求已接收，正在核验运行状态。" : "控制请求已接收，正在核验运行状态。")
+            : setControlNotice(runId, action, "pending")
         );
       });
     }).catch(function (error) {
@@ -858,9 +680,6 @@
       if (state.activeRun && typeof startRunMonitor === "function") { startRunMonitor(state.activeRun.id); }
       if (candidateSelectionChanged) { loadCandidateSamples(0, {force: true, silent: true}); }
       else { refreshCandidateSamples({silent: true}); }
-      if (state.activeRun && typeof ensureAutoAdvanceForRun === "function") {
-        ensureAutoAdvanceForRun(state.activeRun.id);
-      }
       if (selectionChanged) {
         return state.activeRun ? selectRun(state.activeRun.id, false) : true;
       }

@@ -4,9 +4,6 @@
     if (state.allowDemo) { loadDemo(); return Promise.resolve(true); }
     var preferredRunId = state.activeRun && state.activeRun.id || state.lastSelectedRunId;
     var hadRecoverableRunContext = Boolean(state.activeRun || state.runs.length);
-    if (state.autoAdvanceRunId && typeof stopAutoAdvance === "function") {
-      stopAutoAdvance(state.autoAdvanceRunId, { resetTiming: true });
-    }
     if (state.runMonitorRunId && typeof stopRunMonitor === "function") {
       stopRunMonitor(state.runMonitorRunId);
     }
@@ -76,10 +73,6 @@
 
   function syncSelectedRunAlerts(run, events) {
     var runId = run && run.id;
-    if (state.autoAdvanceBlockedRunId !== runId) {
-      state.autoAdvanceBlockedRunId = null;
-      state.autoAdvanceError = null;
-    }
     state.commandError = String(run && run.status || "").toLowerCase() === "failed"
       ? "后台进化失败：" + runFailureMessage(run, events)
       : null;
@@ -94,13 +87,9 @@
       state.candidateSampleLoading = false;
       state.candidateSampleRefreshing = false;
     }
-    if (state.autoAdvanceRunId && state.autoAdvanceRunId !== runId && typeof stopAutoAdvance === "function") {
-      stopAutoAdvance(state.autoAdvanceRunId, { resetTiming: true });
-    }
     if (state.runMonitorRunId && String(state.runMonitorRunId) !== String(runId) && typeof stopRunMonitor === "function") {
       stopRunMonitor(state.runMonitorRunId);
     }
-    if (previousRunId && previousRunId !== runId) { state.autoAdvanceLastDurationMs = null; }
   }
 
   function selectRun(runId, notify) {
@@ -119,7 +108,6 @@
       renderAll();
       loadCandidateSamples(0, {force: true});
       if (state.activeRun && typeof startRunMonitor === "function") { startRunMonitor(state.activeRun.id); }
-      if (state.activeRun && typeof ensureAutoAdvanceForRun === "function") { ensureAutoAdvanceForRun(state.activeRun.id); }
       if (notify) { showToast("已切换进化运行。" ); }
       return Promise.resolve(true);
     }
@@ -155,7 +143,6 @@
       loadCandidateSamples(0, {force: true});
       if (state.activeRun && typeof startRunMonitor === "function") { startRunMonitor(state.activeRun.id); }
       if (notify) { showToast("已切换进化运行。" ); }
-      if (state.activeRun && typeof ensureAutoAdvanceForRun === "function") { ensureAutoAdvanceForRun(state.activeRun.id); }
       return true;
     }).catch(function (error) {
       if (requestId !== state.runReadRequest || epoch !== state.viewEpoch) { return false; }
@@ -498,10 +485,6 @@
       : Math.ceil(samplesPerUpdateSelectionMinimum() / predictionCellsPerOrigin());
   }
 
-  function predictionOriginsPerUpdateMaximum() {
-    return Math.max(1, Math.floor(100000 / predictionCellsPerOrigin()));
-  }
-
   function updateOptimizationScheduleBoundary() {
     var input = $("#selection-holdout-origin-count");
     input.min = String(Math.max(169, predictionOriginsPerUpdateSelectionMinimum()));
@@ -513,8 +496,8 @@
     setHelp("#prediction-model-help", selectedCatalogItem("prediction_models", "#prediction-model-id"), "由策略模型提出，宿主从已登记预测模型中校验采用。");
     setHelp("#strategy-help", selectedCatalogItem("strategies", "#strategy-id"), "策略模型只能在宿主注册表提供的有界策略和参数空间内提出方案。");
     setHelp("#evaluator-help", selectedCatalogItem("evaluators", "#evaluator-id"), "由系统依据数据和候选产物自动绑定。");
-    setModelHelp("#policy-model-help", selectedModelCatalogItem("#policy-model-id"), "负责检索公开元数据、形成结构化研究计划并生成有界候选参数；不会执行模型源码。");
-    setModelHelp("#judge-model-help", selectedModelCatalogItem("#judge-model-id"), "独立检查预测效果、科学约束和搜索保留结论。");
+    setModelHelp("#policy-model-help", selectedModelCatalogItem("#policy-model-id"), "负责查找资料、制定研究计划并提出允许范围内的修改。");
+    setModelHelp("#judge-model-help", selectedModelCatalogItem("#judge-model-id"), "独立检查预测效果、科学约束和版本选择结果。");
     alignDomainDatasetBinding();
     updateOptimizationScheduleBoundary();
     updateParameterOverrideHelp();
@@ -563,17 +546,17 @@
       && capacity.sufficient === true
     );
     var capacityLabel = state.cohortCapacityLoading
-      ? "服务端正在核验因果 cohort 容量"
+      ? "服务端正在核验可用数据量"
       : state.cohortCapacityError
         ? "服务端 cohort 容量核验失败：" + state.cohortCapacityError
         : capacity
           ? cohortCapacityLabel(capacity)
-          : "等待服务端核验因果 cohort 容量";
+          : "等待服务端核验可用数据量";
     return [
       { label: "配置目录已加载", ready: Boolean(catalogReady) },
       { label: "运行配置已完整选择", ready: selections },
-      { label: "入围候选 " + formatNumber(schedule && schedule.formal_origin_count_per_finalist || Number($("#formal-origin-count").value)) + "-origin schedule、局部 batch 与轮末 holdout 参数有效", ready: scheduleReady },
-      { label: "固定 4 候选、单时点完整向量与逐样本并发参数有效", ready: executionParametersReady },
+      { label: "入围候选 " + formatNumber(schedule && schedule.formal_origin_count_per_finalist || Number($("#formal-origin-count").value)) + " 个优化时点、每批时点数及轮末比较参数有效", ready: scheduleReady },
+      { label: "方案数量、预测内容和并发设置有效", ready: executionParametersReady },
       { label: "候选总预算可完整覆盖全部轮次（至少 " + formatNumber(budget.required_candidates) + " 个）", ready: budget.budget_sufficient },
       { label: capacityLabel, ready: capacityReady },
       { label: "所选训练数据集可运行", ready: datasetReady },
@@ -591,18 +574,18 @@
   }
 
   function cohortCapacityLabel(capacity) {
-    if (!capacity) { return "等待服务端核验因果 cohort 容量"; }
+    if (!capacity) { return "等待服务端核验可用数据量"; }
     var required = formatNumber(capacity.planned_origin_occurrences == null ? capacity.required_unique_origins : capacity.planned_origin_occurrences);
     var available = formatNumber(capacity.available_source_origins == null ? capacity.available_eligible_origins : capacity.available_source_origins);
     var maximum = formatNumber(capacity.max_feasible_generations);
     if (capacity.sufficient !== true) {
-      return "因果 cohort 容量不足（需要 " + required + " / 可用 " + available + "；最多 " + maximum + " 轮）";
+      return "可用数据量不足（需要 " + required + " / 可用 " + available + "；最多 " + maximum + " 轮）";
     }
     var reused = Number(capacity.reused_origin_occurrences || 0);
     var reuseNote = reused > 0
       ? "；数据耗尽后循环复用 " + formatNumber(reused) + " 个起点"
       : "；本次无需复用起点";
-    return "因果 cohort 可执行（计划 " + required + " / 可用 " + available + reuseNote + "；最多 " + maximum + " 轮）";
+    return "数据量可满足运行（计划 " + required + " / 可用 " + available + reuseNote + "；最多 " + maximum + " 轮）";
   }
 
   function evolutionCapacityRequest() {

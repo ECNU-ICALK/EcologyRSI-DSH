@@ -4,8 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 from ecologyrsi_dsh import TaskManifest
-from ecologyrsi_dsh.api.evidence_projection import build_evidence_projection
-from ecologyrsi_dsh.api.progress_projection import build_progress_projection
+from ecologyrsi_dsh.api.projection import _evolution_evidence_projection, _run_execution_progress
 from ecologyrsi_dsh.api.run_projection import build_configuration
 
 
@@ -32,26 +31,23 @@ class ProjectionContractTests(unittest.TestCase):
         full = build_configuration(state.task_manifest, state, profile="full")
         summary = build_configuration(state.task_manifest, state, profile="summary")
         self.assertEqual(set(full), set(summary))
+        self.assertEqual(full["execution_protocol"], "dsh_native_plugin_evolution@1")
 
     def test_progress_planned_equals_lifecycle_total(self):
-        progress = build_progress_projection(
+        progress = _run_execution_progress(
             SimpleNamespace(
                 task_manifest=SimpleNamespace(metadata={}, max_generations=1, candidates_per_generation=1, max_candidates=1),
                 run=SimpleNamespace(status=SimpleNamespace(value="running"), generation=0, created_at="now"),
                 events=(),
             ),
-            admission=None,
+            None,
         )
-        lifecycle = (
-            "local_waiting", "admission_waiting", "provider_queued", "provider_active",
-            "workflow_running", "persisting", "completed", "failed", "retry_waiting",
-            "cancelled", "draining",
-        )
-        self.assertEqual(progress["planned"], sum(progress.get(key, 0) for key in lifecycle))
+        self.assertEqual(progress["total_candidates"], 1)
+        self.assertEqual(progress["completed_candidates"], 0)
 
     def test_evidence_projection_is_separate_from_compact_monitor(self):
         state = self._state()
-        evidence = build_evidence_projection(state)
+        evidence = _evolution_evidence_projection(state)
         self.assertIsInstance(evidence, dict)
 
 

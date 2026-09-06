@@ -33,7 +33,7 @@ const dataSource = read("assets/js/data.js");
 const commandsSource = read("assets/js/commands.js");
 
 // The parameter page is the public source of truth for the adaptive finalist
-// schedule. These defaults are complete forecast origins, never scoring cells.
+// schedule. These defaults are complete forecast 个预测时点, never scoring cells.
 for (const [id, value] of [
   ["formal-origin-count", "500"],
   ["local-batch-origin-count", "50"],
@@ -43,7 +43,7 @@ for (const [id, value] of [
   assert.match(html, new RegExp(`id="${id}"[^>]*value="${value}"`));
 }
 assert.match(html, /id="max-generations"[^>]*value="1"/);
-assert.match(html, /默认先运行 1 轮受控验证/);
+assert.match(html, /默认先运行 1 轮/);
 assert.doesNotMatch(html, /id="samples-per-update"/);
 assert.match(commandsSource, /function normalizedOptimizationSchedule\(values\)/);
 assert.match(commandsSource, /optimization_protocol: "top2_adaptive_epoch@1"/);
@@ -56,7 +56,7 @@ const parentWindow = {
   postMessage(message, targetOrigin) { hostMessages.push({message, targetOrigin}); },
 };
 const hostWindow = {
-  location: new URL("http://localhost:4173/plugins/ecology/evolution/?api=/api"),
+  location: new URL("http://localhost:4173/plugins/ecology/evolution/?api=/api/ecology-evolution"),
   parent: parentWindow,
   setTimeout,
   clearTimeout,
@@ -100,7 +100,7 @@ assert.equal(hostMessages[0].message.context_protocol, "ecology-evolution.host-c
 assert.equal(hostMessages[0].message.version, manifest.version);
 assert.deepEqual(
   Array.from(hostMessages[0].message.supported_api_bases),
-  ["/api", "/api/v1", "/api/ecology-evolution", "/api/ecology-evolution/v1"],
+  ["/api/ecology-evolution"],
 );
 
 const rejectedContext = hostAdapter.acceptContextMessage({
@@ -293,8 +293,8 @@ assert.equal(modelSandbox.consultationUncertaintyText("data_interpretation"), "�
 assert.equal(modelSandbox.consultationUncertaintyText("model_selection"), "模型选择");
 assert.equal(modelSandbox.consultationUncertaintyText("tradeoff"), "权衡判断");
 assert.equal(modelSandbox.consultationUncertaintyText("governance_boundary"), "治理边界");
-assert.equal(modelSandbox.createRunButtonLabel({state: "background"}, true), "创建新的进化运行");
-assert.equal(modelSandbox.createRunButtonLabel({state: "failed"}, true), "重新创建进化运行");
+assert.equal(modelSandbox.createRunButtonLabel({state: "background"}, true), "创建新运行");
+assert.equal(modelSandbox.createRunButtonLabel({state: "failed"}, true), "重新创建运行");
 assert.equal(
   modelSandbox.createRunHint(
     {state: "queued", message: "已排队，后台将自动执行全部轮次。"},
@@ -337,10 +337,10 @@ const pairedComparisonEvent = {
     reason: "below_practical_delta",
   },
 };
-assert.equal(modelSandbox.eventTitle(pairedComparisonEvent, null), "挑战者未改善，继续使用原冠军");
+assert.equal(modelSandbox.eventTitle(pairedComparisonEvent, null), "未达到保留条件，沿用原版本");
 assert.equal(modelSandbox.eventCategory(pairedComparisonEvent.type), "评测");
 const pairedComparisonDetail = modelSandbox.eventDetail(pairedComparisonEvent, null);
-for (const evidence of ["冠军 -0.4000", "挑战者 -0.5000", "差值 -0.1000", "门槛 0.0050", "below_practical_delta"]) {
+for (const evidence of ["原版本 -0.4000", "新版本 -0.5000", "提高值 -0.1000", "须超过 0.0050", "below_practical_delta"]) {
   assert.ok(pairedComparisonDetail.includes(evidence), `paired event detail missing: ${evidence}`);
 }
 assert.equal(pairedComparisonDetail.includes("已应用"), false);
@@ -365,10 +365,10 @@ const screenedOutCandidate = {
   status: "screened_out",
   selection_reason: "not_selected_by_screening_top_k",
 };
-assert.equal(modelSandbox.candidateStatusText(screenedOutCandidate.status), "初筛未进入 Top 2");
+assert.equal(modelSandbox.candidateStatusText(screenedOutCandidate.status), "初筛未入围");
 assert.equal(modelSandbox.candidateStatusClass(screenedOutCandidate.status), "pill-neutral");
-assert.equal(modelSandbox.candidateOutcome(screenedOutCandidate, {status: "running"}).text, "初筛未进入 Top 2");
-assert.equal(modelSandbox.selectionReasonText(screenedOutCandidate.selection_reason), "初筛未进入 Top 2，不参加正式评测");
+assert.equal(modelSandbox.candidateOutcome(screenedOutCandidate, {status: "running"}).text, "初筛未入围");
+assert.equal(modelSandbox.selectionReasonText(screenedOutCandidate.selection_reason), "初筛未入围，不参加正式评测");
 assert.equal(modelSandbox.candidateSamplesAreLive({status: "running"}, screenedOutCandidate), false);
 const crossCohortOverview = modelSandbox.renderCandidateOverview(crossCohortProjection, crossCohortProjection.candidates);
 assert.ok(crossCohortOverview.includes("当前保留得分"));
@@ -541,9 +541,9 @@ modelSandbox.renderAdaptiveTrajectories({
 assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("等待本批评测与局部决策"));
 assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("得分 等待评测"));
 assert.equal(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("得分 0.0000"), false);
-assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("KEEP：保持当前修订"));
-assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("已生成下一尝试，尚未同批验证"));
-assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("提案未通过宿主校验"));
+assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("本批不修改"));
+assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("新方案已生成，尚未比较效果"));
+assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("修改提案未通过规则检查"));
 assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("安全门回退"));
 assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("旧版连续更新策略"));
 assert.equal(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("已应用局部修改"), false);
@@ -597,22 +597,22 @@ modelSandbox.renderAdaptiveTrajectories({
 });
 const pairedTrajectoryHtml = adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML;
 for (const label of [
-  "初始冠军已冻结",
-  "挑战者已晋升为轨迹冠军",
-  "挑战者未改善，继续使用原冠军",
-  "下一挑战版本已生成，等待同 cohort 对照验证",
-  "局部提案未通过宿主校验",
+  "初始版本已确定",
+  "新版本已保留用于优化",
+  "未达到保留条件，沿用原版本",
+  "下一次比较的新版本已生成，等待同批效果比较",
+  "修改提案未通过规则检查",
 ]) {
   assert.ok(pairedTrajectoryHtml.includes(label), `paired trajectory missing: ${label}`);
 }
-for (const evidence of ["冠军 -0.4000", "挑战者 -0.4200", "差值 -0.0200", "门槛 0.0050"]) {
+for (const evidence of ["原版本 -0.4000", "新版本 -0.4200", "提高值 -0.0200", "须超过 0.0050"]) {
   assert.ok(pairedTrajectoryHtml.includes(evidence), `paired trajectory evidence missing: ${evidence}`);
 }
 assert.equal(pairedTrajectoryHtml.includes("已应用"), false);
-assert.ok(pairedTrajectoryHtml.includes("冠军等待评测 · 挑战者等待评测"));
-assert.equal(pairedTrajectoryHtml.includes("冠军 0 · 挑战者 0"), false);
+assert.ok(pairedTrajectoryHtml.includes("原版本待评测 · 新版本待评测"));
+assert.equal(pairedTrajectoryHtml.includes("原版本 0 · 新版本 0"), false);
 modelSandbox.renderAdaptiveTrajectories({adaptive_trajectories: [{candidate_id: "candidate:lane-b", batches: []}]});
-assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("等待首个微批证据"));
+assert.ok(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML.includes("等待首批比较结果"));
 modelSandbox.document.querySelector = adaptiveTrajectoryQuerySelector;
 
 const evolutionEvidenceNodes = {
@@ -653,11 +653,11 @@ const evidenceRun = modelSandbox.normalizeRun({
 assert.equal(evidenceRun.evolution_evidence.global_champion.candidate_id, "candidate:seed");
 modelSandbox.renderEvolutionEvidence(evidenceRun);
 assert.equal(evolutionEvidenceNodes["#evolution-evidence-status"].textContent, "上一冠军继续保留");
-assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("旧版严格 paired 门禁"));
+assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("旧版严格对照规则"));
 assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("全局最优"));
 assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("初始种子基线"));
 const generationDecisionHtml = evolutionEvidenceNodes["#generation-decision-list"].innerHTML;
-for (const evidence of ["同一 holdout cohort", "绝对分 -0.4200", "相对上一冠军 -0.0200", "仅探索，禁止晋升", "连续 2 代无候选通过初筛，下一代必须重新规划"]) {
+for (const evidence of ["同一组比较数据", "绝对分 -0.4200", "相对上一轮版本 -0.0200", "仅探索，禁止晋升", "连续 2 代无候选通过初筛，下一代必须重新规划"]) {
   assert.ok(generationDecisionHtml.includes(evidence), `generation evidence missing: ${evidence}`);
 }
 assert.ok(evolutionEvidenceNodes["#evolution-capacity-note"].innerHTML.includes("工程探索证据"));
@@ -704,12 +704,30 @@ const positiveDeltaEvidenceRun = modelSandbox.normalizeRun({
   },
 });
 modelSandbox.renderEvolutionEvidence(positiveDeltaEvidenceRun);
-assert.equal(evolutionEvidenceNodes["#evolution-evidence-status"].textContent, "搜索版本已推进，尚未通过严格认证");
-assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("正向增益搜索 + 独立稳健认证"));
-for (const evidence of ["下一轮搜索版本", "严格认证尚未通过", "搜索资格：通过", "严格认证：未通过", "逐 cell 风险", "宿主同批增益 +0.0100"]) {
+assert.equal(evolutionEvidenceNodes["#evolution-evidence-status"].textContent, "已保留用于优化，认证结果见下方");
+assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("同批提高则继续优化，稳健认证另行判断"));
+for (const evidence of ["下一轮搜索版本", "暂无认证版本", "保留条件：满足", "认证条件：未满足", "部分指标有退化风险", "同批提高值 +0.0100"]) {
   const rendered = evolutionEvidenceNodes["#global-champion-card"].innerHTML + evolutionEvidenceNodes["#generation-decision-list"].innerHTML;
   assert.ok(rendered.includes(evidence), `positive-delta evidence missing: ${evidence}`);
 }
+
+// Missing evidence must not be presented as a failed check, and eligibility is
+// distinct from being selected as the certified version.
+const unevaluatedEvidenceRun = JSON.parse(JSON.stringify(positiveDeltaEvidenceRun));
+unevaluatedEvidenceRun.evolution_evidence.generation_decisions = [];
+modelSandbox.renderEvolutionEvidence(unevaluatedEvidenceRun);
+assert.doesNotMatch(evolutionEvidenceNodes["#global-champion-card"].innerHTML, /认证尚未通过/);
+const eligibleEvidenceRun = JSON.parse(JSON.stringify(positiveDeltaEvidenceRun));
+eligibleEvidenceRun.evolution_evidence.generation_decisions[0].arms[0].certification_eligible = true;
+eligibleEvidenceRun.evolution_evidence.generation_decisions[0].arms[0].certification_failures = [];
+eligibleEvidenceRun.evolution_evidence.generation_decisions[0].selected_search_certification_status = "certification_eligible_not_selected";
+modelSandbox.renderEvolutionEvidence(eligibleEvidenceRun);
+assert.match(evolutionEvidenceNodes["#generation-decision-list"].innerHTML, /认证条件：满足/);
+assert.doesNotMatch(evolutionEvidenceNodes["#generation-decision-list"].innerHTML, /严格认证：通过/);
+eligibleEvidenceRun.evolution_evidence.generation_decisions[0].selected_search_certification_status = "certification_selected";
+modelSandbox.renderEvolutionEvidence(eligibleEvidenceRun);
+assert.match(evolutionEvidenceNodes["#evolution-evidence-status"].textContent, /成为稳健认证版本/);
+assert.equal(modelSandbox.generationSearchIsCertified({}), false);
 
 const uncommittedEvidenceRun = modelSandbox.normalizeRun({
   run_id: "run:uncommitted-evidence", status: "running",
@@ -749,7 +767,7 @@ const legacyEvidenceRun = modelSandbox.normalizeRun({
 });
 modelSandbox.renderEvolutionEvidence(legacyEvidenceRun);
 assert.equal(evolutionEvidenceNodes["#evolution-evidence-status"].textContent, "旧协议审计");
-assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("旧版连续更新审计，跨 cohort 不可归因"));
+assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("旧版更新记录，跨批次不可直接比较"));
 assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("旧协议保留结果"));
 assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("不按 v2 全局冠军解释"));
 assert.equal(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("全局最优"), false);
@@ -1015,7 +1033,7 @@ const pausedDrainedEvidence = modelSandbox.renderCandidateExecutionEvidence(
   },
 );
 assert.ok(pausedDrainedEvidence.includes("已暂停且请求已排空；已完成 594 / 7,125 个样本"));
-assert.ok(pausedDrainedEvidence.includes("恢复后继续 · 剩余 6,531 个样本、736 个微批"));
+assert.ok(pausedDrainedEvidence.includes("恢复后继续 · 剩余 6,531 个样本、736 个批次"));
 assert.ok(pausedDrainedEvidence.includes("candidate-evidence-stage is-warning"));
 const mismatchedProgressEvidence = modelSandbox.renderCandidateExecutionEvidence(
   {id: "candidate:pinned", status: "pending", inference_trace: {status: "pending", rows: []}},
@@ -1283,10 +1301,10 @@ modelSandbox.document.querySelector = (selector) => selector === "#process-summa
 modelSandbox.renderProcessSummary(waitingRun);
 assert.ok(processSummaryNode.innerHTML.includes("逐样本智能体 Token 硬预算"));
 assert.ok(processSummaryNode.innerHTML.includes("仅计 planner / repair / critic；不含 research / proposal / judge"));
-for (const configuredExecutionParameter of ["入围候选轨迹", "Top 2 各 10 × 50 origins", "候选并发", "4 个候选", "单时点向量链", "3 目标 × 3 时距 = 9", "逐样本并发", "2 条预测时点链准入"]) {
+for (const configuredExecutionParameter of ["入围候选轨迹", "Top 2 各 10 × 50 个预测时点", "候选并发", "4 个候选", "单时点向量链", "3 目标 × 3 时距 = 9", "逐样本并发", "2 条预测时点链准入"]) {
   assert.ok(processSummaryNode.innerHTML.includes(configuredExecutionParameter));
 }
-for (const holdoutDetail of ["轮末同 cohort 比较", "F1 / F2 / 上一冠军各 169 origins", "单轮执行预算", "1,763 candidate-origins"]) {
+for (const holdoutDetail of ["轮末同 cohort 比较", "F1 / F2 / 上一冠军各 169 个预测时点", "单轮执行预算", "1,763 candidate-origins"]) {
   assert.ok(processSummaryNode.innerHTML.includes(holdoutDetail));
 }
 const pairedWaitingSchedule = {
@@ -1308,7 +1326,7 @@ for (const pairedCapacityDetail of [
 ]) {
   assert.ok(processSummaryNode.innerHTML.includes(pairedCapacityDetail), `paired process capacity missing: ${pairedCapacityDetail}`);
 }
-assert.equal(processSummaryNode.innerHTML.includes("formal unique origins"), false);
+assert.equal(processSummaryNode.innerHTML.includes("formal unique 个预测时点"), false);
 modelSandbox.renderProcessSummary(crossCohortProjection);
 assert.ok(processSummaryNode.innerHTML.includes("当前保留得分"));
 assert.ok(processSummaryNode.innerHTML.includes("原始最高观测（跨窗口不可直接比较）"));
@@ -1703,7 +1721,7 @@ const dshCircuitPausedRun = {
   },
 };
 assert.equal(modelSandbox.runHasRetryCircuitPause(dshCircuitPausedRun), true);
-assert.equal(modelSandbox.displayRunStatusText(dshCircuitPausedRun, []), "DSH 运行时重试已暂停");
+assert.equal(modelSandbox.displayRunStatusText(dshCircuitPausedRun, []), "等待检查");
 modelSandbox.state.events = [];
 modelSandbox.renderExecutionMonitor(dshCircuitPausedRun);
 assert.equal(monitorNodes["#execution-monitor-status"].textContent, "DSH 运行时重试已暂停");
@@ -2384,22 +2402,37 @@ const activelyExecutingRun = modelSandbox.normalizeRun({
   run_id: "run:executing",
   execution_progress: {phase: "training", current_stage: "training"},
 });
+assert.deepEqual(
+  JSON.parse(JSON.stringify(modelSandbox.runStatusExplanation(waitingBetweenRounds, []))),
+  {
+    label: "等待下一步",
+    detail: "上一轮已完成，等待继续执行下一轮。",
+    nextAction: "点击“继续下一步”开始下一轮。",
+    tone: "waiting",
+  },
+);
+assert.equal(
+  modelSandbox.runStatusExplanation({status: "completed", outcome: "completed_with_search_retained_candidate"}, []).label,
+  "已完成",
+);
+// Completing a search does not certify the model or imply that all checks failed.
+assert.doesNotMatch(modelSandbox.runStatusExplanation({status: "completed"}, []).detail, /没有候选|全部检查|未通过/);
+assert.match(modelSandbox.runStatusExplanation({status: "completed", outcome: "completed_with_search_retained_candidate"}, []).detail, /不代表.*验证/);
+assert.match(modelSandbox.runStatusExplanation({status: "created", auto_progress: false}, []).nextAction, /启动/);
+assert.match(modelSandbox.runStatusExplanation({status: "running", auto_progress: true, execution_progress: {phase: "queued"}}, []).detail, /排队/);
 assert.equal(modelSandbox.runNeedsAdvanceAction(waitingRun, []), true);
 assert.equal(modelSandbox.runNeedsAdvanceAction(waitingBetweenRounds, []), true);
-assert.equal(modelSandbox.displayRunStatusText(waitingBetweenRounds, []), "等待推进");
+assert.equal(modelSandbox.displayRunStatusText(waitingBetweenRounds, []), "等待下一步");
 assert.equal(modelSandbox.runNeedsAdvanceAction(activelyExecutingRun, []), false);
 assert.equal(modelSandbox.runNeedsAdvanceAction({...waitingBetweenRounds, status: "paused"}, []), false);
 const serverManagedRun = modelSandbox.normalizeRun({...waitingBetweenRounds, run_id: "run:server-managed", auto_progress: true});
 assert.equal(modelSandbox.serverAutoProgressEnabled(serverManagedRun), true);
-assert.equal(modelSandbox.autoAdvanceWaiting(serverManagedRun), false);
 assert.equal(modelSandbox.runNeedsAdvanceAction(serverManagedRun, []), false);
-assert.equal(modelSandbox.displayRunStatusText(serverManagedRun, []), "运行中");
+assert.equal(modelSandbox.displayRunStatusText(serverManagedRun, []), "排队中");
+assert.doesNotMatch(modelSandbox.contextRunExplanation(serverManagedRun, []).nextAction, /点击[“" ]继续/);
+assert.equal(modelSandbox.contextRunExplanation({...waitingBetweenRounds, status: "paused"}, []).label, "已暂停");
+assert.equal(modelSandbox.contextRunExplanation({...waitingBetweenRounds, status: "completed"}, []).label, "已完成");
 modelSandbox.state.activeRun = serverManagedRun;
-modelSandbox.state.autoAdvanceRunId = null;
-modelSandbox.state.autoAdvanceTimer = null;
-assert.equal(modelSandbox.ensureAutoAdvanceForRun(serverManagedRun.id), true);
-assert.equal(modelSandbox.state.autoAdvanceRunId, serverManagedRun.id);
-assert.equal(modelSandbox.state.autoAdvanceTimer, null);
 const tokenPausedRun = modelSandbox.normalizeRun({
   ...serverManagedRun,
   run_id: "run:token-paused",
@@ -2408,7 +2441,7 @@ const tokenPausedRun = modelSandbox.normalizeRun({
   pause_reason: "逐样本智能体 Token 硬预算已停止新调用。",
 });
 assert.equal(modelSandbox.runHasHardTokenPause(tokenPausedRun), true);
-assert.equal(modelSandbox.displayRunStatusText(tokenPausedRun, []), "逐样本智能体 Token 预算已暂停");
+assert.equal(modelSandbox.displayRunStatusText(tokenPausedRun, []), "预算已暂停");
 const queuedServerRun = modelSandbox.normalizeRun({
   ...waitingRun,
   run_id: "run:queued-server",
@@ -2419,9 +2452,6 @@ assert.equal(modelSandbox.createStatusForRun(queuedServerRun, []).state, "queued
 assert.match(modelSandbox.createStatusForRun(queuedServerRun, []).message, /后台将自动执行全部轮次/);
 assert.equal(modelSandbox.createStatusForRun(activelyExecutingRun, []).state, "background");
 modelSandbox.state.activeRun = waitingRun;
-modelSandbox.state.autoAdvanceOptOutRunIds[waitingRun.id] = true;
-assert.equal(modelSandbox.ensureAutoAdvanceForRun(waitingRun.id), false);
-delete modelSandbox.state.autoAdvanceOptOutRunIds[waitingRun.id];
 modelSandbox.state.runs = [cancelledEmpty, cancelledWithEvidence, cancelledWithStageEvidence, waitingRun];
 assert.equal(modelSandbox.isCancelledEmptyRun(cancelledEmpty), true);
 assert.equal(modelSandbox.isCancelledEmptyRun(cancelledWithEvidence), false);
@@ -2507,7 +2537,6 @@ modelSandbox.showToast = (message) => createToasts.push(message);
 modelSandbox.renderAll = () => {};
 modelSandbox.loadSelectedDataset = async () => true;
 modelSandbox.refreshEventsForRun = async () => true;
-modelSandbox.ensureAutoAdvanceForRun = () => true;
 modelSandbox.state.candidateSelectionPinned = true;
 const identicalActiveRun = modelSandbox.normalizeRun({
   ...waitingRun,
@@ -2659,8 +2688,6 @@ modelSandbox.state.activeRun = pollingRun;
 modelSandbox.state.runs = [pollingRun];
 modelSandbox.state.events = [];
 modelSandbox.state.createStatus = modelSandbox.createStatusForRun(pollingRun, []);
-modelSandbox.state.autoAdvanceRunId = pollingRun.id;
-modelSandbox.state.autoAdvanceContextEpoch = modelSandbox.state.contextEpoch;
 modelSandbox.showToast = (message) => pollToasts.push(message);
 modelSandbox.renderContext = () => {};
 modelSandbox.renderProcess = () => {};
@@ -2677,7 +2704,6 @@ assert.equal(await modelSandbox.refreshProgressForRun(pollingRun.id), true);
 assert.equal(modelSandbox.state.activeRun.status, "failed");
 assert.match(modelSandbox.state.commandError, /本轮证据门禁失败/);
 assert.equal(modelSandbox.state.createStatus.state, "failed");
-assert.equal(modelSandbox.state.autoAdvanceRunId, null);
 assert.equal(pollToasts.length, 1);
 assert.equal(await modelSandbox.refreshProgressForRun(pollingRun.id), true);
 assert.equal(pollToasts.length, 1);
@@ -2794,11 +2820,6 @@ const targetRun = modelSandbox.normalizeRun({...waitingRun, id: "run:switch-targ
 modelSandbox.state.activeRun = raceRun;
 modelSandbox.state.runs = [raceRun, targetRun];
 modelSandbox.state.createStatus = {runId: raceRun.id, state: "running"};
-modelSandbox.state.autoAdvanceRunId = raceRun.id;
-modelSandbox.state.autoAdvanceContextEpoch = modelSandbox.state.contextEpoch;
-modelSandbox.state.autoAdvanceLastDurationMs = 4321;
-const keptAutoAdvanceTimer = {id: "kept-auto-advance-timer"};
-modelSandbox.state.autoAdvanceTimer = keptAutoAdvanceTimer;
 modelSandbox.state.selectedCandidateId = "candidate:kept";
 raceRun.candidates = [{id: "candidate:kept", status: "evaluated"}];
 modelSandbox.resetCandidateSamples(raceRun.id, "candidate:kept");
@@ -2814,31 +2835,21 @@ assert.equal(modelSandbox.state.activeRun.id, raceRun.id);
 assert.equal(modelSandbox.state.candidateSamplePage.rows[0].sample_id, "sample:kept");
 assert.equal(modelSandbox.candidateSampleSelectionMatches(raceRun.id, "candidate:kept"), true);
 assert.equal(modelSandbox.state.createStatus.runId, raceRun.id);
-assert.equal(modelSandbox.state.autoAdvanceRunId, raceRun.id);
-assert.equal(modelSandbox.state.autoAdvanceTimer, keptAutoAdvanceTimer);
-assert.equal(modelSandbox.state.autoAdvanceLastDurationMs, 4321);
 assert.equal(stoppedSelectionMonitor, raceRun.id);
 assert.equal(restoredSelectionMonitor, raceRun.id);
 
 // A successful switch owns the banner state; errors from the previous run
 // must not leak into a healthy historical run.
-modelSandbox.clearAutoAdvanceTimer();
-modelSandbox.state.autoAdvanceRunId = null;
 modelSandbox.state.commandError = "后台进化失败：旧运行失败";
-modelSandbox.state.autoAdvanceBlockedRunId = "run:old-failure";
-modelSandbox.state.autoAdvanceError = "旧运行自动推进失败";
 modelSandbox.state.candidateSelectionPinned = true;
 modelSandbox.loadSelectedDataset = async () => true;
 modelSandbox.loadCandidateSamples = async () => true;
-modelSandbox.ensureAutoAdvanceForRun = () => false;
 modelSandbox.request = async (path) => path.includes("/events")
   ? {events: []}
   : {projection: targetRun};
 assert.equal(await modelSandbox.selectRun(targetRun.id, false), true);
 assert.equal(modelSandbox.state.activeRun.id, targetRun.id);
 assert.equal(modelSandbox.state.commandError, null);
-assert.equal(modelSandbox.state.autoAdvanceBlockedRunId, null);
-assert.equal(modelSandbox.state.autoAdvanceError, null);
 assert.equal(modelSandbox.state.candidateSelectionPinned, false);
 assert.equal(modelSandbox.state.lastSelectedRunId, targetRun.id);
 
@@ -2989,7 +3000,6 @@ modelSandbox.showToast = (message) => resumeTimeoutToasts.push(message);
 modelSandbox.renderAll = () => {};
 modelSandbox.refreshEventsForRun = async () => true;
 modelSandbox.reconcileVisibleRunSelection = () => false;
-modelSandbox.ensureAutoAdvanceForRun = () => true;
 let resumeControlAttempts = 0;
 modelSandbox.request = async (path, options) => {
   resumeTimeoutRequests.push({path, options});
@@ -3035,6 +3045,53 @@ assert.equal(modelSandbox.state.activeRun.trajectory[0].candidate_id, "candidate
 assert.equal(modelSandbox.state.commandError, null);
 assert.ok(resumeTimeoutToasts.some((message) => message === "恢复成功。"));
 assert.equal(resumeTimeoutToasts.some((message) => message.includes("控制失败")), false);
+
+// An unreachable monitor is an unknown outcome, not proof that resume failed.
+modelSandbox.state.activeRun.status = "paused";
+modelSandbox.state.commandKeys = {};
+const unknownControlKeys = [];
+modelSandbox.request = async (path, options) => {
+  if (path.endsWith("/control")) unknownControlKeys.push(options.body.idempotency_key);
+  const error = new Error("request timed out");
+  error.name = "AbortError";
+  throw error;
+};
+assert.equal(await modelSandbox.controlRun("resume"), false);
+assert.equal(modelSandbox.state.commandError, null);
+assert.equal(modelSandbox.state.controlNotice.mode, "unknown");
+assert.match(modelSandbox.state.controlNotice.message, /尚未确认/);
+assert.equal(modelSandbox.state.controlNotice.runId, "run:large-resume-timeout");
+assert.equal(await modelSandbox.controlRun("resume"), false);
+assert.equal(new Set(unknownControlKeys).size, 1, "retry must reuse the unresolved command key");
+
+// An accepted command can still be pending. Do not announce success until its
+// lightweight projection confirms the requested state.
+modelSandbox.request = async () => ({accepted: true, command_status: "pending", projection: {
+  run_id: "run:large-resume-timeout", status: "paused", projection_revision: 42,
+}});
+resumeTimeoutToasts.length = 0;
+assert.equal(await modelSandbox.controlRun("resume"), true);
+assert.equal(modelSandbox.state.controlNotice.mode, "pending");
+assert.equal(resumeTimeoutToasts.includes("恢复成功。"), false);
+
+const controlBannerQuerySelector = modelSandbox.document.querySelector;
+const controlBannerNodes = Object.fromEntries(["#system-banner", "#system-title", "#system-detail", "#retry-button"]
+  .map((selector) => [selector, {...modelNode(), classList: {add() {}}}]));
+modelSandbox.document.querySelector = (selector) => controlBannerNodes[selector] || controlBannerQuerySelector(selector);
+modelSandbox.renderSystemBanner();
+assert.equal(controlBannerNodes["#system-title"].textContent, "正在确认操作");
+modelSandbox.state.activeRun.status = "running";
+modelSandbox.renderSystemBanner();
+assert.equal(modelSandbox.state.controlNotice, null, "live state confirmation should clear the notice");
+modelSandbox.setControlNotice("run:another", "resume", "unknown");
+modelSandbox.renderSystemBanner();
+assert.equal(controlBannerNodes["#system-banner"].hidden, true, "another run's notice must not leak into this page");
+modelSandbox.state.controlNotice = null;
+modelSandbox.state.pendingAction = "create";
+modelSandbox.renderSystemBanner();
+assert.equal(controlBannerNodes["#system-title"].textContent, "正在提交");
+modelSandbox.state.pendingAction = null;
+modelSandbox.document.querySelector = controlBannerQuerySelector;
 
 const cleanupRequests = [];
 modelSandbox.state.usingDemo = false;
@@ -3207,7 +3264,7 @@ assert.equal(exhaustedProjection.best_observed_candidate_id, "candidate:near-mis
 assert.equal(exhaustedProjection.best_observed_score, -0.1);
 assert.equal(
   modelSandbox.displayRunStatusText(exhaustedProjection, []),
-  "已完成预设进化规模（2 代、2 个候选），尚无候选通过全部评测门控；正式验证未开展",
+  "已完成",
 );
 assert.equal(modelSandbox.displayRunStatusClass(exhaustedProjection, []), "pill-amber");
 modelSandbox.document.querySelector = (selector) => monitorNodes[selector] || monitorQuerySelector(selector);
@@ -3220,7 +3277,7 @@ assert.equal(modelSandbox.runOutcomeCode({outcome: "accepted"}), "completed_with
 assert.equal(modelSandbox.runOutcomeCode({outcome: "completed_with_search_retained_candidate"}), "completed_with_acceptable_candidate");
 assert.equal(
   modelSandbox.displayRunStatusText({status: "completed", outcome: "completed_with_search_retained_candidate"}, []),
-  "已完成，产生训练反馈搜索保留候选；正式验证未开展",
+  "已完成",
 );
 vm.runInContext(read("assets/js/render_process.js"), modelSandbox);
 modelSandbox.state.pendingAction = null;
@@ -3522,9 +3579,9 @@ vm.runInContext(read("assets/js/render_shell.js"), parameterSandbox);
 parameterSandbox.renderParameters();
 assert.equal(parameterNodes["#parameter-summary-pill"].textContent, "每个入围候选 10 × 50");
 assert.equal(parameterNodes["#agent-update-scope"].textContent, "每个入围候选 10 × 50");
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("256 + 1,900 + 507 = 2,663 candidate-origin execution occurrences = 23,967 scoring cells"));
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("13,315 candidate-origin execution occurrences / 119,835 scoring cells；需要 1,665 个起点 occurrence"));
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("500 个 formal origin occurrences"));
+assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("256 + 1,900 + 507 = 2,663 次时点预测 = 23,967 个评分项"));
+assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("13,315 次时点预测 / 119,835 个评分项；需要 1,665 个起点 occurrence"));
+assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("500 个预测时点"));
 assert.equal(parameterNodes["#parameter-summary"].innerHTML.includes("formal unique origins"), false);
 parameterNodes["#local-batch-origin-count"].value = "60";
 parameterSandbox.renderParameters();
@@ -3624,7 +3681,7 @@ assert.equal(manifest.development_only, false);
 assert.equal(manifest.release_stage, "delivery-candidate");
 assert.equal(manifest.integrity.status, "delivery-candidate-unsigned");
 assert.equal(manifest.integrity.signature, null);
-assert.deepEqual(manifest.api.supported_bases, ["/api", "/api/v1", "/api/ecology-evolution", "/api/ecology-evolution/v1"]);
+assert.deepEqual(manifest.api.supported_bases, ["/api/ecology-evolution"]);
 assert.equal(manifest.dsh_compatibility.recommended_proxy_base, "/api/ecology-evolution");
 assert.equal(manifest.dsh_compatibility.backend_mode, "independent-service");
 assert.equal(manifest.api.dataset_samples, "/datasets/{dataset_id}/samples");
@@ -3661,8 +3718,8 @@ for (const workspace of ["settings", "parameters", "training", "process", "candi
   assert.match(html, new RegExp(`data-panel=\\"${workspace}\\"`));
 }
 for (const text of [
-  "运行设置", "参数设计", "训练数据", "进化过程", "候选评测", "人工协作与治理",
-  "训练数据集", "研究领域（自动推导）", "策略模型（API）", "独立评审模型（API）", "模型驱动的受限进化闭环", "训练拟合分区", "外部治理状态",
+  "开始运行", "运行参数", "数据", "运行过程", "候选方案", "人工审核",
+  "训练数据集", "研究领域（自动推导）", "策略模型（API）", "独立评审模型（API）", "一次运行如何进行", "训练拟合分区", "外部治理状态",
   "待专家答复", "已答复", "专家主动意见", "非阻塞咨询不会暂停进化"
 ]) {
   assert.ok(html.includes(text), `missing Chinese interface text: ${text}`);
@@ -3687,7 +3744,7 @@ assert.match(html, /id="workspace-parameters"[\s\S]*name="knowledge_online_enabl
 assert.doesNotMatch(html, /id="workspace-settings"[\s\S]*id="workspace-parameters"[\s\S]*advanced-settings/);
 assert.ok(html.includes("DSH 上下文：等待 Session 计量"));
 assert.doesNotMatch(html, /name="token_limit"/);
-assert.ok(html.includes("全量 training_fit"));
+assert.ok(html.includes("完整训练拟合分区"));
 assert.ok(html.includes("每个入围候选 10 × 50"));
 assert.match(html, /<label><span>训练数据集<\/span><select id="dataset-id" name="dataset_id" required>/);
 assert.match(html, /<label hidden><span>研究领域（自动推导）/);
@@ -3776,7 +3833,7 @@ for (const field of ["rounds", "candidates_per_generation", "formal_origin_count
 assert.match(app, /function syncCandidateBudget\(options\)/);
 assert.match(app, /\$\("#start-button"\)\.disabled = state\.busy;/);
 assert.ok(app.includes("暂时不能创建："));
-assert.ok(app.includes("固定 4 候选、单时点完整向量与逐样本并发参数有效"));
+assert.ok(app.includes("方案数量、预测内容和并发设置有效"));
 for (const adaptiveEventLabel of [
   "candidate.screening_recorded", "formal.selection_cohort_frozen",
   "candidate.screened_out", "formal.batch_started", "formal.batch_evaluated",
@@ -3797,13 +3854,12 @@ assert.doesNotMatch(catalogSource, /入围候选 500-origin schedule/);
 assert.match(catalogSource, /schedule\.formal_origin_count_per_finalist/);
 assert.match(app, /auto_advance: payload\.auto_advance === 0 \? 0 : continuousAutoAdvance \? true : 1/);
 assert.ok(app.includes("已排队，后台将自动执行全部轮次"));
-assert.ok(app.includes("创建新的进化运行"));
+assert.ok(app.includes("创建新运行"));
 assert.ok(app.includes("后台排队中"));
 assert.ok(app.includes("后台自动推进"));
-assert.match(app, /function ensureAutoAdvanceForRun\(runId\)/);
 assert.match(app, /function serverAutoProgressEnabled\(run\)/);
-assert.match(app, /state\.autoAdvanceRunId/);
-assert.match(app, /state\.autoAdvanceRetry/);
+assert.doesNotMatch(app, /function autoAdvanceTick\(runId\)/);
+assert.doesNotMatch(app, /advanceRun\(\{ automatic: true \}\)/);
 assert.match(app, /\/interventions"/);
 assert.match(app, /\/expert-consultations\/" \+ encodeURIComponent\(id\) \+ "\/answer"/);
 assert.match(app, /expertConsultationDrafts/);
@@ -3928,10 +3984,10 @@ assert.ok(app.includes("实际晋升序列"));
 assert.match(app, /point\.incumbent_score != null \? point\.incumbent_score : point\.best_score/);
 assert.doesNotMatch(app, /当前最高分/);
 assert.doesNotMatch(app, /已观测最高得分/);
-assert.ok(app.includes("已完成预设进化规模"));
-assert.ok(app.includes("尚无候选通过全部评测门控；正式验证未开展"));
+assert.ok(app.includes("本次运行已结束"));
+assert.ok(app.includes("不代表已通过独立最终验证"));
 assert.ok(!app.includes("预算已耗尽，未产生训练反馈搜索保留候选"));
-assert.ok(app.includes("训练反馈搜索保留候选："));
+assert.ok(app.includes("保留用于优化候选："));
 assert.ok(app.includes("正式验证未开展"));
 assert.match(app, /run\.best_candidate_id \|\| run\.best_observed_candidate_id/);
 assert.doesNotMatch(app, /delta === 0 \? "当前最佳"/);
@@ -3940,7 +3996,7 @@ for (const text of ["搜索保留", "训练反馈检查", "当前候选选择仅
 }
 assert.equal(app.includes('accepted: "已晋级"'), false);
 assert.equal(app.includes('approved: "已批准"'), false);
-assert.match(app, /retained: "训练反馈搜索保留"/);
+assert.match(app, /retained: "已保留用于优化"/);
 assert.match(app, /return "本地内置"/);
 assert.match(app, /formatObservationTime/);
 assert.match(app, /environment: "环境观测"/);

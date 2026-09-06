@@ -144,9 +144,9 @@
     }[String(value || "").toLowerCase()] || "状态已更新";
   }
   var pairedDecisionLabels = {
-    initial_champion: "初始冠军已冻结",
-    challenger_promoted: "挑战者已晋升为轨迹冠军",
-    champion_retained: "挑战者未改善，继续使用原冠军"
+    initial_champion: "初始版本已确定",
+    challenger_promoted: "新版本已保留用于优化",
+    champion_retained: "未达到保留条件，沿用原版本"
   };
   function pairedDecisionText(value) {
     return pairedDecisionLabels[String(value || "").toLowerCase()] || "";
@@ -194,10 +194,10 @@
       var scoreDelta = Number(payload.score_delta);
       var minimumDelta = Number(payload.minimum_score_delta);
       return [
-        Number.isFinite(championScore) ? "冠军 " + formatNumber(championScore, 4) : "",
-        Number.isFinite(challengerScore) ? "挑战者 " + formatNumber(challengerScore, 4) : "",
-        Number.isFinite(scoreDelta) ? "差值 " + formatNumber(scoreDelta, 4) : "",
-        Number.isFinite(minimumDelta) ? "门槛 " + formatNumber(minimumDelta, 4) : "",
+        Number.isFinite(championScore) ? "原版本 " + formatNumber(championScore, 4) : "",
+        Number.isFinite(challengerScore) ? "新版本 " + formatNumber(challengerScore, 4) : "",
+        Number.isFinite(scoreDelta) ? "提高值 " + signedNumber(scoreDelta, 4) : "",
+        Number.isFinite(minimumDelta) ? "须超过 " + formatNumber(minimumDelta, 4) : "",
         payload.reason ? "原因 " + compactTechnicalText(payload.reason) : ""
       ].filter(Boolean).join(" · ");
     }
@@ -799,7 +799,7 @@
       : null;
     var heartbeatState = executionHeartbeatState(run);
     var heartbeatStalled = heartbeatState.stalled && !research.retrying && !research.waitingRemote && !dshActivity;
-    var automatic = runHasContinuousAutoProgress(run) || state.autoAdvanceRunId === run.id;
+    var automatic = runHasContinuousAutoProgress(run);
     statusNode.className = "pill " + (heartbeatStalled ? "pill-amber" : overall === "completed" ? "pill-green" : overall === "running" ? "pill-blue" : overall === "paused" || overall === "cancelled" ? "pill-amber" : overall === "failed" ? "pill-red" : "pill-neutral");
     statusNode.textContent = heartbeatStalled ? "疑似停滞，正在核验" : overall === "completed" ? "本轮已完成" : overall === "running" ? research.retrying ? "远端请求等待重试" : research.waitingRemote ? "等待远端模型响应" : dshActivity && dshActivity.statusText || "模型执行中" : overall === "paused" ? (pausedDrained ? "已暂停，请求已排空" : "已暂停") : overall === "cancelled" ? "已取消" : overall === "failed" ? "执行失败" : automatic ? "后台排队中" : "等待推进";
     node.innerHTML = steps.map(function (step, index) {
@@ -1204,7 +1204,7 @@
     var penaltyPreviewCount = previewRows.length - validPreviewCount;
     var adaptiveProgress = explicitProgress.stage_progress && typeof explicitProgress.stage_progress === "object" ? explicitProgress.stage_progress : {};
     var adaptiveBatchText = Number.isFinite(Number(adaptiveProgress.batch_index)) && Number.isFinite(Number(adaptiveProgress.batch_count))
-      ? "微批 " + formatNumber(adaptiveProgress.batch_index) + " / " + formatNumber(adaptiveProgress.batch_count) + " · 本轮已结算 " + formatNumber(adaptiveProgress.completed_samples || 0) + " / " + formatNumber(adaptiveProgress.total_samples || 0) + " origins"
+      ? "批次 " + formatNumber(adaptiveProgress.batch_index) + " / " + formatNumber(adaptiveProgress.batch_count) + " · 本轮已结算 " + formatNumber(adaptiveProgress.completed_samples || 0) + " / " + formatNumber(adaptiveProgress.total_samples || 0) + " 个预测时点"
       : "";
     var previewText = previewRows.length
       ? (validPreviewCount ? "有效预测 " + validPreviewCount + " 条" : "尚无有效预测") + (penaltyPreviewCount ? " · 失败惩罚占位 " + penaltyPreviewCount + " 条" : "")
@@ -1667,9 +1667,9 @@
     var displayActive = progress.active && !paused;
     var finished = !paused && !displayActive && (runStatus === "completed" || progress.percent >= 99.99);
     var waiting = runNeedsAdvanceAction(run, state.events);
-    var autoActive = liveAllowed && state.autoAdvanceRunId === run.id;
+    var autoActive = liveAllowed && runHasContinuousAutoProgress(run);
     var autoManaged = liveAllowed && runHasContinuousAutoProgress(run);
-    var autoBlocked = liveAllowed && state.autoAdvanceBlockedRunId === run.id && state.autoAdvanceError;
+    var autoBlocked = false;
     var hardTokenPause = runHasHardTokenPause(run);
     var retryCircuitPaused = runHasRetryCircuitPause(run);
     var schedulerQueue = executionSchedulerQueueInfo(run);
@@ -1696,7 +1696,7 @@
     var currentStage = liveAllowed || paused ? recordedCurrentStage : null;
     var stageText = retryWait ? (evolutionStageLabels[retryWait.stage] || retryWait.stage || "等待重试") : currentStage ? (evolutionStageLabels[currentStage] || executionStageLabels[currentStage] || currentStage) : stages.map(function (item) { return executionStageText(item.value, item.key) === "进行中" ? executionStageLabels[item.key] : ""; }).filter(Boolean)[0];
     var observedDetail = run.best_observed_candidate_id || run.best_observed_score != null ? " · " + rawBestObservedSummary(run) : "";
-    var elapsedMs = state.autoAdvanceRoundStartedAt != null ? Math.max(0, Date.now() - state.autoAdvanceRoundStartedAt) : state.autoAdvanceLastDurationMs;
+    var elapsedMs = null;
     if (elapsedMs == null && displayActive) { elapsedMs = executionActiveStageElapsedMs(run, currentStage); }
     var measuredRoundMs = round && round.timing && Number.isFinite(Number(round.timing.duration_ms)) ? Number(round.timing.duration_ms) : null;
     var effectiveElapsedMs = measuredRoundMs != null && !displayActive ? measuredRoundMs : elapsedMs;
@@ -1705,10 +1705,10 @@
     var batchText = stageProgress && String(stageProgress.evaluation_phase || "").toLowerCase() === "holdout"
       ? " · 留出评测 " + (holdoutArmLabels[String(stageProgress.holdout_arm || "")] || "准备中")
       : stageProgress && Number.isFinite(Number(stageProgress.batch_index)) && Number.isFinite(Number(stageProgress.batch_count))
-        ? " · 微批 " + formatNumber(stageProgress.batch_index) + " / " + formatNumber(stageProgress.batch_count)
+        ? " · 批次 " + formatNumber(stageProgress.batch_index) + " / " + formatNumber(stageProgress.batch_count)
         : "";
     var terminalEvidenceText = (failed || cancelled) && retainedEvidence ? " · " + executionEvidenceQualifier(run) : "";
-    detailNode.textContent = hardTokenPause ? "逐样本智能体 Token 硬预算已耗尽；逐样本 checkpoint 已保留。" : retryCircuitPaused ? retryCircuitDetailText(run) : paused ? "暂停阶段：" + (stageText || "等待阶段状态") + (candidate ? " · " + shortId(candidate.id || candidate.candidate_id) : "") + batchText + (pausedDrained ? " · 请求已排空" : " · 已停止提交新请求") : retryWait ? retryWaitDetailText(retryWait) : schedulerQueue ? schedulerQueue.detail : heartbeatStalled ? "超过 120 秒没有新的执行心跳（最后更新 " + heartbeatState.age_text + "），正在核验模型与宿主状态。" : displayActive ? "当前阶段：" + (stageText || "等待事件回执") + (candidate ? " · " + shortId(candidate.id || candidate.candidate_id) : "") + batchText + (dshActivity ? " · " + dshActivity.detail : "") + elapsedText : statusText + terminalEvidenceText + (exhausted ? observedDetail + "，但未通过全部门禁" : candidate ? " · 最近候选 " + shortId(candidate.id || candidate.candidate_id) : "") + (autoActive ? elapsedText : "");
+    detailNode.textContent = hardTokenPause ? "逐样本智能体 Token 硬预算已耗尽；逐样本 checkpoint 已保留。" : retryCircuitPaused ? retryCircuitDetailText(run) : paused ? "暂停阶段：" + (stageText || "等待阶段状态") + (candidate ? " · " + shortId(candidate.id || candidate.candidate_id) : "") + batchText + (pausedDrained ? " · 请求已排空" : " · 已停止提交新请求") : retryWait ? retryWaitDetailText(retryWait) : schedulerQueue ? schedulerQueue.detail : heartbeatStalled ? "超过 120 秒没有新的执行心跳（最后更新 " + heartbeatState.age_text + "），正在核验模型与宿主状态。" : displayActive ? "当前阶段：" + (stageText || "等待事件回执") + (candidate ? " · " + shortId(candidate.id || candidate.candidate_id) : "") + batchText + (dshActivity ? " · " + dshActivity.detail : "") + elapsedText : statusText + terminalEvidenceText + (exhausted ? observedDetail + "；该分数不代表保留结果" : candidate ? " · 最近候选 " + shortId(candidate.id || candidate.candidate_id) : "") + (autoActive ? elapsedText : "");
     track.className = "execution-progress-track" + (failed ? " is-failed" : paused ? " is-paused" : heartbeatStalled ? " is-stalled" : displayActive ? " is-running" : "");
     track.setAttribute("aria-valuenow", String(roundedPercent));
     fill.style.width = Math.max(0, Math.min(100, progress.percent)).toFixed(1) + "%";
@@ -1861,13 +1861,13 @@
     var reason = String(batch && batch.edit_reason || "").toLowerCase();
     if (paired) {
       return pairedDecisionText(batch && batch.comparison_decision)
-        || (outcome === "rejected" ? "局部提案未通过宿主校验" : "")
-        || (String(batch && batch.status || "").toLowerCase() === "running" ? "同 cohort 对照评测中" : "等待同 cohort 对照验证");
+        || (outcome === "rejected" ? "修改提案未通过规则检查" : "")
+        || (String(batch && batch.status || "").toLowerCase() === "running" ? "正在用同批数据比较" : "等待同批效果比较");
     }
     if (outcome === "rolled_back") { return "安全门回退"; }
     if (reason && outcome === "kept") { return "证据不足或安全门阻断，本批不改"; }
     return {
-      applied: "已生成下一尝试，尚未同批验证", kept: "保持当前修订", rejected: "提案未通过宿主校验"
+      applied: "新方案已生成，尚未比较效果", kept: "沿用当前版本", rejected: "修改提案未通过规则检查"
     }[outcome] || {
       mutate: "建议局部修改", keep: "建议保持"
     }[decision] || (String(batch && batch.status || "").toLowerCase() === "running" ? "评测中" : "等待局部决策");
@@ -1881,11 +1881,11 @@
     lanes.forEach(function (lane) {
       (Array.isArray(lane.batches) ? lane.batches : []).forEach(function (batch) { rows.push({lane: lane, batch: batch || {}}); });
     });
-    count.textContent = lanes.length ? formatNumber(lanes.length) + " 个候选 · " + formatNumber(rows.length) + " 个微批" : "等待正式候选";
+    count.textContent = lanes.length ? formatNumber(lanes.length) + " 个候选 · " + formatNumber(rows.length) + " 个批次" : "等待入围方案";
     if (!rows.length) {
       table.innerHTML = lanes.length
-        ? "<tr><td colspan=\"6\" class=\"empty-state\">入围候选已进入正式 adaptive epoch，正在等待首个微批证据。</td></tr>"
-        : "<tr><td colspan=\"6\" class=\"empty-state\">Top 2 候选进入正式 adaptive epoch 后，将在这里显示逐微批修订与局部修改证据。</td></tr>";
+        ? "<tr><td colspan=\"6\" class=\"empty-state\">入围方案已开始优化，正在等待首批比较结果。</td></tr>"
+        : "<tr><td colspan=\"6\" class=\"empty-state\">选出 2 个入围方案后，这里会显示每批修改、效果比较和选择结果。</td></tr>";
       return;
     }
     table.innerHTML = rows.map(function (entry) {
@@ -1898,7 +1898,7 @@
       var coverageText = Number.isFinite(coverage) ? formatNumber(coverage <= 1 ? coverage * 100 : coverage, 1) + "%" : "—";
       var originSuccessRate = batch.origin_success_rate == null ? NaN : Number(batch.origin_success_rate);
       var originSuccessText = Number.isFinite(originSuccessRate) ? formatNumber(originSuccessRate <= 1 ? originSuccessRate * 100 : originSuccessRate, 1) + "%" : "—";
-      var originText = formatNumber(batch.origin_count || 0) + " origins";
+      var originText = formatNumber(batch.origin_count || 0) + " 个预测时点";
       var operations = paired
         ? Array.isArray(batch.next_challenger_operations) ? batch.next_challenger_operations : []
         : Array.isArray(batch.operations) ? batch.operations : [];
@@ -1908,16 +1908,16 @@
       var operationDetails = operations.map(function (operation) { return "<span class=\"adaptive-trajectory-operation\">" + escapeHTML(adaptiveTrajectoryOperationText(operation)) + "</span>"; }).join("");
       var operationHtml = paired
         ? editOutcome === "rejected"
-          ? "<span>局部提案未通过宿主校验</span>" + (batch.edit_reason ? "<small>宿主原因 " + escapeHTML(compactTechnicalText(batch.edit_reason)) + "</small>" : "") + operationDetails
+          ? "<span>修改提案未通过规则检查</span>" + (batch.edit_reason ? "<small>规则检查原因 " + escapeHTML(compactTechnicalText(batch.edit_reason)) + "</small>" : "") + operationDetails
           : batch.next_challenger_revision_id
-            ? "<span>下一挑战版本已生成，等待同 cohort 对照验证</span>" + operationDetails
+            ? "<span>下一次比较的新版本已生成，等待同批效果比较</span>" + operationDetails
             : batchStatus === "running" || !batch.comparison_decision
-              ? "<span>等待本批同 cohort 对照评测</span>"
-              : "<span>本批比较后未生成新挑战版本</span>"
+              ? "<span>等待本批效果比较</span>"
+              : "<span>本批比较后没有新修改</span>"
         : operations.length
           ? operationDetails
           : editOutcome === "kept" || editDecision === "keep"
-            ? "<span>KEEP：保持当前修订</span>"
+            ? "<span>本批不修改</span>"
             : batchStatus === "running" || !editOutcome && !editDecision
               ? "<span>等待本批评测与局部决策</span>"
               : "<span>已记录决策，未公开局部操作摘要</span>";
@@ -1927,23 +1927,24 @@
         ? comparisonDecision === "challenger_promoted" ? "pill-green" : comparisonDecision === "initial_champion" || batchStatus === "running" ? "pill-blue" : "pill-neutral"
         : editOutcome === "applied" ? "pill-blue" : editOutcome === "rejected" ? "pill-amber" : batchStatus === "running" ? "pill-blue" : "pill-neutral";
       var revisionHtml = paired
-        ? "<small>原冠军</small><code title=\"" + escapeHTML(batch.champion_before_revision_id || "") + "\">" + escapeHTML(shortId(batch.champion_before_revision_id || "—")) + "</code><span>对照</span><code title=\"" + escapeHTML(batch.challenger_revision_id || "") + "\">" + escapeHTML(shortId(batch.challenger_revision_id || "—")) + "</code><small>比较后冠军</small><code title=\"" + escapeHTML(batch.champion_after_revision_id || "") + "\">" + escapeHTML(shortId(batch.champion_after_revision_id || "—")) + "</code>"
+        ? "<small>原版本</small><code title=\"" + escapeHTML(batch.champion_before_revision_id || "") + "\">" + escapeHTML(shortId(batch.champion_before_revision_id || "—")) + "</code><span>对照</span><code title=\"" + escapeHTML(batch.challenger_revision_id || "") + "\">" + escapeHTML(shortId(batch.challenger_revision_id || "—")) + "</code><small>比较后保留版本</small><code title=\"" + escapeHTML(batch.champion_after_revision_id || "") + "\">" + escapeHTML(shortId(batch.champion_after_revision_id || "—")) + "</code>"
         : "<code title=\"" + escapeHTML(batch.candidate_revision_id || "") + "\">" + escapeHTML(shortId(batch.candidate_revision_id || "—")) + "</code><span>→</span><code title=\"" + escapeHTML(batch.active_revision_id || "") + "\">" + escapeHTML(shortId(batch.active_revision_id || "—")) + "</code>";
       var championScore = batch.champion_score == null || batch.champion_score === "" ? NaN : Number(batch.champion_score);
       var challengerScore = batch.challenger_score == null || batch.challenger_score === "" ? NaN : Number(batch.challenger_score);
       var scoreDelta = batch.score_delta == null || batch.score_delta === "" ? NaN : Number(batch.score_delta);
       var minimumScoreDelta = batch.minimum_score_delta == null || batch.minimum_score_delta === "" ? NaN : Number(batch.minimum_score_delta);
+      revisionHtml = "<details class=\"technical-details\"><summary>查看版本编号</summary><div>" + revisionHtml + "</div></details>";
       var scoreHtml = paired
-        ? "<strong>" + escapeHTML(Number.isFinite(championScore) ? "冠军 " + formatNumber(championScore, 4) : "冠军等待评测") + " · " + escapeHTML(Number.isFinite(challengerScore) ? "挑战者 " + formatNumber(challengerScore, 4) : "挑战者等待评测") + "</strong><small>" + escapeHTML(Number.isFinite(scoreDelta) ? "差值 " + formatNumber(scoreDelta, 4) : "差值待计算") + " · " + escapeHTML(Number.isFinite(minimumScoreDelta) ? "门槛 " + formatNumber(minimumScoreDelta, 4) : "门槛待冻结") + "</small>"
-        : "<strong>得分 " + escapeHTML(Number.isFinite(score) ? formatNumber(score, 4) : "等待评测") + "</strong><small>origin 成功率 " + escapeHTML(originSuccessText) + " · 评分单元覆盖率 " + escapeHTML(coverageText) + "</small>";
-      var executionCounts = [batch.succeeded_origins != null ? "成功 origins " + formatNumber(batch.succeeded_origins) : "", batch.failed_origins != null ? "失败 origins " + formatNumber(batch.failed_origins) : "", Number(batch.fallback_scoring_cells) > 0 ? "fallback cells " + formatNumber(batch.fallback_scoring_cells) : ""].filter(Boolean).join(" · ");
+        ? "<strong>" + escapeHTML(Number.isFinite(championScore) ? "原版本 " + formatNumber(championScore, 4) : "原版本待评测") + " · " + escapeHTML(Number.isFinite(challengerScore) ? "新版本 " + formatNumber(challengerScore, 4) : "新版本待评测") + "</strong><small>" + escapeHTML(Number.isFinite(scoreDelta) ? "提高值 " + signedNumber(scoreDelta, 4) : "提高值待计算") + " · " + escapeHTML(Number.isFinite(minimumScoreDelta) ? "须超过 " + formatNumber(minimumScoreDelta, 4) : "阈值待确认") + "</small>"
+        : "<strong>得分 " + escapeHTML(Number.isFinite(score) ? formatNumber(score, 4) : "等待评测") + "</strong><small>预测完成率 " + escapeHTML(originSuccessText) + " · 评分单元覆盖率 " + escapeHTML(coverageText) + "</small>";
+      var executionCounts = [batch.succeeded_origins != null ? "成功时点 " + formatNumber(batch.succeeded_origins) : "", batch.failed_origins != null ? "失败时点 " + formatNumber(batch.failed_origins) : "", Number(batch.fallback_scoring_cells) > 0 ? "备用评分项 " + formatNumber(batch.fallback_scoring_cells) : ""].filter(Boolean).join(" · ");
       return "<tr>"
         + "<td><div class=\"adaptive-trajectory-cell\"><strong>第 " + escapeHTML(formatNumber(Number(lane.generation || 0) + 1)) + " 轮 · " + escapeHTML(shortId(lane.candidate_id)) + "</strong><small>轨迹 " + escapeHTML(formatNumber(lane.completed_batch_count || 0)) + " / " + escapeHTML(formatNumber(lane.batch_count || 0)) + "</small>" + (lane.strategy_label ? "<small>" + escapeHTML(lane.strategy_label) + "</small>" : "") + "</div></td>"
-        + "<td><div class=\"adaptive-trajectory-cell\"><strong>微批 " + escapeHTML(formatNumber(batch.batch_index)) + " / " + escapeHTML(formatNumber(batch.batch_count || lane.batch_count || 0)) + "</strong><span>" + escapeHTML(originText) + "</span><code title=\"" + escapeHTML(batch.cohort_digest || "") + "\">cohort " + escapeHTML(shortId(batch.cohort_digest || "—")) + "</code></div></td>"
+        + "<td><div class=\"adaptive-trajectory-cell\"><strong>批次 " + escapeHTML(formatNumber(batch.batch_index)) + " / " + escapeHTML(formatNumber(batch.batch_count || lane.batch_count || 0)) + "</strong><span>" + escapeHTML(originText) + "</span><details class=\"technical-details\"><summary>数据批次编号</summary><code>" + escapeHTML(batch.cohort_digest || "未记录") + "</code></details></div></td>"
         + "<td><div class=\"adaptive-trajectory-cell\">" + revisionHtml + "</div></td>"
-        + "<td><div class=\"adaptive-trajectory-cell\">" + scoreHtml + "<small>" + escapeHTML(executionCounts || "批次执行统计待核验") + "</small><small class=\"adaptive-trajectory-warning\">" + (paired ? "仅同批 cohort 冠军与挑战者可直接比较" : "不同 cohort 分数不可直接纵向归因") + "</small></div></td>"
+        + "<td><div class=\"adaptive-trajectory-cell\">" + scoreHtml + "<small>" + escapeHTML(executionCounts || "批次执行统计待核验") + "</small><small class=\"adaptive-trajectory-warning\">" + (paired ? "仅本批新旧版本可直接比较" : "不同批次得分不能直接比较") + "</small></div></td>"
         + "<td><div class=\"adaptive-trajectory-cell\">" + operationHtml + "</div></td>"
-        + "<td><div class=\"adaptive-trajectory-cell\"><span class=\"pill " + outcomeTone + "\">" + escapeHTML(outcome) + "</span>" + (paired && batch.comparison_reason ? "<small>原因 " + escapeHTML(compactTechnicalText(batch.comparison_reason)) + "</small>" : "") + "<small>" + escapeHTML(formatDate(batch.created_at)) + "</small></div></td>"
+        + "<td><div class=\"adaptive-trajectory-cell\"><span class=\"pill " + outcomeTone + "\">" + escapeHTML(outcome) + "</span>" + (batch.comparison_reason || batch.edit_reason ? "<small>原因：" + escapeHTML(evolutionCheckText(batch.comparison_reason || batch.edit_reason)) + "</small>" : "") + "<small>" + escapeHTML(formatDate(batch.created_at)) + "</small></div></td>"
         + "</tr>";
     }).join("");
   }
@@ -1951,10 +1952,35 @@
   function evolutionEvidenceArmLabel(arm) {
     return {finalist_1: "入围方案 1", finalist_2: "入围方案 2", incumbent: "上一冠军"}[String(arm || "")] || "对照方案";
   }
+  function evolutionCheckText(value) {
+    return {
+      incompatible_comparison_contract: "新旧版本的比较条件不一致",
+      champion_evaluation_incomplete: "原版本的评测结果不完整",
+      challenger_evaluation_incomplete: "新版本的评测结果不完整",
+      challenger_safety_gate_failed: "新版本未通过安全检查",
+      challenger_cell_regression: "部分预测指标退化超过允许范围",
+      cell_regression: "部分预测指标退化超过允许范围",
+      no_positive_score_delta: "同批得分没有提高",
+      below_practical_delta: "提高值未超过本轮规定的阈值",
+      below_practical_score_delta: "提高值未超过认证阈值",
+      challenger_improved: "同批得分提高，满足保留条件",
+      scientific_gate_failed: "科学约束检查未通过",
+      constraint_violations: "存在约束违规",
+      coverage_failed: "有效预测覆盖不足",
+      objective_grid_incomplete: "预测目标或时距不完整",
+      strict_agent_chain_failed: "预测执行过程未通过完整性检查",
+      screening_exploration_only: "初筛仅供探索，不满足认证条件"
+    }[String(value || "")] || compactTechnicalText(value);
+  }
   function evolutionEvidenceSigned(value) {
     var number = value == null || value === "" ? NaN : Number(value);
     if (!Number.isFinite(number)) { return "待计算"; }
     return (number > 0 ? "+" : "") + formatNumber(number, 4);
+  }
+  function generationSearchIsCertified(decision) {
+    return Boolean(decision && ["finalist_1", "finalist_2"].indexOf(decision.selected_arm) >= 0
+      && (decision.certification_selected_arm === decision.selected_arm
+        || (decision.certification_selected_arm == null && ["certification_selected", "certified"].indexOf(decision.selected_search_certification_status) >= 0)));
   }
   function renderEvolutionEvidence(run) {
     var status = $("#evolution-evidence-status");
@@ -1966,10 +1992,10 @@
     var legacyAudit = evidence.protocol_scope === "legacy_audit";
     var positiveDeltaV3 = evidence.protocol_scope === "positive_delta_search_v3";
     var protocolLabel = legacyAudit
-      ? "旧版连续更新审计，跨 cohort 不可归因"
+      ? "旧版更新记录，跨批次不可直接比较"
       : positiveDeltaV3
-      ? "正向增益搜索 + 独立稳健认证"
-      : "旧版严格 paired 门禁";
+      ? "同批提高则继续优化，稳健认证另行判断"
+      : "旧版严格对照规则";
     var protocolHtml = "<div class=\"evolution-protocol-label\"><span>选择协议</span><strong>" + escapeHTML(protocolLabel) + "</strong></div>";
     var champion = positiveDeltaV3 && evidence.search_version && typeof evidence.search_version === "object"
       ? evidence.search_version
@@ -1978,7 +2004,7 @@
     var decisions = Array.isArray(evidence.generation_decisions) ? evidence.generation_decisions : [];
     var committedDecisions = decisions.filter(function (decision) { return decision.committed !== false; });
     var latest = committedDecisions.length ? committedDecisions[committedDecisions.length - 1] : null;
-    var latestSearchCertified = Boolean(latest && latest.selected_arm !== "incumbent" && (latest.certification_selected_arm === latest.selected_arm || (latest.certification_selected_arm == null && latest.selected_search_certification_status === "certified")));
+    var latestSearchCertified = generationSearchIsCertified(latest);
     var latestHasDifferentCertification = Boolean(latest && latest.certification_selected_arm && latest.certification_selected_arm !== latest.selected_arm);
     if (!run) {
       status.className = "pill pill-neutral";
@@ -1990,14 +2016,14 @@
     }
     status.className = "pill " + (!legacyAudit && latest && latest.selected_arm !== "incumbent" ? latestSearchCertified ? "pill-green" : "pill-blue" : !legacyAudit && latest ? "pill-blue" : "pill-neutral");
     status.textContent = legacyAudit ? "旧协议审计" : positiveDeltaV3 && latest
-      ? latest.selected_arm === "incumbent" ? "未取得正增益，沿用搜索版本" : latestSearchCertified ? "搜索版本已推进并成为稳健认证版本" : latestHasDifferentCertification ? "搜索版本已推进，稳健认证版本为另一方案" : "搜索版本已推进，尚未通过严格认证"
+      ? latest.selected_arm === "incumbent" ? "未取得正增益，沿用优化版本" : latestSearchCertified ? "已保留用于优化，并成为稳健认证版本" : latestHasDifferentCertification ? "已保留用于优化，认证版本为另一方案" : "已保留用于优化，认证结果见下方"
       : latest
       ? latest.selected_arm === "incumbent" ? "上一冠军继续保留" : "挑战者已晋升"
       : champion ? "初始基线已冻结" : "等待冻结基线";
     championNode.innerHTML = protocolHtml + (positiveDeltaV3 && champion
       ? "<div><span>下一轮搜索版本</span><strong>" + escapeHTML(champion.is_initial_seed ? "初始种子基线" : "第 " + formatNumber(champion.generation || 0) + " 代正增益版本") + "</strong><small>" + escapeHTML(shortId(champion.candidate_id || "未知候选")) + " · " + escapeHTML(shortId(champion.candidate_revision_id || "未知修订")) + "</small></div>"
-        + "<div><span>同批 holdout 绝对分</span><strong>" + escapeHTML(champion.absolute_score == null ? "等待首轮 holdout" : formatNumber(champion.absolute_score, 4)) + "</strong><small>绝对分可为负；是否推进由同一 holdout 的正增益决定</small></div>"
-        + "<div><span>严格认证</span><strong>" + escapeHTML(certifiedVersion ? "严格认证已通过" : "严格认证尚未通过") + "</strong><small>" + escapeHTML(certifiedVersion ? shortId(certifiedVersion.candidate_revision_id || "认证版本") : "0.005、统计稳定性、逐 cell 与科学门独立判断") + "</small></div>"
+        + "<div><span>本轮比较得分</span><strong>" + escapeHTML(champion.absolute_score == null ? "等待首轮 holdout" : formatNumber(champion.absolute_score, 4)) + "</strong><small>得分可为负；是否保留取决于同批提高值</small></div>"
+        + "<div><span>稳健认证版本</span><strong>" + escapeHTML(certifiedVersion ? "已有认证版本" : "暂无认证版本") + "</strong><small>" + escapeHTML(certifiedVersion ? shortId(certifiedVersion.candidate_revision_id || "认证版本") + "；不一定是当前优化版本" : "提高幅度、统计稳定性、各项退化和科学检查分别判断") + "</small><small>发布前仍需独立最终验证</small></div>"
       : champion
       ? "<div><span>" + escapeHTML(legacyAudit ? "旧协议保留结果" : "全局最优") + "</span><strong>" + escapeHTML(legacyAudit ? "仅供审计，不按 v2 全局冠军解释" : champion.is_initial_seed ? "初始种子基线" : "第 " + formatNumber(champion.generation || 0) + " 代晋升版本") + "</strong><small>" + escapeHTML(shortId(champion.candidate_id || "未知候选")) + " · " + escapeHTML(shortId(champion.candidate_revision_id || "未知修订")) + "</small></div>"
         + "<div><span>最近同批绝对分</span><strong>" + escapeHTML(champion.absolute_score == null ? "等待首轮 holdout" : formatNumber(champion.absolute_score, 4)) + "</strong><small>" + escapeHTML(legacyAudit ? "gen0 未验证真实 materialized seed；不回溯套用新协议" : "只与同代同 cohort 两个挑战者比较") + "</small></div>"
@@ -2005,7 +2031,7 @@
     decisionNode.innerHTML = decisions.length ? decisions.map(function (decision) {
       var committed = decision.committed !== false;
       var selectedIncumbent = decision.selected_arm === "incumbent";
-      var decisionSearchCertified = decision.selected_arm !== "incumbent" && (decision.certification_selected_arm === decision.selected_arm || (decision.certification_selected_arm == null && decision.selected_search_certification_status === "certified"));
+      var decisionSearchCertified = generationSearchIsCertified(decision);
       var decisionLabel = !committed ? "比较已计算，等待固化" : positiveDeltaV3 ? selectedIncumbent ? "无正增益，沿用搜索版本" : decisionSearchCertified ? "正增益并成为稳健认证版本" : "正增益，作为下一轮版本" : decision.exploration_only ? "仅探索，禁止晋升" : selectedIncumbent ? "上一冠军胜出" : "挑战者通过门禁";
       var arms = Array.isArray(decision.arms) ? decision.arms : [];
       var armHtml = arms.map(function (arm) {
@@ -2013,13 +2039,17 @@
         if (positiveDeltaV3) {
           var certificationFailures = Array.isArray(arm.certification_failures) ? arm.certification_failures : [];
           var cellRisk = certificationFailures.indexOf("cell_regression") >= 0 || Number(arm.worst_cell_delta) < -0.01;
-          failures = "搜索资格：" + (arm.search_eligible ? "通过" : "未通过") + " · 严格认证：" + (arm.certification_eligible ? "通过" : "未通过") + (cellRisk ? " · 逐 cell 风险" : "");
+          failures = arm.arm === "incumbent" ? "本轮比较基准" : "保留条件：" + (arm.search_eligible === true ? "满足" : arm.search_eligible === false ? "未满足" : "待评估") + " · 认证条件：" + (arm.certification_eligible === true ? "满足（不等于已选为认证版本）" : arm.certification_eligible === false ? "未满足" : "待评估") + (cellRisk ? " · 部分指标有退化风险" : "");
+          var reasons = (Array.isArray(arm.search_failures) ? arm.search_failures : []).concat(certificationFailures);
+          if (arm.arm !== "incumbent" && reasons.length) {
+            failures += "；原因：" + Array.from(new Set(reasons)).map(evolutionCheckText).join("、");
+          }
         }
-        return "<div class=\"generation-evidence-arm " + (arm.arm === decision.selected_arm ? "is-selected" : "") + "\"><span>" + escapeHTML(evolutionEvidenceArmLabel(arm.arm)) + "</span><strong>绝对分 " + escapeHTML(arm.absolute_score == null ? "待评测" : formatNumber(arm.absolute_score, 4)) + "</strong><small>" + escapeHTML(positiveDeltaV3 ? "宿主同批增益 " : "相对上一冠军 ") + escapeHTML(evolutionEvidenceSigned(arm.holdout_delta)) + "</small><small>" + escapeHTML(failures) + "</small></div>";
+        return "<div class=\"generation-evidence-arm " + (arm.arm === decision.selected_arm ? "is-selected" : "") + "\"><span>" + escapeHTML(evolutionEvidenceArmLabel(arm.arm)) + "</span><strong>绝对分 " + escapeHTML(arm.absolute_score == null ? "待评测" : formatNumber(arm.absolute_score, 4)) + "</strong><small>" + escapeHTML(positiveDeltaV3 ? "同批提高值 " : "相对上一轮版本 ") + escapeHTML(evolutionEvidenceSigned(arm.holdout_delta)) + "</small><small>" + escapeHTML(failures) + "</small></div>";
       }).join("");
-      return "<article class=\"generation-evidence-card\"><header><div><span>第 " + escapeHTML(formatNumber(decision.generation || 0)) + " 代</span><strong>" + escapeHTML(decisionLabel) + "</strong></div><span class=\"pill " + (!committed ? "pill-neutral" : selectedIncumbent ? "pill-blue" : "pill-green") + "\">" + escapeHTML(!committed ? positiveDeltaV3 ? "尚未写入搜索版本" : "尚未写入全局冠军" : decision.same_cohort ? "同一 holdout cohort" : "cohort 异常") + "</span></header><div class=\"generation-evidence-arms\">" + armHtml + "</div>"
+      return "<article class=\"generation-evidence-card\"><header><div><span>第 " + escapeHTML(formatNumber(decision.generation || 0)) + " 代</span><strong>" + escapeHTML(decisionLabel) + "</strong></div><span class=\"pill " + (!committed ? "pill-neutral" : selectedIncumbent ? "pill-blue" : "pill-green") + "\">" + escapeHTML(!committed ? positiveDeltaV3 ? "尚未写入搜索版本" : "尚未写入全局冠军" : decision.same_cohort ? "同一组比较数据" : "cohort 异常") + "</span></header><div class=\"generation-evidence-arms\">" + armHtml + "</div>"
         + (decision.replan_required ? "<p class=\"generation-evidence-replan\">连续 " + escapeHTML(formatNumber(decision.consecutive_exploration_generations || 0)) + " 代无候选通过初筛，下一代必须重新规划。</p>" : "") + "</article>";
-    }).join("") : "<div class=\"empty-state\">全局最优已保留；等待首轮三臂 holdout 决策。</div>";
+    }).join("") : "<div class=\"empty-state\">暂无轮末版本选择记录，不能据此判断方案是否改进。</div>";
     var capacity = evidence.capacity && typeof evidence.capacity === "object" ? evidence.capacity : {};
     var finalReservation = capacity.final_validation_reservation;
     var finalValidationLocked = finalReservation && typeof finalReservation === "object"
@@ -2080,13 +2110,13 @@
       ["每轮候选", formatNumber(run.candidates_per_generation || 1) + " 个版本"],
       ["候选并发", Number(run.candidate_concurrency) > 0 ? formatNumber(run.candidate_concurrency) + " 个候选" : "历史运行按串行执行"],
       ["入围候选轨迹", batchCount > 0 ? pairedMode
-        ? "Top 2 各 1 个 warm-up 微批 + " + formatNumber(Math.max(0, batchCount - 1)) + " 个冠军/挑战者配对微批；两条 lane 共用 " + formatNumber(formalOrigins) + " 个 formal origin occurrences"
-        : "Top 2 各 " + formatNumber(batchCount) + " × " + formatNumber(batchOrigins) + " origins；每批最多 " + formatNumber(schedule.max_local_edits_per_batch) + " 处改动"
+        ? "Top 2 各 1 个 warm-up 批次 + " + formatNumber(Math.max(0, batchCount - 1)) + " 个冠军/挑战者配对微批；两条 lane 共用 " + formatNumber(formalOrigins) + " 个 formal origin occurrences"
+        : "Top 2 各 " + formatNumber(batchCount) + " × " + formatNumber(batchOrigins) + " 个预测时点；每批最多 " + formatNumber(schedule.max_local_edits_per_batch) + " 处改动"
         : "等待冻结 schedule"],
       [pairedMode ? "正式配对上限" : "轨迹策略", pairedMode
         ? formatNumber(formalCandidateOrigins) + " candidate-origin occurrences；同 cohort 双臂复用上述 " + formatNumber(formalOrigins) + " 个 shared cohort occurrences，不是新的独立源数据"
         : schedule.strategy_label || "旧版连续更新策略"],
-      ["轮末同 cohort 比较", holdoutOrigins > 0 ? "F1 / F2 / 上一冠军各 " + formatNumber(holdoutOrigins) + " origins" : "等待冻结 holdout"],
+      ["轮末同 cohort 比较", holdoutOrigins > 0 ? "F1 / F2 / 上一冠军各 " + formatNumber(holdoutOrigins) + " 个预测时点" : "等待冻结 holdout"],
       ["单轮执行预算", generationCandidateOrigins > 0 ? pairedMode
         ? formatNumber(generationCandidateOrigins) + " candidate-origin execution occurrences" + (generationScoringCells != null ? " = " + formatNumber(generationScoringCells) + " scoring cells" : "")
         : formatNumber(generationCandidateOrigins) + " candidate-origins"
@@ -2109,8 +2139,8 @@
     var pill = $("#process-status-pill");
     var liveAllowed = executionRunAllowsLiveStatus(run);
     var advancing = Boolean(run && liveAllowed && (state.pendingAction === "advance" || state.pendingAction === "auto-advance"));
-    var autoActive = Boolean(run && liveAllowed && state.autoAdvanceRunId === run.id);
-    var autoBlocked = Boolean(run && liveAllowed && state.autoAdvanceBlockedRunId === run.id && state.autoAdvanceError);
+    var autoActive = Boolean(run && liveAllowed && runHasContinuousAutoProgress(run));
+    var autoBlocked = false;
     var submitting = !run && (state.pendingAction === "create" || state.createStatus && state.createStatus.state === "submitting");
     var schedulerQueue = executionSchedulerQueueInfo(run);
     pill.className = "pill " + (submitting || advancing || schedulerQueue ? "pill-blue" : autoBlocked ? "pill-red" : autoActive ? "pill-blue" : run ? displayRunStatusClass(run, state.events) : "pill-neutral");

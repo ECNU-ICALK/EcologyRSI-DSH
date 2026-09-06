@@ -89,8 +89,6 @@
     $("#previous-page").addEventListener("click", function () { loadSelectedDataset(Math.max(0, state.pageOffset - state.pageLimit)); });
     $("#next-page").addEventListener("click", function () { loadSelectedDataset(state.pageOffset + state.pageLimit); });
     $("#retry-button").addEventListener("click", function () {
-      state.autoAdvanceBlockedRunId = null;
-      state.autoAdvanceError = null;
       state.commandError = null;
       connectAndLoad();
     });
@@ -99,7 +97,7 @@
     $("#refresh-button").addEventListener("click", function () { state.busy = true; state.pendingAction = "refresh"; renderAll(); refreshAll({ refreshDataset: true }).then(function (ok) { showToast(ok ? "数据已刷新。" : "刷新失败，已保留上次状态。" ); }).finally(function () { state.busy = false; state.pendingAction = null; renderAll(); }); });
     $("#advance-button").addEventListener("click", advanceRun);
     $("#pause-button").addEventListener("click", function () { if (state.activeRun) { controlRun(state.activeRun.status === "paused" ? "resume" : "pause"); } });
-    $("#cancel-button").addEventListener("click", function () { if (window.confirm("确定取消当前进化运行？取消后不能继续推进。")) { controlRun("cancel"); } });
+    $("#cancel-button").addEventListener("click", function () { if (window.confirm("确定停止当前运行？停止后不能恢复执行，但已有记录会保留。")) { controlRun("cancel"); } });
     $("#archive-button").addEventListener("click", archiveRun);
     $("#delete-button").addEventListener("click", function () {
       if (!state.activeRun) { return; }
@@ -201,7 +199,6 @@
     window.addEventListener("message", function (event) {
       var result = EcologyDSHHost.acceptContextMessage(event);
       if (!result.accepted) { if (!result.ignored) { showToast(result.error); } return; }
-      if (state.autoAdvanceRunId) { stopAutoAdvance(state.autoAdvanceRunId, { resetTiming: true }); }
       if (state.runMonitorRunId && typeof stopRunMonitor === "function") { stopRunMonitor(state.runMonitorRunId); }
       state.contextEpoch += 1;
       nextEpoch();
@@ -237,7 +234,7 @@
   }
 
   function publicState() {
-    return clone({ apiBase: state.apiBase, hostContextReceived: state.hostContextReceived, hostContext: state.hostContext, usingDemo: state.usingDemo, connection: state.connection, loadState: state.loadState, workspace: state.workspace, runs: state.runs, showCancelledEmptyRuns: state.showCancelledEmptyRuns, showArchivedRuns: state.showArchivedRuns, archivedRunCount: state.archivedRunCount, activeRun: state.activeRun, events: state.events, datasetPage: state.datasetPage, candidateSamples: state.candidateSamplePage, autoAdvance: { active: Boolean(state.autoAdvanceRunId), run_id: state.autoAdvanceRunId, blocked: Boolean(state.autoAdvanceBlockedRunId), error: state.autoAdvanceError, last_duration_ms: state.autoAdvanceLastDurationMs, rounds_completed: state.autoAdvanceRoundsCompleted } });
+    return clone({ apiBase: state.apiBase, hostContextReceived: state.hostContextReceived, hostContext: state.hostContext, usingDemo: state.usingDemo, connection: state.connection, loadState: state.loadState, workspace: state.workspace, runs: state.runs, showCancelledEmptyRuns: state.showCancelledEmptyRuns, showArchivedRuns: state.showArchivedRuns, archivedRunCount: state.archivedRunCount, activeRun: state.activeRun, events: state.events, datasetPage: state.datasetPage, candidateSamples: state.candidateSamplePage });
   }
 
     bindEvents();

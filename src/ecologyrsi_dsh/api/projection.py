@@ -4985,7 +4985,7 @@ def _dsh_runtime_projection(state: Any) -> dict[str, Any]:
     )
     if bound is None:
         return {
-            "execution_protocol": "legacy_read_only",
+            "execution_protocol": "dsh_native_plugin_evolution@1",
             "native": False,
             "capability_verified": False,
             "first_call_verified": False,

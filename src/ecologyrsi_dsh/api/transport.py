@@ -14,14 +14,25 @@ from .shared import _PLUGIN_FILES, _plugin_root, _public_http_error
 
 class TransportMixin:
     def _route(self) -> list[str]:
-        path = [unquote(part) for part in urlparse(self.path).path.split("/") if part]
-        if path and path[0] == "api":
-            path = path[1:]
-            if path and path[0] == "ecology-evolution":
-                path = path[1:]
-            if path and path[0] in {"v1", "v2"}:
-                path = path[1:]
-        return path
+        raw_path = urlparse(self.path).path
+        canonical_prefix = "/api/ecology-evolution"
+        if raw_path == canonical_prefix:
+            return []
+        if raw_path.startswith(canonical_prefix + "/"):
+            suffix = raw_path[len(canonical_prefix):]
+            return [unquote(part) for part in suffix.split("/") if part]
+        # /api remains the local sidecar's internal root. It is not advertised
+        # to browser hosts; versioned aliases are deliberately removed.
+        if raw_path == "/api":
+            return []
+        if raw_path in {"/health", "/health/live", "/health/ready"}:
+            return [unquote(part) for part in raw_path.split("/") if part]
+        if raw_path.startswith("/api/"):
+            suffix = raw_path[len("/api/"):]
+            parts = [unquote(part) for part in suffix.split("/") if part]
+            if parts and parts[0] not in {"v1", "v2"}:
+                return parts
+        return ["__unsupported_api_base__"]
 
     def _authorize_api(self) -> bool:
         expected = self.server.capability_token

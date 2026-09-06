@@ -251,12 +251,6 @@ class CatalogEndpointsMixin:
                     "description": "策略模型先形成研究计划，再在宿主有界参数空间内逐轮生成和改进候选。",
                     "autonomous": True,
                 },
-                {
-                    "id": "legacy_component_search@1",
-                    "label": "固定组件搜索（兼容）",
-                    "description": "沿用旧版由请求显式冻结预测模型、策略和评测器的流程。",
-                    "autonomous": False,
-                },
             ],
             "prediction_models": prediction_models,
             "evaluators": evaluators,
@@ -268,8 +262,7 @@ class CatalogEndpointsMixin:
             "dsh_review_models": dsh_review_models,
             "policy_models": [item for item in models if model_supports_role(item, "propose")],
             "judge_models": [item for item in models if model_supports_role(item, "judge")],
-            # Canonical names for the autonomous workflow.  Keep the legacy
-            # policy/judge keys above so older plugin builds continue to load.
+            # Canonical names for the autonomous workflow.
             "strategy_models": [item for item in models if model_supports_role(item, "propose")],
             "review_models": [item for item in models if model_supports_role(item, "judge")],
             "dsh": {

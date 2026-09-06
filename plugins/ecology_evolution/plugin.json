@@ -32,7 +32,7 @@
   "events": ["run.*", "generation.*", "candidate.*", "evaluation.*", "promotion.*", "intervention.*", "expert_consultation.*", "stage.*", "research.*", "implementation.*", "optimization.*"],
   "api": {
     "default_base": "/api/ecology-evolution",
-    "supported_bases": ["/api", "/api/v1", "/api/ecology-evolution", "/api/ecology-evolution/v1"],
+    "supported_bases": ["/api/ecology-evolution"],
     "health": "/health",
     "catalog": "/catalog",
     "datasets": "/datasets/{dataset_id}",

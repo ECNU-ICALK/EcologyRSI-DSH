@@ -118,7 +118,7 @@ ECOLOGYRSI_TEST_REAL_DATA=1 PYTHONPATH=src \
 ## 7. API 与权限
 
 - [ ] `health`、`plugin`、`catalog`、`datasets`、`samples`、`runs`、`events`、`control`、`advance`、`interventions`、`archive`、`restore`、`delete` 主路径可用。
-- [ ] `/api` 与声明支持的 `/api/v1` 行为一致。
+- [ ] 浏览器公开 API 只通过声明的 canonical `/api/ecology-evolution` 暴露；内部 `/api` 仅供本地 sidecar 与测试使用。
 - [ ] 运行 API 只返回 `browser-run/2` 脱敏投影，不返回完整 `state_snapshot`。
 - [ ] 事件接口只返回安全摘要和游标，不返回 task manifest 或原始事件 payload。
 - [ ] 回环地址可本地运行；非回环监听未设置 `ECOLOGYRSI_SERVICE_TOKEN` 时拒绝启动。
@@ -139,7 +139,7 @@ ECOLOGYRSI_TEST_REAL_DATA=1 PYTHONPATH=src \
 - [ ] 候选评测可选择候选并查看参数、理由、训练子模型、预测起点/目标时间/时距、逐样本真实值/预测值/reward、分目标多时距指标、cohort 证据和搜索保留结论。
 - [ ] 人工协作页要求先暂停，再提交意见；历史展示覆盖参数、目标候选、实际应用提案、执行级别和数值前后值。
 - [ ] 页面收到显式 capability 列表时，缺失能力的对应操作入口缺省拒绝，不因目录为空而回退为允许。
-- [ ] DSH context 只接受同源父窗口或显式 `parent_origin`；API 只接受清单声明的 `/api`、`/api/v1`、`/api/ecology-evolution`、`/api/ecology-evolution/v1` 及同源/显式 `api_origin`。
+- [ ] DSH context 只接受同源父窗口或显式 `parent_origin`；浏览器 API 只接受清单声明的 `/api/ecology-evolution` 及同源/显式 `api_origin`。
 - [ ] 宿主身份只用于显示和人工意见归属；宿主 capability 与服务 capability 的交集只约束页面入口；宿主模型只能匹配后端已登记模型。
 - [ ] capability token 仅保存在内存，不进入 localStorage、导出摘要或公开插件状态。
 - [ ] 进程级 `ECOLOGYRSI_SERVICE_TOKEN` 通过后可访问全部服务 API；发布说明不把前端 capability 交集宣称为服务端用户级 scope。
@@ -152,6 +152,10 @@ ECOLOGYRSI_TEST_REAL_DATA=1 PYTHONPATH=src \
 - [ ] 只有显式 `demo=1` 才进入浏览器演示模式；后端失败不会自动伪造数据。
 
 ## 9. 发布物
+
+- [ ] 外部 AI for AI 自进化实验台的 Genome、实验账本和 DSH adapter 已单独验证；其失败不会改变 DSH runtime 状态。
+- [ ] 插件候选只在同 cohort、科学门禁和可靠性门禁全部通过后晋级；回滚记录可由独立 SQLite 账本重放。
+- [ ] 生成 Skill/Tool 提案不包含 Python、Shell、动态导入、网络地址或任意可执行代码；新 Tool 仅通过已审核 Host adapter 接入。
 
 ```bash
 source activate py310

@@ -24,6 +24,7 @@ classifiers = [
 
 [project.scripts]
 ecologyrsi-dsh = "ecologyrsi_dsh.application.cli:main"
+ecologyrsi-ai-evolve = "ecologyrsi_dsh.evolution_lab.__main__:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -47,6 +48,10 @@ where = ["src"]
 ]
 "share/ecologyrsi-dsh/plugins/ecology_evolution/assets/js" = [
     "plugins/ecology_evolution/assets/js/*.js",
+]
+"share/ecologyrsi-dsh/plugins/ai_evolution_lab" = [
+    "plugins/ai_evolution_lab/README.md",
+    "plugins/ai_evolution_lab/plugin.json",
 ]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin" = [
     "integrations/dsh_ecology_plugin/README.md",

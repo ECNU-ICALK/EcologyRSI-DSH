@@ -11,13 +11,13 @@
 
   var statusLabels = {
     idle: "待启动", created: "已创建", preflight: "预检中", starting: "启动中",
-    running: "运行中", paused: "已暂停", promotion_pending: "等待搜索保留决策",
+    running: "执行中", paused: "已暂停", promotion_pending: "等待选择版本",
     released: "已发布", completed: "已完成", quarantined: "已隔离",
-    cancelled: "已取消", failed: "失败"
+    cancelled: "已停止", failed: "执行失败"
   };
   var candidateStatusLabels = {
-    accepted: "训练反馈搜索保留", promoted: "训练反馈搜索保留", retained: "训练反馈搜索保留", released: "已发布", evaluating: "训练反馈检查中",
-    evaluated: "训练反馈已检查", pending: "等待训练反馈", spawned: "等待训练反馈", screened_out: "初筛未进入 Top 2", rejected: "未保留", failed: "失败", duplicate: "重复版本",
+    accepted: "已保留用于优化", promoted: "已保留用于优化", retained: "已保留用于优化", released: "已发布", evaluating: "评测中",
+    evaluated: "已评测", pending: "待评测", spawned: "待评测", screened_out: "初筛未入围", rejected: "未保留", failed: "执行失败", duplicate: "重复版本",
     paused: "已暂停", aborted: "已中止", not_recorded: "未封存"
   };
   var metricLabels = {
@@ -152,6 +152,7 @@
     createStatus: null,
     lastError: null,
     commandError: null,
+    controlNotice: null,
     showAllEvents: false,
     lastUpdated: null,
     viewEpoch: 0,
@@ -164,15 +165,6 @@
     // Continuous evolution is coordinated by one serial scheduler.  Timer
     // handles stay in page memory and are intentionally omitted from the
     // public projection exported to host integrations.
-    autoAdvanceEnabled: true,
-    autoAdvanceRunId: null,
-    autoAdvanceContextEpoch: null,
-    autoAdvanceOptOutRunIds: {},
-    autoAdvanceTimer: null,
-    autoAdvanceRetry: 0,
-    autoAdvanceBlockedRunId: null,
-    autoAdvanceError: null,
-    autoAdvanceRoundStartedAt: null,
     // The durable worker is independent from the browser.  Keep a small
     // read-only monitor in the page so a newly submitted run exposes its
     // progress immediately instead of waiting for the coarse history refresh.
@@ -183,8 +175,6 @@
     runMonitorRetry: 0,
     runMonitorLastPollAt: 0,
     structureHydrationStale: false,
-    autoAdvanceLastDurationMs: null,
-    autoAdvanceRoundsCompleted: 0,
     candidateBudgetManual: false,
     cohortCapacityReport: null,
     cohortCapacitySignature: null,
@@ -399,6 +389,7 @@
       || configuration.auto_progress === true
     ));
   }
+  function serverAutoProgressEnabled(run) { return runHasContinuousAutoProgress(run); }
   function runCandidateCount(run) {
     if (!run) { return 0; }
     if (run.candidates_count != null) { return Number(run.candidates_count); }
@@ -431,9 +422,6 @@
   function reconcileVisibleRunSelection() {
     var runs = visibleRuns();
     if (state.activeRun && runs.some(function (run) { return run.id === state.activeRun.id; })) { return false; }
-    if (state.autoAdvanceRunId && typeof stopAutoAdvance === "function") {
-      stopAutoAdvance(state.autoAdvanceRunId);
-    }
     nextEpoch();
     state.datasetRequest += 1;
     state.activeRun = runs[0] || null;
@@ -468,10 +456,10 @@
       var scale = [];
       if (Number.isInteger(generations) && generations > 0) { scale.push(formatNumber(generations) + " 代"); }
       if (Number.isInteger(candidates) && candidates > 0) { scale.push(formatNumber(candidates) + " 个候选"); }
-      return "已完成预设进化规模" + (scale.length ? "（" + scale.join("、") + "）" : "") + "，尚无候选通过全部评测门控；正式验证未开展";
+      return "本次运行已结束" + (scale.length ? "（" + scale.join("、") + "）" : "") + "，未产生新的保留方案；独立最终验证另行开展";
     }
-    if (outcome === "completed_with_acceptable_candidate") { return "已完成，产生训练反馈搜索保留候选；正式验证未开展"; }
-    if (outcome === "completed_without_acceptable_candidate") { return "运行已结束，未产生训练反馈搜索保留候选；正式验证未开展"; }
+    if (outcome === "completed_with_acceptable_candidate") { return "已完成，保留方案可用于继续优化；不代表已通过独立最终验证"; }
+    if (outcome === "completed_without_acceptable_candidate") { return "本次运行已结束，未产生新的保留方案；独立最终验证另行开展"; }
     return "";
   }
   function publicFailureText(value) {
@@ -631,14 +619,59 @@
     return "历史运行未声明完整的 Token 计量范围";
   }
   function displayRunStatusText(run, events) {
-    if (runHasHardTokenPause(run)) { return tokenBudgetSubjectText(run) + " Token 预算已暂停"; }
-    if (runHasRetryCircuitPause(run)) { return retryCircuitStatusText(run); }
-    return runNeedsAdvanceAction(run, events) ? "等待推进" : runOutcomeText(run) || statusText(run && run.status);
+    return runStatusExplanation(run, events).label;
   }
   function displayRunStatusClass(run, events) {
     if (runNeedsAdvanceAction(run, events)) { return "pill-amber"; }
     if (runOutcomeCode(run) === "budget_exhausted_without_acceptable_candidate") { return "pill-amber"; }
     return statusClass(run && run.status);
+  }
+  function runStatusExplanation(run, events) {
+    if (!run) {
+      return {label: "未创建", detail: "还没有进化运行。", nextAction: "先在“开始运行”中选择数据和模型。", tone: "idle"};
+    }
+    var status = String(run.status || "").toLowerCase();
+    if (runHasHardTokenPause(run)) {
+      return {label: "预算已暂停", detail: "模型调用预算已用完，系统已保存当前进度。", nextAction: "请提高预算后新建运行。", tone: "waiting"};
+    }
+    if (runHasRetryCircuitPause(run)) {
+      return {label: "等待检查", detail: retryCircuitDetailText(run), nextAction: "检查对应服务后点击“恢复”。", tone: "waiting"};
+    }
+    if (runNeedsAdvanceAction(run, events)) {
+      if (Number(run.generation || 0) === 0) {
+        return {label: "等待下一步", detail: "任务已准备就绪，等待开始第一轮。", nextAction: "点击“开始第一轮”执行。", tone: "waiting"};
+      }
+      return {label: "等待下一步", detail: "上一轮已完成，等待继续执行下一轮。", nextAction: "点击“继续下一步”开始下一轮。", tone: "waiting"};
+    }
+    if (status === "running") {
+      var phase = String(run.execution_progress && run.execution_progress.phase || "");
+      if (phase === "queued" || phase === "waiting") {
+        return {label: "排队中", detail: "任务已排队，等待后台继续执行。", nextAction: "无需重复点击，进度会自动更新。", tone: "waiting"};
+      }
+      return {label: "执行中", detail: "系统正在处理当前轮次，进度会自动更新。", nextAction: "可以暂停，或等待本轮完成。", tone: "running"};
+    }
+    if (status === "paused") {
+      return {label: "已暂停", detail: runPauseReason(run) || "当前进度已保存，运行暂时停止。", nextAction: "点击“恢复运行”继续执行。", tone: "waiting"};
+    }
+    if (status === "failed") {
+      return {label: "执行失败", detail: runFailureMessage(run, events), nextAction: "查看失败阶段，修正配置后新建运行。", tone: "failed"};
+    }
+    if (status === "cancelled") {
+      return {label: "已停止", detail: "运行已停止，已有记录仍保留。", nextAction: "如需继续，请新建运行。", tone: "stopped"};
+    }
+    if (status === "completed") {
+      var explicitOutcome = String(run.outcome || run.termination_reason || "");
+      var completedWithCandidate = explicitOutcome && runOutcomeCode(run) === "completed_with_acceptable_candidate";
+      var withoutCandidate = ["budget_exhausted_without_acceptable_candidate", "completed_without_acceptable_candidate"].indexOf(explicitOutcome) >= 0;
+      return {label: "已完成", detail: completedWithCandidate ? "已保留用于继续优化的方案；这不代表已通过独立最终验证。" : withoutCandidate ? "本次运行已结束，未产生新的保留方案；不等于运行出错。" : "本次运行已结束，具体结果请查看候选方案与验证记录。", nextAction: "查看候选方案和本轮结果，或开始新的运行。", tone: "completed"};
+    }
+    if (status === "created" && !serverAutoProgressEnabled(run)) {
+      return {label: "待启动", detail: "任务已创建，尚未开始执行。", nextAction: "请从创建入口或运行控制启动任务。", tone: "waiting"};
+    }
+    if (status === "created" || status === "starting" || status === "preflight") {
+      return {label: "准备中", detail: "运行已创建，正在等待后台准备。", nextAction: "等待后台开始执行。", tone: "waiting"};
+    }
+    return {label: statusText(status), detail: "系统正在读取运行状态。", nextAction: "请稍后刷新页面。", tone: "idle"};
   }
   function candidateStatusText(value) { return candidateStatusLabels[value] || "未知状态"; }
   function candidateStatusClass(value) {

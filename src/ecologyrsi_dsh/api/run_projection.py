@@ -33,7 +33,7 @@ def build_configuration(task: Any, state: Any, profile: str = "full") -> dict[st
         if has_limit:
             token_budget_scope = "sample_agent_gateway_calls_only@1"
     return {
-        "execution_protocol": metadata.get("execution_protocol", "legacy_read_only"),
+        "execution_protocol": metadata.get("execution_protocol", "dsh_native_plugin_evolution@1"),
         "optimization_protocol": metadata.get("optimization_protocol"),
         "optimization_schedule": metadata.get("optimization_schedule"),
         "derived_execution_budget": metadata.get("derived_execution_budget"),

@@ -3,7 +3,7 @@ recursive-include src *.py
 recursive-include src/ecologyrsi_dsh/knowledge *.json
 recursive-include examples *.py *.json *.md
 recursive-include datasets *.json
-recursive-include docs/screenshots *.jpg
+recursive-include docs/screenshots *.jpg *.md
 prune docs/superpowers
 exclude docs/项目整体Review与方案B优化报告.md
 # Internal planning/hand-off notes live at the repository root for local

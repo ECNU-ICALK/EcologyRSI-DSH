@@ -1,8 +1,63 @@
 # EcologyRSI-DSH 生态模型进化工作台
 
-一个把农业与生态预测研究中的“数据边界—模型调研—候选生成—科学评测—人工治理”串成可复现闭环的轻量 DSH 插件。
+把“生态数据 → 自主调研 → 受限方案生成 → 同 cohort 科学评测 → 可审计晋级”连接成闭环的 DSH 插件与外部进化实验台。
 
 > 当前交付：`0.3.55` 可交付候选版 · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
+
+## 先看这里
+
+- [项目意义与边界](#为什么做这个工作台)：为什么要把模型放进可复现的研究闭环。
+- [快速启动](#快速启动)：最短路径启动真实 sidecar，或打开无后端演示。
+- [界面概览](#界面概览)：六个工作区和当前版本的界面证据。
+- [AI for AI 自进化实验台](#外部-ai-for-ai-自进化实验台)：如何在不改变 DSH 的前提下优化 Skill、Tool Policy、Workflow 和算法组合。
+- [架构](#架构)：稳定底座、外部控制平面和科学评测边界。
+- [测试与发布](#测试与发布)：本地验证、真实数据验收和交付边界。
+
+## 项目定位：稳定底座 + 外部探索层
+
+本项目不是让模型直接改写 DSH，也不是把网络上检索到的代码直接执行。它把职责分成两层：
+
+| 层 | 负责什么 | 不负责什么 |
+|---|---|---|
+| DSH 生态模型进化插件 | 数据分区、运行状态、科学评测、权限、事件账本、人工治理和最终投影 | 不接受模型生成的任意代码，不因候选分数变好就自动绕过门禁 |
+| 外部 AI for AI 实验台 | 维护候选 Genome，提出有界变异，安排同 cohort 实验，记录晋级/回滚证据 | 不修改 DSH protocol、runtime、权限或审计；不直接拥有正式发布权 |
+
+这里的“自进化”指系统可以改进下一轮使用的能力组合，而不是模型拥有不受约束的自我复制能力。可优化对象包括：
+
+- **Skill**：调研、规划、诊断和反思流程的提示与结构化输出合同；
+- **Tool Policy**：哪些已登记科学工具可以被调用、调用顺序和失败回退策略；
+- **Workflow**：研究、编译、训练、评测和反思的编排参数；
+- **Algorithm**：已经由开发者实现并登记的预测器、特征策略和有界参数。
+
+所有变更都先编译成不可变 Genome，再在相同数据、窗口、随机种子和评测合同下比较。只有相对当前 incumbent 有实用改善、逐单元不退化且通过稳定性门禁的候选，才有资格成为下一轮父版本；搜索中“暂时最好”的候选不等于正式发布版本。
+
+### 一次实验如何产生下一版本
+
+```text
+冻结数据与评测合同
+        ↓
+生成研究计划与结构化能力提案
+        ↓
+编译为已登记 Genome（拒绝任意代码）
+        ↓
+同 cohort 初筛与 finalist 局部实验
+        ↓
+科学门禁 + 独立评审 + 配对稳定性
+        ↓
+更新 incumbent，或保留旧版本并记录失败证据
+```
+
+## 外部 AI for AI 自进化实验台
+
+项目新增 `ecologyrsi_dsh.evolution_lab` 外部控制平面。它不修改 DSH 的协议、runtime、权限或审计，而是通过窄适配器调用既有 DSH API，独立维护 Skill、Tool Policy、Workflow 和算法的不可变插件 Genome、同 cohort 实验账本、晋级和回滚。
+
+本地可运行确定性 smoke：
+
+```bash
+PYTHONPATH=src python -m ecologyrsi_dsh.evolution_lab --demo --db /tmp/ecology-ai-evolve.sqlite
+```
+
+真实部署时由宿主实现 `DshExperimentAdapter` 的 `run_genome(genome, cohort_id)`，把 Genome 编译为既有运行创建请求，读取 DSH 公共投影后返回 `EvaluationReport`。新 Skill 以结构化提案进入候选池；新 Tool 只能以声明式规格或已审核 Host adapter 接入，任意生成代码不会直接注入 DSH。
 
 ## 为什么做这个工作台
 
@@ -41,7 +96,9 @@ EcologyRSI-DSH 把模型放在“研究助理”的位置，把数据、评测�
 
 前端以 DSH Web Profile 插件形式运行，用户只需要选择训练数据集、策略模型 API、独立评审模型 API 和进化轮数。研究领域、训练序列、预测模型、进化策略和评测器由数据集目录与模型调研结果自动推导并冻结，不要求用户在多个内部实现之间反复做技术选择。
 
-下面六张截图由 `0.3.46` 的 `?demo=1` 显式演示模式重新生成，全部是浏览器内合成示例，只用于说明当前界面和预算口径，不代表真实 AGC 评测结果；截图中没有真实路径、运行 ID、令牌或内部网关地址。
+下面六张截图按当前 `0.3.55` 前端的 `?demo=1` 显式演示模式核对，全部是浏览器内合成示例，只用于说明当前界面和预算口径，不代表真实 AGC 评测结果；截图中没有真实路径、运行 ID、令牌或内部网关地址。演示模式不会启动训练、写入账本或调用模型 API。
+
+截图文件、工作区对应关系和重拍约束见 [`docs/screenshots/README.md`](docs/screenshots/README.md)。
 
 ![运行设置：选择数据集、策略模型、独立评审模型和轮数](docs/screenshots/01-run-settings.jpg)
 
@@ -165,8 +222,6 @@ ecologyrsi-dsh install-dsh-runtime --profile web
 下面的命令在一个终端中启动内部 Python sidecar，并以前台方式启动 DSH Web：
 
 ```bash
-export LANG=en_US.UTF-8
-export LC_ALL=en_US.UTF-8
 source .venv/bin/activate
 mkdir -p .runtime
 
@@ -442,7 +497,7 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
 export ECOLOGYRSI_SERVICE_TOKEN='replace-with-runtime-token'
 ```
 
-插件只接受同源父窗口，或 URL 中通过 `parent_origin` 明确授权的父窗口；`api_base` 只允许 `/api`、`/api/v1`、`/api/ecology-evolution`、`/api/ecology-evolution/v1`，并且只接受同源 API 或通过 `api_origin` 明确授权的来源。能力 token 仅保存在宿主适配模块的内存闭包中，不进入导出或公开插件状态。宿主 capability 与服务 capability 的交集只用于控制页面操作入口，不是后端的用户级 scope 授权；当前进程级服务令牌一旦通过，即可访问服务声明的全部 API。模型执行能力以后端目录为准，宿主独有模型只作为禁用目录项展示，不会由前端直接调用。推荐使用 `provider/model` 作为目录 ID；自定义 ID 只要保留相同的 `model` 字段，也可通过宿主原始模型 ID 别名匹配。
+插件只接受同源父窗口，或 URL 中通过 `parent_origin` 明确授权的父窗口；`api_base` 只允许 canonical `/api/ecology-evolution`，并且只接受同源 API 或通过 `api_origin` 明确授权的来源。能力 token 仅保存在宿主适配模块的内存闭包中，不进入导出或公开插件状态。宿主 capability 与服务 capability 的交集只用于控制页面操作入口，不是后端的用户级 scope 授权；当前进程级服务令牌一旦通过，即可访问服务声明的全部 API。模型执行能力以后端 `dsh_models` 目录为准，宿主独有模型不会由前端直接调用。推荐使用 `provider/model` 作为目录 ID。
 
 ### 安装到 DSH Web Profile
 
@@ -702,7 +757,7 @@ PYTHONPATH=src python -m ecologyrsi_dsh summary run:demo --db /tmp/ecologyrsi-de
 - DSH Session provider 回执累计用量会持续显示，但不是完整、原子的计费账本，因此 DSH-native 运行不接受 `token_limit`，也不再暗中附加 1 亿 token 上限；旧的 sample-gateway 模式仍保留其独立的硬预算合同。
 - 运行进度以 prediction origin 为唯一主口径，显示实时 admission 上限、在飞、等待 provider、待提交、待结算、滚动吞吐和 ETA；自适应轨迹区分“已应用待验证”“宿主拒绝”“安全回退”和“安全保持”。
 
-## 0.3.46 交付更新
+## 0.3.46 交付更新（历史）
 
 - 新建严格运行使用 `top2_adaptive_epoch@1` 与 `dsh-strict-origin-bundle@4`。外层 4 候选筛选与 Top 2 选择不变；每个 finalist 内部改为 500-origin adaptive epoch，默认 `10 × 50`，每批最多 2 处局部修改，最后由 F1/F2/incumbent 在同一 169-origin holdout 上比较。
 - 参数页以 prediction origins 为主口径，同时给出评分单元换算和单轮/全程总预算；`samples_per_update` 已从新建合同移除。逐样本并发默认 64、可配置 1–128，provider 全局物理在飞上限为 128。
@@ -711,4 +766,4 @@ PYTHONPATH=src python -m ecologyrsi_dsh summary run:demo --db /tmp/ecologyrsi-de
 - `/health` 改为不扫描模型目录或账本的静态存活检查；DSH 身份解析使用有界缓存，HTTP backlog 为 256，降低 64/128 并发时健康检查和页面轮询被堵塞的概率。
 - 并发候选结算失败时，自动推进以全部已入场兄弟任务完成后的最新账本序号重试；若运行仍为“运行中”而调度器意外空闲，状态轮询会把它重新入队。
 - 逐 origin Planner/条件 Critic 以及候选聚合反思均使用有界端到端运行时限；取消和暂停在阶段边界安全生效，不把超时或失败样本计为成功。
-- README 的六张界面图已使用 0.3.46 显式演示模式重拍，预算、默认并发、Top 2 adaptive epoch 和治理界面与当前实现一致。
+- 当时 README 的六张界面图使用 0.3.46 显式演示模式重拍；当前截图清单和复核说明见 [`docs/screenshots/README.md`](docs/screenshots/README.md)。

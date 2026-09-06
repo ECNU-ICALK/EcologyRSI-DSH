@@ -253,6 +253,22 @@ class HTTPContractTests(unittest.TestCase):
         self.assertEqual(status, 400, payload)
         self.assertIn("samples_per_update is not supported", payload["error"])
 
+    def test_new_run_contract_rejects_legacy_model_workflow(self) -> None:
+        status, payload = self.request(
+            "/api/runs",
+            "POST",
+            {
+                "dataset_id": "generated-toy-series@1",
+                "model_workflow": "legacy_component_search@1",
+                "rounds": 1,
+                "candidates_per_generation": 1,
+                "max_candidates": 1,
+                "auto_advance": 0,
+            },
+        )
+        self.assertEqual(status, 400, payload)
+        self.assertIn("research_compile_evolve@1", payload["error"])
+
     def test_projection_cursor_and_generation_step(self) -> None:
         status, html = self.request("/plugins/ecology/evolution/")
         self.assertEqual(status, 200)
@@ -456,11 +472,11 @@ class HTTPContractTests(unittest.TestCase):
 
     def test_plugin_manifest_entrypoint_resolves_relative_assets(self) -> None:
         entrypoint = "/plugins/ecology/evolution"
-        with urlopen(self.base + entrypoint + "?api=/api/v1", timeout=3) as response:
+        with urlopen(self.base + entrypoint + "?api=/api/ecology-evolution", timeout=3) as response:
             self.assertEqual(response.status, 200)
             self.assertEqual(
                 response.geturl(),
-                self.base + "/plugins/ecology/evolution/?api=/api/v1",
+                self.base + "/plugins/ecology/evolution/?api=/api/ecology-evolution",
             )
             self.assertIn('href="styles.css"', response.read().decode("utf-8"))
 
@@ -475,15 +491,27 @@ class HTTPContractTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
                 self.assertEqual(response.headers.get_content_type(), content_type)
 
-    def test_dsh_same_origin_proxy_aliases_resolve(self) -> None:
-        for prefix in ("/api/ecology-evolution", "/api/ecology-evolution/v1"):
-            status, health = self.request(prefix + "/health")
-            self.assertEqual(status, 200)
-            self.assertTrue(health["ok"])
+    def test_canonical_proxy_is_the_only_public_api_base(self) -> None:
+        status, health = self.request("/api/ecology-evolution/health")
+        self.assertEqual(status, 200)
+        self.assertTrue(health["ok"])
 
-            status, manifest = self.request(prefix + "/plugin/ecology_evolution")
-            self.assertEqual(status, 200)
-            self.assertEqual(manifest["recommended_dsh_proxy_base"], "/api/ecology-evolution")
+        for prefix in ("/api/v1", "/api/ecology-evolution/v1"):
+            status, _payload = self.request(prefix + "/health")
+            self.assertEqual(status, 404)
+
+        status, manifest = self.request("/api/ecology-evolution/plugin/ecology_evolution")
+        self.assertEqual(status, 200)
+        self.assertEqual(manifest["recommended_dsh_proxy_base"], "/api/ecology-evolution")
+        self.assertEqual(manifest["supported_bases"], ["/api/ecology-evolution"])
+
+    def test_catalog_exposes_only_canonical_workflow(self) -> None:
+        status, catalog = self.request("/api/ecology-evolution/catalog")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [item["id"] for item in catalog["model_workflows"]],
+            ["research_compile_evolve@1"],
+        )
 
     def test_health_live_and_ready_expose_operational_checks(self) -> None:
         status, live = self.request("/health/live")

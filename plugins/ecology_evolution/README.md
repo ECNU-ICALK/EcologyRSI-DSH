@@ -1,6 +1,8 @@
 # 生态模型进化工作台插件
 
-这是一个可由数字科学枢纽（DSH）直接托管的静态 webview 插件，也可作为本地 sidecar 页面运行。前端使用原生 HTML/CSS/JavaScript，不依赖 React、npm 或原 `EcologyRSI/console`；数据、进化、训练评测和 SQLite 账本仍由独立 Python 后端负责。
+这是 EcologyRSI-DSH 的稳定执行与治理界面：负责数据边界、运行状态、科学评测、人工意见和可审计投影。它可以由数字科学枢纽（DSH）直接托管，也可作为本地 sidecar 页面运行。前端使用原生 HTML/CSS/JavaScript，不依赖 React、npm 或原 `EcologyRSI/console`；数据、进化、训练评测和 SQLite 账本仍由独立 Python 后端负责。
+
+外部 `ecologyrsi_dsh.evolution_lab` 实验台负责探索 Skill、Tool Policy、Workflow 和算法的候选 Genome。两者通过 DSH API 的窄适配器连接：实验台可以提出候选和读取投影，但不能修改本插件的权限、科学门禁或运行时协议。项目总览、研究意义和边界见仓库根目录 [README](../../README.md)。
 
 ## 启动
 
@@ -12,7 +14,7 @@ PYTHONPATH=src python -m ecologyrsi_dsh serve \
   --host 127.0.0.1 --port 8765 --db /tmp/ecologyrsi-dsh.sqlite3
 ```
 
-打开 <http://127.0.0.1:8765/plugins/ecology/evolution/>。页面默认连接同源 `/api/ecology-evolution`，也可使用 `/api`、`/api/v1` 或 `/api/ecology-evolution/v1`。这些前缀都指向同一后端，不会启动额外前端端口。
+打开 <http://127.0.0.1:8765/plugins/ecology/evolution/>。页面只连接 canonical 同源 `/api/ecology-evolution`，不会启动额外前端端口。
 
 没有后端时可显式启动浏览器演示：
 
@@ -56,7 +58,7 @@ DELETE {base}/runs/{run_id}
 
 候选逐样本接口每页最多返回 200 条，并以完整 cohort 中冻结的 `sample_index` 稳定排序。状态区分尚未启动的 `pending`、执行中的 `running`、完整封口的 `completed` 和保留部分结果的 `aborted`。成功行的逐样本辅助 MAE 改善定义为 `|baseline - observed| - |predicted - observed|`，正值代表相对仅由 `training_fit` 选出的冻结评分基线更好；候选排名和科学门禁使用 RMSE 技能主适应度。失败行的固定最差惩罚只保留在私有评分归档中；公开接口返回 `prediction_source=failed_no_model_prediction`，并把预测、误差和 reward 置空。
 
-运行创建请求以 `dataset_id` 为必填首要输入；真实 AGC 运行同时冻结目录返回的 `episode_id`，研究领域、预测模型、策略和评测器均由服务端自动绑定。当前请求提交 `strategy_model_id`、`review_model_id`、`autonomous_mode=true`、`rounds`、`budget`、`candidates_per_generation`、`candidate_concurrency`、`sample_agent_batch_size`、`sample_concurrency`、`knowledge_online_enabled`、`seed_policy` 和 `optimization_schedule`；旧的 `samples_per_update` 已拒绝使用。默认 schedule 为四候选共享 64-origin 初筛、Top 2 各执行 500 origins（10 × 50 局部 batch，每批最多 2 处改动），最后两个 finalist 与 incumbent 在同一 169-origin holdout 比较，单轮合计 1,763 candidate-origins。默认温室任务每个 origin 同时评分 3 个目标 × 3 个时距，因此对应 15,867 个评分单元，但只算一个预测时点链；若发生重试，Planner 实际调用数会增加。单时点向量容量默认为 9；逐样本并发默认 64、最大 128；候选并发默认 4、允许 1–8。工作台默认提交自动推进，服务端后台以有界 worker 推进不同运行，同一运行每次只执行一个阶段边界；同一 provider 另有 128 个物理在飞请求的全局 FIFO 上限和独立启动速率门限。
+运行创建请求以 `dataset_id` 为必填首要输入；真实 AGC 运行同时冻结目录返回的 `episode_id`，研究领域、预测模型、策略和评测器均由服务端自动绑定。当前请求提交 `strategy_model_id`、`review_model_id`、`autonomous_mode=true`、`rounds`、`budget`、`candidates_per_generation`、`candidate_concurrency`、`sample_agent_batch_size`、`sample_concurrency`、`knowledge_online_enabled`、`seed_policy` 和 `optimization_schedule`；旧的 `samples_per_update` 已拒绝使用。默认 schedule 为四候选共享 64-origin 初筛、Top 2 各执行 500 origins（10 × 50 局部 batch，每批最多 2 处改动），最后两个 finalist 与 incumbent 在同一 169-origin holdout 比较，单轮最多 `2,663` candidate-origin occurrences，其中 formal paired 阶段最多 `1,900`。默认温室任务每个 origin 同时评分 3 个目标 × 3 个时距，因此对应 `23,967` 个评分单元，但只算一个预测时点链；若发生重试，Planner 实际调用数会增加。单时点向量容量默认为 9；逐样本并发默认 64、最大 128；候选并发默认 4、允许 1–8。工作台默认提交自动推进，服务端后台以有界 worker 推进不同运行，同一运行每次只执行一个阶段边界；同一 provider 另有 128 个物理在飞请求的全局 FIFO 上限和独立启动速率门限。
 
 低于晋级门槛的 API 诊断运行可以执行多代，以验收前代反思和检索知识进入后代，但每一代都保持不可晋级；工作台只创建满足正式门槛的运行。
 

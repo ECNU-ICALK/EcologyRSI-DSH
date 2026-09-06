@@ -242,12 +242,7 @@ PLUGIN_MANIFEST = {
     },
     "api_prefix": "/api",
     "recommended_dsh_proxy_base": "/api/ecology-evolution",
-    "supported_bases": [
-        "/api",
-        "/api/v1",
-        "/api/ecology-evolution",
-        "/api/ecology-evolution/v1",
-    ],
+    "supported_bases": ["/api/ecology-evolution"],
     "capabilities": [
         "start_run",
         "read_projection",
@@ -1446,6 +1441,9 @@ class EvolutionRequestHandler(
         )
 
     def _create_run(self, body: dict[str, Any]) -> None:
+        requested_workflow = body.get("model_workflow", body.get("workflow"))
+        if requested_workflow is not None and str(requested_workflow) != "research_compile_evolve@1":
+            raise ValueError("仅支持 research_compile_evolve@1；旧版组件搜索流程已移除")
         # Resolve execution policy before task binding. Autonomous research is
         # always deferred to generation execution so creating a durable run is
         # independent of current upstream queue health.
@@ -1501,6 +1499,9 @@ class EvolutionRequestHandler(
             strict_remote_plan=False,
             defer_remote_plan=True,
         )
+        task_workflow = task.metadata.get("model_workflow")
+        if task_workflow is not None and task_workflow != "research_compile_evolve@1":
+            raise ValueError("仅支持 research_compile_evolve@1；旧版组件搜索流程已移除")
         autonomous_mode = task.metadata.get("autonomous_mode") is True
         if autonomous_mode and requested_auto_advance != 0:
             # Preserve explicit paused creation (auto_advance=0), while making
@@ -2174,7 +2175,7 @@ class EvolutionRequestHandler(
                     "workflow",
                     "research_compile_evolve@1"
                     if autonomous_requested
-                    else "legacy_component_search@1",
+                    else "research_compile_evolve@1",
                 ),
             ),
             "research_domain": body.get(
@@ -2413,9 +2414,7 @@ class EvolutionRequestHandler(
         )
         metadata.setdefault(
             "model_workflow",
-            "research_compile_evolve@1"
-            if autonomous_mode
-            else "legacy_component_search@1",
+            "research_compile_evolve@1",
         )
         metadata.setdefault("research_domain", manifest.domain_pack)
         strategy_id = str(
@@ -3039,9 +3038,7 @@ class EvolutionRequestHandler(
                 ),
                 "model_workflow": metadata.get(
                     "model_workflow",
-                    "research_compile_evolve@1"
-                    if autonomous_mode
-                    else "legacy_component_search@1",
+                    "research_compile_evolve@1",
                 ),
                 "research_domain": metadata.get(
                     "research_domain", manifest.domain_pack
