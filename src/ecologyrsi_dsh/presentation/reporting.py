@@ -31,6 +31,33 @@ _EVOLUTION_STAGE_ORDER = (
 )
 
 
+def _search_design_audit(value: Any) -> dict[str, Any] | None:
+    """Expose only bounded, aggregate candidate-design diagnostics."""
+
+    if not isinstance(value, Mapping):
+        return None
+    allowed = {
+        "policy",
+        "adopted_parameter",
+        "parameter_source",
+        "host_projection_applied",
+        "sibling_unique",
+        "target_focus",
+        "remote_changed_parameters",
+    }
+    result = {name: value[name] for name in allowed if name in value}
+    reference = value.get("shared_reference_parameters")
+    if isinstance(reference, Mapping):
+        result["shared_reference_parameters"] = {
+            str(name): item
+            for name, item in list(reference.items())[:32]
+            if isinstance(name, str)
+            and isinstance(item, (int, float))
+            and not isinstance(item, bool)
+        }
+    return result
+
+
 def _round_timing(state: Any, generation: int) -> dict[str, Any]:
     """Derive wall-clock duration from immutable generation boundary events."""
 
@@ -737,6 +764,9 @@ def rounds(state: Any) -> list[dict[str, Any]]:
                     "classification": rank.get("classification"),
                     "selection_reason": rank.get("selection_reason"),
                     "proposal_source": proposal.metadata.get("proposal_source"),
+                    "search_design_audit": _search_design_audit(
+                        proposal.metadata.get("search_design_audit")
+                    ),
                     "candidate_direction_id": proposal.metadata.get(
                         "candidate_direction_id"
                     ),

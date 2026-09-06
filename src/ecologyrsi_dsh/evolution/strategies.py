@@ -1967,6 +1967,13 @@ class StrategyRouterDSHAdapter:
         single_parameter_sweep = (
             autonomous_search_name == "bounded_single_parameter_sweep"
         )
+        target_focus = _target_focus_from_analysis(previous_analysis)
+        identifiable_batch = bool(
+            batch is not None
+            and batch_size > 1
+            and strategy_id in {"dsh_authenticated@1", "autonomous_model@1"}
+            and not single_parameter_sweep
+        )
         schedule_index = run.generation * batch_size + slot_index
         base = dict(sweep[schedule_index % len(sweep)])
         model_response: dict[str, Any] = {}
@@ -2018,6 +2025,12 @@ class StrategyRouterDSHAdapter:
             # point.  Slot-specific seeds would confound every observed score
             # difference even when each remote response describes itself as a
             # one-dimensional sweep.
+            base = dict(sweep[run.generation % len(sweep)])
+        elif identifiable_batch and guided_parent_parameters is None:
+            # Every remote sibling must be measured against one shared
+            # reference.  Otherwise the model can change several parameters
+            # while each slot starts from a different sweep seed, making the
+            # resulting score differences uninterpretable.
             base = dict(sweep[run.generation % len(sweep)])
         search_metadata = metadata
         if parent is not None and not parent_parameter_space_compatible:
@@ -2206,8 +2219,10 @@ class StrategyRouterDSHAdapter:
                                 "sibling_slots_must_be_distinct": batch_size > 1,
                                 "requested_search_policy": autonomous_search_name,
                                 "max_parameter_changes_from_shared_reference": (
-                                    1 if single_parameter_sweep else None
+                                    1 if single_parameter_sweep or identifiable_batch else None
                                 ),
+                                "target_focus": dict(target_focus or {}),
+                                "identifiable_batch_design": identifiable_batch,
                             },
                             "human_input": human_input,
                             "host_boundary": {
@@ -2228,6 +2243,19 @@ class StrategyRouterDSHAdapter:
                             model_response["parameters"],
                             schemas,
                             slot_index=slot_index,
+                        )
+                    elif identifiable_batch:
+                        base, search_design_audit = _project_identifiable_parameter_change(
+                            base,
+                            model_response["parameters"],
+                            schemas,
+                            slot_index=slot_index,
+                            sibling_parameters=tuple(
+                                item.get("parameters", {})
+                                for item in (batch.get("sibling_candidate_behaviors", []) if batch else [])
+                                if isinstance(item, Mapping)
+                            ),
+                            target_focus=target_focus,
                         )
                     else:
                         base.update(model_response["parameters"])
@@ -2382,6 +2410,15 @@ class StrategyRouterDSHAdapter:
             rationale += (
                 " 宿主已将模型的多参数输出投影为相对同轮共同参考点的单参数变化："
                 f"{search_design_audit['adopted_parameter']}，避免同轮比较混杂。"
+            )
+        if target_focus:
+            focus_target = str(target_focus.get("target") or "预测目标")
+            focus_horizon = target_focus.get("horizon_hours")
+            rationale += (
+                " 下一轮定向关注"
+                + focus_target
+                + (f" 的 {focus_horizon} 小时时距" if focus_horizon is not None else "")
+                + "，但不改变固定科学门禁。"
             )
         if host_fallback is not None:
             rationale += (
@@ -4546,6 +4583,130 @@ def _autonomous_search_name(plan: Mapping[str, Any]) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     return value.strip()[:200]
+
+
+def _target_focus_from_analysis(
+    analysis: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return the weakest aggregate target cell for the next search batch."""
+
+    if not isinstance(analysis, Mapping):
+        return None
+    weaknesses = analysis.get("target_weaknesses")
+    if not isinstance(weaknesses, (list, tuple)):
+        return None
+    rows = [item for item in weaknesses if isinstance(item, Mapping)]
+    if not rows:
+        return None
+    weakest = rows[0]
+    target = weakest.get("target")
+    horizon = weakest.get("horizon_hours")
+    if not isinstance(target, str) or not target.strip():
+        return None
+    result: dict[str, Any] = {"target": target.strip()[:120]}
+    if isinstance(horizon, (int, float)) and not isinstance(horizon, bool):
+        result["horizon_hours"] = horizon
+    for name in ("mean_skill", "skill_score", "evidence_count"):
+        value = weakest.get(name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            result[name] = value
+    return result
+
+
+def _parameter_step_value(
+    reference: Mapping[str, int | float],
+    name: str,
+    schema: Mapping[str, Any],
+    *,
+    direction: int,
+    attempt: int,
+) -> int | float:
+    """Choose a deterministic bounded witness for a parameter axis."""
+
+    minimum = float(schema["minimum"])
+    maximum = float(schema["maximum"])
+    current = float(reference[name])
+    span = maximum - minimum
+    step = max(1.0, round(span * 0.1)) if schema.get("type") == "integer" else span * 0.1
+    value = current + direction * step * max(1, attempt)
+    if value > maximum or value < minimum:
+        value = current - direction * step * max(1, attempt)
+    value = min(maximum, max(minimum, value))
+    if schema.get("type") == "integer":
+        return int(round(value))
+    return float(value)
+
+
+def _project_identifiable_parameter_change(
+    seed: Mapping[str, int | float],
+    proposed: Mapping[str, Any],
+    schemas: Mapping[str, Mapping[str, Any]],
+    *,
+    slot_index: int,
+    sibling_parameters: Sequence[Mapping[str, Any]] = (),
+    target_focus: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, int | float], dict[str, Any]]:
+    """Force remote proposals into a diverse, one-axis experimental design."""
+
+    reference = _bounded_parameters(seed, schemas, partial=False, source="identifiable_batch.seed")
+    requested = _bounded_parameters(proposed, schemas, partial=True, source="identifiable_batch.remote_parameters")
+    names = list(schemas)
+    focus_target = str(target_focus.get("target")) if isinstance(target_focus, Mapping) else ""
+    focus_horizon = target_focus.get("horizon_hours") if isinstance(target_focus, Mapping) else None
+    focus_tokens = [focus_target.casefold().replace(" ", "_")]
+    if isinstance(focus_horizon, (int, float)) and not isinstance(focus_horizon, bool):
+        focus_tokens.append(f"{focus_tokens[0]}_{int(focus_horizon)}h")
+    names.sort(
+        key=lambda name: (
+            0 if any(token and token in name.casefold() for token in focus_tokens) else 1,
+            list(schemas).index(name),
+        )
+    )
+    adopted = names[slot_index % len(names)]
+    remote_changed = [
+        name
+        for name in schemas
+        if name in requested
+        and not math.isclose(float(requested[name]), float(reference[name]), rel_tol=0.0, abs_tol=1e-12)
+    ]
+    result = dict(reference)
+    if adopted in remote_changed:
+        result[adopted] = requested[adopted]
+        source = "remote_parameter"
+    else:
+        direction = 1 if (slot_index // len(names)) % 2 == 0 else -1
+        result[adopted] = _parameter_step_value(
+            reference, adopted, schemas[adopted], direction=direction, attempt=1
+        )
+        source = "host_bounded_axis_witness"
+    sibling_digests = {
+        canonical_json(dict(item))
+        for item in sibling_parameters
+        if isinstance(item, Mapping)
+    }
+    attempt = 1
+    while canonical_json(result) in sibling_digests and attempt < 8:
+        direction = 1 if (slot_index // len(names) + attempt) % 2 == 0 else -1
+        result[adopted] = _parameter_step_value(
+            reference,
+            adopted,
+            schemas[adopted],
+            direction=direction,
+            attempt=attempt + 1,
+        )
+        attempt += 1
+    if canonical_json(result) in sibling_digests:
+        raise ValueError("identifiable batch could not allocate a unique parameter witness")
+    return result, {
+        "policy": "bounded_identifiable_parameter_design@1",
+        "shared_reference_parameters": dict(reference),
+        "remote_changed_parameters": remote_changed,
+        "adopted_parameter": adopted,
+        "parameter_source": source,
+        "host_projection_applied": True,
+        "sibling_unique": True,
+        "target_focus": dict(target_focus or {}),
+    }
 
 
 def _project_single_parameter_change(

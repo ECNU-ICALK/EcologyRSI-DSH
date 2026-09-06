@@ -3428,6 +3428,19 @@ def _parameter_effects(state: Any, generation: int) -> tuple[dict[str, Any], ...
             and not isinstance(proposal.changes.get(name), bool)
         ]
         if len(pairs) < 3 or len({item[0] for item in pairs}) < 2:
+            if len(pairs) >= 3:
+                effects.append(
+                    {
+                        "parameter": name,
+                        "association_with_score": None,
+                        "direction": "unidentifiable",
+                        "evidence_count": len(pairs),
+                        "unique_value_count": len({item[0] for item in pairs}),
+                        "unique_configuration_count": len(scored),
+                        "generation_end": generation,
+                        "interpretation": "constant_axis_requires_new_exploration",
+                    }
+                )
             continue
         xs = [item[0] for item in pairs]
         ys = [item[1] for item in pairs]
@@ -3446,6 +3459,7 @@ def _parameter_effects(state: Any, generation: int) -> tuple[dict[str, Any], ...
                     "positive" if association > 0.2 else "negative" if association < -0.2 else "weak"
                 ),
                 "evidence_count": len(pairs),
+                "unique_value_count": len({item[0] for item in pairs}),
                 "unique_configuration_count": len(scored),
                 "generation_end": generation,
                 "interpretation": (
@@ -3455,7 +3469,14 @@ def _parameter_effects(state: Any, generation: int) -> tuple[dict[str, Any], ...
                 ),
             }
         )
-    effects.sort(key=lambda item: (-abs(item["association_with_score"]), item["parameter"]))
+    effects.sort(
+        key=lambda item: (
+            -abs(float(item["association_with_score"]))
+            if isinstance(item.get("association_with_score"), (int, float))
+            else 1.0,
+            item["parameter"],
+        )
+    )
     return tuple(effects)
 
 
@@ -3739,7 +3760,9 @@ def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationA
     effects = _parameter_effects(state, batch.generation)
     algorithm_failures = _algorithm_failure_summary(state, candidates)
     sample_failures = _sample_failure_summary(state, candidates)
-    insufficient = len(historical_scored) < 3 or not effects
+    insufficient = len(historical_scored) < 3 or not any(
+        item.get("direction") != "unidentifiable" for item in effects
+    )
 
     directions = []
     if constraint_ids:

@@ -713,6 +713,9 @@ def build_training_trajectory(
             proposal_title=_safe_value(proposal.title),
             proposal_parameters=_safe_value(dict(proposal.changes)),
             proposal_source=_safe_value(proposal_source),
+            search_design_audit=_safe_value(
+                proposal_metadata.get("search_design_audit")
+            ),
             remote_strategy_called=(
                 proposal_metadata.get("remote_strategy_called") is True
             ),
@@ -737,6 +740,9 @@ def build_training_trajectory(
             strategy_id=_safe_value(strategy_id),
             strategy_model_id=_safe_value(strategy_model_id),
             proposal_source=_safe_value(proposal_source),
+            search_design_audit=_safe_value(
+                proposal_metadata.get("search_design_audit")
+            ),
             remote_strategy_called=(
                 proposal_metadata.get("remote_strategy_called") is True
             ),

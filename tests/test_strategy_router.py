@@ -380,6 +380,108 @@ class StrategyRouterTests(unittest.TestCase):
             self.assertTrue(audit["host_projection_applied"])
         self.assertNotEqual(proposals[0].changes, proposals[1].changes)
 
+    def test_authenticated_ridge_batch_forces_identifiable_parameter_coverage(self) -> None:
+        gateway = _PredictorSelectingGateway("greenhouse-exogenous-ridge@1")
+        adapter = StrategyRouterDSHAdapter(gateway=gateway, max_proposals=4)
+        run = _run()
+        task = _task(
+            metadata={
+                "strategy_id": "dsh_authenticated@1",
+                "policy_model_id": "policy-main",
+                "domain": "greenhouse",
+                "prediction_model_id": "greenhouse-exogenous-ridge@1",
+            },
+            domain_pack="greenhouse-climate@1",
+        )
+        session = adapter.open_session(run, task)
+        shared = {
+            "generation": 0,
+            "batch_size": 4,
+            "round_parent_candidate_id": None,
+            "previous_generation_analysis": None,
+            "context_digest": "ridge-diversity-context",
+        }
+        proposals = []
+        siblings = []
+        for slot_index in range(4):
+            proposal = adapter.propose(
+                run,
+                task,
+                session,
+                batch_context={
+                    **shared,
+                    "slot_index": slot_index,
+                    "sibling_candidate_behaviors": siblings,
+                },
+            )
+            proposals.append(proposal)
+            siblings.append(
+                {
+                    "slot_index": slot_index,
+                    "parameters": dict(proposal.changes),
+                    "parameters_digest": digest(dict(proposal.changes)),
+                }
+            )
+
+        audits = [proposal.metadata["search_design_audit"] for proposal in proposals]
+        reference = audits[0]["shared_reference_parameters"]
+        self.assertTrue(all(audit["host_projection_applied"] for audit in audits))
+        self.assertEqual(
+            {audit["adopted_parameter"] for audit in audits},
+            {"history_steps", "ridge_alpha", "residual_scale"},
+        )
+        self.assertEqual(
+            len({json.dumps(dict(proposal.changes), sort_keys=True) for proposal in proposals}),
+            4,
+        )
+        for proposal in proposals:
+            changed = [
+                name
+                for name, value in proposal.changes.items()
+                if value != reference[name]
+            ]
+            self.assertEqual(len(changed), 1)
+
+    def test_next_search_receives_weakest_target_focus(self) -> None:
+        gateway = _PredictorSelectingGateway("greenhouse-exogenous-ridge@1")
+        adapter = StrategyRouterDSHAdapter(gateway=gateway, max_proposals=2)
+        run = _run(generation=1)
+        task = _task(
+            metadata={
+                "strategy_id": "dsh_authenticated@1",
+                "policy_model_id": "policy-main",
+                "domain": "greenhouse",
+                "prediction_model_id": "greenhouse-exogenous-ridge@1",
+            },
+            domain_pack="greenhouse-climate@1",
+        )
+        previous = {
+            "target_weaknesses": [
+                {
+                    "target": "air_temperature",
+                    "horizon_hours": 6,
+                    "mean_skill": -0.65,
+                    "evidence_count": 4,
+                }
+            ]
+        }
+        adapter.propose(
+            run,
+            task,
+            adapter.open_session(run, task),
+            batch_context={
+                "generation": 1,
+                "batch_size": 2,
+                "slot_index": 0,
+                "round_parent_candidate_id": None,
+                "previous_generation_analysis": previous,
+                "context_digest": "target-focus-context",
+            },
+        )
+        focus = gateway.calls[0][1]["search_design"]["target_focus"]
+        self.assertEqual(focus["target"], "air_temperature")
+        self.assertEqual(focus["horizon_hours"], 6)
+
     def test_parameter_sweep_generates_chinese_toy_proposal(self) -> None:
         adapter = StrategyRouterDSHAdapter(max_proposals=4)
         run = _run()
@@ -843,10 +945,14 @@ class StrategyRouterTests(unittest.TestCase):
         self.assertIn("保守恢复种子", recovery_seed.rationale)
         self.assertEqual(
             exploratory.changes,
-            {"blend": 0.72, "window": 10, "bias_scale": 0.9},
+            {"blend": 0.87, "window": 24, "bias_scale": 0.9},
         )
         self.assertEqual(exploratory.metadata["proposal_source"], "remote_model")
         self.assertTrue(exploratory.metadata["remote_strategy_succeeded"])
+        self.assertEqual(
+            exploratory.metadata["search_design_audit"]["adopted_parameter"],
+            "bias_scale",
+        )
         self.assertEqual(len(gateway.calls), 1)
         context = gateway.calls[0][1]
         self.assertEqual(
