@@ -23,11 +23,52 @@ from typing import Any, Mapping
 
 from .gateway_url_policy import GatewayUrlAssessment, assess_gateway_url
 from .model_bindings import canonical_model_roles
+from ..core.models import digest
 
 
 _FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
 _UNSAFE_HTTP_VALUES = {"1", "true", "yes", "on", "enabled"}
 _KEY_VALUE = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)\s*:\s*(?P<value>.*)$")
+
+
+def _provider_execution_digests(text: str) -> dict[str, str]:
+    """Bind native dispatch settings, including nested model capabilities.
+
+    Read the complete YAML blocks rather than the optional discovery parser's
+    reduced model view. Both zero-dependency and PyYAML installations therefore
+    detect identical reasoning/compatibility changes. Credentials and labels
+    at provider level are deliberately excluded.
+    """
+
+    keys = {"api", "baseURL", "base_url", "models", "modelOverrides", "compat",
+            "reasoning", "thinkingBudgets", "defaultContextWindow",
+            "defaultMaxTokens", "defaultInput"}
+    blocks: dict[str, list[str]] = {}
+    in_llm = in_providers = include = False
+    provider = None
+    for line in text.splitlines():
+        content = line.strip()
+        if not content or content.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            in_llm = content == "llm-pi-ai:"
+            in_providers = include = False
+            provider = None
+        elif in_llm and indent == 2:
+            in_providers = content == "providers:"
+            provider = None
+            include = False
+        elif in_providers and indent == 4 and content.endswith(":"):
+            provider = content[:-1].strip()
+            blocks[provider] = []
+            include = False
+        elif provider is not None:
+            if indent == 6:
+                include = content.partition(":")[0] in keys
+            if include:
+                blocks[provider].append(line.rstrip())
+    return {name: digest({"native_provider_settings": lines}) for name, lines in blocks.items()}
 
 
 def insecure_http_allowed_for_provider(
@@ -270,6 +311,7 @@ def discover_model_entries(
     credentials_text = _secure_text(credentials_path) or ""
     credentials = _flat_credentials(credentials_text)
     loaded = _yaml_load(settings_text)
+    execution_digests = _provider_execution_digests(settings_text)
     if not isinstance(loaded, Mapping):
         return []
     llm = loaded.get("llm-pi-ai")
@@ -334,6 +376,7 @@ def discover_model_entries(
                     raw_provider,
                 ),
                 "directory_available": unavailable_reason is None,
+                "native_configuration_digest": execution_digests.get(provider),
             }
             if unavailable_reason is None:
                 entry["gateway_url"] = url_assessment.url

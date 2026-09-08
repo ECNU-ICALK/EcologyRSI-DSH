@@ -1,10 +1,13 @@
 const PHASE_CODES = Object.freeze({
   start: "structured_child_start_failed",
+  output_schema: "structured_child_output_schema_invalid",
   result: "structured_child_result_failed",
   control: "provider_stage_admission_closed",
   aborted: "structured_child_aborted",
   model: "structured_child_model_error",
   model_terminal: "structured_child_model_error",
+  tool_protocol: "structured_child_tool_protocol_error",
+  output_budget: "structured_child_output_budget_exhausted",
   capture: "structured_result_missing",
   admission: "structured_result_admission_failed",
   admission_closed: "structured_result_admission_closed",
@@ -61,4 +64,26 @@ export function structuredRetryAfterMs(error) {
 
 export function isStructuredProviderRateLimit(error) {
   return trustedStructuredErrors.get(error)?.metadata?.providerRateLimit === true;
+}
+
+const PERSISTENCE_BOUNDARIES = Object.freeze({
+  dsh_session_projection_not_ready: "structured_result_persist_projection_lag",
+  structured_result_persistence_unavailable: "structured_result_persist_host_unavailable",
+  unavailable: "structured_result_persist_transport",
+  timeout: "structured_result_persist_timeout",
+  dsh_tool_admission_closed: "structured_result_persist_admission_closed",
+  dsh_tool_authorization_failed: "structured_result_persist_authorization",
+  dsh_prediction_binding_closed: "structured_result_persist_binding_closed",
+  sidecar_rejected: "structured_result_persist_host_rejected",
+  invalid_response: "structured_result_persist_invalid_response",
+  dsh_skill_evidence_invalid: "structured_result_persist_tool_evidence",
+});
+
+// Only trusted phase causes map to public machine codes. Never copy an error
+// message, request payload, arbitrary cause.code or credentials to the ledger.
+export function structuredFailureCode(error) {
+  const trusted = trustedStructuredErrors.get(error);
+  return trusted?.phase === "persistence"
+    ? PERSISTENCE_BOUNDARIES[trusted.cause?.code] || PHASE_CODES.persistence
+    : error?.code;
 }

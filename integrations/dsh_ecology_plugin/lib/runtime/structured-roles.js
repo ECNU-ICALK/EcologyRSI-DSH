@@ -9,6 +9,7 @@ import {
   isTrustedStructuredPhase,
   structuredPhaseError,
 } from "./structured-stage-errors.js";
+import { validateStructuredStageBudget } from "./research-execution-policy.js";
 
 function structuredResult(run) {
   if (typeof run?.result === "function") return run.result();
@@ -58,6 +59,7 @@ export async function runStructuredRole(
     timeoutMs,
     deadline,
     classifyMissingCapture,
+    observeChild,
     signal = null,
   } = {},
 ) {
@@ -66,14 +68,12 @@ export async function runStructuredRole(
   if (!request?.outputSchema || typeof request.outputSchema !== "object") {
     throw new Error("structured role requires an output schema");
   }
-  if (
-    request.maxTokens !== undefined
-    && (!Number.isSafeInteger(request.maxTokens)
-      || request.maxTokens < 512
-      || request.maxTokens > 8192)
-  ) {
-    throw new Error("structured role maxTokens must be between 512 and 8192");
-  }
+  validateStructuredStageBudget(
+    reservedBinding.binding?.stage, request.maxTokens,
+    request.researchExecutionPolicy === undefined ? null
+      : { research_execution_policy: request.researchExecutionPolicy },
+    "structured role maxTokens",
+  );
   if (!pendingStarts?.start || typeof persist !== "function") {
     throw new Error("structured role lifecycle services are required");
   }
@@ -90,6 +90,7 @@ export async function runStructuredRole(
   }
   let pending = null;
   let run;
+  let usageObserver;
   let timeout = null;
   let resultPersisted = false;
   const hardDeadline = deadline === undefined
@@ -157,8 +158,8 @@ export async function runStructuredRole(
         outputSchema,
         // DSH accepts child generation overrides through
         // SubagentStartRequest.agentOptions. Provider and model deliberately
-        // remain inherited from the retained role-host; this stage may only
-        // narrow the child output budget.
+        // remain inherited from the retained role-host. A larger synthesis
+        // ceiling requires the exact Host-frozen stage policy above.
         ...(request.maxTokens === undefined
           ? {}
           : { agentOptions: { maxTokens: request.maxTokens } }),
@@ -168,10 +169,13 @@ export async function runStructuredRole(
       });
       requireBeforeDeadline();
       run = await withinDeadline(() => pending.promise);
+      // Failure to observe usage must not invent or replace a model outcome.
+      try { usageObserver = observeChild?.(run); } catch { /* reflected as missing coverage */ }
     } catch (error) {
       if (deadlineExpired() || error === timeoutError) throw expireDeadline();
       throw structuredPhaseError(
-        error?.code === "provider_stage_admission_closed" ? "control" : "start",
+        error?.code === "provider_stage_admission_closed" ? "control"
+          : error?.code === "UNSUPPORTED_SCHEMA" ? "output_schema" : "start",
         error,
       );
     }
@@ -185,6 +189,10 @@ export async function runStructuredRole(
     requireBeforeDeadline();
     const stopReason = result?.stopReason;
     requireBeforeDeadline();
+    // DSH's one-shot result preserves the consumed turn's native terminal
+    // reason. A direct max-tokens result must not fall through to the generic
+    // model failure, even before Session projection has caught up.
+    if (stopReason === "max-tokens") throw structuredPhaseError("output_budget");
     const structured = result?.structured;
     requireBeforeDeadline();
     const validStructured = structured
@@ -192,7 +200,7 @@ export async function runStructuredRole(
       && !Array.isArray(structured);
     const hasCaptureClassifier = typeof classifyMissingCapture === "function";
     let captureDisposition = null;
-    if (!validStructured && stopReason === "error" && hasCaptureClassifier) {
+    if (!validStructured && ["error", "completed"].includes(stopReason) && hasCaptureClassifier) {
       try {
         const classificationDeadline = deadlineAt === null ? null : Object.freeze({
           signal: pending.controller.signal,
@@ -207,6 +215,14 @@ export async function runStructuredRole(
       }
     }
     requireBeforeDeadline();
+    if (captureDisposition === "tool-protocol") {
+      throw structuredPhaseError("tool_protocol");
+    }
+    if (captureDisposition === "output-budget") {
+      throw structuredPhaseError("output_budget");
+    }
+    // Preserve existing completed-without-result handling for other shapes.
+    if (stopReason === "completed") captureDisposition = null;
     if (stopReason && stopReason !== "completed") {
       if (stopReason === "aborted") throw structuredPhaseError("aborted");
       const captureKind = typeof captureDisposition === "object"
@@ -218,7 +234,7 @@ export async function runStructuredRole(
       }
       if (captureKind === "retryable-provider") {
         throw structuredPhaseError("model", null, {
-          providerRateLimit: true,
+          providerRateLimit: captureDisposition?.limitKind !== "concurrency",
           retryAfterMs: captureDisposition?.retryAfterMs,
         });
       }
@@ -306,6 +322,10 @@ export async function runStructuredRole(
     requireBeforeDeadline();
     return response;
   } finally {
+    try {
+      await usageObserver?.settle(resultPersisted ? "succeeded"
+        : timedOut ? "timed_out" : signal?.aborted ? "cancelled" : "failed");
+    } catch { /* missing accounting is exposed by the Host reservation count */ }
     try {
       if (pending !== null) {
         if (deadlineExpired()) expireDeadline();

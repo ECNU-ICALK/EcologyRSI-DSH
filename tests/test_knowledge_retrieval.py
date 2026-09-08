@@ -792,10 +792,30 @@ class KnowledgeRetrievalTests(unittest.TestCase):
             card.capability_ids,
             (
                 "greenhouse-exogenous-ridge@1",
+                "greenhouse-baseline-aligned-ridge@1",
                 "greenhouse-targetwise-ridge@1",
                 "greenhouse-horizon-targetwise-ridge@1",
             ),
         )
+
+    def test_native_agent_catalog_describes_optional_tools_and_current_evaluator(self) -> None:
+        metadata = {
+            "execution_protocol": "dsh_native_plugin_evolution@1",
+            "prediction_model_id": "greenhouse-baseline-aligned-ridge@1",
+            "evaluator_id": "greenhouse_multihorizon_time_forward@4",
+        }
+        cards = {entry["knowledge_id"]: map_catalog_entry(entry, metadata)
+                 for entry in knowledge_retrieval._catalog()}
+        ridge = cards["sklearn-ridge"]
+        self.assertEqual(ridge.execution_status, "adopted")
+        self.assertEqual(ridge.capability_id, metadata["prediction_model_id"])
+        self.assertEqual(len(ridge.capability_ids), 4)
+        self.assertIn("样本 Agent 自主决定", ridge.selection_reason)
+        self.assertNotIn("不能在轮次中途切换", ridge.selection_reason)
+        evaluator = cards["sklearn-time-series-split"]
+        self.assertEqual(evaluator.execution_status, "adopted")
+        self.assertEqual(evaluator.capability_id, metadata["evaluator_id"])
+        self.assertEqual(cards["greenlight-model"].execution_status, "research_only")
 
     def test_failure_and_horizon_terms_are_sanitized_into_online_query(self) -> None:
         task_data = _task(online=True).to_dict()

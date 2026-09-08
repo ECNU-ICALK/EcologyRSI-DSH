@@ -48,6 +48,7 @@ def build_configuration(task: Any, state: Any, profile: str = "full") -> dict[st
         "strategy_digest": metadata.get("strategy_digest"),
         "prediction_model_id": metadata.get("prediction_model_id", TOY_PREDICTOR_MODEL_ID if dataset_id == TOY_DATASET_ID else EXOGENOUS_RIDGE_MODEL_ID),
         "prediction_model_digest": metadata.get("prediction_model_digest"),
+        "prediction_selection": metadata.get("prediction_selection"),
         "evaluator_id": metadata.get("evaluator_id", TOY_EVALUATOR_ID if dataset_id == TOY_DATASET_ID else GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID),
         "evaluator_digest": metadata.get("evaluator_digest"),
         "objective_profile": metadata.get("objective_profile"),

@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+from ..core.model_execution_policy import NATIVE_SAMPLE_OPERATION_MAX_TOKENS
+
+from ..core.prediction_policy import (RUNTIME_PREDICTION_POLICY, RUNTIME_EVALUATOR_ID, BASELINE_REFERENCE_PREDICTOR_ID)
+
+from ..application.runtime import initialize_runtime
+from ..execution.ownership import RuntimeOwnerLease as _SidecarOwnerLease
+from ..application.runtime_bindings import dsh_revision_snapshot as _dsh_revision_snapshot, ValidatedCandidateIdentityCache as _ValidatedCandidateIdentityCache
+
 import fcntl
 import os
 import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -49,11 +58,16 @@ from ..data.registry import DatasetRegistry
 from ..evaluators.epoch_cohorts import estimate_epoch_capacity
 from ..evaluators.registry import (
     GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
+    GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID,
     TOY_DATASET_ID,
     EvaluatorRegistry,
 )
 from ..evolution.schedule import OPTIMIZATION_PROTOCOL, OptimizationSchedule
 from ..evolution.strategies import StrategyRouterDSHAdapter
+from ..core.search_policy import SEARCH_GUARD_POLICY
+from ..integrations.model_canary import run_preflight, require_model_preflight
+from ..evaluators.agent_stability import REPLICA_COUNT, capacity_with_inference_replicas
+from ..core.model_preflight import AUDIT_EVENT, AUDIT_SCHEMA, AUDIT_METADATA_KEY, preflight_audit_required
 from ..integrations.dsh_native_runtime import (
     DSH_NATIVE_EXECUTION_PROTOCOL,
     DshNativeAgentRuntimeClient,
@@ -70,10 +84,10 @@ from ..knowledge.autonomous_cycle import AUTONOMOUS_RESEARCH_PROTOCOL
 from ..knowledge.program_registry import current_program_registry
 from ..version import __version__
 from .auto_progress import AutoProgressManager
-from .dsh_tools import DshStructuredResultPersistenceError, DshToolService
+from ..integrations.dsh_tools import DshStructuredResultPersistenceError, DshToolService
 from .errors import public_error_payload
 from .projection import _control_payload, _state_payload
-from .sample_admission import (
+from ..execution.sample_admission import (
     DEFAULT_SAMPLE_CONCURRENCY,
     RunSampleAdmission,
     validate_sample_concurrency,
@@ -140,18 +154,6 @@ _DEFAULT_SAMPLE_OPERATION_MAX_TOKENS = {
     "sample.repair": 3072,
     "sample.critic": 2048,
 }
-_DSH_NATIVE_SAMPLE_OPERATION_MAX_TOKENS = {
-    # A native sample child makes three short model turns (Skill, prediction
-    # tool, structured output). Live 64-origin validation found that 2,048
-    # tokens still truncated about five percent of planners after the
-    # prediction tool had succeeded. 4,096 remains bounded while leaving room
-    # for the required terminal structured call.
-    "sample.planner": 4096,
-    # A remote repair child now means a fresh Planner retry after a pre-tool
-    # transient failure, so it needs the same bounded output room as Planner.
-    "sample.repair": 4096,
-    "sample.critic": 2048,
-}
 _DEFAULT_SAMPLE_TRUNCATION_RETRY_POLICY = {
     "version": "escalate_once@1",
     "max_tokens": 8192,
@@ -170,12 +172,12 @@ _STRICT_SAMPLE_REMOTE_CRITIC_POLICY = {
 }
 _STRICT_SAMPLE_REFLECTION_POLICY = "candidate_aggregate_post_score@1"
 _DSH_NATIVE_PRESET_IDS = (
-    "ecology-coordinator-v4",
-    "ecology-researcher-v7",
+    "ecology-coordinator-v5",
+    "ecology-researcher-v12",
     "ecology-candidate-proposer-v4",
-    "ecology-sample-planner-v5",
-    "ecology-sample-critic-v4",
-    "ecology-generation-judge-v7",
+    "ecology-sample-planner-v8",
+    "ecology-sample-critic-v5",
+    "ecology-generation-judge-v8",
 )
 _DSH_NATIVE_STABLE_PRESET_FIELDS = (
     "preset_id",
@@ -187,6 +189,7 @@ _DSH_NATIVE_STABLE_PRESET_FIELDS = (
 _DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR = {
     "greenhouse-rolling-residual@1": "greenhouse-rolling-default@1",
     "greenhouse-exogenous-ridge@1": "greenhouse-exogenous-default@1",
+    "greenhouse-baseline-aligned-ridge@1": "greenhouse-baseline-aligned-default@1",
     "greenhouse-targetwise-ridge@1": "greenhouse-targetwise-default@1",
     "greenhouse-horizon-targetwise-ridge@1": "greenhouse-default@1",
     "toy-rolling-water@1": "toy-default@1",
@@ -324,45 +327,6 @@ def _mark_auto_progress_task(
     return TaskManifest.from_dict(data)
 
 
-class _SidecarOwnerLease:
-    """Process-scoped advisory lock for one persistent event ledger."""
-
-    def __init__(self, db_path: str | Path) -> None:
-        self._fd: int | None = None
-        self.lock_path: Path | None = None
-        if str(db_path) == ":memory:":
-            return
-        resolved_db = Path(db_path).expanduser().resolve()
-        resolved_db.parent.mkdir(parents=True, exist_ok=True)
-        self.lock_path = resolved_db.with_name(resolved_db.name + ".sidecar.lock")
-        fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            os.close(fd)
-            raise RuntimeError(
-                "another EcologyRSI-DSH sidecar already owns this database: "
-                + str(resolved_db)
-            ) from exc
-        except BaseException:
-            os.close(fd)
-            raise
-        self._fd = fd
-        owner = f"pid={os.getpid()}\ndatabase={resolved_db}\n".encode("utf-8")
-        os.ftruncate(fd, 0)
-        os.write(fd, owner)
-        os.fsync(fd)
-
-    def release(self) -> None:
-        fd, self._fd = self._fd, None
-        if fd is None:
-            return
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
-
-
 class _GenerationLease:
     """Reference-counted per-run lock that can be retired without replacement races."""
 
@@ -416,107 +380,6 @@ class _GenerationLease:
         self.release()
 
 
-def _dsh_revision_snapshot(ledger: EventLedger, run_id: str) -> dict[str, int]:
-    """Read DSH cursors without materializing the run projection."""
-
-    run_state_revision = ledger.latest_run_seq(run_id)
-    if run_state_revision == 0:
-        raise KeyError(f"unknown run: {run_id}")
-    return {
-        "run_state_revision": run_state_revision,
-        "ledger_expected_revision": ledger.latest_seq(),
-    }
-
-
-class _ValidatedCandidateIdentityCache:
-    """Cache immutable candidate bindings after one trusted state replay.
-
-    Candidate identity is fixed by ``CandidateSpawned`` and every later event
-    can only repeat that exact binding.  The first miss for a run therefore
-    uses the full projector (retaining all genome, compiler, and tamper
-    checks), then serves defensive copies.  A miss after the run cursor moves
-    refreshes the snapshot so candidates spawned in later generations remain
-    discoverable after normal execution or process recovery.
-    """
-
-    def __init__(
-        self,
-        ledger: EventLedger,
-        state_provider: Callable[[str], Any],
-    ) -> None:
-        self._ledger = ledger
-        self._state_provider = state_provider
-        self._guard = threading.Lock()
-        self._run_locks: dict[str, threading.RLock] = {}
-        self._snapshots: dict[
-            str, tuple[int, dict[str, dict[str, str]]]
-        ] = {}
-
-    @staticmethod
-    def _key(value: str, name: str) -> str:
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"{name} must be a non-empty string")
-        return value.strip()
-
-    def _run_lock(self, run_id: str) -> threading.RLock:
-        with self._guard:
-            lock = self._run_locks.get(run_id)
-            if lock is None:
-                lock = threading.RLock()
-                self._run_locks[run_id] = lock
-            return lock
-
-    def get(self, run_id: str, candidate_id: str) -> dict[str, str] | None:
-        run_id = self._key(run_id, "run_id")
-        candidate_id = self._key(candidate_id, "candidate_id")
-        with self._run_lock(run_id):
-            with self._guard:
-                snapshot = self._snapshots.get(run_id)
-                cached = None if snapshot is None else snapshot[1].get(candidate_id)
-            if cached is not None:
-                return dict(cached)
-
-            latest_run_seq = self._ledger.latest_run_seq(run_id)
-            if latest_run_seq == 0:
-                raise KeyError(f"unknown run: {run_id}")
-            if snapshot is not None and snapshot[0] == latest_run_seq:
-                return None
-
-            # Keep the per-run lock across replay: concurrent sample workers
-            # share one validation pass instead of replaying the same stream.
-            state = self._state_provider(run_id)
-            if state.run.run_id != run_id or not state.events:
-                raise ValueError("candidate identity projection belongs to another run")
-            projected_seq = int(state.events[-1].seq)
-            if projected_seq < latest_run_seq:
-                raise RuntimeError("candidate identity projection is behind the ledger")
-            bindings: dict[str, dict[str, str]] = {}
-            for item in state.candidate_identity_bindings:
-                if not isinstance(item, Mapping):
-                    raise ValueError("candidate identity cache entry is invalid")
-                item_candidate_id = self._key(
-                    item.get("candidate_id"), "candidate_id"
-                )
-                binding = validate_identity_binding(item.get("identity_binding"))
-                existing = bindings.get(item_candidate_id)
-                if existing is not None and existing != binding:
-                    raise ValueError("candidate has conflicting identity bindings")
-                bindings[item_candidate_id] = binding
-            with self._guard:
-                self._snapshots[run_id] = (projected_seq, bindings)
-            result = bindings.get(candidate_id)
-            return dict(result) if result is not None else None
-
-    def forget(self, run_id: str) -> bool:
-        run_id = self._key(run_id, "run_id")
-        with self._run_lock(run_id), self._guard:
-            return self._snapshots.pop(run_id, None) is not None
-
-    def clear(self) -> None:
-        with self._guard:
-            self._snapshots.clear()
-
-
 class EvolutionHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     # The runtime accepts up to 128 concurrent sample callbacks in addition to
@@ -545,6 +408,7 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
             "ECOLOGYRSI_SIDECAR_TOOL_TOKEN", ""
         ).strip()
         self.dsh_tool_token = configured_tool_token or None
+        self.model_preflight_lock = threading.Lock()
         self._owner_lease = _SidecarOwnerLease(db_path)
         try:
             self.ledger = EventLedger(db_path)
@@ -568,51 +432,9 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
                     "historical_replay_prediction_non_causal",
                 ],
             }
-            self.dsh_tools = DshToolService(self.ledger)
-            self.sample_admission = RunSampleAdmission()
-            self.datasets = DatasetRegistry()
-            self.model_gateway = ModelGateway.from_env(verification_store=self.ledger)
-            runtime_origin = os.environ.get("ECOLOGYRSI_DSH_RUNTIME_URL", "").strip()
-            runtime_token = os.environ.get("ECOLOGYRSI_DSH_RUNTIME_TOKEN", "").strip()
-            self.dsh_native_runtime = (
-                DshNativeAgentRuntimeClient(
-                    runtime_origin,
-                    token=runtime_token,
-                    stage_timeout=configured_stage_timeout(),
-                )
-                if runtime_origin and runtime_token
-                else None
-            )
-            self.strategy_router = StrategyRouterDSHAdapter(
-                self.model_gateway,
-                native_runtime_provider=lambda: DshStructuredRoleRuntime(
-                    self.dsh_native_runtime,
-                    admission=self.dsh_tools,
-                ),
-            )
-            self.director = EvolutionDirector(self.ledger, self.strategy_router)
-            self.dsh_identity_cache = _ValidatedCandidateIdentityCache(
-                self.ledger,
-                self.director.state,
-            )
-            self.evaluators = EvaluatorRegistry(
-                self.datasets,
-                self.model_gateway,
-                dsh_runtime_provider=lambda: DshStructuredRoleRuntime(
-                    self.dsh_native_runtime,
-                    admission=self.dsh_tools,
-                ),
-                dsh_revision_provider=lambda run_id: _dsh_revision_snapshot(
-                    self.ledger, run_id
-                ),
-                dsh_identity_provider=self.dsh_identity_cache.get,
-                dsh_prediction_tool_binder=self.dsh_tools.bind_prediction_tool,
-                origin_admission_provider=self.sample_admission.admit,
-                origin_admission_snapshot_provider=self.sample_admission.snapshot,
-            )
-            # A mutation spans several append-only events.  Serial execution keeps
-            # that unit coherent without introducing a queue or transaction layer.
-            self.mutation_lock = threading.RLock()
+            initialize_runtime(self, self.ledger)
+            from ..application.read_cache import ReadSectionCache
+            self.workspace_cache = ReadSectionCache()
             self._control_locks_guard = threading.Lock()
             self._control_locks: WeakValueDictionary[str, threading.RLock] = (
                 WeakValueDictionary()
@@ -1125,6 +947,14 @@ class EvolutionRequestHandler(
             except (RuntimeError, TypeError, ValueError) as exc:
                 self._send(HTTPStatus.CONFLICT, _dsh_sidecar_error(exc))
             return
+        if raw_path == "/api/ecology-agent-sidecar/v1/session-usage":
+            if not self._authorize_dsh_tool():
+                return
+            try:
+                self._send(HTTPStatus.OK, self.server.dsh_tools.record_session_usage(self._body()))
+            except (RuntimeError, TypeError, ValueError) as exc:
+                self._send(HTTPStatus.CONFLICT, _dsh_sidecar_error(exc))
+            return
         if raw_path == "/api/ecology-agent-sidecar/v1/structured-results":
             if not self._authorize_dsh_tool():
                 return
@@ -1205,11 +1035,13 @@ class EvolutionRequestHandler(
             draining_control = control_request and str(
                 body.get("action", body.get("command", ""))
             ).strip().lower() in {"pause", "cancel"}
-            if long_running_advance:
+            if long_running_advance or path in (["model-preflight"], ["evolution-capacity"]):
                 # Generation execution owns a per-run lease and already uses
                 # thread-safe ledger writes.  Keeping the global mutation lock
                 # across remote model waits would block pause/cancel and every
                 # unrelated run for the full generation.
+                # Capacity checks only read data; they must neither wait for
+                # run mutations nor hold up pause/cancel while loading data.
                 self._dispatch_post(path, body)
             elif control_request:
                 # Serializing controls per run keeps a resume or second control
@@ -1266,6 +1098,9 @@ class EvolutionRequestHandler(
             )
 
     def _dispatch_post(self, path: list[str], body: dict[str, Any]) -> None:
+        if path == ["model-preflight"]:
+            self._model_preflight(body)
+            return
         if path == ["evolution-capacity"]:
             self._evolution_capacity(body)
             return
@@ -1349,6 +1184,18 @@ class EvolutionRequestHandler(
             seed=0,
         )
         payload = report.to_dict()
+        if dataset_id != TOY_DATASET_ID:
+            from ..evolution.evidence_capacity import require_guarded_cohort_evidence_capacity
+            payload = capacity_with_inference_replicas(report, schedule)
+            if report.sufficient:
+                try:
+                    payload["guarded_evidence"] = require_guarded_cohort_evidence_capacity(
+                        dataset=dataset, schedule=schedule,
+                        planned_generations=planned_generations, seed=0,
+                    )
+                except ValueError as exc:
+                    payload = capacity_with_inference_replicas(replace(report, sufficient=False), schedule)
+                    payload["rejection_reason"] = str(exc)
         payload["capacity_enforced_for_run_creation"] = (
             dataset_id != TOY_DATASET_ID
         )
@@ -1440,6 +1287,40 @@ class EvolutionRequestHandler(
             {"ok": True, "run_id": run_id, "permanently_deleted": True, "deleted": deleted},
         )
 
+    def _model_preflight_directory(self) -> Path:
+        return Path(self.server.ledger.path).expanduser().resolve().parent / "model-preflight"
+
+    @staticmethod
+    def _request_binding(body: Mapping[str, Any], name: str) -> Any:
+        """Resolve one binding identically for compact and manifest requests."""
+        manifest = body.get("task_manifest")
+        metadata = manifest.get("metadata", {}) if isinstance(manifest, Mapping) else {}
+        if not isinstance(metadata, Mapping):
+            raise TypeError("task_manifest.metadata must be an object")
+        if name in body and name in metadata and body[name] != metadata[name]:
+            raise ValueError(f"conflicting {name} in request and task_manifest.metadata")
+        return body[name] if name in body else metadata.get(name)
+
+    def _model_preflight(self, body: dict[str, Any]) -> None:
+        if self._request_binding(body, "execution_protocol") != DSH_NATIVE_EXECUTION_PROTOCOL:
+            raise ValueError("model preflight requires the native execution protocol")
+        runtime = self.server.dsh_native_runtime
+        if runtime is None:
+            raise DshNativeRuntimeUnavailableError()
+        self._dsh_native_capabilities = runtime.capabilities()
+        task = self._task_from_request(body, defer_remote_plan=True)
+        if not self.server.model_preflight_lock.acquire(blocking=False):
+            raise ValueError("已有模型预检正在运行，请等待其完成")
+        try:
+            result = run_preflight(
+                runtime, metadata=task.metadata,
+                receipt_directory=self._model_preflight_directory(),
+                force=True,
+            )
+        finally:
+            self.server.model_preflight_lock.release()
+        self._send(HTTPStatus.OK, result)
+
     def _create_run(self, body: dict[str, Any]) -> None:
         requested_workflow = body.get("model_workflow", body.get("workflow"))
         if requested_workflow is not None and str(requested_workflow) != "research_compile_evolve@1":
@@ -1474,7 +1355,24 @@ class EvolutionRequestHandler(
             requested_auto_advance == AUTO_ADVANCE_CONTINUOUS
             or requested_auto_progress
         )
-        native_protocol = body.get("execution_protocol") == DSH_NATIVE_EXECUTION_PROTOCOL
+        # A durable command owns its frozen run even if live capability flags
+        # or cached canary TTL changed after the first request. Validate the
+        # identical HTTP body before recovering that resource, without
+        # rebuilding a different TaskManifest from today's runtime state.
+        cache_key = self._command_key("create", body)
+        if self._serve_existing_command(cache_key, "create", "create_run", body):
+            return
+        existing_command = self.server.ledger.command_receipt(cache_key) if cache_key is not None else None
+        if existing_command is not None and existing_command.resource_run_id:
+            state = self.server.director.state(existing_command.resource_run_id)
+            _assert_http_scope(state)
+            state = self._resume_created_run(state, start=start, auto_advance=auto_advance)
+            payload = _state_payload(state)
+            self._complete_command(cache_key, payload)
+            self._schedule_auto_progress(state)
+            self._send(HTTPStatus.OK, payload)
+            return
+        native_protocol = self._request_binding(body, "execution_protocol") == DSH_NATIVE_EXECUTION_PROTOCOL
         native_capabilities = None
         live_capabilities = None
         if native_protocol:
@@ -1571,6 +1469,17 @@ class EvolutionRequestHandler(
             self._schedule_auto_progress(state)
             self._send(HTTPStatus.OK, payload)
             return
+        preflight_receipts = None
+        if task.metadata.get("require_model_contract_preflight") is True:
+            if not native_protocol:
+                raise ValueError("model preflight requires the native execution protocol")
+            # Only new runs opt in. Dynamic receipts live in a separate event,
+            # so refreshing their TTL cannot change the immutable task digest.
+            task = replace(task, metadata={**dict(task.metadata), AUDIT_METADATA_KEY: AUDIT_SCHEMA})
+            try:
+                preflight_receipts = require_model_preflight(task.metadata, self._model_preflight_directory())
+            except FileNotFoundError as exc:
+                raise ValueError("缺少当前模型的有效预检回执，请先运行模型预检") from exc
         if native_protocol:
             run_id = run_id or f"run:{uuid4()}"
             native_request = {
@@ -1624,7 +1533,21 @@ class EvolutionRequestHandler(
         try:
             run = self.server.director.create_run(task, run_id=run_id)
         except BaseException:
-            if native_protocol and run_id is not None:
+            durable_creation = False
+            if run_id is not None:
+                try:
+                    events = self.server.ledger.events(run_id)
+                    durable_creation = bool(
+                        events and events[0].kind == "RunCreated"
+                        and TaskManifest.from_dict(events[0].payload["task_manifest"]).digest == task.digest
+                    )
+                    if durable_creation and cache_key is not None:
+                        self.server.ledger.bind_command_resource_run(cache_key, run_id)
+                except Exception as recovery_error:
+                    # Preserve the original creation error; a failed secondary
+                    # resource binding must not turn it into apparent success.
+                    self.log_error("create recovery binding failed: %s", type(recovery_error).__name__)
+            if native_protocol and run_id is not None and not durable_creation:
                 try:
                     self.server.dsh_native_runtime.cancel(
                         {
@@ -1638,6 +1561,11 @@ class EvolutionRequestHandler(
                 except DshNativeRuntimeUnavailableError:
                     pass
             raise
+        if cache_key is not None:
+            # Claim this durable resource before any later boundary can fail.
+            self.server.ledger.bind_command_resource_run(cache_key, run.run_id)
+        if preflight_receipts is not None:
+            self.server.director.record_model_contract_preflight(run.run_id, preflight_receipts)
         if native_protocol:
             self.server.ledger.append(
                 run.run_id,
@@ -1652,10 +1580,6 @@ class EvolutionRequestHandler(
                 event_id=f"{run.run_id}:dsh-runtime-bound",
                 expected_run_seq=self.server.director.state(run.run_id).events[-1].seq,
             )
-        if cache_key is not None:
-            # Bind immediately after RunCreated.  A failure in start or the
-            # first automatic generation must not leave an ownerless receipt.
-            self.server.ledger.bind_command_resource_run(cache_key, run.run_id)
         if start:
             self.server.director.start_run(run.run_id)
         state = self.server.director.state(run.run_id)
@@ -1730,7 +1654,16 @@ class EvolutionRequestHandler(
         """Finish a create command from its durable run projection."""
 
         run_id = state.run.run_id
+        if state.run.status.value == "created":
+            state = self._ensure_recorded_model_preflight(state)
         if start and state.run.status.value == "created":
+            self._validate_frozen_runtime_bindings(state.task_manifest, run_id=run_id)
+            if state.task_manifest.metadata.get("execution_protocol") == DSH_NATIVE_EXECUTION_PROTOCOL:
+                self.server.dsh_native_runtime.activate({
+                    "run_id": run_id, "run_state_revision": state.events[-1].seq,
+                    "stage_attempt": 0, "ledger_expected_revision": self.server.ledger.latest_seq(),
+                    "idempotency_key": f"create-recovery:{run_id}",
+                })
             self.server.director.start_run(run_id)
             state = self.server.director.state(run_id)
         continuous = auto_advance == AUTO_ADVANCE_CONTINUOUS or bool(
@@ -1748,6 +1681,22 @@ class EvolutionRequestHandler(
                 target_steps=auto_advance,
             )
         return state
+
+    def _ensure_recorded_model_preflight(self, state: Any) -> Any:
+        """Repair an interrupted new create; historical gates remain untouched."""
+        if (state.run.status.value == "created"
+                and state.task_manifest.metadata.get("execution_protocol") == DSH_NATIVE_EXECUTION_PROTOCOL):
+            self.server.director.recover_run_initialization(state.run.run_id)
+            state = self.server.director.state(state.run.run_id)
+        if (not preflight_audit_required(state.task_manifest.metadata)
+                or any(event.kind == AUDIT_EVENT for event in state.events)):
+            return state
+        try:
+            receipts = require_model_preflight(state.task_manifest.metadata, self._model_preflight_directory())
+        except FileNotFoundError as exc:
+            raise ValueError("缺少当前模型的有效预检回执，请先运行模型预检") from exc
+        self.server.director.record_model_contract_preflight(state.run.run_id, receipts)
+        return self.server.director.state(state.run.run_id)
 
     def _find_existing_idempotent_run(
         self,
@@ -1769,7 +1718,12 @@ class EvolutionRequestHandler(
             if not isinstance(metadata, dict) or metadata.get("idempotency_key") != idempotency_key:
                 continue
             existing_manifest = TaskManifest.from_dict(existing_task)
-            if existing_manifest.digest != task.digest:
+            expected_task = task
+            if (preflight_audit_required(existing_manifest.metadata)
+                    and task.metadata.get("require_model_contract_preflight") is True
+                    and AUDIT_METADATA_KEY not in task.metadata):
+                expected_task = replace(task, metadata={**dict(task.metadata), AUDIT_METADATA_KEY: AUDIT_SCHEMA})
+            if existing_manifest.digest != expected_task.digest:
                 raise ValueError("idempotency key already belongs to a different task")
             return existing_run_id
         return None
@@ -1797,11 +1751,18 @@ class EvolutionRequestHandler(
                     "with complete forecast-origin counts"
                 )
         native_protocol = (
-            body.get("execution_protocol") == DSH_NATIVE_EXECUTION_PROTOCOL
+            self._request_binding(body, "execution_protocol") == DSH_NATIVE_EXECUTION_PROTOCOL
         )
 
         if isinstance(body.get("task_manifest"), dict):
             raw = dict(body["task_manifest"])
+            metadata = dict(raw.get("metadata", {}))
+            for name in ("execution_protocol", "prediction_selection_policy", "prediction_model_id",
+                         "evaluator_id", "seed_genome_template_id"):
+                value = self._request_binding(body, name)
+                if name in body or name in metadata:
+                    metadata[name] = value
+            raw["metadata"] = metadata
             if "domain_pack" not in raw:
                 supplied_domain = body.get(
                     "domain_pack",
@@ -1841,6 +1802,8 @@ class EvolutionRequestHandler(
                     "max_candidates",
                     "optimization_protocol",
                     "optimization_schedule",
+                    "search_guard_policy",
+                    "require_model_contract_preflight",
                     "candidate_concurrency",
                     "sample_concurrency",
                     "sample_agent_batch_size",
@@ -1876,6 +1839,10 @@ class EvolutionRequestHandler(
                             f"optimization_protocol must be {OPTIMIZATION_PROTOCOL}"
                         )
                     metadata["optimization_protocol"] = protocol
+                if "search_guard_policy" in body:
+                    metadata["search_guard_policy"] = body["search_guard_policy"]
+                if "require_model_contract_preflight" in body:
+                    metadata["require_model_contract_preflight"] = _request_boolean(body["require_model_contract_preflight"], "require_model_contract_preflight")
                 if "optimization_schedule" in body:
                     metadata["optimization_schedule"] = (
                         OptimizationSchedule.from_dict(
@@ -2149,8 +2116,10 @@ class EvolutionRequestHandler(
                 "strategy_id",
                 "autonomous_model@1" if autonomous_requested else "parameter_sweep@1",
             ),
+            "prediction_selection_policy": body.get("prediction_selection_policy"),
             "prediction_model_id": body.get("prediction_model_id"),
             "evaluator_id": body.get("evaluator_id"),
+            "seed_genome_template_id": body.get("seed_genome_template_id"),
             "policy_model_id": (
                 canonical_policy_model_id
                 if canonical_policy_model_id is not None
@@ -2206,6 +2175,8 @@ class EvolutionRequestHandler(
             "execution_protocol": body.get("execution_protocol"),
             "optimization_protocol": body.get("optimization_protocol"),
             "optimization_schedule": body.get("optimization_schedule"),
+            "search_guard_policy": body.get("search_guard_policy"),
+            "require_model_contract_preflight": (_request_boolean(body["require_model_contract_preflight"], "require_model_contract_preflight") if "require_model_contract_preflight" in body else None),
         }
         metadata = {key: value for key, value in metadata.items() if value is not None}
         seed_policy = str(body.get("seed_policy", "fixed"))
@@ -2421,22 +2392,40 @@ class EvolutionRequestHandler(
             metadata.get("strategy_id")
             or ("autonomous_model@1" if autonomous_mode else "parameter_sweep@1")
         )
-        evaluator_id = str(
-            metadata.get("evaluator_id")
-            or self.server.evaluators.default_evaluator(dataset_id)
+        selection_policy = metadata.get("prediction_selection_policy")
+        if selection_policy not in (None, RUNTIME_PREDICTION_POLICY):
+            raise ValueError("unsupported prediction_selection_policy")
+        runtime_choice = selection_policy == RUNTIME_PREDICTION_POLICY or (
+            native_protocol and autonomous_mode and dataset_id != TOY_DATASET_ID and not metadata.get("prediction_model_id")
+            and not metadata.get("evaluator_id")
         )
+        if runtime_choice:
+            if not native_protocol or not autonomous_mode or dataset_id == TOY_DATASET_ID:
+                raise ValueError("runtime predictor selection requires a native autonomous greenhouse run")
+            if any(metadata.get(key) for key in ("prediction_model_id", "evaluator_id", "seed_genome_template_id")):
+                raise ValueError("runtime predictor selection does not accept a preselected predictor, evaluator or seed template")
+            metadata["prediction_selection_policy"] = RUNTIME_PREDICTION_POLICY
+            # This is a no-residual comparison anchor, not a user's chosen model.
+            metadata["prediction_model_id"] = BASELINE_REFERENCE_PREDICTOR_ID
+            metadata["evaluator_id"] = RUNTIME_EVALUATOR_ID
         prediction_model_id = str(
             metadata.get("prediction_model_id")
             or self.server.evaluators.default_predictor(dataset_id)
         )
+        evaluator_id = str(
+            metadata.get("evaluator_id")
+            or (GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID
+                if prediction_model_id == "greenhouse-baseline-aligned-ridge@1"
+                else self.server.evaluators.default_evaluator(dataset_id))
+        )
         if (
             native_protocol
             and dataset_id != TOY_DATASET_ID
-            and evaluator_id != GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID
+            and evaluator_id not in {GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID, GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID, RUNTIME_EVALUATOR_ID}
         ):
             raise ValueError(
                 "DSH-native greenhouse runs require the 3-target × 3-horizon "
-                f"evaluator {GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID}"
+                f"a registered multi-horizon evaluator ({RUNTIME_EVALUATOR_ID} for runtime model choice)"
             )
         strategy_model_id = str(
             metadata.get("strategy_model_id")
@@ -2639,6 +2628,15 @@ class EvolutionRequestHandler(
             supplied = metadata.get(field)
             if supplied is not None and supplied != computed:
                 raise ValueError(f"任务清单中的{label}校验值与服务端配置不一致")
+        if prediction_model_id == "greenhouse-baseline-aligned-ridge@1":
+            metadata.setdefault("search_guard_policy", SEARCH_GUARD_POLICY)
+        if native_protocol:
+            from ..core.model_execution_policy import (
+                RESEARCH_EXECUTION_POLICY, RESEARCH_EXECUTION_POLICY_KEY,
+                research_execution_policy,
+            )
+            metadata.setdefault(RESEARCH_EXECUTION_POLICY_KEY, dict(RESEARCH_EXECUTION_POLICY))
+            research_execution_policy(metadata)
         autonomous_plan: dict[str, Any] = {}
         evaluator_catalog = [
             dict(item)
@@ -2685,6 +2683,18 @@ class EvolutionRequestHandler(
             "selected_evaluator_id": evaluator_id,
             "objective_profile": objective_profile,
         }
+        if runtime_choice:
+            metadata["prediction_selection"] = {
+                "policy": RUNTIME_PREDICTION_POLICY,
+                "owner": "research_model",
+                "reference_mode": "baseline_only",
+                "reference_predictor_id": BASELINE_REFERENCE_PREDICTOR_ID,
+                "allowed_predictor_ids": [item["id"] for item in compatible_predictors],
+                "can_disable_residual_model": True,
+                "can_switch_predictor": True,
+                "can_optimize_parameters": True,
+                "evaluation_rules_frozen": True,
+            }
         if autonomous_mode and not defer_remote_plan:
             planning_metadata = {
                 **metadata,
@@ -2778,7 +2788,7 @@ class EvolutionRequestHandler(
                     f"optimization_protocol must be {OPTIMIZATION_PROTOCOL}"
                 )
             schedule = (
-                OptimizationSchedule.default()
+                OptimizationSchedule.for_new_run()
                 if requested_schedule is None
                 else OptimizationSchedule.from_dict(requested_schedule)
             )
@@ -2831,6 +2841,17 @@ class EvolutionRequestHandler(
                         f"available={cohort_capacity_report.available_eligible_origins}, "
                         "max_generations="
                         f"{cohort_capacity_report.max_feasible_generations}"
+                    )
+                if metadata.get("search_guard_policy") == SEARCH_GUARD_POLICY:
+                    # Count the actual planned day identities before launching
+                    # paid stages. Origin count alone cannot establish paired
+                    # evidence capacity for sparse or small local batches.
+                    from ..evolution.evidence_capacity import require_guarded_cohort_evidence_capacity
+                    metadata["guarded_cohort_evidence_capacity"] = require_guarded_cohort_evidence_capacity(
+                        dataset=selection_view,
+                        schedule=schedule,
+                        planned_generations=manifest.max_generations,
+                        seed=manifest.seed,
                     )
             else:
                 cohort_capacity_report = estimate_epoch_capacity(
@@ -2964,7 +2985,8 @@ class EvolutionRequestHandler(
                     schedule.to_dict() if schedule is not None else None
                 ),
                 "cohort_capacity_report": (
-                    cohort_capacity_report.to_dict()
+                    (capacity_with_inference_replicas(cohort_capacity_report, schedule)
+                     if native_protocol else cohort_capacity_report.to_dict())
                     if cohort_capacity_report is not None
                     else None
                 ),
@@ -2973,7 +2995,8 @@ class EvolutionRequestHandler(
                 ),
                 "derived_execution_budget": (
                     schedule.generation_execution_budget(
-                        cells_per_origin=prediction_cells_per_origin
+                        cells_per_origin=prediction_cells_per_origin,
+                        holdout_inference_replicas=REPLICA_COUNT if native_protocol else 1,
                     )
                     if schedule is not None
                     else None
@@ -2982,6 +3005,7 @@ class EvolutionRequestHandler(
                     schedule.run_execution_budget(
                         manifest.max_generations,
                         cells_per_origin=prediction_cells_per_origin,
+                        holdout_inference_replicas=REPLICA_COUNT if native_protocol else 1,
                     )
                     if schedule is not None
                     else None
@@ -2999,7 +3023,7 @@ class EvolutionRequestHandler(
                 # cannot silently change an already-created real run.
                 "sample_operation_max_tokens": (
                     dict(
-                        _DSH_NATIVE_SAMPLE_OPERATION_MAX_TOKENS
+                        NATIVE_SAMPLE_OPERATION_MAX_TOKENS
                         if native_protocol
                         else _DEFAULT_SAMPLE_OPERATION_MAX_TOKENS
                     )
@@ -3619,6 +3643,8 @@ class EvolutionRequestHandler(
         if cached is not None:
             self._send(HTTPStatus.OK, cached)
             return
+        if action == "start" and state.run.status.value == "created":
+            state = self._ensure_recorded_model_preflight(state)
         native_request = {
             "run_id": run_id,
             "run_state_revision": state.events[-1].seq,

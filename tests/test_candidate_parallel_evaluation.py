@@ -8,9 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from ecologyrsi_dsh.api import generation_execution
-from ecologyrsi_dsh.api.dsh_tools import DshToolAdmissionClosedError
-from ecologyrsi_dsh.api.generation_execution import _candidate_signature
+from ecologyrsi_dsh.application import generation_execution
+from ecologyrsi_dsh.integrations.dsh_tools import DshToolAdmissionClosedError
+from ecologyrsi_dsh.application.generation_execution import _candidate_signature
 from ecologyrsi_dsh.core.models import Evaluation, ModelArtifact, RunStatus
 from ecologyrsi_dsh.core.trajectory import (
     EvaluationPhase,
@@ -244,6 +244,13 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
 
         self.assertTrue(generation_execution._recoverable_evaluation_error(error))
 
+    def test_unsupported_tool_protocol_is_propagated_to_run_owner(self) -> None:
+        from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
+        error = DshNativeRuntimeUnavailableError(
+            error_code="structured_child_tool_protocol_error", status_code=422)
+        self.assertTrue(generation_execution._recoverable_evaluation_error(error))
+        self.assertFalse(generation_execution._recoverable_evaluation_error(ValueError("bad prediction")))
+
     def test_screening_freezes_deterministic_top_two_by_evidence(self) -> None:
         candidates = tuple(
             SimpleNamespace(slot_index=index, candidate_id=f"candidate-{index}")
@@ -319,7 +326,7 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
         threads = [
             threading.Thread(
                 target=generation_execution._record_stage,
-                args=(endpoint, "run-1", 0, "evaluation", "started"),
+                args=(endpoint.server, "run-1", 0, "evaluation", "started"),
                 kwargs={"candidate_id": f"candidate-{index}"},
             )
             for index in range(2)
@@ -354,7 +361,7 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
 
         with patch.object(generation_execution, "_evaluate_candidate", side_effect=evaluate):
             generation_execution._evaluate_generation_candidates(
-                endpoint,
+                (endpoint).server,
                 "run-1",
                 candidates,
             )
@@ -386,7 +393,7 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
 
         with patch.object(generation_execution, "_evaluate_candidate", side_effect=evaluate):
             generation_execution._evaluate_generation_candidates(
-                endpoint,
+                (endpoint).server,
                 "run-1",
                 candidates,
             )
@@ -409,7 +416,7 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
             side_effect=lambda *_args: observed_threads.append(threading.get_ident()),
         ):
             generation_execution._evaluate_generation_candidates(
-                endpoint,
+                (endpoint).server,
                 "run-1",
                 candidates,
             )
@@ -433,7 +440,7 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
             side_effect=lambda *_args: observed_threads.append(threading.get_ident()),
         ):
             generation_execution._evaluate_generation_candidates(
-                endpoint,
+                (endpoint).server,
                 "run-1",
                 candidates,
             )

@@ -1,10 +1,24 @@
 "use strict";
 
   function renderAll() {
-    renderSystemBanner(); renderWorkspace(); renderContext(); renderReadiness(); renderParameters(); renderTraining(); renderProcess(); renderCandidates(); renderCollaboration();
+    renderSystemBanner(); renderWorkspace(); renderContext(); renderReadiness(); renderParameters(); renderActiveWorkspace();
     $("#last-updated").textContent = state.lastUpdated ? "最近同步：" + formatDate(state.lastUpdated) : "尚未同步";
     $("#refresh-button").disabled = state.busy || state.refreshing || state.loadState === "loading";
     $("#refresh-button").textContent = state.pendingAction === "refresh" ? "正在刷新" : "刷新数据";
+  }
+
+  function renderActiveWorkspace() {
+    if (state.workspace === "training") { renderTraining(); }
+    if (state.workspace === "process") { renderProcess(); }
+    if (state.workspace === "candidates") { renderCandidates(); }
+    if (state.workspace === "collaboration") { renderCollaboration(); }
+    renderWorkspaceLoadState();
+  }
+
+  function activateWorkspace(workspace) {
+    state.workspace = workspace;
+    renderAll();
+    ensureWorkspaceData({navigation: true});
   }
 
   function exportSummary() {
@@ -43,23 +57,19 @@
     }
     tabs.forEach(function (button) {
       button.addEventListener("click", function () {
-        state.workspace = button.dataset.workspace;
-        renderWorkspace();
+        activateWorkspace(button.dataset.workspace);
         scheduleTrajectoryRender();
-        if (state.workspace === "candidates") { refreshCandidateSamples({silent: true}); }
       });
       button.addEventListener("keydown", function (event) {
         var current = tabs.indexOf(button), next = null;
         if (event.key === "ArrowRight" || event.key === "ArrowDown") { next = (current + 1) % tabs.length; }
         if (event.key === "ArrowLeft" || event.key === "ArrowUp") { next = (current - 1 + tabs.length) % tabs.length; }
         if (event.key === "Home") { next = 0; } if (event.key === "End") { next = tabs.length - 1; }
-        if (next == null) { return; } event.preventDefault(); state.workspace = tabs[next].dataset.workspace; renderWorkspace(); scheduleTrajectoryRender(); tabs[next].focus();
+        if (next == null) { return; } event.preventDefault(); activateWorkspace(tabs[next].dataset.workspace); scheduleTrajectoryRender(); tabs[next].focus();
       });
     });
     $("#domain-pack").addEventListener("change", function () { alignDomainDatasetBinding(); ensureAutonomousBindings(); updateSelectionHelp(); loadSelectionPreview(); });
     ["#policy-model-id", "#judge-model-id"].forEach(function (selector) { $(selector).addEventListener("change", updateSelectionHelp); });
-    $("#prediction-model-id").addEventListener("change", function () { alignPredictionBinding(); updateSelectionHelp(); });
-    $("#evaluator-id").addEventListener("change", function () { alignEvaluatorBinding(); updateSelectionHelp(); });
     $("#strategy-id").addEventListener("change", function () { alignStrategyModel(); updateSelectionHelp(); });
     $("#dataset-id").addEventListener("change", function () { alignDatasetBinding(); updateSelectionHelp(); loadSelectionPreview(); scheduleEvolutionCapacityRefresh(); });
     $("#episode-id").addEventListener("change", function () { updateSelectionHelp(); loadSelectionPreview(); scheduleEvolutionCapacityRefresh(); });
@@ -85,6 +95,7 @@
     $("#show-archived-runs").addEventListener("change", function (event) {
       setArchivedRunsVisible(event.target.checked === true);
     });
+    $("#load-older-runs").addEventListener("click", loadOlderRuns);
     $("#run-select").addEventListener("change", function (event) { selectRun(event.target.value, true); });
     $("#previous-page").addEventListener("click", function () { loadSelectedDataset(Math.max(0, state.pageOffset - state.pageLimit)); });
     $("#next-page").addEventListener("click", function () { loadSelectedDataset(state.pageOffset + state.pageLimit); });
@@ -93,6 +104,11 @@
       connectAndLoad();
     });
     $("#retry-dataset-button").addEventListener("click", function () { loadSelectedDataset(state.pageOffset); });
+    $("#workspace-data-retry").addEventListener("click", function () { ensureWorkspaceData({force: true}); });
+    $("#training-assets-table").addEventListener("click", function (event) {
+      var button = event.target.closest("[data-load-training-asset]");
+      if (button) { loadTrainingAsset(button.dataset.loadTrainingAsset); }
+    });
     $("#toggle-events-button").addEventListener("click", function () { state.showAllEvents = !state.showAllEvents; renderProcess(); });
     $("#refresh-button").addEventListener("click", function () { state.busy = true; state.pendingAction = "refresh"; renderAll(); refreshAll({ refreshDataset: true }).then(function (ok) { showToast(ok ? "数据已刷新。" : "刷新失败，已保留上次状态。" ); }).finally(function () { state.busy = false; state.pendingAction = null; renderAll(); }); });
     $("#advance-button").addEventListener("click", advanceRun);
@@ -168,9 +184,8 @@
         return;
       }
       var form = new FormData(event.currentTarget);
-      // The compact form exposes only two model roles; internal components
-      // are selected by the autonomous runtime and are intentionally omitted.
-      createRun({
+      // Predictor selection belongs to the runtime research loop.
+      return createRun({
         autonomous_mode: form.get("autonomous_mode") === "true" || form.get("autonomous_mode") === "on",
         model_workflow: form.get("model_workflow") || "research_compile_evolve@1",
         dataset_id: form.get("dataset_id"),
@@ -243,7 +258,7 @@
   EcologyDSHHost.postReady();
   connectAndLoad();
   // The active-run monitor already carries live execution progress.  This
-  // slower sweep refreshes catalogs and run history without replaying every
+  // slower sweep refreshes run summaries without replaying every
   // large append-only projection six times per minute while the page is idle.
-  window.setInterval(function () { if (!document.hidden && !state.busy && !state.refreshing && state.loadState !== "loading" && !state.usingDemo) { refreshAll(); } }, 60000);
+  window.setInterval(function () { if (!document.hidden && !state.busy && !state.refreshing && state.loadState !== "loading" && !state.usingDemo) { refreshRunOverview(); } }, 60000);
   window.EcologyEvolutionPlugin = { getState: publicState, refresh: refreshAll };

@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from ..evolution.agent_policy import build_agent_policy, validate_agent_policy
+
+from ..evolution.diagnosis import diagnose_generation, hypothesis_for_proposal
+from .research import DiagnosticReport
+
 import json
 import math
 import threading
@@ -17,6 +22,13 @@ from ..evolution.analysis import (
     evaluation_cohort_comparison,
     evaluation_cohort_digest,
     sample_update_windows_enabled,
+)
+from .search_policy import local_challenger_policy, paired_execution_qualification_required
+from .model_preflight import AUDIT_EVENT, build_preflight_audit, preflight_audit_required
+from .artifact_identity import (
+    ARTIFACT_EVENT_V2, EVALUATION_EVENT_V2, FORMAL_STAGE_V2,
+    build_artifact_revision_binding, resolve_artifact_scope,
+    validate_evaluation_artifact_binding,
 )
 from ..evolution.champion_challenger import (
     LOCAL_MINIMUM_SCORE_DELTA,
@@ -109,6 +121,7 @@ from .exposure_registry import (
 from .state import (
     DSH_NATIVE_EVOLUTION_PROTOCOL,
     RunState,
+    RunStateReducer,
     gateway_retry_error_code,
     is_dsh_native_protocol,
     persisted_genome_from_proposal,
@@ -260,6 +273,16 @@ def _frozen_runtime_binding(state: RunState) -> dict[str, Any] | None:
             "prediction_model_adoption": dict(adoption),
         }
     return None
+
+
+def _effective_artifact_binding(state: RunState, artifact: ModelArtifact) -> dict[str, Any]:
+    if artifact.candidate_revision_id is None:
+        raise ValueError("effective artifact identity requires a candidate revision")
+    scope = resolve_artifact_scope(
+        artifact, holdouts=state.generation_holdouts,
+        evaluations=(*state.formal_batch_evaluations, *state.holdout_evaluations),
+    )
+    return build_artifact_revision_binding(artifact, state.revision(artifact.candidate_revision_id), scope)
 
 
 def _generation_sibling_behaviors(
@@ -453,6 +476,9 @@ class EvolutionDirector:
         # run and use the indexed event tail as the invalidation key so polling
         # callers do not replay an unchanged event stream.
         self._state_cache: OrderedDict[str, tuple[int, RunState]] = OrderedDict()
+        from .projection_checkpoint import ProjectionCheckpoints
+        self._projection_checkpoints = ProjectionCheckpoints(ledger)
+        self._state_reducers: dict[str, RunStateReducer] = {}
         self._state_cache_lock = threading.RLock()
 
     def _gateway_retry_now(self) -> datetime:
@@ -576,6 +602,19 @@ class EvolutionDirector:
             self.recover_run_initialization(run_id)
         return run
 
+    def record_model_contract_preflight(self, run_id: str, receipts: Sequence[Mapping[str, Any]]) -> Event:
+        """Seal a successful creation gate once, before the first RunStarted."""
+        state = self.state(run_id)
+        prior = next((event for event in state.events if event.kind == AUDIT_EVENT), None)
+        if prior is not None:
+            return prior
+        self._require_status(state.run, RunStatus.CREATED)
+        payload = build_preflight_audit(state.task_manifest, run_id, receipts)
+        return self.ledger.append(
+            run_id, AUDIT_EVENT, payload, event_id=f"{run_id}:model-contract-preflight",
+            expected_run_seq=state.events[-1].seq,
+        )
+
     def recover_run_initialization(self, run_id: str):
         """Idempotently finish seed materialization using only RunCreated payload."""
 
@@ -631,6 +670,10 @@ class EvolutionDirector:
 
         def payload(state: RunState) -> dict[str, Any]:
             nonlocal opened_session_id
+            if preflight_audit_required(state.task_manifest.metadata) and not any(
+                event.kind == AUDIT_EVENT for event in state.events
+            ):
+                raise RuntimeError("model contract preflight audit is required before start")
             if state.run.status is RunStatus.PAUSED:
                 paused = next(
                     (
@@ -1342,30 +1385,35 @@ class EvolutionDirector:
                 pending_interventions, application_receipts
             )
         ]
-        self.ledger.append(
-            run_id,
-            "ProposalSubmitted",
-            {
-                "proposal": proposal.to_dict(),
-                "intervention_receipts": durable_receipts,
-            },
-        )
+        if research_iteration_context and research_iteration_context.get("diagnostic_report"):
+            diagnostic = DiagnosticReport(**research_iteration_context["diagnostic_report"])
+            evidence = hypothesis_for_proposal(proposal, diagnostic)
+            proposal = replace(proposal, metadata={
+                **dict(proposal.metadata),
+                "diagnostic_report_id": diagnostic.report_id,
+                **({"research_evidence": evidence} if evidence is not None else {}),
+            })
+        entries = [("ProposalSubmitted", {
+            "proposal": proposal.to_dict(), "intervention_receipts": durable_receipts,
+        }, None)]
         for intervention, receipt in zip(pending_interventions, application_receipts):
             if not consume_interventions:
                 continue
-            self.ledger.append(
-                run_id,
+            entries.append((
                 "HumanInterventionApplied",
                 {
                     "intervention_id": intervention.intervention_id,
                     "proposal_id": proposal.proposal_id,
                     **receipt,
                 },
-                event_id=(
+                (
                     f"{run_id}:intervention:{intervention.intervention_id}:"
                     f"applied:{proposal.proposal_id}"
                 ),
-            )
+            ))
+        # A pause/cancel between the post-provider check and this commit must
+        # fence the proposal. Its intervention receipts commit in the same unit.
+        self.ledger.append_many(run_id, entries, expected_run_seq=current.events[-1].seq)
         return proposal
 
     def record_research_iteration(
@@ -1396,6 +1444,11 @@ class EvolutionDirector:
         expected_analysis_digest = previous.analysis_digest if previous else None
         if iteration.source_analysis_digest != expected_analysis_digest:
             raise ValueError("research iteration previous analysis does not match")
+        if iteration.diagnostic_report is not None and (
+            DiagnosticReport(**dict(iteration.diagnostic_report)).to_dict()
+            != diagnose_generation(state, snapshot).to_dict()
+        ):
+            raise ValueError("research diagnosis is not derived from frozen host evidence")
         assessment = (
             state.knowledge_assessment_for(iteration.generation - 1)
             if iteration.generation > 0
@@ -1772,7 +1825,8 @@ class EvolutionDirector:
             parent = state.candidate(proposal.parent_candidate_id)
             if parent.run_id != proposal.run_id:
                 raise ValueError("parent candidate belongs to another run")
-        self.ledger.append(proposal.run_id, "ProposalSubmitted", {"proposal": proposal.to_dict()})
+        self.ledger.append(proposal.run_id, "ProposalSubmitted", {"proposal": proposal.to_dict()},
+                           expected_run_seq=state.events[-1].seq)
         return proposal
 
     def spawn_candidate(
@@ -1904,6 +1958,11 @@ class EvolutionDirector:
                 raise ValueError(
                     "candidate proposal agent profile does not match its Genome"
                 )
+            policy = proposal_obj.metadata.get("agent_policy")
+            if policy is not None:
+                validate_agent_policy(policy)
+                if policy["genome_digest"] != genome.genome_digest or policy["profile"] != expected_agent_profile:
+                    raise ValueError("Agent policy does not match candidate source")
             metadata = state.task_manifest.metadata
             instance_context = CompilationInstanceContext(
                 run_id=run_id,
@@ -1936,6 +1995,7 @@ class EvolutionDirector:
                     "standing_tool_surface_digest"
                 ),
                 security_kernel_digest=metadata.get("security_kernel_digest"),
+                agent_policy_digest=(proposal_obj.metadata.get("agent_policy") or {}).get("policy_digest", "0" * 64),
             )
             bound = bind_phenotype_instance(compiled, instance_context)
             payload["identity_binding"] = {
@@ -1976,6 +2036,9 @@ class EvolutionDirector:
         )
         proposal_id = f"proposal:{run_id}:seed-incumbent-control"
         candidate_id = f"candidate:{run_id}:seed-incumbent-control"
+        seed_profile = resolve_candidate_agent_profile(seed, current_program_registry())
+        seed_policy = build_agent_policy(genome_digest=seed.genome_digest, profile=seed_profile,
+            parameters=seed.scientific_program["parameter_overrides"], previous_analysis=None, generation=0)
         proposal = Proposal(
             proposal_id=proposal_id,
             run_id=run_id,
@@ -1989,6 +2052,7 @@ class EvolutionDirector:
             metadata={
                 "execution_protocol": DSH_NATIVE_EVOLUTION_PROTOCOL,
                 "proposal_source": "seed_incumbent_control",
+                "agent_policy": seed_policy,
                 "candidate_role": CandidateRole.INCUMBENT_CONTROL.value,
                 "evolution_genome_canonical_json": canonical_json(seed.to_dict()),
                 "genome_digest": seed.genome_digest,
@@ -2065,7 +2129,14 @@ class EvolutionDirector:
             binding = state.candidate_identity_binding(candidate.candidate_id)
             if binding is None:
                 raise ValueError("artifact candidate has no identity binding")
-            artifact_payload["identity_binding"] = dict(binding)
+            if artifact.candidate_revision_id is not None:
+                artifact_payload.update({
+                    "schema_version": ARTIFACT_EVENT_V2,
+                    "proposal_identity_binding": dict(binding),
+                    "artifact_revision_binding": _effective_artifact_binding(state, artifact),
+                })
+            else:
+                artifact_payload["identity_binding"] = dict(binding)
         self.ledger.append(
             artifact.run_id,
             "ArtifactRecorded",
@@ -2815,23 +2886,7 @@ class EvolutionDirector:
         batch = state.formal_batch_for(key_candidate, key_index)
         if batch is None:
             raise ValueError("formal batch has not started")
-        expected_revision_id = batch.revision_id
-        if schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
-            if key_index == 0:
-                if arm is not FormalBatchArm.CHAMPION:
-                    raise ValueError("paired batch 0 only accepts the champion arm")
-            elif arm is FormalBatchArm.CHAMPION:
-                prior_comparison = state.batch_comparison_for(
-                    key_candidate,
-                    key_index - 1,
-                )
-                if prior_comparison is None:
-                    raise ValueError(
-                        "paired champion evaluation requires prior comparison"
-                    )
-                expected_revision_id = (
-                    prior_comparison.champion_after_revision_id
-                )
+        expected_revision_id = self._formal_scope_revision_id(state, evaluation.scope)
         if (
             evaluation.scope.run_id != run_id
             or evaluation.scope.candidate_revision_id != expected_revision_id
@@ -2850,7 +2905,9 @@ class EvolutionDirector:
             else None
         )
         if completion_entry is None and sample_results is None and (
-            self._candidate_has_unfinished_sample_results(state, key_candidate)
+            self._candidate_has_unfinished_sample_results(
+                state, key_candidate, execution_scope_digest=evaluation.scope.scope_key
+            )
         ):
             raise ValueError(
                 "formal evaluation with an active sample checkpoint must be "
@@ -2893,6 +2950,11 @@ class EvolutionDirector:
             if existing.to_dict() != comparison.to_dict():
                 raise ValueError("formal batch already has a different comparison")
             return existing
+        paired_execution_qualification_required(
+            state.task_manifest.metadata,
+            comparison.paired_execution_qualification,
+            new_decision=True,
+        )
         batch = state.formal_batch_for(
             comparison.candidate_id,
             comparison.batch_index,
@@ -2979,14 +3041,7 @@ class EvolutionDirector:
             comparison,
             champion_evaluation,
             challenger_evaluation,
-            minimum_score_delta=(
-                POSITIVE_DELTA_MINIMUM_SCORE_DELTA
-                if uses_positive_delta_search_protocol(state.task_manifest)
-                else LOCAL_MINIMUM_SCORE_DELTA
-            ),
-            cell_regression_blocks=not uses_positive_delta_search_protocol(
-                state.task_manifest
-            ),
+            **local_challenger_policy(state.task_manifest.metadata),
         )
         self.ledger.append(
             run_id,
@@ -3674,7 +3729,8 @@ class EvolutionDirector:
         )
         if completion_entry is None and sample_results is None and (
             self._candidate_has_unfinished_sample_results(
-                state, evaluation.scope.candidate_id
+                state, evaluation.scope.candidate_id,
+                execution_scope_digest=evaluation.scope.scope_key,
             )
         ):
             raise ValueError(
@@ -3706,6 +3762,16 @@ class EvolutionDirector:
             if existing.to_dict() != comparison.to_dict():
                 raise ValueError("generation already has a different comparison")
             return existing
+        paired_execution_qualification_required(
+            state.task_manifest.metadata,
+            comparison.gate_results.get("paired_execution_qualification"),
+            new_decision=True,
+        )
+        from .finalist_review import finalist_review_qualification_required
+        finalist_review_qualification_required(
+            state.task_manifest.metadata,
+            comparison.gate_results.get("finalist_review_qualification"), new_decision=True,
+        )
         holdout = state.generation_holdout_for(comparison.generation)
         if holdout is None:
             raise ValueError("generation comparison holdout is missing")
@@ -3724,6 +3790,10 @@ class EvolutionDirector:
             persisted_evaluations={
                 arm: item for arm, item in persisted.items() if item is not None
             },
+            persisted_judgments=(
+                {item.candidate_id: item for item in state.evaluations}
+                if comparison.gate_results.get("finalist_review_qualification") is not None else None
+            ),
         )
         self.ledger.append(
             run_id,
@@ -3946,6 +4016,18 @@ class EvolutionDirector:
                     "evaluation_digest": digest(evaluation.to_dict()),
                 }
             )
+            artifact_binding = state.artifact_revision_binding(artifact.artifact_id)
+            if artifact_binding is not None:
+                actual_binding = _effective_artifact_binding(state, artifact)
+                if canonical_json(artifact_binding) != canonical_json(actual_binding):
+                    raise ValueError("evaluation artifact revision identity mismatch")
+                validate_evaluation_artifact_binding(evaluation, artifact, actual_binding)
+                evaluation_payload.pop("identity_binding")
+                evaluation_payload.update({
+                    "schema_version": EVALUATION_EVENT_V2,
+                    "proposal_identity_binding": dict(binding),
+                    "artifact_revision_binding": actual_binding,
+                })
         evaluation_entry = (
             "EvaluationRecorded",
             evaluation_payload,
@@ -3959,7 +4041,8 @@ class EvolutionDirector:
         )
         if sample_results is None:
             if self._candidate_has_unfinished_sample_results(
-                state, evaluation.candidate_id
+                state, evaluation.candidate_id,
+                execution_scope_digest=evaluation.evaluation_scope_digest,
             ):
                 raise ValueError(
                     "evaluation with an active sample result revision must be sealed atomically"
@@ -4163,12 +4246,22 @@ class EvolutionDirector:
     def _candidate_has_unfinished_sample_results(
         state: RunState,
         candidate_id: str,
+        *,
+        execution_scope_digest: str | None = None,
     ) -> bool:
         starts = [
             event
             for event in state.events
             if event.kind == "EvaluationSampleResultsStarted"
             and event.payload.get("candidate_id") == candidate_id
+            and (
+                execution_scope_digest is None
+                or (
+                    isinstance(event.payload.get("checkpoint"), Mapping)
+                    and event.payload["checkpoint"].get("execution_scope_digest")
+                    == execution_scope_digest
+                )
+            )
         ]
         if not starts:
             return False
@@ -4187,7 +4280,7 @@ class EvolutionDirector:
         candidate_id: str,
         revision: str,
     ) -> tuple[Event, tuple[Event, ...], Event | None]:
-        """Resolve one ledger-backed revision and fence every superseded writer."""
+        """Fence replacements within one frozen scope, including its replica."""
 
         candidate = state.candidate(candidate_id)
         starts = [
@@ -4204,10 +4297,20 @@ class EvolutionDirector:
         if len(matching_starts) != 1:
             raise ValueError("sample result revision has multiple start events")
         start = matching_starts[0]
+        checkpoint = start.payload.get("checkpoint")
+        if (
+            isinstance(checkpoint, Mapping)
+            and checkpoint.get("schema_version") == _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION
+        ):
+            starts = [
+                event for event in starts
+                if isinstance(event.payload.get("checkpoint"), Mapping)
+                and event.payload["checkpoint"].get("execution_scope_digest")
+                == checkpoint["execution_scope_digest"]
+            ]
         if starts[-1].event_id != start.event_id:
             raise ValueError("sample result revision has been superseded")
         start_generation = start.payload.get("generation")
-        checkpoint = start.payload.get("checkpoint")
         generation_matches = start_generation == candidate.generation or (
             isinstance(start_generation, int)
             and not isinstance(start_generation, bool)
@@ -4273,6 +4376,8 @@ class EvolutionDirector:
             "evaluation_id",
             "run_id",
             "candidate_id",
+            "candidate_revision_id",
+            "evaluation_scope",
             "score",
             "partition",
             "evaluator_digest",
@@ -5061,14 +5166,6 @@ class EvolutionDirector:
     ) -> None:
         if not isinstance(revision, str) or not revision.strip():
             raise ValueError("model usage revision must be non-empty text")
-        starts = [
-            event
-            for event in state.events
-            if event.kind == "EvaluationSampleResultsStarted"
-            and event.payload.get("candidate_id") == candidate_id
-        ]
-        if not starts or starts[-1].payload.get("revision") != revision:
-            raise ValueError("model usage revision is not the current checkpoint")
         start, _batches, completed = self._sample_result_revision_events(
             state, candidate_id, revision
         )
@@ -5387,6 +5484,14 @@ class EvolutionDirector:
                             and event.kind == "EvaluationProgressRecorded"
                             and event.payload.get("candidate_id") == candidate_id
                             and event.payload.get("role") == "planner"
+                            and (
+                                event.payload.get("revision") == revision
+                                or (
+                                    not is_scoped
+                                    and event.payload.get("schema_version")
+                                    != "ecologyrsi-dsh.evaluation-progress/3"
+                                )
+                            )
                         ),
                         None,
                     )
@@ -5494,6 +5599,7 @@ class EvolutionDirector:
             "evaluation_phase",
             "formal_batch_index",
             "holdout_arm",
+            "inference_replica",
             "cohort_digest",
             "execution_scope_digest",
             "sample_cohort_digest",
@@ -5556,6 +5662,13 @@ class EvolutionDirector:
                 ) from exc
             formal_batch_index = checkpoint.get("formal_batch_index")
             holdout_arm = checkpoint.get("holdout_arm")
+            if "inference_replica" in checkpoint:
+                replica = checkpoint["inference_replica"]
+                if type(replica) is not int or replica not in (0, 1):
+                    raise ValueError("sample checkpoint inference_replica must be 0 or 1")
+                if replica and phase is not EvaluationPhase.HOLDOUT:
+                    raise ValueError("inference replicas require a holdout checkpoint")
+                projected["inference_replica"] = replica
             if formal_batch_index is not None and (
                 isinstance(formal_batch_index, bool)
                 or not isinstance(formal_batch_index, int)
@@ -5609,6 +5722,34 @@ class EvolutionDirector:
         }
         if any(checkpoint.get(name) != value for name, value in expected.items()):
             raise ValueError("sample checkpoint does not match EvaluationScope")
+        if checkpoint.get("inference_replica", 0) != scope.inference_replica:
+            raise ValueError("sample checkpoint inference replica does not match EvaluationScope")
+
+    @staticmethod
+    def _formal_scope_revision_id(state: RunState, scope: EvaluationScope) -> str:
+        """Resolve the frozen arm identically for checkpoints and final scores."""
+        batch = state.formal_batch_for(scope.candidate_id, scope.batch_index)
+        if batch is None:
+            raise ValueError("formal batch has not started")
+        schedule = OptimizationSchedule.from_dict(
+            state.task_manifest.metadata["optimization_schedule"]
+        )
+        arm = scope.formal_batch_arm
+        if schedule.local_evaluation_mode != PAIRED_LOCAL_EVALUATION_MODE:
+            if arm is not None:
+                raise ValueError("prequential formal evaluation cannot have an arm")
+            return batch.revision_id
+        if arm is None:
+            raise ValueError("paired formal batch evaluation requires an arm")
+        if scope.batch_index == 0:
+            if arm is not FormalBatchArm.CHAMPION:
+                raise ValueError("paired batch 0 only accepts the champion arm")
+        elif arm is FormalBatchArm.CHAMPION:
+            prior = state.batch_comparison_for(scope.candidate_id, scope.batch_index - 1)
+            if prior is None:
+                raise ValueError("paired champion evaluation requires prior comparison")
+            return prior.champion_after_revision_id
+        return batch.revision_id
 
     @staticmethod
     def _validate_evaluation_scope(
@@ -5642,9 +5783,10 @@ class EvolutionDirector:
         elif scope.phase is EvaluationPhase.FORMAL_BATCH:
             assert scope.batch_index is not None
             batch = state.formal_batch_for(candidate.candidate_id, scope.batch_index)
+            expected_revision_id = EvolutionDirector._formal_scope_revision_id(state, scope)
             if (
                 batch is None
-                or batch.revision_id != scope.candidate_revision_id
+                or expected_revision_id != scope.candidate_revision_id
                 or batch.cohort_digest != scope.cohort_digest
                 or batch.origin_count != scope.origin_count
             ):
@@ -5851,7 +5993,12 @@ class EvolutionDirector:
         artifact = state.artifact_for(candidate_id)
         if artifact is None:
             raise ValueError("formal stage requires a frozen artifact")
-        genome = state.persisted_genome_for(candidate_id)
+        actual_binding = (
+            _effective_artifact_binding(state, artifact)
+            if artifact.candidate_revision_id is not None else None
+        )
+        genome_digest = (actual_binding["genome_digest"] if actual_binding is not None
+                         else state.persisted_genome_for(candidate_id).genome_digest)
         metadata = state.task_manifest.metadata
         dataset_digest = str(metadata.get("dataset_digest") or "")
         split_digest = str(metadata.get("split_manifest_digest") or "")
@@ -5863,7 +6010,33 @@ class EvolutionDirector:
             stage=stage,
             stage_partition_digest=partition_digest,
         )
-        token = ScientificExposureRegistry(self.ledger).reserve_formal_stage(
+        exposure_registry = ScientificExposureRegistry(self.ledger)
+        prior_exposure = exposure_registry.formal_exposure(raw_key)
+        prior_frozen = next((event for event in state.events
+                             if event.kind == "FormalStageFrozen"
+                             and event.payload.get("stage") == stage), None)
+        if (prior_exposure is not None
+                and prior_exposure["run_id"] == run_id
+                and prior_exposure["candidate_id"] == candidate_id
+                and prior_exposure["artifact_digest"] == artifact.digest
+                and prior_exposure["genome_digest"] != genome_digest):
+            raise ValueError(
+                "legacy_formal_revision_conflict: the existing formal token freezes "
+                "a different genome from the artifact's actual revision; preserve "
+                "the historical evidence and do not reopen this formal holdout"
+            )
+        if prior_frozen is not None:
+            requested_identity = {
+                "stage": stage, "candidate_id": candidate_id,
+                "artifact_digest": artifact.digest, "genome_digest": genome_digest,
+                "analysis_plan_digest": analysis_plan_digest,
+                "objective_family_digest": objective_family_digest,
+                "partition_digest": partition_digest, "holdout_exposure_key": raw_key,
+            }
+            if any(prior_frozen.payload.get(key) != value
+                   for key, value in requested_identity.items()):
+                raise ValueError("formal stage is already frozen with a different identity")
+        token = exposure_registry.reserve_formal_stage(
             raw_holdout_key=raw_key,
             objective_family_digest=objective_family_digest,
             plan_digest=analysis_plan_digest,
@@ -5872,9 +6045,23 @@ class EvolutionDirector:
             stage=stage,
             candidate_id=candidate_id,
             artifact_digest=artifact.digest,
-            genome_digest=genome.genome_digest,
+            genome_digest=genome_digest,
             partition_digest=partition_digest,
         )
+        if prior_frozen is not None and prior_frozen.payload.get("schema_version") is None:
+            expected = {
+                "stage": stage, "candidate_id": candidate_id,
+                "artifact_digest": artifact.digest, "genome_digest": genome_digest,
+                "analysis_plan_digest": analysis_plan_digest,
+                "objective_family_digest": objective_family_digest,
+                "partition_digest": partition_digest,
+                "holdout_exposure_key": raw_key, "token_digest": token.token_digest,
+            }
+            if canonical_json(prior_frozen.payload) != canonical_json(expected):
+                raise ValueError("legacy formal freeze differs from requested token")
+            # A correct historical R0 token remains a historical v1 record.
+            # Returning it never upgrades that record to a v2 identity audit.
+            return token
         self.ledger.append(
             run_id,
             "FormalStageFrozen",
@@ -5882,12 +6069,17 @@ class EvolutionDirector:
                 "stage": stage,
                 "candidate_id": candidate_id,
                 "artifact_digest": artifact.digest,
-                "genome_digest": genome.genome_digest,
+                "genome_digest": genome_digest,
                 "analysis_plan_digest": analysis_plan_digest,
                 "objective_family_digest": objective_family_digest,
                 "partition_digest": partition_digest,
                 "holdout_exposure_key": raw_key,
                 "token_digest": token.token_digest,
+                **({
+                    "schema_version": FORMAL_STAGE_V2,
+                    "candidate_revision_id": artifact.candidate_revision_id,
+                    "artifact_revision_binding": actual_binding,
+                } if actual_binding is not None else {}),
             },
             event_id=f"{run_id}:formal:{stage}:frozen",
         )
@@ -5955,20 +6147,55 @@ class EvolutionDirector:
         if latest_seq <= 0:
             raise KeyError(f"unknown run: {run_id}")
         with self._state_cache_lock:
-            cached = self._state_cache.get(run_id)
-            if cached is not None and cached[0] == latest_seq:
+            needs_checkpoint = run_id not in self._state_cache
+        if needs_checkpoint:
+            restored = self._projection_checkpoints.load(run_id, latest_seq)
+            if restored is not None:
+                with self._state_cache_lock:
+                    if run_id not in self._state_cache:
+                        self._state_cache[run_id] = (restored.events[-1].seq, restored.snapshot())
+                        self._state_reducers[run_id] = restored
+        while True:
+            with self._state_cache_lock:
+                cached = self._state_cache.get(run_id)
+                if cached is not None and cached[0] == latest_seq:
+                    self._state_cache.move_to_end(run_id)
+                    return cached[1]
+                base_seq = cached[0] if cached is not None and cached[0] < latest_seq else 0
+            # Never hold the projection lock while acquiring the ledger lock:
+            # commands may enter state() from inside a ledger transaction.
+            events = self.ledger.events(run_id, after_seq=base_seq)
+            if not events and cached is None:
+                raise KeyError(f"unknown run: {run_id}")
+            with self._state_cache_lock:
+                if self._state_cache.get(run_id) is not cached:
+                    # Another reader advanced the cache while this tail loaded.
+                    continue
+                try:
+                    reducer = self._state_reducers.get(run_id) if base_seq else None
+                    if events and events[0].kind == "RunCreated":
+                        # Purge/recreate starts a new incarnation even when the ID is reused.
+                        reducer = None
+                    if reducer is None:
+                        reducer = RunStateReducer(events[0])
+                        reducer.apply(events[1:])
+                    else:
+                        reducer.apply(events)
+                    state = reducer.snapshot()
+                except Exception:
+                    self._state_cache.pop(run_id, None)
+                    self._state_reducers.pop(run_id, None)
+                    raise
+                actual_seq = reducer.events[-1].seq
+                self._state_cache[run_id] = (actual_seq, state)
+                self._state_reducers[run_id] = reducer
                 self._state_cache.move_to_end(run_id)
-                return cached[1]
-        events = self.ledger.events(run_id)
-        if not events:
-            raise KeyError(f"unknown run: {run_id}")
-        state = project_run_state(events)
-        with self._state_cache_lock:
-            self._state_cache[run_id] = (latest_seq, state)
-            self._state_cache.move_to_end(run_id)
-            while len(self._state_cache) > _STATE_CACHE_SIZE:
-                self._state_cache.popitem(last=False)
-        return state
+                while len(self._state_cache) > _STATE_CACHE_SIZE:
+                    evicted, _ = self._state_cache.popitem(last=False)
+                    self._state_reducers.pop(evicted, None)
+                checkpoint = self._projection_checkpoints.capture(reducer)
+            self._projection_checkpoints.save(checkpoint)
+            return state
 
     def run_status(self, run_id: str) -> RunStatus:
         """Read one run's durable lifecycle status without replaying its stream."""

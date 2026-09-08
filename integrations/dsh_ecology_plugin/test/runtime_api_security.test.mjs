@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { Readable, Writable } from "node:stream";
+import { createServer } from "node:http";
+import { once } from "node:events";
 import test from "node:test";
 
 import { registerRuntimeRoutes } from "../lib/runtime/routes.js";
+import { structuredPhaseError } from "../lib/runtime/structured-stage-errors.js";
 
 class Response extends Writable {
   constructor() { super(); this.chunks = []; this.statusCode = null; this.headers = {}; }
@@ -27,10 +30,10 @@ function request(path, { address = "127.0.0.1", token = "secret", body = {}, hea
 
 function route(controller = {
   async startRun(body) { return { accepted: true, run_state_revision: body.run_state_revision }; },
-}) {
+}, maxBodyBytes = 128) {
   let registered;
   const ctx = { webServer: { register(value) { registered = value; return () => {}; } } };
-  registerRuntimeRoutes(ctx, controller, { runtimeToken: "secret", maxBodyBytes: 128 });
+  registerRuntimeRoutes(ctx, controller, { runtimeToken: "secret", maxBodyBytes });
   return registered;
 }
 
@@ -83,6 +86,10 @@ test("runtime API distinguishes bounded sample failure from runtime outage", asy
   };
   for (const code of [
     "structured_child_model_error",
+    "structured_child_tool_protocol_error",
+    "structured_child_output_budget_exhausted",
+    "structured_child_output_schema_invalid",
+    "structured_result_missing",
   ]) {
     const res = new Response();
     await route({
@@ -122,4 +129,65 @@ test("runtime API distinguishes bounded sample failure from runtime outage", asy
     error_code: "dsh_native_runtime_unavailable",
   });
   assert.doesNotMatch(Buffer.concat(res.chunks).toString(), /private runtime detail/);
+});
+
+test("real HTTP structured POST preserves schema failure code without exposing private causes", async () => {
+  let knownSchemaFailure = true;
+  let calls = 0;
+  const registered = route({
+    async runStage(body) {
+      calls += 1;
+      assert.equal(body.stage, "generation.research-synthesis");
+      const cause = new Error("private_api_key=fake-private-value; private schema details");
+      if (knownSchemaFailure) throw structuredPhaseError("output_schema", cause);
+      throw cause;
+    },
+  }, 4096);
+  const server = createServer(registered.handler);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const body = {
+      run_id: "run:schema-http", run_state_revision: 2, stage_attempt: 1,
+      ledger_expected_revision: 3, idempotency_key: "schema-http",
+      stage: "generation.research-synthesis", admission_id: "admission-schema-http", request: {},
+    };
+    const url = `http://127.0.0.1:${server.address().port}/api/ecology-agent-runtime/v1/runs/run%3Aschema-http/stages`;
+    for (const expectedStatus of [422, 502]) {
+      const response = await fetch(url, { method: "POST",
+        headers: { authorization: "Bearer secret", "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const text = await response.text();
+      assert.equal(response.status, expectedStatus);
+      assert.deepEqual(JSON.parse(text), knownSchemaFailure
+        ? { error: "runtime_stage_failed", error_code: "structured_child_output_schema_invalid" }
+        : { error: "runtime_controller_failed", error_code: "dsh_native_runtime_unavailable" });
+      assert.doesNotMatch(text, /private|fake-private-value|schema details|secret/);
+      knownSchemaFailure = false;
+    }
+    assert.equal(calls, 2);
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test("model canary route reuses loopback browser and bearer boundaries", async () => {
+  let called = 0;
+  const controller = { async runCanary(body) { called += 1; return { passed: true, scope: "tool_and_schema_transport_only", identity: body.identity }; } };
+  for (const options of [{address:"10.0.0.2"},{token:"wrong"},{headers:{origin:"https://attacker.example"}},{headers:{"sec-fetch-site":"cross-site"}}]) {
+    const res=new Response();await route(controller).handler(request("/api/ecology-agent-runtime/v1/canaries",options),res);
+    assert.ok([401,403].includes(res.statusCode));
+  }
+  assert.equal(called,0);
+  const res=new Response();await route(controller).handler(request("/api/ecology-agent-runtime/v1/canaries",{body:{identity:{role:"researcher"}}}),res);
+  assert.equal(res.statusCode,200);assert.equal(called,1);
+});
+
+test("canary API failures never echo arbitrary runtime diagnostics",async()=>{
+  const res=new Response();await route({async runCanary(){const e=new Error("secret credential");e.code="secret_token";throw e;}})
+    .handler(request("/api/ecology-agent-runtime/v1/canaries"),res);
+  assert.equal(res.statusCode,422);assert.equal(res.json().error_code,"model_canary_failed");
+  assert.doesNotMatch(JSON.stringify(res.json()),/secret/);
 });

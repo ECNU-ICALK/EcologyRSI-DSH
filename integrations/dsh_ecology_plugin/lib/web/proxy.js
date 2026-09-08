@@ -1,6 +1,9 @@
 import { request as httpRequest } from "node:http";
 
 export const API_BASE = "/api/ecology-evolution";
+// Two sequential 120-second model-contract canaries plus bounded local receipt
+// overhead. Ordinary API requests retain the configured short idle timeout.
+export const MODEL_PREFLIGHT_PROXY_TIMEOUT_MS = 250_000;
 
 const HOP = new Set([
   "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -82,7 +85,11 @@ export function registerApiProxy(ctx, config) {
           upstreamResponse.once("end", resolveRequest);
           upstreamResponse.once("close", resolveRequest);
         });
-        upstream.setTimeout(config.totalTimeoutMs, () => upstream.destroy(new Error("timeout")));
+        const timeoutMs = req.method === "POST"
+          && target.pathname === `${API_BASE}/model-preflight`
+          ? MODEL_PREFLIGHT_PROXY_TIMEOUT_MS
+          : config.totalTimeoutMs;
+        upstream.setTimeout(timeoutMs, () => upstream.destroy(new Error("timeout")));
         upstream.once("error", () => {
           if (!res.headersSent) errorResponse(res, 502, "生态模型进化服务不可用");
           else res.destroy();

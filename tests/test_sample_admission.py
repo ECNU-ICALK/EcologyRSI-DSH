@@ -4,11 +4,83 @@ import threading
 import time
 import unittest
 
-from ecologyrsi_dsh.api.sample_admission import RunSampleAdmission
+from ecologyrsi_dsh.execution.sample_admission import RunSampleAdmission
 from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
 
 
 class RunSampleAdmissionTests(unittest.TestCase):
+    def test_fatal_error_cancels_siblings_before_their_join_and_preserves_cause(self):
+        cancelled = threading.Event()
+        started = threading.Event()
+        callbacks, errors = [], []
+        failure = DshNativeRuntimeUnavailableError(
+            error_code="structured_child_tool_protocol_error", status_code=422)
+
+        def abort(run_id):
+            # Snapshot acquires the same lock; this must run outside it.
+            callbacks.append((run_id, admission.snapshot(run_id)["active"]))
+            cancelled.set()
+
+        admission = RunSampleAdmission(on_execution_failure=abort)
+
+        def sibling():
+            try:
+                with admission.admit("run:fatal", 2):
+                    started.set()
+                    if not cancelled.wait(3):
+                        raise AssertionError("fatal failure did not abort sibling")
+                    raise RuntimeError("remote child aborted")
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=sibling)
+        worker.start()
+        self.assertTrue(started.wait(3))
+        with self.assertRaises(DshNativeRuntimeUnavailableError):
+            with admission.admit("run:fatal", 2):
+                raise failure
+        worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(errors, [failure])
+        self.assertEqual(admission.snapshot("run:fatal")["active"], 0)
+
+    def test_frozen_execution_failure_closes_waiting_origins_across_candidates(self):
+        admission = RunSampleAdmission()
+        errors, entered = [], []
+        failure = DshNativeRuntimeUnavailableError(
+            error_code="structured_child_tool_protocol_error", status_code=422)
+
+        def waiting_origin():
+            try:
+                with admission.admit("run:fatal", 1):
+                    entered.append(True)
+            except DshNativeRuntimeUnavailableError as exc:
+                errors.append(exc.error_code)
+
+        with self.assertRaises(DshNativeRuntimeUnavailableError):
+            with admission.admit("run:fatal", 1):
+                workers = [threading.Thread(target=waiting_origin) for _ in range(3)]
+                for worker in workers:
+                    worker.start()
+                deadline = time.monotonic() + 3
+                while admission.snapshot("run:fatal")["waiting"] != 3 and time.monotonic() < deadline:
+                    time.sleep(.005)
+                self.assertEqual(admission.snapshot("run:fatal")["waiting"], 3)
+                raise failure
+        for worker in workers:
+            worker.join(3)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(entered, [])
+        self.assertEqual(errors, [failure.error_code] * 3)
+        with self.assertRaises(DshNativeRuntimeUnavailableError):
+            with admission.admit("run:fatal", 1):
+                self.fail("later origins cannot repeat an invalid frozen configuration")
+        self.assertEqual(admission.snapshot("run:fatal")["active"], 0)
+        self.assertEqual(admission.snapshot("run:fatal")["waiting"], 0)
+        with admission.admit("run:new", 1):
+            pass
+
     def _exercise_limit(
         self,
         *,

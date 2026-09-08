@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,7 @@ class DatasetRegistry:
         self._descriptors = self._load_catalog(self.catalog_path)
         self._descriptors[_TOY_DATASET_ID] = _toy_descriptor()
         self._series_cache: dict[str, CanonicalSeries] = {}
+        self._series_locks = {key: threading.Lock() for key in self._descriptors}
         self._split_cache: dict[str, SplitManifest] = {}
 
     def catalog(self) -> dict[str, Any]:
@@ -328,6 +330,7 @@ class DatasetRegistry:
         *,
         expected_dataset_digest: str | None = None,
         expected_split_manifest_digest: str | None = None,
+        expected_data_protocol_digest: str | None = None,
     ) -> dict[str, Any]:
         normalized_partition = str(partition).strip().casefold().replace("-", "_")
         if normalized_partition in _RESTRICTED_PARTITIONS:
@@ -339,11 +342,15 @@ class DatasetRegistry:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise ValueError("limit must be an integer between 1 and 100")
 
-        series = self.series(
+        reader = self.selection_view if expected_data_protocol_digest is not None else self.series
+        protocol_args = ({"expected_data_protocol_digest": expected_data_protocol_digest}
+                         if expected_data_protocol_digest is not None else {})
+        series = reader(
             dataset_id,
             episode_id,
             expected_dataset_digest=expected_dataset_digest,
             expected_split_manifest_digest=expected_split_manifest_digest,
+            **protocol_args,
         )
         selected = series.partitions[normalized_partition]
         start = min(selected.start + offset, selected.end)
@@ -536,28 +543,31 @@ class DatasetRegistry:
         }
 
     def _load_series(self, descriptor: DatasetDescriptor) -> CanonicalSeries:
-        cached = self._series_cache.get(descriptor.dataset_id)
-        if cached is not None:
-            return cached
-        readiness = self._readiness(descriptor)
-        if not descriptor.runnable:
-            raise ValueError(f"dataset is catalog-only and cannot run: {descriptor.dataset_id}")
-        if not readiness["ready"]:
-            raise FileNotFoundError(
-                f"dataset is not ready: {descriptor.dataset_id}; missing {', '.join(readiness['missing_globs'])}"
-            )
-        if descriptor.dataset_id == _TOY_DATASET_ID:
-            loaded = _toy_series()
-        elif descriptor.adapter_id == "greenhouse_timeseries":
-            loaded = GreenhouseDatasetAdapter(
-                descriptor.dataset_id,
-                descriptor.domain_id,
-                self._dataset_dir(descriptor),
-            ).load()
-        else:  # pragma: no cover - runnable descriptors are currently explicit
-            raise ValueError(f"unsupported dataset adapter: {descriptor.adapter_id}")
-        self._series_cache[descriptor.dataset_id] = loaded
-        return loaded
+        # Capacity and sample requests often arrive together on a cold host.
+        # Parse each dataset once; other datasets can still load independently.
+        with self._series_locks[descriptor.dataset_id]:
+            cached = self._series_cache.get(descriptor.dataset_id)
+            if cached is not None:
+                return cached
+            readiness = self._readiness(descriptor)
+            if not descriptor.runnable:
+                raise ValueError(f"dataset is catalog-only and cannot run: {descriptor.dataset_id}")
+            if not readiness["ready"]:
+                raise FileNotFoundError(
+                    f"dataset is not ready: {descriptor.dataset_id}; missing {', '.join(readiness['missing_globs'])}"
+                )
+            if descriptor.dataset_id == _TOY_DATASET_ID:
+                loaded = _toy_series()
+            elif descriptor.adapter_id == "greenhouse_timeseries":
+                loaded = GreenhouseDatasetAdapter(
+                    descriptor.dataset_id,
+                    descriptor.domain_id,
+                    self._dataset_dir(descriptor),
+                ).load()
+            else:  # pragma: no cover - runnable descriptors are currently explicit
+                raise ValueError(f"unsupported dataset adapter: {descriptor.adapter_id}")
+            self._series_cache[descriptor.dataset_id] = loaded
+            return loaded
 
     def _split_manifest(self, descriptor: DatasetDescriptor, series: CanonicalSeries) -> SplitManifest:
         cached = self._split_cache.get(descriptor.dataset_id)

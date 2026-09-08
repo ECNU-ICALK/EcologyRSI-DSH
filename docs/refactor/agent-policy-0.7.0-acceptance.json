@@ -1,0 +1,288 @@
+{
+  "version": "0.7.0",
+  "date": "2026-09-07",
+  "scope": "engineering acceptance; scientific certification requires a complete independent holdout campaign",
+  "native_sample_protocol": {
+    "package_version": "0.7.0",
+    "model": "pjlab/glm-5.2",
+    "dataset": "agc_cucumber_2018:AiCU",
+    "probe_protocol_passed": true,
+    "independent_inference_replicas": 2,
+    "independent_data_origins": 1,
+    "prediction_cells": 18,
+    "wall_seconds": 342.83583041699603,
+    "tool_calls": 12,
+    "scientific_certification": false,
+    "scope": "real native sample planning, numerical tools and independent-session criticism; no full holdout campaign",
+    "targets": [
+      {
+        "target": "air_temperature",
+        "unit": "degC",
+        "replicas": [
+          {
+            "replica": 0,
+            "agent_mae": 0.786666666852927,
+            "persistence_mae": 1.0833333340783884
+          },
+          {
+            "replica": 1,
+            "agent_mae": 0.843333333519593,
+            "persistence_mae": 1.0833333340783884
+          }
+        ]
+      },
+      {
+        "target": "relative_humidity",
+        "unit": "%",
+        "replicas": [
+          {
+            "replica": 0,
+            "agent_mae": 2.0472222104875564,
+            "persistence_mae": 3.694444432523516
+          },
+          {
+            "replica": 1,
+            "agent_mae": 1.7938888771542214,
+            "persistence_mae": 3.694444432523516
+          }
+        ]
+      },
+      {
+        "target": "co2_concentration",
+        "unit": "ppm",
+        "replicas": [
+          {
+            "replica": 0,
+            "agent_mae": 27.944444463070948,
+            "persistence_mae": 38.44444449194191
+          },
+          {
+            "replica": 1,
+            "agent_mae": 24.23111112973758,
+            "persistence_mae": 38.44444449194191
+          }
+        ]
+      }
+    ],
+    "tool_evidence": [
+      {
+        "replica": 0,
+        "calls": [
+          {
+            "tool_id": "candidate-model",
+            "call_id": "call-candidate-default",
+            "parameters": {
+              "history_steps": 6,
+              "ridge_alpha": 0.1,
+              "residual_scale": 0.5
+            },
+            "status": "completed",
+            "elapsed_ms": 308.797
+          },
+          {
+            "tool_id": "persistence",
+            "call_id": "call-persistence-default",
+            "parameters": {},
+            "status": "completed",
+            "elapsed_ms": 0.02
+          },
+          {
+            "tool_id": "greenhouse-exogenous-ridge@1",
+            "call_id": "call-exo-ridge-h6",
+            "parameters": {
+              "history_steps": 6,
+              "ridge_alpha": 0.1,
+              "residual_scale": 0.5
+            },
+            "status": "completed",
+            "elapsed_ms": 7.688
+          },
+          {
+            "tool_id": "greenhouse-horizon-targetwise-ridge@1",
+            "call_id": "call-ht-ridge-h6",
+            "parameters": {
+              "history_steps": 6,
+              "ridge_alpha": 0.1,
+              "air_temperature_1h_residual_scale": 0.5,
+              "air_temperature_6h_residual_scale": 0.5,
+              "air_temperature_24h_residual_scale": 0.3,
+              "relative_humidity_1h_residual_scale": 0.5,
+              "relative_humidity_6h_residual_scale": 0.4,
+              "relative_humidity_24h_residual_scale": 0.3,
+              "co2_concentration_1h_residual_scale": 0.5,
+              "co2_concentration_6h_residual_scale": 0.4,
+              "co2_concentration_24h_residual_scale": 0.3
+            },
+            "status": "completed",
+            "elapsed_ms": 262.69
+          },
+          {
+            "tool_id": "greenhouse-baseline-aligned-ridge@1",
+            "call_id": "call-baseline-aligned-h6",
+            "parameters": {
+              "history_steps": 6,
+              "ridge_alpha": 0.1,
+              "residual_scale_1h": 0.5,
+              "residual_scale_6h": 0.4,
+              "residual_scale_24h": 0.25
+            },
+            "status": "completed",
+            "elapsed_ms": 290.088
+          },
+          {
+            "tool_id": "greenhouse-targetwise-ridge@1",
+            "call_id": "call-targetwise-h8",
+            "parameters": {
+              "history_steps": 8,
+              "ridge_alpha": 0.05,
+              "air_temperature_residual_scale": 0.5,
+              "relative_humidity_residual_scale": 0.5,
+              "co2_concentration_residual_scale": 0.5
+            },
+            "status": "completed",
+            "elapsed_ms": 282.2
+          }
+        ]
+      },
+      {
+        "replica": 1,
+        "calls": [
+          {
+            "tool_id": "candidate-model",
+            "call_id": "call-candidate-01",
+            "parameters": {
+              "history_steps": 6,
+              "ridge_alpha": 0.1,
+              "residual_scale": 0.5
+            },
+            "status": "completed",
+            "elapsed_ms": 7.741
+          },
+          {
+            "tool_id": "persistence",
+            "call_id": "call-persistence-01",
+            "parameters": {},
+            "status": "completed",
+            "elapsed_ms": 0.015
+          },
+          {
+            "tool_id": "greenhouse-exogenous-ridge@1",
+            "call_id": "call-exo-ridge-01",
+            "parameters": {
+              "history_steps": 6,
+              "ridge_alpha": 0.1,
+              "residual_scale": 0.5
+            },
+            "status": "completed",
+            "elapsed_ms": 7.804
+          },
+          {
+            "tool_id": "greenhouse-horizon-targetwise-ridge@1",
+            "call_id": "call-ht-ridge-01",
+            "parameters": {
+              "history_steps": 8,
+              "ridge_alpha": 0.1,
+              "air_temperature_1h_residual_scale": 0.3,
+              "air_temperature_6h_residual_scale": 0.4,
+              "air_temperature_24h_residual_scale": 0.5,
+              "relative_humidity_1h_residual_scale": 0.3,
+              "relative_humidity_6h_residual_scale": 0.4,
+              "relative_humidity_24h_residual_scale": 0.5,
+              "co2_concentration_1h_residual_scale": 0.4,
+              "co2_concentration_6h_residual_scale": 0.5,
+              "co2_concentration_24h_residual_scale": 0.6
+            },
+            "status": "completed",
+            "elapsed_ms": 283.071
+          },
+          {
+            "tool_id": "greenhouse-targetwise-ridge@1",
+            "call_id": "call-targetwise-01",
+            "parameters": {
+              "history_steps": 8,
+              "ridge_alpha": 0.05,
+              "air_temperature_residual_scale": 0.4,
+              "relative_humidity_residual_scale": 0.4,
+              "co2_concentration_residual_scale": 0.5
+            },
+            "status": "completed",
+            "elapsed_ms": 8.528
+          },
+          {
+            "tool_id": "greenhouse-baseline-aligned-ridge@1",
+            "call_id": "call-baseline-aligned-01",
+            "parameters": {
+              "history_steps": 10,
+              "ridge_alpha": 0.1,
+              "residual_scale_1h": 0.3,
+              "residual_scale_6h": 0.4,
+              "residual_scale_24h": 0.5
+            },
+            "status": "completed",
+            "elapsed_ms": 356.125
+          }
+        ]
+      }
+    ]
+  },
+  "browser": {
+    "passed": true,
+    "normal_dsh_entry": true,
+    "request_interception": false,
+    "checks": [
+      "normal DSH sidebar -> production overlay -> same-origin proxy, no routing interception",
+      "real AGC training data displayed and paginated, 20 rows per page",
+      "create form ready: distinct configured policy/review routes, Agent chooses prediction tools",
+      "submitted normal form with real provider preflight",
+      "real run created: run:48d86c7b-24fa-4cdd-9493-2c3a844c5975",
+      "pause is durable and reflected in normal process page",
+      "resume accepted from normal UI",
+      "stop completed; cancelled run stays visible and no active campaign remains"
+    ],
+    "initial_load_ms": 542,
+    "preflight": {
+      "status": 200,
+      "passed": true
+    },
+    "create_status": 201,
+    "final_status": "cancelled",
+    "source": {
+      "frontend_source_verified": true,
+      "frontend_source_sha256": {
+        "app.js": "3e83b3dd013b2e060e4b1f045cc82cd860a74774625bc282c41493a3581a8c47",
+        "assets/js/catalog.js": "db6ffc99b66a8e2649ce796b174b1b00d69707ae33615cffbaa5fa0dc902b5de",
+        "assets/js/commands.js": "bb3f126c0765c8761bc4496db319c0b7687252bd8d6102a2ef7ca3c9498de853",
+        "assets/js/core.js": "fea71100e553713a98150edba957475242fe8c2dad404d0bf93e5f2d954720e0",
+        "assets/js/data.js": "0c41ebc66ef3897df3220d2227e370ce0f0b7cfdaec8da782da1dc813b0d00b8",
+        "assets/js/demo.js": "49bca99254fe30aea2c5b9a399eabd15fcc45e15cfc1987bbfd000685785228e",
+        "assets/js/host.js": "e408ba0a91418bdd0499d003ffa47bf4b2811a41df25672cce8561d5a29bcd06",
+        "assets/js/render_candidates.js": "97fee9d26d06897958ea5431f8adf06de50945e0c213f22225040ba03f661102",
+        "assets/js/render_collaboration.js": "656f072e96976d42f7a785166e55487711471927f4d5356c0ee37da8c4e9245d",
+        "assets/js/render_process.js": "082558a8a8eedbba9cde2a2cdb1417d4c1e6759cf851be10f9a3e46de1582b32",
+        "assets/js/render_shell.js": "98cd6c33a10602ab6098346dd0bc5b5c9709a171c4d75da42d48f1c302473b76",
+        "assets/js/render_training_trace.js": "49d06d98366567a0779ada01c334db48286e28a03bd1e8c7936fe5aca77153f9",
+        "assets/js/render_training.js": "6d5b3993b6c772595e940bcc99a6d8d7c64380aec7012f2846af0a5098878402",
+        "index.html": "3edf521a393d4410c21eef56b9bdf37a6fb307d9fb4852a65b27112c7922d7f8",
+        "styles.css": "b30424e2c6dd8ee9d7a16de01132cb88ce5d16059f0972327fe1e20532d0ae37"
+      }
+    }
+  },
+  "boundaries": [
+    "Sample canary uses one real causal origin, not a complete scientific campaign.",
+    "GLM planner and critic used independent sessions; the browser verified separate GLM and Kimi role routes.",
+    "Formal experience boundary, certification, policy loading and recovery are covered by automated regression.",
+    "The release is built from an isolated public source snapshot; the original working checkout is preserved."
+  ],
+  "automated_verification": {
+    "python_tests": 1499,
+    "python_test_modules": 117,
+    "python_skipped": 0,
+    "python_passed": true,
+    "node_frontend_and_dsh_tests": 229,
+    "node_passed": true,
+    "installed_wheel_integration_tests": 43,
+    "installed_wheel_passed": true,
+    "real_data_tests_included": 5,
+    "artifact_verification_command": "python scripts/verify_artifacts.py dist/0.7.0"
+  }
+}

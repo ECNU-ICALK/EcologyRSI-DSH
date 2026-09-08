@@ -146,8 +146,8 @@ class LedgerMigrationTests(unittest.TestCase):
             ledger = EventLedger(path)
             self.addCleanup(ledger.close)
 
-            self.assertEqual(SCHEMA_VERSION, 7)
-            self.assertEqual(ledger.schema_version, 7)
+            self.assertEqual(SCHEMA_VERSION, 8)
+            self.assertEqual(ledger.schema_version, 8)
             inspection = sqlite3.connect(path)
             try:
                 columns = inspection.execute(
@@ -238,7 +238,7 @@ class LedgerMigrationTests(unittest.TestCase):
             ledger = EventLedger(path)
             self.addCleanup(ledger.close)
 
-            self.assertEqual(ledger.schema_version, 7)
+            self.assertEqual(ledger.schema_version, 8)
             inspection = sqlite3.connect(path)
             try:
                 columns = inspection.execute(
@@ -668,31 +668,16 @@ class RecoveryAndLineageTests(unittest.TestCase):
 
         original_append = self.server.ledger.append
 
-        def crash_before_receipt(
-            event_run_id,
-            kind,
-            payload,
-            *,
-            event_id=None,
-            created_at=None,
-            expected_run_seq=None,
-        ):
-            if kind == "HumanInterventionApplied":
-                raise KeyboardInterrupt("simulated hard process exit")
-            return original_append(
-                event_run_id,
-                kind,
-                payload,
-                event_id=event_id,
-                created_at=created_at,
-                expected_run_seq=expected_run_seq,
-            )
+        def historical_partial_commit(event_run_id, entries, *, expected_run_seq=None):
+            # Explicitly emulate an old interrupted writer. New production
+            # writes atomically commit this batch, tested separately.
+            for index, (kind, payload, event_id) in enumerate(entries):
+                if kind == "HumanInterventionApplied":
+                    raise KeyboardInterrupt("simulated legacy hard process exit")
+                original_append(event_run_id, kind, payload, event_id=event_id,
+                                expected_run_seq=expected_run_seq if index == 0 else None)
 
-        with patch.object(
-            self.server.ledger,
-            "append",
-            side_effect=crash_before_receipt,
-        ):
+        with patch.object(self.server.ledger, "append_many", side_effect=historical_partial_commit):
             with self.assertRaises(KeyboardInterrupt):
                 self.server.director.propose_and_spawn(run_id)
 

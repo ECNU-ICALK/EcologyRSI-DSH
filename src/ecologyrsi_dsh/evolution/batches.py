@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .diagnosis import diagnose_generation
+
 import json
 from collections.abc import Mapping
 from dataclasses import replace
@@ -433,7 +435,15 @@ def _latest_research_plan(state: Any, generation: int) -> dict[str, Any]:
 
 
 def _research_contract_fallback_enabled(state: Any) -> bool:
-    runtime = state.task_manifest.metadata.get("host_runtime_build")
+    # A native research result must have valid model-authored directions.
+    # The legacy deterministic plan has no such directions and cannot feed
+    # the native proposer. A runtime version alone is never fallback consent.
+    metadata = state.task_manifest.metadata
+    if metadata.get("execution_protocol") == "dsh_native_plugin_evolution@1":
+        return False
+    if metadata.get("allow_host_fallback") is not True:
+        return False
+    runtime = metadata.get("host_runtime_build")
     return bool(
         isinstance(runtime, Mapping)
         and runtime.get("evolution_runtime_schema")
@@ -542,6 +552,8 @@ def _ensure_generation_research_iteration(
         historical_states=_historical_experience_states(director, state),
         history_cutoff_seq=history_cutoff_seq,
     )
+    diagnostic = diagnose_generation(state, knowledge)
+    cross_generation_experience["diagnostic_report"] = diagnostic.to_dict()
     research_attempt: int | None = None
     visible_pending_ids: tuple[str, ...] = ()
     consumed_answer_ids: tuple[str, ...] = ()
@@ -801,6 +813,7 @@ def _ensure_generation_research_iteration(
             model_id=response_contract.model_id,
             pending_consultation_ids=visible_pending_ids,
             expert_answer_ids=consumed_answer_ids,
+            diagnostic_report=diagnostic.to_dict(),
         )
         recorded = director.record_research_iteration(
             iteration,

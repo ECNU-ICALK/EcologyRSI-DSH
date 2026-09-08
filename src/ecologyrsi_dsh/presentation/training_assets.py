@@ -248,13 +248,17 @@ def _candidate_failure_reason(state: Any, candidate_id: str) -> str | None:
     return None
 
 
-def training_assets(state: Any) -> list[dict[str, Any]]:
+def training_assets(
+    state: Any, *, candidate_id: str | None = None, summary_only: bool = False
+) -> list[dict[str, Any]]:
     """Derive one immutable, redacted evolution trajectory per candidate."""
 
     task = state.task_manifest
     metadata = dict(task.metadata)
     result: list[dict[str, Any]] = []
     for candidate in state.candidates:
+        if candidate_id is not None and candidate.candidate_id != candidate_id:
+            continue
         if getattr(candidate, "role", CandidateRole.SEARCH) not in {
             CandidateRole.SEARCH,
             CandidateRole.SEARCH.value,
@@ -386,6 +390,29 @@ def training_assets(state: Any) -> list[dict[str, Any]]:
         judge_binding_source = metadata.get("judge_model_binding_source") or (
             "builtin_implementation" if judge_digest is not None else "legacy_missing"
         )
+        if summary_only:
+            # The list needs identity, admission and scores. Building all model
+            # states, trace steps and evidence hashes belongs to explicit detail.
+            result.append({
+                "schema_version": "ecologyrsi-dsh.evolution-training-sample-summary/1",
+                "sample_id": "training-sample:" + digest({
+                    "run_id": candidate.run_id, "candidate_id": candidate.candidate_id,
+                    "proposal_digest": proposal.digest,
+                })[:32],
+                "run_id": candidate.run_id, "candidate_id": candidate.candidate_id,
+                "generation": candidate.generation + 1, "slot_index": candidate.slot_index,
+                "details_loaded": False,
+                "input": {
+                    "strategy_id": strategy_id, "prediction_model_id": prediction_model_id,
+                    "strategy_model_id": strategy_model_id, "review_model_id": review_model_id,
+                    "applied_interventions": interventions,
+                },
+                "output": {"artifact": artifact_summary},
+                "evaluation": evaluation_summary, "decision": decision, "admission": admission,
+                "provenance": {"dataset_digest": dataset_digest,
+                               "artifact_digest": artifact.digest if artifact else None},
+            })
+            continue
         event_receipts = _event_receipts(
             state, candidate.candidate_id, proposal.proposal_id
         )

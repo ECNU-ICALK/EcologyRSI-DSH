@@ -1,0 +1,213 @@
+{
+  "schema_version": "ecologyrsi.recent-evolution-review/1",
+  "as_of_last_ledger_event": "2026-09-06T20:46:47.163+00:00",
+  "campaign_unchanged_since_final_snapshot": true,
+  "scope": {
+    "real_runs": 8,
+    "completed": 1,
+    "failed": 2,
+    "paused": 5,
+    "excluded_smoke_run": "run:incremental-preview",
+    "different_versions_and_datasets_not_a_model_leaderboard": true
+  },
+  "runtime": {
+    "main_elapsed_minutes": 155.46,
+    "explicit_paused_minutes": 51.464,
+    "active_minutes_excluding_explicit_pause": 103.996,
+    "child_failure_records": 10,
+    "operator_abort_records": 7,
+    "recovered_missing_results": 2,
+    "recovered_acceptance_boundary_failure": 1,
+    "launched_sessions": 843,
+    "settled_sessions": 843,
+    "complete_usage_sessions": 836,
+    "reported_tokens": 15022580,
+    "sample_plan_sessions": 833,
+    "sample_plan_reported_tokens": 14791078,
+    "sample_plan_token_share": 0.9845897309250475,
+    "cache_read_tokens": 10038400,
+    "tokens_per_candidate_origin": 18253.43863912515,
+    "origins_per_active_minute": 7.913765914073618,
+    "billing_complete": false
+  },
+  "main_science": {
+    "successful_scoring_cells": 7407,
+    "candidate_origins": 823,
+    "unique_origins": 253,
+    "unique_target_timestamp_identities": 993,
+    "holdout_origins": 169,
+    "holdout_data_day_blocks": 8,
+    "score_definition": "mean over 9 cells of (baseline_RMSE-model_RMSE)/max(baseline_RMSE,model_RMSE)",
+    "seed_skill": -0.225876214631045,
+    "selected_skill": -0.19336396542080203,
+    "skill_delta": 0.03251224921024298,
+    "selected_display_slot": 3,
+    "selected_code_slot": 2,
+    "certified_candidate_id": null,
+    "validation_status": "not_run",
+    "cells": {
+      "air_temperature@1h": {
+        "target": "air_temperature",
+        "horizon_hours": 1,
+        "n": 169,
+        "rmse": 0.9431190566817795,
+        "mae": 0.6962804719933263,
+        "bias": 0.11931257835308308,
+        "baseline_rmse": 1.1418790016511688,
+        "rmse_gain_vs_baseline": 0.17406392856159048,
+        "mean_normalized_reward": 0.03382084764485655,
+        "rmse_change_percent_vs_baseline": -17.406392856159048
+      },
+      "air_temperature@6h": {
+        "target": "air_temperature",
+        "horizon_hours": 6,
+        "n": 169,
+        "rmse": 3.3284104642943406,
+        "mae": 2.797587584064257,
+        "bias": 0.9768711485458987,
+        "baseline_rmse": 0.8643505806249095,
+        "rmse_gain_vs_baseline": -2.8507644223342354,
+        "mean_normalized_reward": -0.6181262494275924,
+        "rmse_change_percent_vs_baseline": 285.07644223342356
+      },
+      "air_temperature@24h": {
+        "target": "air_temperature",
+        "horizon_hours": 24,
+        "n": 169,
+        "rmse": 1.2108271725207231,
+        "mae": 1.0575586971677846,
+        "bias": 0.6788513520594552,
+        "baseline_rmse": 0.8206452713313629,
+        "rmse_gain_vs_baseline": -0.475457441625605,
+        "mean_normalized_reward": -0.2127229282830283,
+        "rmse_change_percent_vs_baseline": 47.545744162560496
+      },
+      "co2_concentration@1h": {
+        "target": "co2_concentration",
+        "horizon_hours": 1,
+        "n": 169,
+        "rmse": 144.65964705781565,
+        "mae": 93.47922993720343,
+        "bias": 29.544297466885222,
+        "baseline_rmse": 149.8190502881489,
+        "rmse_gain_vs_baseline": 0.03443756465155867,
+        "mean_normalized_reward": -0.1255826780736409,
+        "rmse_change_percent_vs_baseline": -3.443756465155867
+      },
+      "co2_concentration@6h": {
+        "target": "co2_concentration",
+        "horizon_hours": 6,
+        "n": 169,
+        "rmse": 194.78520090076114,
+        "mae": 151.58490754653357,
+        "bias": 88.27882664564005,
+        "baseline_rmse": 135.5622817311501,
+        "rmse_gain_vs_baseline": -0.4368687101849107,
+        "mean_normalized_reward": -0.32639857079909984,
+        "rmse_change_percent_vs_baseline": 43.68687101849107
+      },
+      "co2_concentration@24h": {
+        "target": "co2_concentration",
+        "horizon_hours": 24,
+        "n": 169,
+        "rmse": 186.2743920325823,
+        "mae": 157.17051745411857,
+        "bias": 125.13236756337386,
+        "baseline_rmse": 151.9432542688978,
+        "rmse_gain_vs_baseline": -0.2259471006388203,
+        "mean_normalized_reward": -0.4661411005745617,
+        "rmse_change_percent_vs_baseline": 22.59471006388203
+      },
+      "relative_humidity@1h": {
+        "target": "relative_humidity",
+        "horizon_hours": 1,
+        "n": 169,
+        "rmse": 3.797651562551642,
+        "mae": 2.624846185312775,
+        "bias": -1.2038222874829065,
+        "baseline_rmse": 3.946284370515446,
+        "rmse_gain_vs_baseline": 0.03766398819971262,
+        "mean_normalized_reward": -0.011687055240661983,
+        "rmse_change_percent_vs_baseline": -3.7663988199712617
+      },
+      "relative_humidity@6h": {
+        "target": "relative_humidity",
+        "horizon_hours": 6,
+        "n": 169,
+        "rmse": 7.17570722983041,
+        "mae": 5.374695058451267,
+        "bias": -3.5444819891540424,
+        "baseline_rmse": 4.978448257169216,
+        "rmse_gain_vs_baseline": -0.4413541849103344,
+        "mean_normalized_reward": -0.176561257987491,
+        "rmse_change_percent_vs_baseline": 44.13541849103344
+      },
+      "relative_humidity@24h": {
+        "target": "relative_humidity",
+        "horizon_hours": 24,
+        "n": 169,
+        "rmse": 5.468242305225532,
+        "mae": 4.638685663825273,
+        "bias": 3.9196762012091853,
+        "baseline_rmse": 4.761026511013551,
+        "rmse_gain_vs_baseline": -0.14854271291621646,
+        "mean_normalized_reward": -0.1247794166130981,
+        "rmse_change_percent_vs_baseline": 14.854271291621647
+      }
+    }
+  },
+  "cross_run_exposure": {
+    "semantics": "already_scored_target_timestamp_identities_only_not_independent_sample_counts",
+    "runs": [
+      {
+        "run_id": "run:98c5893b-eace-4074-8e4a-8fcfa2052ee9",
+        "meta": {
+          "episode_id": "agc_cucumber_2018:AiCU",
+          "dataset_digest": "044e11d56fbea80ec4770aa9695d565daa93d96b776c752568bbe5b2c3978b99",
+          "data_protocol_digest": "ca289086cb58f843d90d10ab270053788ed9ae227653a687c5d4c698d24a86c8",
+          "dataset_id": "agc_cucumber_2018"
+        },
+        "recorded_scoring_rows": 81,
+        "distinct_target_timestamp_pairs": 72
+      },
+      {
+        "run_id": "run:stable-20260907-b-kimi",
+        "meta": {
+          "episode_id": "agc_cucumber_2018:AiCU",
+          "dataset_digest": "044e11d56fbea80ec4770aa9695d565daa93d96b776c752568bbe5b2c3978b99",
+          "data_protocol_digest": "ca289086cb58f843d90d10ab270053788ed9ae227653a687c5d4c698d24a86c8",
+          "dataset_id": "agc_cucumber_2018"
+        },
+        "recorded_scoring_rows": 7407,
+        "distinct_target_timestamp_pairs": 993
+      },
+      {
+        "run_id": "run:stable-20260907-e-tomato",
+        "meta": {
+          "episode_id": "agc_tomato_2019:AICU",
+          "dataset_digest": "724c0da13edfc4496c1335a75e1f35b494661b9227c5db851652a90f7ee93d7f",
+          "data_protocol_digest": "ff1683c711ed0ab1d5fa8df7a32888244eea3360f209b77a343c318820fd1506",
+          "dataset_id": "agc_tomato_2019"
+        },
+        "recorded_scoring_rows": 936,
+        "distinct_target_timestamp_pairs": 234
+      }
+    ],
+    "overlaps": [
+      {
+        "run_a": "run:98c5893b-eace-4074-8e4a-8fcfa2052ee9",
+        "run_b": "run:stable-20260907-b-kimi",
+        "same_source": true,
+        "shared_observation_identities": 72,
+        "phase_pairs": [
+          {
+            "phase_a": "screening",
+            "phase_b": "screening",
+            "shared_observation_identities": 72
+          }
+        ]
+      }
+    ]
+  },
+  "correction_to_previous_summary": "The main run contains two recovered structured_result_missing events, not one; original ledger and delivery archive remain unchanged."
+}

@@ -11,6 +11,7 @@ import subprocess
 import sysconfig
 from typing import Any
 
+from .queries import RunQueries
 from .config import bind_toy_dataset, load_json_object, load_local_config, load_task_manifest
 from ..data.registry import DatasetRegistry
 from ..evolution.strategies import FakeDSHAdapter
@@ -82,7 +83,7 @@ def demo(args: argparse.Namespace) -> int:
 def status(args: argparse.Namespace) -> int:
     ledger = _open(args.db)
     try:
-        state = EvolutionDirector(ledger).replay(args.run_id)
+        state = RunQueries(EvolutionDirector(ledger)).state(args.run_id)
         print(json.dumps(state_snapshot(state), ensure_ascii=False, indent=2))
     finally:
         ledger.close()
@@ -92,7 +93,7 @@ def status(args: argparse.Namespace) -> int:
 def summary(args: argparse.Namespace) -> int:
     ledger = _open(args.db)
     try:
-        state = EvolutionDirector(ledger).replay(args.run_id)
+        state = RunQueries(EvolutionDirector(ledger)).state(args.run_id)
         print(json.dumps(run_summary(state), ensure_ascii=False, indent=2))
     finally:
         ledger.close()
@@ -102,7 +103,7 @@ def summary(args: argparse.Namespace) -> int:
 def export_run(args: argparse.Namespace) -> int:
     ledger = _open(args.db)
     try:
-        state = EvolutionDirector(ledger).replay(args.run_id)
+        state = RunQueries(EvolutionDirector(ledger)).state(args.run_id)
         payload = run_export(state)
         target = write_json_atomic(args.output, payload, force=bool(args.force))
         print(
@@ -116,6 +117,22 @@ def export_run(args: argparse.Namespace) -> int:
                 indent=2,
             )
         )
+    finally:
+        ledger.close()
+    return 0
+
+
+def export_agent_policy(args: argparse.Namespace) -> int:
+    from ..integrations.agent_policy_bundle import export_policy_bundle
+    ledger = _open(args.db)
+    try:
+        state = EvolutionDirector(ledger).state(args.run_id)
+        artifact = state.artifact_for(args.candidate_id)
+        if artifact is None:
+            raise ValueError("candidate has no sealed inference artifact")
+        payload = export_policy_bundle(artifact)
+        write_json_atomic(args.output, payload, force=args.force)
+        print(json.dumps({"bundle_digest": payload["bundle_digest"], "output": str(args.output)}, ensure_ascii=False))
     finally:
         ledger.close()
     return 0
@@ -365,12 +382,72 @@ def install_dsh_runtime(args: argparse.Namespace) -> int:
     return 0
 
 
+def advance_command(args: argparse.Namespace) -> int:
+    from .generation_execution import execute_generation, complete_if_budget_exhausted
+    from .runtime import ApplicationRuntime
+    from ..execution.ownership import RuntimeOwnerLease
+    from ..core.models import RunStatus
+    if type(args.steps) is not int or not 1 <= args.steps <= 100:
+        raise ValueError("steps must be between 1 and 100")
+    owner = RuntimeOwnerLease(args.db)
+    try:
+        ledger = _open(args.db)
+        try:
+            services = ApplicationRuntime(ledger)
+            state = complete_if_budget_exhausted(services, args.run_id)
+            for _ in range(args.steps):
+                if state.run.status is not RunStatus.RUNNING:
+                    break
+                state = execute_generation(services, args.run_id)
+            print(json.dumps(state_snapshot(state), ensure_ascii=False, indent=2, allow_nan=False))
+        finally:
+            ledger.close()
+    finally:
+        owner.release()
+    return 0
+
+
+
+
+
+
+def diagnose_training_fit_command(args: argparse.Namespace) -> int:
+    from ..science.diagnostics import candidates_from_payload, run_training_fit_diagnostics
+    candidates = candidates_from_payload(json.loads(Path(args.candidates).read_text())) if args.candidates else None
+    view = DatasetRegistry(data_root=args.data_root).selection_view(args.dataset, args.episode)
+    report = run_training_fit_diagnostics(view, candidates=candidates, folds=args.folds,
+        initial_fit_fraction=args.initial_fit_fraction, purge_hours=args.purge_hours)
+    write_json_atomic(Path(args.output), report)
+    print(json.dumps({"output": str(Path(args.output).resolve()), "scope": report["scope"],
+        "common_origins": [fold["common_origin_count"] for fold in report["folds"]], "remote_requests": 0}, ensure_ascii=False))
+    return 0
+
+
+def model_preflight_command(args: argparse.Namespace) -> int:
+    from urllib.request import Request, urlopen
+    from urllib.parse import urlparse
+    endpoint = args.api_base.rstrip("/")
+    parsed = urlparse(endpoint)
+    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"} or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("model-preflight requires an HTTP loopback API endpoint")
+    payload = load_json_object(args.request)
+    token = os.environ.get(args.token_env, "")
+    if not token:
+        raise ValueError(f"set {args.token_env} to the local service token")
+    request = Request(endpoint + "/model-preflight", data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + token}, method="POST")
+    with urlopen(request, timeout=250) as response:
+        result = json.load(response)
+    write_json_atomic(Path(args.output), result)
+    print(json.dumps({"output": str(Path(args.output).resolve()), "passed": result.get("passed"), "scope": result.get("scope")}, ensure_ascii=False))
+    return 0 if result.get("passed") else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ecologyrsi-dsh", description="Minimal replayable evolution mode"
     )
     sub = parser.add_subparsers(dest="command", required=True)
-
     demo_parser = sub.add_parser("demo", help="run the deterministic toy evolution loop")
     demo_parser.add_argument("--db", default="ecologyrsi-dsh.sqlite3")
     demo_parser.add_argument("--run-id", default="run:demo")
@@ -395,6 +472,14 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--output", required=True)
     export_parser.add_argument("--force", action="store_true", help="allow replacing output")
     export_parser.set_defaults(handler=export_run)
+
+    policy_parser = sub.add_parser("export-policy", help="export a deployable Agent prediction policy")
+    policy_parser.add_argument("run_id")
+    policy_parser.add_argument("candidate_id")
+    policy_parser.add_argument("--db", required=True)
+    policy_parser.add_argument("--output", required=True)
+    policy_parser.add_argument("--force", action="store_true")
+    policy_parser.set_defaults(handler=export_agent_policy)
 
     verify_parser = sub.add_parser("verify", help="verify an exported run bundle digest")
     verify_parser.add_argument("path")
@@ -457,6 +542,27 @@ def build_parser() -> argparse.ArgumentParser:
     install_parser.add_argument("--dsh-home")
     install_parser.add_argument("--dsh-bin")
     install_parser.set_defaults(handler=install_dsh_runtime)
+    advance = sub.add_parser("advance", help="advance an existing run through the shared application service")
+    advance.add_argument("--db", required=True)
+    advance.add_argument("--run-id", required=True)
+    advance.add_argument("--steps", type=int, default=1)
+    advance.set_defaults(handler=advance_command)
+    diagnostic = sub.add_parser("diagnose-training-fit", help="仅使用training_fit进行基线/候选前推对照；不调用远程模型")
+    diagnostic.add_argument("--dataset", default="agc_cucumber_2018")
+    diagnostic.add_argument("--episode", required=True)
+    diagnostic.add_argument("--data-root")
+    diagnostic.add_argument("--candidates")
+    diagnostic.add_argument("--folds", type=int, default=3)
+    diagnostic.add_argument("--initial-fit-fraction", type=float, default=.4)
+    diagnostic.add_argument("--purge-hours", type=int, default=24)
+    diagnostic.add_argument("--output", required=True)
+    diagnostic.set_defaults(handler=diagnose_training_fit_command)
+    preflight = sub.add_parser("model-preflight", help="通过本地API执行真实工具与结构化输出预检")
+    preflight.add_argument("--request", required=True, help="JSON compact create-run request; no run will be created")
+    preflight.add_argument("--api-base", default="http://127.0.0.1:8777/api")
+    preflight.add_argument("--token-env", default="ECOLOGYRSI_SERVICE_TOKEN")
+    preflight.add_argument("--output", required=True)
+    preflight.set_defaults(handler=model_preflight_command)
     return parser
 
 

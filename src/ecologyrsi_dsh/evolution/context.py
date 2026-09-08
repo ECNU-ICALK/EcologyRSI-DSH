@@ -75,6 +75,11 @@ _PARAMETER_SEMANTICS: dict[str, dict[str, str]] = {
             "the learned bias correction."
         ),
     },
+    "greenhouse_baseline_aligned_ridge": {
+        "history_steps": "Number of prior hourly feature steps supplied to the causal ridge model.",
+        "ridge_alpha": "L2 ridge regularization strength; learned coefficients use training_fit only.",
+        **{f"residual_scale_{h}h": f"Fixed {h}-hour residual correction scale, shared across targets; zero returns the training-fit-selected persistence or seasonal-24h baseline, independently of other horizons." for h in (1, 6, 24)},
+    },
     "greenhouse_ridge": {
         "history_steps": "Number of prior hourly feature steps supplied to the ridge model.",
         "ridge_alpha": "L2 regularization strength; increasing it shrinks fitted coefficients more.",
@@ -417,6 +422,12 @@ def analysis_focus_parameter(
             name = f"{prefix}_{horizon}h_residual_scale"
             if marker in target and name in schemas:
                 return name
+        # The baseline-aligned predictor shares one scale across targets at
+        # each horizon. Prefer that directly applicable control before broad
+        # history/regularization edits that change every forecast horizon.
+        name = f"residual_scale_{horizon}h"
+        if name in schemas:
+            return name
     preferred = (
         (
             "co2",

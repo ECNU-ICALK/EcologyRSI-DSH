@@ -17,6 +17,7 @@
       short_forward_fill_hours: "短缺口前向填充上限（小时）", long_forward_fill_hours: "长缺口前向填充上限（小时）",
       target_lag_imputation: "目标历史值插补", label_imputation: "预测标签插补", baseline_imputation: "基线值插补",
       model_task_count: "子模型任务数", solver_fallback_count: "求解器退化任务数",
+      residual_models_fitted: "实际拟合的残差模型数", baseline_only_task_count: "仅使用基线的任务数",
       selected_exogenous_feature_count: "已选外生特征数"
     };
     if (learnedLabels[key]) { return learnedLabels[key]; }
@@ -53,6 +54,7 @@
   function artifactModelStatusText(model) {
     var status = String(model && model.status || "").toLowerCase();
     if (status === "fitted") { return "已拟合"; }
+    if (status === "baseline_only") { return "仅使用基线，未拟合残差模型"; }
     if (status === "fallback_zero_residual") { return "已退化为持续性基线"; }
     return status ? "状态：" + status : "状态未提供";
   }
@@ -78,6 +80,16 @@
   function artifactForCandidate(candidateId) {
     var artifacts = state.activeRun && state.activeRun.artifacts || [];
     return artifacts.find(function (item) { return item && item.candidate_id === candidateId; }) || null;
+  }
+  function renderArtifactIdentity(artifact) {
+    var binding = artifact.artifact_revision_binding || {};
+    var verified = artifact.identity_status === "revision_verified" && artifact.artifact_event_schema === "ecologyrsi-dsh.artifact-recorded/2" && binding.candidate_revision_id === artifact.candidate_revision_id;
+    var revision = artifact.actual_revision_label || "版本编号未提供";
+    if (!verified) {
+      return "<div class=\"change-list\"><div class=\"change-row\"><span>产物版本审计</span><strong>历史记录，缺少有效版本封套</strong></div>" + (artifact.candidate_revision_id ? "<div class=\"change-row\"><span>历史记录声明版本</span><strong title=\"" + escapeHTML(artifact.candidate_revision_id) + "\">" + escapeHTML(revision) + "（未通过新封套核验）</strong></div>" : "") + "</div>";
+    }
+    var proposal = artifact.proposal_identity_binding || {};
+    return "<div class=\"change-list\"><div class=\"change-row\"><span>实际模型版本</span><strong title=\"" + escapeHTML(binding.candidate_revision_id) + "\">" + escapeHTML(revision) + " · 版本绑定已核验</strong></div><div class=\"change-row\"><span>提案来源版本</span><strong title=\"" + escapeHTML(proposal.genome_digest || "") + "\">R0 · 保留原始编译记录</strong></div><div class=\"change-row\"><span>实际模型校验值</span><strong title=\"" + escapeHTML(binding.genome_digest || "") + "\">" + escapeHTML(shortId(binding.genome_digest || "未提供")) + "</strong></div></div>";
   }
   function candidateEvidenceObject(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -187,6 +199,12 @@
     var runProgress = String(activeCandidateId || "") === String(candidateId || "")
       ? candidateEvidenceObject(runExecution.stage_progress)
       : {};
+    // Adaptive run heartbeats count every candidate and phase in the round.
+    // A current_candidate_id does not turn that aggregate into this candidate's
+    // checkpoint scope (for example 19/1195 must not replace screening 19/64).
+    var aggregateRunProgress = String(runProgress.schema_version || "").indexOf("ecologyrsi-dsh.adaptive-progress/") === 0
+      || runProgress.run_total_origins != null || runProgress.run_completed_origins != null;
+    if (aggregateRunProgress) { runProgress = {}; }
     var progress = Object.assign({}, candidateProgress, runProgress);
     return Object.keys(progress).length ? progress : null;
   }
@@ -716,6 +734,10 @@
         ? "已重试 " + formatNumber(retryCount) + " 次" + (Number.isFinite(attempts) && attempts > 0 ? "（共 " + formatNumber(attempts) + " 次尝试）" : "")
         : "";
       var executionDetail = [failure, retryDetail].filter(Boolean).join(" · ");
+      var agentPrediction = row.agent_prediction;
+      if (agentPrediction) {
+        executionDetail = [agentPredictionDescription(agentPrediction), executionDetail].filter(Boolean).join(" · ");
+      }
       var sampleMeta = [row.unit && row.unit !== "unknown" ? unitText(row.unit) : "", shortId(sampleId)].filter(Boolean).join(" · ");
       var prediction = failedSample
         ? "<span class=\"candidate-sample-value-stack\"><strong>未产生有效预测</strong><small>失败惩罚占位，未计为模型预测</small></span>"
@@ -790,7 +812,7 @@
       statusNode.textContent = "权限受限";
     } else if (unavailable) {
       statusNode.className = "pill pill-amber";
-      statusNode.textContent = "摘要预览";
+      statusNode.textContent = state.usingDemo ? "演示预览" : "无样本记录";
     } else if (pageStatus === "aborted") {
       statusNode.className = "pill pill-red";
       statusNode.textContent = "执行中止";
@@ -824,7 +846,7 @@
     } else if (permissionDenied) {
       table.innerHTML = "<tr><td colspan=\"7\" class=\"empty-state candidate-samples-error\">当前 DSH 会话未授予逐样本结果读取能力。</td></tr>";
     } else if (unavailable) {
-      table.innerHTML = "<tr><td colspan=\"7\" class=\"empty-state\">服务端尚未提供逐样本分页记录，当前候选也没有可用的脱敏预览。</td></tr>";
+      table.innerHTML = "<tr><td colspan=\"7\" class=\"empty-state\">该候选没有已记录的逐样本结果。</td></tr>";
     } else if (pageStatus === "aborted") {
       table.innerHTML = "<tr><td colspan=\"7\" class=\"empty-state candidate-samples-error\">候选执行已中止，没有产生可展示的逐样本结果。</td></tr>";
     } else if (stoppedWithFailure) {
@@ -865,7 +887,8 @@
     var predictionLimit = 8;
     var shownPredictionRows = predictionRows.slice(0, predictionLimit);
     var predictionTable = predictionRows.length ? "<div class=\"table-wrap detail-table-wrap candidate-preview-table\" tabindex=\"0\" aria-label=\"预测效果预览，可横向滚动\"><table class=\"prediction-table\"><thead><tr><th>预测起点</th><th>目标时间</th><th>时距</th><th>目标</th><th>观测值</th><th>候选预测 / 失败占位</th><th>基线预测</th><th>单位</th></tr></thead><tbody>" + shownPredictionRows.map(function (row) { return "<tr><td data-label=\"预测起点\">" + escapeHTML(row.origin_timestamp == null ? "—" : formatObservationTime(row.origin_timestamp)) + "</td><td data-label=\"目标时间\">" + escapeHTML(formatObservationTime(row.target_timestamp != null ? row.target_timestamp : row.timestamp)) + "</td><td data-label=\"时距\">" + escapeHTML(row.horizon_hours == null ? "—" : formatNumber(row.horizon_hours) + " 小时") + "</td><td data-label=\"目标\">" + escapeHTML(targetLabels[row.target] || row.target || "预测目标") + "</td><td data-label=\"观测值\">" + escapeHTML(formatNumber(row.observed)) + "</td><td data-label=\"候选预测 / 失败占位\">" + candidatePreviewPredictionCell(row) + "</td><td data-label=\"基线预测\">" + escapeHTML(formatNumber(row.baseline)) + "</td><td data-label=\"单位\">" + escapeHTML(unitText(row.unit)) + "</td></tr>"; }).join("") + "</tbody></table></div>" + (predictionRows.length > predictionLimit ? "<small class=\"candidate-preview-note\">已显示前 " + escapeHTML(formatNumber(predictionLimit)) + " 行，共 " + escapeHTML(formatNumber(predictionRows.length)) + " 行；完整记录可在下方逐样本结果中分页查看。</small>" : "") : "<span class=\"empty-state\">当前评测器未提供预测效果预览。</span>";
-    var artifactSection = artifact ? "<div class=\"artifact-summary\"><div class=\"detail-grid\"><div class=\"detail-value\"><span>训练模型</span><strong title=\"" + escapeHTML(artifact.model_id || "") + "\">" + escapeHTML(predictionModelReferenceLabel(artifact.model_id)) + "</strong></div><div class=\"detail-value\"><span>训练分区</span><strong>" + escapeHTML(partitionText(artifact.training_partition)) + "</strong></div><div class=\"detail-value\"><span>训练样本数</span><strong>" + escapeHTML(formatNumber(artifact.training_rows)) + "</strong></div><div class=\"detail-value\"><span>产物校验值</span><strong title=\"" + escapeHTML(artifact.artifact_digest || "") + "\">" + escapeHTML(shortId(artifact.artifact_digest || "未提供")) + "</strong></div></div><h4>拟合参数</h4><div class=\"change-list\">" + renderArtifactMapping(artifact.learned_parameters) + "</div><h4>训练指标</h4><div class=\"change-list\">" + renderArtifactMapping(artifact.metrics) + "</div></div>" : "<span class=\"empty-state\">尚未记录该候选的训练产物。</span>";
+    var artifactRoleNote = artifact && artifact.metrics && artifact.metrics.final_prediction_owner === "sample_agent" ? "<p>该产物是 Agent 可选的默认模型工具。最终预测还取决于 Agent 的分析与工具调用，不能仅凭这份权重复现。</p>" : "";
+    var artifactSection = artifact ? "<div class=\"artifact-summary\">" + renderArtifactIdentity(artifact) + artifactRoleNote + "<div class=\"detail-grid\"><div class=\"detail-value\"><span>训练模型</span><strong title=\"" + escapeHTML(artifact.model_id || "") + "\">" + escapeHTML(predictionModelReferenceLabel(artifact.model_id)) + "</strong></div><div class=\"detail-value\"><span>训练分区</span><strong>" + escapeHTML(partitionText(artifact.training_partition)) + "</strong></div><div class=\"detail-value\"><span>训练样本数</span><strong>" + escapeHTML(formatNumber(artifact.training_rows)) + "</strong></div><div class=\"detail-value\"><span>产物校验值</span><strong title=\"" + escapeHTML(artifact.artifact_digest || "") + "\">" + escapeHTML(shortId(artifact.artifact_digest || "未提供")) + "</strong></div></div><h4>实际训练参数</h4><div class=\"change-list\">" + renderArtifactMapping(artifact.parameters) + "</div><h4>拟合参数</h4><div class=\"change-list\">" + renderArtifactMapping(artifact.learned_parameters) + "</div><h4>训练指标</h4><div class=\"change-list\">" + renderArtifactMapping(artifact.metrics) + "</div></div>" : "<span class=\"empty-state\">尚未记录该候选的训练产物。</span>";
     var failureReason = candidate.failure_reason || (candidate.status === "failed" ? "候选在训练或评测阶段失败，服务端未提供公开原因。" : "");
     var failureSection = failureReason ? "<section class=\"detail-section failure-detail candidate-section\"><h3>执行异常</h3><div class=\"failure-message\"><strong>" + escapeHTML(candidate.failed_stage ? "阶段：" + (evolutionStageLabels[candidate.failed_stage] || candidate.failed_stage) : "候选执行失败") + "</strong><p>" + escapeHTML(failureReason) + "</p><span>当前版本没有阶段级重试按钮；请保留同一任务证据并新建运行重试。</span></div></section>" : "";
     var header = "<header class=\"candidate-detail-header " + statusClass + "\"><div class=\"candidate-detail-heading\"><span class=\"candidate-detail-kicker\">候选方案 · 第 " + escapeHTML(candidate.generation || "—") + " 轮 / 槽位 " + escapeHTML(Number(candidate.slot_index || 0) + 1) + "</span><h2 title=\"" + escapeHTML(candidate.id) + "\">" + escapeHTML(shortId(candidate.id)) + "</h2><code title=\"" + escapeHTML(candidate.id) + "\">" + escapeHTML(candidate.id) + "</code><p>父方案：<span title=\"" + escapeHTML(candidate.parent_id || "") + "\">" + escapeHTML(shortId(candidate.parent_id || "当前基线")) + "</span> · 轮内排名 " + escapeHTML(candidate.generation_rank == null ? "—" : candidate.generation_rank) + "</p></div><div class=\"candidate-detail-outcome\"><span class=\"pill " + outcome.className + "\">" + escapeHTML(outcome.text) + "</span><strong class=\"candidate-detail-score " + scoreClass + "\">" + escapeHTML(score == null ? "—" : formatNumber(score, 3)) + "</strong><small>综合得分</small></div></header>";
@@ -904,7 +927,7 @@
       ? "下一轮搜索版本：" + (searchVersionId ? shortId(searchVersionId) : "尚未产生") + "；稳健认证版本：" + (certifiedVersionId ? shortId(certifiedVersionId) : "尚未产生")
       : run && run.best_candidate_id ? "保留用于优化候选：" + shortId(run.best_candidate_id) + "（正式验证未开展）" : "保留用于优化候选：尚未产生（正式验证未开展）";
     var observedText = rawBestObservedSummary(run);
-    if (!positiveDeltaV3 && run && runOutcomeCode(run) === "budget_exhausted_without_acceptable_candidate") { acceptableText = "本次运行未产生新的保留方案；请查看各方案的评测与选择原因。"; }
+    if (!positiveDeltaV3 && run && runOutcomeCode(run) === "budget_exhausted_without_acceptable_candidate") { acceptableText = "本次运行未产生新的门禁通过方案；请查看各方案的评测与选择原因。"; }
     $("#best-candidate-label").textContent = acceptableText + "；" + observedText;
     $("#best-candidate-label").title = run ? [searchVersionId, certifiedVersionId, run.best_candidate_id, run.best_observed_candidate_id].filter(Boolean).join("\n") : "";
     $("#export-button").disabled = state.busy || !run;

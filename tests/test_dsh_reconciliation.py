@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ecologyrsi_dsh.api.dsh_tools import DshToolService
+from ecologyrsi_dsh.integrations.dsh_tools import DshToolService
 from ecologyrsi_dsh.core.ledger import EventLedger
 
 

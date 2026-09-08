@@ -21,8 +21,8 @@ from ecologyrsi_dsh.core.errors import (
     FrozenRuntimeBindingDriftError,
     dsh_native_runtime_retryable,
 )
-from ecologyrsi_dsh.api import generation_execution as generation_execution_module
-from ecologyrsi_dsh.api.dsh_tools import DshToolAdmissionClosedError
+from ecologyrsi_dsh.application import generation_execution as generation_execution_module
+from ecologyrsi_dsh.integrations.dsh_tools import DshToolAdmissionClosedError
 from ecologyrsi_dsh.core.models import TaskManifest, canonical_json, digest
 from ecologyrsi_dsh.core.state import project_run_state
 from ecologyrsi_dsh.integrations.dsh_native_runtime import (
@@ -33,6 +33,7 @@ from ecologyrsi_dsh.integrations.dsh_native_runtime import (
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 from ecologyrsi_dsh.presentation.reporting import run_summary
 from ecologyrsi_dsh.presentation.training_assets import training_assets
+from ecologyrsi_dsh.version import __version__
 
 
 class _RealNodeRuntime:
@@ -163,7 +164,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
             "root_services": {"required": ["agents"], "missing": [], "declared": True},
             "presets": [
                 {
-                    "preset_id": "ecology-researcher-v7",
+                    "preset_id": "ecology-researcher-v12",
                     "declared": True,
                     "standing_key": "standing:researcher",
                     "preset_mountable": True,
@@ -191,7 +192,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
     def test_capabilities_and_mutations_are_strict_and_bearer_authenticated(self) -> None:
         self.server.responses.extend([(200, self._capabilities()), (200, self._accepted())])  # type: ignore[attr-defined]
         capability = self.client.capabilities()
-        self.client.require_capabilities(capability, ["ecology-researcher-v7"])
+        self.client.require_capabilities(capability, ["ecology-researcher-v12"])
         response = self.client.create_run(
             {
                 "run_id": "run-1",
@@ -209,12 +210,12 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
 
     def test_python_resume_handshake_accepts_real_node_restored_paused_hosts(self) -> None:
         preset_ids = (
-            "ecology-coordinator-v4",
-            "ecology-researcher-v7",
+            "ecology-coordinator-v5",
+            "ecology-researcher-v12",
             "ecology-candidate-proposer-v4",
-            "ecology-sample-planner-v5",
-            "ecology-sample-critic-v4",
-            "ecology-generation-judge-v7",
+            "ecology-sample-planner-v8",
+            "ecology-sample-critic-v5",
+            "ecology-generation-judge-v8",
         )
         with _RealNodeRuntime() as client:
             cold = client.capabilities()
@@ -337,7 +338,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
             )
         with self.assertRaises(DshNativeRuntimeUnavailableError):
             self.client.require_capabilities(
-                self._capabilities(ready=False), ["ecology-researcher-v7"]
+                self._capabilities(ready=False), ["ecology-researcher-v12"]
             )
 
     def test_remote_errors_and_transport_failures_never_disclose_token(self) -> None:
@@ -390,12 +391,12 @@ class _FakeNativeRuntime:
             raise DshNativeRuntimeUnavailableError()
         presets = []
         for preset_id in (
-            "ecology-coordinator-v4",
-            "ecology-researcher-v7",
+            "ecology-coordinator-v5",
+            "ecology-researcher-v12",
             "ecology-candidate-proposer-v4",
-            "ecology-sample-planner-v5",
-            "ecology-sample-critic-v4",
-            "ecology-generation-judge-v7",
+            "ecology-sample-planner-v8",
+            "ecology-sample-critic-v5",
+            "ecology-generation-judge-v8",
         ):
             presets.append(
                 {
@@ -579,9 +580,9 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "screening_candidate_origins": 256,
                 "formal_candidate_origins": 1000,
-                "holdout_candidate_origins": 507,
-                "total_candidate_origins": 1763,
-                "total_scoring_cells": 1763,
+                "holdout_candidate_origins": 1014,
+                "total_candidate_origins": 2270,
+                "total_scoring_cells": 2270,
             },
         )
         self.assertNotIn("samples_per_update", metadata)
@@ -668,7 +669,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertEqual(
             state.task_manifest.metadata["host_runtime_build"],
             {
-                "package_version": "0.3.55",
+                "package_version": __version__,
                 "evolution_runtime_schema": (
                     "ecologyrsi-dsh.evolution-runtime/3"
                 ),
@@ -753,7 +754,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             state.task_manifest.metadata["optimization_schedule"][
                 "formal_origin_count_per_finalist"
             ],
-            500,
+            200,
         )
         self.assertEqual(
             state.task_manifest.metadata["sample_budget_class"],
@@ -1122,7 +1123,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                 },
             ),
             patch(
-                "ecologyrsi_dsh.api.handler.DshNativeAgentRuntimeClient",
+                "ecologyrsi_dsh.application.runtime.DshNativeAgentRuntimeClient",
                 return_value=runtime,
             ),
         ):
@@ -1250,7 +1251,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                 side_effect=ValueError("invalid mutation"),
             ),
         ):
-            state = generation_execution_module.execute_generation(endpoint, run_id)
+            state = generation_execution_module.execute_generation((endpoint).server, run_id)
 
         self.assertEqual(state.run.status.value, "failed")
         self.assertEqual(len(runtime.cancelled), 1)

@@ -154,6 +154,30 @@ class GreenhouseAdapterTests(unittest.TestCase):
 
 
 class DatasetRegistryTests(unittest.TestCase):
+    def test_concurrent_cold_reads_parse_the_dataset_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        from unittest.mock import patch
+        from ecologyrsi_dsh.data.catalog import _toy_series
+        entered, duplicate, release = Event(), Event(), Event()
+        def load():
+            if entered.is_set():
+                duplicate.set()
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError('test loader was not released')
+            return _toy_series()
+        with patch('ecologyrsi_dsh.data.registry._toy_series', side_effect=load) as loader, ThreadPoolExecutor(2) as pool:
+            first = pool.submit(self.registry.series, 'generated-toy-series@1')
+            self.assertTrue(entered.wait(5))
+            second = pool.submit(self.registry.series, 'generated-toy-series@1')
+            try:
+                self.assertFalse(duplicate.wait(.1))
+            finally:
+                release.set()
+            self.assertEqual(first.result(), second.result())
+            self.assertEqual(loader.call_count, 1)
+
     def setUp(self) -> None:
         self.registry = DatasetRegistry(catalog_path=CATALOG_PATH, data_root=PROJECT_ROOT / "missing-test-data")
 

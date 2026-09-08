@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ecologyrsi_dsh.api import auto_progress as auto_progress_module
-from ecologyrsi_dsh.api.generation_execution import (
+from ecologyrsi_dsh.application.generation_execution import (
     _spawn_generation_candidates,
     execute_generation,
 )
@@ -351,12 +351,12 @@ class RecoverableEvaluationIntegrationTests(unittest.TestCase):
                 endpoint = SimpleNamespace(server=server)
                 batch = start_generation_batch(server.director, run_id)
                 self.assertTrue(
-                    _spawn_generation_candidates(endpoint, run_id, batch)
+                    _spawn_generation_candidates((endpoint).server, run_id, batch)
                 )
 
                 def execute() -> None:
                     try:
-                        execution_states.append(execute_generation(endpoint, run_id))
+                        execution_states.append(execute_generation((endpoint).server, run_id))
                     except BaseException as exc:  # noqa: BLE001 - test thread boundary
                         execution_errors.append(exc)
 
@@ -469,7 +469,7 @@ class RecoverableEvaluationIntegrationTests(unittest.TestCase):
                 endpoint = SimpleNamespace(server=server)
                 batch = start_generation_batch(server.director, run_id)
                 self.assertTrue(
-                    _spawn_generation_candidates(endpoint, run_id, batch)
+                    _spawn_generation_candidates((endpoint).server, run_id, batch)
                 )
                 seeded = server.director.state(run_id)
                 candidates = sorted(seeded.candidates, key=lambda item: item.slot_index)
@@ -490,7 +490,7 @@ class RecoverableEvaluationIntegrationTests(unittest.TestCase):
                     usage_index=0,
                 )
 
-                paused = execute_generation(endpoint, run_id)
+                paused = execute_generation((endpoint).server, run_id)
                 projection = _projection_json(paused)
                 pause_event = next(
                     event
@@ -571,7 +571,7 @@ class RecoverableEvaluationIntegrationTests(unittest.TestCase):
                 self.assertFalse(any(event.kind == "RunFailed" for event in paused.events))
 
                 calls_before_paused_reentry = len(gateway.calls)
-                paused_again = execute_generation(endpoint, run_id)
+                paused_again = execute_generation((endpoint).server, run_id)
                 self.assertEqual(paused_again.run.status.value, "paused")
                 self.assertEqual(len(gateway.calls), calls_before_paused_reentry)
             finally:

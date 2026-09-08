@@ -209,6 +209,16 @@ class DshNativeAgentRuntimeClient:
     def create_run(self, binding: Mapping[str, Any], *, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         return self._mutation("/api/ecology-agent-runtime/v1/runs", binding, cancelled)
 
+    def run_canary(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        from .model_canary import CanaryBounds, canary_request, validate_canary_receipt
+        expected = canary_request(request.get("identity", {}), CanaryBounds(**dict(request.get("bounds") or {})))
+        if dict(request) != expected:
+            raise ValueError("invalid model canary request")
+        payload = self._request("POST", "/api/ecology-agent-runtime/v1/canaries", body=expected,
+                                timeout=expected["bounds"]["total_timeout_ms"] / 1000 + 10)
+        validate_canary_receipt(payload, expected["identity"])
+        return payload
+
     def run_stage(self, request: Mapping[str, Any], *, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         run_id = _nonempty_text(request.get("run_id"), "run_id")
         _nonempty_text(request.get("admission_id"), "admission_id")

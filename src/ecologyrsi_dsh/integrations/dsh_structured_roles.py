@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..core.errors import DshNativeRuntimeUnavailableError
+from ..core.model_execution_policy import research_execution_policy
 from ..core.models import canonical_json, digest
 from .dsh_native_runtime import DshNativeAgentRuntimeClient
 
@@ -44,12 +45,18 @@ class DshStructuredRoleRuntime:
         identity_digests: Mapping[str, str] | None = None,
         max_tokens: int | None = None,
     ) -> dict[str, Any]:
+        policy = research_execution_policy(context) if stage == "generation.research-synthesis" else None
+        maximum = policy["synthesis_max_output_tokens"] if policy is not None else 8192
         if max_tokens is not None and (
             isinstance(max_tokens, bool)
             or not isinstance(max_tokens, int)
-            or not 512 <= max_tokens <= 8192
+            or not 512 <= max_tokens <= maximum
         ):
-            raise ValueError("DSH structured max_tokens must be between 512 and 8192")
+            raise ValueError(f"DSH structured max_tokens must be between 512 and {maximum}")
+        if policy is not None and max_tokens != maximum:
+            raise ValueError("DSH synthesis max_tokens must match the frozen research execution policy")
+        # The exact budget is inside the canonical context and therefore the
+        # child item digest and role-stage phenotype identity used by replay.
         request = {
             "run_id": run_id,
             "stage": stage,

@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 .cache/
 .runtime/
+# Generated experiments retained while migrating modules incrementally.
+/runs/
 .venv/
 build/
 dist/
@@ -36,3 +38,6 @@ EcologyRSI-DSH-迁移清单模板.yaml
 !integrations/dsh_ecology_plugin/dist/
 integrations/dsh_ecology_plugin/dist/*
 !integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-*.tgz
+
+# Rebuildable local projection snapshots
+*.read-models/

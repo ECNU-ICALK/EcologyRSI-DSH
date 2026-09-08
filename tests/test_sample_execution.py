@@ -1735,8 +1735,15 @@ class SampleExecutionTests(unittest.TestCase):
     def test_checkpoint_resume_calls_only_pending_samples_and_keeps_full_cohort(self):
         rows = _rows()
         first = self.execute(_FailureAdapter(), rows=rows)
+        first_row = {**first.scoring_rows[0], "agent_prediction": {
+            "method": "model", "confidence": 0.8,
+            "tools": [{"tool_id": "greenhouse-baseline-aligned-ridge@1",
+                       "status": "completed", "call_id": "prediction:1",
+                       "parameters": {"ridge_alpha": 0.1}, "used_as_evidence": True,
+                       "tool_predicted": first.scoring_rows[0]["predicted"]}],
+        }}
         persisted = build_sample_results(
-            "candidate:test", (first.scoring_rows[0],)
+            "candidate:test", (first_row,)
         )
         adapter = _FailureAdapter()
         descriptors = []
@@ -1771,6 +1778,10 @@ class SampleExecutionTests(unittest.TestCase):
         self.assertEqual(len(batch.scoring_rows), 3)
         self.assertEqual(batch.summary["checkpoint_resumed_examples"], 1)
         self.assertEqual(batch.summary["checkpoint_pending_examples"], 2)
+        self.assertFalse(batch.summary["feedback_diagnostics_complete"])
+        self.assertEqual(batch.summary["feedback_diagnostic_scope"], "current_execution_segment_scoring_cells@1")
+        self.assertEqual(batch.summary["feedback_executed_scoring_cells"], 2)
+        self.assertEqual(batch.summary["feedback_resumed_scoring_cells"], 1)
         self.assertEqual(batch.summary["succeeded_examples"], 3)
         self.assertEqual(batch.summary["coverage"], 1.0)
         self.assertTrue(batch.records[0]["checkpoint_resumed"])
@@ -1780,6 +1791,7 @@ class SampleExecutionTests(unittest.TestCase):
             {row["sample_id"] for row in batch.scoring_rows[1:]},
         )
         self.assertNotIn(persisted[0]["sample_id"], published_ids)
+        self.assertEqual(build_sample_results("candidate:test", batch.scoring_rows[:1]), persisted)
 
     def test_checkpoint_resume_accepts_fit_selected_scoring_baseline(self):
         rows = _rows()

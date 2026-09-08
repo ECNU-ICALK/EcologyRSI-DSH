@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from ..core.prediction_policy import RUNTIME_EVALUATOR_ID, RUNTIME_PREDICTION_POLICY
+
 from typing import Any
+from ..application.queries import RunQueries
 from urllib.parse import parse_qs, urlparse
 
 from ..integrations.model_bindings import (
@@ -17,11 +20,14 @@ from ..evaluators.registry import (
     TOY_PREDICTOR_MODEL_ID,
 )
 from .projection import (
+    _admission_progress_fields,
+    _assert_http_scope,
     _monitor_payload,
     _projection_json,
     _run_summary_projection,
     _state_payload,
 )
+from .workspaces import WORKSPACE_VIEWS, overview_projection, workspace_section
 
 
 class CatalogEndpointsMixin:
@@ -252,6 +258,8 @@ class CatalogEndpointsMixin:
                     "autonomous": True,
                 },
             ],
+            "prediction_selection_policy": RUNTIME_PREDICTION_POLICY,
+            "runtime_evaluator_id": RUNTIME_EVALUATOR_ID,
             "prediction_models": prediction_models,
             "evaluators": evaluators,
             "models": models,
@@ -352,6 +360,9 @@ class CatalogEndpointsMixin:
         expected_split_digest = query.get(
             "expected_split_manifest_digest", [None]
         )[0]
+        expected_protocol_digest = query.get("expected_data_protocol_digest", [None])[0]
+        protocol_args = ({"expected_data_protocol_digest": expected_protocol_digest}
+                         if expected_protocol_digest is not None else {})
         try:
             offset = int(query.get("offset", ["0"])[0])
             limit = int(query.get("limit", ["20"])[0])
@@ -366,6 +377,7 @@ class CatalogEndpointsMixin:
             limit=limit,
             expected_dataset_digest=expected_dataset_digest,
             expected_split_manifest_digest=expected_split_digest,
+            **protocol_args,
         )
         descriptor = description["descriptor"]
         schema = [
@@ -390,11 +402,13 @@ class CatalogEndpointsMixin:
             {"timestamp": item["timestamp"], **item["values"]}
             for item in sample["rows"]
         ]
-        series = self.server.datasets.series(
+        reader = self.server.datasets.selection_view if expected_protocol_digest is not None else self.server.datasets.series
+        series = reader(
             dataset_id,
             episode_id,
             expected_dataset_digest=expected_dataset_digest,
             expected_split_manifest_digest=expected_split_digest,
+            **protocol_args,
         )
         return {
             "schema_version": "ecologyrsi-dsh.browser-dataset/2",
@@ -436,7 +450,7 @@ class CatalogEndpointsMixin:
 
     def _list_runs(self) -> dict[str, Any]:
         query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
-        unknown = set(query) - {"include_archived", "view"}
+        unknown = set(query) - {"include_archived", "view", "limit", "before"}
         if unknown:
             raise ValueError("unknown run list query: " + ", ".join(sorted(unknown)))
         values = query.get("include_archived", ["false"])
@@ -451,21 +465,26 @@ class CatalogEndpointsMixin:
             raise ValueError("view must be detail or summary")
         view = view_values[0].strip().casefold()
         projector = _run_summary_projection if view == "summary" else _projection_json
-        runs = []
-        for run_id in self.server.ledger.run_ids(include_archived=include_archived):
-            try:
-                state = self.server.director.replay(run_id)
-                runs.append(self._decorate_run_projection(projector(state)))
-            except (KeyError, ValueError):
-                # A list response must fail closed rather than silently
-                # presenting a partial view that could be mistaken for the
-                # complete local ledger.
-                raise
+        def page_integer(name: str, default: int | None) -> int | None:
+            values = query.get(name)
+            if values is None:
+                return default
+            if len(values) != 1 or not values[0].isascii() or not values[0].isdigit():
+                raise ValueError(name + " must be a positive integer")
+            return int(values[0])
+        limit = page_integer("limit", 50)
+        queries = RunQueries(self.server.director)
+        before = page_integer("before", None)
+        if view == "summary":
+            result = queries.summaries(projector, include_archived=include_archived, limit=limit, before=before)
+        else:
+            page = queries.page(include_archived=include_archived, limit=limit, before=before)
+            result = {"runs": [projector(state) for state in page.states],
+                      "next_cursor": page.next_cursor, "archived_count": page.archived_count}
         return {
-            "runs": runs,
-            "view": view,
-            "include_archived": include_archived,
-            "archived_count": self.server.ledger.archived_count(),
+            **result,
+            "runs": [self._decorate_run_projection(item) for item in result['runs']],
+            "view": view, "include_archived": include_archived, "limit": limit,
         }
 
     def _decorate_run_projection(self, projection: dict[str, Any]) -> dict[str, Any]:
@@ -481,12 +500,49 @@ class CatalogEndpointsMixin:
         return item
 
     def _run_payload(self, run_id: str) -> dict[str, Any]:
-        state = self.server.director.replay(run_id)
-        admission_snapshot = self.server.sample_admission.snapshot(run_id)
-        query = parse_qs(urlparse(self.path).query)
+        query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
         view = query.get("view", ["detail"])[0]
-        if view not in {"detail", "monitor"}:
-            raise ValueError("view must be detail or monitor")
+        if (set(query) - {"view", "candidate_id"}
+                or any(len(values) != 1 for values in query.values())
+                or view not in {"detail", "monitor"} | WORKSPACE_VIEWS
+                or ('candidate_id' in query and view != 'asset')):
+            raise ValueError("invalid run view query")
+        admission_snapshot = self.server.sample_admission.snapshot(run_id)
+        if view == 'overview':
+            base = RunQueries(self.server.director).completed_projection(run_id, overview_projection)
+            progress = base.get('execution_progress', {}).get('stage_progress')
+            if isinstance(progress, dict) and str(progress.get('schema_version', '')).startswith('ecologyrsi-dsh.adaptive-progress/'):
+                progress.update(_admission_progress_fields(admission_snapshot))
+            return {'schema_version': 'ecologyrsi-dsh.browser-run-workspace/1',
+                    'view': view, 'projection': self._decorate_run_projection(base)}
+        if view in WORKSPACE_VIEWS:
+            candidate_id = query.get('candidate_id', [None])[0]
+            def build_workspace(state):
+                _assert_http_scope(state)
+                revision = state.events[-1].seq if state.events else 0
+                section = self.server.workspace_cache.get_or_build(
+                    (run_id, revision, view, candidate_id),
+                    lambda: workspace_section(state, view, candidate_id),
+                )
+                base = ({'id': run_id, 'run_id': run_id, 'projection_revision': revision,
+                         'status': state.run.status.value}
+                        if view == 'asset' else _projection_json(state, admission_snapshot, overview_only=True))
+                return {**base, **section}
+            projection = RunQueries(self.server.director).completed_projection(
+                run_id, build_workspace,
+                cache_key=f'{workspace_section.__module__}.{workspace_section.__qualname__}:{view}:{candidate_id or ""}',
+            )
+            # Only completed projections persist across restarts. Mutable
+            # admission and scheduler fields still come from the live host.
+            progress = projection.get('execution_progress', {}).get('stage_progress')
+            if isinstance(progress, dict) and str(progress.get('schema_version', '')).startswith('ecologyrsi-dsh.adaptive-progress/'):
+                progress.update(_admission_progress_fields(admission_snapshot))
+            return {
+                'schema_version': 'ecologyrsi-dsh.browser-run-workspace/1',
+                'view': view,
+                'projection': self._decorate_run_projection(projection),
+            }
+        state = RunQueries(self.server.director).state(run_id)
         payload = (
             _monitor_payload(state, admission_snapshot)
             if view == "monitor"

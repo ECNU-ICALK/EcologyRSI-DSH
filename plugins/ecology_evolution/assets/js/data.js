@@ -1,6 +1,7 @@
 "use strict";
 
   function loadSelectedDataset(offset) {
+    if (!state.usingDemo && state.workspace !== "training") { return Promise.resolve(false); }
     var context = trainingDatasetContext();
     if (!context) {
       state.datasetPage = null; state.datasetContext = null; state.datasetError = null; renderTraining(); return Promise.resolve(false);
@@ -27,6 +28,7 @@
     var sampleQuery = new URLSearchParams({ partition: partition, episode_id: episodeId, offset: String(state.pageOffset), limit: String(state.pageLimit) });
     if (context.source === "active_run" && context.dataset_digest) { sampleQuery.set("expected_dataset_digest", context.dataset_digest); }
     if (context.source === "active_run" && context.split_manifest_digest) { sampleQuery.set("expected_split_manifest_digest", context.split_manifest_digest); }
+    if (context.data_protocol_digest) { sampleQuery.set("expected_data_protocol_digest", context.data_protocol_digest); }
     var operation = state.usingDemo ? Promise.resolve(demoDatasetPage(state.pageOffset, partition)) : Promise.all([
       request("/datasets/" + encodeURIComponent(datasetId), { timeout: dataRequestTimeout }),
       request("/datasets/" + encodeURIComponent(datasetId) + "/samples?" + sampleQuery.toString(), { timeout: dataRequestTimeout })
@@ -41,7 +43,7 @@
         dataset: Object.assign({}, description.dataset || {}, samples.dataset || {}), descriptor: description.descriptor || description.dataset || {},
         readiness: description.readiness || {}, source_integrity: description.source_integrity || description.readiness && description.readiness.source_integrity || null, profile: description.profile || {},
         features: description.features || samples.features || description.schema || samples.schema || [],
-        partitions: description.partitions || description.profile && description.profile.partitions || samples.partitions || {},
+        partitions: samples.partitions || description.partitions || description.profile && description.profile.partitions || {},
         dataset_digest: samples.dataset_digest_sha256 || description.dataset_digest_sha256 || null,
         partition: samples.partition || partition,
         visible_partitions: description.visible_partitions || [],
@@ -145,50 +147,22 @@
     });
   }
 
-  function normalizeCandidateSamplePage(value, runId, candidateId, requestedOffset, requestedLimit) {
-    var payload = value && typeof value === "object" ? value : {};
-    var nestedSamples = payload.samples && typeof payload.samples === "object" && !Array.isArray(payload.samples) ? payload.samples : null;
-    var page = payload.page && typeof payload.page === "object" ? payload.page : nestedSamples && nestedSamples.page && typeof nestedSamples.page === "object" ? nestedSamples.page : nestedSamples || payload;
-    var responseRunId = payload.run_id || page.run_id;
-    var responseCandidateId = payload.candidate_id || page.candidate_id;
-    if (responseRunId != null && String(responseRunId) !== String(runId)) { throw new Error("逐样本结果返回了其他运行的数据。"); }
-    if (responseCandidateId != null && String(responseCandidateId) !== String(candidateId)) { throw new Error("逐样本结果返回了其他候选方案的数据。"); }
-    var rawRows = candidateSampleRowsFrom(page);
-    if (!rawRows.length) { rawRows = candidateSampleRowsFrom(payload); }
-    var offset = Number(page.offset != null ? page.offset : payload.offset != null ? payload.offset : requestedOffset);
-    var limit = Number(page.limit != null ? page.limit : payload.limit != null ? payload.limit : requestedLimit);
-    offset = Number.isFinite(offset) && offset >= 0 ? Math.floor(offset) : Math.max(0, Number(requestedOffset) || 0);
-    limit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : Math.max(1, Number(requestedLimit) || 25);
-    var total = Number(page.total != null ? page.total : page.total_count != null ? page.total_count : payload.total != null ? payload.total : payload.total_count);
-    if (!Number.isFinite(total) || total < offset + rawRows.length) { total = offset + rawRows.length; }
-    var explicitHasMore = page.has_more != null ? page.has_more : payload.has_more;
-    var nextOffset = Number(page.next_offset != null ? page.next_offset : payload.next_offset);
-    var hasMore = explicitHasMore != null ? explicitHasMore === true : Number.isFinite(nextOffset) ? nextOffset > offset : offset + rawRows.length < total;
-    return {
-      schema_version: payload.schema_version || page.schema_version || "ecologyrsi-dsh.run-sample-page/1",
-      run_id: runId,
-      candidate_id: candidateId,
-      rows: rawRows.map(normalizeCandidateSampleRow),
-      offset: offset,
-      limit: limit,
-      total: total,
-      available_count: Number(page.available_count != null ? page.available_count : payload.available_count != null ? payload.available_count : total),
-      expected_count: page.expected_count != null ? page.expected_count : payload.expected_count,
-      has_more: hasMore,
-      next_offset: hasMore ? (Number.isFinite(nextOffset) ? nextOffset : offset + rawRows.length) : null,
-      complete: (page.complete != null ? page.complete : payload.complete) === true || !hasMore && (page.complete === true || payload.complete === true),
-      status: page.status || payload.status || null,
-      supported: (page.supported != null ? page.supported : payload.supported) !== false,
-      legacy: (page.legacy != null ? page.legacy : payload.legacy) === true,
-      partial: (page.partial != null ? page.partial : payload.partial) === true,
-      revision: page.revision != null ? page.revision : payload.revision != null ? payload.revision : payload.projection_revision,
-      updated_at: page.updated_at || payload.updated_at || null,
-      source: "api",
-      truncated: false
-    };
+  function normalizeCandidateSamplePage(payload, runId, candidateId, requestedOffset, requestedLimit) {
+    if (!payload || payload.schema_version !== "ecologyrsi-dsh.browser-sample-results/1" || !Array.isArray(payload.rows)) {
+      throw new Error("逐样本接口响应格式无效。");
+    }
+    if (payload.run_id !== runId || payload.candidate_id !== candidateId) {
+      throw new Error("逐样本结果身份与当前候选不一致。");
+    }
+    if (payload.offset !== requestedOffset || payload.limit !== requestedLimit
+        || !Number.isSafeInteger(payload.total) || payload.total < 0 || payload.rows.length > requestedLimit
+        || (payload.rows.length > 0 && payload.total < payload.offset + payload.rows.length)) {
+      throw new Error("逐样本结果分页与请求不一致。");
+    }
+    return Object.assign({}, payload, {rows: payload.rows.map(normalizeCandidateSampleRow), source: "api", truncated: false});
   }
 
-  function candidateSampleFallbackPage(run, candidate, offset, limit) {
+  function demoCandidateSamplePage(run, candidate, offset, limit) {
     var embedded = candidateEmbeddedSampleSource(candidate, run);
     var source = embedded.source && typeof embedded.source === "object" && !Array.isArray(embedded.source) ? embedded.source : {};
     var total = Number(source.sample_count != null ? source.sample_count : source.total);
@@ -198,7 +172,7 @@
     var rows = embedded.rows.slice(start, start + pageLimit).map(normalizeCandidateSampleRow);
     var candidateStatus = String(candidate && candidate.status || "").toLowerCase();
     return {
-      schema_version: "ecologyrsi-dsh.run-sample-page-fallback/1",
+      schema_version: "ecologyrsi-dsh.demo-sample-page/1",
       run_id: run && run.id,
       candidate_id: candidate && (candidate.id || candidate.candidate_id),
       rows: rows,
@@ -229,17 +203,21 @@
     state.candidateSampleSelection = {run_id: runId || null, candidate_id: candidateId || null};
   }
 
+  function sampleCandidates(run) {
+    return state.workspace === "process" ? processCandidates(run) : (run && run.candidates || []);
+  }
+
   function activeCandidateIdForSamples(run) {
     var activeId = run && run.execution_progress && run.execution_progress.current_candidate_id;
     if (!activeId) { return null; }
-    var activeCandidate = (Array.isArray(run.candidates) ? run.candidates : []).find(function (candidate) {
+    var activeCandidate = sampleCandidates(run).find(function (candidate) {
       return String(candidate.id || candidate.candidate_id || "") === String(activeId);
     });
     return activeCandidate ? activeCandidate.id || activeCandidate.candidate_id : null;
   }
 
   function latestCandidateIdForSamples(run) {
-    var candidates = run && Array.isArray(run.candidates) ? run.candidates : [];
+    var candidates = sampleCandidates(run);
     var rounds = run && Array.isArray(run.rounds) ? run.rounds.slice() : [];
     rounds.sort(function (left, right) { return Number(right.generation || 0) - Number(left.generation || 0); });
     for (var roundIndex = 0; roundIndex < rounds.length; roundIndex += 1) {
@@ -261,7 +239,7 @@
   }
 
   function syncCandidateSelection(run) {
-    var candidates = run && Array.isArray(run.candidates) ? run.candidates : [];
+    var candidates = sampleCandidates(run);
     var currentCandidate = candidates.find(function (candidate) {
       return String(candidate.id || candidate.candidate_id || "") === String(state.selectedCandidateId || "");
     });
@@ -289,7 +267,7 @@
   function selectedCandidateForSamples() {
     var run = state.activeRun;
     if (!run || !state.selectedCandidateId) { return null; }
-    return (Array.isArray(run.candidates) ? run.candidates : []).find(function (candidate) {
+    return sampleCandidates(run).find(function (candidate) {
       return String(candidate.id || candidate.candidate_id) === String(state.selectedCandidateId);
     }) || null;
   }
@@ -436,6 +414,7 @@
   }
 
   function loadCandidateSamples(offset, options) {
+    if (!state.usingDemo && ["process", "candidates"].indexOf(state.workspace) < 0) { return Promise.resolve(false); }
     var settings = options || {};
     var run = state.activeRun;
     var candidate = selectedCandidateForSamples();
@@ -447,7 +426,7 @@
     var candidateId = candidate.id || candidate.candidate_id;
     if (!candidateSampleSelectionMatches(run.id, candidateId)) { resetCandidateSamples(run.id, candidateId); }
     if (!state.usingDemo && !hasCapability("evaluation.samples.read")) {
-      state.candidateSamplePage = candidateSampleFallbackPage(run, candidate, 0, state.candidateSampleLimit);
+      state.candidateSamplePage = null;
       state.candidateSampleUnavailable = true;
       state.candidateSamplePermissionDenied = true;
       state.candidateSampleLoading = false;
@@ -469,7 +448,7 @@
     state.candidateSampleRefreshing = Boolean(state.candidateSamplePage);
     renderCandidateSampleViews();
     if (state.usingDemo) {
-      state.candidateSamplePage = candidateSampleFallbackPage(run, candidate, pageOffset, pageLimit);
+      state.candidateSamplePage = demoCandidateSamplePage(run, candidate, pageOffset, pageLimit);
       state.candidateSampleOffset = state.candidateSamplePage.offset;
       state.candidateSampleRetryOffset = null;
       state.candidateSampleUnavailable = true;
@@ -482,32 +461,16 @@
     var query = new URLSearchParams({candidate_id: candidateId, offset: String(pageOffset), limit: String(pageLimit)});
     return request("/runs/" + encodeURIComponent(run.id) + "/samples?" + query.toString(), {timeout: dataRequestTimeout}).then(function (payload) {
       if (requestId !== state.candidateSampleRequest || contextEpoch !== state.contextEpoch || !candidateSampleSelectionMatches(run.id, candidateId)) { return false; }
-      if (payload && (payload.legacy === true || payload.supported === false)) {
-        state.candidateSamplePage = candidateSampleFallbackPage(run, candidate, pageOffset, pageLimit);
-        state.candidateSampleOffset = state.candidateSamplePage.offset;
-        state.candidateSampleRetryOffset = null;
-        state.candidateSampleUnavailable = true;
-        state.candidateSampleError = null;
-        return true;
-      }
       state.candidateSamplePage = normalizeCandidateSamplePage(payload, run.id, candidateId, pageOffset, pageLimit);
       state.candidateSampleOffset = state.candidateSamplePage.offset;
       state.candidateSampleRetryOffset = null;
-      state.candidateSampleUnavailable = false;
+      state.candidateSampleUnavailable = payload.supported === false;
       state.candidateSampleError = null;
       return true;
     }).catch(function (error) {
       if (requestId !== state.candidateSampleRequest || contextEpoch !== state.contextEpoch || !candidateSampleSelectionMatches(run.id, candidateId)) { return false; }
-      if ([404, 405, 501].indexOf(Number(error && error.status)) >= 0) {
-        state.candidateSamplePage = candidateSampleFallbackPage(run, candidate, pageOffset, pageLimit);
-        state.candidateSampleOffset = state.candidateSamplePage.offset;
-        state.candidateSampleRetryOffset = null;
-        state.candidateSampleUnavailable = true;
-        state.candidateSampleError = null;
-        return true;
-      }
       if (Number(error && error.status) === 403) {
-        state.candidateSamplePage = candidateSampleFallbackPage(run, candidate, state.candidateSampleOffset, pageLimit);
+        state.candidateSamplePage = null;
         state.candidateSampleUnavailable = true;
         state.candidateSamplePermissionDenied = true;
         state.candidateSampleError = null;
@@ -527,6 +490,7 @@
   }
 
   function refreshCandidateSamples(options) {
+    if (!state.usingDemo && ["process", "candidates"].indexOf(state.workspace) < 0) { return Promise.resolve(false); }
     var settings = options || {};
     var run = state.activeRun;
     var candidate = selectedCandidateForSamples();
@@ -546,14 +510,23 @@
   function refreshEventsForRun(runId) {
     if (state.usingDemo) { return Promise.resolve(true); }
     var contextEpoch = state.contextEpoch;
-    var requestId = state.runReadRequest + 1;
-    state.runReadRequest = requestId;
-    return request(eventRequestPath(runId, false)).then(function (data) {
+    var pendingKey = contextEpoch + "|" + runId;
+    if (state.eventReadPending && state.eventReadPending.key === pendingKey) { return state.eventReadPending.promise; }
+    var requestId = (state.eventReadRequest || 0) + 1;
+    state.eventReadRequest = requestId;
+    var operation = request(eventRequestPath(runId, false), {timeout: dataRequestTimeout}).then(function (data) {
       if (contextEpoch !== state.contextEpoch) { return false; }
-      if (requestId !== state.runReadRequest) { return true; }
-      if (state.activeRun && state.activeRun.id === runId) { mergeEventStream(runId, data); }
+      if (requestId !== state.eventReadRequest) { return true; }
+      if (state.activeRun && state.activeRun.id === runId) {
+        mergeEventStream(runId, data);
+        if (state.workspace === "process") { renderProcess(); }
+      }
       return true;
-    }).catch(function () { return false; });
+    }).catch(function () { return false; }).finally(function () {
+      if (state.eventReadPending && state.eventReadPending.promise === operation) { state.eventReadPending = null; }
+    });
+    state.eventReadPending = {key: pendingKey, promise: operation};
+    return operation;
   }
 
   function captureProgressUiState() {
@@ -618,10 +591,10 @@
   function renderProgressViews() {
     var uiState = captureProgressUiState();
     if (typeof renderContext === "function") { renderContext(); }
-    if (typeof renderProcess === "function") { renderProcess(); }
-    if (typeof renderCandidates === "function") { renderCandidates(); }
-    if (typeof renderTrainingAssets === "function") { renderTrainingAssets(); }
-    if (typeof renderCollaboration === "function") { renderCollaboration(); }
+    if (state.workspace === "process" && typeof renderProcess === "function") { renderProcess(); }
+    if (state.workspace === "candidates" && typeof renderCandidates === "function") { renderCandidates(); }
+    if (state.workspace === "training" && typeof renderTrainingAssets === "function") { renderTrainingAssets(); }
+    if (state.workspace === "collaboration" && typeof renderCollaboration === "function") { renderCollaboration(); }
     var lastUpdated = $("#last-updated");
     if (lastUpdated) { lastUpdated.textContent = state.lastUpdated ? "最近同步：" + formatDate(state.lastUpdated) : "尚未同步"; }
     restoreProgressUiState(uiState);
@@ -650,7 +623,7 @@
     // accepted when that endpoint has a transient failure.
     return Promise.all([
       request("/runs/" + encodeURIComponent(runId) + "?view=monitor", {timeout: dataRequestTimeout}),
-      request(eventRequestPath(runId, false)).catch(function () { return null; })
+      Promise.resolve(null)
     ]).then(function (results) {
       if (requestId !== state.runReadRequest || contextEpoch !== state.contextEpoch) { return false; }
       if (!state.activeRun || state.activeRun.id !== runId) { return false; }
@@ -712,6 +685,10 @@
       // implicit full-detail read merely because the run crossed a boundary.
       return Promise.resolve(commitProjection(compactProjection)).then(function (committed) {
         if (committed && structuralChange) { state.structureHydrationStale = true; }
+        if (committed) {
+          if (state.workspace === "process") { refreshEventsForRun(runId); }
+          if (typeof ensureWorkspaceData === "function") { ensureWorkspaceData({force: structuralChange}); }
+        }
         return committed;
       });
     }).catch(function (error) {

@@ -15,13 +15,17 @@ const IDENTITY_FIELDS = new Set([
   "idempotency_key",
 ]);
 
-// These failures describe one bounded sample attempt, not loss of the DSH
+// These failures describe one bounded stage attempt, not loss of the DSH
 // runtime itself.  Preserve only this small public machine-code allowlist so
-// the Python coordinator can isolate the sample instead of retrying an entire
+// the Python coordinator can classify the stage instead of retrying an entire
 // generation.  Every other controller failure remains an opaque, retryable
 // runtime outage.
-const PUBLIC_SAMPLE_FAILURE_CODES = new Set([
+const PUBLIC_STAGE_FAILURE_CODES = new Set([
   "structured_child_model_error",
+  "structured_child_tool_protocol_error",
+  "structured_child_output_budget_exhausted",
+  "structured_child_output_schema_invalid",
+  "structured_result_missing",
 ]);
 
 function validIdentityBody(body, extraFields = new Set()) {
@@ -47,7 +51,7 @@ function sendJson(res, status, value) {
 
 function sendControllerError(res, error) {
   const supplied = typeof error?.code === "string" ? error.code : "";
-  if (PUBLIC_SAMPLE_FAILURE_CODES.has(supplied)) {
+  if (PUBLIC_STAGE_FAILURE_CODES.has(supplied)) {
     sendJson(res, 422, {
       error: "runtime_stage_failed",
       error_code: supplied,
@@ -95,6 +99,17 @@ export function registerRuntimeRoutes(ctx, controller, config) {
       if (req.method === "GET" && relative === "/capabilities") {
         try { sendJson(res, 200, await controller.capabilities()); }
         catch { safeJsonError(res, 502, "runtime_controller_failed"); }
+        return;
+      }
+      if (req.method === "POST" && relative === "/canaries") {
+        let body;
+        try { body = await readBoundedJson(req, Math.min(maxBodyBytes, 16384)); }
+        catch { safeJsonError(res, 400, "invalid_request_body"); return; }
+        try { sendJson(res, 200, await controller.runCanary(body)); }
+        catch (error) {
+          const code = ["model_canary_busy", "model_canary_stage_unsupported", "invalid_model_canary_contract"].includes(error?.code) ? error.code : "model_canary_failed";
+          sendJson(res, code === "model_canary_busy" ? 409 : 422, { error: code, error_code: code });
+        }
         return;
       }
       const statusMatch = relative.match(/^\/runs\/([^/]+)$/);

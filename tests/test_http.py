@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import threading
 import time
+from http import HTTPStatus
 import unittest
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
@@ -25,6 +26,7 @@ from ecologyrsi_dsh.evolution.schedule import (
     OPTIMIZATION_PROTOCOL,
     PREQUENTIAL_LOCAL_EVALUATION_MODE,
     SCHEDULE_SCHEMA_VERSION,
+    ISOLATED_SCHEDULE_SCHEMA_VERSION,
     PAIRED_LOCAL_EVALUATION_MODE,
     OptimizationSchedule,
 )
@@ -158,7 +160,7 @@ class HTTPContractTests(unittest.TestCase):
         self.assertGreaterEqual(payload["reused_origin_occurrences"], 0)
         self.assertFalse(payload["capacity_enforced_for_run_creation"])
 
-    def test_create_defaults_to_v2_and_explicit_legacy_schedule_round_trips(self) -> None:
+    def test_create_defaults_to_v3_and_explicit_legacy_schedule_round_trips(self) -> None:
         base = {
             "dataset_id": "generated-toy-series@1",
             "optimization_protocol": OPTIMIZATION_PROTOCOL,
@@ -177,7 +179,7 @@ class HTTPContractTests(unittest.TestCase):
         default_schedule = created["projection"]["configuration"][
             "optimization_schedule"
         ]
-        self.assertEqual(default_schedule["schema_version"], SCHEDULE_SCHEMA_VERSION)
+        self.assertEqual(default_schedule["schema_version"], ISOLATED_SCHEDULE_SCHEMA_VERSION)
         self.assertEqual(
             default_schedule["local_evaluation_mode"],
             PAIRED_LOCAL_EVALUATION_MODE,
@@ -741,6 +743,29 @@ class HTTPContractTests(unittest.TestCase):
                 ):
                     self.assertNotIn(omitted, receipt["response"]["projection"])
 
+    def test_create_command_receipt_remains_compact_after_completion(self) -> None:
+        run_id, detail = self._create_running_run_for_boundary(
+            "large-create-receipt"
+        )
+        status, receipt = self.request(
+            "/api/commands/" + quote("create:large-create-receipt", safe="")
+        )
+        self.assertEqual(status, 200, receipt)
+        self.assertEqual(receipt["status"], "completed")
+        self.assertEqual(receipt["run_id"], run_id)
+        self.assertEqual(
+            receipt["response"]["schema_version"],
+            "ecologyrsi-dsh.browser-run-monitor/1",
+        )
+        for omitted in (
+            "candidates",
+            "rounds",
+            "trajectory",
+            "training_assets",
+        ):
+            self.assertNotIn(omitted, receipt["response"]["projection"])
+        self.assertLess(len(json.dumps(receipt)), len(json.dumps(detail)))
+
     def test_negative_cursor_and_non_integer_steps_are_rejected_before_claim(self) -> None:
         run_id, _created = self._create_running_run_for_boundary("cursor-step-boundary")
         path = "/api/runs/" + quote(run_id, safe="")
@@ -797,6 +822,22 @@ class HTTPContractTests(unittest.TestCase):
         self.assertNotIn("command_status", failed)
         self.assertIsNone(self.server.ledger.command_receipt(f"{run_id}:{key}"))
         self.assertEqual(self.server.ledger.pending_command_keys(), ())
+
+    def test_model_preflight_wait_does_not_hold_global_mutation_lock(self) -> None:
+        lock_available = []
+        def probe_preflight(handler, _body):
+            def probe():
+                acquired = handler.server.mutation_lock.acquire(timeout=.2)
+                lock_available.append(acquired)
+                if acquired: handler.server.mutation_lock.release()
+            thread = threading.Thread(target=probe)
+            thread.start()
+            thread.join(timeout=1)
+            handler._send(HTTPStatus.OK, {"passed": True})
+        with patch.object(handler_module.EvolutionRequestHandler, "_model_preflight", new=probe_preflight):
+            status, payload = self.request("/api/model-preflight", "POST", {})
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(lock_available, [True])
 
     def test_advance_does_not_hold_global_mutation_lock(self) -> None:
         run_id, _created = self._create_running_run_for_boundary(

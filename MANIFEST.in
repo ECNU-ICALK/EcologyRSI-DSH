@@ -4,6 +4,7 @@ recursive-include src/ecologyrsi_dsh/knowledge *.json
 recursive-include examples *.py *.json *.md
 recursive-include datasets *.json
 recursive-include docs/screenshots *.jpg *.md
+recursive-include docs/refactor *.md *.json
 prune docs/superpowers
 exclude docs/项目整体Review与方案B优化报告.md
 # Internal planning/hand-off notes live at the repository root for local
@@ -19,7 +20,7 @@ include integrations/dsh_ecology_plugin/LICENSE integrations/dsh_ecology_plugin/
 prune integrations/dsh_ecology_plugin/.runtime
 prune integrations/dsh_ecology_plugin/.dsh
 prune integrations/dsh_ecology_plugin/.ssh
-include integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.3.55.tgz
+include integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.7.10.tgz
 recursive-include scripts *.sh *.py *.mjs *.cjs
 recursive-include tests *.py *.json
 global-exclude *.py[cod] __pycache__ .DS_Store *.sqlite3

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
 
@@ -10,6 +10,7 @@ LEGACY_SCHEDULE_SCHEMA_VERSION = (
     "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1"
 )
 SCHEDULE_SCHEMA_VERSION = "ecologyrsi-dsh.top2-adaptive-epoch-schedule/2"
+ISOLATED_SCHEDULE_SCHEMA_VERSION = "ecologyrsi-dsh.top2-adaptive-epoch-schedule/3"
 OPTIMIZATION_PROTOCOL = "top2_adaptive_epoch@1"
 PREQUENTIAL_LOCAL_EVALUATION_MODE = "prequential"
 PAIRED_LOCAL_EVALUATION_MODE = "paired_champion_challenger"
@@ -17,6 +18,7 @@ PAIRED_LOCAL_EVALUATION_MODE = "paired_champion_challenger"
 _SCHEDULE_MODES = {
     LEGACY_SCHEDULE_SCHEMA_VERSION: PREQUENTIAL_LOCAL_EVALUATION_MODE,
     SCHEDULE_SCHEMA_VERSION: PAIRED_LOCAL_EVALUATION_MODE,
+    ISOLATED_SCHEDULE_SCHEMA_VERSION: PAIRED_LOCAL_EVALUATION_MODE,
 }
 
 _FIELDS = frozenset(
@@ -85,6 +87,8 @@ class OptimizationSchedule:
             self.selection_holdout_origin_count,
             "selection_holdout_origin_count",
         )
+        if self.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION and batch < 2:
+            raise ValueError("isolated adaptation batches require at least two origins")
         if formal % batch:
             raise ValueError(
                 "local_batch_origin_count must divide "
@@ -107,6 +111,12 @@ class OptimizationSchedule:
             selection_holdout_origin_count=169,
             local_evaluation_mode=PAIRED_LOCAL_EVALUATION_MODE,
         )
+
+    @classmethod
+    def for_new_run(cls) -> "OptimizationSchedule":
+        """Time-purged schedule; legacy defaults remain for historical readers."""
+        return replace(cls.default(), schema_version=ISOLATED_SCHEDULE_SCHEMA_VERSION,
+                       formal_origin_count_per_finalist=200)
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "OptimizationSchedule":
@@ -160,9 +170,10 @@ class OptimizationSchedule:
         return self.batch_count
 
     def generation_execution_budget(
-        self, *, cells_per_origin: int
+        self, *, cells_per_origin: int, holdout_inference_replicas: int = 1
     ) -> dict[str, int]:
         cells = _positive_integer(cells_per_origin, "cells_per_origin")
+        replicas = _positive_integer(holdout_inference_replicas, "holdout_inference_replicas")
         screening = self.screening_origin_count * 4
         if self.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
             formal_per_finalist = self.local_batch_origin_count + (
@@ -173,7 +184,7 @@ class OptimizationSchedule:
             formal = formal_per_finalist * self.finalist_count
         else:
             formal = self.formal_origin_count_per_finalist * self.finalist_count
-        holdout = self.selection_holdout_origin_count * (
+        holdout = replicas * self.selection_holdout_origin_count * (
             self.finalist_count + 1
         )
         total = screening + formal + holdout
@@ -190,12 +201,14 @@ class OptimizationSchedule:
         planned_generations: int,
         *,
         cells_per_origin: int,
+        holdout_inference_replicas: int = 1,
     ) -> dict[str, int]:
         generations = _positive_integer(
             planned_generations, "planned_generations"
         )
         per_generation = self.generation_execution_budget(
-            cells_per_origin=cells_per_origin
+            cells_per_origin=cells_per_origin,
+            holdout_inference_replicas=holdout_inference_replicas,
         )
         return {
             key: value * generations

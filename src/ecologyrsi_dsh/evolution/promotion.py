@@ -9,6 +9,7 @@ import random
 from typing import Any
 
 from ..core.models import digest
+from ..core.immutable import thaw_json
 from ..evaluators.objectives import (
     DEFAULT_TARGET_WEIGHTS,
     OBJECTIVE_AGGREGATION_VERSION,
@@ -234,6 +235,7 @@ def _validated_evidence(evaluation: Any) -> dict[str, Any] | None:
     raw = _contract_value(evaluation, "promotion_block_evidence")
     if not isinstance(raw, Mapping):
         return None
+    raw = thaw_json(raw)
     body = {key: value for key, value in raw.items() if key != "evidence_digest"}
     if (
         raw.get("schema_version") != PROMOTION_BLOCK_EVIDENCE_VERSION
@@ -427,10 +429,13 @@ def _incomparable(score_delta: float, reason_code: str) -> dict[str, Any]:
 
 
 def assess_promotion_improvement(
-    evaluation: Any, incumbent_evaluation: Any
+    evaluation: Any, incumbent_evaluation: Any,
+    *, minimum_paired_blocks: int = PROMOTION_MINIMUM_PAIRED_BLOCKS,
 ) -> dict[str, Any]:
     """Assess practical and paired-block statistical improvement."""
 
+    if isinstance(minimum_paired_blocks, bool) or not isinstance(minimum_paired_blocks, int) or minimum_paired_blocks < 3:
+        raise ValueError("minimum_paired_blocks must be an integer >= 3")
     score_delta = _finite(getattr(evaluation, "score", None), "evaluation score") - _finite(
         getattr(incumbent_evaluation, "score", None), "incumbent score"
     )
@@ -472,7 +477,7 @@ def assess_promotion_improvement(
 
     point_pass = score_delta > V2_MINIMUM_SCORE_DELTA
     interval: tuple[float, float] | None = None
-    evidence_sufficient = len(block_ids) >= PROMOTION_MINIMUM_PAIRED_BLOCKS
+    evidence_sufficient = len(block_ids) >= minimum_paired_blocks
     confidence_pass = False
     confidence_status = "insufficient_blocks"
     if evidence_sufficient:
@@ -531,14 +536,15 @@ def assess_promotion_improvement(
         else "improved"
     )
     return {
-        "policy_version": PROMOTION_POLICY_VERSION,
+        "policy_version": (PROMOTION_POLICY_VERSION if minimum_paired_blocks == PROMOTION_MINIMUM_PAIRED_BLOCKS else "local_search_paired_blocks@1"),
+        "minimum_paired_blocks": minimum_paired_blocks,
         "comparable": True,
         "score_delta": score_delta,
         "minimum_score_delta": V2_MINIMUM_SCORE_DELTA,
         "paired_block_count": len(block_ids),
         "bootstrap_resamples": PROMOTION_BOOTSTRAP_RESAMPLES if interval else 0,
         "confidence_level": PROMOTION_CONFIDENCE_LEVEL,
-        "confidence_method": PROMOTION_CONFIDENCE_METHOD,
+        "confidence_method": (PROMOTION_CONFIDENCE_METHOD if minimum_paired_blocks == PROMOTION_MINIMUM_PAIRED_BLOCKS else "paired_day_block_bootstrap@1"),
         "confidence_status": confidence_status,
         "confidence_interval_95": list(interval) if interval else None,
         "improved": improved,

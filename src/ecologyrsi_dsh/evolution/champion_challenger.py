@@ -14,7 +14,10 @@ from ..core.trajectory import (
     FormalBatchComparison,
     FormalBatchComparisonDecision,
 )
-from .promotion import V2_MINIMUM_SCORE_DELTA
+from .promotion import V2_MINIMUM_SCORE_DELTA, assess_promotion_improvement
+from ..core.search_policy import LOCAL_PAIRED_BLOCK_MINIMUM, PAIRED_EXECUTION_QUALIFICATION
+from ..evaluators.objectives import OBJECTIVE_AGGREGATION_VERSION
+from .execution_qualification import paired_scoring_evidence_complete
 
 
 LOCAL_MINIMUM_SCORE_DELTA = V2_MINIMUM_SCORE_DELTA
@@ -274,6 +277,30 @@ def _cell_map(
     return cells if set(cells) == expected else None
 
 
+def _complete_paired_day_blocks(champion: BatchEvaluation, challenger: BatchEvaluation) -> bool:
+    """Do not count empty or unpaired cell placeholders as usable day blocks.
+
+    Called only after the promotion evidence has passed its identity/digest
+    validation. These are repeated-measures day blocks, not independent trials.
+    """
+    arms = []
+    for evaluation in (champion, challenger):
+        evidence = evaluation.metrics.get("promotion_block_evidence", {})
+        blocks = {}
+        for block in evidence.get("blocks", ()):
+            cells = {(cell["target"], cell["horizon_hours"]): cell for cell in block["cells"]}
+            if any(cell["eligible"] <= 0 or cell["succeeded"] <= 0 for cell in cells.values()):
+                return False
+            blocks[block["block_id"]] = cells
+        arms.append(blocks)
+    if set(arms[0]) != set(arms[1]):
+        return False
+    return all(
+        arms[0][block][cell]["eligible"] == arms[1][block][cell]["eligible"]
+        for block in arms[0] for cell in arms[0][block]
+    )
+
+
 def assess_local_challenger(
     champion: BatchEvaluation,
     challenger: BatchEvaluation,
@@ -281,6 +308,8 @@ def assess_local_challenger(
     challenger_safety_gate_passed: bool,
     minimum_score_delta: float = LOCAL_MINIMUM_SCORE_DELTA,
     cell_regression_blocks: bool = True,
+    require_paired_evidence: bool = False,
+    require_paired_strict_chain: bool = False,
 ) -> LocalChallengerAssessment:
     """Select a challenger only from complete, paired, Host-owned evidence."""
 
@@ -300,11 +329,20 @@ def assess_local_challenger(
     if not isinstance(cell_regression_blocks, bool):
         raise TypeError("cell_regression_blocks must be a bool")
 
+    if not isinstance(require_paired_evidence, bool):
+        raise TypeError("require_paired_evidence must be a bool")
+    if not isinstance(require_paired_strict_chain, bool):
+        raise TypeError("require_paired_strict_chain must be a bool")
     score_delta = challenger.score - champion.score
     contract_matches, contract_digest, contract = _comparison_contract(
         champion,
         challenger,
     )
+    if require_paired_strict_chain:
+        contract_digest = digest({
+            "comparison_contract_digest": contract_digest,
+            "paired_execution_qualification": PAIRED_EXECUTION_QUALIFICATION,
+        })
     champion_cells: dict[tuple[str, int], float] | None = None
     challenger_cells: dict[tuple[str, int], float] | None = None
     if contract is not None:
@@ -334,6 +372,16 @@ def assess_local_challenger(
         reason = "challenger_evaluation_incomplete"
     elif not challenger_safety_gate_passed:
         reason = "challenger_safety_gate_failed"
+    elif require_paired_strict_chain and not all(
+        isinstance(item.metrics.get("sample_execution"), Mapping)
+        and item.metrics["sample_execution"].get("strict_agent_chain_pass") is True
+        for item in (champion, challenger)
+    ):
+        # Operational failure penalties must not supply scientific improvement.
+        # Both arms need the same existing chain qualification before pairing.
+        reason = "paired_strict_agent_chain_failed"
+    elif require_paired_strict_chain and not paired_scoring_evidence_complete(champion, challenger):
+        reason = "paired_scoring_evidence_incomplete"
     elif cell_regression_blocks and not cell_regression_gate_passed:
         reason = "challenger_cell_regression"
     elif score_delta <= float(minimum_score_delta):
@@ -349,6 +397,21 @@ def assess_local_challenger(
         )
     else:
         reason = "challenger_improved"
+
+    if require_paired_evidence:
+        if reason == "below_practical_delta" and score_delta > 0:
+            reason = "probation_below_practical_delta"
+        elif reason == "challenger_improved":
+            if challenger.metrics.get("objective_aggregation_version") != OBJECTIVE_AGGREGATION_VERSION:
+                reason = "probation_invalid_block_evidence"
+            else:
+                evidence = assess_promotion_improvement(
+                    challenger, champion, minimum_paired_blocks=LOCAL_PAIRED_BLOCK_MINIMUM
+                )
+                if evidence["comparable"] and not _complete_paired_day_blocks(champion, challenger):
+                    reason = "probation_incomplete_paired_blocks"
+                elif not evidence["improved"]:
+                    reason = "probation_" + evidence["reason_code"]
 
     promoted = reason == "challenger_improved"
     return LocalChallengerAssessment(
@@ -377,11 +440,18 @@ def validate_formal_batch_comparison(
     *,
     minimum_score_delta: float = LOCAL_MINIMUM_SCORE_DELTA,
     cell_regression_blocks: bool = True,
+    require_paired_evidence: bool = False,
+    require_paired_strict_chain: bool = False,
 ) -> None:
     """Reject comparison fields that differ from Host-derived evidence."""
 
     if not isinstance(comparison, FormalBatchComparison):
         raise TypeError("comparison must be a FormalBatchComparison")
+    marked_qualification = (
+        comparison.paired_execution_qualification == PAIRED_EXECUTION_QUALIFICATION
+    )
+    if marked_qualification and not require_paired_strict_chain:
+        raise ValueError("paired execution qualification requires guarded search")
     safety_gate_passed = (
         local_challenger_safety_reason(challenger.metrics) is None
     )
@@ -391,6 +461,8 @@ def validate_formal_batch_comparison(
         challenger_safety_gate_passed=safety_gate_passed,
         minimum_score_delta=minimum_score_delta,
         cell_regression_blocks=cell_regression_blocks,
+        require_paired_evidence=require_paired_evidence,
+        require_paired_strict_chain=marked_qualification,
     )
     if comparison.batch_index == 0:
         expected_decision = FormalBatchComparisonDecision.INITIAL_CHAMPION

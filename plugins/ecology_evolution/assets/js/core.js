@@ -5,7 +5,7 @@
   var dataRequestTimeout = 30000;
   var evolutionCommandTimeout = 120000;
   var sampleConcurrencyMaximum = 128;
-  var eventInitialTail = 200;
+  var eventInitialTail = 60;
   var eventMemoryLimit = 500;
   var query = new URLSearchParams(window.location.search);
 
@@ -47,6 +47,7 @@
   var parameterLabels = {
     blend: "历史值混合权重", window: "历史窗口（小时）", bias_scale: "偏差校正强度",
     history_steps: "目标历史步数（小时）", ridge_alpha: "岭回归正则化强度", residual_scale: "预测残差缩放系数",
+    residual_scale_1h: "1 小时残差修正系数", residual_scale_6h: "6 小时残差修正系数", residual_scale_24h: "24 小时残差修正系数",
     alpha: "平滑系数", water_threshold: "土壤水分阈值"
   };
   var evolutionStageLabels = {
@@ -59,6 +60,7 @@
     "rule_judge@1": "内置规则独立评审",
     "toy-rolling-water@1": "合成土壤水分滚动预测模型",
     "greenhouse-rolling-residual@1": "温室环境滚动残差预测模型",
+    "greenhouse-baseline-aligned-ridge@1": "基线对齐岭回归（按时距控制修正）",
     "greenhouse-exogenous-ridge@1": "温室外生变量岭回归残差模型",
     "rolling-residual@1": "滚动残差预测模型"
   };
@@ -116,6 +118,8 @@
     runs: [],
     showCancelledEmptyRuns: false,
     showArchivedRuns: false,
+    runListCursor: null,
+    loadingOlderRuns: false,
     archivedRunCount: 0,
     activeRun: null,
     lastSelectedRunId: null,
@@ -175,6 +179,13 @@
     runMonitorRetry: 0,
     runMonitorLastPollAt: 0,
     structureHydrationStale: false,
+    workspaceVersions: {},
+    workspaceRequests: {},
+    workspaceErrors: {},
+    trainingAssetDetails: {},
+    trainingAssetRequests: {},
+    eventReadRequest: 0,
+    eventReadPending: null,
     candidateBudgetManual: false,
     cohortCapacityReport: null,
     cohortCapacitySignature: null,
@@ -348,7 +359,7 @@
   }
   function runHasEvolutionProgress(run, events) {
     var progressArrays = ["trajectory", "rounds", "generation_batches", "generation_analyses", "knowledge_snapshots", "knowledge_assessments", "training_assets", "artifacts", "candidates"];
-    if (run && (Number(run.generation || run.current_generation || 0) > 0
+    if (run && (run.has_evolution_progress === true || Number(run.generation || run.current_generation || 0) > 0
       || progressArrays.some(function (field) { return Array.isArray(run[field]) && run[field].length > 0; })
       || Number(run.execution_progress && run.execution_progress.completed_steps || 0) > 0)) {
       return true;
@@ -410,8 +421,9 @@
       ? state.runs.slice()
       : state.runs.filter(function (run) { return !isCancelledEmptyRun(run); });
   }
-  function runsListPath() {
-    return state.showArchivedRuns ? "/runs?view=summary&include_archived=true" : "/runs?view=summary";
+  function runsListPath(before) {
+    var path = state.showArchivedRuns ? "/runs?view=summary&include_archived=true" : "/runs?view=summary";
+    return path + "&limit=5" + (before ? "&before=" + encodeURIComponent(before) : "");
   }
   function runIsTerminal(run) {
     return Boolean(run) && ["completed", "cancelled", "failed"].indexOf(String(run.status || "").toLowerCase()) >= 0;
@@ -456,10 +468,10 @@
       var scale = [];
       if (Number.isInteger(generations) && generations > 0) { scale.push(formatNumber(generations) + " 代"); }
       if (Number.isInteger(candidates) && candidates > 0) { scale.push(formatNumber(candidates) + " 个候选"); }
-      return "本次运行已结束" + (scale.length ? "（" + scale.join("、") + "）" : "") + "，未产生新的保留方案；独立最终验证另行开展";
+      return "本次运行已结束" + (scale.length ? "（" + scale.join("、") + "）" : "") + "，未产生新的门禁通过方案；独立最终验证另行开展";
     }
     if (outcome === "completed_with_acceptable_candidate") { return "已完成，保留方案可用于继续优化；不代表已通过独立最终验证"; }
-    if (outcome === "completed_without_acceptable_candidate") { return "本次运行已结束，未产生新的保留方案；独立最终验证另行开展"; }
+    if (outcome === "completed_without_acceptable_candidate") { return "本次运行已结束，未产生新的门禁通过方案；独立最终验证另行开展"; }
     return "";
   }
   function publicFailureText(value) {
@@ -663,7 +675,7 @@
       var explicitOutcome = String(run.outcome || run.termination_reason || "");
       var completedWithCandidate = explicitOutcome && runOutcomeCode(run) === "completed_with_acceptable_candidate";
       var withoutCandidate = ["budget_exhausted_without_acceptable_candidate", "completed_without_acceptable_candidate"].indexOf(explicitOutcome) >= 0;
-      return {label: "已完成", detail: completedWithCandidate ? "已保留用于继续优化的方案；这不代表已通过独立最终验证。" : withoutCandidate ? "本次运行已结束，未产生新的保留方案；不等于运行出错。" : "本次运行已结束，具体结果请查看候选方案与验证记录。", nextAction: "查看候选方案和本轮结果，或开始新的运行。", tone: "completed"};
+      return {label: "已完成", detail: completedWithCandidate ? "已保留用于继续优化的方案；这不代表已通过独立最终验证。" : withoutCandidate ? "本次运行已结束，未产生新的门禁通过方案；不等于运行出错。" : "本次运行已结束，具体结果请查看候选方案与验证记录。", nextAction: "查看候选方案和本轮结果，或开始新的运行。", tone: "completed"};
     }
     if (status === "created" && !serverAutoProgressEnabled(run)) {
       return {label: "待启动", detail: "任务已创建，尚未开始执行。", nextAction: "请从创建入口或运行控制启动任务。", tone: "waiting"};
@@ -928,6 +940,8 @@
       domain_packs: normalizeList(value.domain_packs), datasets: normalizeList(value.datasets),
       unavailable_datasets: normalizeList(value.unavailable_datasets),
       prediction_models: normalizeList(value.prediction_models),
+      runtime_evaluator_id: value.runtime_evaluator_id,
+      prediction_selection_policy: value.prediction_selection_policy,
       strategies: normalizeList(value.strategies), evaluators: normalizeList(value.evaluators),
       models: models,
       dsh_models: dshModels,
@@ -977,6 +991,11 @@
       applied_generation: Object.prototype.hasOwnProperty.call(item, "applied_generation") ? item.applied_generation : nestedAnswer.applied_generation
     });
   }
+  function processCandidates(run) {
+    if (!run) { return []; }
+    return Array.isArray(run.candidate_summaries) ? run.candidate_summaries : (run.candidates || []);
+  }
+
   function normalizeRun(input) {
     var item = input && (input.projection || input.run_projection) || input || {};
     var configuration = item.configuration || {};
@@ -996,13 +1015,13 @@
         : null;
     var status = item.status || "idle";
     var bestCandidateId = item.best_candidate_id || null;
-    var outcome = item.outcome || (String(status).toLowerCase() === "completed"
+    var outcome = item.schema_version === "ecologyrsi-dsh.browser-run-summary/2" ? null : item.outcome || (String(status).toLowerCase() === "completed"
       ? bestCandidateId ? "completed_with_acceptable_candidate" : "budget_exhausted_without_acceptable_candidate"
       : null);
     var trajectory = Array.isArray(item.trajectory) ? item.trajectory : [];
     if (!trajectory.length) {
       trajectory = candidates.slice().sort(function (a, b) { return a.generation - b.generation; }).filter(function (candidate) {
-        return Number.isFinite(Number(candidate.score));
+        return !isBlank(candidate.score) && Number.isFinite(Number(candidate.score));
       }).map(function (candidate, index) {
         var score = Number(candidate.score);
         // Legacy projections without a trajectory can still show candidate
@@ -1058,6 +1077,8 @@
       rounds: Array.isArray(item.rounds) ? item.rounds : [],
       generation_analyses: Array.isArray(item.generation_analyses) ? item.generation_analyses : [],
       candidates: candidates,
+      candidate_summaries: Array.isArray(item.candidate_summaries) ? item.candidate_summaries.map(normalizeCandidate) : undefined,
+      intervention_candidates: Array.isArray(item.intervention_candidates) ? item.intervention_candidates.map(normalizeCandidate) : undefined,
       gate: item.gate && typeof item.gate === "object" ? item.gate : {},
       metrics: item.metrics && typeof item.metrics === "object" ? item.metrics : {}
     });
@@ -1135,6 +1156,16 @@
     return base + "?after=" + encodeURIComponent(String(state.eventCursor));
   }
 
+  function pendingCreateStatus() {
+    var creation = state.createStatus;
+    if (creation && ["preflight", "submitting", "verifying", "pending"].indexOf(creation.state) >= 0) { return creation; }
+    return state.pendingAction === "create" ? {state: "submitting", message: "正在创建运行，收到后台确认后会显示进度。"} : null;
+  }
+  function createPhaseLabel(creation) {
+    if (!creation) { return "等待运行"; }
+    return {preflight: "模型能力预检中", submitting: "正在创建运行", verifying: "正在核对创建状态", pending: "等待后台确认创建"}[creation.state] || "正在创建运行";
+  }
+
   function localizeError(message, errorCode) {
     var text = String(message || "");
     if (String(errorCode || "") === "frozen_runtime_binding_drift") {
@@ -1180,6 +1211,38 @@
   }
   function clearCommandKey(kind) { delete state.commandKeys[kind]; }
 
+  var pendingReads = new Map();
+  var cachedReads = new Map();
   function request(path, options) {
-    return EcologyDSHHost.request(path, options);
+    var opts = options || {};
+    if (String(opts.method || "GET").toUpperCase() !== "GET") { return EcologyDSHHost.request(path, options); }
+    var key = state.contextEpoch + "|" + state.apiBase + "|" + path + "|" + (opts.timeout || 8000);
+    var ttl = path === "/catalog" ? 60000 : /^\/datasets\/[^/]+(?:\?|$|\/samples\?)/.test(path) ? 15000 : 0;
+    var cached = cachedReads.get(key);
+    if (ttl && cached && cached.expires > Date.now()) { return Promise.resolve(clone(cached.value)); }
+    if (pendingReads.has(key)) { return pendingReads.get(key).then(clone); }
+    var operation = EcologyDSHHost.request(path, options).then(function (value) {
+      if (ttl) {
+        cachedReads.delete(key);
+        cachedReads.set(key, {value: value, expires: Date.now() + ttl});
+        while (cachedReads.size > 16) { cachedReads.delete(cachedReads.keys().next().value); }
+      }
+      return value;
+    }).finally(function () { if (pendingReads.get(key) === operation) { pendingReads.delete(key); } });
+    pendingReads.set(key, operation);
+    return operation.then(clone);
+  }
+
+  function agentPredictionDescription(info) {
+    if (!info) { return ""; }
+    var method = {direct: "Agent 直接预测", model: "Agent 采用模型", blend: "Agent 融合模型", adjusted: "Agent 调整预测"}[info.method] || "Agent 预测";
+    var calls = info.tools || [];
+    var cited = calls.filter(function (call) { return call.used_as_evidence === true; });
+    var details = calls.map(function (call) {
+      var parameters = Object.keys(call.parameters || {}).sort().map(function (key) { return key + "=" + call.parameters[key]; }).join(", ");
+      return (call.call_id ? call.call_id + ": " : "") + call.tool_id + (parameters ? " (" + parameters + ")" : "") +
+        (call.status === "failed" ? "（失败）" : call.used_as_evidence ? "（已引用）" : "（未引用）");
+    }).join("；");
+    return [method, "自报置信度 " + formatNumber(Number(info.confidence) * 100) + "%",
+      "最终尝试 " + calls.length + " 次预测工具调用，引用 " + cited.length + " 次", details].filter(Boolean).join(" · ");
   }

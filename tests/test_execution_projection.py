@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ecologyrsi_dsh import EventLedger, EvolutionDirector, FakeDSHAdapter, TaskManifest
-from ecologyrsi_dsh.api.generation_execution import _model_token_budget_state
+from ecologyrsi_dsh.application.generation_execution import _model_token_budget_state
 from ecologyrsi_dsh.api.projection import (
     _adaptive_progress_projection,
     _adaptive_trajectory_projection,
@@ -23,6 +23,7 @@ from ecologyrsi_dsh.api.projection import (
     _public_inference_trace,
     _public_evaluation_metrics,
     _run_failure_projection,
+    _rounds_projection,
     _screening_progress_projection,
 )
 from ecologyrsi_dsh.api.shared import _event_type
@@ -86,6 +87,95 @@ def _origin_members(label: str) -> list[str]:
 
 
 class ExecutionProjectionTests(unittest.TestCase):
+    def test_adaptive_round_shows_shared_advisory_review_without_judge_receipts(self) -> None:
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(metadata={"optimization_protocol": "top2_adaptive_epoch@1"}),
+            run=SimpleNamespace(status=SimpleNamespace(value="completed")),
+            generation_comparisons=(SimpleNamespace(generation=0),),
+            candidate_screening_events=(SimpleNamespace(payload={"candidate_id": "c:screened"}),),
+        )
+        row = {"generation": 1, "generation_reflection": {"reflection_id": "r:1"},
+            "stages": {"judge": "running", "decision": "pending"},
+            "candidates": [{"candidate_id": "c:screened", "stages": {
+                "evaluation": "pending", "judge": "pending", "decision": "pending"}}]}
+        with patch("ecologyrsi_dsh.api.projection.rounds", return_value=[row]):
+            projected = _rounds_projection(state)[0]
+        self.assertEqual(projected["adaptive_completion"]["review_scope"], "generation_advisory")
+        self.assertTrue(projected["adaptive_completion"]["comparison_recorded"])
+        self.assertEqual(projected["stages"]["judge"], "completed")
+        self.assertEqual(projected["candidates"][0]["stages"], {
+            "evaluation": "completed", "judge": "completed", "decision": "recorded"})
+
+    def test_terminal_adaptive_progress_preserves_completed_generation(self) -> None:
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(metadata={
+                "optimization_protocol": "top2_adaptive_epoch@1",
+                "optimization_schedule": {
+                    "screening_origin_count": 64,
+                    "formal_origin_count_per_finalist": 20,
+                    "selection_holdout_origin_count": 169,
+                    "local_batch_origin_count": 10,
+                },
+            }, max_generations=2),
+            run=SimpleNamespace(generation=1, status=SimpleNamespace(value="completed")),
+            candidates=(), formal_batches=(),
+            candidate_screening_events=tuple(SimpleNamespace(
+                payload={"generation": 0, "candidate_id": f"c:{i}", "origin_count": 64}
+            ) for i in range(4)),
+            formal_batch_evaluations=tuple(SimpleNamespace(
+                scope=SimpleNamespace(generation=0, origin_count=20)
+            ) for _ in range(2)),
+            holdout_evaluations=tuple(SimpleNamespace(
+                scope=SimpleNamespace(generation=0, origin_count=169)
+            ) for _ in range(3)),
+            events=(SimpleNamespace(kind="GenerationComparisonRecorded",
+                payload={"comparison": {"generation": 0}}),),
+        )
+        progress = _adaptive_progress_projection(state)
+        self.assertEqual(progress["generation"], 0)
+        self.assertEqual(progress["completed_origins"], 803)
+        self.assertEqual(progress["run_completed_origins"], 803)
+        self.assertEqual(progress["run_total_origins"], 1606)
+        self.assertEqual(progress["epoch_progress_percent"], 100)
+        self.assertEqual(progress["terminal_skipped_origins"], 0)
+        self.assertIsNone(progress["current_candidate_id"])
+        # A later failed generation must not inherit the prior completion.
+        state.run.status.value = "failed"
+        state.events += (SimpleNamespace(kind="GenerationBatchStarted",
+            payload={"batch": {"generation": 1}}),)
+        self.assertIsNone(_adaptive_progress_projection(state))
+
+    def test_sealed_screening_is_not_aborted_but_next_revision_remains_partial(self) -> None:
+        candidate = SimpleNamespace(candidate_id="c:screened", proposal_id="p:screened",
+            generation=0, role=CandidateRole.SEARCH, status=SimpleNamespace(value="failed"))
+        state = SimpleNamespace(
+            artifacts=(), evaluations=(), formal_batch_evaluations=(), holdout_evaluations=(),
+            proposals=(), candidates=(candidate,),
+            task_manifest=SimpleNamespace(metadata={"prediction_cells_per_origin": 9}, max_generations=1),
+            candidate_screening_events=(SimpleNamespace(payload={"origin_count": 64}),),
+            run=SimpleNamespace(generation=1, status=SimpleNamespace(value="completed")),
+            events=(
+                SimpleNamespace(seq=1, kind="EvaluationSampleResultsStarted",
+                    payload={"candidate_id": candidate.candidate_id, "revision": "screen"}),
+                SimpleNamespace(seq=2, kind="EvaluationSampleResultsRecorded",
+                    payload={"candidate_id": candidate.candidate_id, "revision": "screen"}),
+            ),
+        )
+        with patch("ecologyrsi_dsh.api.projection._evaluation_progress_projection",
+                return_value={"completed_samples": 2, "total_samples": 5}), patch(
+                "ecologyrsi_dsh.api.projection._evaluation_batch_progress_projection", return_value=None):
+            sealed = _execution_diagnostics(state)
+            self.assertEqual(sealed["partial_evaluation_aborted_candidate_count"], 0)
+            self.assertEqual(sealed["adaptive_all_settled_origins"], 64)
+            self.assertEqual(sealed["adaptive_scored_cells"], 576)
+            self.assertEqual(sealed["candidate_work_items"], 576)
+            self.assertEqual(sealed["execution_evidence_status"], "recorded")
+            state.events += (SimpleNamespace(seq=3, kind="EvaluationSampleResultsStarted",
+                payload={"candidate_id": candidate.candidate_id, "revision": "new"}),)
+            unfinished = _execution_diagnostics(state)
+            self.assertEqual(unfinished["partial_evaluation_aborted_candidate_count"], 1)
+            self.assertEqual(unfinished["execution_evidence_status"], "aborted_partial")
+
     def test_seed_control_holdout_progress_is_not_recounted_as_screening(
         self,
     ) -> None:
@@ -1889,6 +1979,49 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(activity["dsh_stage"], "candidate.local_edit")
         self.assertEqual(activity["role"], "candidate-proposer")
 
+    def test_dsh_activity_counts_parallel_local_edit_and_unresolved_samples(self) -> None:
+        def launch(seq: int, stage: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                seq=seq,
+                kind="DshChildLaunchReserved",
+                payload={"launch": {
+                    "stage": stage,
+                    "role": "candidate-proposer" if stage == "candidate.local_edit" else "sample-planner",
+                    "launch_attempt": 1,
+                    "reservation_id": f"private-reservation:{seq}",
+                    "context": {"private": "never project model context"},
+                }},
+                created_at=f"2026-08-28T00:00:{seq:02d}+00:00",
+            )
+
+        events = [
+            launch(20, "candidate.local_edit"),
+            launch(21, "sample.plan"),
+            launch(22, "sample.plan"),
+            launch(23, "sample.plan"),
+            launch(24, "sample.repair"),
+            SimpleNamespace(seq=25, kind="DshStructuredResultAccepted",
+                payload={"identity": {"child_reservation_id": "private-reservation:21"}},
+                created_at="2026-08-28T00:00:25+00:00"),
+            SimpleNamespace(seq=26, kind="DshChildExecutionFailed",
+                payload={"identity": {"child_reservation_id": "private-reservation:24"}},
+                created_at="2026-08-28T00:00:26+00:00"),
+        ]
+        activity = _dsh_activity_projection(
+            SimpleNamespace(events=events), current_stage="evaluation", run_status="running"
+        )
+        self.assertEqual(activity["dsh_stage"], "sample.plan")
+        self.assertEqual(activity["unresolved_child_count"], 3)
+        self.assertEqual(activity["unresolved_stage_counts"], [
+            {"dsh_stage": "candidate.local_edit", "count": 1},
+            {"dsh_stage": "sample.plan", "count": 2},
+        ])
+        self.assertNotIn("private-reservation", str(activity))
+        self.assertNotIn("model context", str(activity))
+        self.assertIsNone(_dsh_activity_projection(
+            SimpleNamespace(events=events), current_stage="evaluation", run_status="paused"
+        ))
+
     def test_adaptive_trajectory_exposes_bounded_batch_and_edit_evidence(self) -> None:
         legacy_schedule = OptimizationSchedule.default().to_dict()
         legacy_schedule.update(
@@ -2895,7 +3028,7 @@ class ExecutionProjectionTests(unittest.TestCase):
             created_at="2026-08-25T14:39:02+00:00",
         )
         state = SimpleNamespace(
-            run=SimpleNamespace(status=SimpleNamespace(value="completed")),
+            run=SimpleNamespace(generation=1, status=SimpleNamespace(value="completed")),
             events=(failed_stage, completed),
         )
 
@@ -3264,7 +3397,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     payload={
                         "execution_protocol": "dsh_native_plugin_evolution@1",
                         "capabilities_digest": "a" * 64,
-                        "preset_ids": ["ecology-sample-planner-v5"],
+                        "preset_ids": ["ecology-sample-planner-v8"],
                     },
                 ),
                 SimpleNamespace(
@@ -5241,3 +5374,65 @@ class ExecutionProjectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class NativeReplicaProgressTests(unittest.TestCase):
+    def test_independent_replicas_accumulate_without_recounting_checkpoint_replays(self):
+        from ecologyrsi_dsh.api.projection import _holdout_arm_live_projection
+        def event(seq, kind, **payload):
+            return SimpleNamespace(seq=seq, kind=kind, payload=payload, created_at='2026-09-08T00:00:00+00:00')
+        boundary = event(1, 'HoldoutArmStarted', generation=0, holdout_arm='incumbent',
+            candidate_id='c', candidate_revision_id='rev', cohort_digest='a'*64, origin_count=169)
+        def start(seq, replica, revision):
+            return event(seq, 'EvaluationSampleResultsStarted', candidate_id='c', revision=revision,
+                checkpoint={'evaluation_phase':'holdout', 'formal_batch_index':None, 'holdout_arm':'incumbent',
+                    'candidate_revision_id':'rev', 'cohort_digest':'a'*64, 'inference_replica':replica})
+        def batch(seq, revision, count):
+            return event(seq, 'EvaluationSampleResultBatchRecorded', candidate_id='c', revision=revision,
+                batch_index=1, record_count=count*9, sample_ids=[f'cell-{i}' for i in range(count*9)])
+        state = SimpleNamespace(task_manifest=SimpleNamespace(metadata={'sample_agent_mode':'dsh_native_agent',
+            'prediction_cells_per_origin':9}), run=SimpleNamespace(generation=0, status=SimpleNamespace(value='running')),
+            holdout_evaluations=(), events=(boundary, start(2,0,'r0'), batch(3,'r0',169)))
+        first = _holdout_arm_live_projection(state)
+        self.assertEqual(first['completed_origins'], 169)
+        self.assertEqual(first['awaiting_submission_batches'], 169)
+        state.events += (start(4,1,'r1'), batch(5,'r1',3), batch(6,'r1',3))
+        second = _holdout_arm_live_projection(state)
+        self.assertEqual(second['completed_origins'], 172)
+        self.assertEqual(second['host_settled_origins'], 172)
+        self.assertEqual(second['holdout_replica_count'], 2)
+        self.assertEqual([row['completed_origins'] for row in second['holdout_replica_progress']], [169,3])
+        for status in ('paused', 'cancelled', 'failed'):
+            state.run.status.value = status
+            self.assertEqual(_holdout_arm_live_projection(state)['completed_origins'], 172)
+        state.run.status.value = 'running'
+        # Earlier screening results and a stale unrelated holdout do not leak in.
+        state.events = (start(0,1,'old'), batch(0,'old',169), *state.events)
+        self.assertEqual(_holdout_arm_live_projection(state)['completed_origins'], 172)
+
+    def test_native_progress_uses_the_same_execution_budget_as_capacity(self):
+        from dataclasses import replace
+        schedule = replace(OptimizationSchedule.for_new_run(), formal_origin_count_per_finalist=144, local_batch_origin_count=72)
+        state = SimpleNamespace(task_manifest=SimpleNamespace(metadata={
+            'sample_agent_mode':'dsh_native_agent', 'optimization_protocol':'top2_adaptive_epoch@1',
+            'optimization_schedule':schedule.to_dict(), 'prediction_cells_per_origin':9}),
+            run=SimpleNamespace(generation=0,status=SimpleNamespace(value='running')), candidates=(),
+            candidate_screening_events=(), formal_batch_evaluations=(), holdout_evaluations=(), formal_batches=(),
+            events=(SimpleNamespace(seq=1,kind='HoldoutArmStarted', created_at='2026-09-08T00:00:00+00:00',
+                payload={'generation':0,'holdout_arm':'incumbent','candidate_id':'c','origin_count':169}),))
+        progress = _adaptive_progress_projection(state)
+        self.assertEqual(progress['total_origins'], 1702)
+        self.assertEqual(progress['holdout_total_origins'], 1014)
+        self.assertEqual(progress['total_origins'], schedule.generation_execution_budget(
+            cells_per_origin=9,holdout_inference_replicas=2)['total_candidate_origins'])
+        # Durable holdout batches remain visible during a pause or terminal
+        # stop, but those states do not predict a future completion time.
+        state.events += tuple(SimpleNamespace(seq=i + 2, kind='EvaluationSampleResultBatchRecorded',
+            created_at=f'2026-09-08T00:00:0{i + 1}+00:00', payload={
+                'candidate_id':'c','revision':'holdout-results','batch_index':i + 1,
+                'record_count':9,'sample_ids':[f'origin-{i}:cell-{n}' for n in range(9)]})
+            for i in range(2))
+        for status in ('paused', 'cancelled', 'failed', 'completed'):
+            state.run.status.value = status
+            stopped = _adaptive_progress_projection(state)
+            self.assertIsNone(stopped['estimated_remaining_seconds'])
+            self.assertIsNone(stopped['run_estimated_remaining_seconds'])

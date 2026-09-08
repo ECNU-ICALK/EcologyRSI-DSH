@@ -7,6 +7,8 @@ then emits an immutable digest that can be checked before training starts.
 
 from __future__ import annotations
 
+from ..core.prediction_policy import RUNTIME_EVALUATOR_ID
+
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -74,8 +76,15 @@ _CAPABILITIES: dict[str, dict[str, dict[str, Any]]] = {
             "evaluator_ids": (
                 "greenhouse_time_forward@1",
                 "greenhouse_multihorizon_time_forward@1",
-                "greenhouse_multihorizon_time_forward@2",
+                "greenhouse_multihorizon_time_forward@2", RUNTIME_EVALUATOR_ID,
             ),
+        },
+        "greenhouse-baseline-aligned-ridge@1": {
+            "version": "greenhouse-baseline-aligned-ridge/1",
+            "parameter_names": ("history_steps", "ridge_alpha",
+                                "residual_scale_1h", "residual_scale_6h", "residual_scale_24h"),
+            "tool_ids": ("host.predictor.greenhouse-baseline-aligned-ridge.fit-predict@1",),
+            "evaluator_ids": ("greenhouse_multihorizon_time_forward@3", RUNTIME_EVALUATOR_ID),
         },
         "greenhouse-targetwise-ridge@1": {
             "version": "greenhouse-targetwise-ridge/1",
@@ -92,7 +101,7 @@ _CAPABILITIES: dict[str, dict[str, dict[str, Any]]] = {
             "evaluator_ids": (
                 "greenhouse_time_forward@1",
                 "greenhouse_multihorizon_time_forward@1",
-                "greenhouse_multihorizon_time_forward@2",
+                "greenhouse_multihorizon_time_forward@2", RUNTIME_EVALUATOR_ID,
             ),
         },
         "greenhouse-horizon-targetwise-ridge@1": {
@@ -113,10 +122,12 @@ _CAPABILITIES: dict[str, dict[str, dict[str, Any]]] = {
             "tool_ids": (
                 "host.predictor.greenhouse-horizon-targetwise-ridge.fit-predict@1",
             ),
-            "evaluator_ids": ("greenhouse_multihorizon_time_forward@2",),
+            "evaluator_ids": ("greenhouse_multihorizon_time_forward@2", RUNTIME_EVALUATOR_ID,),
         },
     },
     "evaluator": {
+        RUNTIME_EVALUATOR_ID: {"version": "greenhouse-runtime-model-selection-forward/1",
+                               "tool_ids": ("host.evaluator.greenhouse-runtime-model-selection.score@1",)},
         "toy_time_forward@1": {
             "version": "toy-time-forward/3",
             "tool_ids": ("host.evaluator.toy-time-forward.score@1",),
@@ -135,6 +146,12 @@ _CAPABILITIES: dict[str, dict[str, dict[str, Any]]] = {
             "version": "greenhouse-multihorizon-time-forward/5",
             "tool_ids": (
                 "host.evaluator.greenhouse-multihorizon-time-forward.score@2",
+            ),
+        },
+        "greenhouse_multihorizon_time_forward@3": {
+            "version": "greenhouse-baseline-aligned-multihorizon-time-forward/1",
+            "tool_ids": (
+                "host.evaluator.greenhouse-baseline-aligned-multihorizon-time-forward.score@1",
             ),
         },
     },

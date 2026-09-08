@@ -4,7 +4,7 @@ from dataclasses import replace
 import unittest
 from types import SimpleNamespace
 
-from ecologyrsi_dsh.api.generation_execution import (
+from ecologyrsi_dsh.application.generation_execution import (
     _ensure_candidate_algorithm_ready,
 )
 from ecologyrsi_dsh.core.director import EvolutionDirector
@@ -250,7 +250,7 @@ class AlgorithmIRSmokeTests(unittest.TestCase):
             )
 
             ready = _ensure_candidate_algorithm_ready(
-                endpoint,
+                (endpoint).server,
                 director.state("run:smoke-retry"),
                 proposal,
                 candidate,
@@ -343,7 +343,7 @@ class AlgorithmIRSmokeTests(unittest.TestCase):
             )
 
             ready = _ensure_candidate_algorithm_ready(
-                endpoint,
+                (endpoint).server,
                 director.state("run:smoke-digest-tampered"),
                 proposal,
                 candidate,
@@ -434,7 +434,7 @@ class AlgorithmIRSmokeTests(unittest.TestCase):
                 )
             )
             ready = _ensure_candidate_algorithm_ready(
-                endpoint,
+                (endpoint).server,
                 restarted.state("run:smoke-resume"),
                 proposal,
                 candidate,
@@ -475,7 +475,7 @@ class AlgorithmIRSmokeTests(unittest.TestCase):
             )
 
             ready = _ensure_candidate_algorithm_ready(
-                endpoint,
+                (endpoint).server,
                 director.state("run:smoke-exhausted"),
                 proposal,
                 candidate,

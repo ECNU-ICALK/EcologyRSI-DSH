@@ -605,6 +605,11 @@ def _research_iteration_summary(iteration: Any | None) -> dict[str, Any] | None:
                     "ecologyrsi-dsh.evolution-reflection/2",
                 ),
                 "avoid_behavior_count": len(avoid_rows),
+                "review_behaviors": [
+                    {key: item.get(key) for key in ("behavior_digest", "reason", "source_run_id", "source_generation")}
+                    for item in safe_reflection.get("review_behaviors", [])[:8]
+                    if isinstance(item, Mapping)
+                ],
                 "avoid_behaviors": [
                     {
                         "behavior_digest": item.get("behavior_digest"),
@@ -680,6 +685,10 @@ def _research_iteration_summary(iteration: Any | None) -> dict[str, Any] | None:
         result["evolution_reflection"] = reflection_summary
     if historical_provenance is not None:
         result["historical_provenance"] = historical_provenance
+    if getattr(iteration, "diagnostic_report", None) is not None:
+        from ..core.research import DiagnosticReport
+        diagnostic = DiagnosticReport(**dict(iteration.diagnostic_report))
+        result["diagnostic_report"] = {**diagnostic.to_dict(), "report_id": diagnostic.report_id}
     return result
 
 

@@ -383,8 +383,15 @@ class ModelConnection:
     label: str | None = None
     roles: tuple[str, ...] = ("propose", "judge")
     allow_insecure_http: bool = False
+    native_configuration_digest: str | None = None
 
     def __post_init__(self) -> None:
+        if self.native_configuration_digest is not None and (
+            not isinstance(self.native_configuration_digest, str)
+            or len(self.native_configuration_digest) != 64
+            or any(char not in "0123456789abcdef" for char in self.native_configuration_digest)
+        ):
+            raise GatewayConfigurationError("native_configuration_digest must be a SHA-256 digest")
         object.__setattr__(self, "model_id", _required_text(self.model_id, "model_id"))
         if not isinstance(self.allow_insecure_http, bool):
             raise GatewayConfigurationError("allow_insecure_http must be a boolean")
@@ -423,6 +430,7 @@ class ModelConnection:
                 "model": self.model,
                 "roles": sorted(self.roles),
                 "allow_insecure_http": self.allow_insecure_http,
+                "native_configuration_digest": self.native_configuration_digest,
             }
         )
 
@@ -606,6 +614,7 @@ class ModelGateway:
                                 "api_key_env",
                                 "label",
                                 "roles",
+                                "native_configuration_digest",
                             }
                         },
                         env,
@@ -662,6 +671,7 @@ class ModelGateway:
             "api_key_env",
             "label",
             "roles",
+            "native_configuration_digest",
         }
         unknown = set(value) - allowed
         if unknown:
@@ -697,6 +707,7 @@ class ModelGateway:
             label=value.get("label"),
             roles=tuple(raw_roles),
             allow_insecure_http=allow_insecure_http,
+            native_configuration_digest=value.get("native_configuration_digest"),
         )
 
     def catalog(self) -> list[dict[str, Any]]:

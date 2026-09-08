@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { SidecarError } from "../lib/sidecar/client.js";
+import { RESEARCH_EXECUTION_POLICY } from "../lib/runtime/research-execution-policy.js";
 import {
   NativeStageRunner,
   STAGES,
@@ -246,7 +247,7 @@ function samplePlanBinding({ admissionId = "admission-sample-plan-1" } = {}) {
     idempotency_key: "sample-plan-1",
     request: {
       role: "sample-planner",
-      output_schema_id: "ecology-sample-decisions@1",
+      output_schema_id: "ecology-sample-predictions@2",
       max_tokens: 2048,
       context,
       context_canonical_json: canonicalJson(context),
@@ -274,10 +275,10 @@ function directSampleBinding(stage, context) {
     request: {
       role: planner ? "sample-planner" : "sample-critic",
       output_schema_id: planner
-        ? "ecology-sample-decisions@1"
+        ? "ecology-sample-predictions@2"
         : reflection
           ? "ecology-sample-reflection@1"
-          : "ecology-sample-review@1",
+          : "ecology-sample-review@2",
       ...(planner ? { max_tokens: 2048 } : {}),
       context,
       context_canonical_json: canonicalJson(context),
@@ -355,6 +356,7 @@ function directSampleHarness({
     },
     sidecar: {
       request: async (path, options) => {
+        if (path.endsWith("/session-usage")) return { accepted: true };
         if (path.endsWith("/child-reservations")) {
           reservationRequests.push(structuredClone(options.body));
           const attempt = reservations.length + 1;
@@ -438,7 +440,7 @@ test("pre-score sample critic has a bounded schema-recovery protocol", () => {
   assert.match(critic.instruction, /exact wave_digest/i);
   assert.match(critic.instruction, /every supplied sample_id/i);
   assert.match(critic.instruction, /never call structured_output with empty arguments/i);
-  assert.match(critic.instruction, /rejected.*terminate.*fresh.*child attempt/i);
+  assert.match(critic.instruction, /rejects its arguments.*correct.*once/i);
   assert.doesNotMatch(critic.instruction, /retry that same tool/i);
   assert.match(critic.instruction, /emit no prose/i);
 });
@@ -479,6 +481,118 @@ test("Skill-first evidence permits optional retrieval before the terminal tool",
   assert.equal(evidence.first_tool_call_verified, true);
   assert.equal(evidence.next_tool_name, "structured_output");
   assert.equal(evidence.next_tool_call_seq, 5);
+});
+
+function correctedRetrievalEvents() {
+  return [
+    { seq: 1, type: "tool/call", data: { callId: "skill", name: "skill", arguments: { name: "autonomous-ecology-research" } } },
+    { seq: 2, type: "tool/result", data: { message: { content: [{ type: "tool-result", toolCallId: "skill", isError: false }] } } },
+    { seq: 3, type: "tool/call", data: { turn: 1, step: 2, callId: "bad-search", name: "web_search", arguments: JSON.stringify({ queries: "greenhouse forecast", retrieval_key: "evidence" }) } },
+    { seq: 4, type: "tool/result", sourceEventSeqs: [3], data: { turn: 1, step: 2, message: { content: [{ type: "tool-result", toolCallId: "bad-search", isError: true, content: [{ type: "text", text: "Error: web_search requires one to four queries" }] }] } } },
+    { seq: 5, type: "tool/call", data: { callId: "good-search", name: "web_search", arguments: { queries: ["greenhouse forecast"], retrieval_key: "evidence" } } },
+    { seq: 6, type: "tool/result", data: { message: { content: [{ type: "tool-result", toolCallId: "good-search", isError: false }] } } },
+    { seq: 7, type: "tool/call", data: { callId: "structured", name: "structured_output", arguments: {} } },
+  ];
+}
+
+test("retrieval argument correction preserves Skill-first evidence without repeating model work", () => {
+  const evidence = skillInvocationEvidence(correctedRetrievalEvents(), {
+    stage: "generation.research-synthesis",
+    skillName: "autonomous-ecology-research",
+    allowDynamicRetrieval: true,
+  });
+  assert.equal(evidence.first_tool_call_verified, true);
+  assert.equal(evidence.next_tool_call_seq, 7);
+});
+
+function emptyRetrievalEvents() {
+  const events = correctedRetrievalEvents();
+  events[2].data.arguments = {};
+  events[3].data.message.content[0].content[0].text = "Error: web_search arguments have an invalid shape";
+  const secondCall = structuredClone(events[2]);
+  secondCall.seq = 5;
+  secondCall.data.step = 3;
+  secondCall.data.callId = "second-empty-search";
+  const secondResult = structuredClone(events[3]);
+  secondResult.seq = 6;
+  secondResult.sourceEventSeqs = [5];
+  secondResult.data.step = 3;
+  secondResult.data.message.content[0].toolCallId = "second-empty-search";
+  for (const event of events.slice(4)) event.seq += 2;
+  events.splice(4, 0, secondCall, secondResult);
+  return events;
+}
+
+test("two empty retrieval calls can recover within the original three-call budget", () => {
+  const evidence = skillInvocationEvidence(emptyRetrievalEvents(), {
+    stage: "generation.research-synthesis", skillName: "autonomous-ecology-research",
+    allowDynamicRetrieval: true,
+  });
+  assert.equal(evidence.first_tool_call_verified, true);
+  assert.equal(evidence.next_tool_call_seq, 9);
+});
+
+test("empty retrieval recovery does not admit uncorrected, unauthorized or unattributed failures", () => {
+  const mutations = {
+    "no successful correction": (events) => events.splice(6, 2),
+    "wrong error": (events) => { events[3].data.message.content[0].content[0].text = "Error: role tool authorization failed"; },
+    "wrong attribution": (events) => { events[5].sourceEventSeqs = [3]; },
+    "different step": (events) => { events[5].data.step = 4; },
+    "nonempty unbound arguments": (events) => { events[2].data.arguments = { queries: ["forecast"] }; },
+    "array arguments": (events) => { events[2].data.arguments = []; events[3].data.message.content[0].content[0].text = "Error: web_search arguments must be an object"; },
+    "correction failed": (events) => { events[7].data.message.content[0].isError = true; },
+    "correction after terminal": (events) => { events[6].seq = 10; events[7].seq = 11; },
+  };
+  for (const [name, mutate] of Object.entries(mutations)) {
+    const events = emptyRetrievalEvents();
+    mutate(events);
+    assert.throws(() => skillInvocationEvidence(events, {
+      stage: "generation.research-synthesis", skillName: "autonomous-ecology-research",
+      allowDynamicRetrieval: true,
+    }), /dynamic retrieval must succeed/, name);
+  }
+});
+
+test("empty retrieval recovery cannot increase the three-call budget", () => {
+  const events = emptyRetrievalEvents();
+  const extraCall = structuredClone(events[2]);
+  extraCall.seq = 7;
+  extraCall.data.callId = "third-empty-search";
+  const extraResult = structuredClone(events[3]);
+  extraResult.seq = 8;
+  extraResult.sourceEventSeqs = [7];
+  extraResult.data.message.content[0].toolCallId = "third-empty-search";
+  for (const event of events.slice(6)) event.seq += 2;
+  events.splice(6, 0, extraCall, extraResult);
+  assert.throws(() => skillInvocationEvidence(events, {
+    stage: "generation.research-synthesis", skillName: "autonomous-ecology-research",
+    allowDynamicRetrieval: true,
+  }), /retrieval/);
+});
+
+test("retrieval recovery requires exact error attribution and a successful correction", () => {
+  const mutations = {
+    "no correction": (events) => events.splice(4, 2),
+    "different retrieval key": (events) => { events[4].data.arguments.retrieval_key = "unrelated"; },
+    "wrong source event": (events) => { events[3].sourceEventSeqs = [99]; },
+    "missing source event": (events) => { delete events[3].sourceEventSeqs; },
+    "wrong turn": (events) => { events[3].data.turn = 2; },
+    "wrong step": (events) => { events[3].data.step = 3; },
+    "authorization error": (events) => { events[3].data.message.content[0].content[0].text = "Error: stage admission is closed"; },
+    "valid arguments rejected": (events) => { events[2].data.arguments = { queries: ["forecast"], retrieval_key: "evidence" }; },
+    "failed correction": (events) => { events[5].data.message.content[0].isError = true; },
+    "reused call identity": (events) => { events[4].data.callId = "bad-search"; },
+    "late correction": (events) => { events[4].seq = 8; events[5].seq = 9; },
+  };
+  for (const [name, mutate] of Object.entries(mutations)) {
+    const events = correctedRetrievalEvents();
+    mutate(events);
+    assert.throws(() => skillInvocationEvidence(events, {
+      stage: "generation.research-synthesis",
+      skillName: "autonomous-ecology-research",
+      allowDynamicRetrieval: true,
+    }), /dynamic retrieval must succeed/, name);
+  }
 });
 
 test("Skill-first evidence rejects excessive or post-terminal retrieval", () => {
@@ -573,7 +687,7 @@ test("research synthesis and candidate proposal bind structured mutation directi
 
   assert.match(synthesis.instruction, /mutation_direction/i);
   assert.match(synthesis.instruction, /increase or decrease/i);
-  assert.match(synthesis.instruction, /exact parameter assignment/i);
+  assert.match(synthesis.instruction, /structured mutation coordinates are executable/i);
   assert.match(proposal.instruction, /increase must be strictly above/i);
   assert.match(proposal.instruction, /decrease strictly below/i);
   assert.match(proposal.instruction, /must be select/i);
@@ -730,6 +844,7 @@ test("native stage runner reserves before first child tool and durably persists 
     runRegistry: { get: () => ({ status: "running" }) },
     sidecar: {
       request: async (path, options) => {
+        if (path.endsWith("/session-usage")) return { accepted: true };
         persisted.push({
           path,
           body: options.body,
@@ -894,6 +1009,79 @@ test("native stage runner rejects invalid or missing sample planner max_tokens l
   assert.equal(roleHostLookups, 0);
 });
 
+function boundedSynthesisBinding({ policy = true, maxTokens = 16384 } = {}) {
+  const context = {
+    ...(policy ? { research_execution_policy: { ...RESEARCH_EXECUTION_POLICY } } : {}),
+    knowledge_snapshot: { evidence_catalog: [{ knowledge_id: "paper:one" }] },
+    required_candidate_direction_count: 4,
+    synthesis_contract: { allowed_mutation_targets: {
+      scientific_parameter: ["ridge_alpha"], registered_predictor: [], instruction_profile: [],
+    } },
+  };
+  return {
+    run_id: "run:bounded-synthesis", stage: "generation.research-synthesis",
+    run_state_revision: 1, stage_attempt: 1, ledger_expected_revision: 1,
+    admission_id: "admission-bounded-synthesis", idempotency_key: "bounded-synthesis",
+    request: {
+      role: "researcher", output_schema_id: "ecology-research-synthesis@1",
+      context, context_canonical_json: canonicalJson(context), context_digest: jsonDigest(context),
+      max_tokens: maxTokens,
+      identity_digests: { genome_digest: "a".repeat(64), compiled_behavior_digest: "b".repeat(64),
+        phenotype_instance_digest: "c".repeat(64) },
+    },
+  };
+}
+
+test("new synthesis alone receives the frozen 16k budget and concise schema", async () => {
+  const binding = boundedSynthesisBinding();
+  const harness = directSampleHarness({ stage: binding.stage,
+    results: [{ stopReason: "completed", structured: { summary: "bounded" } }],
+    sessionEvents: () => skillFirstEvents("autonomous-ecology-research"),
+  });
+  await harness.runner.run(binding);
+  assert.equal(harness.starts.length, 1);
+  assert.deepEqual(harness.starts[0].request.agentOptions, { maxTokens: 16384 });
+  assert.equal(harness.reservationRequests[0].item_digest, jsonDigest(binding.request.context));
+  const schema = harness.starts[0].request.outputSchema;
+  assert.match(schema.properties.summary.description, /1200 characters/);
+  assert.equal(schema.properties.evidence.maxItems, undefined);
+  assert.match(schema.properties.evidence.description, /at most 8/);
+  assert.equal(schema.properties.candidate_directions.maxItems, undefined);
+  assert.match(schema.properties.candidate_directions.description, /exactly 4/);
+  const direction = schema.properties.candidate_directions.items;
+  assert.match(direction.properties.hypothesis.description, /400 characters/);
+  assert.equal(direction.properties.evidence_refs.maxItems, undefined);
+  assert.match(direction.properties.evidence_refs.description, /at most 4/);
+  assert.equal(harness.persisted.length, 1);
+});
+
+test("synthesis budget drift is rejected before reservation or model launch", async () => {
+  const harness = directSampleHarness({ stage: "generation.research-synthesis", results: [] });
+  for (const binding of [boundedSynthesisBinding({ policy: false }),
+    boundedSynthesisBinding({ maxTokens: 8192 }), boundedSynthesisBinding({ maxTokens: 16385 }),
+    boundedSynthesisBinding({ maxTokens: true })]) {
+    await assert.rejects(harness.runner.run(binding), /max_tokens is invalid/);
+  }
+  const wrongStage = boundedSynthesisBinding();
+  wrongStage.stage = "generation.search-plan";
+  wrongStage.request.output_schema_id = "ecology-research-search-plan@1";
+  await assert.rejects(harness.runner.run(wrongStage), /max_tokens is invalid/);
+  assert.equal(harness.reservationRequests.length, 0);
+  assert.equal(harness.starts.length, 0);
+});
+
+test("16k synthesis exhaustion is terminal without repeating the frozen request", async () => {
+  const binding = boundedSynthesisBinding();
+  const harness = directSampleHarness({ stage: binding.stage, maxAttempts: 4,
+    results: [{ stopReason: "max-tokens" }],
+    sessionEvents: () => skillFirstEvents("autonomous-ecology-research"),
+  });
+  await assert.rejects(harness.runner.run(binding),
+    error => error.code === "structured_child_output_budget_exhausted");
+  assert.equal(harness.starts.length, 1);
+  assert.equal(harness.persisted.length, 0);
+});
+
 test("native stage runner retries one transient child model failure with a fresh reservation", async () => {
   const roleHost = {
     sessionId: "parent-session",
@@ -940,6 +1128,7 @@ test("native stage runner retries one transient child model failure with a fresh
     runRegistry: { get: () => ({ status: "running" }) },
     sidecar: {
       request: async (path, options) => {
+        if (path.endsWith("/session-usage")) return { accepted: true };
         if (path.endsWith("/child-reservations")) {
           reservations += 1;
           return {
@@ -1008,7 +1197,7 @@ test("sample critic retries a consumed completed turn with no capture in a fresh
   };
   const waveDigest = "f".repeat(64);
   const structured = {
-    schema_version: "ecology-sample-review@1",
+    schema_version: "ecology-sample-review@2",
     wave_digest: waveDigest,
     decisions: [],
   };
@@ -1050,6 +1239,7 @@ test("sample critic retries a consumed completed turn with no capture in a fresh
     runRegistry: { get: () => ({ status: "running" }) },
     sidecar: {
       request: async (path, options) => {
+        if (path.endsWith("/session-usage")) return { accepted: true };
         if (path.endsWith("/child-reservations")) {
           reservations += 1;
           return {
@@ -1096,7 +1286,7 @@ test("sample critic retries a consumed completed turn with no capture in a fresh
     idempotency_key: "critic-missing-result-1",
     request: {
       role: "sample-critic",
-      output_schema_id: "ecology-sample-review@1",
+      output_schema_id: "ecology-sample-review@2",
       context,
       context_canonical_json: canonicalJson(context),
       context_digest: jsonDigest(context),
@@ -1201,6 +1391,45 @@ test("sample reflection binds the outer Host identity and retries one missing re
   }
 });
 
+test("serialized tool text is a terminal protocol error with no fabricated tool execution", async () => {
+  for (const stopReason of ["completed", "error"]) {
+    const harness = directSampleHarness({
+      stage: "sample.reflect", results: [{ stopReason }],
+      sessionEvents: () => [
+        { seq: 1, type: "turn/start", data: { turn: 1 } },
+        { seq: 2, type: "step/start", data: { turn: 1, step: 0 } },
+        { seq: 3, type: "assistant/message", data: { turn: 1, message: { content: [
+          { type: "text", text: '<｜DSML｜tool_calls><｜DSML｜invoke name="skill"></｜DSML｜invoke></｜DSML｜tool_calls>' },
+        ] } } },
+        { seq: 4, type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } },
+      ],
+    });
+    await assert.rejects(harness.runner.run(directSampleBinding("sample.reflect", {
+      schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+      wave_digest: "d".repeat(64), sample: { sample_id: "origin-tool-text" }, outcome: { cells: [] },
+    })), (error) => error?.code === "structured_child_tool_protocol_error");
+    assert.equal(harness.starts.length, 1);
+    assert.equal(harness.failures[0].error_code, "structured_child_tool_protocol_error");
+    assert.equal(harness.persisted.length, 0);
+  }
+});
+
+test("output budget exhaustion never repeats the identical capped model call", async () => {
+  for (const stopReason of ["error", "max-tokens"]) {
+    const harness = directSampleHarness({
+      stage: "sample.reflect", results: [{ stopReason }],
+      sessionEvents: () => rc6ConsumedEvents("origin-vector-review", { terminalKind: "max-tokens" }),
+    });
+    await assert.rejects(harness.runner.run(directSampleBinding("sample.reflect", {
+      schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+      wave_digest: "d".repeat(64), sample: { sample_id: "origin-output-budget" }, outcome: { cells: [] },
+    })), (error) => error?.code === "structured_child_output_budget_exhausted");
+    assert.equal(harness.starts.length, 1);
+    assert.equal(harness.persisted.length, 0);
+    assert.equal(harness.failures[0].error_code, "structured_child_output_budget_exhausted");
+  }
+});
+
 test("sample reflection stops after two missing structured outputs without persistence", async () => {
   const context = {
     schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
@@ -1292,7 +1521,7 @@ test("an unconsumed completed no-op turn cannot hide the prior consumed provider
 
 test("sample planner retries a zero-turn child after provider backpressure", async () => {
   const structured = {
-    schema_version: "ecology-sample-decisions@1",
+    schema_version: "ecology-sample-predictions@2",
     wave_digest: "f".repeat(64),
     decisions: [],
   };
@@ -1326,7 +1555,7 @@ test("sample planner retries a zero-turn child after provider backpressure", asy
 
 test("sample planner honors provider retry_after after a consumed RATE_LIMIT turn", async () => {
   const structured = {
-    schema_version: "ecology-sample-decisions@1",
+    schema_version: "ecology-sample-predictions@2",
     wave_digest: "f".repeat(64),
     decisions: [],
   };
@@ -1365,9 +1594,29 @@ test("sample planner honors provider retry_after after a consumed RATE_LIMIT tur
   assert.equal(harness.persisted.length, 1);
 });
 
+test("provider concurrency limit reduces physical capacity instead of RPM spacing", async () => {
+  const structured = { schema_version: "ecology-sample-predictions@2", wave_digest: "f".repeat(64), decisions: [] };
+  const harness = directSampleHarness({
+    stage: "sample.plan",
+    results: [{ stopReason: "error" }, { stopReason: "completed", structured }],
+    sessionEvents: (attempt) => attempt === 1
+      ? rc6ConsumedEvents("origin-vector-forecasting-balanced", {
+        prediction: true, terminalKind: "error",
+        terminalError: { code: "RATE_LIMIT",
+          message: '429: {"code":"cluster_concurrency_rate_limit_exceeded","details":{"limit_type":"concurrency"}}' },
+      }) : skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
+  });
+  const result = await harness.runner.run(directSampleBinding("sample.plan", samplePlanContext()));
+  assert.deepEqual(result.structured, structured);
+  assert.deepEqual(harness.penalties, [{provider: "pjlab", milliseconds: undefined,
+    options: { reduceConcurrency: true }}]);
+  assert.equal(harness.failures.length, 1);
+  assert.equal(harness.persisted.length, 1);
+});
+
 test("sample planner prefers structured 429 Retry-After metadata", async () => {
   const structured = {
-    schema_version: "ecology-sample-decisions@1",
+    schema_version: "ecology-sample-predictions@2",
     wave_digest: "f".repeat(64),
     decisions: [],
   };
@@ -1493,7 +1742,7 @@ test("sample schema specialization is isolated to each schema clone", async () =
       {
         stopReason: "completed",
         structured: {
-          schema_version: "ecology-sample-review@1",
+          schema_version: "ecology-sample-review@2",
           wave_digest: firstWave,
           decisions: [],
         },
@@ -1501,7 +1750,7 @@ test("sample schema specialization is isolated to each schema clone", async () =
       {
         stopReason: "completed",
         structured: {
-          schema_version: "ecology-sample-review@1",
+          schema_version: "ecology-sample-review@2",
           wave_digest: secondWave,
           decisions: [],
         },
@@ -1697,7 +1946,7 @@ test("sample missing-output retry does not broaden to lifecycle or durable-bound
 test("sample planner uses a bounded native one-shot child and retries one missing capture", async () => {
   const skillName = "origin-vector-forecasting-balanced";
   const structured = {
-    schema_version: "ecology-sample-decisions@1",
+    schema_version: "ecology-sample-predictions@2",
     wave_digest: "f".repeat(64),
     decisions: [],
   };
@@ -1733,10 +1982,10 @@ test("sample planner uses a bounded native one-shot child and retries one missin
     assert.deepEqual(request.parent, { id: "sample.plan-role-host" });
     assert.deepEqual(request.agentOptions, { maxTokens: 2048 });
     assert.equal("maxTokens" in request, false);
-    assert.deepEqual(request.outputSchema.properties.wave_digest, { type: "string" });
+    assert.deepEqual(request.outputSchema.properties.wave_digest, { type: "string", const: samplePlanContext().wave_digest });
     assert.deepEqual(
       request.outputSchema.properties.decisions.items.properties.sample_id,
-      { type: "string" },
+      { type: "string", enum: samplePlanContext().samples.map(item => item.sample_id) },
     );
     const plannerPrompt = JSON.parse(request.prompt[0].text);
     assert.match(
@@ -1745,15 +1994,15 @@ test("sample planner uses a bounded native one-shot child and retries one missin
     );
     assert.match(
       plannerPrompt.instruction,
-      /call ecology_execute_prediction_tool exactly once/i,
+      /call ecology_execute_prediction_tool zero to six times/i,
     );
     assert.match(
       plannerPrompt.instruction,
-      /call structured_output exactly once/i,
+      /structured_output.*(?:once|finite)/i,
     );
     assert.match(
       plannerPrompt.instruction,
-      /rejected.*terminate.*do not retry/i,
+      /one output argument correction.*Host-owned retries/i,
     );
   }
   assert.equal(
@@ -1763,7 +2012,7 @@ test("sample planner uses a bounded native one-shot child and retries one missin
   assert.equal(result.skill_invocation_evidence.skill_name, skillName);
   assert.equal(
     result.skill_invocation_evidence.next_tool_name,
-    "ecology_execute_prediction_tool",
+    "structured_output",
   );
   assert.equal(result.skill_invocation_evidence.order_verified, true);
 });
@@ -1771,7 +2020,7 @@ test("sample planner uses a bounded native one-shot child and retries one missin
 test("sample planner waits for the child Session projection before persistence", async () => {
   const skillName = "origin-vector-forecasting-balanced";
   const structured = {
-    schema_version: "ecology-sample-decisions@1",
+    schema_version: "ecology-sample-predictions@2",
     wave_digest: "f".repeat(64),
     decisions: [],
   };
@@ -1804,7 +2053,7 @@ test("sample planner waits for the child Session projection before persistence",
 test("completed sample result after INVALID_ARGS retries as missing capture", async () => {
   const skillName = "origin-vector-forecasting-balanced";
   const structured = {
-    schema_version: "ecology-sample-decisions@1",
+    schema_version: "ecology-sample-predictions@2",
     wave_digest: "f".repeat(64),
     decisions: [],
   };
@@ -1839,7 +2088,7 @@ test("completed sample result after INVALID_ARGS retries as missing capture", as
 test("error result waits for a late completed INVALID_ARGS projection before retry", async () => {
   const skillName = "origin-vector-forecasting-balanced";
   const structured = {
-    schema_version: "ecology-sample-decisions@1",
+    schema_version: "ecology-sample-predictions@2",
     wave_digest: "f".repeat(64),
     decisions: [],
   };
@@ -1920,7 +2169,7 @@ test("error result waits for a late completed INVALID_ARGS projection before ret
 
 test("persistence preserves only the Sidecar safe public diagnostic", async () => {
   const structured = {
-    schema_version: "ecology-sample-decisions@1",
+    schema_version: "ecology-sample-predictions@2",
     wave_digest: "f".repeat(64),
     decisions: [],
   };
@@ -1951,7 +2200,7 @@ test("persistence preserves only the Sidecar safe public diagnostic", async () =
 test("sample persistence retry reuses one child and one frozen sidecar envelope", async () => {
   const waveDigest = "a".repeat(64);
   const structured = {
-    schema_version: "ecology-sample-decisions@1",
+    schema_version: "ecology-sample-predictions@2",
     wave_digest: waveDigest,
     decisions: [],
   };
@@ -2041,7 +2290,7 @@ test("sample critic uses its shorter independent operational timeout", async () 
       idempotency_key: "critic-timeout-1",
       request: {
         role: "sample-critic",
-        output_schema_id: "ecology-sample-review@1",
+        output_schema_id: "ecology-sample-review@2",
         context,
         context_canonical_json: canonicalJson(context),
         context_digest: jsonDigest(context),
@@ -2056,4 +2305,50 @@ test("sample critic uses its shorter independent operational timeout", async () 
   );
   assert.equal(aborted, true);
   assert.ok(Date.now() - startedAt < 500, "sample critic must not inherit the 1s general timeout");
+});
+
+function correctedOutputEvents() {
+  const events = rc6ConsumedEvents('origin-vector-forecasting-balanced', {
+    prediction: true,
+    structuredResult: { isError: true, error: { name: 'ToolArgsError', code: 'INVALID_ARGS' } },
+  });
+  const terminal = events.pop();
+  const previous = events.at(-1).seq;
+  events.push(
+    { seq: previous + 1, type: 'step/start', data: { turn: 1, step: 1 } },
+    { seq: previous + 2, type: 'tool/call', data: { turn: 1, step: 1, callId: 'corrected', name: 'structured_output', arguments: '{}' } },
+    { seq: previous + 3, type: 'tool/result', sourceEventSeqs: [previous + 2], data: { turn: 1, step: 1, message: { content: [{ type: 'tool-result', toolCallId: 'corrected', isError: false }] } } },
+    { seq: previous + 4, type: 'step/end', data: { turn: 1, step: 1 } },
+    { ...terminal, seq: previous + 5 },
+  );
+  return events;
+}
+
+test('one rejected output followed by a captured correction persists without repeating the Agent', async () => {
+  const structured = { schema_version: 'ecology-sample-predictions@2', wave_digest: 'f'.repeat(64), decisions: [] };
+  const harness = directSampleHarness({ stage: 'sample.plan', maxAttempts: 1,
+    results: [{ stopReason: 'completed', structured }], sessionEvents: correctedOutputEvents });
+  const result = await harness.runner.run(directSampleBinding('sample.plan', samplePlanContext()));
+  assert.deepEqual(result.structured, structured);
+  assert.equal(harness.starts.length, 1);
+  assert.equal(harness.persisted.length, 1);
+  assert.equal(harness.failures.length, 0);
+  assert.equal(result.skill_invocation_evidence.next_tool_call_seq,
+    correctedOutputEvents().find(e => e.data?.callId === 'corrected').seq);
+});
+
+test('output correction rejects ambiguous evidence, operational errors, extra calls and repeated successful output', () => {
+  const changes = [
+    events => { events.find(e => e.data?.error).data.error = { name: 'NetworkError', code: 'UNAVAILABLE' }; },
+    events => { events.find(e => e.type === 'tool/result' && e.data?.step === 1).sourceEventSeqs = [0]; },
+    events => { events.find(e => e.type === 'tool/call' && e.data?.callId === 'corrected').data.callId = 'structured-call'; },
+    events => { const e = events.find(e => e.data?.error); delete e.data.error; e.data.message.content[0].isError = false; },
+    events => { events.at(-1).data.reason = { kind: 'error' }; },
+    events => { events.push({ seq: 100, type: 'tool/call', data: { name: 'ecology_execute_prediction_tool', callId: 'late-tool' } }); },
+    events => { events.push({ seq: 100, type: 'tool/call', data: { name: 'structured_output', callId: 'third-output' } }); },
+  ];
+  for (const change of changes) {
+    const events = correctedOutputEvents(); change(events);
+    assert.throws(() => skillInvocationEvidence(events, { stage: 'sample.plan', skillName: 'origin-vector-forecasting-balanced', allowsPredictionTools: true }));
+  }
 });

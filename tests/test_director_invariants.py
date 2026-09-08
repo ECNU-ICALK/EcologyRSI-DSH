@@ -230,7 +230,7 @@ class DirectorInvariantTests(unittest.TestCase):
         )
         self.assertEqual([event.seq for event in first], [event.seq for event in duplicate])
         self.assertEqual([event.payload["usage_index"] for event in first], [0, 1])
-        with self.assertRaisesRegex(ValueError, "current checkpoint"):
+        with self.assertRaisesRegex(ValueError, "missing its start event"):
             self.director.record_model_usage_batch(
                 run_id,
                 generation=0,

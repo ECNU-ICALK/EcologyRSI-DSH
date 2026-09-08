@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from ecologyrsi_dsh.api.generation_execution import (
+from ecologyrsi_dsh.application.generation_execution import (
     _build_adaptive_analysis,
     _local_edit_trajectory_evidence,
 )

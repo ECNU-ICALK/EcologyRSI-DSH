@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from ecologyrsi_dsh.core.models import Evaluation, digest
 from ecologyrsi_dsh.evaluators.objectives import OBJECTIVE_AGGREGATION_VERSION
@@ -146,8 +147,10 @@ class PromotionPolicyTests(unittest.TestCase):
         missing_digest = _evaluation(
             "missing", 0.5, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.1,) * 4
         )
-        incumbent.metrics.pop("dataset_digest")
-        missing_digest.metrics.pop("dataset_digest")
+        incumbent, missing_digest = (
+            replace(item, metrics={k: v for k, v in item.metrics.items() if k != "dataset_digest"})
+            for item in (incumbent, missing_digest)
+        )
         self.assertFalse(
             assess_promotion_improvement(missing_digest, incumbent)["comparable"]
         )
@@ -158,7 +161,8 @@ class PromotionPolicyTests(unittest.TestCase):
         changed_weights = _evaluation(
             "new-weights", 0.5, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.1,) * 4
         )
-        evidence = changed_weights.metrics["promotion_block_evidence"]
+        metrics = changed_weights.to_dict()["metrics"]
+        evidence = metrics["promotion_block_evidence"]
         evidence["target_weights"] = {
             "air_temperature": 1.0,
             "relative_humidity": 0.0,
@@ -167,6 +171,7 @@ class PromotionPolicyTests(unittest.TestCase):
         evidence["evidence_digest"] = digest(
             {key: value for key, value in evidence.items() if key != "evidence_digest"}
         )
+        changed_weights = replace(changed_weights, metrics=metrics)
         assessment = assess_promotion_improvement(changed_weights, incumbent)
         self.assertFalse(assessment["comparable"])
         self.assertFalse(assessment["improved"])
@@ -225,12 +230,14 @@ class PromotionPolicyTests(unittest.TestCase):
         candidate = _evaluation(
             "new", 0.5, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.1,) * 4
         )
-        evidence = candidate.metrics["promotion_block_evidence"]
+        metrics = candidate.to_dict()["metrics"]
+        evidence = metrics["promotion_block_evidence"]
         evidence["blocks"].pop()
         evidence["block_count"] = len(evidence["blocks"])
         evidence["evidence_digest"] = digest(
             {key: value for key, value in evidence.items() if key != "evidence_digest"}
         )
+        candidate = replace(candidate, metrics=metrics)
         assessment = assess_promotion_improvement(candidate, incumbent)
         self.assertFalse(assessment["comparable"])
         self.assertEqual(assessment["reason_code"], "mismatched_block_identities")
@@ -241,8 +248,10 @@ class PromotionPolicyTests(unittest.TestCase):
         short_incumbent = _evaluation(
             "short-old", 0.4, version=OBJECTIVE_AGGREGATION_VERSION, block_scores=(0.0,) * 4
         )
+        short_evaluations = []
         for evaluation in (short_ids, short_incumbent):
-            evidence = evaluation.metrics["promotion_block_evidence"]
+            metrics = evaluation.to_dict()["metrics"]
+            evidence = metrics["promotion_block_evidence"]
             for index, block in enumerate(evidence["blocks"]):
                 block["block_id"] = str(index)
             evidence["evidence_digest"] = digest(
@@ -252,6 +261,8 @@ class PromotionPolicyTests(unittest.TestCase):
                     if key != "evidence_digest"
                 }
             )
+            short_evaluations.append(replace(evaluation, metrics=metrics))
+        short_ids, short_incumbent = short_evaluations
         self.assertFalse(
             assess_promotion_improvement(short_ids, short_incumbent)["comparable"]
         )

@@ -64,6 +64,20 @@ _REGISTERED_PIPELINES: dict[str, dict[str, Any]] = {
             ("host.postprocess.physical-bounds@1", "postprocess", ()),
         ),
     },
+    "greenhouse-baseline-aligned-ridge@1": {
+        "pipeline_version": "greenhouse-baseline-aligned-ridge-operator-graph/1",
+        "parameter_names": ("history_steps", "ridge_alpha",
+                            "residual_scale_1h", "residual_scale_6h", "residual_scale_24h"),
+        "operators": (
+            ("host.feature.causal-lag-exogenous@1", "feature", ("history_steps",)),
+            ("host.fit.partition-selected-baseline@1", "fit", ()),
+            ("host.fit.partition-statistics@1", "fit", ()),
+            ("host.fit.baseline-aligned-closed-form-ridge@1", "fit", ("ridge_alpha",)),
+            ("host.predictor.fit-selected-baseline-residual@1", "predict",
+             ("residual_scale_1h", "residual_scale_6h", "residual_scale_24h")),
+            ("host.postprocess.physical-bounds@1", "postprocess", ()),
+        ),
+    },
     "greenhouse-targetwise-ridge@1": {
         "pipeline_version": "greenhouse-targetwise-ridge-operator-graph/1",
         "parameter_names": (

@@ -65,6 +65,17 @@ def map_catalog_entry(
                 f"宿主已登记 {capability_id}，但本运行冻结的是 {active or '未选择'}；"
                 "不能在轮次中途切换实现。"
             )
+        if (
+            capability_kind == "predictor"
+            and capability_ids
+            and metadata.get("execution_protocol") == "dsh_native_plugin_evolution@1"
+        ):
+            reason = (
+                "已登记的可选数值工具：" + "、".join(capability_ids) + "。"
+                "样本 Agent 自主决定是否调用、使用哪一个及其合法参数，"
+                "也可以融合或调整工具结果；最终预测由 Agent 提交。"
+                "运行绑定仅指定默认工具，不限制样本内的工具选择。"
+            )
     return KnowledgeCard(
         knowledge_id=str(entry["knowledge_id"]),
         title=str(entry["title_zh"]),

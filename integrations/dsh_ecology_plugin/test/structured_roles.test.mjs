@@ -139,6 +139,31 @@ test("one-shot structured role rejects invalid maxTokens before child work", asy
   assert.equal(pendingStarts.size, 0);
 });
 
+test("native research max-tokens after a transport retry is terminal and disposes the child", async () => {
+  // Reduced to public structural fields from the 2026-09-07 native failure:
+  // Skill succeeded, a TRANSPORT retry preceded max-tokens, no output capture.
+  let disposed = false;
+  let persisted = false;
+  let classified = false;
+  const pendingStarts = new PendingChildStarts({ subagents: { start: async () => ({
+    id: "research-synthesis-output-budget-child",
+    result: Promise.resolve({ stopReason: "max-tokens", structured: undefined }),
+    dispose: async () => { disposed = true; },
+  }) } });
+  await assert.rejects(runStructuredRole(
+    { agent: { id: "researcher-host" } },
+    { label: "research-synthesis", reservation_id: "research-reservation" },
+    { prompt: "synthesize frozen evidence", outputSchema: { type: "object" }, maxTokens: 8192 },
+    { pendingStarts, admission: { isOpen: async () => true },
+      classifyMissingCapture: async () => { classified = true; return "retryable-model"; },
+      persist: async () => { persisted = true; return { accepted: true }; } },
+  ), (error) => error.code === "structured_child_output_budget_exhausted");
+  assert.equal(classified, false, "native terminal result must win over a stale projection");
+  assert.equal(persisted, false);
+  assert.equal(disposed, true);
+  assert.equal(pendingStarts.size, 0);
+});
+
 test("closed admission between completion and persistence rejects late structured result", async () => {
   let persisted = false;
   let disposed = false;

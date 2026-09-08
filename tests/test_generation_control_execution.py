@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from ecologyrsi_dsh.api.generation_execution import (
+from ecologyrsi_dsh.application.generation_execution import (
     _evaluate_generation_controls,
     _generation_evidence_failure,
     complete_if_budget_exhausted,
@@ -338,7 +338,7 @@ class GenerationControlExecutionTests(unittest.TestCase):
 
         with patch.object(registry, "evaluate_scientific", side_effect=evaluate):
             controls = _evaluate_generation_controls(
-                endpoint,
+                (endpoint).server,
                 State(),
                 current,
                 on_model_usage=lambda _receipts: None,
@@ -416,7 +416,7 @@ class GenerationControlExecutionTests(unittest.TestCase):
         director = Director()
         endpoint = SimpleNamespace(server=SimpleNamespace(director=director))
 
-        result = complete_if_budget_exhausted(endpoint, run_id, running)
+        result = complete_if_budget_exhausted((endpoint).server, run_id, running)
 
         self.assertIs(result, completed)
         self.assertEqual(

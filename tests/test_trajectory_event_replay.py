@@ -8,9 +8,10 @@ from threading import Barrier, Event as ThreadEvent, Lock
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from ecologyrsi_dsh import EventLedger, EvolutionDirector, FakeDSHAdapter, TaskManifest
-from ecologyrsi_dsh.api import formal_trajectory, generation_execution
+from ecologyrsi_dsh import Evaluation, EventLedger, EvolutionDirector, FakeDSHAdapter, TaskManifest
+from ecologyrsi_dsh.application import formal_trajectory, generation_execution
 from ecologyrsi_dsh.core.models import CandidateRole, digest
+from ecologyrsi_dsh.core.sample_results import build_sample_results
 from ecologyrsi_dsh.core.screening import (
     screening_cohort_digest,
     screening_record_digest,
@@ -398,7 +399,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             ),
         ):
             progressed = formal_trajectory.execute_next_local_edit(
-                endpoint,
+                (endpoint).server,
                 self.run_id,
                 candidate.candidate_id,
             )
@@ -746,7 +747,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
                 "after durable champion selection",
             ):
                 generation_execution._finalize_adaptive_generation(
-                    endpoint,
+                    (endpoint).server,
                     self.run_id,
                     SimpleNamespace(generation=0),
                 )
@@ -790,7 +791,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(_InjectedCrash, "stop after closeout"):
                 generation_execution._finalize_adaptive_generation(
-                    endpoint,
+                    (endpoint).server,
                     self.run_id,
                     SimpleNamespace(generation=0),
                 )
@@ -1361,7 +1362,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
                     "stop after durable start",
                 ):
                     generation_execution._execute_adaptive_holdout_arm(
-                        endpoint,
+                        (endpoint).server,
                         self.run_id,
                         0,
                         arm,
@@ -1439,7 +1440,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             1,
         )
 
-    def test_screened_out_incumbent_holdout_opens_scoped_checkpoint(self) -> None:
+    def _incumbent_holdout_checkpoint(self):
         finalists = self._freeze_top2()
         for candidate in finalists:
             self._complete_lane(candidate)
@@ -1494,6 +1495,10 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             "execution_context_digest": _sha("incumbent-holdout-context"),
             "sample_count": scope.origin_count * 9,
         }
+        return incumbent, scope, checkpoint
+
+    def test_screened_out_incumbent_holdout_opens_scoped_checkpoint(self) -> None:
+        incumbent, scope, checkpoint = self._incumbent_holdout_checkpoint()
 
         prepared = self.director.prepare_evaluation_sample_checkpoint(
             self.run_id,
@@ -1506,6 +1511,92 @@ class TrajectoryEventReplayTests(unittest.TestCase):
 
         self.assertFalse(prepared["resumed"])
         self.assertEqual(len(prepared["rows"]), 0)
+
+    def test_holdout_replicas_resume_own_rows_progress_and_seal_independently(self) -> None:
+        candidate, scope, checkpoint = self._incumbent_holdout_checkpoint()
+        services = SimpleNamespace(director=self.director, ledger=self.ledger)
+        rows = [
+            {"sample_id": f"sample:{i}", "sample_index": i + 1,
+             "target": "air_temperature", "horizon_hours": 1,
+             "origin_timestamp": i, "target_timestamp": i + 1,
+             "observed": 2.0, "predicted": 1.5, "baseline": 1.0}
+            for i in range(checkpoint["sample_count"])
+        ]
+        callbacks = []
+        checkpoints = []
+        for replica, count in ((0, len(rows)), (1, 9)):
+            replica_scope = replace(scope, inference_replica=replica)
+            replica_checkpoint = {**checkpoint, "inference_replica": replica,
+                                  "execution_scope_digest": replica_scope.scope_key}
+            callback = generation_execution._ScopedEvaluationCallbacks(
+                services, run_id=self.run_id, generation=0,
+                proposal_id=candidate.proposal_id, candidate_id=candidate.candidate_id,
+                scope=replica_scope,
+            )
+            callback.prepare_checkpoint(replica_checkpoint)
+            callback.record_results(rows[:count])
+            callback.record_progress({
+                "role": "planner", "model_id": "test-model", "batch_index": 1,
+                "batch_count": 2, "batch_size": count, "completed_samples": count,
+                "total_samples": len(rows), "succeeded_samples": count, "failed_samples": 0,
+                "progress_id": 1, "progress_kind": "completed_batch",
+                "in_flight_batches": 0, "queued_batches": 0,
+            })
+            callbacks.append(callback)
+            checkpoints.append(replica_checkpoint)
+        services.director = EvolutionDirector(self.ledger)
+        for index, expected in ((0, len(rows)), (1, 9)):
+            prepared = callbacks[index].prepare_checkpoint(checkpoints[index])
+            self.assertTrue(prepared["resumed"])
+            self.assertEqual(len(prepared["rows"]), expected)
+            self.assertEqual(prepared["progress"]["completed_samples"], expected)
+        evaluation = HoldoutEvaluation(
+            evaluation_id="holdout:replica-base", scope=scope, score=0.1,
+            passed=True, metrics={}, evaluator_digest=_sha("replica-evaluator"),
+        )
+        with self.assertRaisesRegex(ValueError, "active sample checkpoint"):
+            services.director.record_holdout_evaluation(self.run_id, evaluation)
+        canonical = Evaluation(
+            evaluation_id="canonical:replica-base", run_id=self.run_id,
+            candidate_id=candidate.candidate_id, score=0.1, passed=True,
+            partition="validation", evaluation_scope=scope.to_dict(),
+        )
+        services.director.record_evaluation(
+            canonical, sample_results=callbacks[0].completion_payload(
+                canonical.evaluation_id, build_sample_results(candidate.candidate_id, rows),
+            ),
+        )
+        services.director.record_holdout_evaluation(self.run_id, evaluation)
+        callbacks[1].record_results(rows[9:])
+        services.director._validate_sample_results_completion_identity(
+            services.director.state(self.run_id), run_id=self.run_id,
+            candidate_id=candidate.candidate_id, evaluation_id="replica:1",
+            payload=callbacks[1].completion_payload(
+                "replica:1", build_sample_results(candidate.candidate_id, rows),
+            ),
+        )
+
+    def test_replacement_fences_only_the_matching_inference_scope(self) -> None:
+        candidate, scope, checkpoint = self._incumbent_holdout_checkpoint()
+        kwargs = dict(run_id=self.run_id, generation=0, proposal_id=candidate.proposal_id,
+                      candidate_id=candidate.candidate_id)
+        first = self.director.prepare_evaluation_sample_checkpoint(
+            **kwargs, checkpoint=checkpoint, scope=scope,
+        )
+        other_scope = replace(scope, inference_replica=1)
+        other_checkpoint = {**checkpoint, "inference_replica": 1,
+                            "execution_scope_digest": other_scope.scope_key}
+        other = self.director.prepare_evaluation_sample_checkpoint(
+            **kwargs, checkpoint=other_checkpoint, scope=other_scope,
+        )
+        self.director.prepare_evaluation_sample_checkpoint(
+            **kwargs, checkpoint={**checkpoint, "execution_context_digest": _sha("replacement")},
+            scope=scope,
+        )
+        state = self.director.state(self.run_id)
+        with self.assertRaisesRegex(ValueError, "superseded"):
+            self.director._sample_result_revision_events(state, candidate.candidate_id, first["revision"])
+        self.director._require_open_model_usage_checkpoint(state, candidate.candidate_id, other["revision"])
 
     def test_trajectory_cannot_start_before_top2_freeze(self) -> None:
         candidate = self.candidates[0]
@@ -1540,6 +1631,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
         *,
         reject_initial_challenger: bool = False,
         stop_after_proposal: bool = False,
+        stop_before_pair_evaluation: bool = False,
     ) -> SimpleNamespace:
         schedule = OptimizationSchedule.from_dict(
             {
@@ -1815,6 +1907,15 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             metrics=challenger_metrics,
             evaluator_digest=paired_evaluator_digest,
         )
+        if stop_before_pair_evaluation:
+            return SimpleNamespace(
+                run_id=run_id,
+                candidate=candidate,
+                initial=initial,
+                challenger=challenger,
+                champion_evaluation=champion_evaluation,
+                challenger_evaluation=challenger_evaluation,
+            )
         self.director.record_formal_batch_evaluation(
             run_id,
             champion_evaluation,
@@ -1861,6 +1962,102 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             proposal_payload=proposal_payload,
             decision_payload=decision_payload,
         )
+
+    @staticmethod
+    def _paired_checkpoint(scope: EvaluationScope) -> dict:
+        return {
+            "schema_version": "ecologyrsi-dsh.sample-checkpoint/2",
+            "candidate_revision_id": scope.candidate_revision_id,
+            "evaluation_phase": scope.phase.value,
+            "formal_batch_index": scope.batch_index,
+            "holdout_arm": None,
+            "cohort_digest": scope.cohort_digest,
+            "execution_scope_digest": scope.scope_key,
+            "sample_cohort_digest": _sha("paired-checkpoint-samples"),
+            "execution_context_digest": _sha(scope.scope_key),
+            "sample_count": scope.origin_count * 9,
+        }
+
+    def test_paired_checkpoint_resumes_and_seals_each_revision_independently(self) -> None:
+        case = self._paired_comparison_case(
+            "run:paired-checkpoint", stop_before_pair_evaluation=True
+        )
+        services = SimpleNamespace(director=self.director, ledger=self.ledger)
+        checkpoint_revisions = []
+        for evaluation in (case.champion_evaluation, case.challenger_evaluation):
+            scope = evaluation.scope
+            checkpoint = self._paired_checkpoint(scope)
+            kwargs = dict(
+                run_id=case.run_id, generation=0,
+                proposal_id=case.candidate.proposal_id,
+                candidate_id=case.candidate.candidate_id, scope=scope,
+            )
+            callbacks = generation_execution._ScopedEvaluationCallbacks(services, **kwargs)
+            opened = callbacks.prepare_checkpoint(checkpoint)
+            self.assertFalse(opened["resumed"])
+            rows = [
+                {"sample_id": f"sample:{i}", "sample_index": i + 1, "target": target,
+                 "horizon_hours": horizon, "origin_timestamp": origin,
+                 "target_timestamp": origin + horizon,
+                 "observed": 2.0, "predicted": 1.5, "baseline": 1.0}
+                for i, (origin, target, horizon) in enumerate(
+                    (origin, target, horizon)
+                    for origin in range(scope.origin_count)
+                    for target in ("air_temperature", "relative_humidity", "co2")
+                    for horizon in (1, 6, 24)
+                )
+            ]
+            callbacks.record_results(rows[:45])
+            self.director.pause_run(case.run_id)
+            self.director.resume_run(case.run_id)
+            resumed = generation_execution._ScopedEvaluationCallbacks(services, **kwargs)
+            prepared = resumed.prepare_checkpoint(checkpoint)
+            self.assertTrue(prepared["resumed"])
+            self.assertEqual(prepared["revision"], opened["revision"])
+            self.assertEqual(len(prepared["rows"]), 45)
+            resumed.record_results(rows[45:])
+            self.director.record_formal_batch_evaluation(
+                case.run_id, evaluation,
+                sample_results=resumed.completion_payload(
+                    evaluation.evaluation_id,
+                    build_sample_results(case.candidate.candidate_id, rows),
+                ),
+            )
+            checkpoint_revisions.append(opened["revision"])
+        self.assertEqual(len(set(checkpoint_revisions)), 2)
+        replayed = project_run_state(self.ledger.events(case.run_id))
+        self.assertEqual(replayed.batch_evaluation_for(
+            case.candidate.candidate_id, 1, FormalBatchArm.CHAMPION
+        ).scope.candidate_revision_id, case.initial.revision_id)
+        self.assertEqual(replayed.batch_evaluation_for(
+            case.candidate.candidate_id, 1, FormalBatchArm.CHALLENGER
+        ).scope.candidate_revision_id, case.challenger.revision_id)
+        self.assertEqual(sum(e.kind == "EvaluationSampleResultsRecorded"
+                             for e in replayed.events), 2)
+
+    def test_paired_checkpoint_rejects_swapped_arms_and_unfrozen_cohort(self) -> None:
+        case = self._paired_comparison_case(
+            "run:paired-checkpoint-forged", stop_before_pair_evaluation=True
+        )
+        champion = case.champion_evaluation.scope
+        challenger = case.challenger_evaluation.scope
+        for invalid in (
+            replace(champion, candidate_revision_id=case.challenger.revision_id),
+            replace(challenger, candidate_revision_id=case.initial.revision_id),
+            replace(champion, formal_batch_arm=None),
+            replace(champion, cohort_digest=_sha("unfrozen-cohort")),
+            replace(champion, origin_count=champion.origin_count + 1),
+            replace(challenger, batch_index=0),
+        ):
+            with self.subTest(scope=invalid.to_dict()), self.assertRaises(ValueError):
+                self.director.prepare_evaluation_sample_checkpoint(
+                    case.run_id, generation=0,
+                    candidate_id=case.candidate.candidate_id,
+                    proposal_id=case.candidate.proposal_id,
+                    checkpoint=self._paired_checkpoint(invalid), scope=invalid,
+                )
+        self.assertFalse(any(e.kind == "EvaluationSampleResultsStarted"
+                             for e in self.director.state(case.run_id).events))
 
     @staticmethod
     def _forged_promotion(case: SimpleNamespace) -> FormalBatchComparison:

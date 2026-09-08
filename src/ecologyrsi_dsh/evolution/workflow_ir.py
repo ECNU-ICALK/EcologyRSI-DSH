@@ -68,11 +68,13 @@ _SKILL_NAME_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 _EVALUATOR_VERSIONS = {
+    "greenhouse_multihorizon_time_forward@4": "greenhouse-runtime-model-selection-forward/1",
     "toy_time_forward@1": "toy-time-forward/3",
     "greenhouse_time_forward@1": "greenhouse-time-forward/5",
     "greenhouse_multihorizon_time_forward@1": (
         "greenhouse-multihorizon-time-forward/4"
     ),
+    "greenhouse_multihorizon_time_forward@3": "greenhouse-baseline-aligned-multihorizon-time-forward/1",
     "greenhouse_multihorizon_time_forward@2": (
         "greenhouse-multihorizon-time-forward/5"
     ),
@@ -671,6 +673,7 @@ class CompilationInstanceContext:
     preset_content_digest: str
     standing_tool_surface_digest: str
     security_kernel_digest: str
+    agent_policy_digest: str = "0" * 64
 
     def __post_init__(self) -> None:
         for name in ("run_id", "proposal_id", "candidate_id"):
@@ -691,6 +694,7 @@ class CompilationInstanceContext:
             "preset_content_digest",
             "standing_tool_surface_digest",
             "security_kernel_digest",
+            "agent_policy_digest",
         ):
             object.__setattr__(self, name, _sha(getattr(self, name), name))
 
@@ -773,6 +777,7 @@ def bind_phenotype_instance(
         "resolved_review_route_config_digest": context.resolved_review_route_config_digest,
         "preset_content_digest": context.preset_content_digest,
         "standing_tool_surface_digest": context.standing_tool_surface_digest,
+        "agent_policy_digest": context.agent_policy_digest,
     }
     runtime_execution_digest = _domain_digest(
         "ecologyrsi-dsh/runtime-execution/1", runtime_identity

@@ -2,7 +2,7 @@
   "plugin_id": "ecologyrsi.evolution",
   "plugin_api_version": "dsh-plugin/v1",
   "display_name": "生态模型进化工作台",
-  "version": "0.3.55",
+  "version": "0.7.10",
   "development_only": false,
   "release_stage": "delivery-candidate",
   "description": "用于配置、监控、异步专家咨询和人工协作的模型自主调研、受限能力编译、评测与优化插件。",

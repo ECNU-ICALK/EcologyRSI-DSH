@@ -128,6 +128,17 @@ def dsh_native_runtime_retryable(
 ) -> bool:
     """Classify service outages separately from fail-closed DSH contracts."""
 
+    # Runtime HTTP 503 is also the envelope for completed, deterministic
+    # failures. Their Host-owned codes take precedence over transport status:
+    # replaying an unchanged output cap or tool protocol cannot repair them.
+    if str(getattr(exc, "error_code", "") or "") in {
+        "structured_child_output_budget_exhausted",
+        "structured_child_tool_protocol_error",
+        "structured_child_output_schema_invalid",
+        "structured_result_missing",
+        "dsh_native_runtime_contract_error",
+    }:
+        return False
     status_code = getattr(exc, "status_code", None)
     if isinstance(status_code, int) and not isinstance(status_code, bool):
         return status_code in {408, 425, 429} or 500 <= status_code <= 599
@@ -149,3 +160,21 @@ def dsh_native_runtime_error_in_chain(
         if isinstance(candidate, DshNativeRuntimeUnavailableError):
             return candidate
     return None
+
+
+def dsh_native_runtime_evaluation_fatal(exc: DshNativeRuntimeUnavailableError) -> bool:
+    """An unsupported tool protocol is a run-wide execution fault.
+
+    Do not score it as a bad forecast or keep launching the remaining cohort
+    under the same configuration. An isolated output-budget exhaustion is a
+    failed origin, with no identical-budget retry: coverage and penalty scoring
+    decide whether the candidate is usable. One verbose critic must not cancel
+    every candidate's otherwise valid Agent predictions.
+    """
+    return exc.error_code in {
+        "structured_child_tool_protocol_error",
+    }
+
+
+class DshToolAdmissionClosedError(RuntimeError):
+    error_code = "dsh_tool_admission_closed"

@@ -5,7 +5,7 @@ from threading import Event, Thread
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ecologyrsi_dsh.api.generation_execution import _evaluate_candidate
+from ecologyrsi_dsh.application.generation_execution import _evaluate_candidate
 from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import (
@@ -407,12 +407,13 @@ class ResearchIterationTests(unittest.TestCase):
         )
         self.assertNotIn("unbounded_old_detail", first)
 
-    def test_runtime_v3_contract_failure_records_host_fallback_and_continues(
+    def test_explicit_non_native_fallback_records_plan_and_continues(
         self,
     ) -> None:
         task_data = _task(candidates_per_generation=1).to_dict()
         task_data["metadata"] = {
             **task_data["metadata"],
+            "allow_host_fallback": True,
             "host_runtime_build": {
                 "evolution_runtime_schema": "ecologyrsi-dsh.evolution-runtime/3"
             },
@@ -1610,7 +1611,8 @@ class ResearchIterationTests(unittest.TestCase):
             context = gateway.research_contexts[-1]
             iteration = replayed.state(run_id).research_iteration_for(2)
 
-            self.assertEqual(context["cross_generation_experience"], after_replay)
+            self.assertEqual({k: v for k, v in context["cross_generation_experience"].items() if k != "diagnostic_report"}, after_replay)
+            self.assertIn("diagnostic_report", context["cross_generation_experience"])
             self.assertIsNotNone(iteration)
             assert iteration is not None
             self.assertEqual(
@@ -1756,7 +1758,8 @@ class ResearchIterationTests(unittest.TestCase):
                 historical_states=(replayed.state(historical_run_id),),
                 history_cutoff_seq=cutoff,
             )
-            self.assertEqual(replayed_experience, context)
+            self.assertEqual(replayed_experience, {k: v for k, v in context.items() if k != "diagnostic_report"})
+            self.assertIn("diagnostic_report", context)
             replayed_iteration = replayed.state(current_run_id).research_iteration_for(0)
             self.assertIsNotNone(replayed_iteration)
             assert replayed_iteration is not None
@@ -3094,7 +3097,7 @@ class ResearchIterationTests(unittest.TestCase):
             )
 
             _evaluate_candidate(
-                endpoint, "run:research-full", candidate.candidate_id
+                (endpoint).server, "run:research-full", candidate.candidate_id
             )
             state = director.state("run:research-full")
             attempts = state.algorithm_attempts_for(candidate.candidate_id)

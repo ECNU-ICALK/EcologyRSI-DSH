@@ -40,6 +40,7 @@ SOURCE_DIRS = (
     "examples",
     "datasets",
     "docs/screenshots",
+    "docs/refactor",
     "plugins",
     "integrations",
     "scripts",

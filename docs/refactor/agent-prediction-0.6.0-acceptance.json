@@ -1,0 +1,99 @@
+{
+  "version": "0.6.0",
+  "accepted": true,
+  "kind": "real DSH Agent on synthetic causal input",
+  "model": "pjlab/deepseek-v4-flash-0731",
+  "seconds": 86.74687891697977,
+  "origin_count": 1,
+  "prediction_cells": 9,
+  "tool_calls": [
+    {
+      "tool_id": "candidate-model",
+      "call_id": "cand-1",
+      "status": "completed",
+      "parameters": {}
+    },
+    {
+      "tool_id": "greenhouse-horizon-targetwise-ridge@1",
+      "call_id": "hridge-1",
+      "status": "completed",
+      "parameters": {}
+    },
+    {
+      "tool_id": "greenhouse-baseline-aligned-ridge@1",
+      "call_id": "bridge-1",
+      "status": "completed",
+      "parameters": {}
+    }
+  ],
+  "results": [
+    {
+      "target": "air_temperature",
+      "horizon_hours": 1,
+      "predicted": 19.5,
+      "observed": 19.50000000000001,
+      "method": "adjusted"
+    },
+    {
+      "target": "air_temperature",
+      "horizon_hours": 6,
+      "predicted": 17.2,
+      "observed": 17.170370868554656,
+      "method": "adjusted"
+    },
+    {
+      "target": "air_temperature",
+      "horizon_hours": 24,
+      "predicted": 20.71,
+      "observed": 20.70590477448742,
+      "method": "adjusted"
+    },
+    {
+      "target": "relative_humidity",
+      "horizon_hours": 1,
+      "predicted": 62.5,
+      "observed": 62.500000000000036,
+      "method": "adjusted"
+    },
+    {
+      "target": "relative_humidity",
+      "horizon_hours": 6,
+      "predicted": 55.8,
+      "observed": 55.51111260566397,
+      "method": "adjusted"
+    },
+    {
+      "target": "relative_humidity",
+      "horizon_hours": 24,
+      "predicted": 66.12,
+      "observed": 66.11771432346225,
+      "method": "adjusted"
+    },
+    {
+      "target": "co2_concentration",
+      "horizon_hours": 1,
+      "predicted": 599.8,
+      "observed": 600.0000000000005,
+      "method": "adjusted"
+    },
+    {
+      "target": "co2_concentration",
+      "horizon_hours": 6,
+      "predicted": 505.7,
+      "observed": 506.81483474218624,
+      "method": "adjusted"
+    },
+    {
+      "target": "co2_concentration",
+      "horizon_hours": 24,
+      "predicted": 648.2,
+      "observed": 648.2361909794967,
+      "method": "adjusted"
+    }
+  ],
+  "limits": [
+    "Synthetic input, not independent scientific validation or multi-generation stability evidence.",
+    "Model parameter override and direct zero-tool prediction covered by automated tests, not this real call.",
+    "GLM-5.2 stopped at max-tokens with 4096 and 8192; model_not_available was returned for the initially attempted DeepSeek Pro route."
+  ]
+}

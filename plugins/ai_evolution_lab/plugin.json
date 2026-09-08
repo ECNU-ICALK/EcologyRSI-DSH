@@ -1,8 +1,0 @@
-{
-  "id": "ai_evolution_lab",
-  "name": "AI for AI 自进化实验台",
-  "version": "0.1.0",
-  "execution": "external-control-plane",
-  "dsh_dependency": "read-only-adapter",
-  "capabilities": ["skill-proposals", "tool-policy-experiments", "cohort-evaluation", "promotion-and-rollback"]
-}

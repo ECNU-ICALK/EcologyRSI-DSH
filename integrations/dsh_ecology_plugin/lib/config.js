@@ -78,12 +78,10 @@ export function resolvePluginConfig(config = {}, { defaultStaticRoot, env = proc
     ),
     structuredStageMinIntervalMs: nonNegativeInteger(
       config.structuredStageMinIntervalMs,
-      // A sample planner normally consumes three provider turns (Skill,
-      // prediction tool, structured output).  Keep the run-level 64/128 value
-      // as the true in-flight ceiling while pacing new children to roughly the
-      // provider's user-RPM envelope.  This is a start-rate guard, not an
-      // eight-request concurrency cap.
-      3_000,
+      // A child may make several model requests while choosing numerical
+      // tools. Pace cold starts conservatively; observed provider limits can
+      // slow this further. The run's in-flight ceiling remains independent.
+      6_000,
       "structuredStageMinIntervalMs",
     ),
     structuredStageMaxInFlight: boundedConcurrency(

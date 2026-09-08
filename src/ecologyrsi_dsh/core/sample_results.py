@@ -24,7 +24,7 @@ SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION_V2 = (
     "ecologyrsi-dsh.sample-agent-chain-attestation/2"
 )
 SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION = (
-    "ecologyrsi-dsh.sample-agent-chain-attestation/3"
+    "ecologyrsi-dsh.sample-agent-chain-attestation/4"
 )
 SAMPLE_REWARD_DEFINITION_V1 = "absolute_error_improvement_vs_persistence@1"
 SAMPLE_REWARD_DEFINITION_V2 = (
@@ -54,6 +54,7 @@ def _sample_agent_chain_attestation(
         "planner_invocations",
         "registered_tool_invocations",
         "dsh_agent_tool_invocations",
+        "agent_prediction_submissions",
         "critic_invocations",
         "reflector_invocations",
         "host_route_bypass_count",
@@ -80,6 +81,7 @@ def _sample_agent_chain_attestation(
         "planner_invocations",
         "registered_tool_invocations",
         "dsh_agent_tool_invocations",
+        "agent_prediction_submissions",
         "critic_invocations",
         "reflector_invocations",
         "host_route_bypass_count",
@@ -129,8 +131,7 @@ def _sample_agent_chain_attestation(
     reflection_required = "reflector" in required_remote_roles
     if projected["complete"] and not (
         all(role_counts[role] >= 1 for role in required_remote_roles)
-        and projected["registered_tool_invocations"] >= 1
-        and projected["dsh_agent_tool_invocations"] >= 1
+        and projected["agent_prediction_submissions"] >= 1
         and projected["host_route_bypass_count"] == 0
         and projected["agent_trace_digest"] is not None
         and projected["tool_trace_digest"] is not None
@@ -275,6 +276,23 @@ def build_sample_results(
             "scoring_fallback_source": scoring_fallback_source,
             "failure_class": failure_class,
         }
+        if "agent_prediction" in source:
+            info = source["agent_prediction"]
+            if not isinstance(info, Mapping) or set(info) != {"method", "confidence", "tools"} or info["method"] not in {"direct", "model", "blend", "adjusted"}:
+                raise ValueError("sample Agent prediction summary is invalid")
+            confidence = _finite_number(info["confidence"], "agent_prediction.confidence")
+            tools = info["tools"]
+            if not 0 <= confidence <= 1 or not isinstance(tools, list) or len(tools) > 6:
+                raise ValueError("sample Agent summary budget/confidence is invalid")
+            if any(not isinstance(tool, Mapping) or not {"tool_id", "status"} <= set(tool) or set(tool) - {"tool_id", "status", "call_id", "parameters", "used_as_evidence", "tool_predicted"}
+                   or not isinstance(tool["tool_id"], str) or not 1 <= len(tool["tool_id"]) <= 160
+                   or tool["status"] not in {"completed", "failed"} for tool in tools):
+                raise ValueError("sample Agent tool summary is invalid")
+            from ..evaluators.sample_execution import _public_steps
+            if tools:
+                _public_steps([{"version": "1", **tool} for tool in tools], kind="tool", id_field="tool_id")
+            projected["agent_prediction"] = {"method": info["method"], "confidence": confidence,
+                                              "tools": [dict(tool) for tool in tools]}
         if "raw_predicted" in source:
             projected["raw_predicted"] = _finite_number(
                 source.get("raw_predicted"),

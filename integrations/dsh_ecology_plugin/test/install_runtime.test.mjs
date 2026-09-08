@@ -55,7 +55,7 @@ test("preset installation is exact, idempotent, and refuses drift", async () => 
     "ecology-sample-critic-v3",
     "ecology-generation-judge-v6",
     "ecology-local-editor-v1",
-    "ecology-researcher-v99",
+    "ecology-researcher-v129",
   ].map(
     (id) => path.join(dshHome, ".agent-presets", id),
   );
@@ -80,7 +80,7 @@ test("preset installation is exact, idempotent, and refuses drift", async () => 
     .sort();
   assert.deepEqual(installedIds, [...PRESET_IDS, unmanagedId].sort());
 
-  const target = path.join(dshHome, ".agent-presets", "ecology-researcher-v7", "preset.yml");
+  const target = path.join(dshHome, ".agent-presets", "ecology-researcher-v12", "preset.yml");
   assert.match(await readFile(target, "utf8"), /Ecology Researcher/);
   await writeFile(target, "drift\n");
   await assert.rejects(installPresetTree({ sourceRoot: source, dshHome }), /drift/);
@@ -98,13 +98,13 @@ test("preset installation rejects a composition that DSH cannot parse", async (t
   await cp(source, sourceRoot, { recursive: true });
   await mkdir(dshHome);
   await writeFile(
-    path.join(sourceRoot, "ecology-researcher-v7", "agent.cordis.yml"),
+    path.join(sourceRoot, "ecology-researcher-v12", "agent.cordis.yml"),
     "- id: persona\n  name: '@deepseek-ai/dsh-persona'\n  config:\n    text: invalid plain scalar: parsed as a mapping\n",
   );
 
   await assert.rejects(
     installPresetTree({ sourceRoot, dshHome, dshBin }),
-    /ecology-researcher-v7[\s\S]*not valid YAML|not valid YAML[\s\S]*ecology-researcher-v7/i,
+    /ecology-researcher-v12[\s\S]*not valid YAML|not valid YAML[\s\S]*ecology-researcher-v12/i,
   );
 });
 
@@ -119,7 +119,7 @@ test("preset installation supports a DSH test double without packaged parser mod
   await installPresetTree({ sourceRoot: source, dshHome, dshBin });
 
   assert.match(
-    await readFile(path.join(dshHome, ".agent-presets", "ecology-researcher-v7", "preset.yml"), "utf8"),
+    await readFile(path.join(dshHome, ".agent-presets", "ecology-researcher-v12", "preset.yml"), "utf8"),
     /Ecology Researcher/,
   );
 });

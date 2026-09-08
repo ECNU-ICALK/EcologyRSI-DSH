@@ -1,0 +1,71 @@
+{
+  "schema_version": "ecologyrsi-dsh.sealed-native-host-shadow/1",
+  "run_id": "run:stable-20260907-b-kimi",
+  "dataset_digest": "044e11d56fbea80ec4770aa9695d565daa93d96b776c752568bbe5b2c3978b99",
+  "source_event_digest": "8cc6b56dab7740d76f4a5932d9a914dd4bc45be1613e22cc5849beaaa91c155b",
+  "candidates": [
+    {
+      "candidate_id": "candidate:9edb7b36-cbeb-4c2a-849d-3564ecc8d27f",
+      "candidate_revision_id": "revision:candidate:9edb7b36-cbeb-4c2a-849d-3564ecc8d27f:r0",
+      "artifact_digest": "94b087b56b262cd0e3d21f0a5a609293493cd4f840c6215a93832ff12a2c1ff1",
+      "parameters_digest": "d9f25357a6a6822e13d724c1fc94ef16b662305047c760a828c2f643c7d3bd6b",
+      "candidate_revision_and_artifact_identity_verified": true,
+      "fitted_models_digest": "e3d23c67af3c241adbcb64920d7e42672b15ee55f75060fba321af6b58d57775",
+      "evaluation_scope": {
+        "run_id": "run:stable-20260907-b-kimi",
+        "generation": 0,
+        "candidate_id": "candidate:9edb7b36-cbeb-4c2a-849d-3564ecc8d27f",
+        "candidate_revision_id": "revision:candidate:9edb7b36-cbeb-4c2a-849d-3564ecc8d27f:r0",
+        "phase": "holdout",
+        "cohort_digest": "5b234d28b950f76e20c0b368a864b1df078b1470f49f95493ffafcc5d616d371",
+        "origin_count": 169,
+        "batch_index": null,
+        "holdout_arm": "finalist_1"
+      },
+      "sealed_results_digest": "9a9c29afb9404e905b7f87792dd5494e8aea876497abcc12c3c545d96d2d27eb",
+      "reconstructed_causal_inputs_digest": "22fc4d5a4e9497e9f4d041637738cf58cac5cd0a945d4f4e20fbd658b5e056eb",
+      "native_tool_outputs_digest": "5b2a3b2c800ff01fd8ffe4d5f6b590b297a3acf88dec8e7505a561c14987f45d",
+      "origins": 169,
+      "prediction_cells": 1521,
+      "verified_tool_receipts": 169,
+      "maximum_absolute_prediction_difference": 0.0,
+      "context_construction_seconds": 0.16588366706855595,
+      "host_numerical_seconds": 0.07590483140666038,
+      "host_timing_scope": "prediction_calls_and_output_assembly_excluding_context_construction_receipt_verification_and_loading",
+      "scoring_check": {
+        "sealed_score": -0.19336396542080195,
+        "recomputed_score": -0.19336396542080195,
+        "absolute_score_difference": 0.0,
+        "baseline_and_normalization_inputs_verified": true,
+        "observations_source": "already_sealed_scored_rows_only"
+      },
+      "status": "all_sealed_predictions_and_tool_receipts_reproduced"
+    }
+  ],
+  "native_execution": {
+    "sessions_with_usage": 169,
+    "usage_complete": true,
+    "launches_without_usage": 0,
+    "reported_tokens": {
+      "cache_read_tokens": 2027968,
+      "cache_write_tokens": 0,
+      "output_tokens": 181690,
+      "total_tokens": 2990439,
+      "uncached_input_tokens": 780781
+    },
+    "launches": 169,
+    "accepted_results": 169,
+    "launch_to_last_acceptance_window_seconds": 1050.4,
+    "timing_scope": "shared_live_wall_window_including_queue_pauses_and_overlap_not_model_compute_time"
+  },
+  "refits": 0,
+  "remote_calls": 0,
+  "ledger_writes": 0,
+  "full_planner_input_wave_reconstructed": false,
+  "limits": [
+    "Planner full prompt/context was not archived; original wave digest is preserved, not recomputed.",
+    "This proves original fitted-model numerical replay and exact native tool output receipts, not a prospective provider bypass trial.",
+    "Host pure numerical time cannot be divided into the shared native wall window to claim a speedup or token saving.",
+    "Only already scored adaptive-search rows are compared; this is not independent validation or new promotion evidence."
+  ]
+}

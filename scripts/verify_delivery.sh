@@ -77,18 +77,18 @@ integrations/dsh_ecology_plugin/lib/tools/agent-plugin.js
 integrations/dsh_ecology_plugin/lib/tools/retrieval.js
 integrations/dsh_ecology_plugin/schemas/genome-mutation.schema.json
 integrations/dsh_ecology_plugin/schemas/local-edit.schema.json
-integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4/preset.yml
-integrations/dsh_ecology_plugin/presets/ecology-coordinator-v4/agent.cordis.yml
-integrations/dsh_ecology_plugin/presets/ecology-researcher-v7/preset.yml
-integrations/dsh_ecology_plugin/presets/ecology-researcher-v7/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-coordinator-v5/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-coordinator-v5/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-researcher-v12/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-researcher-v12/agent.cordis.yml
 integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4/agent.cordis.yml
-integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v5/preset.yml
-integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v5/agent.cordis.yml
-integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v4/preset.yml
-integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v4/agent.cordis.yml
-integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v7/preset.yml
-integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v7/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v8/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v8/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v5/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v5/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v8/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v8/agent.cordis.yml
 integrations/dsh_ecology_plugin/test/proxy_security.mjs
 "
 
@@ -107,12 +107,12 @@ import sys
 
 root = Path.cwd()
 current_presets = {
-    "ecology-coordinator-v4",
-    "ecology-researcher-v7",
+    "ecology-coordinator-v5",
+    "ecology-researcher-v12",
     "ecology-candidate-proposer-v4",
-    "ecology-sample-planner-v5",
-    "ecology-sample-critic-v4",
-    "ecology-generation-judge-v7",
+    "ecology-sample-planner-v8",
+    "ecology-sample-critic-v5",
+    "ecology-generation-judge-v8",
 }
 managed_preset = re.compile(
     r"ecology-(?:coordinator|researcher|candidate-proposer|sample-planner|sample-critic|generation-judge|local-editor)-v[0-9]+"
@@ -292,6 +292,7 @@ check_javascript_tree plugins/ecology_evolution
 node plugins/ecology_evolution/test/smoke.mjs
 check_javascript_tree integrations/dsh_ecology_plugin
 node --test integrations/dsh_ecology_plugin/test/*.test.mjs \
+  plugins/ecology_evolution/test/*.test.mjs \
   integrations/dsh_ecology_plugin/test/proxy_security.mjs
 
 if [ "$MODE" = "--artifacts" ]; then

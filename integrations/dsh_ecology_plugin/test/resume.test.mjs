@@ -7,7 +7,7 @@ function binding(overrides = {}) {
   return {
     run_id: "run-1",
     role: "researcher",
-    preset_id: "ecology-researcher-v7",
+    preset_id: "ecology-researcher-v12",
     session_id: "session-1",
     model: "dsh/strategy",
     cwd: "/tmp",

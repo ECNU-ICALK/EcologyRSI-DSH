@@ -125,6 +125,8 @@ export class ProviderStageGate {
     this.queues = new Map();
     this.active = new Map();
     this.nextAllowedAt = new Map();
+    this.rateIntervals = new Map();
+    this.lastRateReductionAt = new Map();
     this.effectiveLimits = new Map();
     this.successStreaks = new Map();
     this.lastReductionAt = new Map();
@@ -169,6 +171,7 @@ export class ProviderStageGate {
       deadline,
       queueTimer: null,
       deadlineTimer: null,
+      onAbort: null,
       queuedAt: this.now(),
       admittedAt: null,
       startedAt: null,
@@ -188,6 +191,17 @@ export class ProviderStageGate {
     const queue = this.queues.get(providerKey) || [];
     queue.push(record);
     this.queues.set(providerKey, queue);
+    record.onAbort = () => {
+      if (record.status === "queued") {
+        this.#cancelQueued(record, controller.signal.reason || admissionClosedError());
+      } else if (record.status === "active") {
+        // Cancellation settles the caller promptly, but physical admission
+        // remains occupied until the operation and its cleanup actually end.
+        record.status = "draining";
+      }
+    };
+    controller.signal.addEventListener("abort", record.onAbort, { once: true });
+    if (controller.signal.aborted) record.onAbort();
     void this.pump(providerKey);
     try {
       return await caller;
@@ -198,12 +212,21 @@ export class ProviderStageGate {
 
   #expireQueued(record) {
     if (record.status !== "queued") return;
+    const error = queueTimeoutError();
+    record.controller.abort(error);
+    this.#cancelQueued(record, error);
+  }
+
+  #cancelQueued(record, error) {
+    if (record.status !== "queued") return;
     const queue = this.queues.get(record.providerKey);
     const index = queue?.indexOf(record) ?? -1;
     if (index >= 0) queue.splice(index, 1);
+    if (record.queueTimer !== null) clearTimeout(record.queueTimer);
+    record.controller.signal.removeEventListener("abort", record.onAbort);
     record.status = "cancelled";
-    record.controller.abort(queueTimeoutError());
-    record.rejectCaller(queueTimeoutError());
+    record.finishedAt = this.now();
+    record.rejectCaller(error);
     this.records.delete(record);
     if (queue && queue.length === 0) this.queues.delete(record.providerKey);
     void this.pump(record.providerKey);
@@ -223,11 +246,7 @@ export class ProviderStageGate {
         }
         const record = queue[0];
         if (record.controller.signal.aborted || this.closedRuns.has(record.runId)) {
-          if (queue[0] === record) queue.shift();
-          if (record.queueTimer !== null) clearTimeout(record.queueTimer);
-          record.status = "cancelled";
-          record.rejectCaller(record.controller.signal.reason || admissionClosedError());
-          this.records.delete(record);
+          this.#cancelQueued(record, record.controller.signal.reason || admissionClosedError());
           continue;
         }
         const remaining = deadlineRemainingMs(record.deadline, this.now);
@@ -242,21 +261,15 @@ export class ProviderStageGate {
         );
         if (wait > 0) {
           try {
+            // The queue's existing deadline timer aborts this same signal.
+            // An additional race timer would survive successful spacing waits
+            // and retain one long-lived timer for every admitted child.
             await abortable(
-              Promise.race([
-                Promise.resolve(this.delay(wait, record.controller.signal)),
-                Number.isFinite(remaining)
-                  ? new Promise((resolve) => setTimeout(resolve, remaining))
-                  : new Promise(() => {}),
-              ]),
+              Promise.resolve(this.delay(Math.min(wait, remaining), record.controller.signal)),
               record.controller.signal,
             );
           } catch (error) {
-            if (queue[0] === record) queue.shift();
-            if (record.queueTimer !== null) clearTimeout(record.queueTimer);
-            record.status = "cancelled";
-            record.rejectCaller(error);
-            this.records.delete(record);
+            this.#cancelQueued(record, error);
             continue;
           }
           // penalize() may have extended nextAllowedAt while this queue head
@@ -281,7 +294,7 @@ export class ProviderStageGate {
           providerKey,
           Math.max(
             this.nextAllowedAt.get(providerKey) || 0,
-            this.now() + this.minimumIntervalMs,
+            this.now() + (this.rateIntervals.get(providerKey) ?? this.minimumIntervalMs),
           ),
         );
         if (record.queueTimer !== null) clearTimeout(record.queueTimer);
@@ -302,6 +315,7 @@ export class ProviderStageGate {
         );
         const release = (succeeded) => {
           if (record.deadlineTimer !== null) clearTimeout(record.deadlineTimer);
+          record.controller.signal.removeEventListener("abort", record.onAbort);
           record.status = succeeded ? "completed" : "failed";
           record.finishedAt = this.now();
           this.records.delete(record);
@@ -348,7 +362,20 @@ export class ProviderStageGate {
     // An RPM limit is a start-rate signal, not evidence that the provider
     // cannot sustain the current number of long-running children. Keep those
     // controls independent so a Retry-After cannot silently turn 64 into 4.
-    if (!reduceConcurrency) return;
+    if (!reduceConcurrency) {
+      // Retry-After drains one RPM window; it does not make the preceding
+      // launch rate sustainable. Slow all children sharing this provider,
+      // including retries and other runs, without changing physical capacity.
+      // One simultaneous failure burst is one rate observation, not 64.
+      const last = this.lastRateReductionAt.get(key);
+      if (last == null || now - last >= Math.max(60_000, cooldown)) {
+        const current = this.rateIntervals.get(key) ?? this.minimumIntervalMs;
+        this.rateIntervals.set(key, Math.max(this.minimumIntervalMs, Math.min(60_000, Math.max(1_000, current * 2))));
+        this.lastRateReductionAt.set(key, now);
+      }
+      this.nextAllowedAt.set(key, Math.max(this.nextAllowedAt.get(key), now + this.rateIntervals.get(key)));
+      return;
+    }
     const lastReduction = this.lastReductionAt.get(key);
     if (lastReduction == null || now - lastReduction >= cooldown) {
       const current = this.#effectiveLimit(key);
@@ -441,6 +468,7 @@ export class ProviderStageGate {
     return Object.freeze({
       maxInFlight: this.maxInFlight,
       effectiveMaxInFlight: this.#effectiveLimit(key),
+      effectiveMinimumIntervalMs: this.rateIntervals.get(key) ?? this.minimumIntervalMs,
       active: this.active.get(key) || 0,
       queued: this.queues.get(key)?.length || 0,
       draining: lifecycleCounts.draining,

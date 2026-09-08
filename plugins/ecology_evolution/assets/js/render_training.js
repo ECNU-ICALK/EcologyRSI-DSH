@@ -169,6 +169,14 @@
     }[value] || displayText(value, "事件已记录");
   }
   function renderTrainingEpisodeDetails(asset) {
+    if (asset && asset.details_loaded === false) {
+      var saved = state.trainingAssetDetails && state.trainingAssetDetails[asset.candidate_id];
+      if (saved && saved.revision === (state.activeRun && state.activeRun.projection_revision)) { asset = saved.asset; }
+      else {
+        var pending = state.trainingAssetRequests && state.trainingAssetRequests[workspaceRequestKey(state.activeRun.id, "asset:" + asset.candidate_id)];
+        return "<tr class=\"training-episode-row\"><td colspan=\"7\"><button type=\"button\" class=\"button button-secondary\" data-load-training-asset=\"" + escapeHTML(asset.candidate_id) + "\"" + (pending ? " disabled" : "") + ">" + (pending ? "正在读取完整轨迹…" : "加载完整训练轨迹与复现证据") + "</button></td></tr>";
+      }
+    }
     var episode = asset && asset.episode;
     var trajectoryHtml = typeof renderTrainingTrajectory === "function" ? renderTrainingTrajectory(asset) : "";
     if ((!episode || typeof episode !== "object") && !trajectoryHtml) { return ""; }
@@ -232,7 +240,7 @@
       return trainingDetailValue(item[0], shortId(item[1] || "未提供"), item[1]);
     }).join("");
     var legacyDetails = hasEpisode ? "<details class=\"training-legacy-details\"><summary>查看五阶段完整训练记录、事件收据链与复现校验值</summary><div class=\"training-stage-list\">" + stageHtml + "</div><section class=\"training-proof-section\"><div><h4>事件收据链</h4><ul>" + receiptHtml + "</ul></div><div><h4>复现校验值</h4><div class=\"training-proof-grid\">" + proofHtml + "</div></div></section></details>" : "";
-    return "<tr class=\"training-episode-row\"><td colspan=\"7\"><details class=\"training-episode-details\"><summary>查看完整训练轨迹（输入 → 智能体交互 → 反馈 → 优化 → 预测）与五阶段完整训练记录</summary>" + trajectoryHtml + legacyDetails + "</details></td></tr>";
+    return "<tr class=\"training-episode-row\"><td colspan=\"7\"><details class=\"training-episode-details\"" + (asset.details_loaded === true ? " open" : "") + "><summary>查看完整训练轨迹（输入 → 智能体交互 → 反馈 → 优化 → 预测）与五阶段完整训练记录</summary>" + trajectoryHtml + legacyDetails + "</details></td></tr>";
   }
   function renderTrainingAssets() {
     var run = state.activeRun;
@@ -273,7 +281,7 @@
       var executedCount = interventions.filter(function (item) { return interventionApplicationStatus(item) !== "recorded"; }).length;
       var recordedOnlyCount = interventions.length - executedCount;
       var interventionSummary = [executedCount ? executedCount + " 条已执行" : "", recordedOnlyCount ? recordedOnlyCount + " 条仅记录" : ""].filter(Boolean).join(" / ") || "无";
-      var trajectorySummary = typeof trainingTrajectorySummary === "function" ? trainingTrajectorySummary(asset) : "轨迹待生成";
+      var trajectorySummary = asset.details_loaded === false ? "完整轨迹按需加载" : typeof trainingTrajectorySummary === "function" ? trainingTrajectorySummary(asset) : "轨迹待生成";
       return "<tr><td>第 " + escapeHTML(asset.generation || "—") + " 轮</td><td><code title=\"训练样本：" + escapeHTML(sampleId) + "\">" + escapeHTML(shortId(sampleId)) + "</code><small title=\"候选方案：" + escapeHTML(candidateId) + "\">候选：" + escapeHTML(shortId(candidateId)) + "</small><small class=\"training-asset-trace-summary\">" + escapeHTML(trajectorySummary) + "</small></td><td><span class=\"pill " + trainingAdmissionClass(admission) + "\">" + escapeHTML(trainingAdmissionText(admission)) + "</span><small>" + escapeHTML(governance) + "</small></td><td><span title=\"" + escapeHTML(strategyId) + "\">策略：" + escapeHTML(strategy) + "</span><small title=\"" + escapeHTML(predictionModelId) + "\">预测：" + escapeHTML(predictionModel) + "</small><small title=\"" + escapeHTML(judgeId) + "\">评审：" + escapeHTML(judge) + "</small></td><td><strong>" + escapeHTML(formatNumber(score)) + "</strong><small>" + escapeHTML(partitionText(partition)) + "</small></td><td>" + escapeHTML(interventionSummary) + "</td><td title=\"" + escapeHTML(traceTitle) + "\">" + escapeHTML(traceText) + "</td></tr>" + renderTrainingEpisodeDetails(asset);
     }).join("");
   }

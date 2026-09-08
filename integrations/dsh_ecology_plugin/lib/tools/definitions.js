@@ -20,10 +20,12 @@ export const TOOL_DEFINITIONS = Object.freeze({
   },
   ecology_execute_prediction_tool: {
     name: "ecology_execute_prediction_tool",
-    description: "Execute the one Host-frozen prediction tool once for every target and horizon in this forecast-origin wave.",
+    description: "Call an available prediction capability for this origin. Choose tool_id and allowed parameters; use a unique call_id. Results are evidence for your final prediction. Maximum six calls.",
     parameters: objectInput({
       tool_id: text(160),
       wave_digest: text(64),
+      call_id: text(80),
+      parameters: { type: "object", additionalProperties: { type: "number" } },
     }),
   },
 });

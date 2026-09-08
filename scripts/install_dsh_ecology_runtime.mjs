@@ -10,12 +10,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
 export const PRESET_IDS = Object.freeze([
-  "ecology-coordinator-v4",
-  "ecology-researcher-v7",
+  "ecology-coordinator-v5",
+  "ecology-researcher-v12",
   "ecology-candidate-proposer-v4",
-  "ecology-sample-planner-v5",
-  "ecology-sample-critic-v4",
-  "ecology-generation-judge-v7",
+  "ecology-sample-planner-v8",
+  "ecology-sample-critic-v5",
+  "ecology-generation-judge-v8",
 ]);
 const MANAGED_PRESET_ID = /^ecology-(?:coordinator|researcher|candidate-proposer|sample-planner|sample-critic|generation-judge|local-editor)-v[0-9]+$/;
 

@@ -21,9 +21,10 @@
         detail.textContent = notice.message; return;
       }
     }
-    if (state.pendingAction === "create" || state.createStatus && state.createStatus.state === "submitting") {
-      banner.hidden = false; banner.classList.add("is-loading"); title.textContent = "正在提交";
-      detail.textContent = "正在创建运行，收到后台确认后会显示进度。请勿重复提交。"; return;
+    var creation = pendingCreateStatus();
+    if (creation) {
+      banner.hidden = false; banner.classList.add("is-loading"); title.textContent = createPhaseLabel(creation);
+      detail.textContent = creation.message + "请勿重复提交。"; return;
     }
     if (state.loadState === "loading") {
       banner.hidden = false; banner.classList.add("is-loading"); title.textContent = "正在连接"; detail.textContent = "正在读取数据集、模型和运行记录。"; return;
@@ -68,16 +69,20 @@
 
   function renderContext() {
     var select = $("#run-select");
+    var creation = pendingCreateStatus();
     var runs = visibleRuns();
     var cancelledCount = cancelledEmptyRunCount();
     select.innerHTML = runs.length ? runs.map(function (run) {
       var runEvents = state.activeRun && state.activeRun.id === run.id ? state.events : run.events;
       var archivePrefix = run.archived ? "已归档 · " : "";
-      var isCurrent = state.activeRun && state.activeRun.id === run.id;
+      var isCurrent = !creation && state.activeRun && state.activeRun.id === run.id;
       var statusLabel = contextRunExplanation(run, runEvents).label;
       return "<option value=\"" + escapeHTML(run.id) + "\"" + (isCurrent ? " selected" : "") + ">" + escapeHTML(shortId(run.id)) + " · " + archivePrefix + escapeHTML(statusLabel) + "</option>";
     }).join("") : "<option value=\"\">暂无进化运行</option>";
-    select.disabled = !runs.length || state.busy || state.refreshing;
+    if (creation) { select.innerHTML = "<option value=\"\" selected>新运行：" + escapeHTML(createPhaseLabel(creation)) + "</option>" + select.innerHTML; }
+    select.disabled = !runs.length || state.busy || state.refreshing || Boolean(creation);
+    $("#load-older-runs").hidden = !state.runListCursor;
+    $("#load-older-runs").disabled = Boolean(state.loadingOlderRuns || state.busy || state.refreshing);
     $("#show-cancelled-empty-runs").checked = state.showCancelledEmptyRuns;
     $("#show-cancelled-empty-runs").disabled = state.busy || state.refreshing;
     $("#cancelled-empty-count").textContent = String(cancelledCount);
@@ -86,16 +91,24 @@
     $("#show-archived-runs").disabled = state.busy || state.refreshing;
     $("#archived-count").textContent = String(state.archivedRunCount);
     $("#archived-filter").hidden = state.archivedRunCount === 0 && !state.showArchivedRuns;
-    var run = state.activeRun;
+    var run = creation ? null : state.activeRun;
     var autoAdvanceActive = Boolean(run && run.status === "running" && runHasContinuousAutoProgress(run));
     var explanation = contextRunExplanation(run, state.events);
     var contextStatus = explanation.label;
-    $("#run-status").textContent = run ? (run.archived ? "已归档 · " : "") + contextStatus : "未创建";
-    $("#run-status-detail").textContent = run ? explanation.detail : explanation.nextAction;
+    if (!run && state.runOverviewLoading) {
+      contextStatus = "正在读取概况";
+      select.value = state.runOverviewLoading;
+    }
+    $("#run-status").textContent = creation ? createPhaseLabel(creation) : run ? (run.archived ? "已归档 · " : "") + contextStatus : state.runOverviewLoading ? "正在读取概况" : state.runOverviewError ? "概况暂不可用" : "未创建";
+    $("#run-status-detail").textContent = creation ? creation.message : run ? explanation.detail : state.runOverviewLoading ? "历史详情在后台加载，可先配置新的运行。" : state.runOverviewError || explanation.nextAction;
     $("#run-status-detail").title = run ? explanation.nextAction : "";
     $("#run-next-action").textContent = run ? explanation.nextAction : "";
     $("#generation-label").textContent = contextGenerationText(run);
     $("#candidate-count-label").textContent = run ? run.candidates_count + " / " + (run.max_candidates || "—") : "0 / 0";
+    if (!run && (state.runOverviewLoading || state.runOverviewError)) {
+      $("#generation-label").textContent = "—";
+      $("#candidate-count-label").textContent = "—";
+    }
     var online = state.usingDemo || state.connection === "online";
     var canControl = hasCapability("run.control");
     var hardTokenPause = runHasHardTokenPause(run);
@@ -127,6 +140,9 @@
   }
 
   function contextRunExplanation(run, events) {
+    if (run && run.schema_version === "ecologyrsi-dsh.browser-run-summary/2") {
+      return {label: run.status === "running" && run.auto_progress ? "自动执行中" : statusText(run.status), detail: "", nextAction: "选择运行以读取详细状态。"};
+    }
     if (run && run.status === "running") {
       if (runHasContinuousAutoProgress(run)) {
         return {label: "自动执行中", detail: "系统会自动继续未完成的轮次。", nextAction: "无需重复操作；需要调整时可以先暂停。", tone: "running"};
@@ -179,15 +195,16 @@
     var pill = $("#readiness-pill");
     pill.className = "pill " + (allReady ? "pill-green" : "pill-amber");
     pill.textContent = allReady ? "可以创建运行" : state.loadState === "loading" ? "正在读取目录" : "配置尚未就绪";
-    // Keep the primary action discoverable. Submission still fails closed in
-    // the form handler, which can now explain the exact unmet condition and
-    // move the user to the relevant controls instead of exposing a dead button.
-    $("#start-button").disabled = state.busy;
+    // Wait for the exact current schedule's asynchronous capacity check.
+    // Other invalid settings remain clickable so submission can explain them.
+    var capacityPending = capacityVerificationPending();
+    $("#start-button").disabled = state.busy || capacityPending;
     var createStatus = state.createStatus;
     $("#start-button").textContent = state.pendingAction === "create"
-      ? "正在创建并提交"
+      ? createPhaseLabel(pendingCreateStatus())
+      : capacityPending ? "正在核验数据容量"
       : createRunButtonLabel(createStatus, Boolean(state.activeRun));
-    $("#create-hint").textContent = createRunHint(createStatus, allReady, unmetChecks);
+    $("#create-hint").textContent = capacityPending && state.pendingAction !== "create" ? "正在核验当前参数对应的数据容量，完成后可创建运行。" : createRunHint(createStatus, allReady, unmetChecks);
     var selectedDataset = selectedCatalogItem("datasets", "#dataset-id");
     var selectedEpisode = datasetEpisodes(selectedDataset).find(function (item) { return itemId(item) === $("#episode-id").value; });
     var optimizationControls = optimizationControlSnapshot();
@@ -205,7 +222,8 @@
       ["入围候选持续优化", optimizationControls.valid
         ? formatNumber(optimizationControls.schedule.formal_origin_count_per_finalist) + " 个预测时点 · 每批 " + formatNumber(optimizationControls.schedule.local_batch_origin_count) + " · 每批最多 " + formatNumber(optimizationControls.schedule.max_local_edits_per_batch) + " 处改动 · 样本并发 " + formatNumber(optimizationControls.sample_concurrency)
         : "参数无效：" + optimizationControls.message + "（" + optimizationControlInputText(optimizationControls) + "）"],
-      ["自动绑定", "系统根据数据与模型提案，选择预测方法和评测工具"],
+      ["预测方案", "运行中由模型选择、切换和优化，可仅使用基线"],
+      ["独立评测器", itemLabel(selectedCatalogItem("evaluators", "#evaluator-id"))],
       ["知识检索", $("#knowledge-online-enabled").checked ? "每轮在线检索并冻结知识快照" : "仅使用内置知识目录"],
       ["运行环境", state.usingDemo ? "浏览器演示" : environmentText(state.catalog.dsh.environment)]
     ];
@@ -215,6 +233,7 @@
 
   function createRunButtonLabel(createStatus, hasActiveRun) {
     if (createStatus && createStatus.state === "failed") { return "重新创建运行"; }
+    if (createStatus && ["verifying", "pending"].indexOf(createStatus.state) >= 0) { return "核对创建状态"; }
     return hasActiveRun ? "创建新运行" : "创建并开始";
   }
 
@@ -256,7 +275,8 @@
       ? schedule.local_batch_origin_count + 2 * Math.max(0, batchCount - 1) * schedule.local_batch_origin_count
       : schedule.formal_origin_count_per_finalist;
     var formalCandidateOrigins = schedule.finalist_count * formalOriginsPerFinalist;
-    var holdoutCandidateOrigins = (schedule.finalist_count + 1) * schedule.selection_holdout_origin_count;
+    var holdoutReplicas = state.usingDemo ? 1 : 2;
+    var holdoutCandidateOrigins = holdoutReplicas * (schedule.finalist_count + 1) * schedule.selection_holdout_origin_count;
     var generationCandidateOrigins = screeningCandidateOrigins + formalCandidateOrigins + holdoutCandidateOrigins;
     var generationScoringCells = generationCandidateOrigins * cellsPerOrigin;
     var runCandidateOrigins = generationCandidateOrigins * budget.max_generations;
@@ -266,19 +286,24 @@
     var capacityOriginText = capacity && capacity.sufficient === true && Number(capacity.reused_origin_occurrences || 0) > 0
       ? "计划 " + formatNumber(capacity.planned_origin_occurrences == null ? uniqueOrigins : capacity.planned_origin_occurrences) + " 个起点；不足部分按 occurrence 循环复用"
       : "需要 " + formatNumber(capacity && capacity.planned_origin_occurrences != null ? capacity.planned_origin_occurrences : uniqueOrigins) + " 个起点 occurrence";
+    if (capacity && capacity.cohort_reuse_policy === "purged_no_reuse@1") {
+      capacityOriginText += "；按目标成熟时间隔离，禁止循环复用；适应数据跨 " + formatNumber(Number((capacity.maturity_gaps || {}).adaptation_day_buckets) || 0) + " 个自然日";
+    }
     var maximumEdits = Math.max(0, batchCount - (pairedMode ? 1 : 0)) * schedule.max_local_edits_per_batch;
     $("#parameter-summary-pill").textContent = "每个入围候选 " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count);
     $("#agent-update-scope").textContent = "每个入围候选 " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count);
     var budgetState = $("#parameter-budget-state");
     var capacitySufficient = state.usingDemo || Boolean(capacity && capacity.sufficient === true);
-    budgetState.textContent = !budget.budget_sufficient ? "预算不足" : state.cohortCapacityLoading ? "正在核验数据容量" : capacitySufficient ? "预算与数据容量完整" : "数据容量不足";
-    budgetState.className = budget.budget_sufficient && capacitySufficient ? "" : "is-insufficient";
+    var capacityPending = !state.usingDemo && capacityVerificationPending();
+    budgetState.textContent = !budget.budget_sufficient ? "预算不足" : capacityPending ? "正在核验数据容量" : capacitySufficient ? "预算与数据容量完整" : state.cohortCapacityError ? "数据容量暂不可用" : "数据容量不足";
+    budgetState.className = budget.budget_sufficient && (capacitySufficient || capacityPending) ? "" : "is-insufficient";
     var values = [
       ["迭代结构", formatNumber(budget.max_generations) + " 轮 · 每轮固定 4 个候选 · 同组 64 个时点评测后选出 2 个"],
       ["局部持续优化", pairedMode
-        ? "两个入围候选共享并复用 " + formatNumber(schedule.formal_origin_count_per_finalist) + " 个预测时点；每个方案包含 1 个初始批次和 " + formatNumber(Math.max(0, batchCount - 1)) + " 个新旧版本同批比较；提高则保留，认证风险单独记录；最多 " + formatNumber(maximumEdits) + " 处局部改动"
+        ? "两个入围候选共享 " + formatNumber(schedule.formal_origin_count_per_finalist) + " 个预测时点；每个方案包含 1 个初始批次和 " + formatNumber(Math.max(0, batchCount - 1)) + " 个新旧版本同批比较；" + "通过实际增益、分项不退化及配对证据检查后保留；证据不足待复核" + "；最多 " + formatNumber(maximumEdits) + " 处局部改动"
         : "每个入围候选 " + formatNumber(schedule.formal_origin_count_per_finalist) + " 个时点 = " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count) + "；最多 " + formatNumber(maximumEdits) + " 处局部改动"],
       ["单轮执行预算", formatNumber(screeningCandidateOrigins) + " + " + formatNumber(formalCandidateOrigins) + " + " + formatNumber(holdoutCandidateOrigins) + " = " + formatNumber(generationCandidateOrigins) + " 次时点预测 = " + formatNumber(generationScoringCells) + " 个评分项"],
+      ["留出重复推理", "每个方案独立推理 " + formatNumber(holdoutReplicas) + " 次，已计入执行预算；独立观测数保持不变"],
       ["全程执行预算", formatNumber(runCandidateOrigins) + " 次时点预测 / " + formatNumber(runScoringCells) + " 个评分项；" + capacityOriginText],
       ["数据容量", state.cohortCapacityLoading ? "正在核验" : capacity ? cohortCapacityLabel(capacity) : state.cohortCapacityError || "等待核验"],
       ["请求组织", "每个预测时点使用一条完整向量链 · " + formatNumber(microbatch) + " 个评分单元原子提交"],

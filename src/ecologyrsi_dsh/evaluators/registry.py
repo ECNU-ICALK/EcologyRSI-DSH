@@ -7,16 +7,24 @@ rows never enter this local adaptive loop.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from ..evolution.agent_policy import summarize_agent_tools, rebind_agent_policy
+
+from ..core.prediction_policy import RUNTIME_EVALUATOR_ID, prediction_usage
+
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from statistics import fmean
 from typing import Any
 
-from ..api.sample_admission import (
+from ..execution.sample_admission import (
     HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK,
     MAX_SAMPLE_CONCURRENCY,
 )
+from ..execution.batch import NativeBatchBackend
+from ..science.context import EvaluationContext
 from ..core.models import (
     Candidate,
     Evaluation,
@@ -54,6 +62,7 @@ from .gateway_sample_adapter import (
     GatewaySampleTool,
 )
 from .dsh_sample_adapter import DshSampleCollaborationAdapter
+from .agent_model_tools import AgentModelTools
 from .fitness import FitnessProfile
 from .epoch_cohorts import PlannedCohort
 from .shared_sample_context import sibling_stage_context_digest
@@ -64,6 +73,8 @@ from .baselines import (
     fit_baseline_profile,
 )
 from .greenhouse_prediction import (
+    BASELINE_ALIGNED_RIDGE_MODEL_ID,
+    BaselineAlignedRidgeConfig,
     EXOGENOUS_RIDGE_MODEL_ID,
     HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
     MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
@@ -71,7 +82,6 @@ from .greenhouse_prediction import (
     ExogenousRidgeConfig,
     HorizonTargetwiseExogenousRidgeConfig,
     TargetwiseExogenousRidgeConfig,
-    fit_predict_exogenous_ridge,
     predict_fitted_exogenous_ridge,
 )
 from .metrics import (
@@ -113,6 +123,9 @@ GREENHOUSE_EVALUATOR_ID = "greenhouse_time_forward@1"
 GREENHOUSE_MULTIHORIZON_EVALUATOR_ID = "greenhouse_multihorizon_time_forward@1"
 GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID = (
     "greenhouse_multihorizon_time_forward@2"
+)
+GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID = (
+    "greenhouse_multihorizon_time_forward@3"
 )
 TOY_EVALUATOR_ID = "toy_time_forward@1"
 TOY_PREDICTOR_MODEL_ID = "toy-rolling-water@1"
@@ -1157,6 +1170,7 @@ class EvaluatorRegistry:
         ]
         | None = None,
         tools: Sequence[GatewaySampleTool] = (),
+        agent_model_tools: AgentModelTools | None = None,
         run_id: str | None = None,
         candidate_id: str | None = None,
     ) -> CollaborativeSampleExecutor:
@@ -1242,6 +1256,8 @@ class EvaluatorRegistry:
                 strategy_model_id=strategy_model_id,
                 review_model_id=review_model_id,
                 forecast_bundle_tool=forecast_bundle_tool,
+                prediction_tool_catalog=agent_model_tools.catalog() if agent_model_tools else (),
+                prediction_tool_executor=agent_model_tools.execute if agent_model_tools else None,
                 prediction_tool_binder=self.dsh_prediction_tool_binder,
                 microbatch_size=min(
                     128,
@@ -1471,6 +1487,34 @@ class EvaluatorRegistry:
                 "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
                 "implementation": "greenhouse-multihorizon-forward/8",
             },
+            {
+                "id": RUNTIME_EVALUATOR_ID,
+                "label": "温室多方案统一时间前向评测",
+                "description": "固定数据、基线、目标和时距；模型在运行中选择是否启用残差模型、切换已登记预测器并优化参数。",
+                "dataset_ids": ["agc_cucumber_2018", "agc_tomato_2019"],
+                "evaluation_partition": "training_feedback",
+                "scientific_scope": "historical_replay_prediction_non_causal",
+                "prediction_model_ids": [BASELINE_ALIGNED_RIDGE_MODEL_ID, EXOGENOUS_RIDGE_MODEL_ID,
+                                         TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID, HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID],
+                "horizons_hours": [1, 6, 24],
+                "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
+                "implementation": "greenhouse-runtime-model-selection-forward/1",
+            },
+            {
+                "id": GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID,
+                "label": "温室基线对齐多时距评测 v3",
+                "description": (
+                    "仅用训练拟合分区选择持续性或24小时季节基底并拟合岭回归残差，"
+                    "在固定训练反馈 cohort 中评测1、6、24小时预测。"
+                ),
+                "dataset_ids": ["agc_cucumber_2018", "agc_tomato_2019"],
+                "evaluation_partition": "training_feedback",
+                "scientific_scope": "historical_replay_prediction_non_causal",
+                "prediction_model_ids": [BASELINE_ALIGNED_RIDGE_MODEL_ID],
+                "horizons_hours": [1, 6, 24],
+                "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
+                "implementation": "greenhouse-baseline-aligned-multihorizon-forward/1",
+            },
         ]
         for item in items:
             profile = self._fitness_profile_for_catalog_item(item)
@@ -1586,6 +1630,19 @@ class EvaluatorRegistry:
                 ],
                 "scientific_scope": "historical_replay_prediction_non_causal",
                 "implementation": "greenhouse-horizon-targetwise-ridge/1",
+            },
+            {
+                "id": BASELINE_ALIGNED_RIDGE_MODEL_ID,
+                "label": "温室基线对齐岭回归残差模型",
+                "description": (
+                    "仅用训练拟合分区为每个目标和时距选定持续性或24小时季节基底，"
+                    "训练和预测使用相同基底；残差缩放为0时还原选定因果基线。"
+                ),
+                "dataset_ids": ["agc_cucumber_2018", "agc_tomato_2019"],
+                "parameter_names": ["history_steps", "ridge_alpha",
+                                    "residual_scale_1h", "residual_scale_6h", "residual_scale_24h"],
+                "scientific_scope": "historical_replay_prediction_non_causal",
+                "implementation": "greenhouse-baseline-aligned-ridge/1",
             },
         ]
         for item in items:
@@ -1729,6 +1786,15 @@ class EvaluatorRegistry:
             )
         )
         schemas = (
+            {
+                "history_steps": (int, 1, 12),
+                "ridge_alpha": (float, 0.0001, 1.0),
+                "residual_scale_1h": (float, 0.0, 1.0),
+                "residual_scale_6h": (float, 0.0, 1.0),
+                "residual_scale_24h": (float, 0.0, 1.0),
+            }
+            if predictor_model_id == BASELINE_ALIGNED_RIDGE_MODEL_ID
+            else
             {
                 "history_steps": (int, 1, 12),
                 "ridge_alpha": (float, 0.0001, 1.0),
@@ -1921,6 +1987,7 @@ class EvaluatorRegistry:
                 execution_plan=execution_plan,
             )
         elif predictor_model_id in {
+            BASELINE_ALIGNED_RIDGE_MODEL_ID,
             EXOGENOUS_RIDGE_MODEL_ID,
             TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
             HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
@@ -1931,6 +1998,8 @@ class EvaluatorRegistry:
                 in {
                     GREENHOUSE_MULTIHORIZON_EVALUATOR_ID,
                     GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
+                    GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID,
+                    RUNTIME_EVALUATOR_ID,
                 }
                 else (1,)
             )
@@ -2772,6 +2841,7 @@ class EvaluatorRegistry:
                 "strategy_model_id": task.metadata.get("strategy_model_id"),
                 "review_model_id": task.metadata.get("review_model_id"),
                 "tool_experience": proposal.metadata.get("tool_experience", []),
+                "agent_policy": proposal.metadata.get("agent_policy"),
                 "algorithm_artifact_digest": digest(
                     {
                         "prediction_model_id": GREENHOUSE_ROLLING_PREDICTOR_ID,
@@ -3342,7 +3412,9 @@ class EvaluatorRegistry:
             candidate, proposal, None
         )
         parameters = (
-            HorizonTargetwiseExogenousRidgeConfig.from_mapping(proposal.changes)
+            BaselineAlignedRidgeConfig.from_mapping(proposal.changes)
+            if predictor_model_id == BASELINE_ALIGNED_RIDGE_MODEL_ID
+            else HorizonTargetwiseExogenousRidgeConfig.from_mapping(proposal.changes)
             if predictor_model_id == HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
             else TargetwiseExogenousRidgeConfig.from_mapping(proposal.changes)
             if predictor_model_id == TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
@@ -3353,7 +3425,7 @@ class EvaluatorRegistry:
             and task.metadata.get("sample_agent_mode")
             in {"gateway_microbatch", "dsh_native_agent"}
         )
-        prediction = fit_predict_exogenous_ridge(
+        prediction = NativeBatchBackend().run(
             series,
             targets=tuple(item[0] for item in _TARGETS),
             horizons=horizons,
@@ -3363,8 +3435,24 @@ class EvaluatorRegistry:
                 ("training_feedback",) if defer_feedback_prediction else ()
             ),
             on_fit_complete=on_training_complete,
+            control=on_sample_control,
         )
+        agent_model_tools = AgentModelTools(
+            series, targets=tuple(item[0] for item in _TARGETS), horizons=horizons,
+            control=on_sample_control,
+            cache_dir=Path.home() / ".cache" / "ecologyrsi-dsh" / "agent-fits-v2",
+            default_fit=prediction, default_config=parameters,
+        ) if task.metadata.get("sample_agent_mode") == "dsh_native_agent" else None
         generated_rows = prediction["prediction_rows"]
+        if agent_model_tools is not None:
+            # Every Agent sees the same current observations regardless of its
+            # candidate's optional numerical predictor or residual scale.
+            for row in generated_rows:
+                origin = row["origin_index"]
+                row["label_free_context"]["available_observations"] = {
+                    name: float(values[origin]) for name, values in series.values.items()
+                    if values[origin] is not None and math.isfinite(float(values[origin]))
+                }
         models = prediction["models"]
         fit_range = series.partitions["training_fit"]
         feedback_range = series.partitions["training_feedback"]
@@ -3432,6 +3520,13 @@ class EvaluatorRegistry:
             )[0]
             for target_name, _unit, _minimum, _maximum in _TARGETS
         }
+
+        measurement_context = EvaluationContext.native(
+            series, generated_feedback_rows,
+            units={name: metadata['unit'] for name, metadata in target_metadata.items()},
+            baseline_profile=baseline_profile, scales=baseline_scales,
+            scoring_contract=_greenhouse_scoring_contract(),
+        )
 
         def finalize_scoring_rows(
             result_rows: Sequence[Mapping[str, Any]],
@@ -3515,6 +3610,7 @@ class EvaluatorRegistry:
         )
         sample_batch = self._sample_executor_for_task(
             task,
+            agent_model_tools=agent_model_tools,
             run_id=candidate.run_id,
             candidate_id=candidate.candidate_id,
             progress_callback=on_evaluation_progress,
@@ -3590,6 +3686,7 @@ class EvaluatorRegistry:
                 "strategy_model_id": task.metadata.get("strategy_model_id"),
                 "review_model_id": task.metadata.get("review_model_id"),
                 "tool_experience": proposal.metadata.get("tool_experience", []),
+                "agent_policy": proposal.metadata.get("agent_policy"),
                 "algorithm_artifact_digest": digest(
                     {
                         "prediction_model_id": predictor_model_id,
@@ -3610,7 +3707,7 @@ class EvaluatorRegistry:
         )
         # Training rows stay local to the registered fit. Every feedback row
         # is replaced by its independently adjudicated result; a failed tool
-        # call first uses the model's declared persistence fallback. Scoring
+        # call first uses the model's declared reference fallback. Scoring
         # then applies the fit-selected comparator and prevents a failed call
         # from receiving a positive reward.
         returned_sample_ids = {
@@ -3638,6 +3735,7 @@ class EvaluatorRegistry:
                 # batches remain idempotent and are never duplicated.
                 publish_scoring_rows(missing_result_rows)
         scored_feedback_rows = finalize_scoring_rows(completed_feedback_rows)
+        measurement_context.validate_rows(scored_feedback_rows, allow_missing=True)
         promotion_block_evidence = build_promotion_block_evidence(
             scored_feedback_rows,
             horizons=horizons,
@@ -4094,6 +4192,10 @@ class EvaluatorRegistry:
             sample_records,
             scored_feedback_rows,
         )
+        sample_execution_summary["agent_tool_performance"] = summarize_agent_tools(
+            sample_records, scored_feedback_rows,
+            source_phase=(task.metadata.get("_evaluation_scope") or {}).get("phase", "training_feedback"),
+        )
         sample_execution_summary.update(
             {
                 "result_vector_expected_examples": len(generated_feedback_rows),
@@ -4149,6 +4251,8 @@ class EvaluatorRegistry:
             series, evaluation_index_rows
         )
         evaluation_metrics = {
+            "measurement_context": measurement_context.summary(),
+            "numerical_backend": NativeBatchBackend.version,
             "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
             "objective_aggregation_version": (
                 GREENHOUSE_OBJECTIVE_AGGREGATION_VERSION
@@ -4263,6 +4367,10 @@ class EvaluatorRegistry:
             "evaluation_cohort": {
                 "partition": "training_feedback",
                 "history_source_partitions": ["training_feedback"],
+                **({
+                    "baseline_history_source_partitions": ["training_fit", "training_feedback"],
+                    "baseline_reference_cutoff": "forecast_origin",
+                } if predictor_model_id == BASELINE_ALIGNED_RIDGE_MODEL_ID else {}),
                 "minimum_history_steps": MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
                 "embargo_rows_visible": False,
                 **(
@@ -4278,14 +4386,28 @@ class EvaluatorRegistry:
             "dataset_digest": series.digest,
             "split_manifest_digest_sha256": series.split_manifest_digest_sha256,
             "prediction_model_id": predictor_model_id,
+            "prediction_usage": ({"mode": "agent_per_origin", "default_model_id": predictor_model_id,
+                                  "numerical_prediction_owner": "sample_agent"}
+                                 if agent_model_tools is not None else prediction_usage(predictor_model_id, parameters.to_dict())),
             "evaluation_scope": "visible/training_feedback/historical_replay",
             "causal_interpretation": False,
         }
+        if agent_model_tools is not None:
+            evaluation_metrics["prediction_owner"] = "sample_agent"
+            evaluation_metrics["agent_inference_stability_status"] = "requires_independent_holdout_replicas"
+        baseline_only = all(item["status"] == "baseline_only" for item in models)
+        fit_passes = int(not baseline_only)
+        if agent_model_tools is not None:
+            training_metrics.update({
+                "prediction_role": "optional_candidate_model_tool",
+                "final_prediction_owner": "sample_agent",
+                "standalone_artifact_reproduces_agent_predictions": False,
+            })
         training_metrics.update(
             {
                 "model_task_count": len(models),
                 "solver_fallback_count": sum(
-                    item["status"] != "fitted" for item in models
+                    item["status"] not in {"fitted", "baseline_only"} for item in models
                 ),
                 "selected_exogenous_feature_count": len(
                     {
@@ -4294,14 +4416,13 @@ class EvaluatorRegistry:
                         for name in item["selected_exogenous_features"]
                     }
                 ),
-                "execution_mode": "closed_form_ridge",
-                "fit_method": "closed_form_ridge",
-                "fit_passes_requested": 1,
-                "fit_passes_completed": 1,
+                "execution_mode": "baseline_only" if baseline_only else "closed_form_ridge",
+                "fit_method": "training_fit_baseline_selection" if baseline_only else "closed_form_ridge",
+                "residual_models_fitted": sum(item["status"] == "fitted" for item in models),
+                "baseline_only_task_count": sum(item["status"] == "baseline_only" for item in models),
+                "fit_passes_requested": fit_passes,
+                "fit_passes_completed": fit_passes,
                 "iterative_epoch_training": False,
-                # Compatibility aliases; ridge is solved in one closed-form fit.
-                "epochs_requested": 1,
-                "epochs_completed": 1,
                 "training_rows": fit_range.size,
                 "training_partition_rows": fit_range.size,
                 "training_eligible_examples": total_fit_eligible_rows,
@@ -4309,6 +4430,9 @@ class EvaluatorRegistry:
                 "training_skipped_examples": total_fit_missing_rows,
             }
         )
+        delivery_policy = rebind_agent_policy(proposal.metadata.get("agent_policy"),
+            genome_digest=proposal.metadata.get("genome_digest", "0" * 64),
+            profile=proposal.metadata.get("candidate_agent_profile", {}), parameters=parameters.to_dict()) if agent_model_tools is not None else None
         artifact = ModelArtifact(
             artifact_id=f"artifact:{candidate.candidate_id}",
             run_id=candidate.run_id,
@@ -4321,6 +4445,12 @@ class EvaluatorRegistry:
             learned_parameters={
                 "feature_policy": prediction["feature_policy"],
                 "models": models,
+                **({"agent_policy": delivery_policy, "optional_tool_catalog": agent_model_tools.catalog(),
+                    "training_data_digest": agent_model_tools.training_digest,
+                    "runtime_contract": {key: task.metadata.get(key) for key in ("strategy_model_id", "review_model_id", "preset_content_digest", "standing_tool_surface_digest", "resolved_policy_route_config_digest", "resolved_review_route_config_digest")}}
+                   if agent_model_tools is not None else {}),
+                **({"baseline_profile": prediction["baseline_profile"]}
+                   if predictor_model_id == BASELINE_ALIGNED_RIDGE_MODEL_ID else {}),
             },
             metrics=training_metrics,
         )
@@ -4410,6 +4540,8 @@ class EvaluatorRegistry:
 
 
 __all__ = [
+    "BASELINE_ALIGNED_RIDGE_MODEL_ID",
+    "GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID",
     "DEFAULT_SAMPLE_EXECUTION_MIN_COVERAGE",
     "EXOGENOUS_RIDGE_MODEL_ID",
     "HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID",

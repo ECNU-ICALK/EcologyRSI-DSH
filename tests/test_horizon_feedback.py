@@ -232,6 +232,38 @@ class HorizonFeedbackTests(unittest.TestCase):
             "co2_concentration_24h_residual_scale",
         )
 
+    def test_baseline_aligned_focus_uses_the_degraded_horizon(self) -> None:
+        schemas = {
+            "history_steps": {"type": "integer", "minimum": 1, "maximum": 12},
+            "ridge_alpha": {"type": "number", "minimum": 0.0001, "maximum": 1.0},
+            **{
+                f"residual_scale_{horizon}h": {
+                    "type": "number", "minimum": 0.0, "maximum": 1.0,
+                }
+                for horizon in (1, 6, 24)
+            },
+        }
+        for target in ("air_temperature", "relative_humidity", "co2_concentration"):
+            for horizon in (1, 6, 24):
+                with self.subTest(target=target, horizon=horizon):
+                    self.assertEqual(
+                        analysis_focus_parameter(
+                            {"target_weaknesses": [{"target": target, "horizon_hours": horizon}]},
+                            schemas,
+                        ),
+                        f"residual_scale_{horizon}h",
+                    )
+
+        # An explicit, already-derived parameter association remains primary.
+        self.assertEqual(
+            analysis_focus_parameter(
+                {"parameter_effects": [{"parameter": "ridge_alpha"}],
+                 "target_weaknesses": [{"target": "relative_humidity", "horizon_hours": 6}]},
+                schemas,
+            ),
+            "ridge_alpha",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ from typing import Any, Mapping, Protocol, Sequence
 from ..core.models import digest
 from ..core.trajectory import OriginOccurrence
 from ..data.splits import IndexRange
-from ..evolution.schedule import OptimizationSchedule
+from ..evolution.schedule import OptimizationSchedule, ISOLATED_SCHEDULE_SCHEMA_VERSION
 from .greenhouse_prediction import MAX_EXOGENOUS_RIDGE_HISTORY_STEPS
 
 
@@ -17,6 +17,8 @@ COHORT_PLANNER_SCHEMA = "ecologyrsi-dsh.epoch-cohort-planner/1"
 RUN_ADAPTATION_COHORT_SCHEMA = "ecologyrsi-dsh.run-adaptation-cohort/1"
 GENERATION_COHORTS_SCHEMA = "ecologyrsi-dsh.generation-cohorts/1"
 CAPACITY_REPORT_SCHEMA = "ecologyrsi-dsh.epoch-capacity-report/1"
+ISOLATED_PLANNER_SCHEMA = "ecologyrsi-dsh.epoch-cohort-planner/2"
+ISOLATED_REUSE_POLICY = "purged_no_reuse@1"
 COHORT_REUSE_POLICY = "cycle_after_exhaustion@1"
 DEFAULT_HORIZONS = (1, 6, 24)
 # Cohorts are shared by every candidate in a generation, including candidates
@@ -304,6 +306,7 @@ class RunAdaptationCohort:
     cohort: PlannedCohort
     batches: tuple[PlannedBatch, ...]
     schema_version: str = RUN_ADAPTATION_COHORT_SCHEMA
+    planner_schema: str = COHORT_PLANNER_SCHEMA
 
     def __post_init__(self) -> None:
         _strict_integer(self.seed, "seed")
@@ -350,7 +353,7 @@ class RunAdaptationCohort:
     def identity_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
-            "planner_schema": COHORT_PLANNER_SCHEMA,
+            "planner_schema": self.planner_schema,
             "dataset_id": self.dataset_id,
             "episode_id": self.episode_id,
             "seed": self.seed,
@@ -369,7 +372,6 @@ class RunAdaptationCohort:
     def from_dict(cls, value: Mapping[str, Any]) -> "RunAdaptationCohort":
         data = dict(value)
         supplied = data.pop("adaptation_digest", None)
-        data.pop("planner_schema", None)
         result = cls(**data)
         if supplied is not None and supplied != result.adaptation_digest:
             raise ValueError("adaptation_digest does not match cohort identity")
@@ -387,6 +389,7 @@ class GenerationCohorts:
     screening: PlannedCohort
     holdout: PlannedCohort
     schema_version: str = GENERATION_COHORTS_SCHEMA
+    planner_schema: str = COHORT_PLANNER_SCHEMA
 
     def __post_init__(self) -> None:
         _strict_integer(self.generation, "generation")
@@ -415,7 +418,7 @@ class GenerationCohorts:
     def identity_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
-            "planner_schema": COHORT_PLANNER_SCHEMA,
+            "planner_schema": self.planner_schema,
             "dataset_id": self.dataset_id,
             "episode_id": self.episode_id,
             "generation": self.generation,
@@ -440,7 +443,6 @@ class GenerationCohorts:
     def from_dict(cls, value: Mapping[str, Any]) -> "GenerationCohorts":
         data = dict(value)
         supplied = data.pop("generation_cohorts_digest", None)
-        data.pop("planner_schema", None)
         result = cls(**data)
         if supplied is not None and supplied != result.generation_cohorts_digest:
             raise ValueError("generation cohort digest does not match identity")
@@ -467,6 +469,7 @@ class CohortCapacityReport:
     cohort_reuse_policy: str = COHORT_REUSE_POLICY
     reused_origin_occurrences: int = 0
     schema_version: str = CAPACITY_REPORT_SCHEMA
+    planner_schema: str = COHORT_PLANNER_SCHEMA
 
     def __post_init__(self) -> None:
         for name in (
@@ -483,7 +486,7 @@ class CohortCapacityReport:
             "reused_origin_occurrences",
         ):
             _strict_integer(getattr(self, name), name)
-        if self.cohort_reuse_policy != COHORT_REUSE_POLICY:
+        if self.cohort_reuse_policy not in {COHORT_REUSE_POLICY, ISOLATED_REUSE_POLICY}:
             raise ValueError(
                 f"cohort_reuse_policy must be {COHORT_REUSE_POLICY!r}"
             )
@@ -499,7 +502,7 @@ class CohortCapacityReport:
     def identity_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
-            "planner_schema": COHORT_PLANNER_SCHEMA,
+            "planner_schema": self.planner_schema,
             "dataset_id": self.dataset_id,
             "episode_id": self.episode_id,
             "planned_generations": self.planned_generations,
@@ -704,6 +707,9 @@ def plan_run_adaptation_cohort(
 ) -> RunAdaptationCohort:
     if not isinstance(schedule, OptimizationSchedule):
         raise TypeError("schedule must be OptimizationSchedule")
+    if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION:
+        from .isolated_cohorts import plan_adaptation
+        return plan_adaptation(dataset, schedule=schedule, seed=seed)
     _strict_integer(seed, "seed")
     eligible, _gaps = _eligible_origins(dataset)
     required = schedule.formal_origin_count_per_finalist
@@ -748,6 +754,9 @@ def plan_generation_selection_cohorts(
 ) -> GenerationCohorts:
     if not isinstance(schedule, OptimizationSchedule):
         raise TypeError("schedule must be OptimizationSchedule")
+    if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION:
+        from .isolated_cohorts import plan_selection
+        return plan_selection(dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed)
     if not isinstance(adaptation, RunAdaptationCohort):
         raise TypeError("adaptation must be RunAdaptationCohort")
     _strict_integer(generation, "generation")
@@ -805,6 +814,9 @@ def estimate_epoch_capacity(
 ) -> CohortCapacityReport:
     if not isinstance(schedule, OptimizationSchedule):
         raise TypeError("schedule must be OptimizationSchedule")
+    if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION:
+        from .isolated_cohorts import estimate_capacity
+        return estimate_capacity(dataset, schedule=schedule, planned_generations=planned_generations, seed=seed, scoring_cells_per_origin=scoring_cells_per_origin)
     _strict_integer(planned_generations, "planned_generations", minimum=1)
     _strict_integer(seed, "seed")
     _strict_integer(

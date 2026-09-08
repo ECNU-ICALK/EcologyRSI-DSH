@@ -11,7 +11,11 @@ from ..core.trajectory import (
     HoldoutArm,
     HoldoutEvaluation,
 )
+from .agent_stability import paired_stability_gate
 from .fitness import FitnessProfile, assess_generation_selection
+from ..core.search_policy import PAIRED_EXECUTION_QUALIFICATION
+from ..core.finalist_review import FINALIST_REVIEW_QUALIFICATION
+from ..evolution.execution_qualification import paired_scoring_evidence_complete
 
 
 PROMOTION_CELL_REGRESSION_FLOOR = -0.01
@@ -217,9 +221,15 @@ def build_generation_comparison(
     challenger_promotion_allowed: bool = True,
     positive_delta_search: bool = False,
     legacy_runtime_v2_shape: bool = False,
+    require_paired_strict_chain: bool = False,
+    finalist_reviews: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> GenerationComparison:
     """Build one immutable three-arm comparison without model-authored ranking."""
 
+    if not isinstance(require_paired_strict_chain, bool):
+        raise TypeError("require_paired_strict_chain must be a bool")
+    if require_paired_strict_chain and legacy_runtime_v2_shape:
+        raise ValueError("paired execution qualification cannot use a legacy gate shape")
     evaluations = tuple(holdout_evaluations)
     if len(evaluations) != len(HoldoutArm):
         raise ValueError("generation comparison requires exactly three holdout evaluations")
@@ -247,6 +257,15 @@ def build_generation_comparison(
         for target in profile.expected_targets
         for horizon in profile.expected_horizons
     }
+    if finalist_reviews is not None:
+        if legacy_runtime_v2_shape or set(finalist_reviews) != {"finalist_1", "finalist_2"}:
+            raise ValueError("independent review requires the two current finalist arms")
+        for item in finalist_evaluations:
+            review = finalist_reviews[item.scope.holdout_arm.value]
+            if (review.get("candidate_id") != item.scope.candidate_id
+                    or review.get("candidate_revision_id") != item.scope.candidate_revision_id
+                    or review.get("evaluation_scope_digest") != item.scope.scope_key):
+                raise ValueError("independent review belongs to another finalist revision")
     assessments = assess_generation_selection(
         tuple(_promotion_view(item) for item in finalist_evaluations),
         _promotion_view(incumbent),
@@ -265,9 +284,24 @@ def build_generation_comparison(
         selection = assessment_by_candidate[item.scope.candidate_id]
         stability_floor = selection.selection_stability_floor
         delta = item.score - incumbent.score
+        strict_chain_pass = bool(
+            _strict_chain_pass(item) and _strict_chain_pass(incumbent)
+        )
+        scoring_evidence_complete = (
+            paired_scoring_evidence_complete(incumbent, item)
+            if require_paired_strict_chain else True
+        )
+        review = finalist_reviews[item.scope.holdout_arm.value] if finalist_reviews is not None else None
+        review_pass = review is None or (
+            review.get("judge_status") == "completed" and review.get("judge_accepted") is True
+        )
         certification_eligible = bool(
-            challenger_promotion_allowed
+            review_pass and challenger_promotion_allowed
             and scientific_gate["eligible"]
+            # Guarded scientific comparison cannot benefit from an incumbent's
+            # transport/chain failure through the coverage-penalized objective.
+            and (not require_paired_strict_chain or strict_chain_pass)
+            and scoring_evidence_complete
             and cell_gate["complete"]
             and cell_gate["coverage_pass"]
             and cell_gate["no_regression"]
@@ -278,14 +312,13 @@ def build_generation_comparison(
             # promoted.
             and delta > profile.selection_minimum_score_delta
         )
-        strict_chain_pass = bool(
-            _strict_chain_pass(item) and _strict_chain_pass(incumbent)
-        )
         cell_values_complete = bool(
             cell_gate["complete"]
             and len(cell_gate.get("cell_deltas", {})) == len(expected_grid)
         )
         search_failures: list[str] = []
+        if not review_pass:
+            search_failures.append("independent_review_not_accepted")
         if scientific_gate["constraint_violations"] != 0:
             search_failures.append("constraint_violations")
         if not scientific_gate["coverage_pass"] or not cell_gate["coverage_pass"]:
@@ -301,7 +334,19 @@ def build_generation_comparison(
             if positive_delta_search
             else certification_eligible
         )
+        inference_stability = None
+        if item.metrics.get("prediction_owner") == "sample_agent" or item.metrics.get("agent_inference_stability") is not None or incumbent.metrics.get("agent_inference_stability") is not None:
+            inference_stability = paired_stability_gate(item, incumbent, minimum_delta=profile.selection_minimum_score_delta)
+            certification_eligible = certification_eligible and inference_stability["passed"]
         certification_failures = list(cell_gate.get("failures", ()))
+        if inference_stability is not None and not inference_stability["passed"]:
+            certification_failures.append(inference_stability["reason"])
+        if not review_pass:
+            certification_failures.append("independent_review_not_accepted")
+        if require_paired_strict_chain and not strict_chain_pass:
+            certification_failures.append("paired_strict_agent_chain_failed")
+        if require_paired_strict_chain and not scoring_evidence_complete:
+            certification_failures.append("paired_scoring_evidence_incomplete")
         if not challenger_promotion_allowed:
             certification_failures.append("screening_exploration_only")
         if not scientific_gate["passed"]:
@@ -348,14 +393,20 @@ def build_generation_comparison(
                 "promotion_assessment": selection.to_dict(),
                 "stability_lower_bound": stability_floor,
                 "strict_agent_chain_pass": strict_chain_pass,
+                **({"paired_scoring_evidence_complete": scoring_evidence_complete}
+                   if require_paired_strict_chain else {}),
                 "search_failures": search_failures,
                 "certification_failures": certification_failures,
+                "agent_inference_stability": inference_stability,
                 "failures": (
                     search_failures
                     if positive_delta_search
                     else certification_failures
                 ),
             }
+        if review is not None:
+            gate["judge_available"] = review.get("judge_status") == "completed"
+            gate["judge_accepted"] = review_pass
         finalist_gates[item.scope.holdout_arm.value] = gate
         if search_eligible:
             search_eligible_finalists.append((item, gate))
@@ -407,6 +458,12 @@ def build_generation_comparison(
         incumbent,
         legacy_runtime_v2_shape=legacy_runtime_v2_shape,
     )
+    incumbent_scoring_complete = (
+        paired_scoring_evidence_complete(incumbent, incumbent)
+        if require_paired_strict_chain else True
+    )
+    if require_paired_strict_chain and (not _strict_chain_pass(incumbent) or not incumbent_scoring_complete):
+        incumbent_scientific_gate["eligible"] = False
     incumbent_gate = (
         incumbent_scientific_gate
         if legacy_runtime_v2_shape
@@ -415,7 +472,13 @@ def build_generation_comparison(
             "search_eligible": True,
             "certification_eligible": incumbent_scientific_gate["eligible"],
             "search_failures": [],
-            "certification_failures": [],
+            "certification_failures": (
+                (["paired_strict_agent_chain_failed"] if not _strict_chain_pass(incumbent) else [])
+                + (["paired_scoring_evidence_incomplete"] if not incumbent_scoring_complete else [])
+                if require_paired_strict_chain else []
+            ),
+            **({"paired_scoring_evidence_complete": incumbent_scoring_complete}
+               if require_paired_strict_chain else {}),
             "strict_agent_chain_pass": _strict_chain_pass(incumbent),
         }
     )
@@ -435,6 +498,10 @@ def build_generation_comparison(
     incumbent_delta = selected.score - incumbent.score
     gate_results = {
         "schema_version": "ecologyrsi-dsh.generation-comparison/1",
+        **({"finalist_review_qualification": FINALIST_REVIEW_QUALIFICATION,
+            "finalist_reviews": _plain_json(finalist_reviews)} if finalist_reviews is not None else {}),
+        **({"paired_execution_qualification": PAIRED_EXECUTION_QUALIFICATION}
+           if require_paired_strict_chain else {}),
         "arms": {
             arm.value: (
                 finalist_gates[arm.value]

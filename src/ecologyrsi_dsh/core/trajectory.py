@@ -17,6 +17,7 @@ from .models import (
     digest,
     utc_now,
 )
+from .search_policy import PAIRED_EXECUTION_QUALIFICATION
 
 
 class EvaluationPhase(str, Enum):
@@ -216,8 +217,11 @@ class EvaluationScope:
     batch_index: int | None = None
     holdout_arm: HoldoutArm | None = None
     formal_batch_arm: FormalBatchArm | None = None
+    inference_replica: int = 0
 
     def __post_init__(self) -> None:
+        if type(self.inference_replica) is not int or not 0 <= self.inference_replica < 2:
+            raise ValueError("inference_replica must be 0 or 1")
         for name in ("run_id", "candidate_id", "candidate_revision_id"):
             object.__setattr__(self, name, _text(getattr(self, name), name))
         object.__setattr__(
@@ -292,6 +296,7 @@ class EvaluationScope:
             "phase": self.phase.value,
             "cohort_digest": self.cohort_digest,
             "origin_count": self.origin_count,
+            "inference_replica": self.inference_replica,
             "batch_index": self.batch_index,
             "holdout_arm": (
                 self.holdout_arm.value if self.holdout_arm is not None else None
@@ -594,8 +599,11 @@ class FormalBatchComparison:
     champion_after_revision_id: str
     reason: str
     created_at: str = field(default_factory=utc_now)
+    paired_execution_qualification: str | None = None
 
     def __post_init__(self) -> None:
+        if self.paired_execution_qualification not in (None, PAIRED_EXECUTION_QUALIFICATION):
+            raise ValueError("unsupported paired execution qualification contract")
         for name in (
             "comparison_id",
             "run_id",
@@ -707,6 +715,8 @@ class FormalBatchComparison:
             "champion_after_revision_id": self.champion_after_revision_id,
             "reason": self.reason,
             "created_at": self.created_at,
+            **({"paired_execution_qualification": self.paired_execution_qualification}
+               if self.paired_execution_qualification is not None else {}),
         }
 
     @classmethod

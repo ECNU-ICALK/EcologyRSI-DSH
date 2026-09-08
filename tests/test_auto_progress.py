@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from collections import Counter
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,8 +16,8 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from ecologyrsi_dsh.api import auto_progress as auto_progress_module
-from ecologyrsi_dsh.api import generation_execution as generation_execution_module
-from ecologyrsi_dsh.api import work_units as work_units_module
+from ecologyrsi_dsh.application import generation_execution as generation_execution_module
+from ecologyrsi_dsh.application import work_units as work_units_module
 from ecologyrsi_dsh.evaluators.sample_execution import SampleResultCallbackError
 from ecologyrsi_dsh.evolution.batches import ResearchResponseContractError
 from ecologyrsi_dsh.core.errors import (
@@ -32,6 +33,15 @@ from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 
 
 class AutoProgressHTTPTests(unittest.TestCase):
+    def test_fatal_evaluation_starts_native_drain_before_generation_returns(self):
+        state, quiescence = object(), object()
+        with patch.object(self.server.director, "state", return_value=state), \
+             patch.object(self.server.auto_progress, "_close_native_admission", return_value=quiescence) as close, \
+             patch.object(self.server.auto_progress, "_start_native_quiescence") as drain:
+            self.server.auto_progress.abort_native_evaluation("run:fatal")
+        close.assert_called_once_with(state, action="cancel")
+        drain.assert_called_once_with("cancel", quiescence)
+
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.server = EvolutionHTTPServer(
@@ -116,6 +126,12 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 TimeoutError("transient ledger boundary")
             )
         )
+
+        from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
+        for status in (422, 502):
+            exhausted = DshNativeRuntimeUnavailableError(error_code="structured_result_missing", status_code=status)
+            self.assertFalse(auto_progress_module._progress_failure_retryable(exhausted, stage="research"))
+            self.assertIsNone(auto_progress_module._retry_later_error(exhausted, stage="research"))
 
         truncated = GatewayResponseError(
             "research response reached its output limit",
@@ -395,10 +411,13 @@ class AutoProgressHTTPTests(unittest.TestCase):
         before = self.server.director.state(run_id)
 
         def mark_adaptive(_endpoint, _run_id, state):
-            state.task_manifest.metadata["optimization_protocol"] = (
-                "top2_adaptive_epoch@1"
+            return replace(
+                state,
+                task_manifest=replace(state.task_manifest, metadata={
+                    **state.task_manifest.metadata,
+                    "optimization_protocol": "top2_adaptive_epoch@1",
+                }),
             )
-            return state
 
         with (
             patch.object(
@@ -493,10 +512,13 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
                 def native_state(item):
                     projected = original_state(item)
-                    projected.task_manifest.metadata["execution_protocol"] = (
-                        DSH_NATIVE_EXECUTION_PROTOCOL
+                    return replace(
+                        projected,
+                        task_manifest=replace(projected.task_manifest, metadata={
+                            **projected.task_manifest.metadata,
+                            "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                        }),
                     )
-                    return projected
 
                 with patch.object(
                     self.server.auto_progress,
@@ -663,10 +685,13 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         def native_state(item):
             projected = original_state(item)
-            projected.task_manifest.metadata["execution_protocol"] = (
-                DSH_NATIVE_EXECUTION_PROTOCOL
+            return replace(
+                projected,
+                task_manifest=replace(projected.task_manifest, metadata={
+                    **projected.task_manifest.metadata,
+                    "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                }),
             )
-            return projected
 
         try:
             with (
@@ -2129,7 +2154,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
             self.server.director.start_run(run_id)
 
         first_generation = generation_execution_module.execute_generation(
-            endpoint,
+            (endpoint).server,
             run_id,
         )
         self.assertEqual(first_generation.run.generation, 1)
@@ -2140,7 +2165,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
             run_id,
         )
         spawned = generation_execution_module._spawn_generation_candidates(
-            endpoint,
+            (endpoint).server,
             run_id,
             batch,
         )

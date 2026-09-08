@@ -33,7 +33,7 @@ test("role-host creation is single-flight, resumable and has no token hard cap",
     },
   };
   const manager = new RoleAgentManager(ctx);
-  const binding = { run_id: "r1", role: "coordinator", preset_id: "ecology-coordinator-v4", model: "p/m", cwd: "/tmp" };
+  const binding = { run_id: "r1", role: "coordinator", preset_id: "ecology-coordinator-v5", model: "p/m", cwd: "/tmp" };
   const [a, b] = await Promise.all([manager.createRoleAgent(binding), manager.createRoleAgent(binding)]);
   assert.equal(a, b);
   assert.equal(calls.filter(([name]) => name === "create").length, 1);
@@ -87,7 +87,7 @@ test("run quiescence waits pending creations and disposes every published host",
   const researcher = manager.createRoleAgent({
     ...common,
     role: "researcher",
-    preset_id: "ecology-researcher-v7",
+    preset_id: "ecology-researcher-v12",
   });
   const proposer = manager.createRoleAgent({
     ...common,
@@ -162,7 +162,7 @@ test("role creation preserves its setup error when private disposal also fails",
   const result = await outcome(manager.createRoleAgent({
     run_id: "run-primary-role-error",
     role: "researcher",
-    preset_id: "ecology-researcher-v7",
+    preset_id: "ecology-researcher-v12",
     model: "provider/model",
     cwd: "/tmp",
   }));

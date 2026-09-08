@@ -3,12 +3,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const ids = [
-  "ecology-coordinator-v4",
-  "ecology-researcher-v7",
+  "ecology-coordinator-v5",
+  "ecology-researcher-v12",
   "ecology-candidate-proposer-v4",
-  "ecology-sample-planner-v5",
-  "ecology-sample-critic-v4",
-  "ecology-generation-judge-v7",
+  "ecology-sample-planner-v8",
+  "ecology-sample-critic-v5",
+  "ecology-generation-judge-v8",
 ];
 
 test("six legal role presets expose only the narrow agent plane", async () => {
@@ -38,13 +38,13 @@ test("no retained role mounts the unused Workflow worker service", async () => {
 test("generation judge preset separates candidate review from batch reflection", async () => {
   const composition = await readFile(
     new URL(
-      "../presets/ecology-generation-judge-v7/agent.cordis.yml",
+      "../presets/ecology-generation-judge-v8/agent.cordis.yml",
       import.meta.url,
     ),
     "utf8",
   );
   const skillsRoot = new URL(
-    "../presets/ecology-generation-judge-v7/skills/",
+    "../presets/ecology-generation-judge-v8/skills/",
     import.meta.url,
   );
   const candidateReview = await readFile(

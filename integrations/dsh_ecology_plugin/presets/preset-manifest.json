@@ -3,12 +3,12 @@
   "protocol": "dsh_native_plugin_evolution@1",
   "presets": [
     {
-      "preset_id": "ecology-coordinator-v4",
+      "preset_id": "ecology-coordinator-v5",
       "tool_profile": "dynamic-retrieval-v1",
       "required_tools": ["skill", "web_search"]
     },
     {
-      "preset_id": "ecology-researcher-v7",
+      "preset_id": "ecology-researcher-v12",
       "tool_profile": "dynamic-retrieval-v1",
       "required_tools": ["skill", "web_search"]
     },
@@ -18,17 +18,17 @@
       "required_tools": ["skill", "web_search"]
     },
     {
-      "preset_id": "ecology-sample-planner-v5",
+      "preset_id": "ecology-sample-planner-v8",
       "tool_profile": "dynamic-retrieval-v1",
       "required_tools": ["ecology_execute_prediction_tool", "skill", "web_search"]
     },
     {
-      "preset_id": "ecology-sample-critic-v4",
+      "preset_id": "ecology-sample-critic-v5",
       "tool_profile": "dynamic-retrieval-v1",
       "required_tools": ["skill", "web_search"]
     },
     {
-      "preset_id": "ecology-generation-judge-v7",
+      "preset_id": "ecology-generation-judge-v8",
       "tool_profile": "dynamic-retrieval-v1",
       "required_tools": ["skill", "web_search"]
     }

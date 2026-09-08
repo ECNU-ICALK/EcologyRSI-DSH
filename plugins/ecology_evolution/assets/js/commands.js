@@ -27,13 +27,13 @@
 
   function normalizedOptimizationSchedule(values) {
     var input = values || {};
-    var formal = strictInteger(input.formal_origin_count == null ? 500 : input.formal_origin_count, "每个入围候选更新时点数", 1);
-    var batch = strictInteger(input.local_batch_origin_count == null ? 50 : input.local_batch_origin_count, "局部 batch 时点数", 1);
+    var formal = strictInteger(input.formal_origin_count == null ? 200 : input.formal_origin_count, "每个入围候选更新时点数", 1);
+    var batch = strictInteger(input.local_batch_origin_count == null ? 50 : input.local_batch_origin_count, "局部 batch 时点数", 2);
     var edits = strictInteger(input.max_local_edits_per_batch == null ? 2 : input.max_local_edits_per_batch, "每批最大局部改动数", 0, 5);
     var holdout = strictInteger(input.selection_holdout_origin_count == null ? 169 : input.selection_holdout_origin_count, "轮末比较时点数", 169);
     if (formal % batch !== 0) { throw new Error("局部 batch 必须整除每个入围候选的更新时点数"); }
     return {
-      schema_version: "ecologyrsi-dsh.top2-adaptive-epoch-schedule/2",
+      schema_version: "ecologyrsi-dsh.top2-adaptive-epoch-schedule/3",
       screening_origin_count: 64,
       finalist_count: 2,
       formal_origin_count_per_finalist: formal,
@@ -81,6 +81,102 @@
         : "预算不足：当前轮数与每轮候选数至少需要 " + formatNumber(budget.required_candidates) + " 个候选。";
     }
     return budget;
+  }
+
+  function createCommandId(body) {
+    var idempotencyKey = body && String(body.idempotency_key || "").trim();
+    return idempotencyKey ? "create:" + idempotencyKey : null;
+  }
+
+  function createRequestMayHaveCommitted(error) {
+    if (!error) { return false; }
+    var status = Number(error.status);
+    var message = String(error.message || "");
+    return error.name === "AbortError"
+      || status === 408
+      || status >= 500
+      || /请求超时|timed out|timeout|服务不可用/i.test(message);
+  }
+
+  function reconcileTimedOutCreate(body) {
+    var commandId = createCommandId(body);
+    if (!commandId) { return Promise.resolve({confirmed: false, pending: false}); }
+    var attempts = 60;
+    var resubmitted = false;
+    var commandPath = "/commands/" + encodeURIComponent(commandId);
+
+    function retryLater() {
+      if (attempts <= 0) { return Promise.resolve({confirmed: false, pending: true}); }
+      return new Promise(function (resolve) { window.setTimeout(resolve, 500); }).then(poll);
+    }
+
+    function poll() {
+      if (attempts <= 0) { return Promise.resolve({confirmed: false, pending: true}); }
+      attempts -= 1;
+      return request(commandPath, {timeout: 5000}).then(function (receipt) {
+        if (receipt && receipt.response) {
+          return {confirmed: true, data: receipt.response};
+        }
+        if (receipt && receipt.run_id) {
+          return request("/runs/" + encodeURIComponent(receipt.run_id) + "?view=monitor", {timeout: dataRequestTimeout})
+            .then(function (data) { return {confirmed: true, data: data}; })
+            .catch(function () { return retryLater(); });
+        }
+        return retryLater();
+      }).catch(function (error) {
+        // The proxy may have dropped the request before the sidecar claimed
+        // the receipt.  One same-key retry is safe and prevents a transient
+        // connection failure from leaving the user with no visible run.
+        if (Number(error && error.status) === 404 && !resubmitted) {
+          resubmitted = true;
+          return request("/runs", {method: "POST", body: body, timeout: 5000})
+            .then(function (data) { return {confirmed: true, data: data}; })
+            .catch(function () { return retryLater(); });
+        }
+        return retryLater();
+      });
+    }
+
+    return poll();
+  }
+
+  function adoptCreatedRun(data) {
+    clearCommandKey("create");
+    var envelope = data && typeof data === "object" ? data : {};
+    var monitorOnly = envelope.schema_version === "ecologyrsi-dsh.browser-run-monitor/1";
+    var run = normalizeRun(data);
+    var hydrate = monitorOnly && !state.usingDemo
+      ? request("/runs/" + encodeURIComponent(run.id) + "?view=overview", {timeout: dataRequestTimeout}).then(function (detail) {
+        var hydrated = normalizeRun(detail);
+        return String(hydrated.id) === String(run.id) ? hydrated : run;
+      }).catch(function () { return run; })
+      : Promise.resolve(run);
+    return hydrate.then(function (hydratedRun) {
+      run = hydratedRun;
+      state.runs = [run].concat(state.runs.filter(function (item) { return item.id !== run.id; }));
+      state.activeRun = run;
+      state.workspaceVersions = {};
+      state.workspaceErrors = {};
+      state.trainingAssetDetails = {};
+      state.lastSelectedRunId = run.id;
+      state.showAllEvents = false;
+      state.candidateSelectionPinned = false;
+      syncCandidateSelection(run);
+      resetEventStream(run.id, state.usingDemo ? clone(demoEvents) : []);
+      state.loadState = state.usingDemo ? "demo" : "ready";
+      state.lastUpdated = new Date().toISOString();
+      state.workspace = "process";
+      if (typeof startRunMonitor === "function") { startRunMonitor(run.id); }
+      ensureWorkspaceData({navigation: true});
+      return refreshEventsForRun(run.id).then(function () {
+        state.createStatus = createStatusForRun(state.activeRun || run, state.events);
+        if (state.createStatus.state === "failed") {
+          state.commandError = state.createStatus.message;
+        }
+        showToast(state.createStatus.message);
+        return run;
+      });
+    });
   }
 
   function createRun(payload) {
@@ -134,10 +230,17 @@
       seed_policy: payload.fixed_seed ? "fixed" : "generated_and_recorded",
       requested_mode: "autonomous", auto_advance: payload.auto_advance === 0 ? 0 : continuousAutoAdvance ? true : 1
     };
+    body.prediction_selection_policy = "model_during_run@1";
+    body.search_guard_policy = "practical_delta_cell_noninferiority_paired_blocks@1";
+    body.require_model_contract_preflight = true;
     var signature = JSON.stringify(body);
     body.idempotency_key = commandKey("create", signature);
     state.busy = true;
     state.pendingAction = "create";
+    // A slow startup overview must not reclaim selection during creation.
+    state.runReadRequest += 1;
+    state.runOverviewLoading = null;
+    state.runOverviewError = null;
     state.createStatus = {state: "submitting", runId: null, message: "提交已接收，正在创建运行并连接实时进度。"};
     state.commandError = null;
     // Move to the process workspace before the POST resolves.  Creation is a
@@ -146,37 +249,55 @@
     state.workspace = "process";
     renderAll();
     showToast("提交已接收，正在连接实时进度。" );
+    var createSubmitted = false;
     var operation;
     if (state.usingDemo) {
       operation = Promise.resolve({ projection: clone(demoRun) });
     } else {
-      operation = request("/runs", { method: "POST", body: body, timeout: evolutionCommandTimeout });
+      var ready = Promise.resolve();
+      if (body.require_model_contract_preflight) {
+        state.createStatus.state = "preflight";
+        state.createStatus.message = "正在检查所选模型的工具调用与结构化输出能力，通过后创建运行。";
+        showToast(state.createStatus.message);
+        renderAll();
+        ready = request("/model-preflight", {method: "POST", body: body, timeout: 250000}).then(function (result) {
+          if (!result || result.passed !== true) { throw new Error("模型工具与结构化输出预检未通过，请检查模型配置后重试。"); }
+        });
+      }
+      operation = ready.then(function () {
+        state.createStatus = {state: "submitting", runId: null, message: "创建请求正在提交，收到运行编号后会自动连接实时进度。"};
+        renderAll();
+        createSubmitted = true;
+        return request("/runs", { method: "POST", body: body, timeout: evolutionCommandTimeout });
+      });
     }
     return operation.then(function (data) {
-      clearCommandKey("create");
-      var run = normalizeRun(data);
-      state.runs = [run].concat(state.runs.filter(function (item) { return item.id !== run.id; }));
-      state.activeRun = run;
-      state.lastSelectedRunId = run.id;
-      state.showAllEvents = false;
-      state.candidateSelectionPinned = false;
-      syncCandidateSelection(run);
-      resetEventStream(run.id, state.usingDemo ? clone(demoEvents) : []);
-      state.loadState = state.usingDemo ? "demo" : "ready";
-      state.lastUpdated = new Date().toISOString();
-      state.workspace = "process";
-      if (typeof startRunMonitor === "function") { startRunMonitor(run.id); }
-      loadSelectedDataset(0);
-      loadCandidateSamples(0, {force: true});
-      return refreshEventsForRun(run.id).then(function () {
-        state.createStatus = createStatusForRun(state.activeRun || run, state.events);
-        if (state.createStatus.state === "failed") {
-          state.commandError = state.createStatus.message;
-        }
-        showToast(state.createStatus.message);
-        return run;
-      });
+      return adoptCreatedRun(data);
     }).catch(function (error) {
+      if (!state.usingDemo && createSubmitted && createRequestMayHaveCommitted(error)) {
+        state.commandError = null;
+        state.createStatus = {
+          state: "verifying",
+          runId: null,
+          message: "创建请求响应超时，正在核对后台状态，请勿重复提交。"
+        };
+        showToast(state.createStatus.message);
+        renderAll();
+        return reconcileTimedOutCreate(body).then(function (result) {
+          if (result && result.confirmed && result.data) {
+            showToast("后台已确认创建成功，正在恢复进度。");
+            return adoptCreatedRun(result.data);
+          }
+          state.commandError = null;
+          state.createStatus = {
+            state: "pending",
+            runId: null,
+            message: "创建请求已提交，后台仍在处理中；页面会继续核对，请勿重复提交。"
+          };
+          showToast(state.createStatus.message);
+          return null;
+        });
+      }
       state.commandError = "创建失败：" + errorMessage(error);
       state.createStatus = {state: "failed", runId: null, message: state.commandError};
       showToast(state.commandError);
@@ -298,6 +419,9 @@
   function finishControlUi(action, runId, message) {
     state.lastUpdated = new Date().toISOString();
     showToast(message);
+    // Keep the run the user just stopped available for inspection, including
+    // cancellation during research before any candidate has been created.
+    if (action === "cancel") { state.showCancelledEmptyRuns = true; }
     return refreshEventsForRun(runId).then(function () {
       var selectionChanged = reconcileVisibleRunSelection();
       if (selectionChanged && state.activeRun) { return selectRun(state.activeRun.id, false); }
@@ -636,6 +760,7 @@
 
   function refreshAll(options) {
     var refreshDataset = Boolean(options && options.refreshDataset);
+    if (typeof cachedReads !== "undefined") { cachedReads.clear(); }
     if (state.usingDemo) {
       if (refreshDataset) { state.datasetContext = activeRunDatasetContext() || selectedDatasetContext(); state.datasetPage = demoDatasetPage(state.pageOffset, state.datasetPartition); state.datasetError = null; }
       state.lastUpdated = new Date().toISOString(); renderAll(); return Promise.resolve(true);
@@ -648,11 +773,11 @@
     state.runReadRequest = requestId;
     state.refreshing = true;
     renderAll();
-    return Promise.all([request("/catalog", { timeout: dataRequestTimeout }), request(runsListPath()), request("/runs/" + encodeURIComponent(runId)), request(eventRequestPath(runId, false)).catch(function () { return null; })]).then(function (results) {
+    return Promise.all([request("/catalog", { timeout: dataRequestTimeout }), request(runsListPath(), {timeout: dataRequestTimeout}), request("/runs/" + encodeURIComponent(runId) + "?view=overview", {timeout: dataRequestTimeout}), Promise.resolve(null)]).then(function (results) {
       if (requestId !== state.runReadRequest || viewEpoch !== state.viewEpoch || !state.activeRun || state.activeRun.id !== runId) { return false; }
       state.catalog = normalizeCatalog(results[0]);
       var previousRun = state.activeRun;
-      var incomingRun = normalizeRun(results[2]);
+      var incomingRun = mergeRunProjection(state.activeRun, results[2]);
       if (!state.activeRun || incomingRun.projection_revision >= state.activeRun.projection_revision) {
         state.activeRun = incomingRun;
         if (results[3]) { mergeEventStream(runId, results[3]); }
@@ -662,6 +787,7 @@
         var rightTime = Date.parse(right.updated_at || right.created_at || "") || 0;
         return rightTime - leftTime;
       });
+      state.runListCursor = results[1] && results[1].next_cursor || null;
       state.archivedRunCount = Math.max(0, Number(results[1] && results[1].archived_count || 0));
       if (!state.runs.some(function (run) { return run.id === runId; })) { state.runs.unshift(state.activeRun); }
       var selectionChanged = reconcileVisibleRunSelection();
@@ -683,7 +809,7 @@
       if (selectionChanged) {
         return state.activeRun ? selectRun(state.activeRun.id, false) : true;
       }
-      return refreshDataset ? loadSelectedDataset(state.pageOffset).then(function () { return true; }) : true;
+      return ensureWorkspaceData({force: true}).then(function () { return true; });
     }).catch(function (error) {
       if (requestId !== state.runReadRequest || viewEpoch !== state.viewEpoch) { return false; }
       state.loadState = "stale";
@@ -692,4 +818,39 @@
       renderAll();
       return false;
     }).finally(function () { state.refreshing = false; renderAll(); });
+  }
+
+  function refreshRunOverview() {
+    if (state.usingDemo || state.refreshing || state.busy || state.loadingOlderRuns) { return Promise.resolve(false); }
+    var epoch = state.viewEpoch;
+    var includeArchived = state.showArchivedRuns;
+    state.refreshing = true;
+    return request(runsListPath(), {timeout: dataRequestTimeout}).then(function (data) {
+      if (epoch !== state.viewEpoch || includeArchived !== state.showArchivedRuns) { return false; }
+      var incoming = listFrom(data, "runs").map(normalizeRun).map(function (run) {
+        if (state.activeRun && run.id === state.activeRun.id) {
+          state.activeRun.archived = run.archived;
+          return state.activeRun;
+        }
+        return run;
+      });
+      // A fresh first page is authoritative. Carrying every absent row forward
+      // keeps deleted/archived runs forever and invalidates the pagination cursor.
+      state.runListCursor = data.next_cursor || null;
+      if (state.runListCursor && state.activeRun && (includeArchived || !state.activeRun.archived) && !incoming.some(function (run) { return run.id === state.activeRun.id; })) {
+        incoming.push(state.activeRun);
+      }
+      state.runs = incoming;
+      state.archivedRunCount = Math.max(0, Number(data.archived_count || 0));
+      var selectionChanged = reconcileVisibleRunSelection();
+      state.loadState = state.activeRun ? "ready" : "empty";
+      renderContext();
+      if (selectionChanged) {
+        if (state.activeRun) { return selectRun(state.activeRun.id, false); }
+        if (state.runMonitorRunId && typeof stopRunMonitor === "function") { stopRunMonitor(state.runMonitorRunId); }
+        renderAll();
+        return true;
+      }
+      return state.activeRun && !state.runMonitorRunId ? refreshProgressForRun(state.activeRun.id) : true;
+    }).catch(function () { return false; }).finally(function () { state.refreshing = false; });
   }

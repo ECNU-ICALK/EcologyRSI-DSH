@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -13,7 +14,6 @@ from ..core.redaction import (
 )
 from ..core.sample_results import (
     SAMPLE_REWARD_DEFINITION,
-    SAMPLE_REWARD_DEFINITION_V1,
     decode_sample_result_batch,
     decode_sample_results,
 )
@@ -66,6 +66,26 @@ def _browser_sample_result_row(value: dict[str, Any]) -> dict[str, Any]:
         if name in row:
             row[name] = None
     return row
+
+
+def _screening_completion_matches(state, candidate, start, completed):
+    checkpoint = start.payload.get('checkpoint') if start is not None else None
+    if not isinstance(checkpoint, Mapping) or checkpoint.get('evaluation_phase') != 'screening':
+        return False
+    generation = start.payload.get('generation')
+    return (
+        generation == candidate.generation
+        and start.payload.get('proposal_id') == candidate.proposal_id
+        and completed.payload.get('evaluation_id') == f'screening-evaluation:{candidate.candidate_id}:{generation}'
+        and any(
+            event.kind == 'CandidateScreeningRecorded'
+            and event.payload.get('candidate_id') == candidate.candidate_id
+            and event.payload.get('generation') == generation
+            and event.payload.get('cohort_digest') == checkpoint.get('cohort_digest')
+            and event.payload.get('prediction_cell_count') == completed.payload.get('record_count')
+            for event in state.events
+        )
+    )
 
 
 class EventEndpointsMixin:
@@ -976,9 +996,12 @@ class EventEndpointsMixin:
         }
 
     def _events_payload(self, run_id: str) -> dict[str, Any]:
-        if run_id not in self.server.ledger.run_ids():
-            raise KeyError(f"unknown run: {run_id}")
-        state = self.server.director.state(run_id)
+        from ..application.queries import RunQueries
+        return RunQueries(self.server.director).completed_read(
+            run_id, lambda state: self._events_payload_from_state(run_id, state),
+            cache_key='public-events:' + urlparse(self.path).query)
+
+    def _events_payload_from_state(self, run_id: str, state) -> dict[str, Any]:
         _assert_http_scope(state)
         query = parse_qs(urlparse(self.path).query)
         raw_after = query.get("after", ["0"])[0]
@@ -997,7 +1020,9 @@ class EventEndpointsMixin:
                 raise ValueError("tail must be an integer between 1 and 500") from exc
             if not 1 <= tail <= 500:
                 raise ValueError("tail must be an integer between 1 and 500")
-        events = self.server.ledger.events(run_id, after_seq=after)
+        # State already contains the validated immutable stream. A tail read
+        # must not fetch and JSON-decode the entire ledger a second time.
+        events = [event for event in state.events if event.seq > after]
         next_cursor = events[-1].seq if events else after
         public_events = [
             event for event in events if event.kind not in _PRIVATE_SAMPLE_EVENT_KINDS
@@ -1076,10 +1101,12 @@ class EventEndpointsMixin:
 
     def _sample_results_payload(self, run_id: str) -> dict[str, Any]:
         """Return one candidate's host-finalized rows with bounded pagination."""
+        from ..application.queries import RunQueries
+        return RunQueries(self.server.director).completed_read(
+            run_id, lambda state: self._sample_results_payload_from_state(run_id, state),
+            cache_key='public-samples:' + urlparse(self.path).query)
 
-        if run_id not in self.server.ledger.run_ids():
-            raise KeyError(f"unknown run: {run_id}")
-        state = self.server.director.state(run_id)
+    def _sample_results_payload_from_state(self, run_id: str, state) -> dict[str, Any]:
         _assert_http_scope(state)
         query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
         unknown = set(query) - {"candidate_id", "offset", "limit"}
@@ -1146,6 +1173,11 @@ class EventEndpointsMixin:
                 for event in state.events
             )
             if not scientific_event_exists:
+                # Screening archives are sealed against CandidateScreeningRecorded,
+                # not EvaluationRecorded. Bind the explicit phase, generation,
+                # frozen cohort and cell count before exposing their sample page.
+                scientific_event_exists = _screening_completion_matches(state, candidate, start, completed)
+            if not scientific_event_exists:
                 raise ValueError(
                     "sample results completion is missing its scientific evaluation"
                 )
@@ -1196,8 +1228,7 @@ class EventEndpointsMixin:
                 expected_count = int(progress_events[-1].payload["total_samples"])
 
         rows.sort(key=lambda row: (int(row["sample_index"]), str(row["sample_id"])))
-        legacy = revision is None and terminal
-        supported = not legacy
+        unavailable = revision is None and terminal
         if completed is not None:
             result_status = "completed"
         elif revision is not None and terminal:
@@ -1206,8 +1237,8 @@ class EventEndpointsMixin:
             result_status = "paused"
         elif revision is not None:
             result_status = "running"
-        elif legacy:
-            result_status = "legacy"
+        elif unavailable:
+            result_status = "unavailable"
         else:
             result_status = "pending"
         complete = completed is not None or terminal
@@ -1226,8 +1257,6 @@ class EventEndpointsMixin:
             if revision is not None
             and batch_events
             and batch_events[-1].payload.get("reward_definition") is not None
-            else SAMPLE_REWARD_DEFINITION_V1
-            if legacy
             else SAMPLE_REWARD_DEFINITION
         )
         return {
@@ -1236,8 +1265,7 @@ class EventEndpointsMixin:
             "reward_definition": reward_definition,
             "positive_is_better": True,
             "candidate_id": candidate_id,
-            "supported": supported,
-            "legacy": legacy,
+            "supported": not unavailable,
             "status": result_status,
             "rows": page_rows,
             "offset": offset,

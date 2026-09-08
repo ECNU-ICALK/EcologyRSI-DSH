@@ -7,6 +7,10 @@ code or receives evaluator internals.
 
 from __future__ import annotations
 
+from ..core.prediction_policy import (
+    BASELINE_REFERENCE_PREDICTOR_ID, RUNTIME_PREDICTION_POLICY, prediction_usage,
+)
+
 import json
 import math
 import re
@@ -14,10 +18,12 @@ from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
+from ..core.model_execution_policy import research_execution_policy
 from ..core.models import Proposal, Run, TaskManifest, canonical_json, digest
 from ..core.protocols import is_strict_origin_protocol
 from ..core.redaction import public_error_summary, public_exception_summary
 from ..evaluators.greenhouse_prediction import (
+    BASELINE_ALIGNED_RIDGE_MODEL_ID,
     EXOGENOUS_RIDGE_MODEL_ID,
     HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
     TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
@@ -62,7 +68,13 @@ from .genome import (
     EcologyEvolutionPluginGenome,
     GenomeMutationContextV1,
     apply_genome_mutation,
+    parameter_trust_region_neighborhood,
 )
+from .agent_policy import build_agent_policy
+from .parameter_activity import (
+    parameter_activity_contract,
+)
+from .research_context import compact_research_context, research_report_size_diagnostics
 from .workflow_ir import (
     DEFAULT_COMPILER_SEMANTIC_DIGEST,
     compile_plugin_behavior,
@@ -88,6 +100,53 @@ _NATIVE_MAX_SEMANTIC_CONTRACT_ATTEMPTS = 2
 _FORECAST_CONTEXT_MAX_TARGETS = 32
 _FORECAST_CONTEXT_MAX_HORIZONS = 32
 _FORECAST_CONTEXT_MAX_CELLS = 256
+
+
+def _predictor_semantics(parent: EcologyEvolutionPluginGenome) -> dict[str, Any]:
+    """Describe the actual parent; scale controls are not fitted coefficients."""
+    program = parent.scientific_program
+    predictor_id = program["predictor_ref"]["id"]
+    result: dict[str, Any] = {
+        "sample_inference": {
+            "numerical_prediction_owner": "sample_agent",
+            "predictor_scope": "optional candidate default; each sample Agent can select other capabilities or predict directly",
+            "evolvable_agent_policy": "candidate-selected instruction Skill and its parameters guide analysis, model use and final prediction",
+            "tool_budget_per_origin_attempt": 6,
+            "model_parameters": "Agent may override supported tool parameters within the catalog bounds; only training_fit is used for fitting",
+            "scoring_scope": "final Agent vector, not the first numerical tool result",
+        },
+        "active_predictor_id": predictor_id,
+        "numerical_fields_scope": "optional default tool only; never infer final Agent behavior from its residual scales or model family",
+        "feature_availability": "only observations available at forecast origin; no future measured forcing",
+        "pipeline_selection": "selecting a registered pipeline installs its catalog defaults; it does not automatically tune scale controls",
+    }
+    scales = {
+        BASELINE_ALIGNED_RIDGE_MODEL_ID: "one fixed scale per horizon, shared across targets",
+        EXOGENOUS_RIDGE_MODEL_ID: "shared across targets and horizons",
+        TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID: "one scale per target, shared across horizons",
+        HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID: "one scale per target and horizon",
+    }
+    if predictor_id in scales:
+        parameters = program["parameter_overrides"]
+        result.update(
+            fit_scope="independent ridge coefficients for every target and horizon in the registered ridge variants",
+            shared_hyperparameters=["history_steps", "ridge_alpha"],
+            residual_scale_scope=scales[predictor_id],
+            residual_scale_values={k: v for k, v in parameters.items()
+                                   if k == "residual_scale" or k.endswith("_residual_scale") or k.startswith("residual_scale_")},
+            fit_updates_residual_scales=False,
+            residual_scale_authority="genome controls the default tool parameters; each sample Agent can override supported call parameters. Fitting ridge coefficients never optimizes these scales",
+            variant_fit_parameter_count="at identical history and feature settings, changing residual scale layout does not add fitted ridge coefficients",
+            numerical_formula="persistence + genome residual scale * independently fitted ridge residual",
+        )
+    if predictor_id == BASELINE_ALIGNED_RIDGE_MODEL_ID:
+        result["numerical_formula"] = "training-fit-selected persistence/seasonal baseline + genome residual scale * ridge residual fitted against that same baseline"
+        result["prediction_usage"] = prediction_usage(predictor_id, program["parameter_overrides"])
+        result["fit_scope"] = "independent ridge coefficients only for target-horizon cells with a nonzero residual scale; zero-scale cells use the selected baseline and skip residual fitting"
+        activity = parameter_activity_contract(parent)
+        if activity:
+            result["scientific_parameter_activity"] = activity
+    return result
 
 
 def _model_search_cycle_enabled(task: TaskManifest) -> bool:
@@ -252,7 +311,11 @@ def _native_evolution_reflection_from_experience(
     *,
     current_run_id: str,
 ) -> dict[str, Any]:
-    """Project failed effective behaviors into a compact Host-owned directive."""
+    """Project candidate-specific failures as scoped research advice.
+
+    A previous cohort is not the next experiment's comparison context. Past
+    scientific failures cannot grant a permanent veto over a valid program.
+    """
 
     safe_experience = safe_aggregate_feedback(
         experience,
@@ -301,6 +364,8 @@ def _native_evolution_reflection_from_experience(
             for behavior in raw_behaviors:
                 if not isinstance(behavior, Mapping):
                     continue
+                if behavior.get("classification") != "scientific_gate_failed":
+                    continue
                 behavior_digest = behavior.get("behavior_digest")
                 if (
                     not isinstance(behavior_digest, str)
@@ -333,16 +398,17 @@ def _native_evolution_reflection_from_experience(
             break
     active_unresolved = safe_experience.get("active_unresolved")
     return {
-        "schema_version": "ecologyrsi-dsh.evolution-reflection/2",
-        "avoid_behaviors": avoid,
+        "schema_version": "ecologyrsi-dsh.evolution-reflection/3",
+        "avoid_behaviors": [],
+        "review_behaviors": avoid,
         "active_unresolved": (
             list(active_unresolved[:8])
             if isinstance(active_unresolved, list)
             else []
         ),
         "policy": {
-            "exact_failed_behavior_replay": "reject_and_retry_once",
-            "host_enforced": True,
+            "exact_failed_behavior_replay": "review_evidence_and_applicability",
+            "host_enforced": False,
             "maximum_avoid_behaviors": _NATIVE_AVOID_BEHAVIOR_LIMIT,
         },
     }
@@ -733,6 +799,16 @@ class StrategyRouterDSHAdapter:
         "ridge_alpha": {"type": "number", "minimum": 0.0001, "maximum": 1.0},
         "residual_scale": {"type": "number", "minimum": 0.0, "maximum": 1.0},
     }
+    _GREENHOUSE_ALIGNED_RIDGE_SCHEMAS: ClassVar[dict[str, dict[str, Any]]] = {
+        "history_steps": {"type": "integer", "minimum": 1, "maximum": 12},
+        "ridge_alpha": {"type": "number", "minimum": 0.0001, "maximum": 1.0},
+        **{f"residual_scale_{horizon}h": {"type": "number", "minimum": 0.0, "maximum": 1.0} for horizon in (1, 6, 24)},
+    }
+    _GREENHOUSE_ALIGNED_RIDGE_SWEEP: ClassVar[tuple[dict[str, Any], ...]] = tuple(
+        {"history_steps": 6, "ridge_alpha": .1, "residual_scale_1h": one,
+         "residual_scale_6h": six, "residual_scale_24h": day}
+        for one, six, day in ((0.,0.,0.),(.25,0.,0.),(0.,.25,0.),(0.,0.,.25))
+    )
     _GREENHOUSE_TARGETWISE_RIDGE_SCHEMAS: ClassVar[dict[str, dict[str, Any]]] = {
         "history_steps": {"type": "integer", "minimum": 1, "maximum": 12},
         "ridge_alpha": {"type": "number", "minimum": 0.0001, "maximum": 1.0},
@@ -1231,6 +1307,8 @@ class StrategyRouterDSHAdapter:
             "forecast_objective": _forecast_objective_context(task),
             "direction_count": direction_count,
             "generation_analysis": analysis,
+            "predictor_semantics_scope": "generation_parent",
+            "predictor_semantics": _predictor_semantics(parent),
             "candidate_outcomes": [
                 safe_aggregate_feedback(
                     item,
@@ -1243,6 +1321,8 @@ class StrategyRouterDSHAdapter:
             "host_boundary": {
                 "aggregate_results_only": True,
                 "reflection_is_advisory": True,
+                "mechanistic_explanations_are_hypotheses": True,
+                "host_predictor_semantics_are_facts": True,
                 "next_generation_research_synthesis_preflight_required": True,
                 "candidate_directions_must_be_distinct": True,
                 **deepcopy(mutation_catalog),
@@ -1314,12 +1394,6 @@ class StrategyRouterDSHAdapter:
                     allowed_mutation_targets=allowed_mutation_targets,
                 )
                 for index, direction in enumerate(directions):
-                    _validate_direction_claim_scope(direction, task=task)
-                    _reject_direction_explicit_parameter_assignments(
-                        direction,
-                        parent=parent,
-                        index=index,
-                    )
                     if any(
                         reference not in allowed_evidence_refs
                         for reference in direction.evidence_refs
@@ -1444,13 +1518,14 @@ class StrategyRouterDSHAdapter:
                             "exactly_one_operation_per_direction": True,
                             "one_operation_must_fully_test_the_hypothesis": True,
                             **deepcopy(mutation_catalog),
-                            "hard_avoid_behaviors": deepcopy(
-                                evolution_reflection["avoid_behaviors"]
+                            "prior_failure_advice": deepcopy(
+                                evolution_reflection["review_behaviors"]
                             ),
                             "diagnostic_insufficient_evidence_is_advisory": True,
                             "cite_only_frozen_evidence": True,
                             "registered_capabilities_only": True,
                             "model_generated_code_execution": False,
+                            "predictor_semantics": _predictor_semantics(parent),
                         },
                     }
                 )
@@ -1465,6 +1540,13 @@ class StrategyRouterDSHAdapter:
                 else "ecology-research-result@1"
             )
             if active_search_cycle:
+                execution_policy = research_execution_policy(task.metadata)
+                if execution_policy is not None:
+                    _boundary, synthesis_parameter_schemas = _genome_parameter_boundary(task, parent)
+                    context = compact_research_context(
+                        context, parent=parent, parameter_schemas=synthesis_parameter_schemas,
+                        policy=execution_policy,
+                    )
                 feedback: dict[str, Any] | None = None
                 for contract_attempt in range(
                     1,
@@ -1494,6 +1576,8 @@ class StrategyRouterDSHAdapter:
                         identity_digests=self._native_stage_identity(
                             parent, task, run, stage, stage_context
                         ),
+                        max_tokens=(execution_policy["synthesis_max_output_tokens"]
+                                    if execution_policy is not None else 8192),
                     )
                     try:
                         reject_executable_fields(structured)
@@ -1538,6 +1622,7 @@ class StrategyRouterDSHAdapter:
                                 "candidate_directions"
                             ],
                             "candidate_direction_preflight": direction_preflight,
+                            "report_size_advisories": research_report_size_diagnostics(normalized) if execution_policy is not None else [],
                             "previous_generation_reflection": (
                                 safe_aggregate_feedback(
                                     previous_generation_reflection,
@@ -2210,6 +2295,10 @@ class StrategyRouterDSHAdapter:
                             "seed": task.seed,
                             "parent": parent,
                             "previous_generation_analysis": previous_analysis,
+                            "diagnostic_report": (
+                                research_iteration_context.get("diagnostic_report")
+                                if isinstance(research_iteration_context, Mapping) else None
+                            ),
                             "knowledge_snapshot": knowledge_context,
                             "research_iteration": research_iteration_context,
                             "parameter_semantics": semantics,
@@ -2644,7 +2733,7 @@ class StrategyRouterDSHAdapter:
         research_directives = research_plan.get("dsh_evolution_reflection")
         if not isinstance(research_directives, Mapping):
             research_directives = {}
-        avoid_behaviors = research_directives.get("avoid_behaviors")
+        avoid_behaviors = research_directives.get("review_behaviors", research_directives.get("avoid_behaviors"))
         if not isinstance(avoid_behaviors, list):
             avoid_behaviors = []
         sibling_candidate_behaviors = batch.get("sibling_candidate_behaviors")
@@ -2667,9 +2756,47 @@ class StrategyRouterDSHAdapter:
             ),
             "active_predictor_id": parent.scientific_program["predictor_ref"]["id"],
             "bounded_parameters": deepcopy(dict(active_parameter_schemas)),
+            "one_step_parameter_intervals": {
+                name: parameter_trust_region_neighborhood(
+                    name=name,
+                    previous=parent.scientific_program["parameter_overrides"][name],
+                    contract=contract,
+                )
+                for name, contract in active_parameter_schemas.items()
+            },
             **deepcopy(mutation_catalog),
             "policy": "single_axis_reject_out_of_bounds_without_clamping",
         }
+        explicit_sibling_feedback = research_execution_policy(task.metadata) is not None
+        if explicit_sibling_feedback and assigned_direction is not None and assigned_direction.mutation_axis == "scientific_parameter":
+            exclusions = []
+            target = assigned_direction.mutation_target
+            for sibling in sibling_candidate_behaviors:
+                if not isinstance(sibling, Mapping) or sibling.get("prediction_model_id") != parent.scientific_program["predictor_ref"]["id"]:
+                    continue
+                parameters = sibling.get("parameters")
+                if not isinstance(parameters, Mapping) or target not in parameters:
+                    continue
+                try:
+                    # A numerical coincidence in another Agent program is not
+                    # an exclusion. Rebuild this single operation under the
+                    # actual parent and require the exact sibling behavior.
+                    witness = apply_genome_mutation(parent, {
+                        "schema_version": "ecologyrsi-dsh.genome-mutation/1",
+                        "operations": [{"op": "set_bounded_parameter", "name": target, "value": parameters[target]}],
+                    }, context, current_program_registry(), parameter_schemas=active_parameter_schemas)
+                except (TypeError, ValueError):
+                    continue
+                if sibling.get("behavior_digest") != witness.behavior_digest:
+                    continue
+                exclusions.append({"slot_index": sibling["slot_index"], "parameter": target,
+                                   "value": parameters[target], "behavior_digest": witness.behavior_digest})
+            mutation_contract["sibling_parameter_exclusions"] = exclusions
+            mutation_contract["sibling_parameter_exclusion_policy"] = (
+                "The listed values exactly reproduce a frozen sibling under this same parent program. "
+                "Choose another value inside the one-step interval and assigned direction; "
+                "do not change a second parameter or use a different axis."
+            )
         analysis_feedback = (
             previous_analysis if isinstance(previous_analysis, Mapping) else {}
         )
@@ -2705,7 +2832,7 @@ class StrategyRouterDSHAdapter:
                 ),
             },
             "assigned_candidate_direction": assigned_direction_execution,
-            "avoid_behavior_digests": [
+            "prior_failure_behavior_digests": [
                 str(item["behavior_digest"])
                 for item in avoid_behaviors
                 if isinstance(item, Mapping)
@@ -2713,6 +2840,7 @@ class StrategyRouterDSHAdapter:
                     r"[0-9a-f]{64}", str(item.get("behavior_digest") or "")
                 )
             ],
+            "prior_failures_are_advisory": True,
             "sibling_behavior_digests": [
                 str(item["behavior_digest"])
                 for item in sibling_candidate_behaviors
@@ -2752,6 +2880,10 @@ class StrategyRouterDSHAdapter:
                 "assigned_candidate_direction": assigned_direction_execution,
                 "generation_context_digest": batch["context_digest"],
                 "research_iteration": deepcopy(proposal_research_iteration),
+                "diagnostic_report": (
+                    research_iteration.get("diagnostic_report")
+                    if isinstance(research_iteration, Mapping) else None
+                ),
                 "evolution_reflection": {
                     **deepcopy(base_reflection),
                     "host_rejections": deepcopy(host_rejections),
@@ -2898,15 +3030,6 @@ class StrategyRouterDSHAdapter:
                     )
                     continue
             scientific = proposed_child.to_dict()["scientific_program"]
-            repeated = next(
-                (
-                    item
-                    for item in avoid_behaviors
-                    if isinstance(item, Mapping)
-                    and item.get("behavior_digest") == proposed_child.behavior_digest
-                ),
-                None,
-            )
             sibling_repeated = next(
                 (
                     item
@@ -2930,7 +3053,7 @@ class StrategyRouterDSHAdapter:
                 ),
                 None,
             )
-            if repeated is None and sibling_repeated is None:
+            if sibling_repeated is None:
                 child = proposed_child
                 break
             if sibling_repeated is not None:
@@ -2943,15 +3066,13 @@ class StrategyRouterDSHAdapter:
                         "sibling_behavior_digest": sibling_repeated.get(
                             "behavior_digest"
                         ),
-                    }
-                )
-            else:
-                host_rejections.append(
-                    {
-                        "reason": "exact_failed_behavior_replay",
-                        "prediction_model_id": scientific["predictor_ref"]["id"],
-                        "parameters_digest": digest(scientific["parameter_overrides"]),
-                        "source_reason": repeated.get("reason"),
+                        **({
+                            "rejected_operations": deepcopy(mutation["operations"]),
+                            "validation_detail": (
+                                "This exact operation repeats a frozen sibling behavior. Choose a different "
+                                "legal value for the same assigned parameter and direction; keep one operation."
+                            ),
+                        } if explicit_sibling_feedback else {}),
                     }
                 )
         if child is None:
@@ -2975,7 +3096,7 @@ class StrategyRouterDSHAdapter:
                     "DSH proposal violates the mutation contract after bounded retry"
                 )
             raise ValueError(
-                "DSH proposal repeats a previously failed behavior after bounded retry"
+                "DSH proposal failed host validation after bounded retry"
             )
         key = (session_id, run.generation)
         index = self._session_counts.setdefault(key, 0)
@@ -2983,6 +3104,11 @@ class StrategyRouterDSHAdapter:
         candidate_agent_profile = resolve_candidate_agent_profile(
             child,
             current_program_registry(),
+        )
+        agent_policy = build_agent_policy(
+            genome_digest=child.genome_digest, profile=candidate_agent_profile,
+            parameters=child.scientific_program["parameter_overrides"],
+            previous_analysis=previous_analysis, generation=run.generation,
         )
         return Proposal(
             proposal_id=(
@@ -3001,6 +3127,8 @@ class StrategyRouterDSHAdapter:
             metadata={
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "proposal_source": "dsh_native_agent",
+                "agent_policy": agent_policy,
+                "tool_experience": agent_policy["experience"]["rows"],
                 "remote_strategy_called": True,
                 "remote_strategy_succeeded": True,
                 "evolution_genome_canonical_json": canonical_json(child.to_dict()),
@@ -3258,6 +3386,7 @@ def _parent_context(
         ("toy", StrategyRouterDSHAdapter._TOY_SCHEMAS),
         ("greenhouse", StrategyRouterDSHAdapter._GREENHOUSE_SCHEMAS),
         ("greenhouse_ridge", StrategyRouterDSHAdapter._GREENHOUSE_RIDGE_SCHEMAS),
+        ("greenhouse_baseline_aligned_ridge", StrategyRouterDSHAdapter._GREENHOUSE_ALIGNED_RIDGE_SCHEMAS),
         (
             "greenhouse_targetwise_ridge",
             StrategyRouterDSHAdapter._GREENHOUSE_TARGETWISE_RIDGE_SCHEMAS,
@@ -3391,227 +3520,6 @@ def _bounded_parameters(
     return result
 
 
-_PARAMETER_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
-    "toy": {
-        "alpha": ("alpha", "平滑权重", "平滑系数"),
-        "window": ("window", "时间窗口", "历史窗口"),
-        "water_threshold": (
-            "water_threshold",
-            "water threshold",
-            "土壤水分阈值",
-            "水分阈值",
-        ),
-    },
-    "greenhouse": {
-        "blend": ("blend", "混合权重", "融合权重"),
-        "window": ("window", "时间窗口", "历史窗口"),
-        "bias_scale": (
-            "bias_scale",
-            "bias scale",
-            "偏差缩放系数",
-            "偏差缩放",
-        ),
-    },
-    "greenhouse_ridge": {
-        "history_steps": (
-            "history_steps",
-            "history steps",
-            "历史步数",
-            "滞后步数",
-        ),
-        "ridge_alpha": (
-            "ridge_alpha",
-            "ridge alpha",
-            "岭回归强度",
-            "正则化强度",
-        ),
-        "residual_scale": (
-            "residual_scale",
-            "residual scale",
-            "残差缩放系数",
-            "残差缩放",
-        ),
-    },
-    "greenhouse_targetwise_ridge": {
-        "history_steps": (
-            "history_steps",
-            "history steps",
-            "历史步数",
-            "滞后步数",
-        ),
-        "ridge_alpha": (
-            "ridge_alpha",
-            "ridge alpha",
-            "岭回归强度",
-            "正则化强度",
-        ),
-        "air_temperature_residual_scale": (
-            "air_temperature_residual_scale",
-            "temperature residual scale",
-            "温度残差缩放",
-        ),
-        "relative_humidity_residual_scale": (
-            "relative_humidity_residual_scale",
-            "humidity residual scale",
-            "湿度残差缩放",
-        ),
-        "co2_concentration_residual_scale": (
-            "co2_concentration_residual_scale",
-            "co2 residual scale",
-            "二氧化碳残差缩放",
-        ),
-    },
-}
-_GUIDANCE_STEPS: dict[str, int | float] = {
-    "alpha": 0.1,
-    "blend": 0.1,
-    "bias_scale": 0.1,
-    "water_threshold": 0.05,
-    "window": 1,
-    "history_steps": 1,
-    "ridge_alpha": 0.05,
-    "residual_scale": 0.1,
-    "air_temperature_residual_scale": 0.1,
-    "relative_humidity_residual_scale": 0.1,
-    "co2_concentration_residual_scale": 0.1,
-}
-_GUIDANCE_DIRECTIONS: dict[str, tuple[str, ...]] = {
-    "decrease": ("缩短", "降低", "减小", "下调", "减少", "decrease", "shorten", "lower"),
-    "increase": ("延长", "提高", "增大", "上调", "增加", "increase", "extend", "raise"),
-}
-_NEGATED_GUIDANCE = re.compile(
-    r"(?:不要|不得|禁止|不应|无需)(?:[^，。；,;]{0,12})$", re.IGNORECASE
-)
-_NUMBER_PATTERN = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
-_ENGLISH_NUMBER_WORD_PATTERN = (
-    r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
-    r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
-    r"nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|"
-    r"hundred|thousand|half)(?:[-\s]+(?:zero|one|two|three|four|five|"
-    r"six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|"
-    r"sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|"
-    r"sixty|seventy|eighty|ninety|hundred|thousand|half))*\b"
-)
-_CHINESE_CARDINAL_PATTERN = (
-    r"[零〇○一二两三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟萬億]+"
-)
-_CHINESE_NUMBER_PATTERN = (
-    rf"(?:[正负]?(?:{_CHINESE_CARDINAL_PATTERN}"
-    rf"(?:点[零〇○一二两三四五六七八九壹贰叁肆伍陆柒捌玖]+)?|半)"
-    rf"|(?:百分之|千分之){_CHINESE_CARDINAL_PATTERN}"
-    rf"|{_CHINESE_CARDINAL_PATTERN}分之{_CHINESE_CARDINAL_PATTERN})"
-)
-_EXACT_PARAMETER_VALUE_PATTERN = (
-    rf"(?:{_NUMBER_PATTERN}(?:[eE][-+]?\d+)?|"
-    rf"{_ENGLISH_NUMBER_WORD_PATTERN}|{_CHINESE_NUMBER_PATTERN})"
-)
-_HISTORICAL_PARAMETER_STATE_SUBJECT_PATTERN = (
-    r"(?:the\s+)?(?:parent|incumbent|baseline|"
-    r"(?:prior|previous|earlier|historical)\s+"
-    r"(?:candidates?|generations?|baselines?|parents?|models?|runs?)|"
-    r"current\s+(?:baselines?|parents?))"
-)
-_HISTORICAL_PARAMETER_OBSERVED_SUBJECT_PATTERN = (
-    r"(?:"
-    + _HISTORICAL_PARAMETER_STATE_SUBJECT_PATTERN
-    + r"|(?:the\s+)?(?:this|current)\s+(?:candidates?|generations?|models?|runs?))"
-)
-_CHINESE_HISTORICAL_PARAMETER_SUBJECT_PATTERN = (
-    r"(?:上一轮|前一轮|当前基线|当前父代|父代|此前|之前)"
-)
-_HISTORICAL_PARAMETER_PREFIX_RE = re.compile(
-    r"(?:"
-    + _HISTORICAL_PARAMETER_STATE_SUBJECT_PATTERN
-    + r"\s+(?:has|had|used|uses|observed|reported|recorded|kept|shows?|showed)|"
-    + _HISTORICAL_PARAMETER_OBSERVED_SUBJECT_PATTERN
-    + r"\s+(?:observed|reported|recorded))\s*$",
-    re.IGNORECASE,
-)
-_CHINESE_HISTORICAL_PARAMETER_PREFIX_RE = re.compile(
-    _CHINESE_HISTORICAL_PARAMETER_SUBJECT_PATTERN
-    + r"(?:的)?(?:\s*(?:使用的?|采用的?|记录的?|观察到的?|报告的?|有|是))?\s*$",
-    re.IGNORECASE,
-)
-_HISTORICAL_PARAMETER_SUFFIX_RE = re.compile(
-    r"^\s*(?:was|were)\s+(?:observed|reported|recorded|used)\s+"
-    r"(?:in|by|for)\s+"
-    + _HISTORICAL_PARAMETER_STATE_SUBJECT_PATTERN
-    + r"\s*$",
-    re.IGNORECASE,
-)
-_CHINESE_HISTORICAL_PARAMETER_SUFFIX_RE = re.compile(
-    r"^\s*(?:是|为)?\s*"
-    + _CHINESE_HISTORICAL_PARAMETER_SUBJECT_PATTERN
-    + r"(?:中|里)?(?:观察到|报告|记录|使用)的?\s*$",
-    re.IGNORECASE,
-)
-_HISTORICAL_PARAMETER_INVERSION_RE = re.compile(
-    r"^\s*,\s*"
-    + _HISTORICAL_PARAMETER_STATE_SUBJECT_PATTERN
-    + (
-        r"\s+(?:has|had|shows?|showed)\s+(?:an?|the)?\s*"
-        r"(?:large|small|high|low|poor|strong|weak|stable|unstable)?\s*"
-        r"(?:residual|error|score|value|observation|result|performance)\s*$"
-    ),
-    re.IGNORECASE,
-)
-_PARAMETER_CONTEXT_BOUNDARY_RE = re.compile(r"[.;。；!?！？\n]")
-
-
-def _parameter_assignment_is_historical(
-    text: str,
-    match: re.Match[str],
-    *,
-    historical_assignment: re.Pattern[str],
-) -> bool:
-    """Recognize one audit-only historical fact, never a mixed instruction."""
-
-    if historical_assignment.fullmatch(match.group()) is None:
-        return False
-    prefix = text[: match.start()]
-    suffix = text[match.end() :]
-    prior_boundaries = tuple(_PARAMETER_CONTEXT_BOUNDARY_RE.finditer(prefix))
-    clause_start = prior_boundaries[-1].end() if prior_boundaries else 0
-    next_boundary = _PARAMETER_CONTEXT_BOUNDARY_RE.search(suffix)
-    clause_end = (
-        match.end() + next_boundary.start()
-        if next_boundary is not None
-        else len(text)
-    )
-    edge_chars = " \t\r\n.;。；!?！？"
-    if (
-        text[:clause_start].strip(edge_chars)
-        or text[clause_end:].strip(edge_chars)
-    ):
-        return False
-    clause_prefix = text[clause_start : match.start()]
-    clause_suffix = text[match.end() : clause_end]
-    if (
-        _HISTORICAL_PARAMETER_PREFIX_RE.fullmatch(clause_prefix.strip())
-        or _CHINESE_HISTORICAL_PARAMETER_PREFIX_RE.fullmatch(
-            clause_prefix.strip()
-        )
-    ):
-        trailing = clause_suffix.strip()
-        return not trailing or re.fullmatch(
-            rf"(?:and\s+later|followed\s+by)\s+{_EXACT_PARAMETER_VALUE_PATTERN}",
-            trailing,
-            re.IGNORECASE,
-        ) is not None
-    if (
-        _HISTORICAL_PARAMETER_SUFFIX_RE.fullmatch(clause_suffix.strip())
-        or _CHINESE_HISTORICAL_PARAMETER_SUFFIX_RE.fullmatch(
-            clause_suffix.strip()
-        )
-    ):
-        return not clause_prefix.strip()
-    return (
-        re.fullmatch(r"\s*with\s*", clause_prefix, re.IGNORECASE) is not None
-        and _HISTORICAL_PARAMETER_INVERSION_RE.fullmatch(clause_suffix)
-        is not None
-    )
-
-
 def _task_parameter_boundary(
     task: TaskManifest,
     current_plan: Mapping[str, Any] | None = None,
@@ -3664,7 +3572,9 @@ def _registered_mutation_targets(
                 if isinstance(item, Mapping)
                 else ""
             )
-            if not predictor_id or predictor_id == current_predictor:
+            baseline_reset = (predictor_id == current_predictor == BASELINE_REFERENCE_PREDICTOR_ID
+                              and prediction_usage(current_predictor, genome.scientific_program["parameter_overrides"])["mode"] != "baseline_only")
+            if not predictor_id or (predictor_id == current_predictor and not baseline_reset):
                 continue
             try:
                 registry.program("predictors", predictor_id)
@@ -3685,7 +3595,9 @@ def _registered_mutation_targets(
             instruction_ids.append(instruction_id)
 
     return {
-        "scientific_parameter": tuple(sorted(parameter_schemas)),
+        "scientific_parameter": tuple(sorted(
+            set(parameter_schemas)
+        )),
         "registered_predictor": tuple(sorted(set(predictor_ids))),
         "instruction_profile": tuple(sorted(instruction_ids)),
     }
@@ -3730,6 +3642,7 @@ def _mutation_contract_catalog(
     diagnostic_only = sample_budget_class == "diagnostic_smoke"
     selection_eligible = sample_budget_class == "selection_eligible"
     return {
+        "scientific_parameter_activity": parameter_activity_contract(genome),
         "allowed_mutation_targets": {
             axis: list(values) for axis, values in targets.items()
         },
@@ -3743,25 +3656,35 @@ def _mutation_contract_catalog(
             "registered_predictor": ["select"],
             "instruction_profile": ["select"],
         },
+        **({"prediction_selection": {
+            "owner": "sample_agent", "default_tool_owner": "research_model", "current_usage": prediction_usage(
+                str(genome.scientific_program["predictor_ref"]["id"]), genome.scientific_program["parameter_overrides"]),
+            "baseline_only_choice": BASELINE_REFERENCE_PREDICTOR_ID,
+            "instructions": "Research evolves the optional default model and Agent policy. Each sample Agent decides whether to use that model, invoke other registered tools with bounded parameters, combine evidence or predict directly. Evaluate the final Agent numbers; evaluator, data and gates remain fixed.",
+            "predictor_options": [
+                {"id": item["id"], "label": item.get("label"), "description": item.get("description"),
+                 "parameter_schemas": item.get("parameter_schemas", {})}
+                for item in task.metadata.get("runtime_component_catalog", {}).get("prediction_models", [])
+            ],
+        }} if task.metadata.get("prediction_selection_policy") == RUNTIME_PREDICTION_POLICY else {}),
         "mutation_axis_effects": {
             "scientific_parameter": (
-                "Changes exactly one registered predictor parameter within its "
+                "Changes exactly one optional default-tool parameter within its "
                 "Host trust region and in the declared increase/decrease "
                 "direction; it cannot change the predictor, Planner "
-                "instruction, sample cohort, budget, evaluator, or gate."
+                "instruction, sample cohort, budget, evaluator, or gate. "
+                "Effects on final predictions are conditional on the Agent using that default; it may choose another tool, override call parameters or predict directly."
             ),
             "registered_predictor": (
-                "Switches only to one registered predictor using that "
-                "predictor's registered defaults; parameter tuning requires a "
-                "later generation."
+                "Switches the optional default predictor to its registered defaults. "
+                "The sample Agent still decides whether to use it and may tune tool-call parameters within catalog bounds. "
+                "Mutating the frozen default parameters requires a later accepted research or local edit."
             ),
             "instruction_profile": (
-                "Changes only Planner reasoning, confidence, reason codes, and "
-                "protocol reliability for the same Host-selected complete "
-                "origin vector. It cannot select origins, increase sample "
-                "counts, change samples_per_update, alter prediction-tool "
-                "values, improve numerical forecast metrics when execution is "
-                "already valid, or satisfy statistical evidence gates."
+                "Changes Agent reasoning, optional tool choice, parameter exploration, "
+                "evidence combination and final numerical predictions. Evaluate both "
+                "forecast quality and execution reliability. The Host-selected origin "
+                "cohort, sample budget, evaluator and statistical gates remain fixed."
             ),
         },
         "evaluation_evidence_contract": {
@@ -3810,394 +3733,6 @@ def _mutation_contract_catalog(
             for instruction_id in targets["instruction_profile"]
         ],
     }
-
-
-_DIAGNOSTIC_SELECTION_CLAIM_RE = re.compile(
-    r"(?:\beligib(?:le|ility)\b|\bpromot(?:e|ion|ed)\b|"
-    r"\bgate\s+passage\b|"
-    r"\b(?:selected|advance)\s+(?:for|to)\s+(?:the\s+)?next\s+generation\b|"
-    r"\b(?:scientific|selection|statistical|evidence)\s+(?:gate|threshold)\b|"
-    r"\b(?:pass|meet|satisfy|exceed)\w*\b[^.;。；]{0,40}"
-    r"\b(?:gate|threshold|eligibility)\b|"
-    r"\bsufficient\s+evidence\b|\bminimum\s+sample(?:s|\s+count)?\b|"
-    r"晋级|入选下一代|进入下一代|门禁|证据充足|样本量达标|"
-    r"(?:通过|满足|超过)[^，。；]{0,16}(?:门槛|门禁|阈值))",
-    re.IGNORECASE,
-)
-_INSTRUCTION_SAMPLING_CLAIM_RE = re.compile(
-    r"(?:\b(?:increase|decrease|change|raise|lower|expand|reduce|allocate|"
-    r"reallocate|choose|select|stratif\w*|concentrat\w*|resampl\w*|"
-    r"oversampl\w*|undersampl\w*)\b[^.;。；]{0,48}\b(?:sample|origin|cohort)s?\b|"
-    r"\b(?:sample|origin|cohort)s?\b[^.;。；]{0,48}\b(?:increase|decrease|"
-    r"change|raise|lower|expand|reduce|allocate|reallocate|choose|select|"
-    r"stratif\w*|concentrat\w*|resampl\w*|oversampl\w*|undersampl\w*)\b|"
-    r"(?:增加|减少|改变|调整|选择|筛选|分层|重采样|过采样|欠采样|重新分配)"
-    r"[^，。；]{0,24}(?:样本|预测起点|起点数量|队列|群组)|"
-    r"(?:样本|预测起点|起点数量|队列|群组)[^，。；]{0,24}"
-    r"(?:增加|减少|改变|调整|选择|筛选|分层|重采样|过采样|欠采样|重新分配))",
-    re.IGNORECASE,
-)
-_INSTRUCTION_NUMERICAL_CLAIM_RE = re.compile(
-    r"(?:\b(?:improv\w*|reduc\w*|lower\w*|decreas\w*|rais\w*|increas\w*|"
-    r"boost\w*|optimi[sz]\w*|minimi[sz]\w*|maximi[sz]\w*|change\w*|"
-    r"alter\w*)\b[^.;。；]{0,48}\b(?:rmse|mae|mse|r\s*(?:\^?2|²)|"
-    r"accuracy|bias|normalized\s+reward|predictive\s+skill|forecast\s+"
-    r"(?:score|error|accuracy))\b|"
-    r"\b(?:rmse|mae|mse|r\s*(?:\^?2|²)|accuracy|bias|normalized\s+reward|"
-    r"predictive\s+skill|forecast\s+(?:score|error|accuracy))\b"
-    r"[^.;。；]{0,48}\b(?:improv\w*|reduc\w*|lower\w*|decreas\w*|"
-    r"rais\w*|increas\w*|boost\w*|optimi[sz]\w*|minimi[sz]\w*|"
-    r"maximi[sz]\w*|change\w*|alter\w*)\b|"
-    r"(?:降低|减少|改善|提高|优化|改变|调整)[^，。；]{0,24}"
-    r"(?:均方误差|预测误差|预测精度|预测得分|技能得分|偏差|RMSE|MAE|MSE|R²)|"
-    r"(?:均方误差|预测误差|预测精度|预测得分|技能得分|偏差|RMSE|MAE|MSE|R²)"
-    r"[^，。；]{0,24}(?:降低|减少|改善|提高|优化|改变|调整))",
-    re.IGNORECASE,
-)
-_CLAIM_NEGATION_BEFORE_RE = re.compile(
-    r"(?:\b(?:no(?!\s+only\b)|not(?!\s+only\b)|never|without|cannot|can't|does\s+not|doesn't|"
-    r"must\s+not|mustn't|will\s+not|won't|avoid)\b|"
-    r"不(?!仅|但|只是)|无|未|不会|不能|不得|禁止|避免|保持|维持)[^.;。；!?！？]{0,48}$",
-    re.IGNORECASE,
-)
-_CLAIM_UNCHANGED_AFTER_RE = re.compile(
-    r"^[^.;。；!?！？]{0,32}(?:\b(?:unchanged|constant|fixed|preserved)\b|"
-    r"不变|不改变|保持不变|维持不变)",
-    re.IGNORECASE,
-)
-_CLAIM_HARD_BOUNDARY_RE = re.compile(
-    r"[.;。；!?！？]+|"
-    r"\b(?:but|then|yet|however|nevertheless|instead|while)\b|"
-    r"但是|然而|然后|不过|却",
-    re.IGNORECASE,
-)
-_CLAIM_SCOPE_RESTART_RE = re.compile(
-    r"[,，:：]|\b(?:and|or)\b|并且|而且",
-    re.IGNORECASE,
-)
-_CLAIM_NEGATED_ASSERTION_BEFORE_RE = re.compile(
-    r"(?:\bno\s+(?:claim\s+of\s+)?(?:eligib\w*|promot\w*|gate\b|"
-    r"threshold\b|(?:scientific|selection|statistical|evidence)[-\s]+"
-    r"(?:gate|threshold|eligibility)\b|candidate[-\s]+"
-    r"(?:advancement|selection|promotion)\b|"
-    r"run[-\s]+level[-\s]+eligibility\b)|"
-    r"\b(?:do|does|did|will|would|should|must|can|could)\s+not\s+"
-    r"(?:claim|assert|imply|constitute)\b|"
-    r"\bwithout\s+(?:claiming|asserting|implying)\b|"
-    r"(?:不|未|不会|不能|不得)\s*(?:声称|宣称|断言|暗示))"
-    r"[^.;。；!?！？]*$",
-    re.IGNORECASE,
-)
-_CLAIM_NEGATED_ENUMERATION_ITEM_RE = re.compile(
-    r"^(?:(?:and|or)\s+)?"
-    r"(?:eligib\w*|promot\w*|gate(?:[-\s]+passage)?|"
-    r"threshold(?:[-\s]+satisfaction)?|"
-    r"(?:scientific|selection|statistical|evidence)[-\s]+"
-    r"(?:gate|threshold|eligibility)(?:[-\s]+(?:passage|satisfaction))?|"
-    r"candidate[-\s]+(?:advancement|selection|promotion)|"
-    r"run[-\s]+level[-\s]+eligibility|"
-    r"(?:门禁|门槛|阈值|晋级|入选|证据充足|样本量达标))"
-    r"(?:\s*(?:[,，]\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)"
-    r"(?:eligib\w*|promot\w*|gate(?:[-\s]+passage)?|"
-    r"threshold(?:[-\s]+satisfaction)?|"
-    r"(?:scientific|selection|statistical|evidence)[-\s]+"
-    r"(?:gate|threshold|eligibility)(?:[-\s]+(?:passage|satisfaction))?|"
-    r"candidate[-\s]+(?:advancement|selection|promotion)|"
-    r"run[-\s]+level[-\s]+eligibility|"
-    r"(?:门禁|门槛|阈值|晋级|入选|证据充足|样本量达标)))*"
-    r"(?:\s+(?:is|are|was|were)\s+"
-    r"(?:claimed|asserted|implied|made)\b)?"
-    r"(?:\s+(?:from|for|in|within|by|based\s+on)\b"
-    r"[^.;。；!?！？]{0,64})?$",
-    re.IGNORECASE,
-)
-_CLAIM_COMPLETED_ASSERTION_BEFORE_RE = re.compile(
-    r"\b(?:is|are|was|were)\s+(?:claimed|asserted|implied|made)\s*$",
-    re.IGNORECASE,
-)
-_CLAIM_COORDINATED_AFFIRMATIVE_ASSERTION_RE = re.compile(
-    r"^(?:and|or)\s+.+\b(?:is|are|was|were)\s+"
-    r"(?:claimed|asserted|implied|made)\b",
-    re.IGNORECASE,
-)
-_CLAIM_COORDINATED_GERUND_RE = re.compile(
-    r"^(?:and|or)\s+\w+ing\b",
-    re.IGNORECASE,
-)
-_CLAIM_SHARED_NEGATION_COMPLETION_RE = re.compile(
-    r"^(?:and|or)\s+.+\b(?:is|are|was|were)\s+"
-    r"(?:expected|unchanged|constant|fixed|preserved)\b",
-    re.IGNORECASE,
-)
-_CLAIM_COMPLETE_FINITE_PREDICATE_BEFORE_RE = re.compile(
-    r"\b(?:is|are|was|were|has|have|had|does|do|did|will|would|"
-    r"should|must|can|could|may|might)\s+(?:(?:not|never)\s+)?\w+\b"
-    r"[^.;。；!?！？]*$",
-    re.IGNORECASE,
-)
-
-
-def _claim_scopes(text: str) -> tuple[str, ...]:
-    """Return full sentences plus suffixes that restart negation scope.
-
-    Hard discourse boundaries cannot join a predicate to an argument. Within
-    each resulting clause, retaining the full text lets a predicate still
-    reach a comma-separated modifier (``choose recent, high-error origins``).
-    Rechecking suffixes after soft boundaries prevents an earlier ``no`` or
-    ``without`` from negating a later independent predicate.
-    """
-
-    scopes: list[str] = []
-    for clause in _CLAIM_HARD_BOUNDARY_RE.split(text):
-        clause = clause.strip()
-        if not clause:
-            continue
-        scopes.append(clause)
-        for boundary in _CLAIM_SCOPE_RESTART_RE.finditer(clause):
-            suffix = clause[boundary.end() :].strip()
-            if not suffix:
-                continue
-            prefix = clause[: boundary.start()]
-            coordinated_suffix = (
-                f"{boundary.group()} {suffix}"
-                if boundary.group().casefold() in {"and", "or"}
-                else suffix
-            )
-            initial_coordinated_affirmative_assertion_suffix = (
-                bool(
-                    _CLAIM_COORDINATED_AFFIRMATIVE_ASSERTION_RE.search(
-                        coordinated_suffix
-                    )
-                )
-                and not _CLAIM_SCOPE_RESTART_RE.search(prefix)
-            )
-            if (
-                _CLAIM_NEGATION_BEFORE_RE.search(prefix)
-                and not _CLAIM_COMPLETE_FINITE_PREDICATE_BEFORE_RE.search(
-                    prefix
-                )
-                and (
-                    _CLAIM_COORDINATED_GERUND_RE.search(coordinated_suffix)
-                    or _CLAIM_SHARED_NEGATION_COMPLETION_RE.search(
-                        coordinated_suffix
-                    )
-                )
-            ):
-                continue
-            if (
-                _CLAIM_NEGATED_ASSERTION_BEFORE_RE.search(prefix)
-                and not _CLAIM_COMPLETED_ASSERTION_BEFORE_RE.search(prefix)
-                and _CLAIM_NEGATED_ENUMERATION_ITEM_RE.fullmatch(suffix)
-                and not initial_coordinated_affirmative_assertion_suffix
-            ):
-                continue
-            scopes.append(suffix)
-    return tuple(scopes)
-
-
-def _contains_unnegated_claim(text: str, pattern: re.Pattern[str]) -> bool:
-    """Return true only for an affirmative prohibited claim.
-
-    The model is encouraged to state invariants explicitly. A raw keyword
-    blacklist therefore rejects correct phrases such as ``no RMSE change``.
-    Keep the bounded lexical guard, but ignore a match with an adjacent
-    negation or unchanged qualifier.
-    """
-
-    for scope in _claim_scopes(text):
-        for match in pattern.finditer(scope):
-            full_before = scope[: match.start()]
-            before = full_before[max(0, len(full_before) - 64) :]
-            after = scope[match.end() : min(len(scope), match.end() + 40)]
-            if boundary := _CLAIM_SCOPE_RESTART_RE.search(after):
-                after = after[: boundary.start()]
-            if _CLAIM_NEGATED_ASSERTION_BEFORE_RE.search(full_before):
-                continue
-            if _CLAIM_NEGATION_BEFORE_RE.search(before):
-                continue
-            if _CLAIM_NEGATION_BEFORE_RE.search(match.group()):
-                continue
-            if _CLAIM_UNCHANGED_AFTER_RE.search(match.group()):
-                continue
-            if _CLAIM_UNCHANGED_AFTER_RE.search(after):
-                continue
-            return True
-    return False
-
-
-def _validate_direction_claim_scope(
-    direction: CandidateDirection,
-    *,
-    task: TaskManifest,
-) -> None:
-    """Reject outcome claims that the declared mutation cannot causally affect."""
-
-    claim_fields = (
-        direction.title,
-        direction.hypothesis,
-        direction.target_weakness,
-        direction.capability_focus,
-        direction.expected_tradeoff,
-        direction.success_criterion,
-    )
-    if (
-        task.metadata.get("sample_budget_class") == "diagnostic_smoke"
-        and any(
-            _contains_unnegated_claim(field, _DIAGNOSTIC_SELECTION_CLAIM_RE)
-            for field in claim_fields
-        )
-    ):
-        raise ValueError(
-            f"candidate direction {direction.direction_id} uses a selection or "
-            "promotion success criterion in a diagnostic-only run"
-        )
-    if direction.mutation_axis != "instruction_profile":
-        return
-    if any(
-        _contains_unnegated_claim(field, _INSTRUCTION_SAMPLING_CLAIM_RE)
-        or _contains_unnegated_claim(field, _INSTRUCTION_NUMERICAL_CLAIM_RE)
-        for field in claim_fields
-    ):
-        raise ValueError(
-            f"candidate direction {direction.direction_id} assigns an "
-            "instruction profile an effect owned by the Host or registered "
-            "prediction tool"
-        )
-
-
-def _direction_explicit_parameter_assignments(
-    direction: CandidateDirection,
-    *,
-    parent: EcologyEvolutionPluginGenome,
-) -> tuple[str, ...]:
-    """Find exact parameter settings hidden in free-form direction prose.
-
-    A direction declares an axis, target, and increase/decrease intent.  The
-    candidate proposer owns the bounded value selection.  Accepting an exact
-    value in prose would create a second, unchecked source of truth even when
-    it names the declared target itself.
-    """
-
-    registry = current_program_registry()
-    # An exact value for any registered predictor parameter would add a second
-    # operation to the direction, even when that parameter is not part of the
-    # current predictor.  Inspect the complete bounded registry rather than
-    # allowing cross-predictor assignments to evade this guard.
-    predictor_ids = set(registry.program_ids("predictors"))
-    predictor_ids.add(str(parent.scientific_program["predictor_ref"]["id"]))
-    if direction.mutation_axis == "registered_predictor":
-        predictor_ids.add(direction.mutation_target)
-    parameter_names: set[str] = set()
-    for predictor_id in predictor_ids:
-        try:
-            predictor = registry.program("predictors", predictor_id)
-        except ValueError:
-            continue
-        parameters = predictor.get("parameters")
-        if isinstance(parameters, Mapping):
-            parameter_names.update(str(name) for name in parameters)
-
-    claim_fields = (
-        direction.title,
-        direction.hypothesis,
-        direction.target_weakness,
-        direction.capability_focus,
-        direction.expected_tradeoff,
-        direction.success_criterion,
-    )
-    assignments: list[str] = []
-    number = _EXACT_PARAMETER_VALUE_PATTERN
-    for name in sorted(parameter_names):
-        aliases = {name, name.replace("_", " ")}
-        for catalog in _PARAMETER_ALIASES.values():
-            aliases.update(catalog.get(name, ()))
-        alias_pattern = "(?:" + "|".join(
-            r"\s+".join(re.escape(part) for part in alias.split())
-            for alias in sorted(aliases, key=lambda item: (-len(item), item))
-        ) + ")"
-        bounded_alias = rf"(?<![A-Za-z0-9_]){alias_pattern}(?![A-Za-z0-9_])"
-        assignment_after = re.compile(
-            bounded_alias
-            + (
-                rf"(?:\s*(?:=|:=|:)\s*{number}"
-                rf"|\s*(?:->|=>|→|⇒)\s*{number}"
-                rf"|\s+{number}"
-                rf"|\s+(?:is|becomes?|equals?|to|at|of|by)\s+(?:the\s+)?{number}"
-                rf"|\s+(?:should|must|will)\s+(?:be|equal|become)"
-                rf"\s+(?:to\s+)?{number}"
-                rf"|\s+(?:set|fixed|changed|adjusted|raised|lowered|"
-                rf"increased|decreased|reduced)\s+(?:to|at|by)\s+{number}"
-                rf"|\s+from\s+{number}\s+to\s+{number}"
-                rf"|\s*(?:设为|设成|设置为|设置成|改为|改成|"
-                rf"变为|变成|修改(?:为|成|至|到)|取|调(?:整)?至|调(?:整)?为|"
-                rf"升至|增(?:加)?到|提高到|降至|降到|"
-                rf"降低到|减至|减少到|为)\s*{number})"
-            ),
-            re.IGNORECASE,
-        )
-        assignment_before = re.compile(
-            (
-                rf"(?:\b(?:use|set|assign|choose|keep|fix|make)\b\s+(?:the\s+)?"
-                rf"(?:{number}\s+(?:(?:for|as)\s+)?{bounded_alias}"
-                rf"|{bounded_alias}\s*(?:(?:to|at|as)\s+|(?:=|:=|:|->|=>|→|⇒)\s*)?{number})"
-                rf"|(?:使用|采用|选用|设置|设定|取)\s*{number}"
-                rf"\s*(?:个|步)?\s*{bounded_alias}"
-                rf"|(?:将|把)?\s*(?:使用|采用|选用|设置|设定|"
-                rf"调整|改变|修改|令|使)\s*{bounded_alias}"
-                rf"\s*(?:为|成|至|到|=|:=|:|：|->|=>|→|⇒)?\s*{number})"
-            ),
-            re.IGNORECASE,
-        )
-        historical_assignment = re.compile(
-            bounded_alias
-            + (
-                rf"(?:\s*(?:=|:=|:)\s*{number}"
-                rf"|\s+{number}"
-                rf"|\s+(?:is|equals?|at|of)\s+(?:the\s+)?{number}"
-                rf"|\s*为\s*{number})"
-            ),
-            re.IGNORECASE,
-        )
-        historical_sequence = re.compile(
-            rf"\s*(?:prior|previous|earlier|historical)\s+generations?\s+"
-            rf"(?:used|observed|reported|recorded)\s+{bounded_alias}\s+"
-            rf"{number}\s+(?:and\s+later|followed\s+by)\s+{number}\s*[.]?\s*",
-            re.IGNORECASE,
-        )
-        if any(
-            historical_sequence.fullmatch(field) is None
-            and any(
-                    not _parameter_assignment_is_historical(
-                        field,
-                        match,
-                        historical_assignment=historical_assignment,
-                    )
-                    for pattern in (assignment_after, assignment_before)
-                    for match in pattern.finditer(field)
-                )
-            for field in claim_fields
-        ):
-            assignments.append(name)
-    return tuple(assignments)
-
-
-def _reject_direction_explicit_parameter_assignments(
-    direction: CandidateDirection,
-    *,
-    parent: EcologyEvolutionPluginGenome,
-    index: int,
-) -> None:
-    explicit_parameters = _direction_explicit_parameter_assignments(
-        direction,
-        parent=parent,
-    )
-    if explicit_parameters:
-        raise ValueError(
-            f"candidate_directions[{index}] contains explicit parameter "
-            f"assignment(s) for {', '.join(explicit_parameters)}; declare "
-            "only mutation_target and mutation_direction so the bounded "
-            "candidate proposer remains the sole value authority"
-        )
 
 
 def _candidate_direction_execution_view(
@@ -4342,13 +3877,6 @@ def _validate_candidate_direction_realizability(
     checks: list[dict[str, Any]] = []
 
     for index, direction in enumerate(directions):
-        _validate_direction_claim_scope(direction, task=task)
-        _reject_direction_explicit_parameter_assignments(
-            direction,
-            parent=parent,
-            index=index,
-        )
-
         if direction.mutation_axis == "scientific_parameter":
             schema = parameter_schemas.get(direction.mutation_target)
             if not isinstance(schema, Mapping):
@@ -4548,6 +4076,8 @@ def _task_parameter_space(
     predictor_id = str(
         metadata.get("prediction_model_id") or "greenhouse-rolling-residual@1"
     )
+    if predictor_id == BASELINE_ALIGNED_RIDGE_MODEL_ID:
+        return ("greenhouse_baseline_aligned_ridge", StrategyRouterDSHAdapter._GREENHOUSE_ALIGNED_RIDGE_SCHEMAS, StrategyRouterDSHAdapter._GREENHOUSE_ALIGNED_RIDGE_SWEEP)
     if predictor_id == EXOGENOUS_RIDGE_MODEL_ID:
         return (
             "greenhouse_ridge",

@@ -64,6 +64,22 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
                 ),
             },
         },
+        "greenhouse-baseline-aligned-ridge@1": {
+            "version": "greenhouse-baseline-aligned-ridge-operator-graph/1",
+            "parameters": {
+                "history_steps": _parameter(
+                    minimum=1, maximum=12, default=6, integer=True
+                ),
+                "ridge_alpha": _parameter(
+                    minimum=0.0001, maximum=1.0, default=0.1
+                ),
+                **{
+                    f"residual_scale_{horizon}h": _parameter(
+                        minimum=0.0, maximum=1.0, default=0.0
+                    ) for horizon in (1, 6, 24)
+                },
+            },
+        },
         "greenhouse-targetwise-ridge@1": {
             "version": "greenhouse-targetwise-ridge-operator-graph/1",
             "parameters": {
@@ -181,7 +197,7 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
     },
     "instruction_templates": {
         "sample-planner-balanced@1": {
-            "version": "sample-planner-balanced-instruction/1",
+            "version": "sample-planner-balanced-instruction/2",
             "role": "sample-planner",
             "skill_name": "origin-vector-forecasting-balanced",
             "parameters": {
@@ -191,7 +207,7 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
             },
         },
         "sample-planner-anomaly-aware@1": {
-            "version": "sample-planner-anomaly-aware-instruction/1",
+            "version": "sample-planner-anomaly-aware-instruction/2",
             "role": "sample-planner",
             "skill_name": "origin-vector-forecasting-anomaly-aware",
             "parameters": {
@@ -201,7 +217,7 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
             },
         },
         "sample-planner-horizon-aware@1": {
-            "version": "sample-planner-horizon-aware-instruction/1",
+            "version": "sample-planner-horizon-aware-instruction/2",
             "role": "sample-planner",
             "skill_name": "origin-vector-forecasting-horizon-aware",
             "parameters": {
@@ -354,14 +370,14 @@ def _agent_program(programs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             "role_profiles": [
                 {
                     "role": "sample-planner",
-                    "preset_id": "ecology-sample-planner-v5",
+                    "preset_id": "ecology-sample-planner-v8",
                     "instruction_template_ref": _program_ref(
                         programs,
                         "instruction_templates",
                         "sample-planner-balanced@1",
                     ),
                     "instruction_parameters": {"confidence_threshold": 0.7},
-                    "response_schema_id": "sample-decisions@1",
+                    "response_schema_id": "ecology-sample-predictions@2",
                     "base_tool_policy_id": "sample-planner-tools@1",
                     "enabled_tool_ids": ["ecology_execute_prediction_tool"],
                 }
@@ -452,6 +468,12 @@ class ProgramRegistrySnapshot:
                 thawed,
                 template_id="greenhouse-exogenous-default@1",
                 predictor_id="greenhouse-exogenous-ridge@1",
+                feature_policy_id="registered_greenhouse_features@1",
+            ),
+            _seed_template(
+                thawed,
+                template_id="greenhouse-baseline-aligned-default@1",
+                predictor_id="greenhouse-baseline-aligned-ridge@1",
                 feature_policy_id="registered_greenhouse_features@1",
             ),
             _seed_template(

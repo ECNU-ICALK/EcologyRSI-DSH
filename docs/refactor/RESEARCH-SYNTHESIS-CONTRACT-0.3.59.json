@@ -1,0 +1,199 @@
+{
+  "schema_version": "ecologyrsi-dsh.research-synthesis-contract-audit/1",
+  "diagnostic_only": true,
+  "source_run_id": "run:d1f998d8-4cb6-4843-ac73-e807be23c151",
+  "source_genome_digest": "1ac5bb80632a89e926b64a28bd2ac91189de15f8401f1cc39849613c70025690",
+  "source_context_digest": "d65745b54b87a8436ffe9d7f84ad81bcbe6023f28764db9e9f27bb60dd1f52ae",
+  "context_before": {
+    "characters": 34447,
+    "utf8_bytes": 35639
+  },
+  "context_after": {
+    "characters": 32548,
+    "utf8_bytes": 33616
+  },
+  "fixture_size": {
+    "characters": 2283,
+    "utf8_bytes": 2283
+  },
+  "fixture": {
+    "schema_version": "ecologyrsi-dsh.research-synthesis/1",
+    "summary": "Test horizon corrections across the full matrix. Distinct same-axis values remain proposer-owned.",
+    "evidence": [],
+    "candidate_directions": [
+      {
+        "direction_id": "direction-1",
+        "title": "1h temperature correction",
+        "hypothesis": "Enabling 1h residual correction may improve temperature skill.",
+        "target_weakness": "Uncertain temperature residual benefit at 1h.",
+        "capability_focus": "Registered aligned ridge",
+        "mutation_axis": "scientific_parameter",
+        "mutation_target": "residual_scale_1h",
+        "mutation_direction": "increase",
+        "evidence_refs": [],
+        "expected_tradeoff": "Shared correction can worsen other targets.",
+        "success_criterion": "Compare paired cell skill and the full forecast matrix."
+      },
+      {
+        "direction_id": "direction-2",
+        "title": "6h humidity correction",
+        "hypothesis": "Enabling 6h residual correction may improve humidity skill.",
+        "target_weakness": "Uncertain humidity residual benefit at 6h.",
+        "capability_focus": "Registered aligned ridge",
+        "mutation_axis": "scientific_parameter",
+        "mutation_target": "residual_scale_6h",
+        "mutation_direction": "increase",
+        "evidence_refs": [],
+        "expected_tradeoff": "Shared correction can worsen other targets.",
+        "success_criterion": "Compare paired cell skill and the full forecast matrix."
+      },
+      {
+        "direction_id": "direction-3",
+        "title": "24h CO2 correction",
+        "hypothesis": "Enabling 24h residual correction may improve CO2 skill.",
+        "target_weakness": "Uncertain CO2 residual benefit at 24h.",
+        "capability_focus": "Registered aligned ridge",
+        "mutation_axis": "scientific_parameter",
+        "mutation_target": "residual_scale_24h",
+        "mutation_direction": "increase",
+        "evidence_refs": [],
+        "expected_tradeoff": "Shared correction can worsen other targets.",
+        "success_criterion": "Compare paired cell skill and the full forecast matrix."
+      },
+      {
+        "direction_id": "direction-4",
+        "title": "1h humidity correction",
+        "hypothesis": "Enabling 1h residual correction may improve humidity skill.",
+        "target_weakness": "Uncertain humidity residual benefit at 1h.",
+        "capability_focus": "Registered aligned ridge",
+        "mutation_axis": "scientific_parameter",
+        "mutation_target": "residual_scale_1h",
+        "mutation_direction": "increase",
+        "evidence_refs": [],
+        "expected_tradeoff": "Shared correction can worsen other targets.",
+        "success_criterion": "Compare paired cell skill and the full forecast matrix."
+      }
+    ]
+  },
+  "fixture_preflight": {
+    "schema_version": "ecologyrsi-dsh.candidate-direction-preflight/1",
+    "parent_behavior_digest": "62eb7ab6b615d5b5d51d3c871074e09c477d4adcf26bb8aaaba5a4158a311e2a",
+    "hard_avoid_behavior_count": 0,
+    "checks": [
+      {
+        "direction_id": "direction-1",
+        "mutation_axis": "scientific_parameter",
+        "mutation_target": "residual_scale_1h",
+        "mutation_direction": "increase",
+        "operation": "set_bounded_parameter",
+        "status": "single_operation_feasible",
+        "witness_behavior_digest": "0ebeee3ceed6ef2479f3c5a949527160d8ef03448b2c57a97a819f34fdaab7ec"
+      },
+      {
+        "direction_id": "direction-2",
+        "mutation_axis": "scientific_parameter",
+        "mutation_target": "residual_scale_6h",
+        "mutation_direction": "increase",
+        "operation": "set_bounded_parameter",
+        "status": "single_operation_feasible",
+        "witness_behavior_digest": "e42895ef94a42e87ef4d0664a62a18078eda1477c7f640942edb1ba10131e38c"
+      },
+      {
+        "direction_id": "direction-3",
+        "mutation_axis": "scientific_parameter",
+        "mutation_target": "residual_scale_24h",
+        "mutation_direction": "increase",
+        "operation": "set_bounded_parameter",
+        "status": "single_operation_feasible",
+        "witness_behavior_digest": "a2a9e57e1e963a687c07f1c49eb04e98f1cc31d37d70461c7073a36d5f7b5538"
+      },
+      {
+        "direction_id": "direction-4",
+        "mutation_axis": "scientific_parameter",
+        "mutation_target": "residual_scale_1h",
+        "mutation_direction": "increase",
+        "operation": "set_bounded_parameter",
+        "status": "single_operation_feasible",
+        "witness_behavior_digest": "f36bf9a4fc58ea487a2b98a1550235187f30eb9ef996d7c977f002d82fd58065"
+      }
+    ]
+  },
+  "all_frozen_evidence_cards_preserved": true,
+  "evidence_card_count": 13,
+  "evidence_catalog_size": {
+    "characters": 14560,
+    "utf8_bytes": 15542
+  },
+  "source_top_level_sizes": {
+    "cross_generation_experience": {
+      "characters": 5174,
+      "utf8_bytes": 5220
+    },
+    "expert_collaboration": {
+      "characters": 311,
+      "utf8_bytes": 311
+    },
+    "forecast_objective": {
+      "characters": 980,
+      "utf8_bytes": 1002
+    },
+    "generation": {
+      "characters": 1,
+      "utf8_bytes": 1
+    },
+    "generation_search_plan": {
+      "characters": 2983,
+      "utf8_bytes": 2983
+    },
+    "host_validation_feedback": {
+      "characters": 4,
+      "utf8_bytes": 4
+    },
+    "knowledge_snapshot": {
+      "characters": 16013,
+      "utf8_bytes": 17137
+    },
+    "objective": {
+      "characters": 22,
+      "utf8_bytes": 22
+    },
+    "parent_genome": {
+      "characters": 3636,
+      "utf8_bytes": 3636
+    },
+    "parent_plan": {
+      "characters": 2,
+      "utf8_bytes": 2
+    },
+    "previous_generation_analysis": {
+      "characters": 4,
+      "utf8_bytes": 4
+    },
+    "previous_generation_reflection": {
+      "characters": 4,
+      "utf8_bytes": 4
+    },
+    "previous_knowledge_assessment": {
+      "characters": 4,
+      "utf8_bytes": 4
+    },
+    "required_candidate_direction_count": {
+      "characters": 1,
+      "utf8_bytes": 1
+    },
+    "synthesis_contract": {
+      "characters": 4936,
+      "utf8_bytes": 4936
+    }
+  },
+  "model_calls": 0,
+  "real_candidates_created": 0,
+  "label_reads": 0,
+  "ledger_writes": 0,
+  "limits": [
+    "Same-target different hypotheses pass distinct behavior preflight; only candidate proposers choose values.",
+    "The four-direction JSON is a synthetic contract witness, not a model-generated research result.",
+    "16K and compact context are forward policy changes; they do not prove a subsequent provider session will complete.",
+    "The captured JSON serialization normalizes integral floats; parent identity was verified against the original ledger canonical genome."
+  ]
+}

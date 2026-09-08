@@ -11,6 +11,26 @@ from ecologyrsi_dsh.integrations.model_gateway import ModelGateway
 
 
 class DshDirectoryTests(unittest.TestCase):
+    def test_nested_native_reasoning_changes_invalidate_frozen_configuration(self):
+        from unittest.mock import patch
+        from ecologyrsi_dsh.integrations.dsh_directory import _fallback_settings_load
+        original = self.settings.read_text()
+        configured = original.replace("      role: reviewer", "      reasoning: minimal\n      compat:\n        thinkingFormat: openai\n      role: reviewer")
+        self.settings.write_text(configured)
+        def bindings():
+            return {item["model_id"]: item["configuration_digest"]
+                    for item in ModelGateway.from_env(self._env()).catalog() if item.get("configuration_digest")}
+        before = bindings()
+        with patch("ecologyrsi_dsh.integrations.dsh_directory._yaml_load", side_effect=_fallback_settings_load):
+            self.assertEqual(bindings(), before)
+        self.settings.write_text(configured.replace("thinkingFormat: openai", "thinkingFormat: zai"))
+        self.assertNotEqual(bindings()["secure/glm-5.2"], before["secure/glm-5.2"])
+        self.settings.write_text(configured.replace("reasoning: minimal", "reasoning: high"))
+        self.assertNotEqual(bindings()["secure/glm-5.2"], before["secure/glm-5.2"])
+        self.settings.write_text(configured)
+        self.credentials.write_text("SECURE_KEY: rotated-secret\n")
+        self.assertEqual(bindings(), before)
+
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         root = Path(self.directory.name)

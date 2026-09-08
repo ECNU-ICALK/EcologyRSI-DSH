@@ -4,16 +4,16 @@ import { RuntimeController } from "../../lib/runtime/controller.js";
 import { registerRuntimeRoutes } from "../../lib/runtime/routes.js";
 
 const presetCatalog = [
-  "ecology-coordinator-v4",
-  "ecology-researcher-v7",
+  "ecology-coordinator-v5",
+  "ecology-researcher-v12",
   "ecology-candidate-proposer-v4",
-  "ecology-sample-planner-v5",
-  "ecology-sample-critic-v4",
-  "ecology-generation-judge-v7",
+  "ecology-sample-planner-v8",
+  "ecology-sample-critic-v5",
+  "ecology-generation-judge-v8",
 ].map((preset_id) => ({
   preset_id,
   tool_profile: "dynamic-retrieval-v1",
-  required_tools: preset_id === "ecology-sample-planner-v5"
+  required_tools: preset_id === "ecology-sample-planner-v8"
     ? ["ecology_execute_prediction_tool", "skill", "web_search"]
     : ["skill", "web_search"],
 }));

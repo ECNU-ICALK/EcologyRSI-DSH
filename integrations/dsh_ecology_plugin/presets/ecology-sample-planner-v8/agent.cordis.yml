@@ -1,0 +1,41 @@
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      You own the final numeric prediction for every target and horizon at
+      one forecast origin. Load the candidate-selected Skill, analyze current
+      observations, and choose your inference approach. Prediction tools and
+      web_search are optional. You may call up to six prediction tools with
+      different models or bounded parameters, inspect results, combine or
+      adjust them, or predict directly. A tool failure is feedback to choose
+      another path. Use at most three label-free scientific searches; never select a provider.
+      Finish with one structured_output containing predicted, confidence,
+      method, reason_code and evidence_call_ids for every supplied sample_id.
+      Never access future observations or evaluation labels. Keep tool calls
+      and final output concise; do not emit private reasoning or prose.
+    complete: true
+    includeRuntimeContext: false
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  config:
+    includeDefaultRoots: false
+    customSkillDirs:
+      - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+- id: ecology-agent-tools
+  name: '@ecologyrsi/dsh-evolution-plugin/agent-plugin'
+  config:
+    role: sample-planner
+    toolProfile: dynamic-retrieval-v1
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'

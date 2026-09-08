@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 import ecologyrsi_dsh.knowledge.algorithms as algorithms_module
-from ecologyrsi_dsh.api.generation_execution import _evaluate_candidate
+from ecologyrsi_dsh.application.generation_execution import _evaluate_candidate
 from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import Evaluation, Proposal, TaskManifest, digest
@@ -132,6 +132,10 @@ class AlgorithmCompilationTests(unittest.TestCase):
                 "greenhouse_multihorizon_time_forward@2": (
                     "greenhouse-multihorizon-time-forward/5"
                 ),
+                "greenhouse_multihorizon_time_forward@3": (
+                    "greenhouse-baseline-aligned-multihorizon-time-forward/1"
+                ),
+                "greenhouse_multihorizon_time_forward@4": "greenhouse-runtime-model-selection-forward/1",
             },
         )
 
@@ -566,7 +570,7 @@ class AlgorithmCompilationTests(unittest.TestCase):
                 server=SimpleNamespace(director=director, evaluators=evaluator)
             )
             _evaluate_candidate(
-                endpoint, "run:algorithm-repair", candidate.candidate_id
+                (endpoint).server, "run:algorithm-repair", candidate.candidate_id
             )
             self.assertEqual(evaluator.calls, 0)
 

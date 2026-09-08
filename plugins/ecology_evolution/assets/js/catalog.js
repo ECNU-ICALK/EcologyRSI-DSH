@@ -1,5 +1,100 @@
 "use strict";
 
+  var workspaceFieldNames = {
+    process: ["rounds", "candidate_summaries"],
+    candidates: ["candidates", "artifacts"],
+    training: ["training_assets"],
+    collaboration: ["interventions", "expert_consultations", "intervention_candidates"]
+  };
+  var workspaceLastRead = {};
+
+  function workspaceRequestKey(runId, view) { return state.contextEpoch + "|" + runId + "|" + view; }
+
+  function renderWorkspaceLoadState() {
+    var node = $("#workspace-data-status");
+    if (!node) { return; }
+    var run = state.activeRun, view = state.workspace;
+    var pending = run && state.workspaceRequests && state.workspaceRequests[workspaceRequestKey(run.id, view)];
+    var error = state.workspaceErrors && state.workspaceErrors[view];
+    var version = state.workspaceVersions && state.workspaceVersions[view];
+    var stale = run && version != null && version < run.projection_revision;
+    node.hidden = !pending && !error && !stale;
+    $("#workspace-data-message").textContent = error ? "本区域暂时加载失败，已保留已有数据：" + error : pending ? "正在加载本区域的数据，其他页面仍可使用。" : stale ? "本区域详情为较早快照，运行状态已更新；可刷新详情。" : "";
+    $("#workspace-data-retry").hidden = (!error && !stale) || Boolean(pending);
+  }
+
+  function ensureWorkspaceData(options) {
+    var settings = options || {}, view = state.workspace, run = state.activeRun;
+    if (view === "training" && (!state.datasetPage || !sameDatasetContext(state.datasetContext, trainingDatasetContext()) || settings.force)) {
+      loadSelectedDataset(state.pageOffset);
+    }
+    if (state.usingDemo || !run || !workspaceFieldNames[view]) { return Promise.resolve(true); }
+    state.workspaceVersions = state.workspaceVersions || {};
+    state.workspaceRequests = state.workspaceRequests || {};
+    state.workspaceErrors = state.workspaceErrors || {};
+    var key = workspaceRequestKey(run.id, view), revision = run.projection_revision;
+    if (state.workspaceRequests[key]) { return state.workspaceRequests[key]; }
+    if (!settings.force && state.workspaceVersions[view] === revision) { return Promise.resolve(true); }
+    if (!settings.force && !settings.navigation && state.workspaceVersions[view] != null && Date.now() - (workspaceLastRead[key] || 0) < 15000) { return Promise.resolve(false); }
+    var epoch = state.contextEpoch;
+    delete state.workspaceErrors[view];
+    workspaceLastRead[key] = Date.now();
+    if (view === "process") { refreshEventsForRun(run.id); }
+    var operation = request("/runs/" + encodeURIComponent(run.id) + "?view=" + view, {timeout: dataRequestTimeout}).then(function (payload) {
+      if (epoch !== state.contextEpoch || !state.activeRun || state.activeRun.id !== run.id) { return false; }
+      var projection = payload.projection || {};
+      if (payload.view !== view || String(projection.run_id || projection.id) !== String(run.id)) { throw new Error("页面数据身份不匹配"); }
+      var incoming = Object.assign({}, state.activeRun);
+      // Older section reads may populate their own panel, but must never roll
+      // back a newer monitor/control status, progress or counters.
+      if (Number(projection.projection_revision) >= incoming.projection_revision) { Object.assign(incoming, projection); }
+      else { workspaceFieldNames[view].forEach(function (name) { if (Object.prototype.hasOwnProperty.call(projection, name)) { incoming[name] = projection[name]; } }); }
+      state.activeRun = normalizeRun(incoming);
+      state.runs = state.runs.map(function (item) { return item.id === run.id ? state.activeRun : item; });
+      state.workspaceVersions[view] = Number(projection.projection_revision);
+      syncCandidateSelection(state.activeRun);
+      if (state.workspace === view && (view === "process" || view === "candidates")) { refreshCandidateSamples({silent: true}); }
+      return true;
+    }).catch(function (error) {
+      if (epoch === state.contextEpoch && state.activeRun && state.activeRun.id === run.id) { state.workspaceErrors[view] = errorMessage(error); }
+      return false;
+    }).finally(function () {
+      if (state.workspaceRequests[key] === operation) { delete state.workspaceRequests[key]; }
+      if (epoch === state.contextEpoch && state.activeRun && state.activeRun.id === run.id && state.workspace === view) { renderAll(); }
+    });
+    state.workspaceRequests[key] = operation;
+    renderWorkspaceLoadState();
+    return operation;
+  }
+
+  function loadTrainingAsset(candidateId) {
+    var run = state.activeRun;
+    if (!run || state.usingDemo) { return Promise.resolve(false); }
+    state.trainingAssetRequests = state.trainingAssetRequests || {};
+    state.trainingAssetDetails = state.trainingAssetDetails || {};
+    var key = workspaceRequestKey(run.id, "asset:" + candidateId), epoch = state.contextEpoch;
+    if (state.trainingAssetRequests[key]) { return state.trainingAssetRequests[key]; }
+    var operation = request("/runs/" + encodeURIComponent(run.id) + "?view=asset&candidate_id=" + encodeURIComponent(candidateId), {timeout: dataRequestTimeout}).then(function (payload) {
+      if (epoch !== state.contextEpoch || !state.activeRun || state.activeRun.id !== run.id) { return false; }
+      var projection = payload.projection || {}, asset = projection.training_asset;
+      if (projection.run_id !== run.id || !asset || asset.candidate_id !== candidateId) { throw new Error("训练轨迹身份不匹配"); }
+      state.trainingAssetDetails[candidateId] = {revision: projection.projection_revision, asset: Object.assign({}, asset, {details_loaded: true})};
+      // Bound the retained full traces independently of the lightweight list.
+      var keys = Object.keys(state.trainingAssetDetails);
+      while (keys.length > 4) { delete state.trainingAssetDetails[keys.shift()]; }
+      return true;
+    }).catch(function (error) {
+      if (epoch === state.contextEpoch && state.activeRun && state.activeRun.id === run.id) { showToast("训练轨迹加载失败，请重试：" + errorMessage(error)); }
+      return false;
+    }).finally(function () {
+      if (state.trainingAssetRequests[key] === operation) { delete state.trainingAssetRequests[key]; }
+      if (state.activeRun && state.activeRun.id === run.id && state.workspace === "training") { renderTrainingAssets(); }
+    });
+    state.trainingAssetRequests[key] = operation;
+    renderTrainingAssets();
+    return operation;
+  }
+
   function connectAndLoad() {
     if (state.allowDemo) { loadDemo(); return Promise.resolve(true); }
     var preferredRunId = state.activeRun && state.activeRun.id || state.lastSelectedRunId;
@@ -9,6 +104,8 @@
     }
     var epoch = nextEpoch();
     state.runReadRequest += 1;
+    state.runOverviewLoading = null;
+    state.runOverviewError = null;
     state.usingDemo = false;
     state.loadState = "loading";
     state.lastError = null;
@@ -18,7 +115,12 @@
     // browser read model.  Under a busy 64-request run it may exceed four
     // seconds even while catalog and projection reads remain healthy.
     request("/health", { timeout: 4000 }).catch(function () { return null; });
-    return Promise.all([request("/catalog", { timeout: dataRequestTimeout }), request(runsListPath())]).then(function (results) {
+    // Both reads initialize the same view. A busy run's summary can exceed
+    // the host's 8-second default even when the catalog is already healthy.
+    return Promise.all([
+      request("/catalog", { timeout: dataRequestTimeout }),
+      request(runsListPath(), { timeout: dataRequestTimeout })
+    ]).then(function (results) {
       if (epoch !== state.viewEpoch) { return false; }
       state.catalog = normalizeCatalog(results[0]);
       state.runs = listFrom(results[1], "runs").map(normalizeRun).sort(function (left, right) {
@@ -26,6 +128,7 @@
         var rightTime = Date.parse(right.updated_at || right.created_at || "") || 0;
         return rightTime - leftTime;
       });
+      state.runListCursor = results[1] && results[1].next_cursor || null;
       state.archivedRunCount = Math.max(0, Number(results[1] && results[1].archived_count || 0));
       var selectableRuns = visibleRuns();
       state.loadState = selectableRuns.length ? "ready" : "empty";
@@ -37,14 +140,14 @@
       scheduleEvolutionCapacityRefresh();
       if (selectableRuns.length) {
         var preferredRun = selectableRuns.find(function (run) { return String(run.id) === String(preferredRunId || ""); });
-        return selectRun((preferredRun || selectableRuns[0]).id, false);
+        return selectRun((preferredRun || selectableRuns[0]).id, false, {background: true});
       }
       state.activeRun = null;
       resetEventStream(null);
       resetCandidateSamples(null, null);
       state.lastUpdated = new Date().toISOString();
       renderAll();
-      loadSelectedDataset(0);
+      if (state.workspace === "training") { loadSelectedDataset(0); }
       return true;
     }).catch(function (error) {
       if (epoch !== state.viewEpoch) { return false; }
@@ -92,7 +195,8 @@
     }
   }
 
-  function selectRun(runId, notify) {
+  function selectRun(runId, notify, options) {
+    var background = Boolean(options && options.background);
     if (!runId) { return Promise.resolve(false); }
     var previousRunId = state.activeRun && state.activeRun.id;
     if (state.usingDemo) {
@@ -113,7 +217,7 @@
     }
     // A projection monitor that starts after this selection request would
     // increment the shared read token and silently discard the selected run.
-    // Stop it before opening the transactional pair of run/event reads; the
+    // Stop it before reading the selected run overview; the
     // selected run starts its own monitor after the commit, while a failed
     // switch restores monitoring for the still-active run below.
     if (state.runMonitorRunId && typeof stopRunMonitor === "function") {
@@ -122,38 +226,48 @@
     var epoch = nextEpoch();
     var requestId = state.runReadRequest + 1;
     state.runReadRequest = requestId;
-    state.busy = true;
-    state.pendingAction = "select";
+    state.runOverviewLoading = runId;
+    state.runOverviewError = null;
+    if (!background) { state.busy = true; state.pendingAction = "select"; }
     renderAll();
-    return Promise.all([request("/runs/" + encodeURIComponent(runId)), request(eventRequestPath(runId, true))]).then(function (results) {
+    // Selection commits the small authoritative overview. Independent panels
+    // must not delay switching the run or pull hidden traces into the page.
+    return request("/runs/" + encodeURIComponent(runId) + "?view=overview", {timeout: dataRequestTimeout}).then(function (result) {
       if (requestId !== state.runReadRequest || epoch !== state.viewEpoch) { return false; }
-      var selectedRun = normalizeRun(results[0]);
-      var selectedEvents = normalizeEvents(results[1]);
+      var selectedRun = normalizeRun(result);
+      if (String(selectedRun.id) !== String(runId)) { throw new Error("运行概况身份不匹配"); }
       commitRunSelection(runId, previousRunId);
       state.activeRun = selectedRun;
       state.structureHydrationStale = false;
-      resetEventStream(runId, selectedEvents, results[1]);
+      resetEventStream(runId);
+      state.workspaceVersions = {};
+      state.workspaceErrors = {};
+      state.trainingAssetDetails = {};
+      if (previousRunId !== runId) { state.pageOffset = 0; }
       syncSelectedRunAlerts(state.activeRun, state.events);
       state.showAllEvents = false;
       state.runs = state.runs.map(function (run) { return run.id === runId ? state.activeRun : run; });
       syncCandidateSelection(state.activeRun);
       state.loadState = "ready";
       state.lastUpdated = new Date().toISOString();
-      loadSelectedDataset(0);
-      loadCandidateSamples(0, {force: true});
+      ensureWorkspaceData();
       if (state.activeRun && typeof startRunMonitor === "function") { startRunMonitor(state.activeRun.id); }
       if (notify) { showToast("已切换进化运行。" ); }
       return true;
     }).catch(function (error) {
       if (requestId !== state.runReadRequest || epoch !== state.viewEpoch) { return false; }
-      state.commandError = "无法读取进化运行：" + errorMessage(error);
-      showToast(state.commandError);
+      state.runOverviewError = "无法读取进化运行：" + errorMessage(error);
+      if (!background) { showToast(state.runOverviewError); }
       if (state.activeRun && String(state.activeRun.status || "").toLowerCase() === "running" && typeof startRunMonitor === "function") {
         startRunMonitor(state.activeRun.id);
       }
       return false;
     }).finally(function () {
-      if (epoch === state.viewEpoch) { state.busy = false; state.pendingAction = null; renderAll(); }
+      if (epoch === state.viewEpoch && requestId === state.runReadRequest) {
+        state.runOverviewLoading = null;
+        if (!background) { state.busy = false; state.pendingAction = null; }
+        renderAll();
+      }
     });
   }
 
@@ -166,30 +280,28 @@
       renderAll();
       return Promise.resolve(false);
     }
+    var previousValue = state.showArchivedRuns;
     state.showArchivedRuns = nextValue;
-    if (!nextValue) {
-      state.runs = state.runs.filter(function (run) { return !run.archived; });
-      var selectionChanged = reconcileVisibleRunSelection();
-      renderAll();
-      return selectionChanged && state.activeRun
-        ? selectRun(state.activeRun.id, false)
-        : Promise.resolve(true);
-    }
 
     var currentRunId = state.activeRun && state.activeRun.id;
     state.busy = true;
     state.pendingAction = "run-history";
     renderAll();
     return request(runsListPath(), { timeout: dataRequestTimeout }).then(function (data) {
-      state.runs = listFrom(data, "runs").map(normalizeRun).sort(function (left, right) {
+      state.runs = listFrom(data, "runs").map(normalizeRun).filter(function (run) { return nextValue || !run.archived; }).sort(function (left, right) {
         var leftTime = Date.parse(left.updated_at || left.created_at || "") || 0;
         var rightTime = Date.parse(right.updated_at || right.created_at || "") || 0;
         return rightTime - leftTime;
       });
+      state.runListCursor = data && data.next_cursor || null;
       state.archivedRunCount = Math.max(0, Number(data && data.archived_count || 0));
       var current = state.runs.find(function (run) { return run.id === currentRunId; });
       if (current) {
-        state.activeRun = current;
+        // Summary pages must not discard the selected run's hydrated details.
+        if (state.activeRun && state.activeRun.id === current.id) {
+          state.activeRun.archived = current.archived;
+          state.runs = state.runs.map(function (run) { return run.id === current.id ? state.activeRun : run; });
+        } else { state.activeRun = current; }
         state.busy = false;
         state.pendingAction = null;
         renderAll();
@@ -202,7 +314,7 @@
       renderAll();
       return state.activeRun ? selectRun(state.activeRun.id, false) : true;
     }).catch(function (error) {
-      state.showArchivedRuns = false;
+      state.showArchivedRuns = previousValue;
       state.busy = false;
       state.pendingAction = null;
       showToast("归档历史读取失败：" + errorMessage(error));
@@ -250,9 +362,13 @@
     return "";
   }
   function runnableDatasetItems() {
+    var trainingDatasets = ["agc_cucumber_2018", "agc_tomato_2019"];
     return (state.catalog.datasets || []).filter(function (item) {
       if (!item || item.available === false || item.runnable === false) { return false; }
+      if (!state.usingDemo && trainingDatasets.indexOf(itemId(item)) < 0) { return false; }
       return !item.readiness || item.readiness.ready !== false;
+    }).sort(function (left, right) {
+      return trainingDatasets.indexOf(itemId(left)) - trainingDatasets.indexOf(itemId(right));
     });
   }
   function datasetEpisodes(dataset) {
@@ -343,7 +459,6 @@
   function populateCatalogControls() {
     populateSelect("#domain-pack", state.catalog.domain_packs, "没有可用的领域模型包");
     populateSelect("#dataset-id", runnableDatasetItems(), "没有可运行的训练数据集");
-    populateSelect("#prediction-model-id", state.catalog.prediction_models, "没有可用的预测模型");
     populateSelect("#strategy-id", state.catalog.strategies, "没有可用的进化策略");
     populateSelect("#evaluator-id", state.catalog.evaluators, "没有可用的评测器");
     var policyItems = autonomousModelItems();
@@ -396,45 +511,13 @@
       $("#domain-pack").value = domainPackId;
     }
     var datasetId = itemId(dataset);
-    var selectedPredictor = selectedCatalogItem("prediction_models", "#prediction-model-id");
-    var predictor = selectedPredictor && (!Array.isArray(selectedPredictor.dataset_ids) || selectedPredictor.dataset_ids.indexOf(datasetId) >= 0) ? selectedPredictor : state.catalog.prediction_models.find(function (item) {
-      return !Array.isArray(item.dataset_ids) || item.dataset_ids.indexOf(datasetId) >= 0;
-    });
-    if (predictor) { $("#prediction-model-id").value = itemId(predictor); }
-    alignPredictionBinding();
-  }
-  function alignPredictionBinding() {
-    var dataset = selectedCatalogItem("datasets", "#dataset-id");
-    var predictor = selectedCatalogItem("prediction_models", "#prediction-model-id");
-    if (!dataset || !predictor) { return; }
-    var datasetId = itemId(dataset);
-    var predictorId = itemId(predictor);
-    var current = selectedCatalogItem("evaluators", "#evaluator-id");
-    var compatible = function (item) {
-      return (!Array.isArray(item.dataset_ids) || item.dataset_ids.indexOf(datasetId) >= 0) &&
-        (!Array.isArray(item.prediction_model_ids) || item.prediction_model_ids.indexOf(predictorId) >= 0);
-    };
-    var defaultEvaluatorId = datasetId === "generated-toy-series@1"
-      ? "toy_time_forward@1"
-      : "greenhouse_multihorizon_time_forward@2";
+    var evaluatorId = datasetId === "generated-toy-series@1" && state.usingDemo
+      ? "toy_time_forward@1" : state.catalog.runtime_evaluator_id;
     var evaluator = state.catalog.evaluators.find(function (item) {
-      return itemId(item) === defaultEvaluatorId && compatible(item);
-    }) || (current && compatible(current) ? current : state.catalog.evaluators.find(compatible));
-    if (evaluator) { $("#evaluator-id").value = itemId(evaluator); }
-  }
-  function alignEvaluatorBinding() {
-    var evaluator = selectedCatalogItem("evaluators", "#evaluator-id");
-    var dataset = selectedCatalogItem("datasets", "#dataset-id");
-    if (!evaluator || !dataset) { return; }
-    var datasetId = itemId(dataset);
-    var allowed = Array.isArray(evaluator.prediction_model_ids) ? evaluator.prediction_model_ids : [];
-    var current = selectedCatalogItem("prediction_models", "#prediction-model-id");
-    if (current && (!allowed.length || allowed.indexOf(itemId(current)) >= 0)) { return; }
-    var predictor = state.catalog.prediction_models.find(function (item) {
-      return (!allowed.length || allowed.indexOf(itemId(item)) >= 0) &&
-        (!Array.isArray(item.dataset_ids) || item.dataset_ids.indexOf(datasetId) >= 0);
+      return itemId(item) === evaluatorId && item.available !== false
+        && (!Array.isArray(item.dataset_ids) || item.dataset_ids.indexOf(datasetId) >= 0);
     });
-    if (predictor) { $("#prediction-model-id").value = itemId(predictor); }
+    $("#evaluator-id").value = evaluator ? itemId(evaluator) : "";
   }
   function alignStrategyModel() {
     var policyItems = autonomousModelItems().filter(function (item) { return modelSupportsRole(item, "propose"); });
@@ -491,25 +574,34 @@
   }
   function updateSelectionHelp() {
     setHelp("#domain-pack-help", selectedCatalogItem("domain_packs", "#domain-pack"), "由所选训练数据集自动推导知识检索范围、科学约束和数据适配器。");
-    setHelp("#dataset-help", selectedCatalogItem("datasets", "#dataset-id"), "仅使用服务端确认可运行的数据集；数据集同时决定研究领域和授权评测边界。");
+    setHelp("#dataset-help", selectedCatalogItem("datasets", "#dataset-id"), "当前训练支持 2018 黄瓜和 2019 番茄数据集；数据集自动匹配研究领域和授权评测边界。");
     populateEpisodeControl($("#episode-id").value);
-    setHelp("#prediction-model-help", selectedCatalogItem("prediction_models", "#prediction-model-id"), "由策略模型提出，宿主从已登记预测模型中校验采用。");
     setHelp("#strategy-help", selectedCatalogItem("strategies", "#strategy-id"), "策略模型只能在宿主注册表提供的有界策略和参数空间内提出方案。");
     setHelp("#evaluator-help", selectedCatalogItem("evaluators", "#evaluator-id"), "由系统依据数据和候选产物自动绑定。");
     setModelHelp("#policy-model-help", selectedModelCatalogItem("#policy-model-id"), "负责查找资料、制定研究计划并提出允许范围内的修改。");
     setModelHelp("#judge-model-help", selectedModelCatalogItem("#judge-model-id"), "独立检查预测效果、科学约束和版本选择结果。");
     alignDomainDatasetBinding();
     updateOptimizationScheduleBoundary();
-    updateParameterOverrideHelp();
     renderReadiness();
+  }
+
+  function predictionBindingsReady() {
+    var datasetId = $("#dataset-id").value;
+    var evaluator = selectedCatalogItem("evaluators", "#evaluator-id");
+    if (!evaluator || evaluator.available === false || (evaluator.readiness && evaluator.readiness.ready === false)) { return false; }
+    var ids = evaluator.prediction_model_ids || [];
+    return state.catalog.prediction_models.some(function (item) {
+      return ids.indexOf(itemId(item)) >= 0 && item.available !== false
+        && (!item.readiness || item.readiness.ready !== false)
+        && (!Array.isArray(item.dataset_ids) || item.dataset_ids.indexOf(datasetId) >= 0);
+    });
   }
 
   function readiness() {
     var availableDatasets = runnableDatasetItems();
     var configuredModels = autonomousModelItems().filter(function (item) { return item.directory_available !== false && item.configured !== false && item.credential_configured !== false; });
     var catalogReady = availableDatasets.length && state.catalog.domain_packs.length && configuredModels.length;
-    // The visible data boundary and two configured API roles are user
-    // inputs.  The research domain and internal components are derived.
+    // Data and model roles are chosen here; prediction methods are chosen during research.
     var selections = ["#dataset-id", "#policy-model-id", "#judge-model-id", "#max-generations", "#candidates-per-generation", "#max-candidates", "#formal-origin-count", "#local-batch-origin-count", "#max-local-edits-per-batch", "#selection-holdout-origin-count"].every(function (selector) { return Boolean($(selector).value); });
     var sampleAgentBatchSize = Number($("#sample-agent-batch-size").value);
     var candidateConcurrency = Number($("#candidate-concurrency").value);
@@ -519,7 +611,7 @@
     try { schedule = optimizationScheduleFromControls(); } catch (_error) { scheduleReady = false; }
     var executionParametersReady = Number($("#candidates-per-generation").value) === 4
       && Number.isInteger(candidateConcurrency) && candidateConcurrency >= 1 && candidateConcurrency <= 8
-      && Number.isInteger(sampleAgentBatchSize) && sampleAgentBatchSize >= 1 && sampleAgentBatchSize <= 128
+      && Number.isInteger(sampleAgentBatchSize) && sampleAgentBatchSize === 9
       && Number.isInteger(sampleConcurrency) && sampleConcurrency >= 1 && sampleConcurrency <= sampleConcurrencyMaximum;
     var separated = $("#policy-model-id").value && $("#judge-model-id").value && $("#policy-model-id").value !== $("#judge-model-id").value;
     var dshReady = (state.connection === "online" || state.usingDemo) && hasCapability("evolution.projection.read");
@@ -535,7 +627,7 @@
     var reviewRoleCatalogReady = state.usingDemo || dshModelRoleCount("review", false) > 0 || Boolean(selectedJudge && selectedJudge.local_model === true);
     var policyConnectionReady = modelSupportsRole(selectedPolicy, "propose") && modelCredentialReady(selectedPolicy) && (state.usingDemo || policyApiSelected);
     var judgeConnectionReady = modelSupportsRole(selectedJudge, "judge") && modelCredentialReady(selectedJudge) && (state.usingDemo || judgeApiSelected);
-    var autoBindingsReady = $("#autonomous-mode").value === "true" || Boolean($("#episode-id").value && $("#strategy-id").value && $("#prediction-model-id").value && $("#evaluator-id").value);
+    var autoBindingsReady = predictionBindingsReady();
     var derivedDomain = selectedDataset && (selectedDataset.domain_pack_id || selectedDataset.domain_id || selectedDataset.domain);
     var domainDataMatch = Boolean(derivedDomain) && derivedDomain === $("#domain-pack").value && derivedDomain === $("#research-domain-id").value;
     var budget = candidateBudgetStatus();
@@ -562,7 +654,7 @@
       { label: "所选训练数据集可运行", ready: datasetReady },
       { label: "训练序列已由数据集自动冻结", ready: episodeReady },
       { label: "研究领域已由数据集自动推导", ready: domainDataMatch },
-      { label: "预测模型、进化策略与评测器将由模型自动确定", ready: autoBindingsReady },
+      { label: "运行时预测工具目录与统一评测规则已就绪", ready: autoBindingsReady },
       { label: "策略模型职责已在 DSH 目录登记", ready: strategyRoleCatalogReady },
       { label: "独立评审职责已在 DSH 目录登记", ready: reviewRoleCatalogReady },
       { label: "策略模型 API 已安全配置", ready: policyConnectionReady },
@@ -579,6 +671,7 @@
     var available = formatNumber(capacity.available_source_origins == null ? capacity.available_eligible_origins : capacity.available_source_origins);
     var maximum = formatNumber(capacity.max_feasible_generations);
     if (capacity.sufficient !== true) {
+      if (capacity.rejection_reason) { return String(capacity.rejection_reason); }
       return "可用数据量不足（需要 " + required + " / 可用 " + available + "；最多 " + maximum + " 轮）";
     }
     var reused = Number(capacity.reused_origin_occurrences || 0);
@@ -603,6 +696,16 @@
   function renderEvolutionCapacityState() {
     if (typeof renderReadiness === "function") { renderReadiness(); }
     if (typeof renderParameters === "function") { renderParameters(); }
+  }
+
+  function capacityVerificationPending() {
+    if (state.usingDemo) { return false; }
+    var planned = evolutionCapacityRequest();
+    var body = planned.body;
+    var valid = Boolean(body.dataset_id && body.episode_id && body.optimization_schedule
+      && Number.isInteger(body.planned_generations) && body.planned_generations > 0);
+    return valid && (state.cohortCapacityLoading || !state.cohortCapacityError
+      && (!state.cohortCapacityReport || state.cohortCapacitySignature !== planned.signature));
   }
 
   function refreshEvolutionCapacity() {
@@ -656,6 +759,8 @@
 
   function scheduleEvolutionCapacityRefresh() {
     if (state.cohortCapacityTimer != null) { window.clearTimeout(state.cohortCapacityTimer); }
+    state.cohortCapacityError = null;
+    renderEvolutionCapacityState();
     state.cohortCapacityTimer = window.setTimeout(function () {
       state.cohortCapacityTimer = null;
       refreshEvolutionCapacity();
@@ -673,6 +778,7 @@
     return {
       dataset_id: String(datasetId), episode_id: String(episodeId), source: "active_run", run_id: run.id,
       dataset_digest: dataset.digest || run.dataset_digest || null,
+      data_protocol_digest: dataset.data_protocol_digest || null,
       split_manifest_digest: dataset.split_manifest_digest || null
     };
   }
@@ -686,5 +792,24 @@
     return activeRunDatasetContext() || selectedDatasetContext();
   }
   function sameDatasetContext(left, right) {
-    return Boolean(left && right) && left.dataset_id === right.dataset_id && left.episode_id === right.episode_id && left.run_id === right.run_id && left.dataset_digest === right.dataset_digest && left.split_manifest_digest === right.split_manifest_digest;
+    return Boolean(left && right) && left.dataset_id === right.dataset_id && left.episode_id === right.episode_id && left.run_id === right.run_id && left.dataset_digest === right.dataset_digest && left.split_manifest_digest === right.split_manifest_digest && left.data_protocol_digest === right.data_protocol_digest;
+  }
+
+  function loadOlderRuns() {
+    if (!state.runListCursor || state.loadingOlderRuns || state.refreshing || state.busy || state.usingDemo) { return Promise.resolve(false); }
+    var epoch = state.viewEpoch;
+    var cursor = state.runListCursor;
+    var includeArchived = state.showArchivedRuns;
+    state.loadingOlderRuns = true;
+    renderContext();
+    return request(runsListPath(cursor), {timeout: dataRequestTimeout}).then(function (data) {
+      if (epoch !== state.viewEpoch || includeArchived !== state.showArchivedRuns) { return false; }
+      var known = new Set(state.runs.map(function (run) { return run.id; }));
+      listFrom(data, "runs").map(normalizeRun).forEach(function (run) {
+        if (!known.has(run.id)) { state.runs.push(run); known.add(run.id); }
+      });
+      state.runListCursor = data.next_cursor || null;
+      return true;
+    }).catch(function (error) { showToast("历史运行读取失败：" + errorMessage(error)); return false; })
+      .finally(function () { state.loadingOlderRuns = false; renderContext(); });
   }

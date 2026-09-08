@@ -22,9 +22,10 @@ from uuid import uuid4
 
 from .models import canonical_json, digest, utc_now
 from .redaction import public_error_summary
+from .immutable import freeze_json
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _RUN_LIFECYCLE_KINDS_SQL = """
     'RunCreated',
@@ -53,6 +54,9 @@ class Event:
     kind: str
     payload: dict[str, Any]
     created_at: str
+
+    def __post_init__(self):
+        object.__setattr__(self, "payload", freeze_json(self.payload))
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,11 +117,39 @@ class EventLedger:
                 "CREATE INDEX IF NOT EXISTS idx_evolution_events_run_seq "
                 "ON evolution_events(run_id, seq)"
             )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_evolution_run_created_seq "
+                "ON evolution_events(seq DESC,run_id) WHERE kind='RunCreated'"
+            )
             # DSH reservation and settlement lookups are scoped by event kind;
             # keep those queries independent of the size of the run history.
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_evolution_events_run_kind_seq "
                 "ON evolution_events(run_id, kind, seq DESC)"
+            )
+            # Usage callbacks must read only their reservation/session history.
+            # Reading every child on each cumulative update causes CAS retries
+            # to amplify work as the run grows and concurrent children settle.
+            for name, expression, predicate in (
+                ("launch_reservation", "$.launch.reservation_id", "kind='DshChildLaunchReserved'"),
+                ("usage_reservation", "$.identity.child_reservation_id", "kind IN ('DshSessionUsageRecorded','DshStructuredResultAccepted')"),
+                ("usage_session", "$.identity.session_id", "kind IN ('DshSessionUsageRecorded','DshStructuredResultAccepted')"),
+            ):
+                self._connection.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_dsh_{name} "
+                    f"ON evolution_events(run_id, json_extract(payload_json, '{expression}'), seq) "
+                    f"WHERE {predicate}"
+                )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dsh_event_key "
+                "ON evolution_events(run_id, kind, json_extract(payload_json, '$.idempotency_key'), seq)"
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dsh_retrieval_stage "
+                "ON evolution_events(run_id, json_extract(payload_json, '$.identity.stage'), "
+                "json_extract(payload_json, '$.identity.stage_attempt'), "
+                "json_extract(payload_json, '$.identity.idempotency_key'), seq) "
+                "WHERE kind='DshRetrievalExecuted'"
             )
             # Lifecycle checks run once per sample admission/control decision.
             # Keep that path independent of run history size: the partial index
@@ -723,12 +755,33 @@ class EventLedger:
                 ).fetchone()
         return self._row_to_event(row) if row is not None else None
 
+    def run_exists(self, run_id: str) -> bool:
+        """Check admission without decoding or replaying the event history."""
+        with self._lock:
+            return self._connection.execute(
+                "SELECT 1 FROM evolution_events WHERE run_id=? LIMIT 1",
+                (self._required_text(run_id, "run_id"),),
+            ).fetchone() is not None
+
+    def retrieval_stage_count(self, identity: Mapping[str, Any]) -> int:
+        """Count a bounded retrieval capability using its frozen stage identity."""
+        with self._lock:
+            return int(self._connection.execute(
+                "SELECT COUNT(*) FROM evolution_events WHERE run_id=? "
+                "AND kind='DshRetrievalExecuted' "
+                "AND json_extract(payload_json, '$.identity.stage')=? "
+                "AND json_extract(payload_json, '$.identity.stage_attempt')=? "
+                "AND json_extract(payload_json, '$.identity.idempotency_key')=?",
+                tuple(identity[key] for key in ("run_id", "stage", "stage_attempt", "idempotency_key")),
+            ).fetchone()[0])
+
     def events_by_kind(
         self,
         run_id: str,
         kind: str,
         *,
         after_seq: int = 0,
+        idempotency_key: str | None = None,
         limit: int | None = None,
     ) -> tuple[Event, ...]:
         """Read only events of one kind from a run, optionally bounded."""
@@ -748,11 +801,49 @@ class EventLedger:
             ORDER BY seq
         """
         params: list[object] = [run_id, kind, after_seq]
+        if idempotency_key is not None:
+            query = query.replace("ORDER BY seq", "AND json_extract(payload_json, '$.idempotency_key') = ? ORDER BY seq")
+            params.append(idempotency_key)
         if limit is not None:
             query += " LIMIT ?"
             params.append(limit)
         with self._lock:
             rows = self._connection.execute(query, tuple(params)).fetchall()
+        return tuple(self._row_to_event(row) for row in rows)
+
+    def dsh_usage_binding_events(
+        self, run_id: str, reservation_id: str, session_id: str
+    ) -> tuple[Event, ...]:
+        """Read the complete evidence relevant to one usage identity.
+
+        Include both identity axes: checking only the reservation would miss a
+        session that was already bound to a different reservation. UNION keeps
+        shared matches unique; no limit may truncate cumulative constraints.
+        """
+        run_id = self._required_text(run_id, "run_id")
+        reservation_id = self._required_text(reservation_id, "reservation_id")
+        session_id = self._required_text(session_id, "session_id")
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT seq, event_id, run_id, kind, payload_json, created_at
+                FROM evolution_events
+                WHERE run_id=? AND kind='DshChildLaunchReserved'
+                  AND json_extract(payload_json, '$.launch.reservation_id')=?
+                UNION
+                SELECT seq, event_id, run_id, kind, payload_json, created_at
+                FROM evolution_events
+                WHERE run_id=? AND kind IN ('DshSessionUsageRecorded','DshStructuredResultAccepted')
+                  AND json_extract(payload_json, '$.identity.child_reservation_id')=?
+                UNION
+                SELECT seq, event_id, run_id, kind, payload_json, created_at
+                FROM evolution_events
+                WHERE run_id=? AND kind IN ('DshSessionUsageRecorded','DshStructuredResultAccepted')
+                  AND json_extract(payload_json, '$.identity.session_id')=?
+                ORDER BY seq
+                """,
+                (run_id, reservation_id, run_id, reservation_id, run_id, session_id),
+            ).fetchall()
         return tuple(self._row_to_event(row) for row in rows)
 
     def latest_event_by_kind(self, run_id: str, kind: str) -> Event | None:
@@ -860,6 +951,79 @@ class EventLedger:
                     """
                 ).fetchall()
         return tuple(str(row["run_id"]) for row in rows)
+
+    def checkpoint_boundary_matches(self, first: Event, last: Event) -> bool:
+        """Bind a disposable checkpoint to committed append-only event boundaries."""
+        if first.run_id != last.run_id:
+            return False
+        with self._lock:
+            if self._connection.in_transaction:
+                return False
+            for event in (first, last):
+                row = self._connection.execute(
+                    "SELECT event_id,payload_json,kind FROM evolution_events WHERE run_id=? AND seq=?",
+                    (event.run_id, event.seq),
+                ).fetchone()
+                if row is None or row['event_id'] != event.event_id or row['kind'] != event.kind or json.loads(row['payload_json']) != event.payload:
+                    return False
+            return True
+
+    def run_page(self, *, include_archived: bool = False, limit: int = 50,
+                 before: int | None = None) -> tuple[tuple[str, ...], int | None]:
+        """Newest-created keyset page, with a bounded payload and stable cursor."""
+        if type(include_archived) is not bool or type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("run page limit must be an integer between 1 and 200")
+        if before is not None and (type(before) is not int or before <= 0):
+            raise ValueError("run cursor must be a positive integer")
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT e.run_id,e.seq FROM evolution_events e WHERE e.kind='RunCreated' "
+                "AND (? IS NULL OR e.seq < ?) AND (? OR NOT EXISTS "
+                "(SELECT 1 FROM run_archives a WHERE a.run_id=e.run_id)) "
+                "ORDER BY e.seq DESC LIMIT ?", (before, before, include_archived, limit + 1)
+            ).fetchall()
+        page = rows[:limit]
+        return tuple(str(row['run_id']) for row in page), int(page[-1]['seq']) if len(rows) > limit else None
+
+    def run_index(self, *, include_archived: bool = False, limit: int = 50,
+                  before: int | None = None) -> tuple[tuple[dict[str, Any], ...], int | None]:
+        """Read picker facts from indexed events, without replay or sample decoding.
+
+        A single SELECT binds each row to one SQLite snapshot. Scientific
+        outcomes and evidence intentionally belong to the selected-run view.
+        """
+        if type(include_archived) is not bool or type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("run page limit must be an integer between 1 and 200")
+        if before is not None and (type(before) is not int or before <= 0):
+            raise ValueError("run cursor must be a positive integer")
+        with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT c.run_id, c.seq AS created_seq, c.created_at,
+                    json_extract(c.payload_json, '$.task_manifest') AS task_manifest_json,
+                    last.seq AS projection_revision, last.created_at AS updated_at,
+                    (SELECT kind FROM evolution_events l WHERE l.run_id=c.run_id
+                        AND l.kind IN ({_RUN_LIFECYCLE_KINDS_SQL}) ORDER BY l.seq DESC LIMIT 1) AS lifecycle_kind,
+                    COALESCE((SELECT json_extract(g.payload_json, '$.generation')
+                        FROM evolution_events g WHERE g.run_id=c.run_id AND g.kind='GenerationAdvanced'
+                        ORDER BY g.seq DESC LIMIT 1), 0) AS generation,
+                    (SELECT COUNT(*) FROM evolution_events n WHERE n.run_id=c.run_id
+                        AND n.kind='CandidateSpawned'
+                        AND COALESCE(json_extract(n.payload_json, '$.candidate.role'), 'search')='search') AS candidates_count,
+                    EXISTS(SELECT 1 FROM evolution_events n WHERE n.run_id=c.run_id AND n.kind IN
+                        ('GenerationBatchStarted','GenerationSearchPlanned','GenerationKnowledgeRetrieved',
+                         'ProposalSubmitted','CandidateSpawned','EvolutionStageRecorded') LIMIT 1) AS has_evolution_progress,
+                    (SELECT json_group_array(DISTINCT json_extract(e.payload_json, '$.evaluation.partition'))
+                        FROM evolution_events e WHERE e.run_id=c.run_id AND e.kind='EvaluationRecorded') AS partitions_json
+                FROM evolution_events c
+                JOIN evolution_events last ON last.seq=(SELECT MAX(seq) FROM evolution_events WHERE run_id=c.run_id)
+                WHERE c.kind='RunCreated' AND (? IS NULL OR c.seq < ?)
+                    AND (? OR NOT EXISTS (SELECT 1 FROM run_archives a WHERE a.run_id=c.run_id))
+                ORDER BY c.seq DESC LIMIT ?
+                """, (before, before, include_archived, limit + 1),
+            ).fetchall()
+        page = rows[:limit]
+        return tuple(dict(row) for row in page), int(page[-1]['created_seq']) if len(rows) > limit else None
 
     def archived_at(self, run_id: str) -> str | None:
         run_id = self._required_text(run_id, "run_id")

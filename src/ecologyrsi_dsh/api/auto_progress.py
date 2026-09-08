@@ -26,7 +26,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from queue import Empty, Queue
-from types import SimpleNamespace
 from typing import Any
 
 from ..core.errors import (
@@ -50,7 +49,7 @@ from ..evolution.schedule import (
 )
 from ..integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 from ..integrations.model_gateway import gateway_error_in_chain
-from .generation_execution import complete_if_budget_exhausted, execute_generation
+from ..application.generation_execution import complete_if_budget_exhausted, execute_generation
 
 _AUTO_PROGRESS_METADATA_KEY = "auto_progress"
 _DEFAULT_RETRY_LIMIT = 3
@@ -145,7 +144,11 @@ def _failure_diagnostics(
         "stage": str(stage or "generation")[:80],
         "work_unit_kind": "generation",
     }
-    if adaptive:
+    if stage in {"preflight", "search", "research", "reflection", "generation.judge"}:
+        # These stages precede or follow the sample scheduler. Zero screening
+        # records do not mean that a research failure happened in screening.
+        context["work_unit_kind"] = stage
+    elif adaptive:
         screening_count = sum(
             int(event.payload.get("generation", -1)) == generation
             for event in state.candidate_screening_events
@@ -237,6 +240,13 @@ def _failure_diagnostics(
     # Preserve stable codes only for concrete Host-owned exception classes.
     # Reading an arbitrary ``error_code`` attribute here would let an
     # untrusted provider exception choose the public terminal classification.
+    native_error = dsh_native_runtime_error_in_chain(exc)
+    if native_error is not None and native_error.error_code in {
+        "structured_child_tool_protocol_error", "structured_child_output_budget_exhausted",
+        "structured_result_missing", "structured_child_output_schema_invalid",
+    }:
+        context["failure_domain"] = "model_execution"
+        return native_error.error_code, context
     binding_drift = find_exception(exc, FrozenRuntimeBindingDriftError)
     if binding_drift is not None:
         return FrozenRuntimeBindingDriftError.error_code, context
@@ -1042,11 +1052,6 @@ class AutoProgressManager:
         """Execute one generation while holding only its per-run lock."""
 
         run_id, _expected_incarnation = work_item
-        # ``generation_execution`` deliberately depends on a tiny endpoint
-        # protocol (``endpoint.server``) shared with the HTTP mixin.  A simple
-        # namespace keeps that code path identical without constructing a fake
-        # BaseHTTPRequestHandler instance.
-        endpoint = SimpleNamespace(server=self.server)
         with self._state_lock:
             pending_gateway_retry = self._pending_gateway_retries.get(work_item)
         if pending_gateway_retry is not None:
@@ -1098,7 +1103,7 @@ class AutoProgressManager:
                     return False
                 attempt_anchor_seq = self._attempt_authority_seq(state)
                 try:
-                    state = complete_if_budget_exhausted(endpoint, run_id, state)
+                    state = complete_if_budget_exhausted(self.server, run_id, state)
                     if state.run.status is not RunStatus.RUNNING:
                         return False
                     # Explicit /advance requests validate the frozen dataset,
@@ -1205,10 +1210,10 @@ class AutoProgressManager:
                     == "top2_adaptive_epoch@1"
                 )
                 if adaptive_protocol:
-                    from .work_units import execute_next_adaptive_work_unit
+                    from ..application.work_units import execute_next_adaptive_work_unit
 
                     before_work_unit_seq = int(state.events[-1].seq)
-                    progressed = execute_next_adaptive_work_unit(endpoint, run_id)
+                    progressed = execute_next_adaptive_work_unit(self.server, run_id)
                     latest = self._state_for_work_item(work_item)
                     if _run_incarnation(latest) != work_item[1]:
                         raise _RunIncarnationChanged(run_id)
@@ -1225,7 +1230,7 @@ class AutoProgressManager:
                         )
                     return True
 
-                result = execute_generation(endpoint, run_id)
+                result = execute_generation(self.server, run_id)
                 latest = (
                     result
                     if getattr(getattr(result, "run", None), "status", None)
@@ -1892,6 +1897,19 @@ class AutoProgressManager:
             self._pending_gateway_retries.pop(work_item, None)
             self._clear_retry_cooldown_locked(work_item)
         return False
+
+    def abort_native_evaluation(self, run_id: str) -> None:
+        """Drain failed native work before candidate executors join siblings.
+
+        The generation owner retains responsibility for persisting RunFailed.
+        Reuse the control fence so concurrent user cancellation cannot race a
+        second remote control request.
+        """
+
+        with self.server.mutation_lock:
+            state = self.server.director.state(run_id)
+            quiescence = self._close_native_admission(state, action="cancel")
+        self._start_native_quiescence("cancel", quiescence)
 
     def _close_native_admission(
         self,

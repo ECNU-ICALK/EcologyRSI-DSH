@@ -14,6 +14,8 @@ import hashlib
 import json
 import math
 from typing import Any, Mapping, TypeVar
+from .immutable import freeze_json, thaw_json
+from .search_policy import guarded_search
 
 
 JsonObject = dict[str, Any]
@@ -61,13 +63,13 @@ def _integer(value: Any, name: str, *, minimum: int | None = None) -> int:
 
 def _mapping(value: Any, name: str) -> dict[str, Any]:
     if value is None:
-        return {}
+        return freeze_json({})
     if not isinstance(value, Mapping):
         raise TypeError(f"{name} must be a mapping")
     result = dict(value)
     # Validate once at the boundary.  This also rejects NaN/Infinity.
     canonical_json(result)
-    return result
+    return freeze_json(result)
 
 
 def _enum(value: Any, enum_type: type[_EnumT], name: str) -> _EnumT:
@@ -156,7 +158,7 @@ class TaskManifest:
         datasets = tuple(_text(item, "visible_datasets item") for item in self.visible_datasets)
         object.__setattr__(self, "visible_datasets", datasets)
         if isinstance(self.budget, Mapping):
-            budget = _mapping(self.budget, "budget")
+            budget = dict(_mapping(self.budget, "budget"))
             candidates_per_generation = budget.get("candidates_per_generation", 1)
             _integer(
                 candidates_per_generation,
@@ -196,11 +198,18 @@ class TaskManifest:
                 "max_candidates": self.budget,
                 "candidates_per_generation": 1,
             }
-        object.__setattr__(self, "budget", budget)
+        object.__setattr__(self, "budget", freeze_json(budget))
         object.__setattr__(self, "seed", _integer(self.seed, "seed"))
         object.__setattr__(self, "seed_policy", _text(self.seed_policy, "seed_policy"))
         object.__setattr__(self, "policy_version", _text(self.policy_version, "policy_version"))
         object.__setattr__(self, "metadata", _mapping(self.metadata, "metadata"))
+        guarded_search(self.metadata)
+        if "require_model_contract_preflight" in self.metadata and not isinstance(self.metadata["require_model_contract_preflight"], bool):
+            raise TypeError("require_model_contract_preflight must be a bool")
+        from .model_preflight import preflight_audit_required
+        preflight_audit_required(self.metadata)
+        from .model_execution_policy import research_execution_policy
+        research_execution_policy(self.metadata)
 
     @property
     def max_candidates(self) -> int:
@@ -243,11 +252,11 @@ class TaskManifest:
             "objective": self.objective,
             "domain_pack": self.domain_pack,
             "visible_datasets": list(self.visible_datasets),
-            "budget": dict(self.budget),
+            "budget": thaw_json(self.budget),
             "seed": self.seed,
             "seed_policy": self.seed_policy,
             "policy_version": self.policy_version,
-            "metadata": dict(self.metadata),
+            "metadata": thaw_json(self.metadata),
         }
 
     @classmethod
@@ -352,14 +361,14 @@ class Proposal:
             "run_id": self.run_id,
             "generation": self.generation,
             "title": self.title,
-            "changes": dict(self.changes),
+            "changes": thaw_json(self.changes),
             "parent_candidate_id": self.parent_candidate_id,
         }
         # Preserve historical proposal digests when no model-design trace is
         # present.  New autonomous proposals include the trace in their
         # identity so it is covered by the audit digest.
         if self.metadata:
-            result["metadata"] = dict(self.metadata)
+            result["metadata"] = thaw_json(self.metadata)
         return result
 
     @property
@@ -371,7 +380,7 @@ class Proposal:
             **self.identity_dict(),
             "proposal_id": self.proposal_id,
             "rationale": self.rationale,
-            "metadata": dict(self.metadata),
+            "metadata": thaw_json(self.metadata),
             "created_at": self.created_at,
         }
 
@@ -484,9 +493,9 @@ class ModelArtifact:
             "dataset_digest": self.dataset_digest,
             "training_partition": self.training_partition,
             "training_rows": self.training_rows,
-            "parameters": dict(self.parameters),
-            "learned_parameters": dict(self.learned_parameters),
-            "metrics": dict(self.metrics),
+            "parameters": thaw_json(self.parameters),
+            "learned_parameters": thaw_json(self.learned_parameters),
+            "metrics": thaw_json(self.metrics),
         }
 
     @property
@@ -549,7 +558,7 @@ class Evaluation:
         if self.evaluation_scope is not None:
             if not isinstance(self.evaluation_scope, Mapping):
                 raise TypeError("evaluation_scope must be a mapping")
-            scope = json.loads(canonical_json(dict(self.evaluation_scope)))
+            scope = json.loads(canonical_json(thaw_json(self.evaluation_scope)))
             if scope.get("run_id") != self.run_id:
                 raise ValueError("evaluation_scope run_id does not match evaluation")
             if scope.get("candidate_id") != self.candidate_id:
@@ -564,7 +573,7 @@ class Evaluation:
                 raise ValueError(
                     "evaluation_scope candidate_revision_id does not match evaluation"
                 )
-            object.__setattr__(self, "evaluation_scope", scope)
+            object.__setattr__(self, "evaluation_scope", freeze_json(scope))
         object.__setattr__(self, "created_at", _text(self.created_at, "created_at"))
 
     @property
@@ -580,13 +589,13 @@ class Evaluation:
             "candidate_id": self.candidate_id,
             "candidate_revision_id": self.candidate_revision_id,
             "evaluation_scope": (
-                dict(self.evaluation_scope)
+                thaw_json(self.evaluation_scope)
                 if self.evaluation_scope is not None
                 else None
             ),
             "score": self.score,
             "passed": self.passed,
-            "metrics": dict(self.metrics),
+            "metrics": thaw_json(self.metrics),
             "partition": self.partition,
             "evaluator_digest": self.evaluator_digest,
             "artifact_digest": self.artifact_digest,
@@ -634,7 +643,7 @@ class HumanIntervention:
             "kind": self.kind.value,
             "message": self.message,
             "created_by": self.created_by,
-            "parameter_overrides": dict(self.parameter_overrides),
+            "parameter_overrides": thaw_json(self.parameter_overrides),
             "target_candidate_id": self.target_candidate_id,
             "applied_proposal_id": self.applied_proposal_id,
             "created_at": self.created_at,

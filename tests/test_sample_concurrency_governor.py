@@ -4,7 +4,7 @@ import threading
 import time
 import unittest
 
-from ecologyrsi_dsh.api.sample_admission import RunSampleAdmission
+from ecologyrsi_dsh.execution.sample_admission import RunSampleAdmission
 from ecologyrsi_dsh.evaluators.sample_execution import _strict_origin_worker_count
 
 

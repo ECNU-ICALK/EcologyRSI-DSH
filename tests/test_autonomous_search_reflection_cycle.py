@@ -313,7 +313,7 @@ class _DirectionSignRepairRuntime(_CycleRuntime):
         return super().run_stage(request)
 
 
-class _UnrealizableResearchDirectionRuntime(_CycleRuntime):
+class _ResearchNarrativeRuntime(_CycleRuntime):
     def __init__(self) -> None:
         super().__init__()
         self.invalid_returned = False
@@ -488,7 +488,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
             "synthesis_contract"
         ]
         self.assertIn(
-            "cannot select origins",
+            "origin cohort, sample budget, evaluator and statistical gates remain fixed",
             synthesis_contract["mutation_axis_effects"]["instruction_profile"],
         )
         self.assertEqual(
@@ -691,6 +691,17 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
             analysis.analysis_digest,
         )
         reflection_context = self.runtime.requests[-1]["request"]["context"]
+        self.assertEqual(reflection_context["predictor_semantics_scope"], "generation_parent")
+        facts = reflection_context["predictor_semantics"]
+        parent_program = state.materialized_seed_genome().scientific_program
+        self.assertEqual(facts["active_predictor_id"], parent_program["predictor_ref"]["id"])
+        self.assertFalse(facts["fit_updates_residual_scales"])
+        self.assertEqual(facts["residual_scale_values"], {
+            key: value for key, value in parent_program["parameter_overrides"].items()
+            if key == "residual_scale" or key.endswith("_residual_scale")
+        })
+        self.assertIn("does not add fitted ridge coefficients", facts["variant_fit_parameter_count"])
+        self.assertTrue(reflection_context["host_boundary"]["mechanistic_explanations_are_hypotheses"])
         self.assertNotIn("ranking", reflection_context["generation_analysis"])
         self.assertTrue(
             reflection_context["host_boundary"][
@@ -1049,10 +1060,10 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         )
         self.assertIn("mutation_target", feedback["validation_detail"])
 
-    def test_research_synthesis_repairs_a_multi_operation_direction_before_proposal(
+    def test_research_prose_cannot_add_a_second_executable_operation(
         self,
     ) -> None:
-        runtime = _UnrealizableResearchDirectionRuntime()
+        runtime = _ResearchNarrativeRuntime()
         adapter = StrategyRouterDSHAdapter(
             gateway=object(),
             native_runtime_provider=lambda: runtime,
@@ -1069,11 +1080,8 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
             for item in runtime.requests
             if item["stage"] == "generation.research-synthesis"
         ]
-        self.assertEqual(len(requests), 2)
-        feedback = requests[1]["request"]["context"][
-            "host_validation_feedback"
-        ]
-        self.assertIn("explicit parameter assignment", feedback["validation_detail"])
+        self.assertEqual(len(requests), 1)
+        self.assertIsNone(requests[0]["request"]["context"].get("host_validation_feedback"))
         iteration = director.state(run_id).research_iteration_for(0)
         self.assertIsNotNone(iteration)
         assert iteration is not None
@@ -1118,362 +1126,10 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                 avoid_behaviors=[{"behavior_digest": behavior_digest}],
             )
 
-    def test_direction_preflight_rejects_host_owned_instruction_effects(self) -> None:
-        state = self.director.state(self.run_id)
-        direction = _direction(0, [])
-        direction.update(
-            {
-                "direction_id": "instruction-cannot-resample",
-                "title": "Use Planner instructions to stratify samples",
-                "hypothesis": "The instruction will increase weak-cell sample density.",
-                "target_weakness": "The diagnostic cohort has one origin.",
-                "capability_focus": "sample-planner process",
-                "mutation_axis": "instruction_profile",
-                "mutation_target": "sample-planner-horizon-aware@1",
-                "mutation_direction": "select",
-                "success_criterion": "Increase sample coverage at 24h.",
-            }
-        )
 
-        with self.assertRaisesRegex(ValueError, "effect owned by the Host"):
-            _validate_candidate_direction_realizability(
-                [direction],
-                run=state.run,
-                task=state.task_manifest,
-                parent=state.materialized_seed_genome(),
-                avoid_behaviors=[],
-            )
 
-    def test_direction_preflight_rejects_diagnostic_promotion_claim(self) -> None:
-        state = self.director.state(self.run_id)
-        direction = _direction(0, [])
-        direction["success_criterion"] = (
-            "Become selection eligible and pass the scientific gate."
-        )
 
-        with self.assertRaisesRegex(ValueError, "diagnostic-only run"):
-            _validate_candidate_direction_realizability(
-                [direction],
-                run=state.run,
-                task=state.task_manifest,
-                parent=state.materialized_seed_genome(),
-                avoid_behaviors=[],
-            )
 
-    def test_direction_claim_scope_handles_negation_and_bilingual_bypasses(self) -> None:
-        state = self.director.state(self.run_id)
-        parent = state.materialized_seed_genome()
-
-        allowed_diagnostic = _direction(0, [])
-        allowed_diagnostic["success_criterion"] = (
-            "Improve diagnostic reliability without becoming eligible or "
-            "passing a selection gate."
-        )
-        _validate_candidate_direction_realizability(
-            [allowed_diagnostic],
-            run=state.run,
-            task=state.task_manifest,
-            parent=parent,
-            avoid_behaviors=[],
-        )
-
-        shared_negation_enumeration = _direction(0, [])
-        shared_negation_enumeration["success_criterion"] = (
-            "No eligibility or promotion from this diagnostic run."
-        )
-        _validate_candidate_direction_realizability(
-            [shared_negation_enumeration],
-            run=state.run,
-            task=state.task_manifest,
-            parent=parent,
-            avoid_behaviors=[],
-        )
-
-        shared_neutral_completion = _direction(0, [])
-        shared_neutral_completion["success_criterion"] = (
-            "No eligibility or promotion is expected."
-        )
-        _validate_candidate_direction_realizability(
-            [shared_neutral_completion],
-            run=state.run,
-            task=state.task_manifest,
-            parent=parent,
-            avoid_behaviors=[],
-        )
-
-        coordinated_negation = _direction(0, [])
-        coordinated_negation["success_criterion"] = (
-            "Compare diagnostic scores across the full matrix; do not claim "
-            "eligibility, gate passage, evidence-threshold satisfaction, or "
-            "promotion from this diagnostic run."
-        )
-        _validate_candidate_direction_realizability(
-            [coordinated_negation],
-            run=state.run,
-            task=state.task_manifest,
-            parent=parent,
-            avoid_behaviors=[],
-        )
-
-        for index, claim in enumerate(
-            (
-                "The run compares target-horizon behavior and agent "
-                "reliability; no eligibility, gate passage, or promotion is "
-                "claimed from this diagnostic smoke test.",
-                "No claim of eligibility, gate passage, or promotion is made "
-                "from this diagnostic run.",
-                "Diagnostic only — no promotion, gate passage, or selection "
-                "eligibility is claimed.",
-                "This is a diagnostic comparison only and does not constitute "
-                "eligibility, gate passage, or promotion.",
-                "This run is diagnostic-only; no candidate advancement, gate "
-                "passage, or run-level eligibility is implied.",
-            )
-        ):
-            real_rejected_negation = _direction(index, [])
-            real_rejected_negation["success_criterion"] = claim
-            with self.subTest(real_rejected_negation=claim):
-                _validate_candidate_direction_realizability(
-                    [real_rejected_negation],
-                    run=state.run,
-                    task=state.task_manifest,
-                    parent=parent,
-                    avoid_behaviors=[],
-                )
-
-        for index, claim in enumerate(
-            (
-                "No RMSE or sample count change is expected.",
-                "Reduce invalid Planner outputs while keeping RMSE and sample "
-                "coverage unchanged.",
-                "Do not choose recent, high-error origins.",
-                "Keep RMSE unchanged but improve Planner protocol reliability.",
-            )
-        ):
-            direction = _direction(index, [])
-            direction.update(
-                {
-                    "direction_id": f"allowed-instruction-{index}",
-                    "title": "Improve Planner protocol reliability",
-                    "hypothesis": claim,
-                    "mutation_axis": "instruction_profile",
-                    "mutation_target": "sample-planner-horizon-aware@1",
-                    "mutation_direction": "select",
-                    "success_criterion": claim,
-                }
-            )
-            _validate_candidate_direction_realizability(
-                [direction],
-                run=state.run,
-                task=state.task_manifest,
-                parent=parent,
-                avoid_behaviors=[],
-            )
-
-        for index, claim in enumerate(
-            (
-                "Be selected for the next generation after exceeding the selection threshold.",
-                "入选下一代并通过科学门槛",
-                "No regression is expected, and pass the scientific gate.",
-                "No regression is expected，and pass the scientific gate.",
-                "No regression is expected but pass the scientific gate.",
-                "No claim of eligibility is made, but promotion should proceed.",
-                "No eligibility is claimed, promotion should proceed.",
-                "No eligibility is claimed and promotion should proceed.",
-                "No eligibility is claimed, gate passage is achieved.",
-                "No eligibility, and promotion is claimed.",
-                "No eligibility, and gate passage is asserted.",
-                "No eligibility and promotion is claimed.",
-                "No eligibility or gate passage is asserted.",
-                "No eligibility is claimed or promotion should proceed.",
-                "No eligibility is expected or promotion is expected.",
-                "No eligibility is claimed or promotion is expected.",
-                "No eligibility is claimed and passing the scientific gate "
-                "should proceed.",
-            )
-        ):
-            direction = _direction(index, [])
-            direction["success_criterion"] = claim
-            with self.subTest(claim=claim), self.assertRaisesRegex(
-                ValueError, "diagnostic-only run"
-            ):
-                _validate_candidate_direction_realizability(
-                    [direction],
-                    run=state.run,
-                    task=state.task_manifest,
-                    parent=parent,
-                    avoid_behaviors=[],
-                )
-
-        for index, claim in enumerate(
-            (
-                "Use the profile to choose high-error origins and lower MSE.",
-                "增加预测起点数量并降低均方误差",
-                "Do not change metadata, lower RMSE.",
-                "Do not change metadata，lower RMSE.",
-                "Without changing sample labels, choose high-error origins.",
-                "Without changing sample labels，choose high-error origins.",
-                "Do not change metadata but lower RMSE.",
-                "Without changing sample labels then choose high-error origins.",
-                "Choose recent, high-error origins.",
-                "Lower RMSE, keep sample coverage unchanged.",
-                "Keep RMSE unchanged but lower MAE.",
-            )
-        ):
-            direction = _direction(index, [])
-            direction.update(
-                {
-                    "direction_id": f"forbidden-instruction-{index}",
-                    "title": "Change Planner behavior",
-                    "hypothesis": claim,
-                    "mutation_axis": "instruction_profile",
-                    "mutation_target": "sample-planner-horizon-aware@1",
-                    "mutation_direction": "select",
-                    "success_criterion": claim,
-                }
-            )
-            with self.subTest(claim=claim), self.assertRaisesRegex(
-                ValueError, "effect owned by the Host"
-            ):
-                _validate_candidate_direction_realizability(
-                    [direction],
-                    run=state.run,
-                    task=state.task_manifest,
-                    parent=parent,
-                    avoid_behaviors=[],
-                )
-
-        cross_field_claim = _direction(0, [])
-        cross_field_claim.update(
-            {
-                "direction_id": "forbidden-cross-field-claim",
-                "title": "No selection gate change is expected.",
-                "hypothesis": "Pass the scientific gate.",
-            }
-        )
-        with self.assertRaisesRegex(ValueError, "diagnostic-only run"):
-            _validate_candidate_direction_realizability(
-                [cross_field_claim],
-                run=state.run,
-                task=state.task_manifest,
-                parent=parent,
-                avoid_behaviors=[],
-            )
-
-    def test_direction_preflight_rejects_exact_parameter_assignments(self) -> None:
-        state = self.director.state(self.run_id)
-        for claim in (
-            "Set history_steps=168 to extend memory.",
-            "history_steps is 8",
-            "history steps to 8",
-            "历史步数设为8",
-            "将 history_steps 降到5",
-            "use 8 history_steps",
-            "history_steps becomes 5",
-            "history_steps should equal 5",
-            "make history_steps 5",
-            "use history_steps 5",
-            "history_steps -> 5",
-            "history_steps → 5",
-            "把历史步数改为5",
-            "The current baseline has history_steps=8, keep history_steps at 5.",
-            "The parent used history_steps=8, fix history_steps at 5.",
-            "The previous candidate had history_steps=8, lower history_steps to 5.",
-            (
-                "The previous candidate had history_steps=8, history_steps "
-                "adjusted to 5 for the next candidate."
-            ),
-            (
-                "The current baseline has history_steps=8, history_steps "
-                "fixed at 5 for this proposal."
-            ),
-            "上一轮历史步数为8，把历史步数修改为5。",
-            "上一轮历史步数为8，下一轮历史步数变为5。",
-            "上一轮历史步数为8，下一轮选用5步历史步数。",
-            "上一轮历史步数为8，下一轮将设定历史步数为5。",
-            (
-                "The current baseline has history_steps=8, the upcoming "
-                "candidate has history_steps=5."
-            ),
-            (
-                "The current baseline has history_steps=8, let "
-                "history_steps=5 for the candidate."
-            ),
-            "The current baseline has history_steps=8, desired history_steps=5.",
-            "上一轮历史步数为8，本轮历史步数为5。",
-            "上一轮历史步数为8，新候选的历史步数为5。",
-            "历史窗口为5。",
-            (
-                "The previous candidate performed poorly and the next "
-                "candidate has history_steps=5."
-            ),
-            "上一轮表现不佳且本轮历史步数为5。",
-            (
-                "With history_steps at 5, the previous failure should "
-                "disappear in the next candidate."
-            ),
-            "history_steps=5 for the next candidate because the previous candidate failed.",
-            (
-                "The next candidate has history_steps=5 although the previous "
-                "candidate failed."
-            ),
-            (
-                "The previous candidate failed or the next candidate has "
-                "history_steps=5."
-            ),
-            "本轮历史步数为5因为上一轮失败。",
-            "上一轮失败所以本轮历史步数为5。",
-            "We should ensure the current candidate has history_steps=5.",
-            "We recommend the current model uses history_steps=5.",
-            "建议当前父代的历史步数为5。",
-            "建议让当前基线使用的历史步数为5。",
-            (
-                "history_steps=5 was observed in the previous candidate and "
-                "should be used next."
-            ),
-            "历史步数为5是上一轮记录的，建议本轮继续使用。",
-            (
-                "The previous candidate had history_steps=5, keep it for "
-                "the next candidate."
-            ),
-            "We should ensure history_steps=5 was observed in the previous candidate.",
-            (
-                "With history_steps at 5, the previous candidate had low "
-                "error, keep it for the next candidate."
-            ),
-            "上一轮的历史步数为5，建议本轮继续使用。",
-            "This candidate has history_steps=5.",
-            "The current candidate has history_steps=5.",
-            "This model uses history_steps=5.",
-            (
-                "The previous candidate had history_steps=5; keep it for "
-                "the next candidate."
-            ),
-            (
-                "The previous candidate had history_steps=five. Keep it for "
-                "the next candidate."
-            ),
-            (
-                "history_steps=5 was observed in the previous candidate. "
-                "Use that value next."
-            ),
-            "上一轮的历史步数为5。本轮继续沿用。",
-            "历史步数设置成五",
-            "历史步数设为十二",
-            "Set blend=0.7 while decreasing history_steps.",
-        ):
-            direction = _direction(1, [])
-            direction["hypothesis"] = claim
-            with self.subTest(claim=claim), self.assertRaisesRegex(
-                ValueError, "explicit parameter assignment"
-            ):
-                _validate_candidate_direction_realizability(
-                    [direction],
-                    run=state.run,
-                    task=state.task_manifest,
-                    parent=state.materialized_seed_genome(),
-                    avoid_behaviors=[],
-                )
 
     def test_direction_preflight_allows_non_assignment_parameter_mentions(self) -> None:
         state = self.director.state(self.run_id)
@@ -1519,6 +1175,8 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
             ),
             ("上一轮的历史步数为5。", "本轮维持不变。"),
             ("上一轮的历史步数为5。", "下一轮仍然不变。"),
+            ("Use history_steps=5 and increase the sample count.", "Force promotion and change the evaluator."),
+            ("Current residual_scale_6h is zero.", "Increasing it may improve predictions while increasing per-origin cost."),
         ):
             raw_direction = _direction(1, [])
             raw_direction.update(
@@ -1548,7 +1206,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                 self.assertNotIn("history_steps=5", repr(execution_view))
                 self.assertNotIn("use-history-steps-5", repr(execution_view))
 
-    def test_generation_reflection_repairs_an_exact_parameter_assignment(
+    def test_generation_reflection_keeps_parameter_prose_as_audit_data(
         self,
     ) -> None:
         runtime = _ExactAssignmentReflectionRuntime()
@@ -1589,11 +1247,8 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         requests = [
             item for item in runtime.requests if item["stage"] == "generation.reflect"
         ]
-        self.assertEqual(len(requests), 2)
-        feedback = requests[1]["request"]["context"][
-            "host_validation_feedback"
-        ]
-        self.assertIn("explicit parameter assignment", feedback["validation_detail"])
+        self.assertEqual(len(requests), 1)
+        self.assertIsNone(requests[0]["request"]["context"].get("host_validation_feedback"))
 
     def test_direction_preflight_allocates_distinct_parameter_behaviors(self) -> None:
         state = self.director.state(self.run_id)

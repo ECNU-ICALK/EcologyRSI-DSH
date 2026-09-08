@@ -1,0 +1,71 @@
+{
+  "schema_version": "ecologyrsi-dsh.sealed-native-host-shadow/1",
+  "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+  "dataset_digest": "044e11d56fbea80ec4770aa9695d565daa93d96b776c752568bbe5b2c3978b99",
+  "source_event_digest": "e1772df1029390fc562d917a4d26ced0c657035bdbc7c5fc03eb8e686faf4665",
+  "candidates": [
+    {
+      "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+      "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+      "artifact_digest": "2604040030e48fc92625d6ac70634e1b414e8342a6872653a6acafd2831acd98",
+      "parameters_digest": "946d86bae5facda996e0aa2985fe96b2528c837699dc71407116638dc11b54f9",
+      "candidate_revision_and_artifact_identity_verified": true,
+      "fitted_models_digest": "a4cd579c085ae56015467fa4116ada5f610fce0eafe779862d4403a07e47e4a2",
+      "evaluation_scope": {
+        "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+        "generation": 0,
+        "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+        "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+        "phase": "holdout",
+        "cohort_digest": "0f1e74a1093d930ef4652372cc34648b47d620805da48ab0b71aa4a447d99f32",
+        "origin_count": 169,
+        "batch_index": null,
+        "holdout_arm": "finalist_2"
+      },
+      "sealed_results_digest": "a6a713595f959dd8bbd83125adf7e46f45542788bda46edcd3d58caf699689f7",
+      "reconstructed_causal_inputs_digest": "b4b701d35127e005f954140d2fd2214ac993a223a8622dd0df3fa93c5dfaf2e4",
+      "native_tool_outputs_digest": "1eed6f7f1660545d9d3d7310f9fbd9f62ca7301dba46dec77c664b0b538445fe",
+      "origins": 169,
+      "prediction_cells": 1521,
+      "verified_tool_receipts": 169,
+      "maximum_absolute_prediction_difference": 0.0,
+      "context_construction_seconds": 0.1676687499275431,
+      "host_numerical_seconds": 0.08393266424536705,
+      "host_timing_scope": "prediction_calls_and_output_assembly_excluding_context_construction_receipt_verification_and_loading",
+      "scoring_check": {
+        "sealed_score": -0.005341461329556497,
+        "recomputed_score": -0.005341461329556498,
+        "absolute_score_difference": 8.673617379884035e-19,
+        "baseline_and_normalization_inputs_verified": true,
+        "observations_source": "already_sealed_scored_rows_only"
+      },
+      "status": "all_sealed_predictions_and_tool_receipts_reproduced"
+    }
+  ],
+  "native_execution": {
+    "sessions_with_usage": 188,
+    "usage_complete": false,
+    "launches_without_usage": 0,
+    "reported_tokens": {
+      "cache_read_tokens": 1058816,
+      "cache_write_tokens": 0,
+      "output_tokens": 354504,
+      "total_tokens": 5022713,
+      "uncached_input_tokens": 3609393
+    },
+    "launches": 188,
+    "accepted_results": 169,
+    "launch_to_last_acceptance_window_seconds": 1289.49,
+    "timing_scope": "shared_live_wall_window_including_queue_pauses_and_overlap_not_model_compute_time"
+  },
+  "refits": 0,
+  "remote_calls": 0,
+  "ledger_writes": 0,
+  "full_planner_input_wave_reconstructed": false,
+  "limits": [
+    "Planner full prompt/context was not archived; original wave digest is preserved, not recomputed.",
+    "This proves original fitted-model numerical replay and exact native tool output receipts, not a prospective provider bypass trial.",
+    "Host pure numerical time cannot be divided into the shared native wall window to claim a speedup or token saving.",
+    "Only already scored adaptive-search rows are compared; this is not independent validation or new promotion evidence."
+  ]
+}

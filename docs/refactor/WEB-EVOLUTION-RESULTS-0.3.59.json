@@ -1,0 +1,4848 @@
+{
+  "schema_version": "ecologyrsi-dsh.web-evolution-delivery-evidence/1",
+  "version": "0.3.59",
+  "generated_at": "2026-09-07T07:46:03.637229+00:00",
+  "verified_run": {
+    "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+    "status": "completed",
+    "created_at": "2026-09-07T03:17:32.921+00:00",
+    "started_at": "2026-09-07T03:17:32.926+00:00",
+    "completed_at": "2026-09-07T07:45:26.130+00:00",
+    "completion": {
+      "accepted_candidate_id": null,
+      "formal_validation_status": "not_run",
+      "outcome": "budget_exhausted_without_acceptable_candidate",
+      "selection_scope": "iterative_training_feedback_only",
+      "termination_reason": "candidate_budget_exhausted+generation_budget_exhausted"
+    },
+    "event_counts": {
+      "RunCreated": 1,
+      "RunSeedGenomeMaterialized": 1,
+      "ModelContractPreflightRecorded": 1,
+      "DshRuntimeBound": 1,
+      "RunStarted": 1,
+      "EvolutionStageRecorded": 32,
+      "DshChildLaunchReserved": 1315,
+      "DshSessionUsageRecorded": 5707,
+      "DshStructuredResultAccepted": 1203,
+      "GenerationSearchPlanned": 1,
+      "GenerationKnowledgeRetrieved": 1,
+      "DshChildExecutionFailed": 112,
+      "GatewayRetryScheduled": 7,
+      "RunPaused": 8,
+      "RunResumed": 8,
+      "GenerationResearchIterated": 1,
+      "GenerationBatchStarted": 1,
+      "ProposalSubmitted": 5,
+      "CandidateSpawned": 5,
+      "CandidateRevisionCreated": 7,
+      "RunAdaptationCohortFrozen": 1,
+      "GenerationCohortsFrozen": 1,
+      "AlgorithmAttemptRecorded": 8,
+      "EvaluationSampleResultsStarted": 13,
+      "DshPredictionToolExecuted": 1192,
+      "EvaluationProgressRecorded": 7373,
+      "EvaluationSampleResultBatchRecorded": 1195,
+      "EvaluationSampleResultsResumed": 20,
+      "CandidateScreeningRecorded": 4,
+      "EvaluationSampleResultsRecorded": 13,
+      "FormalSelectionCohortFrozen": 1,
+      "CandidateScreenedOut": 2,
+      "FormalTrajectoryStarted": 2,
+      "FormalBatchStarted": 4,
+      "FormalBatchEvaluated": 6,
+      "FormalBatchCompared": 4,
+      "LocalEditProposalRecorded": 2,
+      "LocalEditDecided": 2,
+      "TrajectoryRevisionAdvanced": 2,
+      "FormalTrajectoryCompleted": 2,
+      "GenerationHoldoutFrozen": 1,
+      "HoldoutArmStarted": 3,
+      "ArtifactRecorded": 2,
+      "EvaluationRecorded": 2,
+      "HoldoutEvaluationRecorded": 3,
+      "EvaluationJudged": 2,
+      "GenerationComparisonRecorded": 1,
+      "CandidateEffectiveRevisionFrozen": 1,
+      "GenerationChampionSelected": 1,
+      "GenerationAnalyzed": 1,
+      "PromotionDecided": 2,
+      "GenerationReflected": 1,
+      "GenerationAdvanced": 1,
+      "RunCompleted": 1
+    },
+    "last_event_seq": 28490,
+    "terminal_event_seq": 28490,
+    "domain_replay_verified": true
+  },
+  "frozen_binding": {
+    "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+    "prediction_model_id": "greenhouse-baseline-aligned-ridge@1",
+    "evaluator_id": "greenhouse_multihorizon_time_forward@3",
+    "search_guard_policy": "practical_delta_cell_noninferiority_paired_blocks@1",
+    "strategy_model_id": "pjlab/glm-5.2",
+    "review_model_id": "pjlab/kimi-k3",
+    "research_execution_policy": {
+      "retry_identical_exhausted_request": false,
+      "schema_version": "ecologyrsi-dsh.research-execution-policy/1",
+      "synthesis_context_format": "compact@1",
+      "synthesis_max_output_tokens": 16384,
+      "synthesis_report_format": "concise@1"
+    },
+    "preflight": {
+      "status": "verified",
+      "scope": "tool_and_schema_transport_only",
+      "checked_at": "2026-09-07T03:17:32.924464+00:00",
+      "roles": [
+        {
+          "role": "researcher",
+          "model_id": "pjlab/glm-5.2",
+          "receipt_id": "canary:816e9d6d-f00a-4b69-8718-c6fa00b58a6e",
+          "checked_at": "2026-09-07T03:17:22.960Z",
+          "expires_at": "2026-09-07T04:17:22.960Z",
+          "identity_digest": "80df8f0c41acd522292f5ebfb3dad1f7a5ddf41b9156b3ecdccd30ccf7a108aa",
+          "receipt_digest": "87868217f03534375864e0f006b41540149dfa3a3188c041ce49b5b82239c1bd"
+        },
+        {
+          "role": "generation-judge",
+          "model_id": "pjlab/kimi-k3",
+          "receipt_id": "canary:6c564f68-e7fb-402f-bd11-07d7cecacb94",
+          "checked_at": "2026-09-07T03:17:31.976Z",
+          "expires_at": "2026-09-07T04:17:31.976Z",
+          "identity_digest": "703fa7e3f0d0e1ecd53c736fc9a7a39110923d0da60dab5e7c8aad1e39cec714",
+          "receipt_digest": "ef751c9183b79908b4eb9ae3cb5000771f1354c0e9a1abf5522ca0ec0a6dd754"
+        }
+      ],
+      "audit_digest": "2b53468b592713f6fe6a4a4d9be9db36a4218fe62d5a283700ecebf0b0fbe324",
+      "audit_required": true
+    }
+  },
+  "aggregate_analysis": {
+    "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+    "status": "completed",
+    "last_seq": 28490,
+    "dataset_id": "agc_cucumber_2018",
+    "episode_id": "agc_cucumber_2018:AiCU",
+    "configuration": {
+      "strategy_model_id": "pjlab/glm-5.2",
+      "review_model_id": "pjlab/kimi-k3",
+      "prediction_model_id": "greenhouse-baseline-aligned-ridge@1",
+      "optimization_schedule": {
+        "finalist_count": 2,
+        "formal_origin_count_per_finalist": 144,
+        "local_batch_origin_count": 72,
+        "local_evaluation_mode": "paired_champion_challenger",
+        "max_local_edits_per_batch": 1,
+        "schema_version": "ecologyrsi-dsh.top2-adaptive-epoch-schedule/3",
+        "screening_origin_count": 64,
+        "selection_holdout_origin_count": 169
+      },
+      "data_protocol_digest": "ca289086cb58f843d90d10ab270053788ed9ae227653a687c5d4c698d24a86c8",
+      "derived_execution_budget": {
+        "formal_candidate_origins": 432,
+        "holdout_candidate_origins": 507,
+        "screening_candidate_origins": 256,
+        "total_candidate_origins": 1195,
+        "total_scoring_cells": 10755
+      }
+    },
+    "event_counts": {
+      "RunCreated": 1,
+      "RunSeedGenomeMaterialized": 1,
+      "ModelContractPreflightRecorded": 1,
+      "DshRuntimeBound": 1,
+      "RunStarted": 1,
+      "EvolutionStageRecorded": 32,
+      "DshChildLaunchReserved": 1315,
+      "DshSessionUsageRecorded": 5707,
+      "DshStructuredResultAccepted": 1203,
+      "GenerationSearchPlanned": 1,
+      "GenerationKnowledgeRetrieved": 1,
+      "DshChildExecutionFailed": 112,
+      "GatewayRetryScheduled": 7,
+      "RunPaused": 8,
+      "RunResumed": 8,
+      "GenerationResearchIterated": 1,
+      "GenerationBatchStarted": 1,
+      "ProposalSubmitted": 5,
+      "CandidateSpawned": 5,
+      "CandidateRevisionCreated": 7,
+      "RunAdaptationCohortFrozen": 1,
+      "GenerationCohortsFrozen": 1,
+      "AlgorithmAttemptRecorded": 8,
+      "EvaluationSampleResultsStarted": 13,
+      "DshPredictionToolExecuted": 1192,
+      "EvaluationProgressRecorded": 7373,
+      "EvaluationSampleResultBatchRecorded": 1195,
+      "EvaluationSampleResultsResumed": 20,
+      "CandidateScreeningRecorded": 4,
+      "EvaluationSampleResultsRecorded": 13,
+      "FormalSelectionCohortFrozen": 1,
+      "CandidateScreenedOut": 2,
+      "FormalTrajectoryStarted": 2,
+      "FormalBatchStarted": 4,
+      "FormalBatchEvaluated": 6,
+      "FormalBatchCompared": 4,
+      "LocalEditProposalRecorded": 2,
+      "LocalEditDecided": 2,
+      "TrajectoryRevisionAdvanced": 2,
+      "FormalTrajectoryCompleted": 2,
+      "GenerationHoldoutFrozen": 1,
+      "HoldoutArmStarted": 3,
+      "ArtifactRecorded": 2,
+      "EvaluationRecorded": 2,
+      "HoldoutEvaluationRecorded": 3,
+      "EvaluationJudged": 2,
+      "GenerationComparisonRecorded": 1,
+      "CandidateEffectiveRevisionFrozen": 1,
+      "GenerationChampionSelected": 1,
+      "GenerationAnalyzed": 1,
+      "PromotionDecided": 2,
+      "GenerationReflected": 1,
+      "GenerationAdvanced": 1,
+      "RunCompleted": 1
+    },
+    "reported_tokens": 35811535,
+    "usage_coverage": {
+      "scope": "dsh_child_provider_usage",
+      "launched_session_count": 1315,
+      "observed_session_count": 1297,
+      "settled_session_count": 1270,
+      "complete_session_count": 1176,
+      "unobserved_session_count": 18,
+      "complete": false,
+      "includes_retrieval_provider_usage": false
+    },
+    "scoring_rows": 10755,
+    "statuses": {
+      "succeeded": 10719,
+      "failed": 36
+    },
+    "public_failures": [
+      {
+        "time": "2026-09-07T03:18:33.276+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_start_failed",
+        "stage": "generation.research-synthesis"
+      },
+      {
+        "time": "2026-09-07T03:18:48.339+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_start_failed",
+        "stage": "generation.research-synthesis"
+      },
+      {
+        "time": "2026-09-07T03:19:18.442+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_start_failed",
+        "stage": "generation.research-synthesis"
+      },
+      {
+        "time": "2026-09-07T03:19:48.487+00:00",
+        "kind": "RunPaused",
+        "code": null,
+        "stage": null
+      },
+      {
+        "time": "2026-09-07T03:29:16.014+00:00",
+        "kind": "RunPaused",
+        "code": null,
+        "stage": null
+      },
+      {
+        "time": "2026-09-07T03:29:17.000+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:18.137+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:18.676+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:18.861+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:19.428+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:19.866+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:20.234+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:20.295+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:20.314+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:20.332+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:20.356+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:20.482+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:20.523+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:20.667+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:21.776+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:29:21.779+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:37:57.809+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_output_budget_exhausted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:37:59.181+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_output_budget_exhausted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:47:38.123+00:00",
+        "kind": "RunPaused",
+        "code": null,
+        "stage": null
+      },
+      {
+        "time": "2026-09-07T03:47:42.998+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:47:43.492+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:47:43.573+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:47:43.620+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:47:44.325+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:47:44.581+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:47:44.647+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:47:47.167+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:55:39.151+00:00",
+        "kind": "RunPaused",
+        "code": null,
+        "stage": null
+      },
+      {
+        "time": "2026-09-07T03:55:41.444+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:55:43.887+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:55:44.867+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:55:45.319+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:55:46.109+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:55:46.334+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:55:48.805+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:55:51.210+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T03:55:56.180+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T04:06:38.614+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_result_missing",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T04:12:12.743+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "unavailable",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T04:25:39.673+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_output_budget_exhausted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T05:29:44.090+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_role_operational_timeout",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T05:29:51.655+00:00",
+        "kind": "RunPaused",
+        "code": null,
+        "stage": null
+      },
+      {
+        "time": "2026-09-07T05:30:14.072+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_role_operational_timeout",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T05:34:35.730+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T05:36:37.511+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_role_operational_timeout",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:06:46.194+00:00",
+        "kind": "RunPaused",
+        "code": null,
+        "stage": null
+      },
+      {
+        "time": "2026-09-07T06:25:26.761+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:11.840+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:11.904+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:18.916+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:20.091+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:20.468+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:22.463+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:26.705+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:28.019+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:28.115+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:28.771+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:29.869+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:30.195+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:30.787+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:30.904+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:31.042+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:32.148+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:34.176+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:39.000+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:39.816+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:40.864+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:47.446+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:47.522+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:26:47.693+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:27:12.566+00:00",
+        "kind": "RunPaused",
+        "code": null,
+        "stage": null
+      },
+      {
+        "time": "2026-09-07T06:27:15.681+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:27:16.203+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:27:16.286+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:27:16.486+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:27:16.662+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:27:16.711+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:27:16.846+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:41:29.992+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:41:42.355+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:41:42.658+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:41:44.037+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:41:45.648+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:41:45.718+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:41:48.390+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:41:48.609+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:45:32.231+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:48:42.920+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_role_operational_timeout",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:48:43.064+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_role_operational_timeout",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:48:43.147+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_role_operational_timeout",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:52:32.845+00:00",
+        "kind": "RunPaused",
+        "code": null,
+        "stage": null
+      },
+      {
+        "time": "2026-09-07T06:52:34.155+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:52:34.423+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:52:37.767+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:52:37.937+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:52:38.142+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:52:38.228+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T06:52:38.272+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_aborted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:03:24.625+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:03:25.401+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:03:30.541+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_model_error",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:07:21.375+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_result_persist_admission_closed",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:07:22.050+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_result_persist_admission_closed",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:07:26.186+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_result_missing",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:07:27.082+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_result_persist_admission_closed",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:07:32.064+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_result_persist_admission_closed",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:07:33.539+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_result_persist_admission_closed",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:07:34.483+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_result_missing",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:07:36.202+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_result_persist_admission_closed",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:07:55.766+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_result_missing",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:07:57.301+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_result_missing",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:08:02.624+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_result_persist_tool_evidence",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:08:44.417+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_child_output_budget_exhausted",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:08:58.201+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_result_missing",
+        "stage": "sample.plan"
+      },
+      {
+        "time": "2026-09-07T07:13:15.211+00:00",
+        "kind": "DshChildExecutionFailed",
+        "code": "structured_role_operational_timeout",
+        "stage": "sample.plan"
+      }
+    ],
+    "stages": {
+      "generation.search-plan": {
+        "observed_sessions": 1
+      },
+      "generation.research-synthesis": {
+        "observed_sessions": 1
+      },
+      "candidate.propose": {
+        "observed_sessions": 4
+      },
+      "sample.plan": {
+        "observed_sessions": 1285
+      },
+      "candidate.local_edit": {
+        "observed_sessions": 2
+      },
+      "generation.judge": {
+        "observed_sessions": 2
+      },
+      "generation.reflect": {
+        "observed_sessions": 2
+      }
+    },
+    "candidates": [
+      {
+        "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+        "slot": 0,
+        "role": "challenger",
+        "cohort_digest": "10e2e7ef2d96697024b3cb6c34070a836bb3e8a8afde98d036d88b3b61eb5b35",
+        "generation": 0,
+        "phase": "screening",
+        "batch_index": null,
+        "revision": "3924fcdc-4a96-4e7a-a8f6-1f557c2b7544",
+        "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+        "execution_scope_digest": "f3664489e81a4a79806b4b5e91306b3482d23471048b6a3fca5de8849a9b94fc",
+        "holdout_arm": null,
+        "statuses": {
+          "succeeded": 576
+        },
+        "retry_count": 0,
+        "cells": [
+          {
+            "target": "air_temperature",
+            "horizon_hours": 1,
+            "n": 64,
+            "rmse": 1.0878141842583255,
+            "mae": 0.7359729805893539,
+            "bias": -0.06652358412741344,
+            "baseline_rmse": 1.1119273252077484,
+            "rmse_gain_vs_baseline": 0.02168589655346198,
+            "mean_normalized_reward": 0.005738064149479595
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 6,
+            "n": 64,
+            "rmse": 0.9981847938882081,
+            "mae": 0.7495442703531177,
+            "bias": 0.21868489605161145,
+            "baseline_rmse": 0.9981847938882081,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 24,
+            "n": 64,
+            "rmse": 0.8644954773903499,
+            "mae": 0.6015625005893517,
+            "bias": 0.3773437495940019,
+            "baseline_rmse": 0.8644954773903499,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 1,
+            "n": 64,
+            "rmse": 109.24374002189279,
+            "mae": 67.41056071234466,
+            "bias": -1.4164089237642594,
+            "baseline_rmse": 110.3878468078628,
+            "rmse_gain_vs_baseline": 0.010364427054740943,
+            "mean_normalized_reward": 0.012743453865105187
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 6,
+            "n": 64,
+            "rmse": 140.2469412744878,
+            "mae": 96.19010433976169,
+            "bias": -20.757812515235866,
+            "baseline_rmse": 140.2469412744878,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 24,
+            "n": 64,
+            "rmse": 125.89778461530486,
+            "mae": 84.20963557229938,
+            "bias": -16.82942700951147,
+            "baseline_rmse": 125.89778461530486,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 1,
+            "n": 64,
+            "rmse": 5.167610160902213,
+            "mae": 3.2860467725884996,
+            "bias": 0.10879004766229716,
+            "baseline_rmse": 5.23187979120899,
+            "rmse_gain_vs_baseline": 0.012284232985392274,
+            "mean_normalized_reward": 0.002047166904316684
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 6,
+            "n": 64,
+            "rmse": 6.8761698152966515,
+            "mae": 5.031315108881488,
+            "bias": -1.0548828058817885,
+            "baseline_rmse": 6.8761698152966515,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 24,
+            "n": 64,
+            "rmse": 6.026472186882114,
+            "mae": 3.92617188160075,
+            "bias": -0.5662760408634019,
+            "baseline_rmse": 6.026472186882114,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+        "slot": 1,
+        "role": "challenger",
+        "cohort_digest": "10e2e7ef2d96697024b3cb6c34070a836bb3e8a8afde98d036d88b3b61eb5b35",
+        "generation": 0,
+        "phase": "screening",
+        "batch_index": null,
+        "revision": "497136c7-d7da-4dc0-a160-72349e411da4",
+        "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+        "execution_scope_digest": "b3ed14acffe2f9d224250a090278b9525806b1fd8a1e2fea80ba7fdef0fdcd7a",
+        "holdout_arm": null,
+        "statuses": {
+          "succeeded": 576
+        },
+        "retry_count": 0,
+        "cells": [
+          {
+            "target": "air_temperature",
+            "horizon_hours": 1,
+            "n": 64,
+            "rmse": 1.1119273252077484,
+            "mae": 0.7494791665269691,
+            "bias": -0.10781250008731169,
+            "baseline_rmse": 1.1119273252077484,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 6,
+            "n": 64,
+            "rmse": 0.9796402324567602,
+            "mae": 0.7369994172812002,
+            "bias": 0.1806162976560317,
+            "baseline_rmse": 0.9981847938882081,
+            "rmse_gain_vs_baseline": 0.018578284847650006,
+            "mean_normalized_reward": 0.005329644653564462
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 24,
+            "n": 64,
+            "rmse": 0.8644954773903499,
+            "mae": 0.6015625005893517,
+            "bias": 0.3773437495940019,
+            "baseline_rmse": 0.8644954773903499,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 1,
+            "n": 64,
+            "rmse": 110.3878468078628,
+            "mae": 68.79557303741842,
+            "bias": -4.334635391084405,
+            "baseline_rmse": 110.3878468078628,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 6,
+            "n": 64,
+            "rmse": 139.04294281831886,
+            "mae": 97.08093016625998,
+            "bias": 7.542527326662525,
+            "baseline_rmse": 140.2469412744878,
+            "rmse_gain_vs_baseline": 0.008584846451748951,
+            "mean_normalized_reward": -0.008196459783287854
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 24,
+            "n": 64,
+            "rmse": 125.89778461530486,
+            "mae": 84.20963557229938,
+            "bias": -16.82942700951147,
+            "baseline_rmse": 125.89778461530486,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 1,
+            "n": 64,
+            "rmse": 5.23187979120899,
+            "mae": 3.3076822880999934,
+            "bias": 0.11002604236952451,
+            "baseline_rmse": 5.23187979120899,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 6,
+            "n": 64,
+            "rmse": 7.108951056238473,
+            "mae": 5.08406677085466,
+            "bias": -2.2016369123686452,
+            "baseline_rmse": 6.8761698152966515,
+            "rmse_gain_vs_baseline": -0.033853329279910804,
+            "mean_normalized_reward": -0.004991397430849673
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 24,
+            "n": 64,
+            "rmse": 6.026472186882114,
+            "mae": 3.92617188160075,
+            "bias": -0.5662760408634019,
+            "baseline_rmse": 6.026472186882114,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate:8f8bdf41-06fa-49dd-acb5-7f71e8918ac8",
+        "slot": 2,
+        "role": "challenger",
+        "cohort_digest": "10e2e7ef2d96697024b3cb6c34070a836bb3e8a8afde98d036d88b3b61eb5b35",
+        "generation": 0,
+        "phase": "screening",
+        "batch_index": null,
+        "revision": "54fb6572-fbce-47ef-b7c1-e2ca2fb56577",
+        "candidate_revision_id": "revision:candidate:8f8bdf41-06fa-49dd-acb5-7f71e8918ac8:r0",
+        "execution_scope_digest": "f10b0c7e2950fe3201e322dd7fa2d7e6d995b4f811d1f964c0f06f3b71a79474",
+        "holdout_arm": null,
+        "statuses": {
+          "succeeded": 567,
+          "failed": 9
+        },
+        "retry_count": 0,
+        "cells": [
+          {
+            "target": "air_temperature",
+            "horizon_hours": 1,
+            "n": 63,
+            "rmse": 1.0983924834171293,
+            "mae": 0.7333333332490718,
+            "bias": -0.08148148162783253,
+            "baseline_rmse": 1.0983924834171293,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 6,
+            "n": 63,
+            "rmse": 0.9981559545002502,
+            "mae": 0.7455687826031195,
+            "bias": 0.23802910072866876,
+            "baseline_rmse": 0.9981559545002502,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 24,
+            "n": 63,
+            "rmse": 0.9506882588969655,
+            "mae": 0.7318026175940079,
+            "bias": 0.5653413351944859,
+            "baseline_rmse": 0.8712662842936335,
+            "rmse_gain_vs_baseline": -0.09115694711832245,
+            "mean_normalized_reward": -0.05183740532565691
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 1,
+            "n": 63,
+            "rmse": 111.25699623111134,
+            "mae": 69.77645513688324,
+            "bias": -4.2923280040994705,
+            "baseline_rmse": 111.25699623111134,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 6,
+            "n": 63,
+            "rmse": 141.31212756009464,
+            "mae": 97.27513245279313,
+            "bias": -20.64550266279865,
+            "baseline_rmse": 141.31212756009464,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 24,
+            "n": 63,
+            "rmse": 123.24597293773714,
+            "mae": 81.30060740247605,
+            "bias": -0.39276473676429685,
+            "baseline_rmse": 126.72542975657352,
+            "rmse_gain_vs_baseline": 0.027456658269141898,
+            "mean_normalized_reward": 0.03150651058612484
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 1,
+            "n": 63,
+            "rmse": 5.260928405036047,
+            "mae": 3.314814810885521,
+            "bias": 0.15714285816287765,
+            "baseline_rmse": 5.260928405036047,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 6,
+            "n": 63,
+            "rmse": 6.899989788746805,
+            "mae": 5.0292989467083435,
+            "bias": -1.1535052841622873,
+            "baseline_rmse": 6.899989788746805,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 24,
+            "n": 63,
+            "rmse": 5.812728251750714,
+            "mae": 3.9409220815361143,
+            "bias": 0.29683387016611534,
+            "baseline_rmse": 6.0733780109415,
+            "rmse_gain_vs_baseline": 0.04291676867819061,
+            "mean_normalized_reward": 0.0033746675231203682
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate:5e1c5af2-f8a1-435c-acb7-76cc09c9b482",
+        "slot": 3,
+        "role": "challenger",
+        "cohort_digest": "10e2e7ef2d96697024b3cb6c34070a836bb3e8a8afde98d036d88b3b61eb5b35",
+        "generation": 0,
+        "phase": "screening",
+        "batch_index": null,
+        "revision": "43cdaf2b-4f42-4e90-aa76-6b10343d5be6",
+        "candidate_revision_id": "revision:candidate:5e1c5af2-f8a1-435c-acb7-76cc09c9b482:r0",
+        "execution_scope_digest": "30b64b5ca787045b85e5e16e2cdb4778170b32f87d689b1b6adf91cb9be7e7fc",
+        "holdout_arm": null,
+        "statuses": {
+          "succeeded": 567,
+          "failed": 9
+        },
+        "retry_count": 0,
+        "cells": [
+          {
+            "target": "air_temperature",
+            "horizon_hours": 1,
+            "n": 63,
+            "rmse": 1.1199691542254837,
+            "mae": 0.7562169312080625,
+            "bias": -0.11468253963819096,
+            "baseline_rmse": 1.1199691542254837,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 6,
+            "n": 63,
+            "rmse": 1.0054422285291416,
+            "mae": 0.7569444439876503,
+            "bias": 0.21765873041151698,
+            "baseline_rmse": 1.0054422285291416,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 24,
+            "n": 63,
+            "rmse": 0.9877015768157047,
+            "mae": 0.7840849390551395,
+            "bias": 0.6301181959995924,
+            "baseline_rmse": 0.8713194194670024,
+            "rmse_gain_vs_baseline": -0.13357002581199762,
+            "mean_normalized_reward": -0.07371221856462164
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 1,
+            "n": 63,
+            "rmse": 111.26048960611578,
+            "mae": 69.88492073071379,
+            "bias": -4.400793597930016,
+            "baseline_rmse": 111.26048960611578,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 6,
+            "n": 63,
+            "rmse": 141.29722291733069,
+            "mae": 97.20502663162294,
+            "bias": -21.599206363930126,
+            "baseline_rmse": 141.29722291733069,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 24,
+            "n": 63,
+            "rmse": 122.12862402759082,
+            "mae": 79.57893800651674,
+            "bias": 2.843747748075861,
+            "baseline_rmse": 126.5985070709934,
+            "rmse_gain_vs_baseline": 0.0353075494081142,
+            "mean_normalized_reward": 0.04488907586500172
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 1,
+            "n": 63,
+            "rmse": 5.264623118136199,
+            "mae": 3.32222221911338,
+            "bias": 0.07380952503798303,
+            "baseline_rmse": 5.264623118136199,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 6,
+            "n": 63,
+            "rmse": 6.9301039361143575,
+            "mae": 5.101521169050307,
+            "bias": -1.0619708929871199,
+            "baseline_rmse": 6.9301039361143575,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 24,
+            "n": 63,
+            "rmse": 5.739550554873661,
+            "mae": 3.8959972961481086,
+            "bias": 0.5338100599226474,
+            "baseline_rmse": 6.067146876231877,
+            "rmse_gain_vs_baseline": 0.053995119623950205,
+            "mean_normalized_reward": 0.005284996025159432
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+        "slot": 0,
+        "role": "challenger",
+        "cohort_digest": "23ffe9353f558ce97d1fde4be0fa532a45cecf1bbc3665fa58285e4ea3795217",
+        "generation": 0,
+        "phase": "formal_batch",
+        "batch_index": 0,
+        "revision": "dc0bdb30-a431-47cf-891b-6bfde5c34414",
+        "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+        "execution_scope_digest": "94e77a1bcf948968702f91e9d4a122224c0f2aca95389d2c5a2b53bd368a2c76",
+        "holdout_arm": null,
+        "statuses": {
+          "succeeded": 648
+        },
+        "retry_count": 0,
+        "cells": [
+          {
+            "target": "air_temperature",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 0.9815352321325734,
+            "mae": 0.7000486672558099,
+            "bias": 0.00025090883136262104,
+            "baseline_rmse": 1.0066124928409679,
+            "rmse_gain_vs_baseline": 0.024912526803257506,
+            "mean_normalized_reward": 0.008092723644574924
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 1.9885098667876944,
+            "mae": 1.2586805562773309,
+            "bias": -0.021874999557621067,
+            "baseline_rmse": 1.9885098667876944,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 1.7318171895643855,
+            "mae": 1.1896990741245201,
+            "bias": 0.7239583334303465,
+            "baseline_rmse": 1.7318171895643855,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 71.44678949479307,
+            "mae": 47.760599115306235,
+            "bias": -1.6648832374825489,
+            "baseline_rmse": 72.22535825473022,
+            "rmse_gain_vs_baseline": 0.010779714753248237,
+            "mean_normalized_reward": 0.0007437698002984905
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 132.40070691649905,
+            "mae": 99.32581012445519,
+            "bias": -48.29571756445888,
+            "baseline_rmse": 132.40070691649905,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 127.85978021826202,
+            "mae": 96.63831009841695,
+            "bias": -46.40335651904483,
+            "baseline_rmse": 127.85978021826202,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 4.0152592287569195,
+            "mae": 2.9595314209913344,
+            "bias": 0.028037025128573312,
+            "baseline_rmse": 4.102726283878001,
+            "rmse_gain_vs_baseline": 0.02131925189959427,
+            "mean_normalized_reward": 0.008625905345377338
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 11.611579178636593,
+            "mae": 8.721527764390014,
+            "bias": -0.9398148136584221,
+            "baseline_rmse": 11.611579178636593,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 11.138762083964716,
+            "mae": 7.901909717088308,
+            "bias": -2.1448495401608483,
+            "baseline_rmse": 11.138762083964716,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+        "slot": 1,
+        "role": "challenger",
+        "cohort_digest": "23ffe9353f558ce97d1fde4be0fa532a45cecf1bbc3665fa58285e4ea3795217",
+        "generation": 0,
+        "phase": "formal_batch",
+        "batch_index": 0,
+        "revision": "345b6886-781a-4708-a5e0-95f291340fb4",
+        "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+        "execution_scope_digest": "a99999486c0e87cd49152e986cdb7b4b4fc0e99e9fd1cd445f8ebc02cc80918e",
+        "holdout_arm": null,
+        "statuses": {
+          "succeeded": 648
+        },
+        "retry_count": 0,
+        "cells": [
+          {
+            "target": "air_temperature",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 1.0066124928409679,
+            "mae": 0.7190972222105811,
+            "bias": 0.027199074070193657,
+            "baseline_rmse": 1.0066124928409679,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 1.9708801291588438,
+            "mae": 1.2633807071485466,
+            "bias": 0.09329625981145234,
+            "baseline_rmse": 1.9885098667876944,
+            "rmse_gain_vs_baseline": 0.008865803445738063,
+            "mean_normalized_reward": -0.001996845544392738
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 1.7318171895643855,
+            "mae": 1.1896990741245201,
+            "bias": 0.7239583334303465,
+            "baseline_rmse": 1.7318171895643855,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 72.22535825473022,
+            "mae": 47.84143515483959,
+            "bias": 0.056712962342078614,
+            "baseline_rmse": 72.22535825473022,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 137.3182287997364,
+            "mae": 101.79338950307914,
+            "bias": -56.57988538686803,
+            "baseline_rmse": 132.40070691649905,
+            "rmse_gain_vs_baseline": -0.0371412056458178,
+            "mean_normalized_reward": -0.022704118512666925
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 127.85978021826202,
+            "mae": 96.63831009841695,
+            "bias": -46.40335651904483,
+            "baseline_rmse": 127.85978021826202,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 4.102726283878001,
+            "mae": 3.0506944368192404,
+            "bias": -0.020138888892769283,
+            "baseline_rmse": 4.102726283878001,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 11.646214967451009,
+            "mae": 8.730645406838967,
+            "bias": -0.926195497024385,
+            "baseline_rmse": 11.611579178636593,
+            "rmse_gain_vs_baseline": -0.0029828663510420572,
+            "mean_normalized_reward": -0.0008627174081878751
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 11.138762083964716,
+            "mae": 7.901909717088308,
+            "bias": -2.1448495401608483,
+            "baseline_rmse": 11.138762083964716,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+        "slot": 0,
+        "role": "challenger",
+        "cohort_digest": "8cdae944a588c4bdc45d711caa9722886557cf0f88151836cc5a77574ec2780c",
+        "generation": 0,
+        "phase": "formal_batch",
+        "batch_index": 1,
+        "revision": "dad38c92-883f-43ab-9e28-6a109cbaa328",
+        "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+        "execution_scope_digest": "dc38bc9e906b9f6256612cd64858332ac252b81ba84d71c09457bd19496394c3",
+        "holdout_arm": null,
+        "statuses": {
+          "succeeded": 639,
+          "failed": 9
+        },
+        "retry_count": 0,
+        "cells": [
+          {
+            "target": "air_temperature",
+            "horizon_hours": 1,
+            "n": 71,
+            "rmse": 1.0222769353066,
+            "mae": 0.6819547167356984,
+            "bias": -0.0017181613696679557,
+            "baseline_rmse": 1.042326081628437,
+            "rmse_gain_vs_baseline": 0.019235003973530174,
+            "mean_normalized_reward": 0.007068110486697156
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 6,
+            "n": 71,
+            "rmse": 1.8442814908641727,
+            "mae": 1.1409624419677915,
+            "bias": -0.4158450702336481,
+            "baseline_rmse": 1.8442814908641727,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 24,
+            "n": 71,
+            "rmse": 1.6188716910434398,
+            "mae": 0.9886737102384673,
+            "bias": -0.617899061516889,
+            "baseline_rmse": 1.6188716910434398,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 1,
+            "n": 71,
+            "rmse": 104.68258551470619,
+            "mae": 61.27837240106925,
+            "bias": 1.533405747457406,
+            "baseline_rmse": 106.08705338854199,
+            "rmse_gain_vs_baseline": 0.013238824427444174,
+            "mean_normalized_reward": 0.011747719226621324
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 6,
+            "n": 71,
+            "rmse": 109.49795448368647,
+            "mae": 78.93075110208886,
+            "bias": -1.3896712295955986,
+            "baseline_rmse": 109.49795448368647,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 24,
+            "n": 71,
+            "rmse": 134.35195767087717,
+            "mae": 94.38615013337188,
+            "bias": 16.89906106395161,
+            "baseline_rmse": 134.35195767087717,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 1,
+            "n": 71,
+            "rmse": 3.399899217989604,
+            "mae": 2.165070358507155,
+            "bias": 0.17710162862214585,
+            "baseline_rmse": 3.472762895906767,
+            "rmse_gain_vs_baseline": 0.020981472130747747,
+            "mean_normalized_reward": 0.004304580133739515
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 6,
+            "n": 71,
+            "rmse": 4.848250338328275,
+            "mae": 3.045129107654602,
+            "bias": 1.7484154933001061,
+            "baseline_rmse": 4.848250338328275,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 24,
+            "n": 71,
+            "rmse": 6.270918916331151,
+            "mae": 3.963908444766058,
+            "bias": 2.1174295725497663,
+            "baseline_rmse": 6.270918916331151,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+        "slot": 0,
+        "role": "challenger",
+        "cohort_digest": "8cdae944a588c4bdc45d711caa9722886557cf0f88151836cc5a77574ec2780c",
+        "generation": 0,
+        "phase": "formal_batch",
+        "batch_index": 1,
+        "revision": "6a9bf6fe-0e7f-4eaf-b63d-32cd65f72b97",
+        "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:batch:1",
+        "execution_scope_digest": "49c77eddfa5d14709fe7579b67702ba68bcf2655459f4a1efc7ccbaedd4bcc86",
+        "holdout_arm": null,
+        "statuses": {
+          "succeeded": 648
+        },
+        "retry_count": 0,
+        "cells": [
+          {
+            "target": "air_temperature",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 1.0334910947255738,
+            "mae": 0.6953256689100216,
+            "bias": 0.021148247445007564,
+            "baseline_rmse": 1.053169817876974,
+            "rmse_gain_vs_baseline": 0.018685232730149215,
+            "mean_normalized_reward": 0.007001432481912174
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 1.8379613761559175,
+            "mae": 1.1365353407518877,
+            "bias": -0.4462514485776061,
+            "baseline_rmse": 1.8314736991039597,
+            "rmse_gain_vs_baseline": -0.0035423260815221624,
+            "mean_normalized_reward": -0.004212346303992118
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 1.6076094167074753,
+            "mae": 0.9758680569176137,
+            "bias": -0.608391204118918,
+            "baseline_rmse": 1.6076094167074753,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 103.95806720470429,
+            "mae": 60.547274287358476,
+            "bias": 1.3921180535497528,
+            "baseline_rmse": 105.35962703289123,
+            "rmse_gain_vs_baseline": 0.013302627084560537,
+            "mean_normalized_reward": 0.012195060949474494
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 108.83174614708017,
+            "mae": 76.51604133671414,
+            "bias": 10.634855979840884,
+            "baseline_rmse": 108.77668583853287,
+            "rmse_gain_vs_baseline": -0.0005061774784076434,
+            "mean_normalized_reward": 0.015400335290368043
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 133.50139681895536,
+            "mae": 93.63888879129402,
+            "bias": 16.10069447273332,
+            "baseline_rmse": 133.50139681895536,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 3.6789363146679745,
+            "mae": 2.3072321667256035,
+            "bias": 0.00240965391579056,
+            "baseline_rmse": 3.7636650419730837,
+            "rmse_gain_vs_baseline": 0.02251229223647666,
+            "mean_normalized_reward": 0.004758566276038298
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 4.643881048202507,
+            "mae": 2.888512518681524,
+            "bias": 1.0566370582030957,
+            "baseline_rmse": 4.8144811383516695,
+            "rmse_gain_vs_baseline": 0.03543478211809348,
+            "mean_normalized_reward": 0.010959699769101763
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 6.324472675057389,
+            "mae": 4.0390624938067035,
+            "bias": 1.9578124954908462,
+            "baseline_rmse": 6.324472675057389,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+        "slot": 1,
+        "role": "challenger",
+        "cohort_digest": "8cdae944a588c4bdc45d711caa9722886557cf0f88151836cc5a77574ec2780c",
+        "generation": 0,
+        "phase": "formal_batch",
+        "batch_index": 1,
+        "revision": "a0c2886c-cd69-4d19-80d5-a692f6ee5795",
+        "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+        "execution_scope_digest": "322fa28a13cbfa88306337b56d23cb89a6879e1156b2a1ce3b8d0a9b8e3e3a7f",
+        "holdout_arm": null,
+        "statuses": {
+          "succeeded": 648
+        },
+        "retry_count": 0,
+        "cells": [
+          {
+            "target": "air_temperature",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 1.053169817876974,
+            "mae": 0.7118055559358473,
+            "bias": -0.0004629629784851868,
+            "baseline_rmse": 1.053169817876974,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 1.8415135342026736,
+            "mae": 1.1427792003221373,
+            "bias": -0.4635901359244442,
+            "baseline_rmse": 1.8314736991039597,
+            "rmse_gain_vs_baseline": -0.005481834166456201,
+            "mean_normalized_reward": -0.00686503203776787
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 1.6076094167074753,
+            "mae": 0.9758680569176137,
+            "bias": -0.608391204118918,
+            "baseline_rmse": 1.6076094167074753,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 105.35962703289123,
+            "mae": 61.87268495693354,
+            "bias": -1.2071759252274328,
+            "baseline_rmse": 105.35962703289123,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 109.57637398380969,
+            "mae": 76.86083485866119,
+            "bias": 16.815131126499928,
+            "baseline_rmse": 108.77668583853287,
+            "rmse_gain_vs_baseline": -0.007351650209897587,
+            "mean_normalized_reward": 0.012227901182472765
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 133.50139681895536,
+            "mae": 93.63888879129402,
+            "bias": 16.10069447273332,
+            "baseline_rmse": 133.50139681895536,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 3.7636650419730837,
+            "mae": 2.357523148990219,
+            "bias": 0.03576388874530995,
+            "baseline_rmse": 3.7636650419730837,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 4.597453258468289,
+            "mae": 2.9205533852600047,
+            "bias": 0.7236419297264945,
+            "baseline_rmse": 4.8144811383516695,
+            "rmse_gain_vs_baseline": 0.04507814521372988,
+            "mean_normalized_reward": 0.007927971608511074
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 6.324472675057389,
+            "mae": 4.0390624938067035,
+            "bias": 1.9578124954908462,
+            "baseline_rmse": 6.324472675057389,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+        "slot": 1,
+        "role": "challenger",
+        "cohort_digest": "8cdae944a588c4bdc45d711caa9722886557cf0f88151836cc5a77574ec2780c",
+        "generation": 0,
+        "phase": "formal_batch",
+        "batch_index": 1,
+        "revision": "2b9f260c-8934-465b-a453-e7ab189d951c",
+        "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:batch:1",
+        "execution_scope_digest": "d67c546c9708045641885a85f199bcab7ff9ce13908ed6b16179ffe1a65a8080",
+        "holdout_arm": null,
+        "statuses": {
+          "succeeded": 648
+        },
+        "retry_count": 0,
+        "cells": [
+          {
+            "target": "air_temperature",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 1.053169817876974,
+            "mae": 0.7118055559358473,
+            "bias": -0.0004629629784851868,
+            "baseline_rmse": 1.053169817876974,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 1.8314736991039597,
+            "mae": 1.1266203710106548,
+            "bias": -0.4115740738839299,
+            "baseline_rmse": 1.8314736991039597,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 1.6076094167074753,
+            "mae": 0.9758680569176137,
+            "bias": -0.608391204118918,
+            "baseline_rmse": 1.6076094167074753,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 105.35962703289123,
+            "mae": 61.87268495693354,
+            "bias": -1.2071759252274328,
+            "baseline_rmse": 105.35962703289123,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 108.77668583853287,
+            "mae": 78.18981474329696,
+            "bias": -1.7256943134772185,
+            "baseline_rmse": 108.77668583853287,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 133.50139681895536,
+            "mae": 93.63888879129402,
+            "bias": 16.10069447273332,
+            "baseline_rmse": 133.50139681895536,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 1,
+            "n": 72,
+            "rmse": 3.7636650419730837,
+            "mae": 2.357523148990219,
+            "bias": 0.03576388874530995,
+            "baseline_rmse": 3.7636650419730837,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 6,
+            "n": 72,
+            "rmse": 4.8144811383516695,
+            "mae": 3.004340277451815,
+            "bias": 1.7226273151563,
+            "baseline_rmse": 4.8144811383516695,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 24,
+            "n": 72,
+            "rmse": 6.324472675057389,
+            "mae": 4.0390624938067035,
+            "bias": 1.9578124954908462,
+            "baseline_rmse": 6.324472675057389,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+        "slot": 0,
+        "role": "challenger",
+        "cohort_digest": "0f1e74a1093d930ef4652372cc34648b47d620805da48ab0b71aa4a447d99f32",
+        "generation": 0,
+        "phase": "holdout",
+        "batch_index": null,
+        "revision": "37018a7b-3733-470b-af14-ae8959a54b89",
+        "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+        "execution_scope_digest": "0e4a0f89a02c811e653e1129cb5d847f58d068f20e28ae3cdb6656d1fc4efabf",
+        "holdout_arm": "finalist_1",
+        "statuses": {
+          "succeeded": 1512,
+          "failed": 9
+        },
+        "retry_count": 0,
+        "cells": [
+          {
+            "target": "air_temperature",
+            "horizon_hours": 1,
+            "n": 168,
+            "rmse": 1.125404073949906,
+            "mae": 0.7756107956379653,
+            "bias": 0.07283001426418653,
+            "baseline_rmse": 1.1469322825723505,
+            "rmse_gain_vs_baseline": 0.018770252568147017,
+            "mean_normalized_reward": 0.0006466768640590005
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 6,
+            "n": 168,
+            "rmse": 0.7250588653155389,
+            "mae": 0.4818452381151942,
+            "bias": 0.03596230164051972,
+            "baseline_rmse": 0.7250588653155389,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 24,
+            "n": 168,
+            "rmse": 0.708239810096586,
+            "mae": 0.4694940475641656,
+            "bias": 0.001488095342868423,
+            "baseline_rmse": 0.708239810096586,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 1,
+            "n": 168,
+            "rmse": 192.40497012129416,
+            "mae": 99.32521424813909,
+            "bias": 1.4158300124144305,
+            "baseline_rmse": 193.85235825774114,
+            "rmse_gain_vs_baseline": 0.007466445853202219,
+            "mean_normalized_reward": 0.0007638604781753831
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 6,
+            "n": 168,
+            "rmse": 175.7542058676646,
+            "mae": 113.50793630855031,
+            "bias": -2.3903769739655893,
+            "baseline_rmse": 175.7542058676646,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 24,
+            "n": 168,
+            "rmse": 178.144234419676,
+            "mae": 116.51066452443105,
+            "bias": -10.333085345815773,
+            "baseline_rmse": 178.144234419676,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 1,
+            "n": 168,
+            "rmse": 3.0871348493184034,
+            "mae": 1.9989519270292506,
+            "bias": 0.02753096289212175,
+            "baseline_rmse": 3.1445140380965086,
+            "rmse_gain_vs_baseline": 0.018247394695314778,
+            "mean_normalized_reward": 0.004708172026065621
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 6,
+            "n": 168,
+            "rmse": 4.784739227142217,
+            "mae": 3.18318452232606,
+            "bias": -0.6688988093974161,
+            "baseline_rmse": 4.784739227142217,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 24,
+            "n": 168,
+            "rmse": 4.938689301640915,
+            "mae": 3.2375992055808647,
+            "bias": -0.2227182539383184,
+            "baseline_rmse": 4.938689301640915,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+        "slot": 1,
+        "role": "challenger",
+        "cohort_digest": "0f1e74a1093d930ef4652372cc34648b47d620805da48ab0b71aa4a447d99f32",
+        "generation": 0,
+        "phase": "holdout",
+        "batch_index": null,
+        "revision": "58150c1e-55e1-457a-a378-41773424271d",
+        "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+        "execution_scope_digest": "79eb563546d86b0c805dd8feb51b148b87e478cc672a5421f3d7d1b5c8a66de8",
+        "holdout_arm": "finalist_2",
+        "statuses": {
+          "succeeded": 1521
+        },
+        "retry_count": 0,
+        "cells": [
+          {
+            "target": "air_temperature",
+            "horizon_hours": 1,
+            "n": 169,
+            "rmse": 1.1494698876181082,
+            "mae": 0.7815088750800042,
+            "bias": -0.0014299802447226705,
+            "baseline_rmse": 1.1494698876181082,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 6,
+            "n": 169,
+            "rmse": 0.7224725949160514,
+            "mae": 0.4793001930266203,
+            "bias": -0.05481837914752321,
+            "baseline_rmse": 0.7251582550036136,
+            "rmse_gain_vs_baseline": 0.003703550320266036,
+            "mean_normalized_reward": 0.0017344171130463154
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 24,
+            "n": 169,
+            "rmse": 0.7065837245465726,
+            "mae": 0.4686390531949209,
+            "bias": 0.003402366963098895,
+            "baseline_rmse": 0.7065837245465726,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 1,
+            "n": 169,
+            "rmse": 193.29611048645813,
+            "mae": 99.02366833584989,
+            "bias": -2.449704142474737,
+            "baseline_rmse": 193.29611048645813,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 6,
+            "n": 169,
+            "rmse": 179.51182347881584,
+            "mae": 118.66256872254606,
+            "bias": 31.946093004354683,
+            "baseline_rmse": 176.625886359148,
+            "rmse_gain_vs_baseline": -0.016339264754202665,
+            "mean_normalized_reward": -0.03794124240444533
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 24,
+            "n": 169,
+            "rmse": 177.6288427840484,
+            "mae": 115.98298801118563,
+            "bias": -10.433678531852108,
+            "baseline_rmse": 177.6288427840484,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 1,
+            "n": 169,
+            "rmse": 3.137390785519244,
+            "mae": 2.0456114393115192,
+            "bias": -0.00488165677993513,
+            "baseline_rmse": 3.137390785519244,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 6,
+            "n": 169,
+            "rmse": 5.129852385994498,
+            "mae": 3.401401217780261,
+            "bias": -1.537346777697503,
+            "baseline_rmse": 4.946716055039258,
+            "rmse_gain_vs_baseline": -0.03702179969854513,
+            "mean_normalized_reward": -0.012907307457983581
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 24,
+            "n": 169,
+            "rmse": 4.924551827438035,
+            "mae": 3.2238165672752754,
+            "bias": -0.21602564100414895,
+            "baseline_rmse": 4.924551827438035,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate:run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09:seed-incumbent-control",
+        "slot": 0,
+        "role": "incumbent_control",
+        "cohort_digest": "0f1e74a1093d930ef4652372cc34648b47d620805da48ab0b71aa4a447d99f32",
+        "generation": 0,
+        "phase": "holdout",
+        "batch_index": null,
+        "revision": "5b986ef3-8b00-42c2-8503-52787ad3dbbf",
+        "candidate_revision_id": "revision:candidate:run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09:seed-incumbent-control:r0",
+        "execution_scope_digest": "0645b388196071b7ed792b77a9ad872f55ba7ac9951154ec6bf7a0b6238ffcfc",
+        "holdout_arm": "incumbent",
+        "statuses": {
+          "succeeded": 1521
+        },
+        "retry_count": 0,
+        "cells": [
+          {
+            "target": "air_temperature",
+            "horizon_hours": 1,
+            "n": 169,
+            "rmse": 1.1494698876181082,
+            "mae": 0.7815088750800042,
+            "bias": -0.0014299802447226705,
+            "baseline_rmse": 1.1494698876181082,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 6,
+            "n": 169,
+            "rmse": 0.7251582550036136,
+            "mae": 0.4833826430327448,
+            "bias": 0.03136094678358626,
+            "baseline_rmse": 0.7251582550036136,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "air_temperature",
+            "horizon_hours": 24,
+            "n": 169,
+            "rmse": 0.7065837245465726,
+            "mae": 0.4686390531949209,
+            "bias": 0.003402366963098895,
+            "baseline_rmse": 0.7065837245465726,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 1,
+            "n": 169,
+            "rmse": 193.29611048645813,
+            "mae": 99.02366833584989,
+            "bias": -2.449704142474737,
+            "baseline_rmse": 193.29611048645813,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 6,
+            "n": 169,
+            "rmse": 176.625886359148,
+            "mae": 114.53895444065493,
+            "bias": -0.6735700058697516,
+            "baseline_rmse": 176.625886359148,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "co2_concentration",
+            "horizon_hours": 24,
+            "n": 169,
+            "rmse": 177.6288427840484,
+            "mae": 115.98298801118563,
+            "bias": -10.433678531852108,
+            "baseline_rmse": 177.6288427840484,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 1,
+            "n": 169,
+            "rmse": 3.137390785519244,
+            "mae": 2.0456114393115192,
+            "bias": -0.00488165677993513,
+            "baseline_rmse": 3.137390785519244,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 6,
+            "n": 169,
+            "rmse": 4.946716055039258,
+            "mae": 3.264990136627093,
+            "bias": -0.5642998026009777,
+            "baseline_rmse": 4.946716055039258,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          },
+          {
+            "target": "relative_humidity",
+            "horizon_hours": 24,
+            "n": 169,
+            "rmse": 4.924551827438035,
+            "mae": 3.2238165672752754,
+            "bias": -0.21602564100414895,
+            "baseline_rmse": 4.924551827438035,
+            "rmse_gain_vs_baseline": 0.0,
+            "mean_normalized_reward": 0.0
+          }
+        ]
+      }
+    ],
+    "paired_partial_comparisons": [
+      {
+        "cohort_digest": "10e2e7ef2d96697024b3cb6c34070a836bb3e8a8afde98d036d88b3b61eb5b35",
+        "generation": 0,
+        "phase": "screening",
+        "batch_index": null,
+        "common_complete_origins": 62,
+        "origin_first": 1040880,
+        "origin_last": 1040943,
+        "candidates": [
+          {
+            "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+            "revision": "3924fcdc-4a96-4e7a-a8f6-1f557c2b7544",
+            "slot": 0,
+            "role": "challenger",
+            "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+            "execution_scope_digest": "f3664489e81a4a79806b4b5e91306b3482d23471048b6a3fca5de8849a9b94fc",
+            "holdout_arm": null,
+            "cells": [
+              {
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "n": 62,
+                "rmse": 1.0833790247675261,
+                "mae": 0.7271688169211707,
+                "bias": -0.046696730080966684,
+                "baseline_rmse": 1.1064454566237347,
+                "rmse_gain_vs_baseline": 0.020847328459004832,
+                "mean_normalized_reward": 0.005417029288179232
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 6,
+                "n": 62,
+                "rmse": 1.0055297650596902,
+                "mae": 0.7530241931067575,
+                "bias": 0.23729838733110595,
+                "baseline_rmse": 1.0055297650596902,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 24,
+                "n": 62,
+                "rmse": 0.878254316835343,
+                "mae": 0.6190860222218932,
+                "bias": 0.3913978489351168,
+                "baseline_rmse": 0.878254316835343,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 1,
+                "n": 62,
+                "rmse": 110.99106103165849,
+                "mae": 69.51975417428163,
+                "bias": -1.4362108933339137,
+                "baseline_rmse": 112.15063908141569,
+                "rmse_gain_vs_baseline": 0.010339468943332597,
+                "mean_normalized_reward": 0.012692178103622593
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 6,
+                "n": 62,
+                "rmse": 142.38828860771886,
+                "mae": 98.32392491247523,
+                "bias": -21.498655930787375,
+                "baseline_rmse": 142.38828860771886,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 24,
+                "n": 62,
+                "rmse": 127.44602925056769,
+                "mae": 84.98521523987772,
+                "bias": -17.643817106872714,
+                "baseline_rmse": 127.44602925056769,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 1,
+                "n": 62,
+                "rmse": 5.231088232102242,
+                "mae": 3.3121050316119267,
+                "bias": 0.12248747775903403,
+                "baseline_rmse": 5.2944799231845066,
+                "rmse_gain_vs_baseline": 0.011973166770294585,
+                "mean_normalized_reward": 0.0016652542835342155
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 6,
+                "n": 62,
+                "rmse": 6.954983190208291,
+                "mae": 5.100604843941608,
+                "bias": -1.1622983803867446,
+                "baseline_rmse": 6.954983190208291,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 24,
+                "n": 62,
+                "rmse": 6.115137994256121,
+                "mae": 4.003494631240185,
+                "bias": -0.6096774174486326,
+                "baseline_rmse": 6.115137994256121,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              }
+            ]
+          },
+          {
+            "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+            "revision": "497136c7-d7da-4dc0-a160-72349e411da4",
+            "slot": 1,
+            "role": "challenger",
+            "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+            "execution_scope_digest": "b3ed14acffe2f9d224250a090278b9525806b1fd8a1e2fea80ba7fdef0fdcd7a",
+            "holdout_arm": null,
+            "cells": [
+              {
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "n": 62,
+                "rmse": 1.1064454566237347,
+                "mae": 0.7399193548882813,
+                "bias": -0.08803763442212147,
+                "baseline_rmse": 1.1064454566237347,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 6,
+                "n": 62,
+                "rmse": 0.9870270636522548,
+                "mae": 0.7413576580528728,
+                "bias": 0.19881342029024096,
+                "baseline_rmse": 1.0055297650596902,
+                "rmse_gain_vs_baseline": 0.018400948485435498,
+                "mean_normalized_reward": 0.0049564937763001944
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 24,
+                "n": 62,
+                "rmse": 0.878254316835343,
+                "mae": 0.6190860222218932,
+                "bias": 0.3913978489351168,
+                "baseline_rmse": 0.878254316835343,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 1,
+                "n": 62,
+                "rmse": 112.15063908141569,
+                "mae": 70.89919363328764,
+                "bias": -4.358870901587995,
+                "baseline_rmse": 112.15063908141569,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 6,
+                "n": 62,
+                "rmse": 141.04448716972513,
+                "mae": 99.16803092014362,
+                "bias": 6.741292505075277,
+                "baseline_rmse": 142.38828860771886,
+                "rmse_gain_vs_baseline": 0.009437584025578927,
+                "mean_normalized_reward": -0.00776659223260495
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 24,
+                "n": 62,
+                "rmse": 127.44602925056769,
+                "mae": 84.98521523987772,
+                "bias": -17.643817106872714,
+                "baseline_rmse": 127.44602925056769,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 1,
+                "n": 62,
+                "rmse": 5.2944799231845066,
+                "mae": 3.329704297605342,
+                "bias": 0.12110215209684927,
+                "baseline_rmse": 5.2944799231845066,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 6,
+                "n": 62,
+                "rmse": 7.194589227851267,
+                "mae": 5.137776585149389,
+                "bias": -2.3028217046090647,
+                "baseline_rmse": 6.954983190208291,
+                "rmse_gain_vs_baseline": -0.03445098731227847,
+                "mean_normalized_reward": -0.003517214939295878
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 24,
+                "n": 62,
+                "rmse": 6.115137994256121,
+                "mae": 4.003494631240185,
+                "bias": -0.6096774174486326,
+                "baseline_rmse": 6.115137994256121,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              }
+            ]
+          },
+          {
+            "candidate_id": "candidate:8f8bdf41-06fa-49dd-acb5-7f71e8918ac8",
+            "revision": "54fb6572-fbce-47ef-b7c1-e2ca2fb56577",
+            "slot": 2,
+            "role": "challenger",
+            "candidate_revision_id": "revision:candidate:8f8bdf41-06fa-49dd-acb5-7f71e8918ac8:r0",
+            "execution_scope_digest": "f10b0c7e2950fe3201e322dd7fa2d7e6d995b4f811d1f964c0f06f3b71a79474",
+            "holdout_arm": null,
+            "cells": [
+              {
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "n": 62,
+                "rmse": 1.1064454566237347,
+                "mae": 0.7399193548882813,
+                "bias": -0.08803763442212147,
+                "baseline_rmse": 1.1064454566237347,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 6,
+                "n": 62,
+                "rmse": 1.0055297650596902,
+                "mae": 0.7530241931067575,
+                "bias": 0.23729838733110595,
+                "baseline_rmse": 1.0055297650596902,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 24,
+                "n": 62,
+                "rmse": 0.9582787945318079,
+                "mae": 0.7424181212970348,
+                "bias": 0.575647508149338,
+                "baseline_rmse": 0.878254316835343,
+                "rmse_gain_vs_baseline": -0.09111765938688565,
+                "mean_normalized_reward": -0.05239728665456913
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 1,
+                "n": 62,
+                "rmse": 112.15063908141569,
+                "mae": 70.89919363328764,
+                "bias": -4.358870901587995,
+                "baseline_rmse": 112.15063908141569,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 6,
+                "n": 62,
+                "rmse": 142.38828860771886,
+                "mae": 98.32392491247523,
+                "bias": -21.498655930787375,
+                "baseline_rmse": 142.38828860771886,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 24,
+                "n": 62,
+                "rmse": 123.73152643954418,
+                "mae": 81.1915925163067,
+                "bias": -1.8194146574375218,
+                "baseline_rmse": 127.44602925056769,
+                "rmse_gain_vs_baseline": 0.029145692752188812,
+                "mean_normalized_reward": 0.03490500068789433
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 1,
+                "n": 62,
+                "rmse": 5.2944799231845066,
+                "mae": 3.329704297605342,
+                "bias": 0.12110215209684927,
+                "baseline_rmse": 5.2944799231845066,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 6,
+                "n": 62,
+                "rmse": 6.954983190208291,
+                "mae": 5.100604843941608,
+                "bias": -1.1622983803867446,
+                "baseline_rmse": 6.954983190208291,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 24,
+                "n": 62,
+                "rmse": 5.845043100171935,
+                "mae": 3.9523927498263807,
+                "bias": 0.2495289221439619,
+                "baseline_rmse": 6.115137994256121,
+                "rmse_gain_vs_baseline": 0.04416824188397428,
+                "mean_normalized_reward": 0.004835294094244345
+              }
+            ]
+          },
+          {
+            "candidate_id": "candidate:5e1c5af2-f8a1-435c-acb7-76cc09c9b482",
+            "revision": "43cdaf2b-4f42-4e90-aa76-6b10343d5be6",
+            "slot": 3,
+            "role": "challenger",
+            "candidate_revision_id": "revision:candidate:5e1c5af2-f8a1-435c-acb7-76cc09c9b482:r0",
+            "execution_scope_digest": "30b64b5ca787045b85e5e16e2cdb4778170b32f87d689b1b6adf91cb9be7e7fc",
+            "holdout_arm": null,
+            "cells": [
+              {
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "n": 62,
+                "rmse": 1.1064454566237347,
+                "mae": 0.7399193548882813,
+                "bias": -0.08803763442212147,
+                "baseline_rmse": 1.1064454566237347,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 6,
+                "n": 62,
+                "rmse": 1.0055297650596902,
+                "mae": 0.7530241931067575,
+                "bias": 0.23729838733110595,
+                "baseline_rmse": 1.0055297650596902,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 24,
+                "n": 62,
+                "rmse": 0.995312703400908,
+                "mae": 0.7935141388417041,
+                "bias": 0.6370640612207449,
+                "baseline_rmse": 0.878254316835343,
+                "rmse_gain_vs_baseline": -0.13328529598051642,
+                "mean_normalized_reward": -0.07410528236916214
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 1,
+                "n": 62,
+                "rmse": 112.15063908141569,
+                "mae": 70.89919363328764,
+                "bias": -4.358870901587995,
+                "baseline_rmse": 112.15063908141569,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 6,
+                "n": 62,
+                "rmse": 142.38828860771886,
+                "mae": 98.32392491247523,
+                "bias": -21.498655930787375,
+                "baseline_rmse": 142.38828860771886,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 24,
+                "n": 62,
+                "rmse": 123.02896304776154,
+                "mae": 80.29669775288386,
+                "bias": 3.455386159040881,
+                "baseline_rmse": 127.44602925056769,
+                "rmse_gain_vs_baseline": 0.034658327362415475,
+                "mean_normalized_reward": 0.04313889862898008
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 1,
+                "n": 62,
+                "rmse": 5.2944799231845066,
+                "mae": 3.329704297605342,
+                "bias": 0.12110215209684927,
+                "baseline_rmse": 5.2944799231845066,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 6,
+                "n": 62,
+                "rmse": 6.954983190208291,
+                "mae": 5.100604843941608,
+                "bias": -1.1622983803867446,
+                "baseline_rmse": 6.954983190208291,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 24,
+                "n": 62,
+                "rmse": 5.785426494763822,
+                "mae": 3.952347097957687,
+                "bias": 0.5359310353414924,
+                "baseline_rmse": 6.115137994256121,
+                "rmse_gain_vs_baseline": 0.053917262341748096,
+                "mean_normalized_reward": 0.004839613704500875
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "cohort_digest": "23ffe9353f558ce97d1fde4be0fa532a45cecf1bbc3665fa58285e4ea3795217",
+        "generation": 0,
+        "phase": "formal_batch",
+        "batch_index": 0,
+        "common_complete_origins": 72,
+        "origin_first": 1040688,
+        "origin_last": 1040759,
+        "candidates": [
+          {
+            "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+            "revision": "dc0bdb30-a431-47cf-891b-6bfde5c34414",
+            "slot": 0,
+            "role": "challenger",
+            "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+            "execution_scope_digest": "94e77a1bcf948968702f91e9d4a122224c0f2aca95389d2c5a2b53bd368a2c76",
+            "holdout_arm": null,
+            "cells": [
+              {
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "n": 72,
+                "rmse": 0.9815352321325734,
+                "mae": 0.7000486672558099,
+                "bias": 0.00025090883136262104,
+                "baseline_rmse": 1.0066124928409679,
+                "rmse_gain_vs_baseline": 0.024912526803257506,
+                "mean_normalized_reward": 0.008092723644574924
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 6,
+                "n": 72,
+                "rmse": 1.9885098667876944,
+                "mae": 1.2586805562773309,
+                "bias": -0.021874999557621067,
+                "baseline_rmse": 1.9885098667876944,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 24,
+                "n": 72,
+                "rmse": 1.7318171895643855,
+                "mae": 1.1896990741245201,
+                "bias": 0.7239583334303465,
+                "baseline_rmse": 1.7318171895643855,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 1,
+                "n": 72,
+                "rmse": 71.44678949479307,
+                "mae": 47.760599115306235,
+                "bias": -1.6648832374825489,
+                "baseline_rmse": 72.22535825473022,
+                "rmse_gain_vs_baseline": 0.010779714753248237,
+                "mean_normalized_reward": 0.0007437698002984905
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 6,
+                "n": 72,
+                "rmse": 132.40070691649905,
+                "mae": 99.32581012445519,
+                "bias": -48.29571756445888,
+                "baseline_rmse": 132.40070691649905,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 24,
+                "n": 72,
+                "rmse": 127.85978021826202,
+                "mae": 96.63831009841695,
+                "bias": -46.40335651904483,
+                "baseline_rmse": 127.85978021826202,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 1,
+                "n": 72,
+                "rmse": 4.0152592287569195,
+                "mae": 2.9595314209913344,
+                "bias": 0.028037025128573312,
+                "baseline_rmse": 4.102726283878001,
+                "rmse_gain_vs_baseline": 0.02131925189959427,
+                "mean_normalized_reward": 0.008625905345377338
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 6,
+                "n": 72,
+                "rmse": 11.611579178636593,
+                "mae": 8.721527764390014,
+                "bias": -0.9398148136584221,
+                "baseline_rmse": 11.611579178636593,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 24,
+                "n": 72,
+                "rmse": 11.138762083964716,
+                "mae": 7.901909717088308,
+                "bias": -2.1448495401608483,
+                "baseline_rmse": 11.138762083964716,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              }
+            ]
+          },
+          {
+            "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+            "revision": "345b6886-781a-4708-a5e0-95f291340fb4",
+            "slot": 1,
+            "role": "challenger",
+            "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+            "execution_scope_digest": "a99999486c0e87cd49152e986cdb7b4b4fc0e99e9fd1cd445f8ebc02cc80918e",
+            "holdout_arm": null,
+            "cells": [
+              {
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "n": 72,
+                "rmse": 1.0066124928409679,
+                "mae": 0.7190972222105811,
+                "bias": 0.027199074070193657,
+                "baseline_rmse": 1.0066124928409679,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 6,
+                "n": 72,
+                "rmse": 1.9708801291588438,
+                "mae": 1.2633807071485466,
+                "bias": 0.09329625981145234,
+                "baseline_rmse": 1.9885098667876944,
+                "rmse_gain_vs_baseline": 0.008865803445738063,
+                "mean_normalized_reward": -0.001996845544392738
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 24,
+                "n": 72,
+                "rmse": 1.7318171895643855,
+                "mae": 1.1896990741245201,
+                "bias": 0.7239583334303465,
+                "baseline_rmse": 1.7318171895643855,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 1,
+                "n": 72,
+                "rmse": 72.22535825473022,
+                "mae": 47.84143515483959,
+                "bias": 0.056712962342078614,
+                "baseline_rmse": 72.22535825473022,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 6,
+                "n": 72,
+                "rmse": 137.3182287997364,
+                "mae": 101.79338950307914,
+                "bias": -56.57988538686803,
+                "baseline_rmse": 132.40070691649905,
+                "rmse_gain_vs_baseline": -0.0371412056458178,
+                "mean_normalized_reward": -0.022704118512666925
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 24,
+                "n": 72,
+                "rmse": 127.85978021826202,
+                "mae": 96.63831009841695,
+                "bias": -46.40335651904483,
+                "baseline_rmse": 127.85978021826202,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 1,
+                "n": 72,
+                "rmse": 4.102726283878001,
+                "mae": 3.0506944368192404,
+                "bias": -0.020138888892769283,
+                "baseline_rmse": 4.102726283878001,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 6,
+                "n": 72,
+                "rmse": 11.646214967451009,
+                "mae": 8.730645406838967,
+                "bias": -0.926195497024385,
+                "baseline_rmse": 11.611579178636593,
+                "rmse_gain_vs_baseline": -0.0029828663510420572,
+                "mean_normalized_reward": -0.0008627174081878751
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 24,
+                "n": 72,
+                "rmse": 11.138762083964716,
+                "mae": 7.901909717088308,
+                "bias": -2.1448495401608483,
+                "baseline_rmse": 11.138762083964716,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "cohort_digest": "8cdae944a588c4bdc45d711caa9722886557cf0f88151836cc5a77574ec2780c",
+        "generation": 0,
+        "phase": "formal_batch",
+        "batch_index": 1,
+        "common_complete_origins": 71,
+        "origin_first": 1040784,
+        "origin_last": 1040855,
+        "candidates": [
+          {
+            "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+            "revision": "dad38c92-883f-43ab-9e28-6a109cbaa328",
+            "slot": 0,
+            "role": "challenger",
+            "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+            "execution_scope_digest": "dc38bc9e906b9f6256612cd64858332ac252b81ba84d71c09457bd19496394c3",
+            "holdout_arm": null,
+            "cells": [
+              {
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "n": 71,
+                "rmse": 1.0222769353066,
+                "mae": 0.6819547167356984,
+                "bias": -0.0017181613696679557,
+                "baseline_rmse": 1.042326081628437,
+                "rmse_gain_vs_baseline": 0.019235003973530174,
+                "mean_normalized_reward": 0.007068110486697156
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 6,
+                "n": 71,
+                "rmse": 1.8442814908641727,
+                "mae": 1.1409624419677915,
+                "bias": -0.4158450702336481,
+                "baseline_rmse": 1.8442814908641727,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 24,
+                "n": 71,
+                "rmse": 1.6188716910434398,
+                "mae": 0.9886737102384673,
+                "bias": -0.617899061516889,
+                "baseline_rmse": 1.6188716910434398,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 1,
+                "n": 71,
+                "rmse": 104.68258551470619,
+                "mae": 61.27837240106925,
+                "bias": 1.533405747457406,
+                "baseline_rmse": 106.08705338854199,
+                "rmse_gain_vs_baseline": 0.013238824427444174,
+                "mean_normalized_reward": 0.011747719226621324
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 6,
+                "n": 71,
+                "rmse": 109.49795448368647,
+                "mae": 78.93075110208886,
+                "bias": -1.3896712295955986,
+                "baseline_rmse": 109.49795448368647,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 24,
+                "n": 71,
+                "rmse": 134.35195767087717,
+                "mae": 94.38615013337188,
+                "bias": 16.89906106395161,
+                "baseline_rmse": 134.35195767087717,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 1,
+                "n": 71,
+                "rmse": 3.399899217989604,
+                "mae": 2.165070358507155,
+                "bias": 0.17710162862214585,
+                "baseline_rmse": 3.472762895906767,
+                "rmse_gain_vs_baseline": 0.020981472130747747,
+                "mean_normalized_reward": 0.004304580133739515
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 6,
+                "n": 71,
+                "rmse": 4.848250338328275,
+                "mae": 3.045129107654602,
+                "bias": 1.7484154933001061,
+                "baseline_rmse": 4.848250338328275,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 24,
+                "n": 71,
+                "rmse": 6.270918916331151,
+                "mae": 3.963908444766058,
+                "bias": 2.1174295725497663,
+                "baseline_rmse": 6.270918916331151,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              }
+            ]
+          },
+          {
+            "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+            "revision": "6a9bf6fe-0e7f-4eaf-b63d-32cd65f72b97",
+            "slot": 0,
+            "role": "challenger",
+            "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:batch:1",
+            "execution_scope_digest": "49c77eddfa5d14709fe7579b67702ba68bcf2655459f4a1efc7ccbaedd4bcc86",
+            "holdout_arm": null,
+            "cells": [
+              {
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "n": 71,
+                "rmse": 1.0222769353066,
+                "mae": 0.6819547167356984,
+                "bias": -0.0017181613696679557,
+                "baseline_rmse": 1.042326081628437,
+                "rmse_gain_vs_baseline": 0.019235003973530174,
+                "mean_normalized_reward": 0.007068110486697156
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 6,
+                "n": 71,
+                "rmse": 1.8507863386263894,
+                "mae": 1.1505897298649908,
+                "bias": -0.4505835293502264,
+                "baseline_rmse": 1.8442814908641727,
+                "rmse_gain_vs_baseline": -0.0035270362981134618,
+                "mean_normalized_reward": -0.004090125502106904
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 24,
+                "n": 71,
+                "rmse": 1.6188716910434398,
+                "mae": 0.9886737102384673,
+                "bias": -0.617899061516889,
+                "baseline_rmse": 1.6188716910434398,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 1,
+                "n": 71,
+                "rmse": 104.68258551470619,
+                "mae": 61.27837240106925,
+                "bias": 1.533405747457406,
+                "baseline_rmse": 106.08705338854199,
+                "rmse_gain_vs_baseline": 0.013238824427444174,
+                "mean_normalized_reward": 0.011747719226621324
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 6,
+                "n": 71,
+                "rmse": 109.59363440400868,
+                "mae": 77.51810472905177,
+                "bias": 10.860270014496987,
+                "baseline_rmse": 109.49795448368647,
+                "rmse_gain_vs_baseline": -0.0008738055498238584,
+                "mean_normalized_reward": 0.012997713851786583
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 24,
+                "n": 71,
+                "rmse": 134.35195767087717,
+                "mae": 94.38615013337188,
+                "bias": 16.89906106395161,
+                "baseline_rmse": 134.35195767087717,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 1,
+                "n": 71,
+                "rmse": 3.399899217989604,
+                "mae": 2.165070358507155,
+                "bias": 0.17710162862214585,
+                "baseline_rmse": 3.472762895906767,
+                "rmse_gain_vs_baseline": 0.020981472130747747,
+                "mean_normalized_reward": 0.004304580133739515
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 6,
+                "n": 71,
+                "rmse": 4.675417383643618,
+                "mae": 2.917420453555797,
+                "bias": 1.0832946103271976,
+                "baseline_rmse": 4.848250338328275,
+                "rmse_gain_vs_baseline": 0.035648521141392164,
+                "mean_normalized_reward": 0.012083878007298274
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 24,
+                "n": 71,
+                "rmse": 6.270918916331151,
+                "mae": 3.963908444766058,
+                "bias": 2.1174295725497663,
+                "baseline_rmse": 6.270918916331151,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              }
+            ]
+          },
+          {
+            "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+            "revision": "a0c2886c-cd69-4d19-80d5-a692f6ee5795",
+            "slot": 1,
+            "role": "challenger",
+            "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+            "execution_scope_digest": "322fa28a13cbfa88306337b56d23cb89a6879e1156b2a1ce3b8d0a9b8e3e3a7f",
+            "holdout_arm": null,
+            "cells": [
+              {
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "n": 71,
+                "rmse": 1.042326081628437,
+                "mae": 0.698591549642071,
+                "bias": -0.023708920242885814,
+                "baseline_rmse": 1.042326081628437,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 6,
+                "n": 71,
+                "rmse": 1.8543467131485454,
+                "mae": 1.1567078664667394,
+                "bias": -0.46795275890851545,
+                "baseline_rmse": 1.8442814908641727,
+                "rmse_gain_vs_baseline": -0.005457530390144738,
+                "mean_normalized_reward": -0.006689398195246815
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 24,
+                "n": 71,
+                "rmse": 1.6188716910434398,
+                "mae": 0.9886737102384673,
+                "bias": -0.617899061516889,
+                "baseline_rmse": 1.6188716910434398,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 1,
+                "n": 71,
+                "rmse": 106.08705338854199,
+                "mae": 62.5551640850671,
+                "bias": -1.0352112641820372,
+                "baseline_rmse": 106.08705338854199,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 6,
+                "n": 71,
+                "rmse": 110.34390813325973,
+                "mae": 77.87665850577723,
+                "bias": 16.985240636543274,
+                "baseline_rmse": 109.49795448368647,
+                "rmse_gain_vs_baseline": -0.007725748426645751,
+                "mean_normalized_reward": 0.0096986720821642
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 24,
+                "n": 71,
+                "rmse": 134.35195767087717,
+                "mae": 94.38615013337188,
+                "bias": 16.89906106395161,
+                "baseline_rmse": 134.35195767087717,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 1,
+                "n": 71,
+                "rmse": 3.472762895906767,
+                "mae": 2.21056338111201,
+                "bias": 0.21643192476063902,
+                "baseline_rmse": 3.472762895906767,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 6,
+                "n": 71,
+                "rmse": 4.627525923822784,
+                "mae": 2.9447878407230297,
+                "bias": 0.7507341688407443,
+                "baseline_rmse": 4.848250338328275,
+                "rmse_gain_vs_baseline": 0.04552661251019452,
+                "mean_normalized_reward": 0.009494357584888365
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 24,
+                "n": 71,
+                "rmse": 6.270918916331151,
+                "mae": 3.963908444766058,
+                "bias": 2.1174295725497663,
+                "baseline_rmse": 6.270918916331151,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              }
+            ]
+          },
+          {
+            "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+            "revision": "2b9f260c-8934-465b-a453-e7ab189d951c",
+            "slot": 1,
+            "role": "challenger",
+            "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:batch:1",
+            "execution_scope_digest": "d67c546c9708045641885a85f199bcab7ff9ce13908ed6b16179ffe1a65a8080",
+            "holdout_arm": null,
+            "cells": [
+              {
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "n": 71,
+                "rmse": 1.042326081628437,
+                "mae": 0.698591549642071,
+                "bias": -0.023708920242885814,
+                "baseline_rmse": 1.042326081628437,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 6,
+                "n": 71,
+                "rmse": 1.8442814908641727,
+                "mae": 1.1409624419677915,
+                "bias": -0.4158450702336481,
+                "baseline_rmse": 1.8442814908641727,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 24,
+                "n": 71,
+                "rmse": 1.6188716910434398,
+                "mae": 0.9886737102384673,
+                "bias": -0.617899061516889,
+                "baseline_rmse": 1.6188716910434398,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 1,
+                "n": 71,
+                "rmse": 106.08705338854199,
+                "mae": 62.5551640850671,
+                "bias": -1.0352112641820372,
+                "baseline_rmse": 106.08705338854199,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 6,
+                "n": 71,
+                "rmse": 109.49795448368647,
+                "mae": 78.93075110208886,
+                "bias": -1.3896712295955986,
+                "baseline_rmse": 109.49795448368647,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 24,
+                "n": 71,
+                "rmse": 134.35195767087717,
+                "mae": 94.38615013337188,
+                "bias": 16.89906106395161,
+                "baseline_rmse": 134.35195767087717,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 1,
+                "n": 71,
+                "rmse": 3.472762895906767,
+                "mae": 2.21056338111201,
+                "bias": 0.21643192476063902,
+                "baseline_rmse": 3.472762895906767,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 6,
+                "n": 71,
+                "rmse": 4.848250338328275,
+                "mae": 3.045129107654602,
+                "bias": 1.7484154933001061,
+                "baseline_rmse": 4.848250338328275,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 24,
+                "n": 71,
+                "rmse": 6.270918916331151,
+                "mae": 3.963908444766058,
+                "bias": 2.1174295725497663,
+                "baseline_rmse": 6.270918916331151,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "cohort_digest": "0f1e74a1093d930ef4652372cc34648b47d620805da48ab0b71aa4a447d99f32",
+        "generation": 0,
+        "phase": "holdout",
+        "batch_index": null,
+        "common_complete_origins": 168,
+        "origin_first": 1040968,
+        "origin_last": 1041136,
+        "candidates": [
+          {
+            "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+            "revision": "37018a7b-3733-470b-af14-ae8959a54b89",
+            "slot": 0,
+            "role": "challenger",
+            "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+            "execution_scope_digest": "0e4a0f89a02c811e653e1129cb5d847f58d068f20e28ae3cdb6656d1fc4efabf",
+            "holdout_arm": "finalist_1",
+            "cells": [
+              {
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "n": 168,
+                "rmse": 1.125404073949906,
+                "mae": 0.7756107956379653,
+                "bias": 0.07283001426418653,
+                "baseline_rmse": 1.1469322825723505,
+                "rmse_gain_vs_baseline": 0.018770252568147017,
+                "mean_normalized_reward": 0.0006466768640590005
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 6,
+                "n": 168,
+                "rmse": 0.7250588653155389,
+                "mae": 0.4818452381151942,
+                "bias": 0.03596230164051972,
+                "baseline_rmse": 0.7250588653155389,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 24,
+                "n": 168,
+                "rmse": 0.708239810096586,
+                "mae": 0.4694940475641656,
+                "bias": 0.001488095342868423,
+                "baseline_rmse": 0.708239810096586,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 1,
+                "n": 168,
+                "rmse": 192.40497012129416,
+                "mae": 99.32521424813909,
+                "bias": 1.4158300124144305,
+                "baseline_rmse": 193.85235825774114,
+                "rmse_gain_vs_baseline": 0.007466445853202219,
+                "mean_normalized_reward": 0.0007638604781753831
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 6,
+                "n": 168,
+                "rmse": 175.7542058676646,
+                "mae": 113.50793630855031,
+                "bias": -2.3903769739655893,
+                "baseline_rmse": 175.7542058676646,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 24,
+                "n": 168,
+                "rmse": 178.144234419676,
+                "mae": 116.51066452443105,
+                "bias": -10.333085345815773,
+                "baseline_rmse": 178.144234419676,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 1,
+                "n": 168,
+                "rmse": 3.0871348493184034,
+                "mae": 1.9989519270292506,
+                "bias": 0.02753096289212175,
+                "baseline_rmse": 3.1445140380965086,
+                "rmse_gain_vs_baseline": 0.018247394695314778,
+                "mean_normalized_reward": 0.004708172026065621
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 6,
+                "n": 168,
+                "rmse": 4.784739227142217,
+                "mae": 3.18318452232606,
+                "bias": -0.6688988093974161,
+                "baseline_rmse": 4.784739227142217,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 24,
+                "n": 168,
+                "rmse": 4.938689301640915,
+                "mae": 3.2375992055808647,
+                "bias": -0.2227182539383184,
+                "baseline_rmse": 4.938689301640915,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              }
+            ]
+          },
+          {
+            "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+            "revision": "58150c1e-55e1-457a-a378-41773424271d",
+            "slot": 1,
+            "role": "challenger",
+            "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+            "execution_scope_digest": "79eb563546d86b0c805dd8feb51b148b87e478cc672a5421f3d7d1b5c8a66de8",
+            "holdout_arm": "finalist_2",
+            "cells": [
+              {
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "n": 168,
+                "rmse": 1.1469322825723505,
+                "mae": 0.777132935812771,
+                "bias": 0.007589285777482603,
+                "baseline_rmse": 1.1469322825723505,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 6,
+                "n": 168,
+                "rmse": 0.7218869142679448,
+                "mae": 0.477302496774472,
+                "bias": -0.05029400543180884,
+                "baseline_rmse": 0.7250588653155389,
+                "rmse_gain_vs_baseline": 0.004374749691824831,
+                "mean_normalized_reward": 0.001929970559265046
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 24,
+                "n": 168,
+                "rmse": 0.708239810096586,
+                "mae": 0.4694940475641656,
+                "bias": 0.001488095342868423,
+                "baseline_rmse": 0.708239810096586,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 1,
+                "n": 168,
+                "rmse": 193.85235825774114,
+                "mae": 99.40823382729782,
+                "bias": -2.2594246089621026,
+                "baseline_rmse": 193.85235825774114,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 6,
+                "n": 168,
+                "rmse": 178.3173433784324,
+                "mae": 117.44902206248396,
+                "bias": 30.216376845970032,
+                "baseline_rmse": 175.7542058676646,
+                "rmse_gain_vs_baseline": -0.014583648215495515,
+                "mean_normalized_reward": -0.03626180328828615
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 24,
+                "n": 168,
+                "rmse": 178.144234419676,
+                "mae": 116.51066452443105,
+                "bias": -10.333085345815773,
+                "baseline_rmse": 178.144234419676,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 1,
+                "n": 168,
+                "rmse": 3.1445140380965086,
+                "mae": 2.04871031687325,
+                "bias": -0.013988095266367446,
+                "baseline_rmse": 3.1445140380965086,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 6,
+                "n": 168,
+                "rmse": 4.991180304326259,
+                "mae": 3.3252807990185196,
+                "bias": -1.642864505956136,
+                "baseline_rmse": 4.784739227142217,
+                "rmse_gain_vs_baseline": -0.043145732167172435,
+                "mean_normalized_reward": -0.013445244450814832
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 24,
+                "n": 168,
+                "rmse": 4.938689301640915,
+                "mae": 3.2375992055808647,
+                "bias": -0.2227182539383184,
+                "baseline_rmse": 4.938689301640915,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              }
+            ]
+          },
+          {
+            "candidate_id": "candidate:run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09:seed-incumbent-control",
+            "revision": "5b986ef3-8b00-42c2-8503-52787ad3dbbf",
+            "slot": 0,
+            "role": "incumbent_control",
+            "candidate_revision_id": "revision:candidate:run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09:seed-incumbent-control:r0",
+            "execution_scope_digest": "0645b388196071b7ed792b77a9ad872f55ba7ac9951154ec6bf7a0b6238ffcfc",
+            "holdout_arm": "incumbent",
+            "cells": [
+              {
+                "target": "air_temperature",
+                "horizon_hours": 1,
+                "n": 168,
+                "rmse": 1.1469322825723505,
+                "mae": 0.777132935812771,
+                "bias": 0.007589285777482603,
+                "baseline_rmse": 1.1469322825723505,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 6,
+                "n": 168,
+                "rmse": 0.7250588653155389,
+                "mae": 0.4818452381151942,
+                "bias": 0.03596230164051972,
+                "baseline_rmse": 0.7250588653155389,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "air_temperature",
+                "horizon_hours": 24,
+                "n": 168,
+                "rmse": 0.708239810096586,
+                "mae": 0.4694940475641656,
+                "bias": 0.001488095342868423,
+                "baseline_rmse": 0.708239810096586,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 1,
+                "n": 168,
+                "rmse": 193.85235825774114,
+                "mae": 99.40823382729782,
+                "bias": -2.2594246089621026,
+                "baseline_rmse": 193.85235825774114,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 6,
+                "n": 168,
+                "rmse": 175.7542058676646,
+                "mae": 113.50793630855031,
+                "bias": -2.3903769739655893,
+                "baseline_rmse": 175.7542058676646,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "co2_concentration",
+                "horizon_hours": 24,
+                "n": 168,
+                "rmse": 178.144234419676,
+                "mae": 116.51066452443105,
+                "bias": -10.333085345815773,
+                "baseline_rmse": 178.144234419676,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 1,
+                "n": 168,
+                "rmse": 3.1445140380965086,
+                "mae": 2.04871031687325,
+                "bias": -0.013988095266367446,
+                "baseline_rmse": 3.1445140380965086,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 6,
+                "n": 168,
+                "rmse": 4.784739227142217,
+                "mae": 3.18318452232606,
+                "bias": -0.6688988093974161,
+                "baseline_rmse": 4.784739227142217,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              },
+              {
+                "target": "relative_humidity",
+                "horizon_hours": 24,
+                "n": 168,
+                "rmse": 4.938689301640915,
+                "mae": 3.2375992055808647,
+                "bias": -0.2227182539383184,
+                "baseline_rmse": 4.938689301640915,
+                "rmse_gain_vs_baseline": 0.0,
+                "mean_normalized_reward": 0.0
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "evidence_scope": "exploratory_committed_run_results_not_independent_validation"
+  },
+  "origin_execution_totals": {
+    "attempted": 1195,
+    "succeeded": 1191,
+    "failed": 4
+  },
+  "local_comparisons": [
+    {
+      "event_seq": 16415,
+      "created_at": "2026-09-07T04:20:12.436+00:00",
+      "comparison": {
+        "batch_index": 0,
+        "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+        "cell_regression_gate_passed": true,
+        "challenger_evaluation_digest": "d602f69ebb482dd8ee06e8fa743a07a7c1544af4e962e798faad537085057e44",
+        "challenger_evaluation_id": "formal-evaluation:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:0:champion",
+        "challenger_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+        "challenger_score": 0.006334610384011099,
+        "champion_after_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+        "champion_before_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+        "champion_evaluation_digest": "d602f69ebb482dd8ee06e8fa743a07a7c1544af4e962e798faad537085057e44",
+        "champion_evaluation_id": "formal-evaluation:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:0:champion",
+        "champion_score": 0.006334610384011099,
+        "cohort_digest": "23ffe9353f558ce97d1fde4be0fa532a45cecf1bbc3665fa58285e4ea3795217",
+        "comparison_contract_digest": "b3f22832fea131c71b58beac3e5ed7237b721da5d77048324e1c62205c5f9b91",
+        "comparison_id": "comparison:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:0",
+        "created_at": "2026-09-07T04:20:12.408+00:00",
+        "decision": "initial_champion",
+        "generation": 0,
+        "minimum_score_delta": 0.005,
+        "paired_execution_qualification": "paired_strict_agent_chain@1",
+        "reason": "initial_champion",
+        "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+        "safety_gate_passed": true,
+        "score_delta": 0.0
+      }
+    },
+    {
+      "event_seq": 16435,
+      "created_at": "2026-09-07T04:21:11.505+00:00",
+      "comparison": {
+        "batch_index": 0,
+        "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+        "cell_regression_gate_passed": true,
+        "challenger_evaluation_digest": "049ed19d694e64ad282dd6e61de01bfab8fd38a3556427804940c61bf5aebf5b",
+        "challenger_evaluation_id": "formal-evaluation:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:0:champion",
+        "challenger_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+        "challenger_score": -0.003324369858053283,
+        "champion_after_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+        "champion_before_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+        "champion_evaluation_digest": "049ed19d694e64ad282dd6e61de01bfab8fd38a3556427804940c61bf5aebf5b",
+        "champion_evaluation_id": "formal-evaluation:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:0:champion",
+        "champion_score": -0.003324369858053283,
+        "cohort_digest": "23ffe9353f558ce97d1fde4be0fa532a45cecf1bbc3665fa58285e4ea3795217",
+        "comparison_contract_digest": "b3f22832fea131c71b58beac3e5ed7237b721da5d77048324e1c62205c5f9b91",
+        "comparison_id": "comparison:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:0",
+        "created_at": "2026-09-07T04:21:11.503+00:00",
+        "decision": "initial_champion",
+        "generation": 0,
+        "minimum_score_delta": 0.005,
+        "paired_execution_qualification": "paired_strict_agent_chain@1",
+        "reason": "initial_champion",
+        "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+        "safety_gate_passed": true,
+        "score_delta": 0.0
+      }
+    },
+    {
+      "event_seq": 19475,
+      "created_at": "2026-09-07T06:12:24.937+00:00",
+      "comparison": {
+        "batch_index": 1,
+        "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+        "cell_regression_gate_passed": false,
+        "challenger_evaluation_digest": "03d09b2c7dcd2a68ca52b232b9ac2fe9561802f05120c0e580f7a11eccf6f8bb",
+        "challenger_evaluation_id": "formal-evaluation:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:1:challenger",
+        "challenger_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:batch:1",
+        "challenger_score": 0.0095443544974401,
+        "champion_after_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+        "champion_before_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+        "champion_evaluation_digest": "ea3e2715dd3609cab7de8195de492072715168a6d3e3e84429db9b4e8d3c3483",
+        "champion_evaluation_id": "formal-evaluation:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:1:champion",
+        "champion_score": -0.008031903799764968,
+        "cohort_digest": "8cdae944a588c4bdc45d711caa9722886557cf0f88151836cc5a77574ec2780c",
+        "comparison_contract_digest": "cfdb41764a4329eedd03e06631e631b754bf44bf63033312085c734b642f34ac",
+        "comparison_id": "comparison:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:1",
+        "created_at": "2026-09-07T06:12:24.926+00:00",
+        "decision": "champion_retained",
+        "generation": 0,
+        "minimum_score_delta": 0.005,
+        "paired_execution_qualification": "paired_strict_agent_chain@1",
+        "reason": "paired_strict_agent_chain_failed",
+        "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+        "safety_gate_passed": true,
+        "score_delta": 0.017576258297205067
+      }
+    },
+    {
+      "event_seq": 20419,
+      "created_at": "2026-09-07T06:17:22.037+00:00",
+      "comparison": {
+        "batch_index": 1,
+        "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+        "cell_regression_gate_passed": false,
+        "challenger_evaluation_digest": "38dcdff61e37187935814df2b4eb879a1fb0db11c8283d18524c4bf1c1cca8c1",
+        "challenger_evaluation_id": "formal-evaluation:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:1:challenger",
+        "challenger_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:batch:1",
+        "challenger_score": 0.0,
+        "champion_after_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+        "champion_before_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+        "champion_evaluation_digest": "79949d7bbc3096e3befae62c54b56cbcab04927d9395c4f3a94a9b4c80958bec",
+        "champion_evaluation_id": "formal-evaluation:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:1:champion",
+        "champion_score": 0.0035920222041208394,
+        "cohort_digest": "8cdae944a588c4bdc45d711caa9722886557cf0f88151836cc5a77574ec2780c",
+        "comparison_contract_digest": "cfdb41764a4329eedd03e06631e631b754bf44bf63033312085c734b642f34ac",
+        "comparison_id": "comparison:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:1",
+        "created_at": "2026-09-07T06:17:22.035+00:00",
+        "decision": "champion_retained",
+        "generation": 0,
+        "minimum_score_delta": 0.005,
+        "paired_execution_qualification": "paired_strict_agent_chain@1",
+        "reason": "challenger_cell_regression",
+        "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+        "safety_gate_passed": true,
+        "score_delta": -0.0035920222041208394
+      }
+    }
+  ],
+  "holdout_comparisons": [
+    {
+      "event_seq": 28470,
+      "created_at": "2026-09-07T07:28:14.503+00:00",
+      "comparison": {
+        "cohort_digest": "0f1e74a1093d930ef4652372cc34648b47d620805da48ab0b71aa4a447d99f32",
+        "comparison_digest": "73e336bf6810c919e3411aafee8cb50b35cec2af2e113a3038e1d6cd3af0a85a",
+        "comparison_id": "generation-comparison:run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09:0",
+        "created_at": "2026-09-07T07:28:12.577+00:00",
+        "gate_results": {
+          "arms": {
+            "finalist_1": {
+              "cell_deltas": {
+                "air_temperature@1h": 0.018770252568147048,
+                "air_temperature@24h": 0.0,
+                "air_temperature@6h": 0.0,
+                "co2_concentration@1h": 0.007466445853202329,
+                "co2_concentration@24h": 0.0,
+                "co2_concentration@6h": 0.0,
+                "relative_humidity@1h": 0.0182473946953147,
+                "relative_humidity@24h": 0.0,
+                "relative_humidity@6h": 0.0
+              },
+              "certification_eligible": false,
+              "certification_failures": [
+                "independent_review_not_accepted",
+                "paired_strict_agent_chain_failed",
+                "paired_scoring_evidence_incomplete",
+                "scientific_gate_failed",
+                "unstable_or_below_delta"
+              ],
+              "complete_objective_grid": true,
+              "constraint_violations": 0,
+              "coverage_pass": true,
+              "eligible": false,
+              "failures": [
+                "independent_review_not_accepted",
+                "paired_strict_agent_chain_failed",
+                "paired_scoring_evidence_incomplete",
+                "scientific_gate_failed",
+                "unstable_or_below_delta"
+              ],
+              "judge_accepted": false,
+              "judge_available": true,
+              "no_cell_regression": true,
+              "overall_coverage": 1.0,
+              "paired_scoring_evidence_complete": false,
+              "passed": false,
+              "promotion_assessment": {
+                "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+                "evidence_class": "exploratory_adaptive_data",
+                "formal_confirmation": false,
+                "paired_block_count": 8,
+                "paired_block_ids_digest": "9b244f145be3f588be51efdb72afa39e0f91f02b1fcdb0eab87b883998d86047",
+                "primary_delta": -0.0010037293598951357,
+                "primary_selection_gate": false,
+                "selection_stability_floor": -0.007035802310424011,
+                "status": "unstable_or_below_delta",
+                "valid_three_day_start_count": 6
+              },
+              "score": -0.0010037293598951222,
+              "search_eligible": false,
+              "search_failures": [
+                "independent_review_not_accepted",
+                "strict_agent_chain_failed",
+                "no_positive_score_delta"
+              ],
+              "stability_lower_bound": -0.007035802310424011,
+              "strict_agent_chain_pass": false,
+              "worst_cell_delta": 0.0
+            },
+            "finalist_2": {
+              "cell_deltas": {
+                "air_temperature@1h": 0.0,
+                "air_temperature@24h": 0.0,
+                "air_temperature@6h": 0.003703550320266019,
+                "co2_concentration@1h": 0.0,
+                "co2_concentration@24h": 0.0,
+                "co2_concentration@6h": -0.01607658517272202,
+                "relative_humidity@1h": 0.0,
+                "relative_humidity@24h": 0.0,
+                "relative_humidity@6h": -0.03570011711355248
+              },
+              "certification_eligible": false,
+              "certification_failures": [
+                "cell_regression",
+                "independent_review_not_accepted",
+                "scientific_gate_failed",
+                "unstable_or_below_delta"
+              ],
+              "complete_objective_grid": true,
+              "constraint_violations": 0,
+              "coverage_pass": true,
+              "eligible": false,
+              "failures": [
+                "cell_regression",
+                "independent_review_not_accepted",
+                "scientific_gate_failed",
+                "unstable_or_below_delta"
+              ],
+              "judge_accepted": false,
+              "judge_available": true,
+              "no_cell_regression": false,
+              "overall_coverage": 1.0,
+              "paired_scoring_evidence_complete": true,
+              "passed": false,
+              "promotion_assessment": {
+                "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+                "evidence_class": "exploratory_adaptive_data",
+                "formal_confirmation": false,
+                "paired_block_count": 8,
+                "paired_block_ids_digest": "9b244f145be3f588be51efdb72afa39e0f91f02b1fcdb0eab87b883998d86047",
+                "primary_delta": -0.005341461329556537,
+                "primary_selection_gate": false,
+                "selection_stability_floor": -0.011373534280085413,
+                "status": "unstable_or_below_delta",
+                "valid_three_day_start_count": 6
+              },
+              "score": -0.005341461329556497,
+              "search_eligible": false,
+              "search_failures": [
+                "independent_review_not_accepted",
+                "no_positive_score_delta"
+              ],
+              "stability_lower_bound": -0.011373534280085413,
+              "strict_agent_chain_pass": true,
+              "worst_cell_delta": -0.03570011711355248
+            },
+            "incumbent": {
+              "certification_eligible": false,
+              "certification_failures": [],
+              "constraint_violations": 0,
+              "coverage_pass": true,
+              "eligible": false,
+              "overall_coverage": 1.0,
+              "paired_scoring_evidence_complete": true,
+              "passed": false,
+              "score": 0.0,
+              "search_eligible": true,
+              "search_failures": [],
+              "strict_agent_chain_pass": true
+            }
+          },
+          "certification_eligible_finalist_count": 0,
+          "certification_selected_arm": null,
+          "challenger_promotion_allowed": true,
+          "delta_to_incumbent": 0.0,
+          "eligible_finalist_count": 0,
+          "finalist_review_qualification": "independent_finalist_review@1",
+          "finalist_reviews": {
+            "finalist_1": {
+              "artifact_digest": "5f4c3575bf73161363beb3ddfb1979203ecba20aa7cb7c673a6dc45570fd2fa7",
+              "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+              "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+              "evaluation_scope_digest": "0e4a0f89a02c811e653e1129cb5d847f58d068f20e28ae3cdb6656d1fc4efabf",
+              "judge_accepted": false,
+              "judge_model_id": "pjlab/kimi-k3",
+              "judge_result_digest": "92cc88befc459be82b9bec4b786b471884f4637c4869aa50e62ffc677d92493d",
+              "judge_status": "completed",
+              "judged_evaluation_digest": "54d17033ca4d7bf1e5e0f69456d421db9c5ddbb9ad4536a5363a225842584c49"
+            },
+            "finalist_2": {
+              "artifact_digest": "2604040030e48fc92625d6ac70634e1b414e8342a6872653a6acafd2831acd98",
+              "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+              "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+              "evaluation_scope_digest": "79eb563546d86b0c805dd8feb51b148b87e478cc672a5421f3d7d1b5c8a66de8",
+              "judge_accepted": false,
+              "judge_model_id": "pjlab/kimi-k3",
+              "judge_result_digest": "dcf3701129fb5b11fda320650c69abd118717cacd57a1040db15d088aa5ba83d",
+              "judge_status": "completed",
+              "judged_evaluation_digest": "2f42c670db91687266c87364d9d0dd324ea84e0ecff1e584de001bd4de6343da"
+            }
+          },
+          "fitness_profile_digest": "4208847c13b2523bda27066bd18e15d31d48dc21568053559950cc20a18d6800",
+          "incumbent_gate_pass": false,
+          "incumbent_score": 0.0,
+          "paired_execution_qualification": "paired_strict_agent_chain@1",
+          "schema_version": "ecologyrsi-dsh.generation-comparison/1",
+          "search_eligible_finalist_count": 0,
+          "selected_arm": "incumbent",
+          "selected_score": 0.0,
+          "selected_search_certification_status": "incumbent_retained",
+          "selection_policy": "strict_certification@1",
+          "selection_rule": "shared_centered_max_t_then_scientific_cell_gates_then_stability_lower_bound_delta_worst_cell_candidate_revision_else_incumbent"
+        },
+        "generation": 0,
+        "holdout_evaluations": [
+          {
+            "evaluation_id": "holdout-evaluation:0:finalist_1",
+            "evaluator_digest": "b2e7696c366006753ce00df5fee05fbcccc8e7eb0269a77dd6b279c54b16cb99",
+            "scope": {
+              "batch_index": null,
+              "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+              "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+              "cohort_digest": "0f1e74a1093d930ef4652372cc34648b47d620805da48ab0b71aa4a447d99f32",
+              "generation": 0,
+              "holdout_arm": "finalist_1",
+              "origin_count": 169,
+              "phase": "holdout",
+              "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09"
+            },
+            "score": -0.0010037293598951222,
+            "passed": false,
+            "created_at": "2026-09-07T06:38:39.693+00:00",
+            "metrics": {
+              "objective_score": -0.0010037293598951222,
+              "constraint_violations": 0,
+              "scientific_pass": false,
+              "sample_execution_coverage": 0.9940828402366864,
+              "sample_execution_coverage_pass": true,
+              "evaluation_origin_count": 169,
+              "prediction_cell_count": 1521,
+              "failed_cell_count": 9,
+              "evaluation_scoring_fallback_examples": 9,
+              "sample_execution_trace_digest": "b2eecdaa45c723f6a60b9d22c7eca4fa0db7ac9bcea987a74f3354da3c4eafdb",
+              "sample_execution_trace_record_count": 1521,
+              "execution_scope_digest": "0e4a0f89a02c811e653e1129cb5d847f58d068f20e28ae3cdb6656d1fc4efabf",
+              "sample_execution": {
+                "adapter_attempt_coverage": 0.9940828402366864,
+                "attempted_examples": 1521,
+                "attempted_origin_samples": 169,
+                "checkpoint_pending_examples": 432,
+                "checkpoint_resumed_examples": 1089,
+                "complete_agent_chains": 1512,
+                "complete_origin_agent_chains": 168,
+                "coverage": 0.9940828402366864,
+                "coverage_early_stopped": false,
+                "coverage_pass": true,
+                "dsh_agent_prediction_tool_invocations": 48,
+                "early_stop_reason": null,
+                "eligible_examples": 1521,
+                "exploration_failures": 0,
+                "failed_examples": 9,
+                "failed_origin_samples": 1,
+                "feedback_deferred_examples": 5406,
+                "feedback_diagnostics_complete": false,
+                "feedback_executed_scoring_cells": 432,
+                "feedback_population_examples": 6927,
+                "feedback_resumed_scoring_cells": 1089,
+                "feedback_selected_examples": 1521,
+                "host_route_bypass_count": 0,
+                "incomplete_prediction_tasks": 0,
+                "input_failures": 0,
+                "input_unavailable_examples": 0,
+                "max_attempts": 3,
+                "minimum_coverage": 0.8,
+                "minimum_task_coverage": 0.8,
+                "per_task_coverage_pass": true,
+                "plan_attempts": 1,
+                "prediction_cell_count": 1521,
+                "prediction_cells_per_origin": 9,
+                "recovered_examples": 0,
+                "registered_prediction_tool_invocations": 48,
+                "remote_critic_invocations": 0,
+                "remote_planner_invocations": 168,
+                "remote_reflection_invocations": 0,
+                "remote_sample_agents": true,
+                "repair_count": 0,
+                "result_vector_expected_examples": 1521,
+                "result_vector_missing_examples": 0,
+                "result_vector_returned_examples": 1521,
+                "retry_count": 0,
+                "samples_per_update": 169,
+                "scored_examples": 1512,
+                "scoring_fallback_examples": 9,
+                "skipped_examples": 9,
+                "strict_agent_chain_coverage": 0.9940828402366864,
+                "strict_agent_chain_pass": false,
+                "strict_agent_contract": true,
+                "succeeded_examples": 1512,
+                "succeeded_origin_samples": 168
+              }
+            }
+          },
+          {
+            "evaluation_id": "holdout-evaluation:0:finalist_2",
+            "evaluator_digest": "b2e7696c366006753ce00df5fee05fbcccc8e7eb0269a77dd6b279c54b16cb99",
+            "scope": {
+              "batch_index": null,
+              "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+              "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+              "cohort_digest": "0f1e74a1093d930ef4652372cc34648b47d620805da48ab0b71aa4a447d99f32",
+              "generation": 0,
+              "holdout_arm": "finalist_2",
+              "origin_count": 169,
+              "phase": "holdout",
+              "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09"
+            },
+            "score": -0.005341461329556497,
+            "passed": false,
+            "created_at": "2026-09-07T07:00:12.082+00:00",
+            "metrics": {
+              "objective_score": -0.005341461329556497,
+              "constraint_violations": 0,
+              "scientific_pass": false,
+              "sample_execution_coverage": 1.0,
+              "sample_execution_coverage_pass": true,
+              "evaluation_origin_count": 169,
+              "prediction_cell_count": 1521,
+              "failed_cell_count": 0,
+              "evaluation_scoring_fallback_examples": 0,
+              "sample_execution_trace_digest": "bbce417a992cf462d822f1dfcca2e66b1a5f100089dceb558c6308d9f635ef8e",
+              "sample_execution_trace_record_count": 1521,
+              "execution_scope_digest": "79eb563546d86b0c805dd8feb51b148b87e478cc672a5421f3d7d1b5c8a66de8",
+              "sample_execution": {
+                "adapter_attempt_coverage": 1.0,
+                "attempted_examples": 1521,
+                "attempted_origin_samples": 169,
+                "checkpoint_pending_examples": 765,
+                "checkpoint_resumed_examples": 756,
+                "complete_agent_chains": 1521,
+                "complete_origin_agent_chains": 169,
+                "coverage": 1.0,
+                "coverage_early_stopped": false,
+                "coverage_pass": true,
+                "dsh_agent_prediction_tool_invocations": 85,
+                "early_stop_reason": null,
+                "eligible_examples": 1521,
+                "exploration_failures": 0,
+                "failed_examples": 0,
+                "failed_origin_samples": 0,
+                "feedback_deferred_examples": 5406,
+                "feedback_diagnostics_complete": false,
+                "feedback_executed_scoring_cells": 765,
+                "feedback_population_examples": 6927,
+                "feedback_resumed_scoring_cells": 756,
+                "feedback_selected_examples": 1521,
+                "host_route_bypass_count": 0,
+                "incomplete_prediction_tasks": 0,
+                "input_failures": 0,
+                "input_unavailable_examples": 0,
+                "max_attempts": 3,
+                "minimum_coverage": 0.8,
+                "minimum_task_coverage": 0.8,
+                "per_task_coverage_pass": true,
+                "plan_attempts": 1,
+                "prediction_cell_count": 1521,
+                "prediction_cells_per_origin": 9,
+                "recovered_examples": 0,
+                "registered_prediction_tool_invocations": 85,
+                "remote_critic_invocations": 0,
+                "remote_planner_invocations": 169,
+                "remote_reflection_invocations": 0,
+                "remote_sample_agents": true,
+                "repair_count": 0,
+                "result_vector_expected_examples": 1521,
+                "result_vector_missing_examples": 0,
+                "result_vector_returned_examples": 1521,
+                "retry_count": 0,
+                "samples_per_update": 169,
+                "scored_examples": 1521,
+                "scoring_fallback_examples": 0,
+                "skipped_examples": 0,
+                "strict_agent_chain_coverage": 1.0,
+                "strict_agent_chain_pass": true,
+                "strict_agent_contract": true,
+                "succeeded_examples": 1521,
+                "succeeded_origin_samples": 169
+              }
+            }
+          },
+          {
+            "evaluation_id": "holdout-evaluation:0:incumbent",
+            "evaluator_digest": "b2e7696c366006753ce00df5fee05fbcccc8e7eb0269a77dd6b279c54b16cb99",
+            "scope": {
+              "batch_index": null,
+              "candidate_id": "candidate:run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09:seed-incumbent-control",
+              "candidate_revision_id": "revision:candidate:run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09:seed-incumbent-control:r0",
+              "cohort_digest": "0f1e74a1093d930ef4652372cc34648b47d620805da48ab0b71aa4a447d99f32",
+              "generation": 0,
+              "holdout_arm": "incumbent",
+              "origin_count": 169,
+              "phase": "holdout",
+              "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09"
+            },
+            "score": 0.0,
+            "passed": false,
+            "created_at": "2026-09-07T07:23:31.622+00:00",
+            "metrics": {
+              "objective_score": 0.0,
+              "constraint_violations": 0,
+              "scientific_pass": false,
+              "sample_execution_coverage": 1.0,
+              "sample_execution_coverage_pass": true,
+              "evaluation_origin_count": 169,
+              "prediction_cell_count": 1521,
+              "failed_cell_count": 0,
+              "evaluation_scoring_fallback_examples": 0,
+              "sample_execution_trace_digest": "a71149bbca100b8a2bf72a2058ed2be458e901cc6f15dd5de465ecaafb712e2d",
+              "sample_execution_trace_record_count": 1521,
+              "execution_scope_digest": "0645b388196071b7ed792b77a9ad872f55ba7ac9951154ec6bf7a0b6238ffcfc",
+              "sample_execution": {
+                "adapter_attempt_coverage": 1.0,
+                "attempted_examples": 1521,
+                "attempted_origin_samples": 169,
+                "checkpoint_pending_examples": 873,
+                "checkpoint_resumed_examples": 648,
+                "complete_agent_chains": 1521,
+                "complete_origin_agent_chains": 169,
+                "coverage": 1.0,
+                "coverage_early_stopped": false,
+                "coverage_pass": true,
+                "dsh_agent_prediction_tool_invocations": 97,
+                "early_stop_reason": null,
+                "eligible_examples": 1521,
+                "exploration_failures": 0,
+                "failed_examples": 0,
+                "failed_origin_samples": 0,
+                "feedback_deferred_examples": 5406,
+                "feedback_diagnostics_complete": false,
+                "feedback_executed_scoring_cells": 873,
+                "feedback_population_examples": 6927,
+                "feedback_resumed_scoring_cells": 648,
+                "feedback_selected_examples": 1521,
+                "host_route_bypass_count": 0,
+                "incomplete_prediction_tasks": 0,
+                "input_failures": 0,
+                "input_unavailable_examples": 0,
+                "max_attempts": 3,
+                "minimum_coverage": 0.8,
+                "minimum_task_coverage": 0.8,
+                "per_task_coverage_pass": true,
+                "plan_attempts": 1,
+                "prediction_cell_count": 1521,
+                "prediction_cells_per_origin": 9,
+                "recovered_examples": 0,
+                "registered_prediction_tool_invocations": 97,
+                "remote_critic_invocations": 0,
+                "remote_planner_invocations": 169,
+                "remote_reflection_invocations": 0,
+                "remote_sample_agents": true,
+                "repair_count": 0,
+                "result_vector_expected_examples": 1521,
+                "result_vector_missing_examples": 0,
+                "result_vector_returned_examples": 1521,
+                "retry_count": 0,
+                "samples_per_update": 169,
+                "scored_examples": 1521,
+                "scoring_fallback_examples": 0,
+                "skipped_examples": 0,
+                "strict_agent_chain_coverage": 1.0,
+                "strict_agent_chain_pass": true,
+                "strict_agent_contract": true,
+                "succeeded_examples": 1521,
+                "succeeded_origin_samples": 169
+              }
+            }
+          }
+        ],
+        "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+        "selected_candidate_id": "candidate:run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09:seed-incumbent-control",
+        "selected_revision_id": "revision:candidate:run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09:seed-incumbent-control:r0"
+      },
+      "export_scope": "sealed_identities_and_aggregate_metrics_only",
+      "full_comparison_payload_sha256": "ffb8c3bea802aaa1bbea730722698f071a9ec13bab0cbd830e34479cc9175913"
+    }
+  ],
+  "artifacts": [
+    {
+      "event_seq": 23018,
+      "event_schema": "ecologyrsi-dsh.artifact-recorded/2",
+      "artifact": {
+        "artifact_id": "artifact:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+        "artifact_digest": "5f4c3575bf73161363beb3ddfb1979203ecba20aa7cb7c673a6dc45570fd2fa7",
+        "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+        "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+        "model_id": "greenhouse-baseline-aligned-ridge@1",
+        "dataset_digest": "044e11d56fbea80ec4770aa9695d565daa93d96b776c752568bbe5b2c3978b99",
+        "training_partition": "training_fit",
+        "training_rows": 578,
+        "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+        "evaluation_scope_digest": "0e4a0f89a02c811e653e1129cb5d847f58d068f20e28ae3cdb6656d1fc4efabf",
+        "created_at": "2026-09-07T06:38:39.619+00:00"
+      },
+      "proposal_identity_binding": {
+        "behavior_digest": "fdbff021cd8cd4050d64e4b41d944c25f2c50789a187212923c1ae2e85e9a69a",
+        "compiled_behavior_digest": "4139c8954964659a924d4aab408b1cbf8d6d9b389f5f00146ccf63f970c9e5cd",
+        "compiler_semantic_digest": "18b0bd211c94463ace7c5dd8bc7cc2038b4f65ffdc6cdf8cba97958bf19c4a2a",
+        "evaluation_cohort_digest": "0fa9a7793006ffd7844884bb12603263cea5c4f16dee985cc286d924563913f6",
+        "execution_protocol": "dsh_native_plugin_evolution@1",
+        "genome_digest": "064d55380b3da44434596840fbd6a34c9265de9ff6ebf3d782c4704faa9fdada",
+        "phenotype_instance_digest": "9ed5b40d292119c51f775ad14183e0c52c8822e83c4b18f350a63ccc5dc3a08d",
+        "registry_catalog_digest": "b8efbcef6d22f257c46bf908a27f492122b56ce9e7966cf4099a6ebca5dc822d",
+        "runtime_execution_digest": "5ac9eeeb0b6129ba3e0123283c7a38748e1c603e430d649dd9f7996edee5aae0",
+        "security_semantic_digest": "116bd8bebe6c44cddd5c96dd4e934ef03d54e4f6b67976e2241650f8fb933b87"
+      },
+      "artifact_revision_binding": {
+        "artifact_digest": "5f4c3575bf73161363beb3ddfb1979203ecba20aa7cb7c673a6dc45570fd2fa7",
+        "artifact_id": "artifact:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+        "behavior_digest": "fdbff021cd8cd4050d64e4b41d944c25f2c50789a187212923c1ae2e85e9a69a",
+        "binding_digest": "d1fdda066820bdbd6e1ee156d81b5b7d728aa0f89be28a75e8afcf449533aeec",
+        "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+        "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+        "evaluation_scope": {
+          "batch_index": null,
+          "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+          "candidate_revision_id": "revision:candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26:r0",
+          "cohort_digest": "0f1e74a1093d930ef4652372cc34648b47d620805da48ab0b71aa4a447d99f32",
+          "generation": 0,
+          "holdout_arm": "finalist_1",
+          "origin_count": 169,
+          "phase": "holdout",
+          "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09"
+        },
+        "evaluation_scope_digest": "0e4a0f89a02c811e653e1129cb5d847f58d068f20e28ae3cdb6656d1fc4efabf",
+        "generation": 0,
+        "genome_digest": "064d55380b3da44434596840fbd6a34c9265de9ff6ebf3d782c4704faa9fdada",
+        "learned_parameters_digest": "e0529c0c259c86973793b737666efe015eaf56ee05037c55ee886c444e65b4ce",
+        "parameters_digest": "5a151af75b4d589517c7636c05e99c35aa79658e2564727bdbd8d2fbce37ecd6",
+        "predictor_id": "greenhouse-baseline-aligned-ridge@1",
+        "revision_digest": "7b462e49bbc7474f0b5d218650e64758b9a6e4968d363f3746684d242eb544da",
+        "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+        "schema_version": "ecologyrsi-dsh.artifact-revision-binding/1"
+      }
+    },
+    {
+      "event_seq": 25861,
+      "event_schema": "ecologyrsi-dsh.artifact-recorded/2",
+      "artifact": {
+        "artifact_id": "artifact:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+        "artifact_digest": "2604040030e48fc92625d6ac70634e1b414e8342a6872653a6acafd2831acd98",
+        "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+        "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+        "model_id": "greenhouse-baseline-aligned-ridge@1",
+        "dataset_digest": "044e11d56fbea80ec4770aa9695d565daa93d96b776c752568bbe5b2c3978b99",
+        "training_partition": "training_fit",
+        "training_rows": 578,
+        "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+        "evaluation_scope_digest": "79eb563546d86b0c805dd8feb51b148b87e478cc672a5421f3d7d1b5c8a66de8",
+        "created_at": "2026-09-07T07:00:12.006+00:00"
+      },
+      "proposal_identity_binding": {
+        "behavior_digest": "52355bd478f8f7c351ccae753fe305ce566be87b2c34d75597461ba18414937e",
+        "compiled_behavior_digest": "05ca3b3d8eb5ae74f36f77c550f14cb9d3f4c12375c9e62ddf15296ed8658bf2",
+        "compiler_semantic_digest": "18b0bd211c94463ace7c5dd8bc7cc2038b4f65ffdc6cdf8cba97958bf19c4a2a",
+        "evaluation_cohort_digest": "0fa9a7793006ffd7844884bb12603263cea5c4f16dee985cc286d924563913f6",
+        "execution_protocol": "dsh_native_plugin_evolution@1",
+        "genome_digest": "5514090ee66a095907010f0e4acc73ff27c8a9cf081e28932a4b6c2f03ec9624",
+        "phenotype_instance_digest": "a893d0fa70a6c2d2f955cb9c96b19e61871dbedbc014161a42f28a2600769d42",
+        "registry_catalog_digest": "b8efbcef6d22f257c46bf908a27f492122b56ce9e7966cf4099a6ebca5dc822d",
+        "runtime_execution_digest": "85de6f6a24a9818f0fe5b1ecabacc41459b7ea07e6f518da47d51a3135c80c6b",
+        "security_semantic_digest": "116bd8bebe6c44cddd5c96dd4e934ef03d54e4f6b67976e2241650f8fb933b87"
+      },
+      "artifact_revision_binding": {
+        "artifact_digest": "2604040030e48fc92625d6ac70634e1b414e8342a6872653a6acafd2831acd98",
+        "artifact_id": "artifact:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+        "behavior_digest": "52355bd478f8f7c351ccae753fe305ce566be87b2c34d75597461ba18414937e",
+        "binding_digest": "56bb8951d8c6312b624b015d9c4f3368324facb434f175c93bfd9c2f094ae30d",
+        "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+        "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+        "evaluation_scope": {
+          "batch_index": null,
+          "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+          "candidate_revision_id": "revision:candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d:r0",
+          "cohort_digest": "0f1e74a1093d930ef4652372cc34648b47d620805da48ab0b71aa4a447d99f32",
+          "generation": 0,
+          "holdout_arm": "finalist_2",
+          "origin_count": 169,
+          "phase": "holdout",
+          "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09"
+        },
+        "evaluation_scope_digest": "79eb563546d86b0c805dd8feb51b148b87e478cc672a5421f3d7d1b5c8a66de8",
+        "generation": 0,
+        "genome_digest": "5514090ee66a095907010f0e4acc73ff27c8a9cf081e28932a4b6c2f03ec9624",
+        "learned_parameters_digest": "b3ebb66f8846a8a7d750e771b2bfd8f267e03cf22b4dcb0d5832a71c6497025f",
+        "parameters_digest": "946d86bae5facda996e0aa2985fe96b2528c837699dc71407116638dc11b54f9",
+        "predictor_id": "greenhouse-baseline-aligned-ridge@1",
+        "revision_digest": "21a2f611f933114e069c3908de9fc12ad410e3ad098238fd46e4f4206e7f5e0a",
+        "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+        "schema_version": "ecologyrsi-dsh.artifact-revision-binding/1"
+      }
+    }
+  ],
+  "host_analysis": [
+    {
+      "event_seq": 28473,
+      "created_at": "2026-09-07T07:28:16.494+00:00",
+      "analysis": {
+        "schema_version": "ecologyrsi-dsh.generation-analysis/1",
+        "analysis_digest": "ec78c256da4732635e3007c157dffee09477f933417f3e84dab6f71795919921",
+        "run_id": "run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09",
+        "generation": 0,
+        "candidate_count": 4,
+        "eligible_count": 0,
+        "outcome": "no_improvement",
+        "selected_candidate_id": null,
+        "champion_candidate_id": null,
+        "incumbent_before_candidate_id": "candidate:run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09:seed-incumbent-control",
+        "incumbent_after_candidate_id": "candidate:run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09:seed-incumbent-control",
+        "search_parent_candidate_id": "candidate:run:121a3305-e5fa-461c-ab0c-7db6a4e9ed09:seed-incumbent-control",
+        "insufficient_evidence": false,
+        "created_at": "2026-09-07T07:28:16.494+00:00"
+      }
+    }
+  ],
+  "accepted_native_finalist_reviews": [
+    {
+      "event_seq": 28458,
+      "candidate_id": "candidate:ec9e4953-713c-4dcd-bba0-8e1e81968f26",
+      "result_digest": "92cc88befc459be82b9bec4b786b471884f4637c4869aa50e62ffc677d92493d",
+      "stage": "generation.judge",
+      "session_id": "2a854315-3be7-4bf6-abff-9286031f23c2"
+    },
+    {
+      "event_seq": 28466,
+      "candidate_id": "candidate:f5d9e614-1941-469e-b1bb-3bd993eac13d",
+      "result_digest": "dcf3701129fb5b11fda320650c69abd118717cacd57a1040db15d088aa5ba83d",
+      "stage": "generation.judge",
+      "session_id": "ec465662-b31b-4086-9eb0-38ecc0434da1"
+    }
+  ],
+  "execution_monitor_policy": {
+    "created_at": "2026-09-07T03:17:34.540Z",
+    "deadline": "2026-09-07T07:47:51.480000+00:00",
+    "reported_token_pause_threshold_per_run": 40000000,
+    "poll_seconds": 20,
+    "stall_seconds": 900,
+    "budget_estimate_revision": {
+      "previous_reported_token_pause_threshold": 25000000,
+      "reason": "99 completed native sample sessions average 28486.6768 reported tokens; 1195 planned origins estimate 34041579 plus other stages and in-flight margin; complete the already planned single generation",
+      "observed_at": "2026-09-07T03:38:31.464108+00:00",
+      "deadline_unchanged": true,
+      "scope": "reported provider token counts including cache reads, not monetary cost"
+    },
+    "deadline_revision": {
+      "reason": "user_requested_continue_after_verified_host_sleep_and_protective_pause",
+      "observed_at": "2026-09-07T05:49:30.903264+00:00",
+      "original_deadline": "2026-09-07T06:17:34.540000+00:00",
+      "revised_deadline": "2026-09-07T07:25:19.865732+00:00",
+      "monitor_sleep_gap_seconds": 2942.792,
+      "excluded_expected_poll_seconds": 20,
+      "paused_wait_seconds": 1142.534,
+      "credited_seconds": 4065.326,
+      "os_sleep_verified": true,
+      "token_limit_and_frozen_protocol_unchanged": true
+    },
+    "maintenance_deadline_revision": {
+      "reason": "credit_exact_manual_repair_pauses_without_expanding_the_planned_experiment",
+      "observed_at": "2026-09-07T07:14:06.203252+00:00",
+      "previous_deadline": "2026-09-07T07:25:19.865732+00:00",
+      "revised_deadline": "2026-09-07T07:35:37.757732+00:00",
+      "credited_seconds": 617.892,
+      "pauses": [
+        {
+          "paused_at": "2026-09-07T06:06:46.194+00:00",
+          "resumed_at": "2026-09-07T06:08:28.011+00:00",
+          "seconds": 101.817
+        },
+        {
+          "paused_at": "2026-09-07T06:27:12.566+00:00",
+          "resumed_at": "2026-09-07T06:34:25.551+00:00",
+          "seconds": 432.985
+        },
+        {
+          "paused_at": "2026-09-07T06:52:32.845+00:00",
+          "resumed_at": "2026-09-07T06:53:55.935+00:00",
+          "seconds": 83.09
+        }
+      ],
+      "frozen_protocol_and_token_limit_unchanged": true
+    },
+    "finalization_grace": {
+      "reason": "allow_the_already_running_final_reflection_its_existing_10_minute_stage_deadline_plus_two_minutes_to_seal",
+      "observed_at": "2026-09-07T07:34:47.625615+00:00",
+      "previous_deadline": "2026-09-07T07:35:37.757732+00:00",
+      "revised_deadline": "2026-09-07T07:40:16.563000+00:00",
+      "reflection_started_at": "2026-09-07T07:28:16.563000+00:00",
+      "existing_stage_timeout_seconds": 600,
+      "seal_grace_seconds": 120,
+      "extra_candidates_or_origins": 0,
+      "token_limit_unchanged": true,
+      "semantic_repair": {
+        "reason": "first_result_was_structurally_accepted_but_required_the_preexisting_second_and_final_semantic_contract_attempt",
+        "observed_at": "2026-09-07T07:38:50.106530+00:00",
+        "previous_deadline": "2026-09-07T07:40:16.563000+00:00",
+        "attempt": 2,
+        "existing_attempt_limit": 2,
+        "started_at": "2026-09-07T07:35:51.480000+00:00",
+        "existing_stage_timeout_seconds": 600,
+        "seal_grace_seconds": 120,
+        "revised_deadline": "2026-09-07T07:47:51.480000+00:00",
+        "extra_candidates_or_origins": 0,
+        "token_limit_unchanged": true
+      }
+    }
+  },
+  "host_settlement_recovery": {
+    "event_count": 8646,
+    "last_seq": 18849,
+    "rows_sha256": "5c676adfb29e7460a4009ae2b9396b04aebe2fef44ed1daa7334b51ed38624c7",
+    "batch_count": 555,
+    "post_restart_prefix_equal": true,
+    "rechecked_against_terminal_snapshot": true
+  },
+  "provider_admission_recovery": {
+    "event_count": 12216,
+    "last_seq": 22419,
+    "rows_sha256": "9ecb959a5fe47f195dc26de78b8babf55308f8a10d7c09e436226d520f99f850",
+    "batch_count": 809,
+    "post_restart_prefix_equal": true,
+    "rechecked_against_terminal_snapshot": true
+  },
+  "final_decision_recovery": {
+    "event_count": 14741,
+    "last_seq": 24944,
+    "rows_sha256": "a04b4b4b83cd00365dfd16bef31b0b411b2bde2f712924c89d5b3b041981a680",
+    "batch_count": 941,
+    "post_restart_prefix_equal": true,
+    "rechecked_against_terminal_snapshot": true
+  },
+  "checkpoint_recovery": {
+    "checked_at": "2026-09-07T03:35:53.228277+00:00",
+    "ledger_snapshot_max_seq": 11373,
+    "before_snapshot_last_seq": 10668,
+    "before_checkpoint_event_count": 24,
+    "before_committed_sample_cells": 216,
+    "preserved_before_checkpoint_events": true,
+    "current_committed_batch_count": 50,
+    "current_committed_sample_cells": 450,
+    "duplicate_committed_sample_identity_count": 0,
+    "post_resume_committed_batch_count": 26,
+    "rechecked_against_terminal_snapshot": true
+  },
+  "historical_ledger": {
+    "historical_events": 10133,
+    "last_historical_seq": 10134,
+    "exact_all_column_rows_equal_to_backup": true,
+    "ordered_rows_json_sha256": "bfd0c5c6e240dc9d7e78484b9a558236323d7aa47e3def081c07b5098cd17f07",
+    "rechecked_at": "2026-09-07T07:46:01.825381+00:00"
+  },
+  "interpretation_boundaries": [
+    "Search holdout remains adaptive-search evidence; independent validation and final_test were not executed.",
+    "A forecast origin has nine dependent scoring cells; cell counts are not independent trial counts.",
+    "Reported tokens include cache reads and incomplete cancelled streams; they are not a monetary bill.",
+    "Earlier failed or paused attempts are retained separately and are not counted as a completed evolution.",
+    "Completion validates the executed protocol; scientifically required skips and failures must be read from its evidence."
+  ]
+}

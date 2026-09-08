@@ -26,6 +26,7 @@ test("provider stage gate admits the configured 128-request provider window imme
   assert.deepEqual(gate.snapshot("pjlab"), {
     maxInFlight: 128,
     effectiveMaxInFlight: 128,
+    effectiveMinimumIntervalMs: 0,
     active: 128,
     queued: 1,
     draining: 0,
@@ -240,8 +241,8 @@ test("a Retry-After extends an in-progress spacing wait without one early start"
     runId: "run-second",
   });
 
-  assert.deepEqual(waits, [10, 90]);
-  assert.equal(secondStartedAt, 1_100);
+  assert.deepEqual(waits, [10, 990]);
+  assert.equal(secondStartedAt, 2_000);
 });
 
 test("an RPM cooldown does not rewrite the provider concurrency capacity", async () => {

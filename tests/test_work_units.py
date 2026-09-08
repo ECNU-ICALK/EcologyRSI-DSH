@@ -6,9 +6,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from ecologyrsi_dsh.api import work_units
-from ecologyrsi_dsh.api import formal_trajectory
-from ecologyrsi_dsh.api import generation_execution
+from ecologyrsi_dsh.application import work_units
+from ecologyrsi_dsh.application import formal_trajectory
+from ecologyrsi_dsh.application import generation_execution
 from ecologyrsi_dsh.api import projection
 from ecologyrsi_dsh.core.models import (
     CandidateRole,
@@ -82,7 +82,7 @@ class WorkUnitContractTests(unittest.TestCase):
                 )
             )
         )
-        self.assertFalse(work_units.execute_next_adaptive_work_unit(endpoint, "run:x"))
+        self.assertFalse(work_units.execute_next_adaptive_work_unit((endpoint).server, "run:x"))
 
     def test_one_lane_batch_is_one_scheduler_turn(self):
         state = SimpleNamespace(
@@ -99,7 +99,7 @@ class WorkUnitContractTests(unittest.TestCase):
         with patch.object(work_units, "RunStatus", RunStatus):
             # The protocol gate is evaluated before any lane call; this fake
             # deliberately proves a paused/non-adaptive scheduler is a no-op.
-            self.assertFalse(work_units.execute_next_adaptive_work_unit(endpoint, "run:x"))
+            self.assertFalse(work_units.execute_next_adaptive_work_unit((endpoint).server, "run:x"))
 
     def test_existing_batch_resumes_incomplete_candidate_and_frozen_inputs(self):
         batch = SimpleNamespace(generation=0, batch_size=4)
@@ -140,11 +140,11 @@ class WorkUnitContractTests(unittest.TestCase):
             ) as freeze,
         ):
             self.assertTrue(
-                work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+                work_units.execute_next_adaptive_work_unit((endpoint).server, "run:x")
             )
 
-        spawn.assert_called_once_with(endpoint, "run:x", batch)
-        freeze.assert_called_once_with(endpoint, "run:x", 0)
+        spawn.assert_called_once_with(endpoint.server, "run:x", batch)
+        freeze.assert_called_once_with(endpoint.server, "run:x", 0)
 
     def test_incumbent_control_is_not_counted_as_generation_work(self):
         batch = SimpleNamespace(generation=0, batch_size=4)
@@ -200,7 +200,7 @@ class WorkUnitContractTests(unittest.TestCase):
             ),
         ):
             self.assertFalse(
-                work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+                work_units.execute_next_adaptive_work_unit((endpoint).server, "run:x")
             )
 
         spawn.assert_not_called()
@@ -254,7 +254,7 @@ class WorkUnitContractTests(unittest.TestCase):
             patch.object(
                 generation_execution,
                 "estimate_epoch_capacity",
-                return_value=SimpleNamespace(planner_digest="planner"),
+                return_value=SimpleNamespace(planner_digest="planner", to_dict=lambda: {"planner_digest": "planner"}),
             ),
             patch.object(
                 generation_execution,
@@ -268,7 +268,7 @@ class WorkUnitContractTests(unittest.TestCase):
             ),
         ):
             generation_execution._freeze_adaptive_generation_inputs(
-                endpoint,
+                (endpoint).server,
                 "run:legacy",
                 0,
             )
@@ -300,7 +300,7 @@ class WorkUnitContractTests(unittest.TestCase):
             patch.object(
                 generation_execution,
                 "estimate_epoch_capacity",
-                return_value=SimpleNamespace(planner_digest="planner"),
+                return_value=SimpleNamespace(planner_digest="planner", to_dict=lambda: {"planner_digest": "planner"}),
             ),
             patch.object(
                 generation_execution,
@@ -314,7 +314,7 @@ class WorkUnitContractTests(unittest.TestCase):
             ),
         ):
             generation_execution._freeze_adaptive_generation_inputs(
-                endpoint,
+                (endpoint).server,
                 "run:host-only-adaptive",
                 0,
             )
@@ -396,7 +396,7 @@ class WorkUnitContractTests(unittest.TestCase):
             ),
         ):
             finalists = generation_execution._prepare_formal_finalists(
-                endpoint,
+                (endpoint).server,
                 "run:legacy",
                 candidates,
                 max_concurrency=1,
@@ -441,7 +441,7 @@ class WorkUnitContractTests(unittest.TestCase):
             ) as freeze,
         ):
             self.assertFalse(
-                work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+                work_units.execute_next_adaptive_work_unit((endpoint).server, "run:x")
             )
 
         spawn.assert_not_called()
@@ -508,7 +508,7 @@ class WorkUnitContractTests(unittest.TestCase):
         ):
             for _ in range(5):
                 self.assertTrue(
-                    work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+                    work_units.execute_next_adaptive_work_unit((endpoint).server, "run:x")
                 )
 
         self.assertEqual(
@@ -568,7 +568,7 @@ class WorkUnitContractTests(unittest.TestCase):
             ),
         ):
             self.assertTrue(
-                work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+                work_units.execute_next_adaptive_work_unit((endpoint).server, "run:x")
             )
 
         self.assertEqual(calls, ["candidate:a:batch", "candidate:a:edit"])
@@ -618,7 +618,7 @@ class WorkUnitContractTests(unittest.TestCase):
             ),
         ):
             self.assertTrue(
-                work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+                work_units.execute_next_adaptive_work_unit((endpoint).server, "run:x")
             )
 
         self.assertCountEqual(calls, ["candidate:a", "candidate:b"])
@@ -677,7 +677,7 @@ class WorkUnitContractTests(unittest.TestCase):
             ),
         ):
             self.assertTrue(
-                work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+                work_units.execute_next_adaptive_work_unit((endpoint).server, "run:x")
             )
 
         self.assertEqual(maximum_active_edits, 1)
@@ -729,7 +729,7 @@ class WorkUnitContractTests(unittest.TestCase):
             ),
         ):
             self.assertTrue(
-                work_units.execute_next_adaptive_work_unit(endpoint, "run:x")
+                work_units.execute_next_adaptive_work_unit((endpoint).server, "run:x")
             )
 
         self.assertEqual(len(calls), 1)
@@ -763,7 +763,7 @@ class WorkUnitContractTests(unittest.TestCase):
         ) as mutation:
             self.assertEqual(
                 formal_trajectory.ensure_formal_trajectory(
-                    endpoint, "run:x", candidate.candidate_id
+                    (endpoint).server, "run:x", candidate.candidate_id
                 ),
                 "trajectory",
             )
@@ -778,7 +778,7 @@ class WorkUnitContractTests(unittest.TestCase):
                     "optimization_schedule": schedule,
                 }
             ),
-            run=SimpleNamespace(generation=0),
+            run=SimpleNamespace(generation=0, status=RunStatus.RUNNING),
             candidate_screening_events=tuple(
                 SimpleNamespace(payload={"generation": 0, "origin_count": 64})
                 for _ in range(4)

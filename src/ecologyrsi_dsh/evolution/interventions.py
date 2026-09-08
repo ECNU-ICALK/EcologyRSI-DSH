@@ -8,14 +8,103 @@ from typing import Any, Mapping, Sequence
 
 from ..core.models import TaskManifest
 from .strategies import (
-    _GUIDANCE_DIRECTIONS,
-    _GUIDANCE_STEPS,
-    _NEGATED_GUIDANCE,
-    _NUMBER_PATTERN,
-    _PARAMETER_ALIASES,
     _bounded_parameters,
     _task_parameter_boundary,
 )
+
+
+_PARAMETER_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
+    "toy": {
+        "alpha": ("alpha", "平滑权重", "平滑系数"),
+        "window": ("window", "时间窗口", "历史窗口"),
+        "water_threshold": (
+            "water_threshold",
+            "water threshold",
+            "土壤水分阈值",
+            "水分阈值",
+        ),
+    },
+    "greenhouse": {
+        "blend": ("blend", "混合权重", "融合权重"),
+        "window": ("window", "时间窗口", "历史窗口"),
+        "bias_scale": (
+            "bias_scale",
+            "bias scale",
+            "偏差缩放系数",
+            "偏差缩放",
+        ),
+    },
+    "greenhouse_ridge": {
+        "history_steps": (
+            "history_steps",
+            "history steps",
+            "历史步数",
+            "滞后步数",
+        ),
+        "ridge_alpha": (
+            "ridge_alpha",
+            "ridge alpha",
+            "岭回归强度",
+            "正则化强度",
+        ),
+        "residual_scale": (
+            "residual_scale",
+            "residual scale",
+            "残差缩放系数",
+            "残差缩放",
+        ),
+    },
+    "greenhouse_targetwise_ridge": {
+        "history_steps": (
+            "history_steps",
+            "history steps",
+            "历史步数",
+            "滞后步数",
+        ),
+        "ridge_alpha": (
+            "ridge_alpha",
+            "ridge alpha",
+            "岭回归强度",
+            "正则化强度",
+        ),
+        "air_temperature_residual_scale": (
+            "air_temperature_residual_scale",
+            "temperature residual scale",
+            "温度残差缩放",
+        ),
+        "relative_humidity_residual_scale": (
+            "relative_humidity_residual_scale",
+            "humidity residual scale",
+            "湿度残差缩放",
+        ),
+        "co2_concentration_residual_scale": (
+            "co2_concentration_residual_scale",
+            "co2 residual scale",
+            "二氧化碳残差缩放",
+        ),
+    },
+}
+_GUIDANCE_STEPS: dict[str, int | float] = {
+    "alpha": 0.1,
+    "blend": 0.1,
+    "bias_scale": 0.1,
+    "water_threshold": 0.05,
+    "window": 1,
+    "history_steps": 1,
+    "ridge_alpha": 0.05,
+    "residual_scale": 0.1,
+    "air_temperature_residual_scale": 0.1,
+    "relative_humidity_residual_scale": 0.1,
+    "co2_concentration_residual_scale": 0.1,
+}
+_GUIDANCE_DIRECTIONS: dict[str, tuple[str, ...]] = {
+    "decrease": ("缩短", "降低", "减小", "下调", "减少", "decrease", "shorten", "lower"),
+    "increase": ("延长", "提高", "增大", "上调", "增加", "increase", "extend", "raise"),
+}
+_NEGATED_GUIDANCE = re.compile(
+    r"(?:不要|不得|禁止|不应|无需)(?:[^，。；,;]{0,12})$", re.IGNORECASE
+)
+_NUMBER_PATTERN = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
 
 
 def _matching_parameters(message: str, domain: str) -> list[str]:

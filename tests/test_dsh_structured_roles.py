@@ -5,8 +5,8 @@ import re
 import unittest
 from types import SimpleNamespace
 
-from ecologyrsi_dsh.api.dsh_tools import DshToolService
-from ecologyrsi_dsh.api.generation_execution import _apply_candidate_judge
+from ecologyrsi_dsh.integrations.dsh_tools import DshToolService
+from ecologyrsi_dsh.application.generation_execution import _apply_candidate_judge
 from ecologyrsi_dsh.core.director import EvolutionDirector, _task_for_proposal_predictor
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import (
@@ -562,7 +562,7 @@ class DshStructuredRoleTests(unittest.TestCase):
                 idempotency_key="digest-1",
             )
 
-    def test_native_research_freezes_failed_cross_run_parameters_for_proposer(self) -> None:
+    def test_native_research_retains_candidate_failure_as_scoped_advice(self) -> None:
         runtime = _NativeRuntime(
             {
                 "schema_version": "ecology-research-result@1",
@@ -628,7 +628,9 @@ class DshStructuredRoleTests(unittest.TestCase):
             ledger_expected_revision=ledger.latest_seq(),
         )
 
-        avoid = plan["dsh_evolution_reflection"]["avoid_behaviors"]
+        self.assertEqual(plan["dsh_evolution_reflection"]["avoid_behaviors"], [])
+        self.assertFalse(plan["dsh_evolution_reflection"]["policy"]["host_enforced"])
+        avoid = plan["dsh_evolution_reflection"]["review_behaviors"]
         self.assertEqual(len(avoid), 1)
         self.assertEqual(avoid[0]["behavior_digest"], "a" * 64)
         self.assertEqual(avoid[0]["parameters_digest"], digest(failed_parameters))
@@ -890,7 +892,7 @@ class DshStructuredRoleTests(unittest.TestCase):
         self.assertNotIn("research_summary", reflection)
         self.assertNotIn("previous_next_action", reflection)
 
-    def test_native_proposer_retries_then_rejects_an_exact_failed_behavior(self) -> None:
+    def test_native_proposer_treats_past_cohort_failure_as_advice(self) -> None:
         repeated_mutation = {
             "schema_version": "ecologyrsi-dsh.genome-mutation/1",
             "operations": [
@@ -951,38 +953,35 @@ class DshStructuredRoleTests(unittest.TestCase):
             knowledge_snapshot_digest="2" * 64,
         )
 
-        with self.assertRaisesRegex(ValueError, "repeats a previously failed behavior"):
-            adapter.propose(
-                state.run,
-                task,
-                state.run.session_id or "",
-                batch_context={
-                    "generation": 0,
-                    "slot_index": 0,
-                    "batch_size": 1,
+        proposal = adapter.propose(
+            state.run,
+            task,
+            state.run.session_id or "",
+            batch_context={
+                "generation": 0,
+                "slot_index": 0,
+                "batch_size": 1,
+                "knowledge_snapshot_digest": "2" * 64,
+                "research_iteration": iteration.to_dict(),
+                "context_digest": "3" * 64,
+                "parent_genome_digest": parent.genome_digest,
+                "parent_genome_canonical_json": canonical_json(parent.to_dict()),
+                "stage_context_digests": {
+                    "research_iteration_digest": iteration.iteration_digest,
                     "knowledge_snapshot_digest": "2" * 64,
-                    "research_iteration": iteration.to_dict(),
-                    "context_digest": "3" * 64,
-                    "parent_genome_digest": parent.genome_digest,
-                    "parent_genome_canonical_json": canonical_json(parent.to_dict()),
-                    "stage_context_digests": {
-                        "research_iteration_digest": iteration.iteration_digest,
-                        "knowledge_snapshot_digest": "2" * 64,
-                    },
-                    "run_state_revision": state.events[-1].seq,
-                    "stage_attempt": 1,
-                    "ledger_expected_revision": ledger.latest_seq(),
                 },
-            )
-
-        self.assertEqual(len(runtime.requests), 4)
-        retry_reflection = runtime.requests[3]["request"]["context"][
-            "evolution_reflection"
-        ]
-        self.assertEqual(
-            [item["reason"] for item in retry_reflection["host_rejections"]],
-            ["exact_failed_behavior_replay"] * 3,
+                "run_state_revision": state.events[-1].seq,
+                "stage_attempt": 1,
+                "ledger_expected_revision": ledger.latest_seq(),
+            },
         )
+
+        self.assertEqual(proposal.metadata["behavior_digest"], failed_behavior_digest)
+        self.assertEqual(len(runtime.requests), 1)
+        reflection = runtime.requests[0]["request"]["context"]["evolution_reflection"]
+        self.assertTrue(reflection["prior_failures_are_advisory"])
+        self.assertIn(failed_behavior_digest, reflection["prior_failure_behavior_digests"])
+        self.assertEqual(reflection["host_rejections"], [])
 
     def test_native_proposal_uses_verified_genome_predictor_boundary(self) -> None:
         runtime = _NativeRuntime(
@@ -1134,7 +1133,7 @@ class DshStructuredRoleTests(unittest.TestCase):
         )
 
         _apply_candidate_judge(
-            endpoint,
+            (endpoint).server,
             director.state(run_id),
             proposal,
             artifact,

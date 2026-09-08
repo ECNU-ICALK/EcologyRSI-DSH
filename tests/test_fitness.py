@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from ecologyrsi_dsh.core.models import Evaluation, TaskManifest, canonical_json, digest
 from ecologyrsi_dsh.evaluators.fitness import (
@@ -146,7 +147,7 @@ class FitnessTests(unittest.TestCase):
     def test_missing_or_sparse_block_evidence_fails_closed(self) -> None:
         profile = FitnessProfile.from_task(_task())
         candidate = _evaluation("missing-blocks", 0.2, (0.1,) * 8)
-        candidate.metrics.pop("promotion_block_evidence")
+        candidate = replace(candidate, metrics={k: v for k, v in candidate.metrics.items() if k != "promotion_block_evidence"})
 
         missing = build_fitness_assessment(candidate, None, {}, profile)
 
@@ -167,7 +168,7 @@ class FitnessTests(unittest.TestCase):
     def test_missing_objective_cells_serialize_finite_failure_diagnostics(self) -> None:
         profile = FitnessProfile.from_task(_task())
         candidate = _evaluation("missing-cells", 0.2, (0.1,) * 8)
-        candidate.metrics.pop("targets")
+        candidate = replace(candidate, metrics={k: v for k, v in candidate.metrics.items() if k != "targets"})
 
         assessment = build_fitness_assessment(candidate, None, {}, profile)
         payload = assessment.to_dict()
@@ -217,9 +218,11 @@ class FitnessTests(unittest.TestCase):
         profile = FitnessProfile.from_task(_task())
         incumbent = _evaluation("old-gap", 0.1, (0.0,) * 8)
         candidate = _evaluation("new-gap", 0.2, (0.1,) * 8)
-        for evaluation in (incumbent, candidate):
-            evidence = _block_evidence((0.0,) * 8, (0, 1, 2, 10, 11, 12, 20, 21))
-            evaluation.metrics["promotion_block_evidence"] = evidence
+        evidence = _block_evidence((0.0,) * 8, (0, 1, 2, 10, 11, 12, 20, 21))
+        incumbent, candidate = (
+            replace(item, metrics={**item.metrics, "promotion_block_evidence": evidence})
+            for item in (incumbent, candidate)
+        )
         result = assess_generation_selection((candidate,), incumbent, profile)[0]
         self.assertEqual(result.status, "insufficient_evidence")
         self.assertFalse(result.primary_selection_gate)
@@ -251,7 +254,7 @@ class FitnessTests(unittest.TestCase):
         profile = FitnessProfile.from_task(_task())
         incumbent = _evaluation("incumbent", 0.5, (0.0,) * 8)
         regressed = _evaluation("fast-regression", 0.6, (0.1,) * 8)
-        regressed.metrics["targets"] = _cells(0.1, bad_cell=-0.1)
+        regressed = replace(regressed, metrics={**regressed.metrics, "targets": _cells(0.1, bad_cell=-0.1)})
         robust = _evaluation("slow-robust", 0.55, (0.05,) * 8)
         bad = build_fitness_assessment(
             regressed, incumbent, {"latency_ms": 1}, profile
@@ -265,8 +268,10 @@ class FitnessTests(unittest.TestCase):
         profile = FitnessProfile.from_task(_task())
         higher = _evaluation("a-higher", 0.3, (0.1,) * 8)
         lower = _evaluation("z-lower", 0.2, (0.1,) * 8)
-        for evaluation in (higher, lower):
-            evaluation.metrics["targets"] = _cells(0.1)
+        higher, lower = (
+            replace(item, metrics={**item.metrics, "targets": _cells(0.1)})
+            for item in (higher, lower)
+        )
         higher_assessment = build_fitness_assessment(higher, None, {}, profile)
         lower_assessment = build_fitness_assessment(lower, None, {}, profile)
 
@@ -284,20 +289,20 @@ class FitnessTests(unittest.TestCase):
         incumbent = _evaluation("policy-incumbent", 0.4, (0.0,) * 8)
         reliable = _evaluation("policy-reliable", 0.5, (0.1,) * 8)
         noisy = _evaluation("policy-noisy", 0.5, (0.1,) * 8)
-        reliable.metrics["sample_execution"] = {
+        reliable = replace(reliable, metrics={**reliable.metrics, "sample_execution": {
             "eligible_examples": 10,
             "failed_examples": 0,
             "retry_count": 0,
             "repair_count": 0,
             "critic_outcome_counts": {"accepted": 10},
-        }
-        noisy.metrics["sample_execution"] = {
+        }})
+        noisy = replace(noisy, metrics={**noisy.metrics, "sample_execution": {
             "eligible_examples": 10,
             "failed_examples": 0,
             "retry_count": 5,
             "repair_count": 0,
             "critic_outcome_counts": {"accepted": 10, "rejected": 10},
-        }
+        }})
 
         good = build_fitness_assessment(reliable, incumbent, {}, profile)
         bad = build_fitness_assessment(noisy, incumbent, {}, profile)
@@ -309,9 +314,9 @@ class FitnessTests(unittest.TestCase):
     def test_average_improvement_with_one_bad_cell_fails_robustness_gate(self) -> None:
         profile = FitnessProfile.from_task(_task())
         incumbent = _evaluation("cell-old", 0.4, (0.0,) * 8)
-        incumbent.metrics["targets"] = _cells(0.0)
+        incumbent = replace(incumbent, metrics={**incumbent.metrics, "targets": _cells(0.0)})
         candidate = _evaluation("cell-new", 0.5, (0.1,) * 8)
-        candidate.metrics["targets"] = _cells(0.2, bad_cell=-0.01)
+        candidate = replace(candidate, metrics={**candidate.metrics, "targets": _cells(0.2, bad_cell=-0.01)})
         assessment = build_fitness_assessment(candidate, incumbent, {}, profile)
         self.assertGreater(assessment.primary_delta, 0)
         self.assertLess(assessment.robustness_min_cell_delta, 0)
@@ -319,8 +324,7 @@ class FitnessTests(unittest.TestCase):
 
     def test_formal_gate_uses_frozen_baseline_and_requires_point_and_uq(self) -> None:
         candidate = _evaluation("formal", 0.2, (0.1,) * 14)
-        candidate.metrics.update(
-            {
+        candidate = replace(candidate, metrics={**candidate.metrics, **{
                 "objective_weight_coverage": 0.96,
                 "formal_score": 0.1,
                 "formal_score_lcb": 0.02,
@@ -337,8 +341,7 @@ class FitnessTests(unittest.TestCase):
                     }
                     for cell in _cells(0.01)
                 ],
-            }
-        )
+            }})
         baseline = {
             "artifact_digest": "9" * 64,
             "policy_id": "cellwise_time_block_calibrated_residual@1",
@@ -351,8 +354,8 @@ class FitnessTests(unittest.TestCase):
         self.assertTrue(result.point_pass)
         self.assertTrue(result.uq_pass)
 
-        candidate.metrics["formal_score_lcb"] = -0.001
-        candidate.metrics["paired_interval_score_delta_ucb"] = -1.0
+        candidate = replace(candidate, metrics={**candidate.metrics, "formal_score_lcb": -0.001})
+        candidate = replace(candidate, metrics={**candidate.metrics, "paired_interval_score_delta_ucb": -1.0})
         failed = build_formal_fitness_assessment(
             candidate, baseline, FitnessProfile.from_task(_task())
         )

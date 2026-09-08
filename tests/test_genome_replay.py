@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from ecologyrsi_dsh.core.director import EvolutionDirector
-from ecologyrsi_dsh.api.dsh_tools import DshToolService
+from ecologyrsi_dsh.integrations.dsh_tools import DshToolService
 from ecologyrsi_dsh.api.projection import _candidate_projection
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.state import RunState

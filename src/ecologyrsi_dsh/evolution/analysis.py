@@ -21,6 +21,7 @@ from ..core.models import (
 )
 from ..core.protocols import is_strict_origin_protocol
 from .promotion import assess_promotion_improvement
+from .agent_policy import prior_candidate_tool_experience
 from ..evaluators.fitness import (
     EXPLORATORY_EVIDENCE_CLASS,
     FitnessProfile,
@@ -898,6 +899,7 @@ def _candidate_row(state: Any, candidate: Any, parent_id: str | None) -> dict[st
         )
         if tool_performance:
             row["tool_performance"] = tool_performance
+    row["agent_tool_performance"] = prior_candidate_tool_experience(state, candidate, metrics)
     return row
 
 
@@ -1043,6 +1045,10 @@ def _sample_failure_summary(
                 for name, value in list(raw_counts.items())[:32]
                 if isinstance(value, int) and not isinstance(value, bool) and value >= 0
             }
+        for name in ("feedback_diagnostic_scope", "feedback_diagnostics_complete",
+                     "feedback_executed_scoring_cells", "feedback_resumed_scoring_cells"):
+            if name in summary:
+                row[name] = summary[name]
         for source_name in (
             "critic_outcome_counts",
             "reason_code_counts",

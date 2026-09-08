@@ -179,7 +179,7 @@
     $("#submit-intervention").textContent = state.pendingAction === "intervention" ? "正在提交专家意见" : "提交专家意见";
     $("#intervention-hint").textContent = !run ? "请先创建进化运行。" : ended ? "运行已结束，不能再提交主动意见；未答咨询仍可补录专家答复并归档。" : !hasCapability("intervention.write") ? "当前 DSH 会话未授予提交专家意见与答复的能力。" : paused ? "提交后请恢复运行，意见将在下一轮处理。" : "主动意见需暂停后提交；模型咨询可在运行中异步答复。";
     renderExpertConsultations(run, ended);
-    var candidates = run ? run.candidates.filter(function (candidate) {
+    var candidates = run && Array.isArray(run.intervention_candidates) ? run.intervention_candidates : run ? run.candidates.filter(function (candidate) {
       return ["retained", "rejected", "promoted", "accepted"].indexOf(String(candidate.status || "").toLowerCase()) >= 0 && candidate.promotion;
     }) : [];
     var targetSelect = $("#target-candidate-id");
@@ -209,23 +209,6 @@
     }).join("") : "<div class=\"empty-state\">尚未提交专家主动意见。</div>";
   }
 
-  function updateParameterOverrideHelp() {
-    var predictorId = $("#prediction-model-id").value || state.activeRun && state.activeRun.configuration && state.activeRun.configuration.prediction_model_id || "";
-    var input = $("#parameter-overrides");
-    var help = $("#parameter-overrides-help");
-    if (predictorId === "greenhouse-exogenous-ridge@1") {
-      input.placeholder = "history_steps=6\nridge_alpha=0.05\nresidual_scale=0.75";
-      help.textContent = "可覆盖：目标历史步数 1–12 小时、岭回归正则化强度 0.0001–1、预测残差缩放系数 0–1；每行一个“参数=值”。";
-      return;
-    }
-    if (predictorId === "greenhouse-rolling-residual@1") {
-      input.placeholder = "blend=0.4\nwindow=6\nbias_scale=0.8";
-      help.textContent = "可覆盖：历史值混合权重 0–1、历史窗口 1–48 小时、偏差校正强度 0–2；每行一个“参数=值”。";
-      return;
-    }
-    input.placeholder = "alpha=0.35\nwindow=5\nwater_threshold=0.4";
-    help.textContent = "可覆盖：平滑系数 0.05–0.95、历史窗口 1–30、土壤水分阈值 0.05–0.85；每行一个“参数=值”。";
-  }
   function updateInterventionFields() {
     var kind = $("#intervention-kind").value;
     var parameterOverride = kind === "parameter_override";
@@ -236,5 +219,4 @@
     $("#target-candidate-id").disabled = !parentSelection;
     $("#target-candidate-id").required = parentSelection;
     if (!parentSelection) { $("#target-candidate-id").value = ""; }
-    updateParameterOverrideHelp();
   }

@@ -1,4 +1,4 @@
-"""DSH-owned planner/critic routing over the existing Host prediction tools."""
+"""Agent-owned numerical inference with optional Host model capabilities."""
 
 from __future__ import annotations
 
@@ -8,65 +8,22 @@ from threading import RLock
 from typing import Any
 
 from ..core.models import digest
+from .sample_contracts import _causal_wave_identity, _safe_mapping, _normalized_operation_max_tokens, _normalized_remote_critic_policy
+from .shared_sample_context import normalized_sample_planner_prompt_profile
+from .sample_execution import SampleExecutionPausedError, SampleExecutionCancelledError, SampleExecutionControlUnavailableError, classify_sample_failure
+from ..core.errors import dsh_native_runtime_error_in_chain, dsh_native_runtime_retryable
+from ..core.model_execution_policy import NATIVE_SAMPLE_OPERATION_MAX_TOKENS
+from ..core.errors import dsh_native_runtime_evaluation_fatal
+from ..core.agent_prediction import MAX_PREDICTION_CALLS, validate_predictions, validate_agent_review
 from ..core.redaction import REMOTE_REASON_CODES
-from ..evolution.execution_plan import DerivedExecutionPlan
 from ..integrations.dsh_structured_roles import DshStructuredRoleRuntime
-from .gateway_sample_adapter import (
-    GatewaySampleCollaborationAdapter,
-)
 from .sample_execution import (
     SampleExecutionContractError,
+    SampleExecutionAttemptError,
+    SampleExecutionControlError,
+    SamplePredictionOutcome,
     forecast_origin_sample_id,
 )
-
-
-_DEFAULT_DSH_SAMPLE_OPERATION_MAX_TOKENS = {
-    "sample.planner": 4096,
-    "sample.repair": 4096,
-    "sample.critic": 2048,
-}
-_PRE_TOOL_TRANSIENT_FAILURES = frozenset(
-    {"connection", "rate_limited", "remote_transient", "timeout"}
-)
-
-
-def _latest_retry_feedback(plan: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    raw_feedback = plan.get("sample_retry_feedback")
-    if not isinstance(raw_feedback, (list, tuple)) or not raw_feedback:
-        return None
-    latest = raw_feedback[-1]
-    if not isinstance(latest, Mapping):
-        raise SampleExecutionContractError(
-            "DSH repair requires structured latest retry feedback"
-        )
-    return latest
-
-
-def _feedback_has_finite_prediction(feedback: Mapping[str, Any]) -> bool:
-    if "previous_prediction" not in feedback:
-        return False
-    value = feedback.get("previous_prediction")
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(float(value))
-    ):
-        raise SampleExecutionContractError(
-            "DSH repair previous_prediction must be finite"
-        )
-    return True
-
-
-def _is_pre_tool_transient_retry(feedback: Mapping[str, Any]) -> bool:
-    tool_ids = feedback.get("tool_ids")
-    has_tool_evidence = isinstance(tool_ids, (list, tuple)) and bool(tool_ids)
-    return bool(
-        feedback.get("failure_class") in _PRE_TOOL_TRANSIENT_FAILURES
-        and feedback.get("retryable") is True
-        and not _feedback_has_finite_prediction(feedback)
-        and not has_tool_evidence
-        and "requested_tool_id" not in feedback
-    )
 
 
 def _sample_routing_wave(
@@ -119,9 +76,9 @@ class _DshSampleDecisionClient:
         dsh_role = "sample-critic" if role == "critic" else "sample-planner"
         stage = "sample.critic" if role == "critic" else "sample.plan"
         schema_id = (
-            "ecology-sample-review@1"
+            "ecology-sample-review@2"
             if role == "critic"
-            else "ecology-sample-decisions@1"
+            else "ecology-sample-predictions@2"
         )
         max_tokens = options.get("max_tokens")
         if (
@@ -274,17 +231,13 @@ class _DshSampleDecisionClient:
         }
 
 
-class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
+class DshSampleCollaborationAdapter:
     """Run the only supported DSH sample protocol: one vector chain per origin."""
 
     adapter_id = "dsh-native-sample-collaboration"
-    adapter_version = "1"
-    # A retry carrying a finite Host-rejected prediction is resolved by
-    # ``_forced_repair_route`` with a frozen deterministic repair tool.  This
-    # capability lets the executor finish those local repairs even when the
-    # surrounding remote wave has reached a coverage terminal state; it never
-    # authorizes another remote child.
-    terminal_constraint_repair_is_local = True
+    adapter_version = "7-native-origin-agent-policy"
+    # Rejected predictions return to the Agent under the ordinary retry budget.
+    terminal_constraint_repair_is_local = False
 
     def __init__(
         self,
@@ -297,6 +250,8 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
         review_model_id: str,
         forecast_bundle_tool: Callable[..., Any],
         prediction_tool_binder: Callable[..., Any],
+        prediction_tool_catalog: Sequence[Mapping[str, Any]] = (),
+        prediction_tool_executor: Callable[..., Any] | None = None,
         microbatch_size: int = 128,
         sample_concurrency: int = 4,
         progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
@@ -315,6 +270,8 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
             admission_snapshot_provider
         ):
             raise TypeError("admission_snapshot_provider must be callable")
+        self._agent_tool_catalog = [dict(item) for item in prediction_tool_catalog]
+        self._agent_tool_executor = prediction_tool_executor
         self._strict_progress_callback = progress_callback
         self._prediction_tool_binder = prediction_tool_binder
         self._strict_progress_state: dict[str, int] | None = None
@@ -348,44 +305,84 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
             revision_provider=revision_provider,
             identity_digests=identity_digests,
         )
-        super().__init__(
-            client,
-            strategy_model_id=strategy_model_id,
-            review_model_id=review_model_id,
-            remote_review_enabled=True,
-            forecast_bundle_tool=forecast_bundle_tool,
-            tools=(),
-            # Every target/horizon cell for one verified forecast origin is
-            # sent in the same Planner/Critic wave.
-            microbatch_size=microbatch_size,
-            sample_concurrency=sample_concurrency,
-            progress_callback=(
-                self._handle_strict_gateway_progress
-                if progress_callback is not None
-                else progress_callback
-            ),
-            run_control_callback=run_control_callback,
-            remote_critic_policy=remote_critic_policy,
-            sample_planner_prompt_profile=sample_planner_prompt_profile,
-            require_remote_planner=True,
-            require_remote_critic=require_success_critic,
-            operation_max_tokens=(
-                dict(_DEFAULT_DSH_SAMPLE_OPERATION_MAX_TOKENS)
-                if operation_max_tokens is None
-                else operation_max_tokens
-            ),
-            token_limit=0,
-            token_reservation_per_wave=0,
-        )
-        # The gateway base derives versions from optional profiles. DSH has a
-        # single explicit protocol identity instead.
-        self.adapter_id = "dsh-native-sample-collaboration"
+        self.strategy_model_id = strategy_model_id
+        self.review_model_id = review_model_id
+        if not strategy_model_id or not review_model_id:
+            raise ValueError("DSH sample roles require model routes")
+        if type(microbatch_size) is not int or not 1 <= microbatch_size <= 128:
+            raise ValueError("microbatch_size must be between 1 and 128")
+        if type(sample_concurrency) is not int or not 1 <= sample_concurrency <= 128:
+            raise ValueError("sample_concurrency must be between 1 and 128")
+        self.microbatch_size, self.sample_concurrency = microbatch_size, sample_concurrency
+        self._forecast_bundle_tool = forecast_bundle_tool
+        self._run_control_callback = run_control_callback
+        self.remote_review_enabled = True
+        self.require_remote_planner = True
+        self.require_remote_critic = require_success_critic
+        self.remote_critic_policy = _normalized_remote_critic_policy(remote_critic_policy)
+        self.sample_planner_prompt_profile = normalized_sample_planner_prompt_profile(sample_planner_prompt_profile)
+        self.operation_max_tokens = _normalized_operation_max_tokens(operation_max_tokens or NATIVE_SAMPLE_OPERATION_MAX_TOKENS)
         self._decision_client = client
-        self.adapter_version = (
-            "4-concurrent-origin-bundle"
-            if require_success_critic and self.sample_reflection_enabled
-            else "5-adaptive-sparse-origin-review"
-        )
+
+    def _check_control(self):
+        if self._run_control_callback is None:
+            return
+        try:
+            status = self._run_control_callback()
+        except Exception as exc:
+            raise SampleExecutionControlUnavailableError("run control unavailable") from exc
+        if status == "paused":
+            raise SampleExecutionPausedError("sample Agent paused")
+        if status == "cancelled":
+            raise SampleExecutionCancelledError("sample Agent cancelled")
+        if status != "running":
+            raise SampleExecutionControlUnavailableError("invalid run control state")
+
+    def _agent_decide(self, model_id, *, role, samples, context, available_tools, **_unused):
+        self._check_control()
+        result = self._decision_client.sample_decide(model_id, role=role, samples=samples,
+            context=context, available_tools=available_tools, max_tokens=self.operation_max_tokens["sample." + role])
+        self._check_control()
+        return result
+
+    def predict_sample(self, request, plan, *, attempt):
+        outcome = self.predict_samples((request,), (plan,), attempts=(attempt,))[0]
+        if outcome.error is not None:
+            raise outcome.error
+        return outcome.result
+
+    def predict_samples(self, requests, plans, *, attempts):
+        """Execute complete origin waves; outer executor owns concurrency/checkpoints.
+
+        DSH owns admission, usage settlement and transport retries. This adapter
+        never opens a second scheduler or splits an origin into cell Agents.
+        """
+        if not len(requests) == len(plans) == len(attempts):
+            raise ValueError("requests, plans, attempts must have equal lengths")
+        if len({r.sample_id for r in requests}) != len(requests):
+            raise SampleExecutionContractError("sample IDs must be unique")
+        groups = {}
+        outcomes = [None] * len(requests)
+        for i, (request, plan, attempt) in enumerate(zip(requests, plans, attempts)):
+            if type(attempt) is not int or attempt < 1:
+                raise ValueError("sample attempts must be positive integers")
+            _safe_mapping(request.to_dict(), "sample Agent request")
+            _safe_mapping(plan, "sample Agent plan")
+            try:
+                causal = _causal_wave_identity(request, index=i)
+            except SampleExecutionContractError as exc:
+                outcomes[i] = SamplePredictionOutcome(sample_id=request.sample_id, error=SampleExecutionAttemptError(
+                    str(exc), failure_class="invalid_causal_provenance", retryable=False, error_type=type(exc).__name__))
+                continue
+            key = (request.candidate_id, request.dataset_digest, request.partition, causal,
+                   plan["decision_context_digest"], "planner" if attempt == 1 else "repair")
+            groups.setdefault(key, []).append(i)
+        for key, indices in groups.items():
+            self._check_control()
+            if len(indices) > 128:
+                raise SampleExecutionContractError("origin exceeds prediction-cell protocol limit")
+            self._route_chunk(requests, plans, attempts, indices, role=key[-1], outcomes=outcomes, diagnostics=None)
+        return tuple(outcomes)
 
     def _prediction_tool_context(
         self,
@@ -402,20 +399,6 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
         # as ``repair``.  There is no critic-selected repair tool in that case:
         # it is still the same strict DSH Planner -> prediction-tool chain and
         # therefore needs the same ephemeral Host binding as the first attempt.
-        if role not in {"planner", "repair"}:
-            return super()._prediction_tool_context(
-                role=role,
-                model_id=model_id,
-                requests=requests,
-                samples=samples,
-                context=context,
-                available_tools=available_tools,
-            )
-        if len(available_tools) != 1:
-            raise SampleExecutionContractError(
-                "strict DSH Planner retry requires exactly one frozen prediction tool"
-            )
-        tool_id = str(available_tools[0].get("tool_id") or "").strip()
         sample_ids = tuple(str(request.sample_id) for request in requests)
         wave = _sample_routing_wave(
             model_id,
@@ -433,29 +416,20 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
             stage_attempt=stage_attempt,
             idempotency_key=idempotency_key,
             wave_digest=wave_digest,
-            tool_id=tool_id,
+            catalog=available_tools,
             sample_ids=sample_ids,
-            executor=lambda: self._forecast_bundle_tool(frozen_requests),
+            executor=lambda tool_id, parameters: self._execute_agent_tool(
+                frozen_requests, tool_id, parameters
+            ),
         )
-
-    def set_outcome_callback(self, callback: Callable[..., Any] | None) -> None:
-        """Delay durable publication until mandatory post-score reflection exists."""
-
-        self._outcome_callback = None
-        self._durable_outcome_statuses = None
-        self._planner_progress_session = None
 
     def set_resume_checkpoint(self, checkpoint: Mapping[str, Any] | None) -> None:
         """Keep cumulative progress while strict chains stream one sample at a time."""
 
         with self._strict_progress_lock:
-            super().set_resume_checkpoint(checkpoint)
             # The base adapter's cumulative session is invocation-local and
             # cannot be shared by concurrent origin chains. Strict progress is
             # aggregated below after each complete origin is durable.
-            self._resume_checkpoint = None
-            self._durable_outcome_statuses = None
-            self._planner_progress_session = None
             if checkpoint is None:
                 self._strict_progress_state = None
                 self._strict_progress_id = 0
@@ -624,7 +598,19 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
         self.record_finalized_sample_progress(status=status)
 
     def plan_batch(self, context: Mapping[str, Any]) -> Mapping[str, Any]:
-        plan = dict(super().plan_batch(context))
+        for field, expected in (("strategy_model_id", self.strategy_model_id), ("review_model_id", self.review_model_id)):
+            if context.get(field) is not None and context[field] != expected:
+                raise SampleExecutionContractError("sample model route does not match frozen task")
+        fields = {"run_id", "candidate_id", "dataset_digest", "partition", "algorithm_id", "algorithm_version",
+            "evaluator_id", "horizons_hours", "candidate_parameters", "tool_experience", "agent_policy",
+            "stage_context_digest", "candidate_genome_digest", "candidate_agent_profile", "derived_execution_plan", "evaluation_scope"}
+        decision_context = _safe_mapping({key: context[key] for key in fields if key in context}, "sample policy context")
+        plan = {"plan_id": "native-origin-agent@1", "remote_sample_agents": True,
+                "strategy_model_id": self.strategy_model_id, "review_model_id": self.review_model_id,
+                "sample_concurrency": self.sample_concurrency, "microbatch_size": self.microbatch_size,
+                "require_remote_planner": True, "require_remote_critic": self.require_remote_critic,
+                "remote_critic_policy": self.remote_critic_policy,
+                "decision_context": decision_context, "decision_context_digest": digest(decision_context)}
         require_success_critic = bool(
             self.require_remote_critic
             or self.remote_critic_policy is None
@@ -640,24 +626,15 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "sample_prompt_batch_size": 1,
                 "prediction_unit": "forecast_origin_with_target_horizon_vector",
-                "execution_mode": "per_origin_remote_agent_vector_tool_loop",
+                "execution_mode": "per_origin_agent_owned_prediction",
                 "host_route_bypass_allowed": False,
                 "host_prediction_fallback_allowed": False,
                 "post_score_reflection_required": self.sample_reflection_enabled,
                 "required_success_remote_roles": required_remote_roles,
                 "remote_roles": required_remote_roles,
-                "routing_policy": (
-                    "remote_planner_per_origin_then_agent_invoked_registered_vector_"
-                    "tool_then_sparse_remote_critic_on_uncertainty_or_failure_then_"
-                    "host_cell_scoring_then_candidate_aggregate_reflection;"
-                    "no_host_route_bypass;no_prediction_fallback"
-                    if required_remote_roles == ["planner"]
-                    else
-                    "remote_planner_per_origin_then_agent_invoked_registered_vector_"
-                    "tool_then_remote_critic_per_origin_then_host_cell_scoring_"
-                    "then_remote_reflector_per_origin;no_host_route_bypass;"
-                    "no_prediction_fallback"
-                ),
+                "routing_policy": "sample_agent_analyzes_and_optionally_calls_tools_then_submits_prediction;host_validates_then_scores",
+                "forecast_value_source": "agent_final_structured_prediction",
+                "tools": self._available_tool_catalog(None, plan, role="planner"),
             }
         )
         return plan
@@ -785,137 +762,189 @@ class DshSampleCollaborationAdapter(GatewaySampleCollaborationAdapter):
             "cell_sample_ids": sample_ids,
         }
 
-    def _available_tool_catalog(
-        self,
-        request: Any,
-        plan: Mapping[str, Any],
-        *,
-        role: str,
-    ) -> list[dict[str, str]]:
-        """Keep the initial path bound to one registered candidate tool."""
-
+    def _available_tool_catalog(self, request, plan, *, role):
         if role not in {"planner", "repair"}:
-            return super()._available_tool_catalog(request, plan, role=role)
-        if role == "repair":
-            latest = _latest_retry_feedback(plan)
-            retry_feedback = plan.get("sample_retry_feedback")
-            critic_selected = isinstance(retry_feedback, (list, tuple)) and any(
-                isinstance(item, Mapping) and "requested_tool_id" in item
-                for item in retry_feedback
-            )
-            host_constraint_repair = bool(
-                latest is not None
-                and latest.get("failure_class") == "constraint_rejected"
-                and _feedback_has_finite_prediction(latest)
-            )
-            if critic_selected or host_constraint_repair:
-                # Critic-selected and Host-derived repair tools execute on the
-                # generic deterministic path.  They must never be rebound as a
-                # DSH Planner prediction tool.
-                return super()._available_tool_catalog(request, plan, role=role)
+            return []
         return [
-            {
-                "tool_id": request.algorithm_id,
-                "version": request.algorithm_version,
-                "purpose": "registered_candidate_prediction",
-            }
+            {"tool_id": "candidate-model", "version": "1", "purpose": "Candidate's evolved default model; optional", "parameters": {}},
+            {"tool_id": "persistence", "version": "1", "purpose": "Latest causal history value", "parameters": {}},
+            *self._agent_tool_catalog,
         ]
 
-    def _forced_repair_route(
-        self,
-        plan: Mapping[str, Any],
-        *,
-        attempt: int,
-    ) -> tuple[str, str, str, str] | None:
-        """Split explicit critic, Host constraint, and pre-tool retry routes."""
+    def _execute_agent_tool(self, requests, tool_id, parameters):
+        if tool_id in {"candidate-model", "persistence"}:
+            if parameters:
+                raise ValueError("this tool takes no parameters")
+            if tool_id == "candidate-model":
+                return self._forecast_bundle_tool(requests)
+            outputs = {}
+            for request in requests:
+                history = request.label_free_context.get("history_window", [])
+                times = request.label_free_context.get("causal_provenance", {}).get("history_timestamps", [])
+                if not history or len(history) != len(times):
+                    raise ValueError("persistence requires timestamped history")
+                latest = max(range(len(times)), key=times.__getitem__)
+                outputs[request.sample_id] = {"predicted": history[latest], "metadata": {"source": "persistence"}}
+            return outputs
+        if self._agent_tool_executor is None:
+            raise ValueError("unknown Agent prediction capability")
+        return self._agent_tool_executor(requests, tool_id, parameters)
 
-        critic_route = super()._forced_repair_route(plan, attempt=attempt)
-        if critic_route is not None:
-            return critic_route
-        if attempt < 2:
-            return None
-        latest = _latest_retry_feedback(plan)
-        if latest is None:
-            raise SampleExecutionContractError(
-                "DSH repair attempt requires bounded retry feedback"
-            )
-        previous_attempt = latest.get("attempt")
-        if (
-            isinstance(previous_attempt, bool)
-            or not isinstance(previous_attempt, int)
-            or previous_attempt != attempt - 1
-        ):
-            raise SampleExecutionContractError(
-                "DSH repair feedback attempt is not contiguous"
-            )
-        if latest.get("failure_class") == "constraint_rejected" and (
-            _feedback_has_finite_prediction(latest)
-        ):
-            raw_execution_plan = plan.get("derived_execution_plan")
-            if not isinstance(raw_execution_plan, Mapping):
-                raise SampleExecutionContractError(
-                    "DSH Host constraint repair requires a frozen derived execution plan"
+    def _route_chunk(self, requests, plans, attempts, indices, *, role, outcomes,
+                     diagnostics, split_depth=0, split_floor=None):
+        selected = [requests[i] for i in indices]
+        samples, origin_contexts = [], {}
+        for index in indices:
+            request = requests[index]
+            visible = dict(request.label_free_context)
+            visible.pop("predictor_state", None)
+            ref = digest(visible)
+            origin_contexts[ref] = visible
+            sample = request.to_dict()
+            sample.pop("label_free_context")
+            samples.append({**sample, "context_ref": ref, "attempt": attempts[index],
+                            "failure_feedback": plans[index].get("sample_retry_feedback", [])})
+        decision_context = plans[indices[0]].get("decision_context", {})
+        context = {
+            "role": role, "origin_contexts": origin_contexts,
+            "evaluation_scope": decision_context.get("evaluation_scope"),
+            "context_resolution": "Each sample.context_ref resolves to origin_contexts with causal numeric history and current inputs",
+            "candidate_agent_profile": decision_context.get("candidate_agent_profile"),
+            "evolution_context": {key: decision_context[key] for key in
+                                  ("candidate_parameters", "tool_experience", "agent_policy") if key in decision_context},
+        }
+        context["prediction_contract"] = {
+            "owner": "sample_agent", "max_prediction_tool_calls": MAX_PREDICTION_CALLS,
+            "model_fit_cache_capacity": 8,
+            "exploration_budget": "Per-attempt tool calls only; cache eviction does not remove capabilities",
+            "final_prediction": "Agent submits numeric predictions; tools are optional evidence",
+            "allowed_methods": ["direct", "model", "blend", "adjusted"],
+            "training_boundary": "Models fit training_fit only; evaluation labels are unavailable",
+        }
+        catalog = self._available_tool_catalog(selected[0], plans[indices[0]], role=role)
+        try:
+            with self._prediction_tool_context(
+                role=role, model_id=self.strategy_model_id, requests=selected,
+                samples=samples, context=context, available_tools=catalog,
+            ) as binding:
+                raw = self._agent_decide(
+                    self.strategy_model_id, role=role, samples=samples, context=context,
+                    available_tools=catalog, allow_format_retry=False, diagnostics=diagnostics,
                 )
-            try:
-                execution_plan = DerivedExecutionPlan.from_dict(raw_execution_plan)
-            except (TypeError, ValueError) as exc:
-                raise SampleExecutionContractError(
-                    "DSH Host constraint repair execution plan is invalid"
-                ) from exc
-            repair_index = min(
-                attempt - 2,
-                len(execution_plan.repair_sequence) - 1,
+                structured = {"schema_version": "ecology-sample-predictions@2", "wave_digest": binding.wave_digest, **raw}
+                rows = validate_predictions(structured, [r.sample_id for r in selected], wave_digest=binding.wave_digest)
+
+        except SampleExecutionControlError:
+            raise
+        except Exception as exc:
+            runtime_error = dsh_native_runtime_error_in_chain(exc)
+            if runtime_error is not None and (dsh_native_runtime_retryable(runtime_error)
+                                              or dsh_native_runtime_evaluation_fatal(runtime_error)):
+                raise
+            failure_class, retryable, error_type = classify_sample_failure(exc)
+            for index in indices:
+                failure = SampleExecutionAttemptError("sample Agent attempt failed", failure_class=failure_class,
+                    retryable=retryable, error_type=error_type,
+                    tool_calls=binding.public_trace(requests[index].sample_id) if "binding" in locals() else ())
+                failure.__cause__ = exc
+                outcomes[index] = SamplePredictionOutcome(sample_id=requests[index].sample_id, error=failure)
+            return
+        by_id = {row["sample_id"]: row for row in rows}
+        successful = []
+        for index in indices:
+            request = requests[index]
+            row = by_id[request.sample_id]
+            tool_trace = binding.public_trace(request.sample_id, row["evidence_call_ids"])
+            final_step = {
+                "tool_id": "agent-final-prediction", "version": "2", "status": "completed",
+                "input_digest": binding.wave_digest, "output_digest": digest(structured),
+                "execution_owner": "dsh_agent_prediction",
+            }
+            agent_step = {
+                "role": "remote_planner_agent", "decision": "submit_prediction:" + row["method"],
+                "status": "completed", "model_id": self.strategy_model_id,
+                "reason_code": row["reason_code"], "confidence": row["confidence"],
+                "response_digest": digest(row),
+            }
+            item = {"index": index, "request": request, "predicted": row["predicted"],
+                    "agent_steps": [agent_step], "tool_step": final_step,
+                    "decision": row, "tool_trace": tool_trace,
+                    "causal_context": origin_contexts[samples[indices.index(index)]["context_ref"]]}
+            successful.append(item)
+            outcomes[index] = SamplePredictionOutcome(sample_id=request.sample_id, result={
+                "predicted": row["predicted"], "agent_decisions": [agent_step],
+                "tool_calls": [*tool_trace, final_step],
+            })
+        review = [item for item in successful if self.require_remote_critic or self.remote_critic_policy is None
+                  or self.remote_critic_policy["version"] == "always@1"
+                  or item["decision"]["confidence"] < self.remote_critic_policy["min_planner_confidence"]]
+        if self.remote_review_enabled and review:
+            self._review_successes(review, plans, outcomes, diagnostics)
+
+    def _review_successes(self, successful, plans, outcomes, diagnostics, *, compact=False):
+        """Review causal evidence; all non-accept decisions return to the Agent."""
+        samples = [{
+            "sample_id": item["request"].sample_id,
+            "target": item["request"].target,
+            "horizon_hours": item["request"].horizon_hours,
+            "physical_bounds": [item["request"].minimum, item["request"].maximum],
+            "baseline": item["request"].baseline,
+            "prediction": dict(item["decision"]),
+            "causal_context": item["causal_context"],
+            "tool_evidence": item["tool_trace"],
+        } for item in successful]
+        try:
+            raw = self._agent_decide(
+                self.review_model_id, role="critic", samples=samples,
+                context={"review_contract": {
+                    "owner": "sample_agent", "phase": "pre_score_label_free",
+                    "actions": ["accept", "revise", "uncertain"],
+                    "revision": "Return evidence concerns to the Agent under its existing attempt budget; never substitute a tool value",
+                    "hard_constraints": "Host validates finite values and physical bounds after Agent execution",
+                }}, available_tools=[], allow_format_retry=False, diagnostics=diagnostics,
             )
-            return (
-                execution_plan.repair_sequence[repair_index],
-                "host_repair_router",
-                "derived_constraint_repair",
-                "execute_derived_repair_tool",
-            )
-        if _is_pre_tool_transient_retry(latest):
-            # A new remote child is appropriate only when no prediction/tool
-            # evidence exists and the prior Planner failed transiently before
-            # the registered predictor could run.
-            return None
-        raise SampleExecutionContractError(
-            "DSH implicit repair is neither Host constraint repair nor pre-tool transient retry"
-        )
-
-    def _review_successes(
-        self,
-        successful: Sequence[Mapping[str, Any]],
-        plans: Sequence[Mapping[str, Any]],
-        outcomes: list[Any],
-        diagnostics: Any,
-        *,
-        compact: bool = False,
-    ) -> None:
-        """Keep DSH critic waves bounded while reviewing every selected sample."""
-
-        super()._review_successes(
-            successful,
-            plans,
-            outcomes,
-            diagnostics,
-            compact=True,
-        )
-
-    def _review_tool_failures(
-        self,
-        failures: Sequence[Mapping[str, Any]],
-        plans: Sequence[Mapping[str, Any]],
-        outcomes: list[Any],
-        diagnostics: Any,
-        *,
-        compact: bool = False,
-    ) -> None:
-        super()._review_tool_failures(
-            failures,
-            plans,
-            outcomes,
-            diagnostics,
-            compact=True,
-        )
+            reviews = {row["sample_id"]: row for row in validate_agent_review(raw, [s["sample_id"] for s in samples])}
+        except SampleExecutionControlError:
+            raise
+        except Exception as exc:
+            runtime_error = dsh_native_runtime_error_in_chain(exc)
+            if runtime_error is not None and (dsh_native_runtime_retryable(runtime_error)
+                                              or dsh_native_runtime_evaluation_fatal(runtime_error)):
+                raise
+            # A selected review is part of this attempt's contract. Unavailability
+            # must be visible and cannot silently turn into scientific acceptance.
+            for item in successful:
+                outcomes[item["index"]] = SamplePredictionOutcome(
+                    sample_id=item["request"].sample_id,
+                    error=SampleExecutionAttemptError(
+                        "required Agent review failed", failure_class="invalid_output",
+                        retryable=True, error_type=type(exc).__name__,
+                        agent_decisions=item["agent_steps"],
+                        tool_calls=[*item["tool_trace"], item["tool_step"]],
+                        previous_prediction=item["predicted"],
+                    ),
+                )
+            return
+        for item in successful:
+            row = reviews[item["request"].sample_id]
+            step = {"role": "remote_critic_agent", "decision": row["action"],
+                    "status": "completed", "model_id": self.review_model_id,
+                    "reason_code": row["reason_code"], "confidence": row["confidence"],
+                    "response_digest": digest(row)}
+            decisions = [*item["agent_steps"], step]
+            calls = [*item["tool_trace"], item["tool_step"]]
+            if row["action"] == "accept":
+                outcome = SamplePredictionOutcome(sample_id=item["request"].sample_id, result={
+                    "predicted": item["predicted"], "agent_decisions": decisions, "tool_calls": calls,
+                })
+            else:
+                outcome = SamplePredictionOutcome(sample_id=item["request"].sample_id,
+                    error=SampleExecutionAttemptError(
+                        "Critic requested Agent reconsideration", failure_class="critic_" + row["action"],
+                        retryable=True, error_type="AgentReviewRequestedRevision",
+                        agent_decisions=decisions, tool_calls=calls, previous_prediction=item["predicted"],
+                    ))
+            outcomes[item["index"]] = outcome
 
 
 __all__ = ["DshSampleCollaborationAdapter"]

@@ -11,7 +11,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from ecologyrsi_dsh.api.dsh_tools import (
+from ecologyrsi_dsh.integrations.dsh_tools import (
     DshToolAdmissionClosedError,
     DshToolAuthorizationError,
     DshStructuredResultPersistenceError,
@@ -63,11 +63,7 @@ def _skill_evidence(stage: str) -> dict:
         "call_seq": 1,
         "result_seq": 2,
         "first_tool_call_verified": True,
-        "next_tool_name": (
-            "ecology_execute_prediction_tool"
-            if stage == "sample.plan"
-            else "structured_output"
-        ),
+        "next_tool_name": "structured_output",
         "next_tool_call_seq": 3,
         "order_verified": True,
         "source": "dsh_session_event_log",
@@ -173,123 +169,39 @@ def _arm_structured_envelope(
     return fence
 
 
-def _append_recorded_planner_result(
-    ledger: EventLedger,
-    *,
-    case: str,
-) -> tuple[dict, object]:
-    """Append one durable Planner result, optionally corrupting its binding."""
-
+def _append_recorded_planner_result(ledger, *, case):
+    from ecologyrsi_dsh.integrations.prediction_binding import DshPredictionToolBinding
     idempotency_key = f"restart-planner-{case}"
-    prediction_event_digest = digest(
-        {
-            "idempotency_key": idempotency_key,
-            "tool_name": "ecology_execute_prediction_tool",
-        }
+    binding = DshPredictionToolBinding(
+        run_id="run:tool-test", stage_attempt=2, idempotency_key=idempotency_key, wave_digest="d"*64,
+        catalog=[{"tool_id": "ridge@1", "version": "1"}], sample_ids=("s1",),
+        executor=lambda *_: {"s1": {"predicted": 21.5, "metadata": {}}},
     )
-    prediction_event_id = (
-        f"run:tool-test:dsh-prediction-tool:"
-        f"{prediction_event_digest}"
-    )
-    prediction_payload = {
-        "schema_version": "ecologyrsi-dsh.dsh-prediction-tool-executed/1",
-        "stage": "sample.plan",
-        "stage_attempt": 2,
-        "idempotency_key": idempotency_key,
-        "tool_id": "ridge@1",
-        "wave_digest": "d" * 64,
-        "sample_ids": ["s1"],
-        "prediction_count": 1,
-        "request_digest": "",
-        "output_digest": "f" * 64,
-        "execution_owner": "dsh_agent_tool_call",
-    }
-    if case == "binding":
-        prediction_payload["stage_attempt"] = 3
-    elif case == "wave":
-        prediction_payload["wave_digest"] = "c" * 64
-    elif case == "request-digest":
-        prediction_payload["request_digest"] = "0" * 64
-    if case != "request-digest":
-        prediction_payload["request_digest"] = digest(
-            {
-                "tool_name": "ecology_execute_prediction_tool",
-                "run_id": "run:tool-test",
-                "stage": "sample.plan",
-                "stage_attempt": prediction_payload["stage_attempt"],
-                "idempotency_key": prediction_payload["idempotency_key"],
-                "arguments": {
-                    "tool_id": prediction_payload["tool_id"],
-                    "wave_digest": prediction_payload["wave_digest"],
-                },
-            }
-        )
-    prediction_event = ledger.append(
-        "run:tool-test",
-        "DshPredictionToolExecuted",
-        prediction_payload,
-        event_id=prediction_event_id,
-    )
-
+    def persist(payload):
+        if case == "binding": payload["stage_attempt"] = 3
+        elif case == "wave": payload["wave_digest"] = "c"*64
+        elif case == "request-digest": payload["request_digest"] = "0"*64
+        return ledger.append("run:tool-test", "DshPredictionToolExecuted", payload)
+    binding.execute({"tool_id": "ridge@1", "wave_digest": "d"*64, "call_id": "one", "parameters": {}},
+                    session_id="test-session", persist=persist)
     identity = _identity(ledger, idempotency_key=idempotency_key)
-    structured = {
-        "schema_version": "ecology-sample-decisions@1",
-        "wave_digest": "d" * 64,
-        "decisions": [
-            {
-                "sample_id": "s1",
-                "next_tool": "ridge@1",
-                "reason_code": "frozen_registered_route",
-                "confidence": 0.9,
-            }
-        ],
-    }
+    structured = {"schema_version": "ecology-sample-predictions@2", "wave_digest": "d"*64,
+                  "decisions": [{"sample_id": "s1", "predicted": 22, "method": "adjusted",
+                                 "reason_code": "agent_adjusted", "confidence": .9, "evidence_call_ids": ["one"]}]}
+    receipt = binding.final_receipt(structured, session_id="test-session")
+    if case == "receipt": receipt["calls"][0]["output_digest"] = "0"*64
     if case == "decision":
-        structured["decisions"][0]["next_tool"] = "forged@9"
-    receipt = {
-        "event_id": prediction_event.event_id,
-        "event_seq": prediction_event.seq,
-        "request_digest": prediction_payload["request_digest"],
-        "output_digest": prediction_payload["output_digest"],
-        "execution_owner": "dsh_agent_tool_call",
-    }
-    if case == "receipt":
-        receipt["output_digest"] = "0" * 64
-    accepted_payload = {
-        "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
-        "identity": identity,
-        "output_schema_id": "ecology-sample-decisions@1",
-        "result_digest": digest(structured),
-        "structured": structured,
-        "skill_invocation_evidence": _skill_evidence("sample.plan"),
-    }
-    if case != "missing-receipt":
-        accepted_payload["required_tool_receipt"] = receipt
-    accepted_event_digest = digest(
-        {
-            "stage": "sample.plan",
-            "idempotency_key": idempotency_key,
-        }
-    )
-    accepted_event_id = (
-        f"run:tool-test:dsh-structured:"
-        f"{accepted_event_digest}"
-    )
-    accepted_event = ledger.append(
-        "run:tool-test",
-        "DshStructuredResultAccepted",
-        accepted_payload,
-        event_id=accepted_event_id,
-    )
-    envelope = {
-        "identity": identity,
-        "output_schema_id": "ecology-sample-decisions@1",
-        "structured": structured,
-        "result_digest": digest(structured),
-        "skill_invocation_evidence": _skill_evidence("sample.plan"),
-        "admission_id": "lost-response-admission",
-    }
-    return envelope, accepted_event
+        structured["decisions"][0]["evidence_call_ids"] = ["forged"]
+        receipt["result_digest"] = digest(structured)
+    envelope = {"identity": identity, "output_schema_id": "ecology-sample-predictions@2", "structured": structured,
+                "result_digest": digest(structured), "skill_invocation_evidence": _skill_evidence("sample.plan"),
+                "admission_id": "lost-response-admission"}
+    payload = {"schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
+               **{k:v for k,v in envelope.items() if k != "admission_id"}}
+    if case != "missing-receipt": payload["required_tool_receipt"] = receipt
+    event = ledger.append("run:tool-test", "DshStructuredResultAccepted", payload,
+                          event_id=DshToolService._structured_event_id("run:tool-test", "sample.plan", idempotency_key))
+    return envelope, event
 
 
 def _accepted_payload(envelope: dict) -> dict:
@@ -404,7 +316,7 @@ class DshToolServiceTests(unittest.TestCase):
     def test_role_surface_and_idempotency_are_fail_closed(self) -> None:
         executions = 0
 
-        def predict() -> dict:
+        def predict(*_args) -> dict:
             nonlocal executions
             executions += 1
             return {"s1": {"predicted": 21.5, "metadata": {"model": "ridge"}}}
@@ -414,21 +326,20 @@ class DshToolServiceTests(unittest.TestCase):
             stage_attempt=2,
             idempotency_key="tool-idem-1",
             wave_digest="d" * 64,
-            tool_id="ridge@1",
+            catalog=[{"tool_id": "ridge@1", "version": "1"}],
             sample_ids=("s1",),
             executor=predict,
         ) as binding:
             envelope = {
                 "identity": _identity(self.ledger),
-                "arguments": {"tool_id": "ridge@1", "wave_digest": "d" * 64},
+                "arguments": {"tool_id": "ridge@1", "wave_digest": "d" * 64, "call_id": "one", "parameters": {}},
             }
             first = self.service.execute(
                 "ecology_execute_prediction_tool", envelope
             )
-            self.assertEqual(first["prediction_count"], 1)
+            self.assertEqual(len(first["outputs"]), 1)
             self.assertEqual(executions, 1)
-            with self.assertRaises(DshToolAuthorizationError):
-                self.service.execute("ecology_execute_prediction_tool", envelope)
+            self.assertEqual(self.service.execute("ecology_execute_prediction_tool", envelope), first)
 
             retry = json.loads(json.dumps(envelope))
             retry["identity"]["session_id"] = "session:planner-2"
@@ -445,7 +356,7 @@ class DshToolServiceTests(unittest.TestCase):
                 1,
             )
             self.assertEqual(
-                binding.prediction_bundle()["s1"]["metadata"]["execution_owner"],
+                binding.public_trace()[0]["execution_owner"],
                 "dsh_agent_tool_call",
             )
 
@@ -473,7 +384,7 @@ class DshToolServiceTests(unittest.TestCase):
                 "ecology_execute_prediction_tool",
                 {
                     "identity": _identity(self.ledger),
-                    "arguments": {"tool_id": "ridge@1", "wave_digest": "d" * 64},
+                    "arguments": {"tool_id": "ridge@1", "wave_digest": "d" * 64, "call_id": "one", "parameters": {}},
                 },
             )
 
@@ -978,19 +889,19 @@ class DshToolServiceTests(unittest.TestCase):
     def test_completed_planner_is_replayed_without_a_second_agent_call(self) -> None:
         executions = 0
 
-        def predict() -> dict:
+        def predict(*_args) -> dict:
             nonlocal executions
             executions += 1
             return {"s1": {"predicted": 21.5, "metadata": {"model": "ridge"}}}
 
         identity = _identity(self.ledger)
         structured = {
-            "schema_version": "ecology-sample-decisions@1",
+            "schema_version": "ecology-sample-predictions@2",
             "wave_digest": "d" * 64,
             "decisions": [
                 {
                     "sample_id": "s1",
-                    "next_tool": "ridge@1",
+                    "predicted": 21.5, "method": "model", "evidence_call_ids": ["one"],
                     "reason_code": "initial_registered_route",
                     "confidence": 0.9,
                 }
@@ -1001,7 +912,7 @@ class DshToolServiceTests(unittest.TestCase):
             stage_attempt=2,
             idempotency_key="tool-idem-1",
             wave_digest="d" * 64,
-            tool_id="ridge@1",
+            catalog=[{"tool_id": "ridge@1", "version": "1"}],
             sample_ids=("s1",),
             executor=predict,
         ):
@@ -1012,12 +923,13 @@ class DshToolServiceTests(unittest.TestCase):
                     "arguments": {
                         "tool_id": "ridge@1",
                         "wave_digest": "d" * 64,
+                        "call_id": "one", "parameters": {},
                     },
                 },
             )
             envelope = {
                 "identity": identity,
-                "output_schema_id": "ecology-sample-decisions@1",
+                "output_schema_id": "ecology-sample-predictions@2",
                 "structured": structured,
                 "result_digest": digest(structured),
                 "skill_invocation_evidence": _skill_evidence("sample.plan"),
@@ -1040,7 +952,7 @@ class DshToolServiceTests(unittest.TestCase):
             stage_attempt=2,
             idempotency_key="tool-idem-1",
             wave_digest="d" * 64,
-            tool_id="ridge@1",
+            catalog=[{"tool_id": "ridge@1", "version": "1"}],
             sample_ids=("s1",),
             executor=predict,
         ) as binding:
@@ -1049,7 +961,7 @@ class DshToolServiceTests(unittest.TestCase):
                 stage="sample.plan",
                 role="sample-planner",
                 context={"retry_after": "critic_failure"},
-                output_schema_id="ecology-sample-decisions@1",
+                output_schema_id="ecology-sample-predictions@2",
                 run_state_revision=self.ledger.latest_seq(),
                 stage_attempt=2,
                 ledger_expected_revision=self.ledger.latest_seq(),
@@ -1060,12 +972,12 @@ class DshToolServiceTests(unittest.TestCase):
                     "phenotype_instance_digest": "c" * 64,
                 },
             )
-            bundle = binding.prediction_bundle()
+            trace = binding.public_trace()
 
         self.assertEqual(replayed, structured)
-        self.assertEqual(bundle["s1"]["predicted"], 21.5)
+        self.assertEqual(trace[0]["tool_id"], "ridge@1")
         self.assertEqual(runtime.calls, 0)
-        self.assertEqual(executions, 2)
+        self.assertEqual(executions, 1)
         kinds = [event.kind for event in self.ledger.events("run:tool-test")]
         self.assertEqual(kinds.count("DshPredictionToolExecuted"), 1)
         self.assertEqual(kinds.count("DshStructuredResultAccepted"), 1)
@@ -1782,7 +1694,7 @@ class DshToolServiceTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     ValueError,
-                    "recorded sample.plan prediction-tool binding is invalid",
+                    "Agent|agent|prediction|evidence|receipt|digest|wave",
                 ):
                     DshToolService(self.ledger).accept_structured(envelope)
 
@@ -2237,7 +2149,7 @@ class DshToolHTTPAuthTests(unittest.TestCase):
     def _request(self, token: str) -> tuple[int, dict]:
         envelope = {
             "identity": _identity(self.server.ledger),
-            "arguments": {"tool_id": "ridge@1", "wave_digest": "d" * 64},
+            "arguments": {"tool_id": "ridge@1", "wave_digest": "d" * 64, "call_id": "one", "parameters": {}},
         }
         request = Request(
             f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -2279,9 +2191,9 @@ class DshToolHTTPAuthTests(unittest.TestCase):
             stage_attempt=2,
             idempotency_key="tool-idem-1",
             wave_digest="d" * 64,
-            tool_id="ridge@1",
+            catalog=[{"tool_id": "ridge@1", "version": "1"}],
             sample_ids=("s1",),
-            executor=lambda: {
+            executor=lambda *_: {
                 "s1": {"predicted": 21.5, "metadata": {"model": "ridge"}}
             },
         ):

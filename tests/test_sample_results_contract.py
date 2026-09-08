@@ -232,6 +232,22 @@ class SampleResultCodecTests(unittest.TestCase):
         payload = sample_results_event_payload(evaluation, rows, revision="revision:clipping")
         self.assertEqual(decode_sample_results(payload), rows)
 
+    def test_agent_prediction_summary_round_trip(self) -> None:
+        source = _source_row(1)
+        source.update(prediction_source="sample_agent", agent_prediction={
+            "method": "adjusted", "confidence": .8,
+            "tools": [{"tool_id": "candidate-model", "status": "failed"},
+                      {"tool_id": "persistence", "status": "completed"}],
+        })
+        rows = build_sample_results(CANDIDATE_ID, [source])
+        self.assertEqual(rows[0]["prediction_source"], "sample_agent")
+        self.assertEqual(rows[0]["agent_prediction"], source["agent_prediction"])
+        evaluation = Evaluation(evaluation_id="evaluation:agent", run_id=RUN_ID,
+                                candidate_id=CANDIDATE_ID, score=.1, passed=True,
+                                partition="validation")
+        payload = sample_results_event_payload(evaluation, rows, revision="revision:agent")
+        self.assertEqual(decode_sample_results(payload), rows)
+
     def test_corrupt_metadata_digest_base64_and_decompression_limit_fail_closed(self) -> None:
         rows = build_sample_results(CANDIDATE_ID, [_source_row(1)])
         evaluation = Evaluation(
@@ -828,7 +844,7 @@ class SampleResultHTTPTests(unittest.TestCase):
             f"candidate_id={quote(candidate_id, safe='')}{suffix}"
         )
 
-    def test_pending_legacy_aborted_and_completed_pagination_contract(self) -> None:
+    def test_pending_unavailable_aborted_and_completed_pagination_contract(self) -> None:
         pending_run = "run:http-pending"
         _proposal, pending_candidate = self._candidate(pending_run, "candidate:http-pending")
         status, pending = self.request(
@@ -840,15 +856,15 @@ class SampleResultHTTPTests(unittest.TestCase):
         self.assertIs(pending["complete"], False)
 
         self.server.director.fail_candidate(
-            pending_run, pending_candidate.candidate_id, "legacy terminal candidate"
+            pending_run, pending_candidate.candidate_id, "candidate failed before sample evaluation"
         )
-        status, legacy = self.request(
+        status, unavailable = self.request(
             self._sample_path(pending_run, pending_candidate.candidate_id)
         )
         self.assertEqual(status, 200)
-        self.assertEqual(legacy["status"], "legacy")
-        self.assertIs(legacy["legacy"], True)
-        self.assertIs(legacy["supported"], False)
+        self.assertEqual(unavailable["status"], "unavailable")
+        self.assertNotIn("legacy", unavailable)
+        self.assertIs(unavailable["supported"], False)
 
         aborted_run = "run:http-aborted"
         proposal, candidate = self._candidate(aborted_run, "candidate:http-aborted")

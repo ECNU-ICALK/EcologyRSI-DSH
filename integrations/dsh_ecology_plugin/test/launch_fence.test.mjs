@@ -7,16 +7,16 @@ import { RuntimeRunRegistry } from "../lib/runtime/run-registry.js";
 import { NativeStageRunner, jsonDigest } from "../lib/runtime/stage-runner.js";
 
 const REALISTIC_PRESET_CATALOG = Object.freeze([
-  "ecology-coordinator-v4",
-  "ecology-researcher-v7",
+  "ecology-coordinator-v5",
+  "ecology-researcher-v12",
   "ecology-candidate-proposer-v4",
-  "ecology-sample-planner-v5",
-  "ecology-sample-critic-v4",
-  "ecology-generation-judge-v7",
+  "ecology-sample-planner-v8",
+  "ecology-sample-critic-v5",
+  "ecology-generation-judge-v8",
 ].map((preset_id) => ({
   preset_id,
   tool_profile: "dynamic-retrieval-v1",
-  required_tools: preset_id === "ecology-sample-planner-v5"
+  required_tools: preset_id === "ecology-sample-planner-v8"
     ? ["ecology_execute_prediction_tool", "skill", "web_search"]
     : ["skill", "web_search"],
 })));
@@ -44,7 +44,7 @@ async function startReadyControllerRun(controller, startBinding) {
   const roleAgents = controller.roleAgents;
   controller.stageRunner = null;
   controller.presetCatalog = [
-    { preset_id: "ecology-researcher-v7", tool_profile: "test" },
+    { preset_id: "ecology-researcher-v12", tool_profile: "test" },
   ];
   controller.roleAgents = {
     createRoleAgent: async () => ({ dispose: async () => {} }),
@@ -162,7 +162,7 @@ function stageBinding({ samplePlan = false, suffix = "race", revision = 7 } = {}
     request: {
       role: samplePlan ? "sample-planner" : "researcher",
       output_schema_id: samplePlan
-        ? "ecology-sample-decisions@1"
+        ? "ecology-sample-predictions@2"
         : "ecology-research-result@1",
       ...(samplePlan ? { max_tokens: 2048 } : {}),
       context,
@@ -197,7 +197,7 @@ function launchRaceHarness({ samplePlan = false } = {}) {
   });
   const structured = samplePlan
     ? {
-      schema_version: "ecology-sample-decisions@1",
+      schema_version: "ecology-sample-predictions@2",
       wave_digest: "f".repeat(64),
       decisions: [],
     }

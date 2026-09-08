@@ -15,7 +15,7 @@ from ecologyrsi_dsh import (
     StrategyRouterDSHAdapter,
     TaskManifest,
 )
-from ecologyrsi_dsh.api.generation_execution import (
+from ecologyrsi_dsh.application.generation_execution import (
     _apply_candidate_judge,
     _generation_judges_should_retry,
     complete_if_budget_exhausted,
@@ -295,7 +295,7 @@ class JudgePersistenceTests(unittest.TestCase):
             )
 
             _apply_candidate_judge(
-                endpoint,
+                (endpoint).server,
                 director.state(run_id),
                 proposal,
                 artifact,
@@ -351,7 +351,7 @@ class JudgePersistenceTests(unittest.TestCase):
                 )
             )
 
-            state = execute_generation(endpoint, run_id)
+            state = execute_generation((endpoint).server, run_id)
 
             self.assertEqual(state.run.status.value, "completed")
             self.assertEqual(len(state.evaluations), 1)
@@ -398,7 +398,7 @@ class JudgePersistenceTests(unittest.TestCase):
                 )
             )
 
-            state = execute_generation(endpoint, run_id)
+            state = execute_generation((endpoint).server, run_id)
 
             self.assertEqual(state.run.status.value, "completed")
             self.assertEqual(len(state.candidates), 3)
@@ -459,7 +459,7 @@ class JudgePersistenceTests(unittest.TestCase):
                 )
             )
 
-            first_state = execute_generation(endpoint, run_id)
+            first_state = execute_generation((endpoint).server, run_id)
             self.assertEqual(first_state.run.generation, 1)
             evaluation_events_before = tuple(
                 event
@@ -471,7 +471,7 @@ class JudgePersistenceTests(unittest.TestCase):
                 for event in first_state.events
                 if event.kind == "GenerationAdvanced"
             )
-            final_state = execute_generation(endpoint, run_id)
+            final_state = execute_generation((endpoint).server, run_id)
 
             ordered = sorted(final_state.candidates, key=lambda item: item.generation)
             self.assertIs(ordered[0].status, CandidateStatus.PROMOTED)
@@ -550,7 +550,7 @@ class JudgePersistenceTests(unittest.TestCase):
                 )
             )
 
-            execute_generation(endpoint, run_id)
+            execute_generation((endpoint).server, run_id)
             baseline = director.state(run_id)
             baseline_evaluations = tuple(
                 event for event in baseline.events if event.kind == "EvaluationRecorded"
@@ -563,7 +563,7 @@ class JudgePersistenceTests(unittest.TestCase):
                 "complete_run",
                 side_effect=RuntimeError("simulated completion write crash"),
             ), self.assertRaisesRegex(RuntimeError, "simulated completion"):
-                execute_generation(endpoint, run_id)
+                execute_generation((endpoint).server, run_id)
 
             interrupted = director.state(run_id)
             self.assertEqual(interrupted.run.status.value, "running")
@@ -590,7 +590,7 @@ class JudgePersistenceTests(unittest.TestCase):
             )
             self.assertIsNotNone(interrupted.analysis_for(1))
 
-            recovered = complete_if_budget_exhausted(endpoint, run_id)
+            recovered = complete_if_budget_exhausted((endpoint).server, run_id)
 
             self.assertEqual(recovered.run.status.value, "completed")
             self.assertEqual(recovered.run.generation, 1)
@@ -644,7 +644,7 @@ class JudgePersistenceTests(unittest.TestCase):
                 )
             )
 
-            state = execute_generation(endpoint, run_id)
+            state = execute_generation((endpoint).server, run_id)
 
             self.assertEqual(state.run.status.value, "failed")
             self.assertEqual(state.run.generation, 0)
@@ -706,7 +706,7 @@ class JudgePersistenceTests(unittest.TestCase):
                 )
             )
 
-            state = execute_generation(endpoint, run_id)
+            state = execute_generation((endpoint).server, run_id)
 
             self.assertEqual(state.run.status.value, "failed")
             self.assertEqual(state.run.generation, 0)
@@ -746,7 +746,7 @@ class JudgePersistenceTests(unittest.TestCase):
             )
 
             with self.assertRaises(GatewayResponseError) as raised:
-                execute_generation(endpoint, run_id)
+                execute_generation((endpoint).server, run_id)
 
             self.assertTrue(raised.exception.retryable)
             self.assertEqual(
@@ -767,7 +767,7 @@ class JudgePersistenceTests(unittest.TestCase):
             )
 
             evaluator.available = True
-            recovered = execute_generation(endpoint, run_id)
+            recovered = execute_generation((endpoint).server, run_id)
 
             self.assertEqual(recovered.run.status.value, "completed")
             self.assertEqual(recovered.run.generation, 1)
@@ -806,7 +806,7 @@ class JudgePersistenceTests(unittest.TestCase):
                 )
             )
 
-            state = execute_generation(endpoint, run_id)
+            state = execute_generation((endpoint).server, run_id)
 
             self.assertEqual(state.run.status.value, "failed")
             self.assertEqual(state.run.generation, 0)
@@ -867,7 +867,7 @@ class JudgePersistenceTests(unittest.TestCase):
                 )
             )
 
-            state = execute_generation(endpoint, run_id)
+            state = execute_generation((endpoint).server, run_id)
 
             self.assertEqual(state.run.status.value, "failed")
             self.assertEqual(len(state.evaluations), 1)
@@ -901,7 +901,7 @@ class JudgePersistenceTests(unittest.TestCase):
                 )
             )
 
-            state = execute_generation(endpoint, run_id)
+            state = execute_generation((endpoint).server, run_id)
 
             self.assertEqual(state.run.status.value, "failed")
             self.assertEqual(len(state.evaluations), 1)

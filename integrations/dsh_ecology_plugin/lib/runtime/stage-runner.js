@@ -6,6 +6,7 @@ import {
   roleToolNames,
 } from "../tools/roles.js";
 import { MAX_REQUEST_TIMEOUT_MS, SidecarClient } from "../sidecar/client.js";
+import { normalizeRetrievalArguments } from "../tools/retrieval.js";
 import { dshSessionMetrics } from "./agents.js";
 import { ChildBindingRegistry } from "./child-bindings.js";
 import {
@@ -19,10 +20,14 @@ import {
   validateStructuredTimeoutMs,
 } from "./structured-deadline.js";
 import { runStructuredRole } from "./structured-roles.js";
+import { specializeResearchOutputSchema } from "./research-contract.js";
+import { validateStructuredStageBudget } from "./research-execution-policy.js";
+import { observeSessionUsage } from "./session-usage.js";
 import {
   isStructuredProviderRateLimit,
   isTrustedStructuredPhase,
   structuredPhaseError,
+  structuredFailureCode,
   structuredRetryAfterMs,
 } from "./structured-stage-errors.js";
 import { PendingChildStarts } from "./pending-child-starts.js";
@@ -55,11 +60,12 @@ const STAGES = Object.freeze({
     skillName: "autonomous-ecology-research",
     instruction: [
       "Use only the frozen evidence_catalog supplied by the Host.",
+      "Treat synthesis_contract.predictor_semantics as implementation facts. Ridge coefficients are independent per target and horizon in all ridge variants. Residual scales are fixed genome controls, not automatically fitted; selecting a pipeline only installs its defaults. Never claim otherwise in prose.",
       "Reason against the complete forecast_objective target-horizon matrix; a focused direction must state its local weakness without treating one target as the whole task.",
       "For evidence_ref use exactly a frozen knowledge_id, evidence_digest, or registered capability_id/capability_ids value; never invent a source.",
       "Return exactly required_candidate_direction_count distinct, implementable directions.",
       "Each direction must select exactly one mutation_axis and one matching target from synthesis_contract.allowed_mutation_targets.",
-      "Set mutation_direction to increase or decrease for scientific_parameter, and to select for registered_predictor or instruction_profile. Do not put an exact parameter assignment in free-form direction prose.",
+      "Set mutation_direction to increase or decrease for scientific_parameter, and to select for registered_predictor or instruction_profile. Baseline values may be described for context; prose is audit-only and only the structured mutation coordinates are executable.",
       "If host_validation_feedback is present, correct its validation_detail in a fresh complete response.",
     ].join(" "),
   }),
@@ -74,6 +80,7 @@ const STAGES = Object.freeze({
       "Choose exactly one operation so the candidate changes one identifiable axis.",
       "When an assigned candidate direction is present, implement its exact mutation_axis and mutation_target using mutation_contract.operation_by_axis.",
       "For a numeric parameter, implement mutation_direction exactly: increase must be strictly above the parent value and decrease strictly below it; stay within the Host-provided normalized trust-region step and avoid exact failed parameter sets.",
+      "Use mutation_contract.one_step_parameter_intervals when supplied. For floating parameters choose an interior value; rounding a boundary outward is invalid. These intervals already include the normalized step restriction.",
       "For registered_predictor and instruction_profile, mutation_direction must be select.",
       "Do not reconstruct or repeat the parent genome.",
     ].join(" "),
@@ -117,28 +124,27 @@ const STAGES = Object.freeze({
       "Explain why candidate directions succeeded or failed without making causal claims.",
       "Return exactly direction_count distinct next-step directions and bounded search queries.",
       "Each direction must select one mutation_axis and one exact target from host_boundary.allowed_mutation_targets.",
-      "Set mutation_direction to increase or decrease for scientific_parameter and select for the other axes; never encode an exact parameter assignment in direction prose.",
+      "Set mutation_direction to increase or decrease for scientific_parameter and select for the other axes; only the structured mutation coordinates are executable; prose remains audit-only.",
       "Cite only identifiers in the frozen knowledge_snapshot and correct host_validation_feedback when present.",
       "Every reflected direction is advisory and must pass the next research synthesis Host preflight before candidate use. Your stop recommendation is advisory; the Host owns selection and termination.",
     ].join(" "),
   }),
   "sample.plan": Object.freeze({
     role: "sample-planner",
-    schema: "ecology-sample-decisions@1",
+    schema: "ecology-sample-predictions@2",
     file: "sample-decisions",
-    requiresPredictionTool: true,
+    allowsPredictionTools: true,
     instruction: [
-      "After loading the candidate-selected Skill, call ecology_execute_prediction_tool exactly once using the sole available tool_id and the exact wave_digest from context.",
-      "Wait for its complete target-horizon vector result.",
-      "Copy the exact Host wave_digest and every exact Host samples[].sample_id into the structured result.",
-      "Then call structured_output exactly once, selecting that same tool for every sample_id.",
-      "Do not invent, replace, or calculate predictions yourself.",
-      "If the prediction or structured_output call is rejected, terminate the child turn immediately: emit no prose and do not retry; the Host will start a fresh bounded child attempt.",
+      "Analyze the label-free forecast origin using the candidate-selected Skill. You own the final numeric predictions.",
+      "Choose whether to use tools. Call ecology_execute_prediction_tool zero to six times using a catalog tool_id, unique call_id, exact wave_digest, and permitted parameters. Track remaining_calls returned by the Host; zero means submit now. Use parameters={} for defaults and never borrow parameter names from another tool. Compare results and revise your approach as needed.",
+      "You may use a model result, blend multiple results, adjust a forecast, or predict directly from the observable context. Reference successful call_ids in evidence_call_ids for model, blend, and adjusted predictions.",
+      "Submit exactly one structured_output with a finite predicted value, confidence, method, reason_code, and evidence_call_ids for each exact Host sample_id. Do not submit next_tool.",
+      "Never access evaluation labels or future observations. Only one output argument correction is allowed; other failures end this turn for Host-owned retries.",
     ].join(" "),
   }),
   "sample.critic": Object.freeze({
     role: "sample-critic",
-    schema: "ecology-sample-review@1",
+    schema: "ecology-sample-review@2",
     file: "sample-review",
     skillName: "origin-vector-review",
     instruction: [
@@ -146,7 +152,7 @@ const STAGES = Object.freeze({
       "Copy the exact Host wave_digest and every exact Host samples[].sample_id into the structured result.",
       "Return one decision for every supplied sample_id and no additional decisions.",
       "Never call structured_output with empty arguments.",
-      "If a skill or structured_output call is rejected, terminate the child turn immediately: emit no prose and do not retry; the Host will start a fresh bounded child attempt.",
+      "If skill fails, end the child turn. If structured_output rejects its arguments, correct only the arguments once; emit no prose or additional tool calls.",
     ].join(" "),
   }),
   "sample.reflect": Object.freeze({
@@ -216,6 +222,15 @@ export function dshCompatibleSchema(schema) {
     }
   }
   return projected;
+}
+
+export function prepareStageOutputSchema(stage, schema, context) {
+  const prepared = dshCompatibleSchema(schema);
+  specializeSampleOutputSchema(stage, prepared, context);
+  specializeResearchOutputSchema(stage, prepared, context);
+  // Specialization can add Host bounds. DSH rejects unsupported keywords
+  // before creating the child; normalize the final schema at this boundary.
+  return dshCompatibleSchema(prepared);
 }
 
 function canonical(value) {
@@ -326,13 +341,9 @@ function specializeSampleOutputSchema(stage, schema, context) {
   if (!sampleIdSchema) {
     throw new Error("sample decision schema has no sample_id property");
   }
-  // sample.plan is the hot path.  Keep its output schema identical across
-  // origin waves so the provider can reuse the schema/prompt prefix cache.
-  // The Host still validates the exact wave digest, sample-id set, sole
-  // prediction-tool receipt, and one decision per prediction before accepting
-  // a result.  Critic schemas retain exact per-wave specialization because
-  // their much smaller volume benefits more from early schema rejection.
-  if (stage === "sample.plan") return schema;
+  // Bind identity at the Agent tool boundary, where a typo can be corrected
+  // in the same child. A stable but unconstrained schema defers rejection
+  // until Host persistence, after the child has already completed.
   properties.wave_digest = {
     ...properties.wave_digest,
     const: waveDigest,
@@ -491,6 +502,7 @@ function structuredCaptureDisposition(rawEvents) {
   if (!modelTurnStarted) return "retryable-model";
   const terminal = consumedTerminalEnd(rawEvents);
   const terminalData = eventData(terminal);
+  if (terminalData.reason?.kind === "max-tokens") return "output-budget";
   const terminalError = terminalData.reason?.error;
   const retryFailures = rawEvents
     .filter((event) => event?.type === "llm/retry")
@@ -536,18 +548,41 @@ function structuredCaptureDisposition(rawEvents) {
       ...structuredRetryAfterValues,
       ...messageRetryAfterValues,
     ];
+    const concurrencyLimited = [terminalError, ...retryFailures].some((failure) => (
+      failure?.limitType === "concurrency"
+      || failure?.details?.limit_type === "concurrency"
+      || (typeof failure?.message === "string" && (
+        /cluster_concurrency_rate_limit_exceeded/i.test(failure.message)
+        || /["']?limit_type["']?\s*[:=]\s*["']?concurrency/i.test(failure.message)
+      ))
+    ));
     return {
       kind: "retryable-provider",
+      limitKind: concurrencyLimited ? "concurrency" : "rate",
       retryAfterMs: retryAfterValues.length
         ? Math.max(...retryAfterValues)
         : null,
     };
   }
   if (terminalData.reason?.kind !== "completed") return "non-missing";
-  // A schema-tool rejection always invalidates the child attempt. DSH may let
-  // the model issue a second call and finish the turn, while SubagentRun has
-  // already published the first failure. Never accept that projection race as
-  // an exactly-once result; the Host retries one fresh bounded child instead.
+  // Some model gateways emit serialized tool calls as ordinary assistant
+  // text. No tool actually ran. Retrying the same endpoint cannot repair its
+  // wire protocol; never parse this text into an authorized tool invocation.
+  const terminalTurn = terminalData.turn;
+  const terminalEvents = rawEvents.filter((event) => eventData(event).turn === terminalTurn);
+  if (!terminalEvents.some((event) => event?.type === "tool/call")
+      && terminalEvents.some((event) => {
+        if (event?.type !== "assistant/message") return false;
+        const content = eventData(event).message?.content;
+        return Array.isArray(content) && content.some((block) => block?.type === "text"
+          && typeof block.text === "string"
+          && block.text.includes("<｜DSML｜tool_calls>")
+          && block.text.includes("<｜DSML｜invoke ")
+          && block.text.includes("</｜DSML｜tool_calls>"));
+      })) return "tool-protocol";
+  // A failed argument check may be corrected once in the same consumed turn.
+  // Only a source-bound rejection followed by one successful submission is
+  // recoverable; missing captures still retry through the bounded child path.
   if (exactInvalidStructuredArgsSeen(rawEvents)) return "missing";
   const turn = terminalData.turn;
   const events = rawEvents.map((event, index) => ({
@@ -598,6 +633,89 @@ function successfulResultAfter(events, call) {
     const result = toolResultIdentity(item.event);
     return result?.callId === callId && result.isError === false;
   }) || null;
+}
+
+function correctedRetrievalArgumentResult(events, call, retrievalCalls, terminalSeq) {
+  const args = callArguments(call.event);
+  let expectedError;
+  try {
+    normalizeRetrievalArguments(args);
+    return null; // Valid arguments with an operational/auth error still fail closed.
+  } catch (error) {
+    expectedError = `Error: ${error.message}`;
+  }
+  // An empty object is rejected before any retrieval or admission side effect.
+  // It has no key to preserve; only a later successful, well-formed call can
+  // recover it. Nonempty requests still require the same retrieval key.
+  const emptyArguments = args && typeof args === "object"
+    && !Array.isArray(args) && Object.keys(args).length === 0;
+  if (!emptyArguments && (!args || typeof args.retrieval_key !== "string")) return null;
+  const callData = eventData(call.event);
+  if (retrievalCalls.filter((item) => eventData(item.event).callId === callData.callId).length !== 1) return null;
+  const failed = events.find((item) => {
+    if (item.event?.type !== "tool/result" || item.seq <= call.seq || item.seq >= terminalSeq) return false;
+    const data = eventData(item.event);
+    const identity = toolResultIdentity(item.event);
+    const blocks = data.message?.content;
+    const result = Array.isArray(blocks)
+      ? blocks.find((block) => block?.type === "tool-result" && block.toolCallId === callData.callId)
+      : null;
+    return identity?.callId === callData.callId && identity.isError === true
+      && data.turn === callData.turn && data.step === callData.step
+      && Array.isArray(item.event.sourceEventSeqs)
+      && item.event.sourceEventSeqs.length === 1 && item.event.sourceEventSeqs[0] === call.seq
+      && result?.content?.length === 1 && result.content[0]?.type === "text"
+      && result.content[0].text === expectedError;
+  });
+  if (!failed) return null;
+  const corrected = retrievalCalls.some((retry) => {
+    if (retry.seq <= failed.seq || retry.seq >= terminalSeq) return false;
+    const retryId = eventData(retry.event).callId;
+    if (retrievalCalls.filter((item) => eventData(item.event).callId === retryId).length !== 1) return false;
+    let normalized;
+    try { normalized = normalizeRetrievalArguments(callArguments(retry.event)); }
+    catch { return false; }
+    const result = successfulResultAfter(events, retry);
+    return (emptyArguments || normalized.retrieval_key === args.retrieval_key)
+      && result && result.seq < terminalSeq;
+  });
+  // Only a source-bound argument rejection followed by a successful correction
+  // is recoverable. Both attempts still consume the three-call retrieval budget.
+  return corrected ? failed : null;
+}
+
+function correctedStructuredArgumentCall(events) {
+  const calls = events.filter(({ event }) => event?.type === "tool/call"
+    && eventData(event).name === "structured_output");
+  if (calls.length !== 2) return null;
+  const [first, last] = calls;
+  const firstData = eventData(first.event), lastData = eventData(last.event);
+  if (!firstData.callId || !lastData.callId || firstData.callId === lastData.callId
+    || firstData.turn !== lastData.turn) return null;
+  function resultFor(call) {
+    const data = eventData(call.event);
+    const matches = events.filter((item) => item.event?.type === "tool/result"
+      && toolResultIdentity(item.event)?.callId === data.callId);
+    if (matches.length !== 1) return null;
+    const result = matches[0], resultData = eventData(result.event);
+    return result.seq > call.seq && resultData.turn === data.turn && resultData.step === data.step
+      && result.event.sourceEventSeqs?.length === 1 && result.event.sourceEventSeqs[0] === call.seq
+      ? result : null;
+  }
+  const rejected = resultFor(first), accepted = resultFor(last);
+  const error = eventData(rejected?.event).error;
+  const terminal = consumedTerminalEnd(events.map((item) => item.event));
+  if (!rejected || !accepted || rejected.seq >= last.seq
+    || toolResultIdentity(rejected.event)?.isError !== true
+    || error?.name !== "ToolArgsError" || error?.code !== "INVALID_ARGS"
+    || toolResultIdentity(accepted.event)?.isError !== false
+    || eventData(terminal).reason?.kind !== "completed"
+    || eventData(terminal).turn !== lastData.turn || terminal.seq <= accepted.seq) return null;
+  // Corrections edit only output arguments; no new evidence or second result
+  // may be introduced after the first submission.
+  if (events.some(({ event, seq }) => event?.type === "tool/call"
+    && seq > first.seq && event !== last.event)) return null;
+  return last;
 }
 
 function exactInvalidStructuredArgsSeen(rawEvents) {
@@ -658,7 +776,7 @@ function waitForSessionProjection(milliseconds, signal) {
   });
 }
 
-async function synchronizedStructuredCaptureDisposition(
+export async function synchronizedStructuredCaptureDisposition(
   ctx,
   sessionId,
   deadline,
@@ -701,13 +819,21 @@ async function synchronizedStructuredCaptureDisposition(
 }
 
 function verifiedSkillInvocationEvidence(events, options) {
-  if (exactInvalidStructuredArgsSeen(events)) {
+  const ordered = Array.isArray(events) ? events.map((event, index) => ({ event, seq: eventSequence(event, index) }))
+    .sort((a, b) => a.seq - b.seq) : [];
+  if (exactInvalidStructuredArgsSeen(events) && !correctedStructuredArgumentCall(ordered)) {
     throw structuredPhaseError("capture");
   }
-  return skillInvocationEvidence(events, options);
+  try { return skillInvocationEvidence(events, options); }
+  catch (cause) {
+    const error = new Error("dsh_skill_evidence_invalid");
+    error.code = "dsh_skill_evidence_invalid";
+    error.cause = cause;
+    throw error;
+  }
 }
 
-async function synchronizedSkillInvocationEvidence(ctx, sessionId, options, deadline) {
+export async function synchronizedSkillInvocationEvidence(ctx, sessionId, options, deadline) {
   const graceMs = Math.min(
     SESSION_PROJECTION_SYNC_GRACE_MS,
     Math.max(1, deadline.remainingTimeoutMs()),
@@ -724,10 +850,7 @@ async function synchronizedSkillInvocationEvidence(ctx, sessionId, options, dead
       return verifiedSkillInvocationEvidence(events, options);
     } catch (error) {
       lastError = error;
-      // A schema-tool rejection is a bounded missing capture even when DSH
-      // subsequently reports a structured result. Retrying it in a fresh
-      // child preserves the exactly-once structured-output contract instead
-      // of misreporting a local evidence rejection as persistence failure.
+      // Unrecovered schema rejections remain a bounded missing capture.
       // Once the consumed turn-end is visible, all prior tool events for that
       // turn have been projected. A remaining evidence error is a real
       // contract violation, not eventual-consistency lag.
@@ -752,7 +875,7 @@ export function skillInvocationEvidence(
   {
     stage,
     skillName,
-    requiresPredictionTool = false,
+    allowsPredictionTools = false,
     allowDynamicRetrieval = false,
   } = {},
 ) {
@@ -773,11 +896,10 @@ export function skillInvocationEvidence(
   const skillResult = successfulResultAfter(events, skillCall);
   if (!skillResult) throw new Error("the registered Skill call did not succeed");
 
-  const nextToolName = requiresPredictionTool
-    ? "ecology_execute_prediction_tool"
-    : "structured_output";
+  const nextToolName = "structured_output";
   const nextCalls = calls.filter((item) => eventData(item.event).name === nextToolName);
-  if (nextCalls.length !== 1 || nextCalls[0].seq <= skillResult.seq) {
+  const corrected = correctedStructuredArgumentCall(events);
+  if ((nextCalls.length !== 1 && !corrected) || nextCalls[0].seq <= skillResult.seq) {
     throw new Error(`the required ${nextToolName} call did not follow the Skill result`);
   }
   const retrievalCalls = calls.filter(
@@ -790,7 +912,8 @@ export function skillInvocationEvidence(
     throw new Error("the zero to three dynamic retrieval call budget was exceeded");
   }
   for (const retrievalCall of retrievalCalls) {
-    const retrievalResult = successfulResultAfter(events, retrievalCall);
+    const retrievalResult = successfulResultAfter(events, retrievalCall)
+      || correctedRetrievalArgumentResult(events, retrievalCall, retrievalCalls, nextCalls[0].seq);
     if (
       retrievalCall.seq <= skillResult.seq
       || retrievalCall.seq >= nextCalls[0].seq
@@ -802,19 +925,16 @@ export function skillInvocationEvidence(
       );
     }
   }
-  if (requiresPredictionTool) {
-    const predictionResult = successfulResultAfter(events, nextCalls[0]);
-    const structuredCalls = calls.filter(
-      (item) => eventData(item.event).name === "structured_output",
-    );
-    if (
-      !predictionResult
-      || structuredCalls.length !== 1
-      || structuredCalls[0].seq <= predictionResult.seq
-    ) {
-      throw new Error(
-        "sample.plan must complete Skill, prediction tool, then structured_output in order",
-      );
+  const predictionCalls = calls.filter((item) => eventData(item.event).name === "ecology_execute_prediction_tool");
+  if ((!allowsPredictionTools && predictionCalls.length) || predictionCalls.length > 6) {
+    throw new Error("prediction tool capability/call budget exceeded");
+  }
+  for (const call of predictionCalls) {
+    const result = events.find((item) => item.seq > call.seq && item.event?.type === "tool/result"
+      && toolResultIdentity(item.event)?.callId === eventData(call.event).callId);
+    // Tool failures are visible evidence; the Agent may choose another capability.
+    if (call.seq <= skillResult.seq || call.seq >= nextCalls[0].seq || !result || result.seq >= nextCalls[0].seq) {
+      throw new Error("prediction tools must settle between Skill and final structured_output");
     }
   }
   return Object.freeze({
@@ -827,7 +947,7 @@ export function skillInvocationEvidence(
     result_seq: skillResult.seq,
     first_tool_call_verified: true,
     next_tool_name: nextToolName,
-    next_tool_call_seq: nextCalls[0].seq,
+    next_tool_call_seq: (corrected || nextCalls[0]).seq,
     order_verified: true,
     source: "dsh_session_event_log",
   });
@@ -903,7 +1023,7 @@ export class NativeStageRunner {
   }
 
   async #recordChildFailure(binding, error) {
-    const supplied = String(error?.code || "structured_stage_failed");
+    const supplied = String(structuredFailureCode(error) || "structured_stage_failed");
     const errorCode = /^[a-z0-9_]{1,80}$/i.test(supplied)
       ? supplied
       : "structured_stage_failed";
@@ -949,12 +1069,10 @@ export class NativeStageRunner {
     ) {
       throw new Error("DSH structured stage context digest mismatch");
     }
-    if (
-      request.max_tokens !== undefined
-      && (!Number.isSafeInteger(request.max_tokens)
-        || request.max_tokens < 512
-        || request.max_tokens > 8192)
-    ) {
+    try {
+      validateStructuredStageBudget(binding.stage, request.max_tokens, request.context,
+        "DSH structured stage max_tokens");
+    } catch {
       throw new Error("DSH structured stage max_tokens is invalid");
     }
     if (binding.stage === "sample.plan" && request.max_tokens === undefined) {
@@ -1041,6 +1159,7 @@ export class NativeStageRunner {
   }) {
     const dynamicRetrieval = (
       roleHost.binding?.tool_profile === DYNAMIC_RETRIEVAL_TOOL_PROFILE
+      && !["generation.search-plan", "generation.research-synthesis"].includes(binding.stage)
     );
     if (lifecycle.deadline !== null) requireStructuredDeadline(lifecycle.deadline);
     const reservationTimeoutMs = lifecycle.deadline === null
@@ -1109,26 +1228,31 @@ export class NativeStageRunner {
     let persistedSkillEvidence = null;
     try {
       requireStructuredDeadline(lifecycle.deadline);
-      const outputSchema = await withinStructuredDeadline(
+      let outputSchema = await withinStructuredDeadline(
         lifecycle.deadline,
         () => this.schema(contract.file),
       );
       requireStructuredDeadline(lifecycle.deadline);
-      specializeSampleOutputSchema(binding.stage, outputSchema, request.context);
+      outputSchema = prepareStageOutputSchema(binding.stage, outputSchema, request.context);
       requireStructuredDeadline(lifecycle.deadline);
       const responseProtocol = [
         "Do not narrate analysis.",
+        ...(["generation.search-plan", "generation.research-synthesis"].includes(binding.stage) ? [
+          "Do not call web_search in this stage. The Host executes the search plan and freezes the evidence catalog before synthesis.",
+          "Keep findings concise. Every citation must be a literal identifier in the supplied frozen evidence catalog.",
+        ] : []),
         `Your first response must call skill exactly once with name ${skillName}.`,
         ...(dynamicRetrieval ? [
           "After the Skill result, make zero to three web_search calls only when current reasoning needs external evidence; submit queries and retrieval_key only, and never choose a provider.",
         ] : []),
-        ...(contract.requiresPredictionTool ? [
-          `${dynamicRetrieval ? "Then" : "After the Skill result,"} call ecology_execute_prediction_tool exactly once; do not call structured_output before its result arrives.`,
-          "After the prediction-tool result, call structured_output exactly once and emit no prose.",
+        ...(contract.allowsPredictionTools ? [
+          "After the Skill result, analyze the sample and optionally call prediction tools up to six times, interleaving searches when useful. Use unique call_ids; wait for each tool result before continuing.",
+          "When ready, call structured_output once with your final numerical predictions and evidence references. Emit no prose.",
         ] : [
           `${dynamicRetrieval ? "Then" : "After the Skill result,"} call structured_output exactly once with one concise object matching the supplied output schema.`,
           "Do not emit prose before or after it.",
         ]),
+        "If structured_output returns INVALID_ARGS, correct the arguments once using the error feedback. Do not call other tools, repeat an accepted output, or make more than two output attempts.",
       ];
       const prompt = canonical({
         instruction: [
@@ -1180,7 +1304,7 @@ export class NativeStageRunner {
           const evidenceOptions = {
             stage: binding.stage,
             skillName,
-            requiresPredictionTool: contract.requiresPredictionTool === true,
+            allowsPredictionTools: contract.allowsPredictionTools === true,
             allowDynamicRetrieval: dynamicRetrieval,
           };
           const evidence = capturedSessionEvents
@@ -1236,10 +1360,17 @@ export class NativeStageRunner {
       const result = await runStructuredRole(
         roleHost,
         reservation,
-        { prompt, outputSchema, maxTokens: request.max_tokens },
+        { prompt, outputSchema, maxTokens: request.max_tokens,
+          researchExecutionPolicy: request.context.research_execution_policy },
         {
           pendingStarts: this.pendingStarts,
           admission,
+          observeChild: (child) => observeSessionUsage(this.ctx, this.sidecar, {
+            run_id: binding.run_id, stage: binding.stage,
+            idempotency_key: binding.idempotency_key,
+            child_reservation_id: reservation.launch.reservation_id,
+            session_id: String(child?.id || ""),
+          }),
           persist: async ({ structured, session_id }, persistenceDeadline) => persist(
             structured,
             session_id,

@@ -25,6 +25,7 @@ from ..core.errors import (
     DshNativeRuntimeUnavailableError,
     dsh_native_runtime_error_in_chain,
     dsh_native_runtime_retryable,
+    dsh_native_runtime_evaluation_fatal,
 )
 from ..core.models import canonical_json, digest
 from ..core.trajectory import EvaluationScope
@@ -71,7 +72,7 @@ _FORBIDDEN_SAMPLE_CONTEXT_TOKENS = frozenset(
 _SAMPLE_CHECKPOINT_SCHEMA_VERSION = "ecologyrsi-dsh.sample-checkpoint/1"
 _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION = "ecologyrsi-dsh.sample-checkpoint/2"
 SAMPLE_AGENT_CHAIN_ATTESTATION_VERSION = (
-    "ecologyrsi-dsh.sample-agent-chain-attestation/3"
+    "ecologyrsi-dsh.sample-agent-chain-attestation/4"
 )
 
 
@@ -930,6 +931,7 @@ class CollaborativeSampleExecutor:
                         if evaluation_scope.holdout_arm is not None
                         else None
                     ),
+                    "inference_replica": evaluation_scope.inference_replica,
                     "execution_scope_digest": evaluation_scope.scope_key,
                     "sample_cohort_digest": sample_cohort_digest,
                 }
@@ -1197,9 +1199,10 @@ class CollaborativeSampleExecutor:
             bundle.origin_sample_id: bundle for bundle in origin_bundles
         }
         remaining_origin_bundles: Any = iter(())
+        origin_failure: Exception | None = None
 
         def submit_next_origin_bundle() -> bool:
-            if origin_executor is None:
+            if origin_executor is None or origin_failure is not None:
                 return False
             try:
                 bundle = next(remaining_origin_bundles)
@@ -1342,7 +1345,7 @@ class CollaborativeSampleExecutor:
             order below before their deterministic digests are calculated.
             """
 
-            nonlocal origin_executor, terminal_reason
+            nonlocal origin_executor, terminal_reason, origin_failure
             if not concurrent_origin_contract:
                 yield from rows
                 return
@@ -1372,6 +1375,14 @@ class CollaborativeSampleExecutor:
                             origin_reflections,
                             origin_terminal_reason,
                         ) = future.result()
+                    except Exception as exc:
+                        # Stop refill, but keep consuming already admitted
+                        # origins so their completed predictions become durable.
+                        # Discarding these results repeats paid Agent work on
+                        # resume and makes progress appear stuck after one error.
+                        if origin_failure is None:
+                            origin_failure = exc
+                        continue
                     except BaseException:
                         if origin_executor is not None:
                             origin_executor.shutdown(
@@ -1402,6 +1413,11 @@ class CollaborativeSampleExecutor:
                             "strict origin scheduler completed an unknown origin"
                         )
                     yield from bundle.rows
+            if origin_failure is not None:
+                if origin_executor is not None:
+                    origin_executor.shutdown(wait=True, cancel_futures=True)
+                    origin_executor = None
+                raise origin_failure
 
         for raw_row in execution_rows():
             row = dict(raw_row)
@@ -1708,6 +1724,9 @@ class CollaborativeSampleExecutor:
                     final_exception = None
                     break
                 except Exception as exc:  # noqa: BLE001 - isolate third-party sample tools
+                    dsh_error = dsh_native_runtime_error_in_chain(exc)
+                    if dsh_error is not None and dsh_native_runtime_evaluation_fatal(dsh_error):
+                        raise
                     final_failure = classify_sample_failure(exc)
                     final_exception = exc
                     category, retryable, error_type = final_failure
@@ -1984,6 +2003,17 @@ class CollaborativeSampleExecutor:
                 executed_row["sample_agent_chain"] = record[
                     "sample_agent_chain"
                 ]
+            final_agent = next((step for step in reversed(decisions)
+                                if str(step.get("decision", "")).startswith("submit_prediction:")), None)
+            if final_agent is not None:
+                executed_row["prediction_source"] = "sample_agent"
+                executed_row["agent_prediction"] = {
+                    "method": final_agent["decision"].split(":", 1)[1],
+                    "confidence": final_agent["confidence"],
+                    "tools": [{key: step[key] for key in ("tool_id", "status", "call_id", "parameters", "used_as_evidence", "tool_predicted") if key in step}
+                              for step in result["tool_calls"]
+                              if step.get("execution_owner") == "dsh_agent_tool_call"],
+                }
             successful_rows.append(executed_row)
             append_scoring_row(executed_row)
 
@@ -2063,7 +2093,7 @@ class CollaborativeSampleExecutor:
                 if (
                     isinstance(tool, Mapping)
                     and tool.get("status") == "completed"
-                    and tool.get("tool_id") != "physical-range-check"
+                    and tool.get("tool_id") not in {"physical-range-check", "agent-final-prediction"}
                 ):
                     registered_tool_invocation_keys.add(
                         (
@@ -2211,6 +2241,13 @@ class CollaborativeSampleExecutor:
             "retry_count": total_retries,
             "checkpoint_resumed_examples": len(resumed_rows),
             "checkpoint_pending_examples": len(pending_rows),
+            # Checkpoints preserve scoring/agent-chain receipts, but not every
+            # prior decision step. These diagnostic counters must not be read
+            # as whole-cohort or per-origin counts after a resume.
+            "feedback_diagnostic_scope": "current_execution_segment_scoring_cells@1",
+            "feedback_diagnostics_complete": not bool(resumed_rows),
+            "feedback_executed_scoring_cells": attempted - len(resumed_rows),
+            "feedback_resumed_scoring_cells": len(resumed_rows),
             "exploration_failures": exploration_failures,
             "recovered_examples": recovered_examples,
             "input_failures": input_failures,
@@ -2377,7 +2414,8 @@ class CollaborativeSampleExecutor:
             if gateway_error_in_chain(exc, retryable_only=True) is not None:
                 raise
             dsh_error = dsh_native_runtime_error_in_chain(exc)
-            if dsh_error is not None and dsh_native_runtime_retryable(dsh_error):
+            if dsh_error is not None and (dsh_native_runtime_retryable(dsh_error)
+                                          or dsh_native_runtime_evaluation_fatal(dsh_error)):
                 raise
             return {
                 request.sample_id: SamplePredictionOutcome(
@@ -2574,7 +2612,8 @@ class CollaborativeSampleExecutor:
                 if gateway_error_in_chain(exc, retryable_only=True) is not None:
                     raise
                 dsh_error = dsh_native_runtime_error_in_chain(exc)
-                if dsh_error is not None and dsh_native_runtime_retryable(dsh_error):
+                if dsh_error is not None and (dsh_native_runtime_retryable(dsh_error)
+                                          or dsh_native_runtime_evaluation_fatal(dsh_error)):
                     raise
                 raw_outcomes = tuple(
                     SamplePredictionOutcome(sample_id=request.sample_id, error=exc)
@@ -3518,6 +3557,9 @@ def _checkpoint_scoring_row(
     agent_chain = resumed.get("sample_agent_chain")
     if isinstance(agent_chain, Mapping):
         projected["sample_agent_chain"] = dict(agent_chain)
+    agent_prediction = resumed.get("agent_prediction")
+    if isinstance(agent_prediction, Mapping):
+        projected["agent_prediction"] = dict(agent_prediction)
     origin_sample_id = resumed.get("origin_sample_id")
     if isinstance(origin_sample_id, str) and origin_sample_id.startswith("origin:"):
         projected["origin_sample_id"] = origin_sample_id
@@ -4186,6 +4228,7 @@ def _public_steps(value: Any, *, kind: str, id_field: str) -> list[dict[str, Any
             "execution_owner",
             "dsh_tool_event_id",
             "dsh_tool_output_digest",
+            "call_id", "parameters", "used_as_evidence", "tool_predicted", "elapsed_ms",
         }
     )
     required = (
@@ -4206,7 +4249,7 @@ def _public_steps(value: Any, *, kind: str, id_field: str) -> list[dict[str, Any
                     f"sample response {kind} step {field_name} must be non-empty text"
                 )
             projected[field_name] = raw.strip()[:160]
-        for field_name in allowed - set(required) - {"confidence"}:
+        for field_name in allowed - set(required) - {"confidence", "parameters", "used_as_evidence", "tool_predicted", "elapsed_ms"}:
             if field_name not in item:
                 continue
             raw = item[field_name]
@@ -4215,6 +4258,25 @@ def _public_steps(value: Any, *, kind: str, id_field: str) -> list[dict[str, Any
                     f"sample response {kind} step {field_name} must be non-empty text"
                 )
             projected[field_name] = raw.strip()[:200]
+        if kind == "tool":
+            if "parameters" in item:
+                params = item["parameters"]
+                if not isinstance(params, Mapping) or len(params) > 16 or any(
+                    not isinstance(k, str) or len(k) > 100 or type(v) not in (int, float) or not math.isfinite(v)
+                    for k, v in params.items()
+                ):
+                    raise SampleExecutionContractError("tool parameters must be bounded finite numeric values")
+                projected["parameters"] = dict(params)
+            if "used_as_evidence" in item:
+                if type(item["used_as_evidence"]) is not bool:
+                    raise SampleExecutionContractError("tool evidence flag must be boolean")
+                projected["used_as_evidence"] = item["used_as_evidence"]
+            if "elapsed_ms" in item:
+                projected["elapsed_ms"] = _finite_float(item["elapsed_ms"], "tool elapsed milliseconds")
+                if projected["elapsed_ms"] < 0:
+                    raise SampleExecutionContractError("tool duration must not be negative")
+            if "tool_predicted" in item:
+                projected["tool_predicted"] = _finite_float(item["tool_predicted"], "tool prediction")
         if "confidence" in item:
             confidence = item["confidence"]
             if (
@@ -4263,6 +4325,7 @@ def _attach_execution_trace(
                 "execution_owner",
                 "dsh_tool_event_id",
                 "dsh_tool_output_digest",
+            "call_id", "parameters", "used_as_evidence", "tool_predicted", "elapsed_ms",
             )
             if name in item
         }
@@ -4304,7 +4367,7 @@ def _sample_agent_chain_attestation(
     reflector_invocations = roles.count("remote_reflector_agent")
     host_route_bypass_count = roles.count("host_deterministic_router")
     registered_tool_invocations = sum(
-        str(item.get("tool_id") or "") != "physical-range-check"
+        str(item.get("tool_id") or "") not in {"physical-range-check", "agent-final-prediction"}
         and str(item.get("status") or "") == "completed"
         for item in tools
     )
@@ -4312,6 +4375,12 @@ def _sample_agent_chain_attestation(
         item.get("execution_owner") == "dsh_agent_tool_call"
         and isinstance(item.get("dsh_tool_event_id"), str)
         and bool(item.get("dsh_tool_event_id"))
+        for item in tools
+    )
+    agent_prediction_submissions = sum(
+        item.get("execution_owner") == "dsh_agent_prediction"
+        and item.get("tool_id") == "agent-final-prediction"
+        and item.get("status") == "completed"
         for item in tools
     )
     response_digest = reflection.get("response_digest")
@@ -4332,6 +4401,7 @@ def _sample_agent_chain_attestation(
         "planner_invocations": planner_invocations,
         "registered_tool_invocations": registered_tool_invocations,
         "dsh_agent_tool_invocations": dsh_agent_tool_invocations,
+        "agent_prediction_submissions": agent_prediction_submissions,
         "critic_invocations": critic_invocations,
         "reflector_invocations": reflector_invocations,
         "host_route_bypass_count": host_route_bypass_count,
@@ -4346,8 +4416,7 @@ def _sample_agent_chain_attestation(
         "required_remote_roles": list(required_roles),
         "complete": bool(
             required_roles_complete
-            and registered_tool_invocations >= 1
-            and dsh_agent_tool_invocations >= 1
+            and agent_prediction_submissions >= 1
             and host_route_bypass_count == 0
             and (not reflection_required or bool(response_digest))
             and (not reflection_required or bool(wave_digest))
@@ -4366,7 +4435,7 @@ def _attempt_trace_entry(
 ) -> dict[str, Any] | None:
     """Project one remote attempt without retaining prompts or tool output bodies."""
 
-    selected = next(
+    selected = next((item for item in tools if item.get("tool_id") == "agent-final-prediction"), None) or next(
         (
             item
             for item in tools
@@ -4403,6 +4472,7 @@ def _attempt_trace_entry(
                 "execution_owner",
                 "dsh_tool_event_id",
                 "dsh_tool_output_digest",
+            "call_id", "parameters", "used_as_evidence", "tool_predicted", "elapsed_ms",
             )
             if name in selected
         }
@@ -4425,6 +4495,7 @@ def _attempt_trace_entry(
                 if name in item
             }
         )
+    result["model_evidence"] = [dict(tool) for tool in tools if tool.get("execution_owner") == "dsh_agent_tool_call"]
     result["critic_decisions"] = critic_decisions
     if isinstance(requested_tool_id, str) and requested_tool_id.strip():
         result["requested_repair_tool"] = requested_tool_id.strip()[:160]

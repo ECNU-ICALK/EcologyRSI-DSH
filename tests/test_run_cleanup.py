@@ -106,12 +106,12 @@ class RunCleanupHTTPTests(unittest.TestCase):
         self.assertEqual([item["run_id"] for item in summary["runs"]], [run_id])
         self.assertEqual(
             summary["runs"][0]["schema_version"],
-            "ecologyrsi-dsh.browser-run-summary/1",
+            "ecologyrsi-dsh.browser-run-summary/2",
         )
         self.assertNotIn("rounds", summary["runs"][0])
         self.assertNotIn("candidates", summary["runs"][0])
-        self.assertIn("configuration", summary["runs"][0])
-        self.assertIn("budget", summary["runs"][0])
+        self.assertNotIn("configuration", summary["runs"][0])
+        self.assertNotIn("budget", summary["runs"][0])
 
     def test_permanent_delete_requires_archive_exact_confirmation_and_is_scoped(self) -> None:
         run_id, create_body = self.create("purge-target")

@@ -13,8 +13,8 @@ from ecologyrsi_dsh import (
     FakeDSHAdapter,
     TaskManifest,
 )
-from ecologyrsi_dsh.api import formal_trajectory
-from ecologyrsi_dsh.api.formal_trajectory import (
+from ecologyrsi_dsh.application import formal_trajectory
+from ecologyrsi_dsh.application.formal_trajectory import (
     _durable_batch_metrics,
     _local_edit_bundle_signature,
     _local_edit_context,
@@ -143,8 +143,13 @@ class FormalTrajectoryTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            _local_challenger_policy(endpoint, "run:v3"),
-            (1e-12, False),
+            _local_challenger_policy((endpoint).server, "run:v3"),
+            {
+                "minimum_score_delta": 1e-12,
+                "cell_regression_blocks": False,
+                "require_paired_evidence": False,
+                "require_paired_strict_chain": False,
+            },
         )
 
     def test_durable_batch_metrics_keep_one_auditable_compressed_trace(self) -> None:
@@ -464,24 +469,24 @@ class FormalTrajectoryTests(unittest.TestCase):
 
         with (
             patch(
-                "ecologyrsi_dsh.api.formal_trajectory._local_edit_context",
+                "ecologyrsi_dsh.application.formal_trajectory._local_edit_context",
                 return_value=context,
             ),
             patch(
-                "ecologyrsi_dsh.api.formal_trajectory._local_edit_proposal",
+                "ecologyrsi_dsh.application.formal_trajectory._local_edit_proposal",
                 return_value=proposal,
             ),
             patch(
-                "ecologyrsi_dsh.api.formal_trajectory.apply_or_reject_local_edit_bundle"
+                "ecologyrsi_dsh.application.formal_trajectory.apply_or_reject_local_edit_bundle"
             ) as apply_edit,
             patch(
-                "ecologyrsi_dsh.api.formal_trajectory._director_mutation",
+                "ecologyrsi_dsh.application.formal_trajectory._director_mutation",
                 side_effect=lambda *args: calls.append(args),
             ),
         ):
             self.assertTrue(
                 execute_next_local_edit(
-                    endpoint, "run:dedup", candidate.candidate_id
+                    (endpoint).server, "run:dedup", candidate.candidate_id
                 )
             )
 
@@ -530,7 +535,7 @@ class FormalTrajectoryTests(unittest.TestCase):
 
         with (
             patch(
-                "ecologyrsi_dsh.api.formal_trajectory._registered_mutation_targets",
+                "ecologyrsi_dsh.application.formal_trajectory._registered_mutation_targets",
                 return_value={
                     "scientific_parameter": ("ridge_alpha",),
                     "registered_predictor": (
@@ -539,7 +544,7 @@ class FormalTrajectoryTests(unittest.TestCase):
                 },
             ),
             patch(
-                "ecologyrsi_dsh.api.formal_trajectory._genome_parameter_boundary",
+                "ecologyrsi_dsh.application.formal_trajectory._genome_parameter_boundary",
                 return_value=("test", {}),
             ),
         ):
@@ -574,7 +579,7 @@ class FormalTrajectoryTests(unittest.TestCase):
         )
 
         proposal = _local_edit_proposal(
-            endpoint,
+            (endpoint).server,
             state,
             SimpleNamespace(candidate_id="candidate:zero-edit"),
             SimpleNamespace(batch_index=0),
@@ -788,16 +793,16 @@ class FormalTrajectoryTests(unittest.TestCase):
         mutations = []
 
         with (
-            patch("ecologyrsi_dsh.api.formal_trajectory._local_edit_context", return_value=context),
-            patch("ecologyrsi_dsh.api.formal_trajectory._local_edit_proposal") as authored,
-            patch("ecologyrsi_dsh.api.formal_trajectory.EcologyEvolutionPluginGenome.from_dict", return_value=object()),
+            patch("ecologyrsi_dsh.application.formal_trajectory._local_edit_context", return_value=context),
+            patch("ecologyrsi_dsh.application.formal_trajectory._local_edit_proposal") as authored,
+            patch("ecologyrsi_dsh.application.formal_trajectory.EcologyEvolutionPluginGenome.from_dict", return_value=object()),
             patch(
-                "ecologyrsi_dsh.api.formal_trajectory.apply_or_reject_local_edit_bundle",
+                "ecologyrsi_dsh.application.formal_trajectory.apply_or_reject_local_edit_bundle",
                 return_value=LocalEditResult(LocalEditOutcome.KEPT, (), None, "b" * 64),
             ) as apply_edit,
-            patch("ecologyrsi_dsh.api.formal_trajectory._director_mutation", side_effect=lambda *_args: mutations.append(_args[1])),
+            patch("ecologyrsi_dsh.application.formal_trajectory._director_mutation", side_effect=lambda *_args: mutations.append(_args[1])),
         ):
-            self.assertTrue(execute_next_local_edit(endpoint, "run:replay", candidate.candidate_id))
+            self.assertTrue(execute_next_local_edit((endpoint).server, "run:replay", candidate.candidate_id))
 
         authored.assert_not_called()
         recovered = apply_edit.call_args.args[1]
@@ -835,11 +840,11 @@ class FormalTrajectoryTests(unittest.TestCase):
         )
         calls = []
         with (
-            patch("ecologyrsi_dsh.api.formal_trajectory._local_edit_context", return_value=SimpleNamespace(evidence_scope_digest="a" * 64)),
-            patch("ecologyrsi_dsh.api.formal_trajectory._local_edit_proposal") as authored,
-            patch("ecologyrsi_dsh.api.formal_trajectory._director_mutation", side_effect=lambda *args: calls.append(args)),
+            patch("ecologyrsi_dsh.application.formal_trajectory._local_edit_context", return_value=SimpleNamespace(evidence_scope_digest="a" * 64)),
+            patch("ecologyrsi_dsh.application.formal_trajectory._local_edit_proposal") as authored,
+            patch("ecologyrsi_dsh.application.formal_trajectory._director_mutation", side_effect=lambda *args: calls.append(args)),
         ):
-            self.assertTrue(execute_next_local_edit(endpoint, "run:guard", candidate.candidate_id))
+            self.assertTrue(execute_next_local_edit((endpoint).server, "run:guard", candidate.candidate_id))
 
         authored.assert_not_called()
         self.assertEqual(calls[0][1], "record_local_edit_proposal")
@@ -1054,14 +1059,14 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
         with patches[0], patches[1], patches[2], patches[3], patches[4]:
             self.assertTrue(
                 formal_trajectory.execute_next_formal_batch(
-                    self.endpoint,
+                    (self.endpoint).server,
                     self.run_id,
                     candidate_id,
                 )
             )
             self.assertTrue(
                 formal_trajectory.execute_next_formal_batch(
-                    self.endpoint,
+                    (self.endpoint).server,
                     self.run_id,
                     candidate_id,
                 )
@@ -1076,7 +1081,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
 
             self.assertTrue(
                 formal_trajectory.execute_next_local_edit(
-                    self.endpoint,
+                    (self.endpoint).server,
                     self.run_id,
                     candidate_id,
                 )
@@ -1090,7 +1095,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
             for _ in range(3):
                 self.assertTrue(
                     formal_trajectory.execute_next_formal_batch(
-                        self.endpoint,
+                        (self.endpoint).server,
                         self.run_id,
                         candidate_id,
                     )
@@ -1105,7 +1110,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
 
             self.assertTrue(
                 formal_trajectory.execute_next_local_edit(
-                    self.endpoint,
+                    (self.endpoint).server,
                     self.run_id,
                     candidate_id,
                 )
@@ -1121,7 +1126,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
             for _ in range(3):
                 self.assertTrue(
                     formal_trajectory.execute_next_formal_batch(
-                        self.endpoint,
+                        (self.endpoint).server,
                         self.run_id,
                         candidate_id,
                     )
@@ -1137,7 +1142,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
             self.assertEqual(trajectory.final_revision_id, second_challenger_id)
             self.assertFalse(
                 formal_trajectory.execute_next_local_edit(
-                    self.endpoint,
+                    (self.endpoint).server,
                     self.run_id,
                     candidate_id,
                 )
@@ -1194,21 +1199,21 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
         ):
             self.assertTrue(
                 formal_trajectory.execute_next_formal_batch(
-                    self.endpoint,
+                    (self.endpoint).server,
                     self.run_id,
                     candidate_id,
                 )
             )
             self.assertTrue(
                 formal_trajectory.execute_next_formal_batch(
-                    self.endpoint,
+                    (self.endpoint).server,
                     self.run_id,
                     candidate_id,
                 )
             )
             self.assertTrue(
                 formal_trajectory.execute_next_local_edit(
-                    self.endpoint,
+                    (self.endpoint).server,
                     self.run_id,
                     candidate_id,
                 )
@@ -1216,7 +1221,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
             for _ in range(3):
                 self.assertTrue(
                     formal_trajectory.execute_next_formal_batch(
-                        self.endpoint,
+                        (self.endpoint).server,
                         self.run_id,
                         candidate_id,
                     )
@@ -1284,12 +1289,12 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
             restart_from_ledger()
 
         run_formal = lambda: formal_trajectory.execute_next_formal_batch(
-            self.endpoint,
+            (self.endpoint).server,
             self.run_id,
             candidate_id,
         )
         run_local = lambda: formal_trajectory.execute_next_local_edit(
-            self.endpoint,
+            (self.endpoint).server,
             self.run_id,
             candidate_id,
         )
@@ -1515,28 +1520,28 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
         with patches[0], patches[1], patches[2], patches[3], patches[4]:
             self.assertTrue(
                 formal_trajectory.execute_next_formal_batch(
-                    self.endpoint,
+                    (self.endpoint).server,
                     self.run_id,
                     candidate_id,
                 )
             )
             self.assertTrue(
                 formal_trajectory.execute_next_formal_batch(
-                    self.endpoint,
+                    (self.endpoint).server,
                     self.run_id,
                     candidate_id,
                 )
             )
             self.assertTrue(
                 formal_trajectory.execute_next_local_edit(
-                    self.endpoint,
+                    (self.endpoint).server,
                     self.run_id,
                     candidate_id,
                 )
             )
             self.assertTrue(
                 formal_trajectory.execute_next_formal_batch(
-                    self.endpoint,
+                    (self.endpoint).server,
                     self.run_id,
                     candidate_id,
                 )
@@ -1544,7 +1549,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
             call_count = len(self.evaluator.calls)
             self.assertTrue(
                 formal_trajectory.execute_next_formal_batch(
-                    self.endpoint,
+                    (self.endpoint).server,
                     self.run_id,
                     candidate_id,
                 )

@@ -10,8 +10,8 @@ from ..core.redaction import safe_error_code
 from ..integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 from .command_receipts import compact_command_receipt_payload
 from .errors import public_error_payload
-from .generation_execution import complete_if_budget_exhausted, execute_generation
-from .projection import _control_payload
+from ..application.generation_execution import complete_if_budget_exhausted, execute_generation
+from .projection import _control_payload, _monitor_payload
 from .shared import (
     _assert_http_scope,
     _evaluation_partition,
@@ -46,7 +46,22 @@ class ExecutionEndpointsMixin:
         if receipt is None:
             raise KeyError(f"unknown command: {key}")
         payload = compact_command_receipt_payload(receipt)
-        if receipt.response is not None:
+        # Create receipts may store the full response needed by the original
+        # POST.  A status lookup is a polling endpoint, however: never replay
+        # candidates, evidence, or training assets through it.  Rebuild the
+        # compact monitor projection from the durable run instead.
+        if receipt.command_kind == "create_run" and receipt.resource_run_id:
+            try:
+                payload["response"] = _monitor_payload(
+                    self.server.director.replay(receipt.resource_run_id),
+                    self.server.sample_admission.snapshot(receipt.resource_run_id),
+                )
+            except (KeyError, RuntimeError, TypeError, ValueError):
+                # The create receipt can briefly precede RunCreated during a
+                # binding gap.  Keep only the receipt metadata and let the
+                # next poll retry; never fall back to the stored full payload.
+                pass
+        elif receipt.response is not None:
             payload["response"] = dict(receipt.response)
         else:
             run_id = receipt.resource_run_id or (None if receipt.command_kind == "create_run" else receipt.run_id)
@@ -58,7 +73,10 @@ class ExecutionEndpointsMixin:
                             self.server.sample_admission.snapshot(run_id),
                         )
                     else:
-                        payload["response"] = self._run_payload(run_id)
+                        payload["response"] = _monitor_payload(
+                            self.server.director.replay(run_id),
+                            self.server.sample_admission.snapshot(run_id),
+                        )
                 except (KeyError, RuntimeError, TypeError, ValueError):
                     # The command may be in the Host→DSH binding gap.  Keep the
                     # receipt visible without leaking internal exception text.
@@ -109,12 +127,12 @@ class ExecutionEndpointsMixin:
         # before RunCompleted.  Repair that durable gap before counting the
         # command's completed generation steps; otherwise a retry with the same
         # idempotency key would be treated as a no-op forever.
-        state = complete_if_budget_exhausted(self, run_id, state)
+        state = complete_if_budget_exhausted(self.server, run_id, state)
         if state.run.status.value == "completed":
             return state
         completed_steps = self._completed_command_steps(run_id)
         for _ in range(max(0, requested_steps - completed_steps)):
-            state = execute_generation(self, run_id)
+            state = execute_generation(self.server, run_id)
             if state.run.status.value != "running":
                 break
         return self.server.director.state(run_id)

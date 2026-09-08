@@ -10,14 +10,16 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from statistics import fmean, median
 from typing import Any, Callable, ClassVar, Mapping, Sequence
 
 from ..data.registry import DatasetSeries
 from ..data.splits import IndexRange
+from .baselines import fit_baseline_profile
 
 EXOGENOUS_RIDGE_MODEL_ID = "greenhouse-exogenous-ridge@1"
+BASELINE_ALIGNED_RIDGE_MODEL_ID = "greenhouse-baseline-aligned-ridge@1"
 TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID = "greenhouse-targetwise-ridge@1"
 HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID = (
     "greenhouse-horizon-targetwise-ridge@1"
@@ -93,6 +95,59 @@ class ExogenousRidgeConfig:
         del target, horizon_hours
         return float(self.residual_scale)
 
+
+@dataclass(frozen=True, slots=True)
+class BaselineAlignedRidgeConfig(ExogenousRidgeConfig):
+    """Ridge residuals around the baseline selected on training_fit only.
+
+    Missing horizon scales inherit the shared scale at the Python boundary;
+    the persisted parameter mapping always contains all three explicit scales.
+    """
+
+    residual_scale_1h: float | None = None
+    residual_scale_6h: float | None = None
+    residual_scale_24h: float | None = None
+
+    def __post_init__(self) -> None:
+        ExogenousRidgeConfig.__post_init__(self)
+        for name in ("residual_scale_1h", "residual_scale_6h", "residual_scale_24h"):
+            value = getattr(self, name)
+            if value is None:
+                value = self.residual_scale
+            _bounded_number(name, value, 0.0, 1.0)
+            object.__setattr__(self, name, float(value))
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "BaselineAlignedRidgeConfig":
+        if not isinstance(value, Mapping):
+            raise TypeError("baseline-aligned ridge parameters must be an object")
+        required = {"history_steps", "ridge_alpha"}
+        optional = {"residual_scale_1h", "residual_scale_6h", "residual_scale_24h"}
+        if (
+            required.difference(value)
+            or set(value).difference(required | optional | {"residual_scale"})
+            or ("residual_scale" not in value and optional.difference(value))
+        ):
+            raise ValueError("baseline-aligned ridge parameters do not match the contract")
+        # Explicit JSON null is not an admissible registered candidate value.
+        if any(value[name] is None for name in optional.intersection(value)):
+            raise ValueError("baseline-aligned horizon scale must be numeric")
+        return cls(**{"residual_scale": 0.0, **dict(value)})
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "history_steps": self.history_steps,
+            "ridge_alpha": float(self.ridge_alpha),
+            "residual_scale_1h": float(self.residual_scale_1h),
+            "residual_scale_6h": float(self.residual_scale_6h),
+            "residual_scale_24h": float(self.residual_scale_24h),
+        }
+
+    def residual_scale_for(self, target: str, horizon_hours: int) -> float:
+        del target
+        if horizon_hours not in (1, 6, 24):
+            raise ValueError("baseline-aligned ridge horizon must be 1, 6 or 24 hours")
+        return float(getattr(self, f"residual_scale_{horizon_hours}h"))
 
 @dataclass(frozen=True, slots=True)
 class TargetwiseExogenousRidgeConfig:
@@ -288,6 +343,7 @@ class _BaseSample:
     target_lag_timestamps: tuple[int, ...]
     observed: float
     baseline: float
+    baseline_reference: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,11 +414,15 @@ def fit_predict_exogenous_ridge(
     evaluation_history_steps: int | None = None,
     defer_prediction_partitions: Sequence[str] = (),
     on_fit_complete: Callable[[], None] | None = None,
+    prediction_partitions: Sequence[str] = ("training_fit", "training_feedback"),
+    check_control: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    """Fit persistence-residual ridge models and predict both visible partitions.
+    """Fit registered ridge residuals and predict both visible partitions.
 
     Every ``target`` x ``horizon`` model learns feature selection, imputation,
     centering, scaling, and ridge coefficients solely from ``training_fit``.
+    BaselineAlignedRidgeConfig also selects its causal baseline there; the
+    other registered configurations retain their persistence reference.
     Returned rows include both ``training_fit`` and ``training_feedback``. A
     caller may defer selected partitions so those rows contain only the
     label-free inputs needed by a registered host tool; prediction then occurs
@@ -382,7 +442,9 @@ def fit_predict_exogenous_ridge(
         else ExogenousRidgeConfig.from_mapping(config)
     )
     model_id = (
-        HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
+        BASELINE_ALIGNED_RIDGE_MODEL_ID
+        if isinstance(resolved_config, BaselineAlignedRidgeConfig)
+        else HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
         if isinstance(resolved_config, HorizonTargetwiseExogenousRidgeConfig)
         else TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
         if isinstance(resolved_config, TargetwiseExogenousRidgeConfig)
@@ -416,14 +478,31 @@ def fit_predict_exogenous_ridge(
             "history_steps and the supported maximum"
         )
 
+    requested_partitions = frozenset(prediction_partitions)
+    if requested_partitions - {"training_fit", "training_feedback"}:
+        raise ValueError("unsupported prediction partition")
+    if check_control is not None:
+        check_control()
     ranges = {
         "training_fit": series.partitions["training_fit"],
         "training_feedback": series.partitions["training_feedback"],
     }
+    baseline_profile = (
+        fit_baseline_profile(
+            series, targets=resolved_targets, horizons=resolved_horizons
+        )
+        if isinstance(resolved_config, BaselineAlignedRidgeConfig)
+        else None
+    )
+    baseline_index = {
+        series.timestamps[index]: index
+        for selected in ranges.values()
+        for index in range(selected.start, selected.end)
+    } if baseline_profile is not None else {}
     external_features = _external_feature_roles(series)
     filled_by_partition = {
         partition: _causal_forward_fill(series, selected, external_features)
-        for partition, selected in ranges.items()
+        for partition, selected in ranges.items() if partition == "training_fit" or partition in requested_partitions
     }
 
     fitted_tasks: list[_FittedTask] = []
@@ -432,6 +511,8 @@ def fit_predict_exogenous_ridge(
             name: role for name, role in external_features.items() if name != target
         }
         for horizon in resolved_horizons:
+            if check_control is not None:
+                check_control()
             fit_samples = _base_samples(
                 series,
                 target,
@@ -445,8 +526,8 @@ def fit_predict_exogenous_ridge(
                 ranges["training_feedback"],
                 horizon,
                 resolved_config.history_steps,
-            )
-            if evaluation_history_steps is not None:
+            ) if "training_feedback" in requested_partitions else ()
+            if evaluation_history_steps is not None and "training_feedback" in requested_partitions:
                 cohort_pairs = {
                     (sample.origin_index, sample.label_index)
                     for sample in _base_samples(
@@ -462,6 +543,15 @@ def fit_predict_exogenous_ridge(
                     for sample in feedback_samples
                     if (sample.origin_index, sample.label_index) in cohort_pairs
                 )
+            if baseline_profile is not None:
+                fit_samples = _align_sample_baselines(
+                    series, target, horizon, fit_samples,
+                    baseline_profile, baseline_index,
+                )
+                feedback_samples = _align_sample_baselines(
+                    series, target, horizon, feedback_samples,
+                    baseline_profile, baseline_index,
+                )
             model, coefficients, statistics = _fit_model(
                 series,
                 target,
@@ -469,8 +559,25 @@ def fit_predict_exogenous_ridge(
                 fit_samples,
                 target_external_features,
                 filled_by_partition["training_fit"],
-                resolved_config,
+                resolved_config, check_control=check_control,
             )
+            if baseline_profile is not None:
+                selected_baseline = next(
+                    cell["baseline_id"] for cell in baseline_profile["cells"]
+                    if cell["target"] == target and cell["horizon_hours"] == horizon
+                )
+                model.update({
+                    "prediction_model_id": model_id,
+                    "parameter_digest": _digest(resolved_config.to_dict()),
+                    "fit_parameters_digest": _digest({"history_steps": resolved_config.history_steps, "ridge_alpha": resolved_config.ridge_alpha}),
+                    "baseline_profile_digest": baseline_profile["digest"],
+                    "requested_baseline_id": selected_baseline,
+                    "baseline_selection_partition": "training_fit",
+                    "training_baseline_fallback_rows": sum(
+                        bool(sample.baseline_reference["fallback_reason"])
+                        for sample in fit_samples if sample.baseline_reference
+                    ),
+                })
             fitted_tasks.append(
                 _FittedTask(
                     target=target,
@@ -494,6 +601,10 @@ def fit_predict_exogenous_ridge(
             ("training_fit", fitted.fit_samples),
             ("training_feedback", fitted.feedback_samples),
         ):
+            if partition not in requested_partitions:
+                continue
+            if check_control is not None:
+                check_control()
             rows, fallback_rows = _predict_rows(
                 series,
                 partition,
@@ -517,7 +628,9 @@ def fit_predict_exogenous_ridge(
 
     result = {
         "schema_version": (
-            _HORIZON_TARGETWISE_RESULT_SCHEMA
+            "ecologyrsi-dsh.greenhouse-baseline-aligned-ridge-result/1"
+            if model_id == BASELINE_ALIGNED_RIDGE_MODEL_ID
+            else _HORIZON_TARGETWISE_RESULT_SCHEMA
             if model_id == HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
             else _TARGETWISE_RESULT_SCHEMA
             if model_id == TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
@@ -539,6 +652,8 @@ def fit_predict_exogenous_ridge(
         "models": models,
         "prediction_rows": prediction_rows,
     }
+    if baseline_profile is not None:
+        result["baseline_profile"] = baseline_profile
     if deferred_partitions:
         result["deferred_prediction_partitions"] = sorted(deferred_partitions)
     if evaluation_history_steps is not None:
@@ -597,6 +712,16 @@ def predict_fitted_exogenous_ridge(
     if len(matching) != 1:
         raise ValueError("ridge tool requires exactly one fitted target-horizon model")
     model = matching[0]
+    if isinstance(resolved_config, BaselineAlignedRidgeConfig):
+        _validate_aligned_reference(
+            model, label_free_context, baseline_value,
+            target, horizon_hours, resolved_config,
+        )
+        # A cached fit may contain coefficients even when this invocation
+        # disables the residual. Its causal baseline is still validated, but
+        # no residual features are needed or prepared by _predict_rows.
+        if resolved_config.residual_scale_for(target, horizon_hours) == 0:
+            return baseline_value
     if model.get("status") != "fitted":
         return baseline_value
 
@@ -660,7 +785,10 @@ def _fit_model(
     external_features: Mapping[str, str],
     filled: Mapping[str, tuple[float | None, ...]],
     config: RidgeConfig,
+    *, check_control: Callable[[], None] | None = None,
 ) -> tuple[dict[str, Any], tuple[float, ...], tuple[_FeatureStatistic, ...]]:
+    if isinstance(config, BaselineAlignedRidgeConfig) and config.residual_scale_for(target, horizon) == 0:
+        return _model_metadata(target, horizon, "baseline_only", None, (), (), ()), (), ()
     selected, coverage, medians = _select_external_features(
         samples, external_features, filled
     )
@@ -684,10 +812,11 @@ def _fit_model(
         return model, (), ()
 
     try:
-        raw_rows = [
-            _raw_feature_row(series, sample, target, selected, filled, medians)
-            for sample in samples
-        ]
+        raw_rows = []
+        for index, sample in enumerate(samples):
+            if check_control is not None and index % 128 == 0:
+                check_control()
+            raw_rows.append(_raw_feature_row(series, sample, target, selected, filled, medians))
         statistics: list[_FeatureStatistic] = []
         for column, (name, (kind, source_feature)) in enumerate(
             zip(feature_names, feature_kinds)
@@ -725,7 +854,7 @@ def _fit_model(
         if not all(math.isfinite(value) for value in residuals):
             raise ArithmeticError("training residuals are not finite")
         coefficients = _ridge_coefficients(
-            normalized_rows, residuals, float(config.ridge_alpha)
+            normalized_rows, residuals, float(config.ridge_alpha), check_control=check_control,
         )
         if not all(math.isfinite(value) for value in coefficients):
             raise ArithmeticError("ridge coefficients are not finite")
@@ -804,7 +933,9 @@ def _predict_rows(
     target_residual_scale = config.residual_scale_for(target, horizon)
     predictor_state: dict[str, Any] = {
         "predictor_id": (
-            HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
+            BASELINE_ALIGNED_RIDGE_MODEL_ID
+            if isinstance(config, BaselineAlignedRidgeConfig)
+            else HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
             if isinstance(config, HorizonTargetwiseExogenousRidgeConfig)
             else TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
             if isinstance(config, TargetwiseExogenousRidgeConfig)
@@ -828,11 +959,17 @@ def _predict_rows(
             for name, value in config.to_dict().items()
             if name.endswith("_residual_scale")
         }
+    elif isinstance(config, BaselineAlignedRidgeConfig):
+        predictor_state["horizon_residual_scales"] = {
+            str(horizon): config.residual_scale_for(target, horizon)
+            for horizon in (1, 6, 24)
+        }
     for sample in samples:
-        used_fallback = not coefficients or not statistics
+        baseline_only = isinstance(config, BaselineAlignedRidgeConfig) and target_residual_scale == 0
+        used_fallback = not baseline_only and (not coefficients or not statistics)
         predicted_residual = 0.0
         raw_features: tuple[float, ...] = ()
-        if not used_fallback:
+        if not used_fallback and not baseline_only:
             raw_features = _raw_feature_row(
                 series, sample, target, selected, filled, medians
             )
@@ -893,6 +1030,22 @@ def _predict_rows(
             }
         if not defer_prediction:
             row["predicted"] = predicted
+        if sample.baseline_reference is not None:
+            reference = dict(sample.baseline_reference)
+            row["baseline_reference"] = reference
+            used_persistence = (
+                reference["baseline_id"] == "persistence"
+                and (target_residual_scale == 0.0 or used_fallback)
+            )
+            row["used_target_persistence"] = used_persistence
+            row["label_free_context"]["baseline_reference"] = dict(reference)
+            row["label_free_context"]["predictor_state"].update({
+                "used_target_persistence": used_persistence,
+                "used_selected_baseline": target_residual_scale == 0.0 or used_fallback,
+                "baseline_id": reference["baseline_id"],
+                "baseline_profile_digest": reference["baseline_profile_digest"],
+                "baseline_fallback_reason": reference["fallback_reason"],
+            })
         rows.append(row)
     return rows, fallback_rows
 
@@ -980,6 +1133,7 @@ def _ridge_coefficients(
     feature_rows: Sequence[Sequence[float]],
     labels: Sequence[float],
     alpha: float,
+    *, check_control: Callable[[], None] | None = None,
 ) -> tuple[float, ...]:
     if not feature_rows or len(feature_rows) != len(labels):
         raise ValueError("ridge fit requires aligned non-empty rows")
@@ -989,7 +1143,9 @@ def _ridge_coefficients(
     dimension = width + 1
     gram = [[0.0 for _ in range(dimension)] for _ in range(dimension)]
     right = [0.0 for _ in range(dimension)]
-    for row, label in zip(feature_rows, labels):
+    for index, (row, label) in enumerate(zip(feature_rows, labels)):
+        if check_control is not None and index % 128 == 0:
+            check_control()
         augmented = (1.0, *row)
         for left_index, left_value in enumerate(augmented):
             right[left_index] += left_value * label
@@ -1044,6 +1200,115 @@ def _solve_with_partial_pivoting(
     if not all(math.isfinite(value) for value in solution):
         raise ArithmeticError("linear solution is not finite")
     return tuple(solution)
+
+
+def _align_sample_baselines(
+    series: DatasetSeries,
+    target: str,
+    horizon: int,
+    samples: Sequence[_BaseSample],
+    profile: Mapping[str, Any],
+    visible_index: Mapping[int, int],
+) -> tuple[_BaseSample, ...]:
+    """Use only a selected baseline reference available by the origin.
+
+    The lookup matches the scoring baseline's visible fit/feedback history.
+    A seasonal reference can cross their boundary only into past observations;
+    validation and final-test indices are absent from ``visible_index``.
+    """
+
+    requested = next(
+        cell["baseline_id"] for cell in profile["cells"]
+        if cell["target"] == target and cell["horizon_hours"] == horizon
+    )
+    aligned: list[_BaseSample] = []
+    for sample in samples:
+        origin = series.timestamps[sample.origin_index]
+        source_timestamp = origin
+        baseline = sample.target_lags[0]
+        resolved_id = "persistence"
+        fallback = None
+        if requested == "seasonal_24h":
+            seasonal_timestamp = origin + horizon - 24
+            index = visible_index.get(seasonal_timestamp)
+            seasonal = (
+                _finite_value(series.values[target][index])
+                if index is not None and seasonal_timestamp <= origin
+                else None
+            )
+            if seasonal is None:
+                fallback = "seasonal_reference_missing"
+            else:
+                baseline = seasonal
+                source_timestamp = seasonal_timestamp
+                resolved_id = "seasonal_24h"
+        reference = {
+            "schema_version": "ecologyrsi-dsh.ridge-baseline-reference/1",
+            "target": target,
+            "horizon_hours": horizon,
+            "requested_baseline_id": requested,
+            "baseline_id": resolved_id,
+            "baseline_profile_digest": profile["digest"],
+            "selection_partition": "training_fit",
+            "value": float(baseline),
+            "source_timestamp": source_timestamp,
+            "origin_timestamp": origin,
+            "fallback_reason": fallback,
+        }
+        aligned.append(replace(
+            sample, baseline=float(baseline), baseline_reference=reference
+        ))
+    return tuple(aligned)
+
+
+def _validate_aligned_reference(
+    model: Mapping[str, Any],
+    context: Mapping[str, Any],
+    baseline: float,
+    target: str,
+    horizon: int,
+    config: BaselineAlignedRidgeConfig,
+) -> None:
+    """Fence deferred/replayed inference to the fitted baseline identity."""
+
+    reference = context.get("baseline_reference")
+    provenance = context.get("causal_provenance")
+    if not isinstance(reference, Mapping) or not isinstance(provenance, Mapping):
+        raise ValueError("aligned ridge requires baseline reference provenance")
+    origin = reference.get("origin_timestamp")
+    source = reference.get("source_timestamp")
+    requested = reference.get("requested_baseline_id")
+    resolved = reference.get("baseline_id")
+    fallback = reference.get("fallback_reason")
+    if (
+        reference.get("schema_version") != "ecologyrsi-dsh.ridge-baseline-reference/1"
+        or reference.get("target") != target
+        or reference.get("horizon_hours") != horizon
+        or reference.get("selection_partition") != "training_fit"
+        or model.get("prediction_model_id") != BASELINE_ALIGNED_RIDGE_MODEL_ID
+        or model.get("fit_parameters_digest") != _digest({"history_steps": config.history_steps, "ridge_alpha": config.ridge_alpha})
+        or not isinstance(model.get("baseline_profile_digest"), str)
+        or reference.get("baseline_profile_digest") != model.get("baseline_profile_digest")
+        or requested != model.get("requested_baseline_id")
+        or requested not in {"persistence", "seasonal_24h"}
+        or _finite_number(reference.get("value"), "aligned ridge baseline reference") != baseline
+        or isinstance(origin, bool) or not isinstance(origin, int)
+        or isinstance(source, bool) or not isinstance(source, int)
+        or source > origin
+        or origin != provenance.get("origin_cutoff_timestamp")
+    ):
+        raise ValueError("aligned ridge baseline identity or causal provenance mismatch")
+    if resolved == "seasonal_24h":
+        valid = requested == resolved and source == origin + horizon - 24 and fallback is None
+    elif resolved == "persistence":
+        valid = source == origin and (
+            (requested == resolved and fallback is None)
+            or (requested == "seasonal_24h" and fallback == "seasonal_reference_missing")
+        )
+    else:
+        valid = False
+    if not valid:
+        raise ValueError("aligned ridge baseline fallback provenance mismatch")
 
 
 def _base_samples(
@@ -1221,6 +1486,8 @@ def _digest(value: Any) -> str:
 
 
 __all__ = [
+    "BASELINE_ALIGNED_RIDGE_MODEL_ID",
+    "BaselineAlignedRidgeConfig",
     "EXOGENOUS_RIDGE_MODEL_ID",
     "HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID",
     "TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID",

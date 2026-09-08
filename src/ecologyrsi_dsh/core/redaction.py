@@ -17,6 +17,7 @@ REMOTE_REASON_INVALID = "remote_reason_invalid"
 REMOTE_REASON_CODES = frozenset(
     {
         "accept_prediction",
+        "agent_direct", "agent_model", "agent_blend", "agent_adjusted",
         "baseline",
         "bounded_retry_recovered",
         "candidate_forecast",

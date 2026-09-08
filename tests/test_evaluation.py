@@ -110,11 +110,11 @@ class _DshOriginRuntimeStub:
             samples = context["samples"]
             if request["stage"] == "sample.critic":
                 next_tool = "accept"
-                schema_version = "ecology-sample-review@1"
+                schema_version = "ecology-sample-review@2"
                 reason_code = "accept_prediction"
             else:
                 next_tool = context["available_tools"][0]["tool_id"]
-                schema_version = "ecology-sample-decisions@1"
+                schema_version = "ecology-sample-predictions@2"
                 reason_code = "initial_registered_route"
             structured = {
                 "schema_version": schema_version,
@@ -122,39 +122,19 @@ class _DshOriginRuntimeStub:
                 "decisions": [
                     {
                         "sample_id": item["sample_id"],
-                        "next_tool": next_tool,
+                        "action": next_tool,
                         "reason_code": reason_code,
                         "confidence": 0.9,
                     }
                     for item in samples
                 ],
             }
+        if request["stage"] == "sample.plan":
+            structured["decisions"] = prediction_rows(context, model_result(context))
         return {"structured": structured, "result_digest": digest(structured)}
 
 
-class _DshPredictionBindingStub:
-    def __init__(self, values: dict, event_id: str) -> None:
-        self._values = values
-        self._event_id = event_id
-        self._output_digest = digest(values)
-
-    def prediction_bundle(self) -> dict:
-        return self._values
-
-    def audit_receipt(self) -> dict:
-        return {
-            "event_id": self._event_id,
-            "output_digest": self._output_digest,
-            "execution_owner": "dsh_agent_tool_call",
-        }
-
-
-@contextmanager
-def _dsh_prediction_tool_binder(**binding):
-    yield _DshPredictionBindingStub(
-        binding["executor"](),
-        f"{binding['run_id']}:tool:{binding['wave_digest']}",
-    )
+from tests.agent_prediction_fixtures import agent_binding as _dsh_prediction_tool_binder, model_result, prediction_rows
 
 
 def _series(
@@ -1164,6 +1144,14 @@ class GreenhouseEvaluationTests(unittest.TestCase):
                 "greenhouse-multihorizon-forward/8",
                 "greenhouse-multihorizon-forward/7",
             ),
+            "greenhouse_multihorizon_time_forward@3": (
+                "greenhouse-baseline-aligned-multihorizon-forward/1",
+                "greenhouse-multihorizon-forward/8",
+            ),
+            "greenhouse_multihorizon_time_forward@4": (
+                "greenhouse-runtime-model-selection-forward/1",
+                "greenhouse-baseline-aligned-multihorizon-forward/1",
+            ),
         }
         for item in registry.catalog():
             implementation, previous_implementation = implementations[item["id"]]
@@ -1427,7 +1415,7 @@ class GreenhouseEvaluationTests(unittest.TestCase):
             )
             for record in bundle.evaluation.metrics["sample_execution_records"]
             for tool in record.get("tool_trace", ())
-            if tool.get("tool_id") == EXOGENOUS_RIDGE_MODEL_ID.removesuffix("@1")
+            if tool.get("tool_id") == "candidate-model"
         }
         self.assertEqual(len(registered_tool_evidence), 1)
 

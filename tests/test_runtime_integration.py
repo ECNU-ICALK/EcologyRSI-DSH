@@ -702,12 +702,12 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     "first_call_verified": False,
                 }
                 for preset_id in (
-                    "ecology-coordinator-v4",
-                    "ecology-researcher-v7",
+                    "ecology-coordinator-v5",
+                    "ecology-researcher-v12",
                     "ecology-candidate-proposer-v4",
-                    "ecology-sample-planner-v5",
-                    "ecology-sample-critic-v4",
-                    "ecology-generation-judge-v7",
+                    "ecology-sample-planner-v8",
+                    "ecology-sample-critic-v5",
+                    "ecology-generation-judge-v8",
                 )
             ],
             "live_agent_service_ready": True,
@@ -919,9 +919,9 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                 "sample_operation_max_tokens"
             ],
             {
-                "sample.planner": 4096,
-                "sample.repair": 4096,
-                "sample.critic": 2048,
+                "sample.planner": 8192,
+                "sample.repair": 8192,
+                "sample.critic": 4096,
             },
         )
         explicit_configuration = explicit_created["projection"]["configuration"]

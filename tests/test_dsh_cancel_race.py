@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from ecologyrsi_dsh.api.dsh_tools import (
+from ecologyrsi_dsh.integrations.dsh_tools import (
     DshToolAdmissionClosedError,
     DshToolService,
 )

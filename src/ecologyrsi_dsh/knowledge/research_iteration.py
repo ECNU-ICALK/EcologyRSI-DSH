@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
+from types import MappingProxyType
 from typing import Any
 
 from ..core.models import JsonObject, canonical_json, digest, utc_now
 from .algorithms import PredictorAdoption
+from ..core.research import DiagnosticReport
+from ..core.immutable import freeze_json, thaw_json
 
 RESEARCH_ITERATION_VERSION = "ecologyrsi-dsh.research-iteration/1"
 
@@ -256,6 +259,7 @@ class ResearchIteration:
     created_at: str = field(default_factory=utc_now)
     schema_version: str = RESEARCH_ITERATION_VERSION
     iteration_digest: str = ""
+    diagnostic_report: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "run_id", _text(self.run_id, "run_id", maximum=500))
@@ -269,17 +273,22 @@ class ResearchIteration:
         if status not in _STATUSES:
             raise ValueError("unsupported research iteration status")
         object.__setattr__(self, "status", status)
+        if self.diagnostic_report is not None:
+            report = DiagnosticReport(**dict(self.diagnostic_report))
+            object.__setattr__(self, "diagnostic_report", MappingProxyType(
+                {item.name: getattr(report, item.name) for item in fields(report)}
+            ))
         if self.schema_version != RESEARCH_ITERATION_VERSION:
             raise ValueError("unsupported research iteration version")
         plan = _bounded_plan(self.plan)
-        object.__setattr__(self, "plan", plan)
+        object.__setattr__(self, "plan", freeze_json(plan))
         adoption = PredictorAdoption.from_dict(self.prediction_model_adoption)
         if adoption.plan_digest != digest(plan):
             raise ValueError("research iteration adoption does not match its plan")
         object.__setattr__(
             self,
             "prediction_model_adoption",
-            adoption.to_dict(),
+            freeze_json(adoption.to_dict()),
         )
         object.__setattr__(
             self,
@@ -299,7 +308,7 @@ class ResearchIteration:
         object.__setattr__(
             self,
             "historical_provenance",
-            _historical_provenance(self.historical_provenance),
+            freeze_json(_historical_provenance(self.historical_provenance)),
         )
         object.__setattr__(
             self,
@@ -345,8 +354,8 @@ class ResearchIteration:
             "run_id": self.run_id,
             "generation": self.generation,
             "status": self.status,
-            "plan": dict(self.plan),
-            "prediction_model_adoption": dict(self.prediction_model_adoption),
+            "plan": thaw_json(self.plan),
+            "prediction_model_adoption": thaw_json(self.prediction_model_adoption),
             "knowledge_snapshot_digest": self.knowledge_snapshot_digest,
             "source_analysis_digest": self.source_analysis_digest,
             "source_assessment_digest": self.source_assessment_digest,
@@ -364,7 +373,9 @@ class ResearchIteration:
         if self.expert_answer_ids:
             result["expert_answer_ids"] = list(self.expert_answer_ids)
         if self.historical_provenance is not None:
-            result["historical_provenance"] = dict(self.historical_provenance)
+            result["historical_provenance"] = thaw_json(self.historical_provenance)
+        if self.diagnostic_report is not None:
+            result["diagnostic_report"] = DiagnosticReport(**dict(self.diagnostic_report)).to_dict()
         return result
 
     def to_dict(self) -> JsonObject:

@@ -119,6 +119,7 @@ code, .technical-value { font-family: "SFMono-Regular", Consolas, "Liberation Mo
 .pill-blue { color: var(--blue); border-color: #b8cde5; background: var(--blue-soft); }
 .pill-amber { color: var(--amber); border-color: #dfc98e; background: var(--amber-soft); }
 .pill-red { color: var(--red); border-color: #dfbbb8; background: var(--red-soft); }
+#execution-monitor-status { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
 
 .settings-layout, .collaboration-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 0.82fr); gap: 12px; }
 .parameters-layout { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(280px, 0.72fr); gap: 12px; }
@@ -1710,3 +1711,16 @@ tbody tr:hover { background: #f8faf9; }
   #workspace-candidates .candidate-samples-table tr.candidate-sample-row td:nth-child(6) { border-bottom: 1px solid #edf1f0; }
   #workspace-candidates .candidate-samples-footer { padding-inline: 10px; }
 }
+/* Review records remain explicit about evidence scope and never look like a
+   pending automatic job. */
+.search-probation-list { margin: 0 20px 18px; padding: 12px 16px; background: #fff8eb; border: 1px solid #ecd7ad; border-radius: 8px; }
+.search-probation-list summary { cursor: pointer; font-weight: 600; }
+.search-probation-list p { font-size: 12px; line-height: 1.7; color: #685333; }
+.search-probation-entry { display: grid; gap: 5px; padding: 12px 0; border-top: 1px solid #ecd7ad; font-size: 12px; overflow-wrap: anywhere; }
+.model-preflight-evidence { grid-column: 1 / -1; padding: 12px; min-width: 0; overflow-wrap: anywhere; }
+.model-preflight-evidence p { font-size: 12px; line-height: 1.7; }
+.model-preflight-role { display: grid; gap: 5px; padding: 12px 0; border-top: 1px solid #e1e7ec; }
+/* Section reads leave navigation and the current snapshot usable. */
+.workspace-data-status { margin: 0 0 12px; padding: 10px 14px; border: 1px solid #dce5e3; border-radius: 8px; background: #f5f9f8; }
+.workspace-data-status[hidden] { display: none; }
+.workspace-data-status button { margin-left: 12px; }

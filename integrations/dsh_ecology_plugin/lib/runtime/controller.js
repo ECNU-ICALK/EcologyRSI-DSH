@@ -5,6 +5,7 @@ import { RuntimeRunRegistry } from "./run-registry.js";
 import { runtimeCapabilities } from "./capabilities.js";
 import { RoleAgentManager } from "./agents.js";
 import { NativeStageRunner } from "./stage-runner.js";
+import { ModelContractCanary } from "./model-canary.js";
 
 const PRESET_MANIFEST = Object.freeze(JSON.parse(readFileSync(
   new URL("../../presets/preset-manifest.json", import.meta.url),
@@ -40,6 +41,7 @@ const CONTROL_TRANSITIONS = Object.freeze({
 export class RuntimeController {
   constructor(ctx, { registry = new RuntimeRunRegistry(), presetCatalog = DEFAULT_PRESETS, stageRunner = null } = {}) {
     this.ctx = ctx;
+    this.modelCanary = new ModelContractCanary(ctx);
     this.registry = registry;
     this.presetCatalog = presetCatalog;
     this.roleAgents = new RoleAgentManager(ctx);
@@ -57,6 +59,8 @@ export class RuntimeController {
     });
     return this.stageRunner;
   }
+
+  runCanary(request) { return this.modelCanary.run(request); }
 
   async capabilities() {
     const value = await runtimeCapabilities(this.ctx, this.presetCatalog);

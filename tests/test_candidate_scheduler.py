@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import unittest
 
-from ecologyrsi_dsh.api.candidate_scheduler import (
+from ecologyrsi_dsh.application.candidate_scheduler import (
     CandidateEvaluationTask,
     run_candidate_evaluations,
 )
