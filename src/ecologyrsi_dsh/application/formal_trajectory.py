@@ -695,8 +695,8 @@ def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRev
     _boundary, parameter_schemas = _genome_parameter_boundary(state.task_manifest, genome)
     cells = tuple(
         f"{target}@{horizon}h"
-        for target in ("air_temperature", "relative_humidity", "co2_concentration")
-        for horizon in (1, 6, 24)
+        for target in state.task_manifest.metadata["fitness_profile"]["expected_targets"]
+        for horizon in state.task_manifest.metadata["fitness_profile"]["expected_horizons"]
     )
     return LocalEditContext(
         run_id=state.run.run_id,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ..core.model_execution_policy import NATIVE_SAMPLE_OPERATION_MAX_TOKENS
 
+from ..data.adapters import dataset_adapter
 from ..core.prediction_policy import (RUNTIME_PREDICTION_POLICY, RUNTIME_EVALUATOR_ID, BASELINE_REFERENCE_PREDICTOR_ID)
 
 from ..application.runtime import initialize_runtime
@@ -1182,6 +1183,8 @@ class EvolutionRequestHandler(
             schedule=schedule,
             planned_generations=planned_generations,
             seed=0,
+            scoring_cells_per_origin=(1 if dataset_id == TOY_DATASET_ID
+                                      else dataset_adapter(dataset_id).contract()["prediction_cells_per_origin"]),
         )
         payload = report.to_dict()
         if dataset_id != TOY_DATASET_ID:
@@ -2346,6 +2349,20 @@ class EvolutionRequestHandler(
             if "greenhouse" not in manifest.domain_pack.casefold():
                 raise ValueError("真实温室数据集必须绑定 greenhouse_environment@1 领域模型包")
             metadata = dict(manifest.metadata)
+            adapter = dataset_adapter(dataset_id)
+            contract = adapter.contract()
+            supplied_contract = metadata.get("dataset_task")
+            if supplied_contract is not None and supplied_contract != contract:
+                raise ValueError("任务清单中的数据集任务与服务端适配器不一致")
+            if metadata.get("dataset_task_digest", contract["contract_digest"]) != contract["contract_digest"]:
+                raise ValueError("dataset_task_digest must match the dataset adapter")
+            metadata["dataset_task"] = contract
+            metadata["dataset_task_digest"] = contract["contract_digest"]
+            for key, value in (("objective_targets", list(adapter.target_names)),
+                               ("objective_horizons", list(adapter.horizons_hours))):
+                if key in metadata and metadata[key] != value:
+                    raise ValueError(f"{key} must match the dataset adapter")
+                metadata[key] = value
             requested_episode = metadata.get("episode_id")
             series = self.server.datasets.series(
                 dataset_id,
@@ -2407,7 +2424,7 @@ class EvolutionRequestHandler(
             metadata["prediction_selection_policy"] = RUNTIME_PREDICTION_POLICY
             # This is a no-residual comparison anchor, not a user's chosen model.
             metadata["prediction_model_id"] = BASELINE_REFERENCE_PREDICTOR_ID
-            metadata["evaluator_id"] = RUNTIME_EVALUATOR_ID
+            metadata["evaluator_id"] = dataset_adapter(dataset_id).evaluator_id
         prediction_model_id = str(
             metadata.get("prediction_model_id")
             or self.server.evaluators.default_predictor(dataset_id)
@@ -2424,7 +2441,7 @@ class EvolutionRequestHandler(
             and evaluator_id not in {GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID, GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID, RUNTIME_EVALUATOR_ID}
         ):
             raise ValueError(
-                "DSH-native greenhouse runs require the 3-target × 3-horizon "
+                "DSH-native greenhouse runs require "
                 f"a registered multi-horizon evaluator ({RUNTIME_EVALUATOR_ID} for runtime model choice)"
             )
         strategy_model_id = str(
@@ -2460,10 +2477,14 @@ class EvolutionRequestHandler(
         )
         strategy_digest = self.server.strategy_router.configuration_digest(strategy_id)
         evaluator_digest = self.server.evaluators.evaluator_configuration_digest(
-            evaluator_id
+            evaluator_id, dataset_id
         )
-        objective_profile = self.server.evaluators.objective_profile(evaluator_id)
-        fitness_profile = self.server.evaluators.fitness_profile(evaluator_id)
+        objective_profile = self.server.evaluators.objective_profile(evaluator_id, dataset_id)
+        fitness_profile = self.server.evaluators.fitness_profile(evaluator_id, dataset_id)
+        if native_protocol and dataset_id != TOY_DATASET_ID:
+            adapter = dataset_adapter(dataset_id)
+            if fitness_profile.expected_targets != adapter.target_names or fitness_profile.expected_horizons != adapter.horizons_hours:
+                raise ValueError("native evaluator grid must match the dataset adapter")
         fitness_profile_data = fitness_profile.to_dict()
         supplied_fitness_profile = metadata.get("fitness_profile")
         if (
@@ -2640,7 +2661,7 @@ class EvolutionRequestHandler(
         autonomous_plan: dict[str, Any] = {}
         evaluator_catalog = [
             dict(item)
-            for item in self.server.evaluators.catalog()
+            for item in self.server.evaluators.catalog(dataset_id)
             if dataset_id in item.get("dataset_ids", [])
         ]
         selected_evaluator = next(
@@ -2802,11 +2823,11 @@ class EvolutionRequestHandler(
         sample_agent_batch_size = metadata.get("sample_agent_batch_size")
         minimum_selection_samples_per_update = (
             self.server.evaluators.minimum_selection_samples_per_update(
-                evaluator_id
+                evaluator_id, dataset_id
             )
         )
         selection_fitness_profile = self.server.evaluators.fitness_profile(
-            evaluator_id
+            evaluator_id, dataset_id
         )
         minimum_selection_origin_samples_per_update = (
             selection_fitness_profile.minimum_balanced_origins_per_update()
@@ -3339,6 +3360,10 @@ class EvolutionRequestHandler(
             frozen_runtime_build
         ):
             raise FrozenRuntimeBindingDriftError("Host evolution runtime")
+        if dataset_id != TOY_DATASET_ID:
+            contract = dataset_adapter(dataset_id).contract()
+            if metadata.get("dataset_task") != contract or metadata.get("dataset_task_digest") != contract["contract_digest"]:
+                raise FrozenRuntimeBindingDriftError("dataset task adapter")
         dataset_digest = metadata.get("dataset_digest")
         split_digest = metadata.get("split_manifest_digest")
         if not isinstance(dataset_digest, str) or not dataset_digest.strip():
@@ -3368,7 +3393,7 @@ class EvolutionRequestHandler(
                 "evaluator_id",
                 "evaluator_digest",
                 "评测器",
-                server.evaluators.evaluator_configuration_digest,
+                lambda evaluator_id: server.evaluators.evaluator_configuration_digest(evaluator_id, dataset_id),
             ),
             (
                 "prediction_model_id",
@@ -3392,7 +3417,7 @@ class EvolutionRequestHandler(
 
         if metadata.get("execution_protocol") == DSH_NATIVE_EXECUTION_PROTOCOL:
             evaluator_id = str(metadata.get("evaluator_id") or "").strip()
-            expected_profile = server.evaluators.fitness_profile(evaluator_id)
+            expected_profile = server.evaluators.fitness_profile(evaluator_id, dataset_id)
             frozen_profile = metadata.get("fitness_profile")
             if not isinstance(frozen_profile, dict):
                 raise ValueError(

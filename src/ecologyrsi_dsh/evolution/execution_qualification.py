@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..evaluators.objectives import DEFAULT_TARGET_WEIGHTS
+from ..data.adapters import dataset_adapter
+from ..core.immutable import thaw_json
 from .promotion import _evidence_matches_evaluation, _validated_evidence
 
 
@@ -26,6 +28,18 @@ def _complete_scoring_blocks(evaluation: Any) -> dict[str, tuple[int, int]] | No
     metrics = getattr(evaluation, "metrics", None)
     if not isinstance(metrics, Mapping):
         return None
+    contract = metrics.get("dataset_task")
+    grid = _GRID
+    if contract is not None:
+        if not isinstance(contract, Mapping):
+            return None
+        try:
+            adapter = dataset_adapter(contract.get("dataset_id"))
+        except ValueError:
+            return None
+        if thaw_json(contract) != adapter.contract():
+            return None
+        grid = {(target, horizon) for target in adapter.target_names for horizon in adapter.horizons_hours}
     sample = metrics.get("sample_execution")
     if not isinstance(sample, Mapping):
         return None
@@ -42,7 +56,7 @@ def _complete_scoring_blocks(evaluation: Any) -> dict[str, tuple[int, int]] | No
     # Native evaluator reports cell totals as well. Compact local evidence may
     # omit them; when present, they must agree with the independently summed grid.
     for key in ("eligible_examples", "attempted_examples", "succeeded_examples", "prediction_cell_count"):
-        if key in sample and not _count(sample[key], origins * len(_GRID)):
+        if key in sample and not _count(sample[key], origins * len(grid)):
             return None
     for key in ("input_failures", "skipped_examples"):
         if key in sample and not _count(sample[key], 0):
@@ -50,12 +64,12 @@ def _complete_scoring_blocks(evaluation: Any) -> dict[str, tuple[int, int]] | No
     evidence = _validated_evidence(evaluation)
     if evidence is None or not _evidence_matches_evaluation(evidence, evaluation):
         return None
-    if {(target, horizon) for target in evidence["weights"] for horizon in evidence["horizons"]} != _GRID:
+    if {(target, horizon) for target in evidence["weights"] for horizon in evidence["horizons"]} != grid:
         return None
-    totals = {cell: 0 for cell in _GRID}
+    totals = {cell: 0 for cell in grid}
     day_counts: dict[str, int] = {}
     for block_id, cells in evidence["blocks"].items():
-        if set(cells) != _GRID:
+        if set(cells) != grid:
             return None
         counts = {cell["eligible"] for cell in cells.values()}
         if len(counts) != 1 or next(iter(counts)) <= 0:
@@ -81,6 +95,8 @@ def _complete_scoring_blocks(evaluation: Any) -> dict[str, tuple[int, int]] | No
 
 def paired_scoring_evidence_complete(champion: Any, challenger: Any) -> bool:
     """Require both frozen cohorts to have every scientific cell successfully scored."""
+    if champion.metrics.get("dataset_task") != challenger.metrics.get("dataset_task"):
+        return False
     champion_days = _complete_scoring_blocks(champion)
     challenger_days = _complete_scoring_blocks(challenger)
     return champion_days is not None and champion_days == challenger_days

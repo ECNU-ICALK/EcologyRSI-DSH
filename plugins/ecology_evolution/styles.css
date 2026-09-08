@@ -168,6 +168,7 @@ code, .technical-value { font-family: "SFMono-Regular", Consolas, "Liberation Mo
 label { min-width: 0; }
 .form-grid label, .intervention-form > label { display: grid; gap: 5px; color: #354147; font-size: 12px; font-weight: 650; }
 .form-grid small, .intervention-form small { color: var(--subtle); font-size: 12px; font-weight: 400; line-height: 1.4; }
+.dataset-task-summary { margin: 0 14px 12px; padding: 10px 12px; border-left: 3px solid var(--primary); background: #f2f8f6; color: var(--muted); font-size: 12px; line-height: 1.6; white-space: pre-line; overflow-wrap: anywhere; }
 input, select, textarea { width: 100%; min-width: 0; border: 1px solid var(--line-strong); border-radius: 4px; background: #fff; }
 input, select { height: 35px; padding: 0 9px; }
 textarea { resize: vertical; padding: 8px 9px; line-height: 1.5; }

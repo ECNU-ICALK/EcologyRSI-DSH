@@ -486,7 +486,7 @@ class DatasetRegistryTests(unittest.TestCase):
     def test_optional_real_greenhouse_data(self) -> None:
         registry = DatasetRegistry(catalog_path=CATALOG_PATH)
         ready = [item for item in registry.catalog()["datasets"] if item["readiness"]["ready"]]
-        greenhouse = [item for item in ready if item["adapter_id"] == "greenhouse_timeseries"]
+        greenhouse = [item for item in ready if item["training_selectable"]]
         self.assertTrue(greenhouse, "未找到已就绪的真实温室数据")
         series = registry.series(greenhouse[0]["dataset_id"])
         self.assertGreater(len(series.timestamps), 0)

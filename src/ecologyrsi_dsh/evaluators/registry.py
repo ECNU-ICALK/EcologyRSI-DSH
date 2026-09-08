@@ -37,6 +37,8 @@ from ..core.trajectory import EvaluationScope
 from ..core.protocols import is_strict_origin_protocol
 from ..core.sample_results import SAMPLE_REWARD_DEFINITION, build_sample_results
 from ..data.registry import DatasetRegistry, DatasetSeries
+from ..data.adapters import DatasetAdapter, dataset_adapter
+from ..core.immutable import thaw_json
 from ..data.toy import ToyCropSoilWater
 from ..evolution.execution_plan import DerivedExecutionPlan, derive_execution_plan
 from ..evolution.promotion import (
@@ -142,11 +144,6 @@ GREENHOUSE_MIN_SKILL_EXCLUSIVE = 1e-9
 GREENHOUSE_NO_REGRESSION_TOLERANCE = 1e-12
 GREENHOUSE_MAX_CONSTRAINT_VIOLATIONS = 0
 
-_TARGETS = (
-    ("air_temperature", "degC", -10.0, 60.0),
-    ("relative_humidity", "percent", 0.0, 100.0),
-    ("co2_concentration", "ppm", 0.0, 5000.0),
-)
 _PREVIEW_ROWS_PER_TARGET = 16
 _PREVIEW_ROWS_TOTAL = 48
 _FEEDBACK_UPDATE_COHORT_SCHEMA_VERSION = (
@@ -158,6 +155,7 @@ def _aggregate_greenhouse_objective(
     task_results: Sequence[Mapping[str, Any]],
     horizons: Sequence[int],
     *,
+    target_weights: Mapping[str, float] | None = None,
     missing_skill_penalty: float = GREENHOUSE_OBJECTIVE_MISSING_PENALTY,
     missing_reward_penalty: float = GREENHOUSE_OBJECTIVE_MISSING_PENALTY,
 ) -> dict[str, Any]:
@@ -166,7 +164,7 @@ def _aggregate_greenhouse_objective(
     return aggregate_greenhouse_objective(
         task_results,
         horizons,
-        target_weights=GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS,
+        target_weights=target_weights if target_weights is not None else GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS,
         missing_skill_penalty=missing_skill_penalty,
         missing_reward_penalty=missing_reward_penalty,
     )
@@ -932,7 +930,7 @@ def _complete_scoring_rows(
     return completed
 
 
-def _greenhouse_hard_gates() -> list[dict[str, Any]]:
+def _greenhouse_hard_gates(adapter: DatasetAdapter | None = None) -> list[dict[str, Any]]:
     """Describe the exact evaluator checks in a machine-readable form."""
 
     return [
@@ -941,7 +939,7 @@ def _greenhouse_hard_gates() -> list[dict[str, Any]]:
             "scope": "overall",
             "metric": "objective_score",
             "operator": ">",
-            "threshold": GREENHOUSE_MIN_SKILL_EXCLUSIVE,
+            "threshold": adapter.minimum_skill if adapter else GREENHOUSE_MIN_SKILL_EXCLUSIVE,
         },
         {
             "id": "all_targets_no_regression",
@@ -950,39 +948,39 @@ def _greenhouse_hard_gates() -> list[dict[str, Any]]:
             "metric": "normalized_rmse",
             "operator": "<=",
             "reference_metric": "baseline_normalized_rmse",
-            "tolerance": GREENHOUSE_NO_REGRESSION_TOLERANCE,
+            "tolerance": adapter.no_regression_tolerance if adapter else GREENHOUSE_NO_REGRESSION_TOLERANCE,
         },
         {
             "id": "no_constraint_violations",
             "scope": "aggregate",
             "metric": "constraint_violations",
             "operator": "<=",
-            "threshold": GREENHOUSE_MAX_CONSTRAINT_VIOLATIONS,
+            "threshold": adapter.maximum_constraint_violations if adapter else GREENHOUSE_MAX_CONSTRAINT_VIOLATIONS,
         },
         {
             "id": "minimum_sample_execution_coverage",
             "scope": "overall_and_per_prediction_task",
             "metric": "sample_execution_coverage",
             "operator": ">=",
-            "threshold": DEFAULT_SAMPLE_EXECUTION_MIN_COVERAGE,
+            "threshold": adapter.minimum_coverage if adapter else DEFAULT_SAMPLE_EXECUTION_MIN_COVERAGE,
         },
     ]
 
 
-def _greenhouse_scoring_contract() -> dict[str, Any]:
+def _greenhouse_scoring_contract(adapter: DatasetAdapter | None = None) -> dict[str, Any]:
     """Return every constant that can change scoring or promotion semantics."""
 
     return {
         "objective_aggregation_version": GREENHOUSE_OBJECTIVE_AGGREGATION_VERSION,
         "baseline_profile_version": BASELINE_PROFILE_VERSION,
         "reward_definition": SAMPLE_REWARD_DEFINITION,
-        "target_weights": dict(GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS),
+        "target_weights": adapter.target_weights if adapter else dict(GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS),
         "horizon_weighting": "equal",
         "missing_task_penalty": GREENHOUSE_OBJECTIVE_MISSING_PENALTY,
         "objective_component_bound": OBJECTIVE_COMPONENT_BOUND,
         "normalization_scale_method": NORMALIZATION_SCALE_METHOD,
         "baseline_selection_tolerance": BASELINE_SELECTION_TOLERANCE,
-        "minimum_practical_score_delta": V2_MINIMUM_SCORE_DELTA,
+        "minimum_practical_score_delta": adapter.selection_minimum_score_delta if adapter else V2_MINIMUM_SCORE_DELTA,
         "promotion_policy_version": PROMOTION_POLICY_VERSION,
         "promotion_evidence_schema_version": PROMOTION_BLOCK_EVIDENCE_VERSION,
         "confidence_method": PROMOTION_CONFIDENCE_METHOD,
@@ -990,7 +988,7 @@ def _greenhouse_scoring_contract() -> dict[str, Any]:
         "minimum_paired_blocks": PROMOTION_MINIMUM_PAIRED_BLOCKS,
         "block_hours": PROMOTION_BLOCK_HOURS,
         "bootstrap_resamples": PROMOTION_BOOTSTRAP_RESAMPLES,
-        "hard_gates": _greenhouse_hard_gates(),
+        "hard_gates": _greenhouse_hard_gates(adapter),
     }
 
 
@@ -1423,7 +1421,7 @@ class EvaluatorRegistry:
         scope = EvaluationScope.from_dict(raw)
         return {"evaluation_scope": scope.to_dict()}
 
-    def catalog(self) -> list[dict[str, Any]]:
+    def catalog(self, dataset_id: str | None = None) -> list[dict[str, Any]]:
         items = [
             {
                 "id": TOY_EVALUATOR_ID,
@@ -1516,8 +1514,17 @@ class EvaluatorRegistry:
                 "implementation": "greenhouse-baseline-aligned-multihorizon-forward/1",
             },
         ]
+        adapter = dataset_adapter(dataset_id) if dataset_id and dataset_id != TOY_DATASET_ID else None
+        if dataset_id is not None:
+            items = [item for item in items if dataset_id in item["dataset_ids"]]
         for item in items:
-            profile = self._fitness_profile_for_catalog_item(item)
+            if adapter is not None:
+                item["targets"] = [target.name for target in adapter.targets]
+                item["task_adapter"] = adapter.contract()
+                if item["id"] == adapter.evaluator_id:
+                    item["horizons_hours"] = list(adapter.horizons_hours)
+                    item["label"] = adapter.label + "评测"
+            profile = self._fitness_profile_for_catalog_item(item, adapter)
             target_count = len(profile.expected_targets)
             item["prediction_task_count"] = max(
                 1,
@@ -1542,22 +1549,27 @@ class EvaluatorRegistry:
                 "fitness_profile": item["fitness_profile"],
             }
             if item.get("objective_profile") == GREENHOUSE_OBJECTIVE_PROFILE_ID:
-                digest_payload["scoring_contract"] = _greenhouse_scoring_contract()
+                digest_payload["scoring_contract"] = _greenhouse_scoring_contract(adapter)
+            if adapter is not None:
+                digest_payload["dataset_task_digest"] = adapter.contract()["contract_digest"]
             item["configuration_digest"] = digest(digest_payload)
         return items
 
     @staticmethod
     def _fitness_profile_for_catalog_item(
         item: Mapping[str, Any],
+        adapter: DatasetAdapter | None = None,
     ) -> FitnessProfile:
         targets = (
-            tuple(GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS)
+            tuple(item.get("targets") or GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS)
             if item.get("objective_profile") == GREENHOUSE_OBJECTIVE_PROFILE_ID
             else ("soil_water",)
         )
         return FitnessProfile(
             expected_targets=targets,
             expected_horizons=tuple(int(value) for value in item["horizons_hours"]),
+            **({"selection_minimum_coverage": adapter.selection_minimum_coverage,
+                "selection_minimum_score_delta": adapter.selection_minimum_score_delta} if adapter else {}),
         )
 
     def predictor_catalog(self) -> list[dict[str, Any]]:
@@ -1660,7 +1672,7 @@ class EvaluatorRegistry:
         return (
             TOY_EVALUATOR_ID
             if dataset_id == TOY_DATASET_ID
-            else GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID
+            else dataset_adapter(dataset_id).evaluator_id
         )
 
     def default_predictor(self, dataset_id: str) -> str:
@@ -1670,26 +1682,26 @@ class EvaluatorRegistry:
             else EXOGENOUS_RIDGE_MODEL_ID
         )
 
-    def minimum_samples_per_update(self, evaluator_id: str) -> int:
+    def minimum_samples_per_update(self, evaluator_id: str, dataset_id: str | None = None) -> int:
         """Return the smallest diagnostic cohort covering every scoring task."""
 
-        for item in self.catalog():
+        for item in self.catalog(dataset_id):
             if item["id"] == evaluator_id:
                 return int(item["minimum_samples_per_update"])
         raise ValueError(f"unknown evaluator_id: {evaluator_id}")
 
-    def minimum_selection_samples_per_update(self, evaluator_id: str) -> int:
+    def minimum_selection_samples_per_update(self, evaluator_id: str, dataset_id: str | None = None) -> int:
         """Return the smallest balanced cohort that can pass selection gates."""
 
-        for item in self.catalog():
+        for item in self.catalog(dataset_id):
             if item["id"] == evaluator_id:
                 return int(item["minimum_selection_samples_per_update"])
         raise ValueError(f"unknown evaluator_id: {evaluator_id}")
 
-    def fitness_profile(self, evaluator_id: str) -> FitnessProfile:
+    def fitness_profile(self, evaluator_id: str, dataset_id: str | None = None) -> FitnessProfile:
         """Return the immutable Host-owned fitness profile for an evaluator."""
 
-        for item in self.catalog():
+        for item in self.catalog(dataset_id):
             if item["id"] == evaluator_id:
                 raw = item["fitness_profile"]
                 if not isinstance(raw, Mapping):
@@ -1697,22 +1709,22 @@ class EvaluatorRegistry:
                 return FitnessProfile(**dict(raw))
         raise ValueError(f"unknown evaluator_id: {evaluator_id}")
 
-    def evaluator_configuration_digest(self, evaluator_id: str) -> str:
-        for item in self.catalog():
+    def evaluator_configuration_digest(self, evaluator_id: str, dataset_id: str | None = None) -> str:
+        for item in self.catalog(dataset_id):
             if item["id"] == evaluator_id:
                 return str(item["configuration_digest"])
         raise ValueError(f"unknown evaluator_id: {evaluator_id}")
 
-    def objective_profile(self, evaluator_id: str) -> dict[str, Any]:
+    def objective_profile(self, evaluator_id: str, dataset_id: str | None = None) -> dict[str, Any]:
         """Return the frozen optimization objective for UI and audit output."""
 
-        for item in self.catalog():
+        for item in self.catalog(dataset_id):
             if item["id"] != evaluator_id:
                 continue
             if item.get("objective_profile") == GREENHOUSE_OBJECTIVE_PROFILE_ID:
                 return {
                     "id": GREENHOUSE_OBJECTIVE_PROFILE_ID,
-                    **_greenhouse_scoring_contract(),
+                    **_greenhouse_scoring_contract(dataset_adapter(dataset_id) if dataset_id else None),
                 }
             return {
                 "id": str(item.get("objective_profile") or "unspecified"),
@@ -1946,7 +1958,13 @@ class EvaluatorRegistry:
             or self.default_predictor(dataset_id)
         )
         self.validate_binding(dataset_id, evaluator_id, predictor_model_id)
+        adapter = dataset_adapter(dataset_id) if dataset_id != TOY_DATASET_ID else None
+        if adapter is not None and task.metadata.get("dataset_task") is not None:
+            if thaw_json(task.metadata["dataset_task"]) != adapter.contract():
+                raise ValueError("frozen dataset task does not match its registered adapter")
         series = self._validated_series(task, dataset_id)
+        if adapter is not None:
+            adapter.validate_series(series)
         if resolved_algorithm_spec is not None:
             if resolved_algorithm_spec.evaluator_id != evaluator_id:
                 raise ValueError(
@@ -1992,17 +2010,8 @@ class EvaluatorRegistry:
             TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
             HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
         }:
-            horizons = (
-                (1, 6, 24)
-                if evaluator_id
-                in {
-                    GREENHOUSE_MULTIHORIZON_EVALUATOR_ID,
-                    GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
-                    GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID,
-                    RUNTIME_EVALUATOR_ID,
-                }
-                else (1,)
-            )
+            horizons = tuple(next(item for item in self.catalog(dataset_id)
+                                  if item["id"] == evaluator_id)["horizons_hours"])
             bundle = self._evaluate_greenhouse_ridge(
                 task,
                 candidate,
@@ -2091,6 +2100,8 @@ class EvaluatorRegistry:
         base = SampleExecutionPolicy.from_mapping(
             task.metadata.get("sample_execution_policy")
         )
+        adapter = dataset_adapter(task.dataset) if task.dataset != TOY_DATASET_ID else None
+        coverage_floor = adapter.minimum_coverage if adapter else base.minimum_coverage
         # Prior-generation evidence may increase resilience, but it may never
         # weaken the immutable coverage thresholds chosen by the host.
         return SampleExecutionPolicy(
@@ -2098,8 +2109,8 @@ class EvaluatorRegistry:
             plan_max_attempts=max(
                 base.plan_max_attempts, execution_plan.plan_max_attempts
             ),
-            minimum_coverage=base.minimum_coverage,
-            minimum_task_coverage=base.minimum_task_coverage,
+            minimum_coverage=max(base.minimum_coverage, coverage_floor),
+            minimum_task_coverage=max(base.minimum_task_coverage, coverage_floor),
             retry_backoff_seconds=max(
                 base.retry_backoff_seconds,
                 execution_plan.retry_backoff_seconds,
@@ -2129,17 +2140,8 @@ class EvaluatorRegistry:
                 expected_dataset_digest=dataset_digest,
                 expected_split_manifest_digest=split_digest,
                 expected_data_protocol_digest=metadata.get("data_protocol_digest"),
-                target_names=tuple(
-                    metadata.get(
-                        "objective_targets",
-                        (
-                            "air_temperature",
-                            "relative_humidity",
-                            "co2_concentration",
-                        ),
-                    )
-                ),
-                horizons=tuple(metadata.get("objective_horizons", (1, 6, 24))),
+                target_names=dataset_adapter(dataset_id).target_names,
+                horizons=dataset_adapter(dataset_id).horizons_hours,
                 history_steps=int(metadata.get("history_steps", 3)),
             )
         else:
@@ -2544,6 +2546,9 @@ class EvaluatorRegistry:
         on_sample_control: Callable[[], str] | None = None,
         execution_plan: DerivedExecutionPlan | None = None,
     ) -> EvaluationBundle:
+        adapter = dataset_adapter(series.dataset_id)
+        targets = adapter.target_bounds
+        target_weights = adapter.target_weights
         execution_plan = execution_plan or self._resolve_execution_plan(
             candidate, proposal, None
         )
@@ -2584,7 +2589,7 @@ class EvaluatorRegistry:
         fitted_targets: list[
             tuple[str, str, float, float, tuple[float | None, ...], float]
         ] = []
-        for target_name, unit, minimum, maximum in _TARGETS:
+        for target_name, unit, minimum, maximum in targets:
             try:
                 values = tuple(series.values[target_name])
             except KeyError:
@@ -2716,7 +2721,7 @@ class EvaluatorRegistry:
 
         baseline_profile = fit_baseline_profile(
             series,
-            targets=tuple(item[0] for item in _TARGETS),
+            targets=tuple(item[0] for item in targets),
             horizons=(1,),
         )
         baseline_scales = {
@@ -2853,7 +2858,7 @@ class EvaluatorRegistry:
             },
             target_bounds={
                 name: {"unit": unit, "minimum": minimum, "maximum": maximum}
-                for name, unit, minimum, maximum in _TARGETS
+                for name, unit, minimum, maximum in targets
             },
             algorithm_id=algorithm_name,
             algorithm_version=algorithm_revision,
@@ -2877,7 +2882,7 @@ class EvaluatorRegistry:
             },
             target_bounds={
                 name: {"unit": unit, "minimum": minimum, "maximum": maximum}
-                for name, unit, minimum, maximum in _TARGETS
+                for name, unit, minimum, maximum in targets
             },
         )
         if on_sample_results is not None:
@@ -2892,9 +2897,10 @@ class EvaluatorRegistry:
         promotion_block_evidence = build_promotion_block_evidence(
             scoring_rows,
             horizons=(1,),
-            target_weights=GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS,
+            target_weights=target_weights,
             dataset_digest=series.digest,
             split_manifest_digest_sha256=series.split_manifest_digest_sha256,
+            dataset_task=adapter.contract(),
         )
         sample_records = list(sample_batch.records)
         incomplete_prediction_tasks = 0
@@ -3111,14 +3117,14 @@ class EvaluatorRegistry:
             else -1.0
         )
         objective_aggregate = _aggregate_greenhouse_objective(
-            target_results, (1,)
+            target_results, (1,), target_weights=target_weights
         )
         objective_score = objective_aggregate["weighted_skill_score"]
         per_target_no_regression = all(
             item["normalized_rmse"] is not None
             and item["baseline_normalized_rmse"] is not None
             and item["normalized_rmse"]
-            <= item["baseline_normalized_rmse"] + GREENHOUSE_NO_REGRESSION_TOLERANCE
+            <= item["baseline_normalized_rmse"] + adapter.no_regression_tolerance
             for item in target_results
         )
         total_eligible_rows = total_rows + total_missing_rows
@@ -3137,9 +3143,9 @@ class EvaluatorRegistry:
             and per_task_coverage_pass
         )
         scientific_pass = (
-            objective_score > GREENHOUSE_MIN_SKILL_EXCLUSIVE
+            objective_score > adapter.minimum_skill
             and per_target_no_regression
-            and constraint_violations <= GREENHOUSE_MAX_CONSTRAINT_VIOLATIONS
+            and constraint_violations <= adapter.maximum_constraint_violations
             and sample_execution_coverage_pass
             and bool(sample_batch.summary.get("strict_agent_chain_pass", True))
         )
@@ -3195,11 +3201,12 @@ class EvaluatorRegistry:
         )
         evaluation_metrics.update(
             {
+                "dataset_task": adapter.contract(),
                 "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
                 "objective_aggregation_version": (
                     GREENHOUSE_OBJECTIVE_AGGREGATION_VERSION
                 ),
-                "objective_target_weights": dict(GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS),
+                "objective_target_weights": dict(target_weights),
                 "objective_horizons": [1],
                 "objective_horizon_weighting": "equal",
                 "objective_score": objective_score,
@@ -3373,7 +3380,7 @@ class EvaluatorRegistry:
             partition="training_feedback",
             evaluator_digest=str(
                 task.metadata.get("evaluator_digest")
-                or self.evaluator_configuration_digest(GREENHOUSE_EVALUATOR_ID)
+                or self.evaluator_configuration_digest(GREENHOUSE_EVALUATOR_ID, series.dataset_id)
             ),
             artifact_digest=artifact.digest,
         )
@@ -3408,6 +3415,9 @@ class EvaluatorRegistry:
         execution_plan: DerivedExecutionPlan | None = None,
         predictor_model_id: str = EXOGENOUS_RIDGE_MODEL_ID,
     ) -> EvaluationBundle:
+        adapter = dataset_adapter(series.dataset_id)
+        targets = adapter.target_bounds
+        target_weights = adapter.target_weights
         execution_plan = execution_plan or self._resolve_execution_plan(
             candidate, proposal, None
         )
@@ -3427,7 +3437,7 @@ class EvaluatorRegistry:
         )
         prediction = NativeBatchBackend().run(
             series,
-            targets=tuple(item[0] for item in _TARGETS),
+            targets=tuple(item[0] for item in targets),
             horizons=horizons,
             config=parameters,
             evaluation_history_steps=MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
@@ -3438,7 +3448,7 @@ class EvaluatorRegistry:
             control=on_sample_control,
         )
         agent_model_tools = AgentModelTools(
-            series, targets=tuple(item[0] for item in _TARGETS), horizons=horizons,
+            series, targets=tuple(item[0] for item in targets), horizons=horizons,
             control=on_sample_control,
             cache_dir=Path.home() / ".cache" / "ecologyrsi-dsh" / "agent-fits-v2",
             default_fit=prediction, default_config=parameters,
@@ -3458,7 +3468,7 @@ class EvaluatorRegistry:
         feedback_range = series.partitions["training_feedback"]
         target_metadata = {
             name: {"unit": unit, "minimum": minimum, "maximum": maximum}
-            for name, unit, minimum, maximum in _TARGETS
+            for name, unit, minimum, maximum in targets
         }
         algorithm_name, separator, algorithm_revision = (
             predictor_model_id.rpartition("@")
@@ -3507,7 +3517,7 @@ class EvaluatorRegistry:
         )
         baseline_profile = fit_baseline_profile(
             series,
-            targets=tuple(item[0] for item in _TARGETS),
+            targets=tuple(item[0] for item in targets),
             horizons=horizons,
         )
         baseline_scales = {
@@ -3518,14 +3528,14 @@ class EvaluatorRegistry:
                     ]
                 )
             )[0]
-            for target_name, _unit, _minimum, _maximum in _TARGETS
+            for target_name, _unit, _minimum, _maximum in targets
         }
 
         measurement_context = EvaluationContext.native(
             series, generated_feedback_rows,
             units={name: metadata['unit'] for name, metadata in target_metadata.items()},
             baseline_profile=baseline_profile, scales=baseline_scales,
-            scoring_contract=_greenhouse_scoring_contract(),
+            scoring_contract=_greenhouse_scoring_contract(adapter),
         )
 
         def finalize_scoring_rows(
@@ -3739,9 +3749,10 @@ class EvaluatorRegistry:
         promotion_block_evidence = build_promotion_block_evidence(
             scored_feedback_rows,
             horizons=horizons,
-            target_weights=GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS,
+            target_weights=target_weights,
             dataset_digest=series.digest,
             split_manifest_digest_sha256=series.split_manifest_digest_sha256,
+            dataset_task=adapter.contract(),
         )
         rows = [
             row for row in generated_rows if row["partition"] == "training_fit"
@@ -3769,10 +3780,10 @@ class EvaluatorRegistry:
         incomplete_prediction_tasks = 0
         evaluation_index_rows: list[dict[str, Any]] = []
         preview_per_task = max(
-            1, _PREVIEW_ROWS_TOTAL // (len(_TARGETS) * len(horizons))
+            1, _PREVIEW_ROWS_TOTAL // (len(targets) * len(horizons))
         )
 
-        for target_name, _unit, _minimum, _maximum in _TARGETS:
+        for target_name, _unit, _minimum, _maximum in targets:
             scale, scale_method = _normalization_scale(
                 tuple(series.values[target_name][fit_range.start : fit_range.end])
             )
@@ -4094,6 +4105,7 @@ class EvaluatorRegistry:
         objective_aggregate = _aggregate_greenhouse_objective(
             task_results,
             horizons,
+            target_weights=target_weights,
         )
         if normalized_candidate:
             overall_nrmse: float | None = fmean(normalized_candidate)
@@ -4109,7 +4121,7 @@ class EvaluatorRegistry:
             item["normalized_rmse"] is not None
             and item["baseline_normalized_rmse"] is not None
             and item["normalized_rmse"]
-            <= item["baseline_normalized_rmse"] + GREENHOUSE_NO_REGRESSION_TOLERANCE
+            <= item["baseline_normalized_rmse"] + adapter.no_regression_tolerance
             for item in task_results
         )
         total_eligible_rows = total_rows + total_missing_rows
@@ -4129,9 +4141,9 @@ class EvaluatorRegistry:
         )
         scientific_pass = (
             objective_aggregate["weighted_skill_score"]
-            > GREENHOUSE_MIN_SKILL_EXCLUSIVE
+            > adapter.minimum_skill
             and per_task_no_regression
-            and constraint_violations <= GREENHOUSE_MAX_CONSTRAINT_VIOLATIONS
+            and constraint_violations <= adapter.maximum_constraint_violations
             and sample_execution_coverage_pass
             and bool(sample_batch.summary.get("strict_agent_chain_pass", True))
         )
@@ -4245,7 +4257,7 @@ class EvaluatorRegistry:
         evaluator_id = str(task.metadata.get("evaluator_id") or GREENHOUSE_EVALUATOR_ID)
         evaluator_digest = str(
             task.metadata.get("evaluator_digest")
-            or self.evaluator_configuration_digest(evaluator_id)
+            or self.evaluator_configuration_digest(evaluator_id, series.dataset_id)
         )
         evaluation_index_digest = _evaluation_index_digest(
             series, evaluation_index_rows
@@ -4253,11 +4265,12 @@ class EvaluatorRegistry:
         evaluation_metrics = {
             "measurement_context": measurement_context.summary(),
             "numerical_backend": NativeBatchBackend.version,
-            "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
+            "dataset_task": adapter.contract(),
+                "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
             "objective_aggregation_version": (
                 GREENHOUSE_OBJECTIVE_AGGREGATION_VERSION
             ),
-            "objective_target_weights": dict(GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS),
+            "objective_target_weights": dict(target_weights),
             "objective_horizons": list(horizons),
             # Explicit objective fields are additive. ``skill_score`` and
             # ``mean_normalized_reward`` retain their historical semantics.

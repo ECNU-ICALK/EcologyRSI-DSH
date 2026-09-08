@@ -21,7 +21,7 @@ from ecologyrsi_dsh.data.splits import IndexRange
 
 
 def _feature(name: str, role: str) -> FeatureSpec:
-    return FeatureSpec(name, name, role, "unit")
+    return FeatureSpec(name, name, role, {"air_temperature": "degC", "relative_humidity": "percent", "co2_concentration": "ppm"}.get(name, "unit"))
 
 
 def _series(

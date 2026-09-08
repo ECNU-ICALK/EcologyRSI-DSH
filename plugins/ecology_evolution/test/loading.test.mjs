@@ -22,6 +22,27 @@ function sandbox() {
 }
 const section = (view, revision=5, fields={}) => ({view,projection:{run_id:'run:a',status:'running',projection_revision:revision,...fields}});
 
+test('dataset adapters control the training selector and per-dataset evaluation grid',()=>{
+  const c=sandbox();
+  const dataset=(id,cells)=>({id,training_selectable:true,task_adapter:{evaluator_id:'engine'},
+    evaluation:{id:'engine',prediction_cells_per_origin:cells,minimum_samples_per_update:cells}});
+  c.state.usingDemo=false;
+  c.state.catalog.datasets=[dataset('dataset:a',9),dataset('dataset:b',4),
+    {id:'synthetic',available:true}, {...dataset('unready',2),readiness:{ready:false}}];
+  c.state.catalog.evaluators=[{id:'engine',prediction_cells_per_origin:99}];
+  assert.deepEqual(Array.from(c.runnableDatasetItems(),x=>x.id),['dataset:a','dataset:b']);
+  for(const [id,cells] of [['dataset:a',9],['dataset:b',4]]){
+    c.document.querySelector('#dataset-id').value=id;
+    c.alignDatasetBinding();
+    assert.equal(c.document.querySelector('#evaluator-id').value,'engine');
+    assert.equal(c.predictionCellsPerOrigin(),cells);
+    assert.equal(c.samplesPerUpdateMinimum(),cells);
+  }
+  c.state.catalog.datasets[1].task_adapter.evaluator_id='missing';
+  c.alignDatasetBinding();
+  assert.equal(c.document.querySelector('#evaluator-id').value,'');
+});
+
 test('sample pages require the current envelope and requested run, candidate and page',()=>{
   const c=sandbox();
   const page={schema_version:'ecologyrsi-dsh.browser-sample-results/1',run_id:'run:a',candidate_id:'candidate:a',rows:[],offset:0,limit:25,total:0};

@@ -522,7 +522,9 @@ class FormalTrajectoryTests(unittest.TestCase):
             run=SimpleNamespace(run_id="run:bounded-local"),
             task_manifest=SimpleNamespace(
                 metadata={
-                    "optimization_schedule": OptimizationSchedule.default().to_dict()
+                    "optimization_schedule": OptimizationSchedule.default().to_dict(),
+                    "fitness_profile": {"expected_targets": ["air_temperature", "relative_humidity", "co2_concentration"],
+                                        "expected_horizons": [1, 6, 24]},
                 }
             ),
             batch_evaluation_for=lambda *_args: SimpleNamespace(scope=SimpleNamespace(scope_key="a" * 64)),

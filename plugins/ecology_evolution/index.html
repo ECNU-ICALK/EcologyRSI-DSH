@@ -94,6 +94,7 @@
                   <label class="autonomy-model-field"><span>策略模型（API）</span><select id="policy-model-id" name="strategy_model_id" required></select><small id="policy-model-help">从 DSH 已登记模型目录选择；负责检索知识并提出结构化研究计划和有界候选参数。</small></label>
                   <label class="autonomy-model-field"><span>独立评审模型（API）</span><select id="judge-model-id" name="review_model_id" required></select><small id="judge-model-help">从同一 DSH 模型目录选择；独立检查候选效果、科学约束与搜索保留结论。必须选择不同的模型目录 ID。</small></label>
                 </div>
+                <div id="dataset-task-help" class="dataset-task-summary" hidden aria-live="polite"></div>
                 <div class="auto-binding-note" role="note"><strong>预测方案由模型自主选择</strong><span>预测方案由研究模型在运行中决定：可以只用基线、选择已登记模型，并根据评测结果切换模型或优化参数。系统固定数据和评测规则，实际选择与效果在运行过程中展示。</span></div>
                 <div class="auto-binding-fields" aria-hidden="true">
                   <label hidden><span>研究领域（自动推导）</span><select id="domain-pack" name="domain" required></select><small id="domain-pack-help">由所选训练数据集自动推导知识检索范围、科学约束和数据适配器。</small></label>

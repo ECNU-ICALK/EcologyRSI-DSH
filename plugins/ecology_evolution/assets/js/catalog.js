@@ -362,13 +362,10 @@
     return "";
   }
   function runnableDatasetItems() {
-    var trainingDatasets = ["agc_cucumber_2018", "agc_tomato_2019"];
     return (state.catalog.datasets || []).filter(function (item) {
       if (!item || item.available === false || item.runnable === false) { return false; }
-      if (!state.usingDemo && trainingDatasets.indexOf(itemId(item)) < 0) { return false; }
+      if (!state.usingDemo && (item.training_selectable !== true || !item.task_adapter || !item.evaluation)) { return false; }
       return !item.readiness || item.readiness.ready !== false;
-    }).sort(function (left, right) {
-      return trainingDatasets.indexOf(itemId(left)) - trainingDatasets.indexOf(itemId(right));
     });
   }
   function datasetEpisodes(dataset) {
@@ -485,6 +482,10 @@
   }
   function selectedCatalogItem(collection, selector) {
     var value = $(selector).value;
+    if (collection === "evaluators") {
+      var dataset = selectedCatalogItem("datasets", "#dataset-id");
+      if (dataset && dataset.evaluation && itemId(dataset.evaluation) === value) { return dataset.evaluation; }
+    }
     return state.catalog[collection].find(function (item) { return itemId(item) === value; });
   }
   function alignDomainDatasetBinding() {
@@ -512,7 +513,7 @@
     }
     var datasetId = itemId(dataset);
     var evaluatorId = datasetId === "generated-toy-series@1" && state.usingDemo
-      ? "toy_time_forward@1" : state.catalog.runtime_evaluator_id;
+      ? "toy_time_forward@1" : dataset.task_adapter && dataset.task_adapter.evaluator_id;
     var evaluator = state.catalog.evaluators.find(function (item) {
       return itemId(item) === evaluatorId && item.available !== false
         && (!Array.isArray(item.dataset_ids) || item.dataset_ids.indexOf(datasetId) >= 0);
@@ -575,6 +576,19 @@
   function updateSelectionHelp() {
     setHelp("#domain-pack-help", selectedCatalogItem("domain_packs", "#domain-pack"), "由所选训练数据集自动推导知识检索范围、科学约束和数据适配器。");
     setHelp("#dataset-help", selectedCatalogItem("datasets", "#dataset-id"), "当前训练支持 2018 黄瓜和 2019 番茄数据集；数据集自动匹配研究领域和授权评测边界。");
+    var dataset = selectedCatalogItem("datasets", "#dataset-id");
+    var task = dataset && dataset.task_adapter;
+    var taskHelp = $("#dataset-task-help");
+    if (taskHelp) {
+      taskHelp.hidden = !task;
+      taskHelp.textContent = task ? [
+        task.label,
+        "预测目标：" + task.targets.map(function (target) { return target.label + "（" + target.unit + "，权重 " + Math.round(target.weight * 1000) / 10 + "%）"; }).join("、"),
+        "预测时距：" + task.horizons_hours.join(" / ") + " 小时；按目标权重汇总相对基线的 RMSE 改善，各时距等权。",
+        "通过要求：整体优于基线，各目标与时距不退化；预测覆盖率至少 " + Math.round(task.minimum_coverage * 100) + "%（候选选择至少 " + Math.round(task.selection_minimum_coverage * 100) + "%）；越界预测最多 " + task.maximum_constraint_violations + " 个。",
+        task.label_semantics.join(" ")
+      ].join("\n") : "";
+    }
     populateEpisodeControl($("#episode-id").value);
     setHelp("#strategy-help", selectedCatalogItem("strategies", "#strategy-id"), "策略模型只能在宿主注册表提供的有界策略和参数空间内提出方案。");
     setHelp("#evaluator-help", selectedCatalogItem("evaluators", "#evaluator-id"), "由系统依据数据和候选产物自动绑定。");

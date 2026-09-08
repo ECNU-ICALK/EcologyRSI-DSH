@@ -9,6 +9,7 @@ from typing import Any, Mapping, Protocol, Sequence
 from ..core.models import digest
 from ..core.trajectory import OriginOccurrence
 from ..data.splits import IndexRange
+from ..data.adapters import DATASET_ADAPTERS
 from ..evolution.schedule import OptimizationSchedule, ISOLATED_SCHEDULE_SCHEMA_VERSION
 from .greenhouse_prediction import MAX_EXOGENOUS_RIDGE_HISTORY_STEPS
 
@@ -566,14 +567,20 @@ class CohortCapacityReport:
         return payload
 
 
+def _dataset_horizons(dataset: DatasetIdentityView) -> tuple[int, ...]:
+    adapter = DATASET_ADAPTERS.get(dataset.dataset_id)
+    return adapter.horizons_hours if adapter else DEFAULT_HORIZONS
+
+
 def _eligible_origins(
     dataset: DatasetIdentityView,
     *,
-    horizons: tuple[int, ...] = DEFAULT_HORIZONS,
+    horizons: tuple[int, ...] | None = None,
     history_steps: int = DEFAULT_HISTORY_STEPS,
 ) -> tuple[tuple[PlannedOrigin, ...], dict[str, int]]:
     dataset_id, episode_id, timestamps = _dataset_identity(dataset)
     selected = _selection_partition(dataset)
+    horizons = _dataset_horizons(dataset) if horizons is None else horizons
     maximum_horizon = max(horizons)
     by_timestamp = {timestamp: index for index, timestamp in enumerate(timestamps)}
     origins: list[PlannedOrigin] = []
@@ -717,7 +724,7 @@ def plan_run_adaptation_cohort(
     cohort = PlannedCohort(
         role="adaptation",
         origins=selected,
-        maximum_horizon=max(DEFAULT_HORIZONS),
+        maximum_horizon=max(_dataset_horizons(dataset)),
         shared_candidate_count=schedule.finalist_count,
     )
     batches = tuple(
@@ -729,7 +736,7 @@ def plan_run_adaptation_cohort(
                     index * schedule.local_batch_origin_count :
                     (index + 1) * schedule.local_batch_origin_count
                 ],
-                maximum_horizon=max(DEFAULT_HORIZONS),
+                maximum_horizon=max(_dataset_horizons(dataset)),
                 shared_candidate_count=schedule.finalist_count,
             ),
         )
@@ -783,13 +790,13 @@ def plan_generation_selection_cohorts(
     screening = PlannedCohort(
         role="screening",
         origins=selected[:screening_end],
-        maximum_horizon=max(DEFAULT_HORIZONS),
+        maximum_horizon=max(_dataset_horizons(dataset)),
         shared_candidate_count=4,
     )
     holdout = PlannedCohort(
         role="holdout",
         origins=selected[screening_end:],
-        maximum_horizon=max(DEFAULT_HORIZONS),
+        maximum_horizon=max(_dataset_horizons(dataset)),
         shared_arm_count=3,
     )
     return GenerationCohorts(
@@ -810,10 +817,14 @@ def estimate_epoch_capacity(
     schedule: OptimizationSchedule,
     planned_generations: int,
     seed: int,
-    scoring_cells_per_origin: int = DEFAULT_SCORING_CELLS_PER_ORIGIN,
+    scoring_cells_per_origin: int | None = None,
 ) -> CohortCapacityReport:
     if not isinstance(schedule, OptimizationSchedule):
         raise TypeError("schedule must be OptimizationSchedule")
+    if scoring_cells_per_origin is None:
+        adapter = DATASET_ADAPTERS.get(dataset.dataset_id)
+        scoring_cells_per_origin = (len(adapter.targets) * len(adapter.horizons_hours)
+                                    if adapter else DEFAULT_SCORING_CELLS_PER_ORIGIN)
     if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION:
         from .isolated_cohorts import estimate_capacity
         return estimate_capacity(dataset, schedule=schedule, planned_generations=planned_generations, seed=seed, scoring_cells_per_origin=scoring_cells_per_origin)

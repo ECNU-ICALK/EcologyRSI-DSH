@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 from ecologyrsi_dsh.core.models import digest
+from ecologyrsi_dsh.core.prediction_policy import RUNTIME_EVALUATOR_ID
 from ecologyrsi_dsh.data.registry import DatasetRegistry, DatasetSeries
 from ecologyrsi_dsh.evaluators.registry import (
     EXOGENOUS_RIDGE_MODEL_ID,
@@ -21,7 +22,7 @@ from ecologyrsi_dsh.evaluators.registry import (
     EvaluationBundle,
     EvaluatorRegistry,
 )
-from ecologyrsi_dsh.data.greenhouse import FeatureSpec
+from ecologyrsi_dsh.data.greenhouse import FeatureSpec, feature_specs
 from ecologyrsi_dsh.knowledge.algorithms import (
     compile_algorithm_spec,
     registered_predictor_evaluator_ids,
@@ -179,7 +180,7 @@ def _series(
             "training_feedback": IndexRange(31, 60),
             "development": IndexRange(80, 80),
         },
-        features={},
+        features=feature_specs("greenhouse_cucumber_2018"),
         split_manifest_digest_sha256=SPLIT_DIGEST,
     )
 
@@ -214,7 +215,7 @@ def _cohort_series() -> DatasetSeries:
             "training_feedback": IndexRange(101, 200),
             "development": IndexRange(200, 220),
         },
-        features={},
+        features=feature_specs("greenhouse_cucumber_2018"),
         split_manifest_digest_sha256=SPLIT_DIGEST,
     )
 
@@ -813,7 +814,7 @@ class GreenhouseEvaluationTests(unittest.TestCase):
         self.assertEqual(registry.default_predictor(DATASET_ID), EXOGENOUS_RIDGE_MODEL_ID)
         self.assertEqual(
             registry.default_evaluator(DATASET_ID),
-            GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
+            RUNTIME_EVALUATOR_ID,
         )
         self.assertEqual(
             len(predictors[EXOGENOUS_RIDGE_MODEL_ID]["configuration_digest"]), 64

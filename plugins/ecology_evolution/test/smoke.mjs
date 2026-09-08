@@ -239,7 +239,7 @@ const automaticBindingNodes = {
 modelSandbox.document.querySelector = (selector) => automaticBindingNodes[selector] || modelNode();
 modelSandbox.state.catalog = {
   runtime_evaluator_id: "greenhouse_multihorizon_time_forward@4",
-  datasets: [{id: "agc_cucumber_2018"}],
+  datasets: [{id: "agc_cucumber_2018", task_adapter: {evaluator_id: "greenhouse_multihorizon_time_forward@4"}}],
   prediction_models: [{id: "greenhouse-exogenous-ridge@1"}],
   evaluators: [
     {id: "greenhouse_multihorizon_time_forward@2", prediction_model_ids: ["greenhouse-exogenous-ridge@1"]},
@@ -251,7 +251,7 @@ assert.equal(automaticBindingNodes["#evaluator-id"].value, "greenhouse_multihori
 assert.equal(modelSandbox.predictionBindingsReady(), true);
 modelSandbox.state.catalog.prediction_models[0].available = false;
 assert.equal(modelSandbox.predictionBindingsReady(), false);
-modelSandbox.state.catalog.runtime_evaluator_id = "missing";
+modelSandbox.state.catalog.datasets[0].task_adapter.evaluator_id = "missing";
 modelSandbox.alignDatasetBinding();
 assert.equal(automaticBindingNodes["#evaluator-id"].value, "");
 modelSandbox.document.querySelector = automaticBindingQuerySelector;

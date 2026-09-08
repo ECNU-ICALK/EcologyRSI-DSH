@@ -151,7 +151,7 @@ class HTTPContractTests(unittest.TestCase):
         self.assertEqual(
             payload["candidate_origin_executions_per_generation"], 2663
         )
-        self.assertEqual(payload["scoring_cells_per_generation"], 23967)
+        self.assertEqual(payload["scoring_cells_per_generation"], 2663)
         # The synthetic toy series has no complete 1/6/24-hour origin
         # population; it remains intentionally ineligible for the strict
         # cohort planner even though toy run creation is not capacity-gated.

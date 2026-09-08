@@ -10,6 +10,7 @@ from typing import Any
 
 from ..core.models import digest
 from ..core.immutable import thaw_json
+from ..data.adapters import dataset_adapter
 from ..evaluators.objectives import (
     DEFAULT_TARGET_WEIGHTS,
     OBJECTIVE_AGGREGATION_VERSION,
@@ -34,6 +35,7 @@ _COMMON_CONTRACT_FIELDS = (
     "evaluation_index_digest",
     "dataset_digest",
     "split_manifest_digest_sha256",
+    "dataset_task",
 )
 
 
@@ -47,7 +49,8 @@ def _finite(value: Any, name: str) -> float:
 
 
 def _validated_grid(
-    horizons: Sequence[int], target_weights: Mapping[str, float]
+    horizons: Sequence[int], target_weights: Mapping[str, float],
+    dataset_task: Mapping[str, Any] | None = None,
 ) -> tuple[tuple[int, ...], dict[str, float]]:
     resolved_horizons = tuple(horizons)
     if (
@@ -65,14 +68,20 @@ def _validated_grid(
     }
     if not weights or any(value < 0 for value in weights.values()) or sum(weights.values()) <= 0:
         raise ValueError("promotion target weights must be non-negative and non-zero")
-    if set(weights) != set(DEFAULT_TARGET_WEIGHTS) or any(
+    expected_weights = DEFAULT_TARGET_WEIGHTS
+    if dataset_task is not None:
+        adapter = dataset_adapter(dataset_task.get("dataset_id"))
+        if thaw_json(dataset_task) != adapter.contract() or not set(resolved_horizons).issubset(adapter.horizons_hours):
+            raise ValueError("promotion dataset task does not match its frozen adapter")
+        expected_weights = adapter.target_weights
+    if set(weights) != set(expected_weights) or any(
         not math.isclose(
             weights[target],
-            DEFAULT_TARGET_WEIGHTS[target],
+            expected_weights[target],
             rel_tol=0.0,
             abs_tol=1e-15,
         )
-        for target in DEFAULT_TARGET_WEIGHTS
+        for target in expected_weights
     ):
         raise ValueError("promotion target weights do not match the frozen objective")
     return resolved_horizons, weights
@@ -85,10 +94,11 @@ def build_promotion_block_evidence(
     target_weights: Mapping[str, float],
     dataset_digest: str,
     split_manifest_digest_sha256: str,
+    dataset_task: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build private 24-hour origin blocks of objective sufficient statistics."""
 
-    resolved_horizons, weights = _validated_grid(horizons, target_weights)
+    resolved_horizons, weights = _validated_grid(horizons, target_weights, dataset_task)
     cell_keys = tuple(
         (target, horizon) for target in weights for horizon in resolved_horizons
     )
@@ -183,6 +193,7 @@ def build_promotion_block_evidence(
         "score_definition": PROMOTION_SCORE_DEFINITION,
         "target_weights": weights,
         "horizons": list(resolved_horizons),
+        **({"dataset_task": thaw_json(dataset_task)} if dataset_task is not None else {}),
         "block_count": len(blocks),
         "blocks": blocks,
     }
@@ -247,7 +258,7 @@ def _validated_evidence(evaluation: Any) -> dict[str, Any] | None:
         return None
     try:
         horizons, weights = _validated_grid(
-            raw.get("horizons", ()), raw.get("target_weights", {})
+            raw.get("horizons", ()), raw.get("target_weights", {}), raw.get("dataset_task")
         )
     except (TypeError, ValueError):
         return None
@@ -313,9 +324,11 @@ def _validated_evidence(evaluation: Any) -> dict[str, Any] | None:
         "score_definition": raw["score_definition"],
         "target_weights": weights,
         "horizons": list(horizons),
+        **({"dataset_task": raw["dataset_task"]} if raw.get("dataset_task") is not None else {}),
     }
     return {
         "config_digest": digest(config),
+        "dataset_task": raw.get("dataset_task"),
         "horizons": horizons,
         "weights": weights,
         "blocks": blocks,
@@ -332,12 +345,13 @@ def _evidence_matches_evaluation(
     ):
         return False
     try:
-        horizons, weights = _validated_grid(raw_horizons, raw_weights)
+        horizons, weights = _validated_grid(raw_horizons, raw_weights, _contract_value(evaluation, "dataset_task"))
     except (TypeError, ValueError):
         return False
     return bool(
         tuple(evidence["horizons"]) == horizons
         and evidence["weights"] == weights
+        and evidence.get("dataset_task") == _contract_value(evaluation, "dataset_task")
     )
 
 
@@ -475,7 +489,10 @@ def assess_promotion_improvement(
     if set(block_ids) != set(incumbent["blocks"]):
         return _incomparable(score_delta, "mismatched_block_identities")
 
-    point_pass = score_delta > V2_MINIMUM_SCORE_DELTA
+    contract = current.get("dataset_task")
+    minimum_delta = (dataset_adapter(contract["dataset_id"]).selection_minimum_score_delta
+                     if contract else V2_MINIMUM_SCORE_DELTA)
+    point_pass = score_delta > minimum_delta
     interval: tuple[float, float] | None = None
     evidence_sufficient = len(block_ids) >= minimum_paired_blocks
     confidence_pass = False
@@ -540,7 +557,7 @@ def assess_promotion_improvement(
         "minimum_paired_blocks": minimum_paired_blocks,
         "comparable": True,
         "score_delta": score_delta,
-        "minimum_score_delta": V2_MINIMUM_SCORE_DELTA,
+        "minimum_score_delta": minimum_delta,
         "paired_block_count": len(block_ids),
         "bootstrap_resamples": PROMOTION_BOOTSTRAP_RESAMPLES if interval else 0,
         "confidence_level": PROMOTION_CONFIDENCE_LEVEL,

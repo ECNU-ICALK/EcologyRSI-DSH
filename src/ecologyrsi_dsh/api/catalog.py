@@ -44,15 +44,17 @@ class CatalogEndpointsMixin:
                 "display_name": raw["display_name_zh"],
                 "description": " ".join(raw.get("notes_zh", [])),
                 "domain_id": raw["domain_id"],
-                "domain_pack_id": (
-                    "crop_soil_water"
-                    if raw["dataset_id"] == TOY_DATASET_ID
-                    else "greenhouse_environment@1"
-                ),
+                "domain_pack_id": (raw["task_adapter"]["domain_pack_id"]
+                                   if raw.get("task_adapter") else "crop_soil_water" if raw["dataset_id"] == TOY_DATASET_ID else None),
+                "training_selectable": raw["training_selectable"],
+                "task_adapter": raw["task_adapter"],
                 "license": raw["license"],
                 "ready": readiness["ready"],
                 "readiness": readiness,
             }
+            if raw.get("task_adapter"):
+                item["evaluation"] = next(evaluator for evaluator in self.server.evaluators.catalog(raw["dataset_id"])
+                                          if evaluator["id"] == raw["task_adapter"]["evaluator_id"])
             if raw["runnable"] and readiness["ready"]:
                 item["episodes"] = self.server.datasets.episodes(raw["dataset_id"])
                 ready_datasets.append(item)

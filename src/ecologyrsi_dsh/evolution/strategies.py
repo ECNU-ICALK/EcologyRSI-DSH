@@ -229,6 +229,7 @@ def _forecast_objective_context(task: TaskManifest) -> dict[str, Any]:
 
     result: dict[str, Any] = {
         "schema_version": "ecologyrsi-dsh.forecast-objective-context/1",
+        "dataset_task": task.to_dict()["metadata"].get("dataset_task"),
         "dataset_ids": list(task.visible_datasets),
         "expected_targets": targets,
         "expected_horizons_hours": horizons,

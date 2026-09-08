@@ -17,6 +17,7 @@ from ecologyrsi_dsh.core.models import Candidate, Proposal, TaskManifest, digest
 from ecologyrsi_dsh.core.sample_results import build_sample_results
 from ecologyrsi_dsh.core.state import validate_evaluation_progress_payload
 from ecologyrsi_dsh.data.registry import DatasetRegistry, DatasetSeries
+from ecologyrsi_dsh.data.greenhouse import feature_specs
 from ecologyrsi_dsh.evaluators.gateway_sample_adapter import (
     GatewaySampleCollaborationAdapter,
     GatewaySampleTool,
@@ -1150,7 +1151,7 @@ def _series() -> DatasetSeries:
             "training_feedback": IndexRange(41, 80),
             "development": IndexRange(90, 100),
         },
-        features={},
+        features=feature_specs("greenhouse_cucumber_2018"),
         split_manifest_digest_sha256="s" * 64,
     )
 

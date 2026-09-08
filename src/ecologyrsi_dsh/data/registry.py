@@ -23,7 +23,8 @@ from .contracts import (
     DatasetSeries,
     SelectionDatasetView,
 )
-from .greenhouse import CanonicalEpisode, CanonicalSeries, GreenhouseDatasetAdapter
+from .greenhouse import CanonicalEpisode, CanonicalSeries
+from .adapters import DATASET_ADAPTERS, dataset_adapter
 from .preparation import (
     _audit_source_archive,
     _download_verified_source,
@@ -65,6 +66,9 @@ class DatasetRegistry:
                 {
                     **item.to_dict(),
                     "readiness": self._readiness(item),
+                    "training_selectable": item.dataset_id in DATASET_ADAPTERS,
+                    "task_adapter": (dataset_adapter(item.dataset_id).contract()
+                                     if item.dataset_id in DATASET_ADAPTERS else None),
                 }
                 for item in sorted(self._descriptors.values(), key=lambda value: value.dataset_id)
             ],
@@ -169,27 +173,8 @@ class DatasetRegistry:
                     "row_count": 60,
                 }
             ]
-        if descriptor.adapter_id == "greenhouse_timeseries":
-            filename = (
-                "Greenhouse_climate.csv"
-                if descriptor.domain_id == "greenhouse_cucumber_2018"
-                else "GreenhouseClimate.csv"
-            )
-            result = []
-            for path in sorted(self._dataset_dir(descriptor).glob(f"*/{filename}")):
-                team = path.parent.name
-                if "reference" in team.casefold():
-                    continue
-                episode_id = f"{descriptor.dataset_id}:{team}"
-                result.append(
-                    {
-                        "id": episode_id,
-                        "episode_id": episode_id,
-                        "label": team,
-                        "row_count": None,
-                    }
-                )
-            return result
+        if dataset_id in DATASET_ADAPTERS:
+            return dataset_adapter(dataset_id).episodes(self._dataset_dir(descriptor))
         canonical = self._load_series(descriptor)
         manifest = self._split_manifest(descriptor, canonical)
         result: list[dict[str, Any]] = []
@@ -280,16 +265,20 @@ class DatasetRegistry:
         expected_dataset_digest: str | None = None,
         expected_split_manifest_digest: str | None = None,
         expected_data_protocol_digest: str | None = None,
-        target_names: tuple[str, ...] = (
-            "air_temperature",
-            "relative_humidity",
-            "co2_concentration",
-        ),
-        horizons: tuple[int, ...] = (1, 6, 24),
+        target_names: tuple[str, ...] | None = None,
+        horizons: tuple[int, ...] | None = None,
         history_steps: int = 3,
     ) -> SelectionDatasetView:
         """Return the only raw-row view allowed to a new adaptive evaluator."""
 
+        adapter = dataset_adapter(dataset_id) if dataset_id in DATASET_ADAPTERS else None
+        if adapter is not None:
+            if target_names is not None and target_names != adapter.target_names:
+                raise ValueError("selection targets must match the dataset adapter")
+            if horizons is not None and horizons != adapter.horizons_hours:
+                raise ValueError("selection horizons must match the dataset adapter")
+        target_names = adapter.target_names if adapter else target_names or ("soil_water",)
+        horizons = adapter.horizons_hours if adapter else horizons or (1,)
         descriptor = self._descriptor(dataset_id)
         canonical = self._load_series(descriptor)
         manifest = self._split_manifest(descriptor, canonical)
@@ -399,6 +388,10 @@ class DatasetRegistry:
             descriptor = DatasetDescriptor.from_dict(raw)
             if descriptor.dataset_id in descriptors:
                 raise ValueError(f"duplicate dataset_id: {descriptor.dataset_id}")
+            if descriptor.dataset_id in DATASET_ADAPTERS:
+                adapter = dataset_adapter(descriptor.dataset_id)
+                if descriptor.adapter_id != adapter.adapter_id or descriptor.domain_id != adapter.domain_id:
+                    raise ValueError("dataset descriptor does not match its registered adapter")
             descriptors[descriptor.dataset_id] = descriptor
         return descriptors
 
@@ -515,12 +508,13 @@ class DatasetRegistry:
                 "required_features": ["rainfall", "evapotranspiration", "soil_water"],
                 "scientific_limits_zh": ["仅用于工程测试，不代表真实农业观测或因果结论。"],
             }
-        elif descriptor.adapter_id == "greenhouse_timeseries":
-            profile = GreenhouseDatasetAdapter(
-                descriptor.dataset_id,
-                descriptor.domain_id,
-                self._dataset_dir(descriptor),
-            ).profile()
+        elif descriptor.dataset_id in DATASET_ADAPTERS:
+            adapter = dataset_adapter(descriptor.dataset_id)
+            profile = {
+                **adapter.loader(self._dataset_dir(descriptor)).profile(),
+                "adapter_id": adapter.adapter_id,
+                "task_adapter": adapter.contract(),
+            }
         else:
             profile = {
                 "schema_version": "ecologyrsi-dsh.dataset-profile/1",
@@ -558,12 +552,11 @@ class DatasetRegistry:
                 )
             if descriptor.dataset_id == _TOY_DATASET_ID:
                 loaded = _toy_series()
-            elif descriptor.adapter_id == "greenhouse_timeseries":
-                loaded = GreenhouseDatasetAdapter(
-                    descriptor.dataset_id,
-                    descriptor.domain_id,
-                    self._dataset_dir(descriptor),
-                ).load()
+            elif descriptor.dataset_id in DATASET_ADAPTERS:
+                adapter = dataset_adapter(descriptor.dataset_id)
+                loaded = adapter.loader(self._dataset_dir(descriptor)).load()
+                for episode in loaded.episodes:
+                    adapter.validate_series(episode)
             else:  # pragma: no cover - runnable descriptors are currently explicit
                 raise ValueError(f"unsupported dataset adapter: {descriptor.adapter_id}")
             self._series_cache[descriptor.dataset_id] = loaded

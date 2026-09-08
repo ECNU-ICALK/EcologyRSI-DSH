@@ -13,6 +13,7 @@ from ecologyrsi_dsh.core.prediction_policy import (
     RUNTIME_PREDICTION_POLICY, prediction_usage,
 )
 from ecologyrsi_dsh.data.splits import IndexRange
+from ecologyrsi_dsh.data.adapters import CUCUMBER_2018
 from ecologyrsi_dsh.evaluators.greenhouse_prediction import BaselineAlignedRidgeConfig
 from ecologyrsi_dsh.evaluators.registry import EvaluatorRegistry
 from ecologyrsi_dsh.evolution.batches import start_generation_batch
@@ -74,8 +75,12 @@ class RuntimeChoiceApiTests(unittest.TestCase):
                 self.assertEqual(status, 201, created)
                 state = self.server.director.state(created["projection"]["run_id"])
                 metadata = state.task_manifest.metadata
+                self.assertEqual(created["projection"]["configuration"]["dataset_task"], CUCUMBER_2018.contract())
                 self.assertEqual(metadata["prediction_selection_policy"], RUNTIME_PREDICTION_POLICY)
                 self.assertEqual(metadata["evaluator_id"], RUNTIME_EVALUATOR_ID)
+                self.assertEqual(metadata["dataset_task"], CUCUMBER_2018.contract())
+                self.assertEqual(metadata["dataset_task_digest"], CUCUMBER_2018.contract()["contract_digest"])
+                self.assertEqual(metadata["evaluator_digest"], self.server.evaluators.evaluator_configuration_digest(RUNTIME_EVALUATOR_ID, CUCUMBER_2018.dataset_id))
                 self.assertEqual(set(metadata["prediction_selection"]["allowed_predictor_ids"]), set(PREDICTORS))
                 self.assertEqual({p["id"] for p in metadata["runtime_component_catalog"]["prediction_models"]}, set(PREDICTORS))
                 genome = state.materialized_seed_genome()
@@ -88,6 +93,15 @@ class RuntimeChoiceApiTests(unittest.TestCase):
                     "strategy_model_id": "stub/strategy", "review_model_id": "stub/review",
                     "autonomous_mode": True,
                 }).to_dict()
+            for field, value in (("dataset_task", {"dataset_id": "wrong"}), ("dataset_task_digest", "bad"),
+                                 ("objective_targets", ["marketable_yield"]),
+                                 ("objective_horizons", [72])):
+                invalid = {**full, "metadata": {**full["metadata"], field: value}}
+                status, error = self.request("/runs", "POST", {
+                    "task_manifest": invalid, "auto_advance": 0,
+                    "idempotency_key": "reject-dataset-task-" + field,
+                })
+                self.assertEqual(status, 400, error)
             full_request = {"task_manifest": full, "auto_advance": 0,
                             "idempotency_key": "full-manifest-choice",
                             "prediction_selection_policy": RUNTIME_PREDICTION_POLICY}

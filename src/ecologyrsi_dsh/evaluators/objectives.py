@@ -104,16 +104,8 @@ def normalized_absolute_error_reward(
 def _validated_target_weights(
     target_weights: Mapping[str, float],
 ) -> dict[str, float]:
-    expected = set(DEFAULT_TARGET_WEIGHTS)
-    if set(target_weights) != expected:
-        missing = expected - set(target_weights)
-        unknown = set(target_weights) - expected
-        detail = []
-        if missing:
-            detail.append("missing " + ", ".join(sorted(missing)))
-        if unknown:
-            detail.append("unknown " + ", ".join(sorted(unknown)))
-        raise ValueError("objective weights are invalid: " + "; ".join(detail))
+    if not target_weights or any(not isinstance(name, str) or not name.strip() for name in target_weights):
+        raise ValueError("objective weights require non-empty target names")
     result: dict[str, float] = {}
     for target, value in target_weights.items():
         if (

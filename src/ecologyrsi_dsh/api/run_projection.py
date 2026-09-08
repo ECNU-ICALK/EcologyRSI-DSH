@@ -43,6 +43,8 @@ def build_configuration(task: Any, state: Any, profile: str = "full") -> dict[st
         "host_runtime_build": metadata.get("host_runtime_build"),
         "domain_pack_id": task.domain_pack,
         "dataset_id": dataset_id,
+        "dataset_task": metadata.get("dataset_task"),
+        "dataset_task_digest": metadata.get("dataset_task_digest"),
         "episode_id": metadata.get("episode_id"),
         "strategy_id": metadata.get("strategy_id", "parameter_sweep@1"),
         "strategy_digest": metadata.get("strategy_digest"),

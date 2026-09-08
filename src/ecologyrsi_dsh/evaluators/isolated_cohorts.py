@@ -11,7 +11,7 @@ import math
 from .epoch_cohorts import (
     CohortCapacityError, CohortCapacityReport, GenerationCohorts, PlannedBatch,
     PlannedCohort, RunAdaptationCohort, ISOLATED_PLANNER_SCHEMA,
-    ISOLATED_REUSE_POLICY, DEFAULT_HORIZONS, _eligible_origins,
+    ISOLATED_REUSE_POLICY, _dataset_horizons, _eligible_origins,
     _dataset_identity, _selection_partition, _strict_integer,
 )
 from ..core.models import digest
@@ -40,17 +40,17 @@ class _Cursor:
         return result
 
 
-def _adaptation(eligible, schedule, seed):
+def _adaptation(eligible, schedule, seed, horizons):
     _strict_integer(seed, "seed")
     cursor = _Cursor(eligible)
     batches = tuple(PlannedBatch(i, PlannedCohort(
         role="adaptation_batch",
         origins=cursor.take(schedule.local_batch_origin_count, cross_day=True),
-        maximum_horizon=max(DEFAULT_HORIZONS),
+        maximum_horizon=max(horizons),
         shared_candidate_count=schedule.finalist_count,
     )) for i in range(schedule.batch_count))
     origins = tuple(o for batch in batches for o in batch.cohort.origins)
-    cohort = PlannedCohort("adaptation", origins, max(DEFAULT_HORIZONS),
+    cohort = PlannedCohort("adaptation", origins, max(horizons),
                            shared_candidate_count=schedule.finalist_count)
     return RunAdaptationCohort(origins[0].dataset_id, origins[0].episode_id,
                               seed, cohort, batches,
@@ -59,25 +59,25 @@ def _adaptation(eligible, schedule, seed):
 
 def plan_adaptation(dataset, *, schedule, seed):
     eligible, _ = _eligible_origins(dataset)
-    return _adaptation(eligible, schedule, seed)[0]
+    return _adaptation(eligible, schedule, seed, _dataset_horizons(dataset))[0]
 
 
-def _selection(cursor, schedule):
+def _selection(cursor, schedule, horizons):
     screening = PlannedCohort("screening", cursor.take(schedule.screening_origin_count),
-                              max(DEFAULT_HORIZONS), shared_candidate_count=4)
+                              max(horizons), shared_candidate_count=4)
     holdout = PlannedCohort("holdout", cursor.take(schedule.selection_holdout_origin_count),
-                            max(DEFAULT_HORIZONS), shared_arm_count=3)
+                            max(horizons), shared_arm_count=3)
     return screening, holdout
 
 
 def plan_selection(dataset, *, schedule, generation, adaptation, seed):
     _strict_integer(generation, "generation")
     eligible, _ = _eligible_origins(dataset)
-    expected, cursor = _adaptation(eligible, schedule, seed)
+    expected, cursor = _adaptation(eligible, schedule, seed, _dataset_horizons(dataset))
     if expected.adaptation_digest != adaptation.adaptation_digest:
         raise ValueError("adaptation cohort does not match isolated dataset plan")
     for _ in range(generation + 1):
-        screening, holdout = _selection(cursor, schedule)
+        screening, holdout = _selection(cursor, schedule, _dataset_horizons(dataset))
     return GenerationCohorts(
         adaptation.dataset_id, adaptation.episode_id, generation, seed,
         adaptation.adaptation_digest, adaptation.batch_digests, screening, holdout,
@@ -93,10 +93,10 @@ def estimate_capacity(dataset, *, schedule, planned_generations, seed, scoring_c
     eligible, gaps = _eligible_origins(dataset)
     feasible, purged = 0, 0
     try:
-        adaptation, cursor = _adaptation(eligible, schedule, seed)
+        adaptation, cursor = _adaptation(eligible, schedule, seed, _dataset_horizons(dataset))
         gaps["adaptation_day_buckets"] = len({o.origin_timestamp // 24 for o in adaptation.origins})
         while True:
-            _selection(cursor, schedule)
+            _selection(cursor, schedule, _dataset_horizons(dataset))
             feasible += 1
             if feasible == planned_generations:
                 purged = cursor.purged
