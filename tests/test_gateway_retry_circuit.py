@@ -645,6 +645,37 @@ class GatewayRetryCircuitTests(unittest.TestCase):
         self.assertEqual(restarted.status.value, "running")
         self.assertEqual(self.director.state(manual_run_id).events[-1].kind, "RunStarted")
 
+    def test_native_six_outages_remain_automatic_and_recovery_resets_the_chain(self):
+        for attempt in range(1, 7):
+            kwargs = self._failure_kwargs(attempt)
+            kwargs.update(retry_class="dsh_native_runtime", last_error_code="structured_child_model_error")
+            decision = self.director.schedule_gateway_retry_or_pause(self.run_id, **kwargs)
+            self.assertEqual(decision.outcome, "scheduled")
+            self.assertEqual(decision.event.payload["retry_limit"], 12)
+            self.assertEqual(decision.event.payload["last_error_code"], "structured_child_model_error")
+        self.director = EvolutionDirector(self.ledger, FakeDSHAdapter())
+        self.assertEqual(self.director.state(self.run_id).run.status.value, "running")
+        self._record_dsh_success()
+        kwargs = self._failure_kwargs(7)
+        kwargs.update(retry_class="dsh_native_runtime", last_error_code="provider_route_cooling_down")
+        recovered = self.director.schedule_gateway_retry_or_pause(self.run_id, **kwargs)
+        self.assertEqual(recovered.event.payload["consecutive_failures"], 1)
+        self.assertEqual(recovered.event.payload["breaker_epoch"], 2)
+
+    def test_native_recovery_keeps_the_thirty_minute_deadline(self):
+        clock = MutableClock(datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc))
+        self.director = EvolutionDirector(self.ledger, FakeDSHAdapter(), clock=clock)
+        for attempt in (1, 2):
+            kwargs = self._failure_kwargs(attempt)
+            kwargs.update(retry_class="dsh_native_runtime", last_error_code="structured_child_model_error")
+            decision = self.director.schedule_gateway_retry_or_pause(self.run_id, **kwargs)
+            if attempt == 1:
+                self.assertEqual(decision.outcome, "scheduled")
+                clock.advance(timedelta(minutes=30))
+        self.assertEqual(decision.outcome, "paused")
+        self.assertEqual(decision.event.payload["pause_trigger"], "epoch_elapsed")
+        self.assertEqual(decision.event.payload["consecutive_failures"], 2)
+
     def test_thirty_minute_epoch_opens_before_six_failures(self) -> None:
         clock = MutableClock(datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc))
         self.director = EvolutionDirector(

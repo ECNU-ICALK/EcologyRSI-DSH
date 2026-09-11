@@ -62,10 +62,25 @@ class ModelPreflightAuditTests(unittest.TestCase):
         self.assertNotIn("must-never-be-persisted", json.dumps(audit.payload))
         evidence = model_preflight_projection(state)
         self.assertEqual((evidence["status"], evidence["scope"]), ("verified", SCOPE))
-        self.assertEqual([role["model_id"] for role in evidence["roles"]], ["dsh/strategy", "dsh/review"])
-        self.assertEqual(len(evidence["roles"]), 2)
+        self.assertEqual([role["model_id"] for role in evidence["roles"]], ["dsh/strategy", "dsh/review", "dsh/review", "dsh/strategy"])
+        self.assertEqual(len(evidence["roles"]), 4)
         for projection in (_state_payload(state)["projection"], _monitor_payload(state)["projection"]):
             self.assertEqual(projection["model_contract_preflight"], evidence)
+
+    def test_historical_audit_replays_only_its_original_two_role_evidence(self):
+        from ecologyrsi_dsh.core.model_preflight import LEGACY_AUDIT_SCHEMA
+        _body, state = self.create()
+        task = replace(state.task_manifest, metadata={**state.task_manifest.metadata,
+            AUDIT_METADATA_KEY: LEGACY_AUDIT_SCHEMA})
+        receipts = receipts_for(task.metadata)[:2]
+        audit = build_preflight_audit(task, state.run.run_id, receipts)
+        self.assertEqual(len(audit["receipts"]), 2)
+        self.assertEqual(audit["schema_version"], LEGACY_AUDIT_SCHEMA)
+        validate_preflight_audit(audit, task, state.run.run_id,
+            recorded_at=audit["checked_at"], created_at=state.run.created_at)
+        with self.assertRaises(ValueError):
+            validate_preflight_audit(audit, state.task_manifest, state.run.run_id,
+                recorded_at=audit["checked_at"], created_at=state.run.created_at)
 
     def test_completed_create_replay_does_not_require_current_receipt_or_duplicate_audit(self):
         body, state = self.create()

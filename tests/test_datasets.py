@@ -9,6 +9,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 from ecologyrsi_dsh.application.cli import build_parser
@@ -19,6 +20,22 @@ from ecologyrsi_dsh.data.splits import build_split_manifest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CATALOG_PATH = PROJECT_ROOT / "datasets" / "autonomous_greenhouse.json"
+
+
+class DefaultDataRootTests(unittest.TestCase):
+    def test_fetch_and_service_use_same_persistent_root_without_environment(self):
+        from ecologyrsi_dsh.data.catalog import _default_data_root
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            with patch.dict(os.environ, {}, clear=True), patch("pathlib.Path.home", return_value=home):
+                expected = (home / ".ecologyrsi-dsh/data/greenhouse").resolve()
+                self.assertEqual(_default_data_root(), expected)
+                (expected / "agc_cucumber_2018").mkdir(parents=True)
+                self.assertEqual(DatasetRegistry().data_root, expected)
+
+    def test_explicit_data_root_wins(self):
+        with tempfile.TemporaryDirectory() as raw, patch.dict(os.environ, {"ECOLOGYRSI_DATA_ROOT": raw}):
+            self.assertEqual(DatasetRegistry().data_root, Path(raw).resolve())
 
 
 def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, object]]) -> None:
@@ -126,7 +143,7 @@ class GreenhouseAdapterTests(unittest.TestCase):
             _write_csv(
                 team / "GreenhouseClimate.csv",
                 ["%time", "Tair", "RHair", "CO2air"],
-                [{"%time": "1.0", "Tair": 21, "RHair": 68, "CO2air": 720}],
+                [{"%time": str(day), "Tair": 21, "RHair": 68, "CO2air": 720} for day in (1.0, 2.0)],
             )
             _write_csv(
                 team / "Resources.csv",
@@ -136,8 +153,9 @@ class GreenhouseAdapterTests(unittest.TestCase):
             adapter = GreenhouseDatasetAdapter("tomato", "greenhouse_tomato_2019", root)
             episode = adapter.load().episodes[0]
 
-        self.assertEqual(episode.values["electricity_use"], (4.0,))
-        self.assertEqual(episode.values["water_use"], (5.0,))
+        # Daily totals only become observable on the following day.
+        self.assertEqual(episode.values["electricity_use"], (None, 4.0))
+        self.assertEqual(episode.values["water_use"], (None, 5.0))
         self.assertEqual(episode.features["water_use"].display_name_zh, "净用水量")
 
     def test_missing_required_feature_is_rejected(self) -> None:

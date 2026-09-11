@@ -84,6 +84,24 @@ class WorkUnitContractTests(unittest.TestCase):
         )
         self.assertFalse(work_units.execute_next_adaptive_work_unit((endpoint).server, "run:x"))
 
+    def test_fatal_parallel_lane_overrides_earlier_transport_failure(self):
+        from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
+        state = _AdaptiveLaneState()
+        services = SimpleNamespace(director=SimpleNamespace(state=lambda _run_id: state))
+        barrier = threading.Barrier(2)
+        fatal = DshNativeRuntimeUnavailableError(error_code="structured_child_tool_protocol_error", status_code=422)
+        def batch(_services, _run_id, candidate_id):
+            barrier.wait(timeout=3)
+            if candidate_id == "candidate:b":
+                raise fatal
+            raise DshNativeRuntimeUnavailableError(status_code=502)
+        with patch.object(generation_execution, "_two_stage_screening_enabled", return_value=True), \
+             patch.object(formal_trajectory, "ensure_formal_trajectory", side_effect=lambda _s, _r, c: state.trajectories[c]), \
+             patch.object(formal_trajectory, "execute_next_formal_batch", side_effect=batch):
+            with self.assertRaises(DshNativeRuntimeUnavailableError) as caught:
+                work_units.execute_next_adaptive_work_unit(services, "run:lanes")
+        self.assertIs(caught.exception, fatal)
+
     def test_one_lane_batch_is_one_scheduler_turn(self):
         state = SimpleNamespace(
             run=SimpleNamespace(status=RunStatus.RUNNING, generation=0),

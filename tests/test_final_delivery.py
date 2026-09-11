@@ -6,18 +6,24 @@ import os
 import unittest
 
 from ecologyrsi_dsh.core.dsh_usage import validate_session_usage, check_usage_binding, session_usage_projection
-from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
+from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule, ISOLATED_SCHEDULE_SCHEMA_VERSION
 from ecologyrsi_dsh.evaluators.epoch_cohorts import (
     plan_run_adaptation_cohort, plan_generation_selection_cohorts,
     estimate_epoch_capacity, RunAdaptationCohort, GenerationCohorts, CohortCapacityError,
 )
 from tests.test_epoch_cohort_planning import dataset_fixture
-from ecologyrsi_dsh.evolution.batches import _research_contract_fallback_enabled
+from ecologyrsi_dsh.evolution.batches import (
+    _research_contract_fallback_allowed,
+    _research_contract_fallback_enabled,
+)
+from ecologyrsi_dsh.evolution.strategies import _deterministic_fallback_directions
+from ecologyrsi_dsh.knowledge.autonomous_cycle import normalize_candidate_directions
 
 
 class IsolatedCohortsTests(unittest.TestCase):
     def test_time_purge_cross_day_and_round_trip(self):
-        schedule = replace(OptimizationSchedule.for_new_run(),
+        schedule = replace(OptimizationSchedule.default(),
+                           schema_version=ISOLATED_SCHEDULE_SCHEMA_VERSION,
                            formal_origin_count_per_finalist=20, local_batch_origin_count=10)
         data = dataset_fixture(1200, timestamp_gap_at=400)
         adaptation = plan_run_adaptation_cohort(data, schedule=schedule, seed=7)
@@ -40,7 +46,7 @@ class IsolatedCohortsTests(unittest.TestCase):
 
     def test_capacity_refuses_reuse_and_default_fits_realistic_partition(self):
         data = dataset_fixture(803)
-        schedule = OptimizationSchedule.for_new_run()
+        schedule = replace(OptimizationSchedule.default(), schema_version=ISOLATED_SCHEDULE_SCHEMA_VERSION, formal_origin_count_per_finalist=200)
         report = estimate_epoch_capacity(data, schedule=schedule, planned_generations=1, seed=7)
         self.assertTrue(report.sufficient)
         self.assertEqual(report.max_feasible_generations, 1)
@@ -66,6 +72,33 @@ class IsolatedCohortsTests(unittest.TestCase):
             }))
             self.assertFalse(_research_contract_fallback_enabled(state))
 
+    def test_native_quick_recovers_oversized_research_payload(self):
+        state = SimpleNamespace(task_manifest=SimpleNamespace(metadata={
+            'execution_protocol': 'dsh_native_plugin_evolution@1',
+            'optimization_protocol': 'quick_adaptive_epoch@1',
+        }))
+        error = ValueError('research iteration plan exceeds the bounded contract')
+        self.assertTrue(_research_contract_fallback_allowed(state, error))
+        self.assertFalse(_research_contract_fallback_allowed(
+            SimpleNamespace(task_manifest=SimpleNamespace(metadata={
+                'execution_protocol': 'dsh_native_plugin_evolution@1',
+                'optimization_protocol': 'top2_adaptive_epoch@1',
+            })), error
+        ))
+
+    def test_native_fallback_directions_match_slot_contract(self):
+        allowed = {
+            "scientific_parameter": ("residual_scale_24h",),
+            "registered_predictor": (),
+            "instruction_profile": (),
+        }
+        directions = _deterministic_fallback_directions(allowed, 4)
+        normalized = normalize_candidate_directions(
+            directions, exact_items=4, allowed_mutation_targets=allowed
+        )
+        self.assertEqual(len(normalized), 4)
+        self.assertEqual(len({item.hypothesis for item in normalized}), 4)
+
 
 def usage(total=10, settlement='active', complete=False):
     return {'schema_version': 'ecologyrsi-dsh.session-usage/1',
@@ -83,6 +116,21 @@ def event(kind, payload, seq=1):
 
 
 class UsageTests(unittest.TestCase):
+    def test_activity_is_bounded_metadata_and_does_not_change_billing(self):
+        body = usage(10)
+        body['session_metrics']['activity'] = {
+            'kind': 'streaming', 'log_revision': 20, 'updated_at': '2026-09-09T00:00:00Z',
+        }
+        validate_session_usage(body, run_id='r')
+        self.assertEqual(body['session_metrics']['provider_usage']['totals']['total_tokens'], 10)
+        for key, value in [('kind', 'arbitrary'), ('log_revision', True), ('updated_at', 'yesterday')]:
+            bad = deepcopy(body); bad['session_metrics']['activity'][key] = value
+            with self.assertRaises(ValueError):
+                validate_session_usage(bad, run_id='r')
+        body['session_metrics']['activity']['text'] = 'not allowed'
+        with self.assertRaises(ValueError):
+            validate_session_usage(body, run_id='r')
+
     def test_failed_calls_count_without_scientific_acceptance_and_snapshots_do_not_sum(self):
         launch = event('DshChildLaunchReserved', {'launch': dict(run_id='r', stage='s', idempotency_key='k', reservation_id='c')})
         active = usage()

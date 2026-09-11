@@ -364,6 +364,20 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 422)
         self.assertFalse(dsh_native_runtime_retryable(raised.exception))
 
+    def test_provider_contract_preserves_status_and_retry_after(self) -> None:
+        for status in (429, 503):
+            self.server.responses.append((status, {
+                "schema_version": "ecology-runtime-failure/1",
+                "error_code": "structured_child_model_error",
+                "failure_domain": "provider", "provider_status": status,
+                "retry_after_ms": 17000,
+            }))
+            with self.assertRaises(DshNativeRuntimeUnavailableError) as raised:
+                self.client.status("run-1")
+            self.assertTrue(dsh_native_runtime_retryable(raised.exception))
+            self.assertEqual(raised.exception.provider_status, status)
+            self.assertEqual(raised.exception.retry_after_seconds, 17)
+
     def test_caller_cancellation_fails_before_network(self) -> None:
         with self.assertRaises(DshNativeRuntimeUnavailableError) as raised:
             self.client.capabilities(cancelled=lambda: True)
@@ -664,7 +678,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         )
         self.assertEqual(
             state.task_manifest.metadata["minimum_selection_samples_per_update"],
-            169,
+            40,
         )
         self.assertEqual(
             state.task_manifest.metadata["host_runtime_build"],
@@ -754,7 +768,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             state.task_manifest.metadata["optimization_schedule"][
                 "formal_origin_count_per_finalist"
             ],
-            200,
+            100,
         )
         self.assertEqual(
             state.task_manifest.metadata["sample_budget_class"],

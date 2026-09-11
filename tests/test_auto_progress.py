@@ -1585,6 +1585,53 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         schedule_work_item.assert_not_called()
 
+    def test_formal_failure_diagnostics_can_be_persisted(self):
+        status, created = self.request("/runs", "POST", {
+            "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
+            "start": False, "auto_advance": 0, "idempotency_key": "formal-failure-context",
+        })
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        context = {"generation": 0, "stage": "formal_batch", "work_unit_kind": "formal_batch",
+                   "failure_domain": "model_execution", "formal_origin_occurrences_completed": 20,
+                   "formal_origin_occurrences_upper_bound": 380}
+        for bad in (True, -1, "20"):
+            with self.assertRaises(ValueError):
+                self.server.director.fail_run(run_id, "test", failure_context={**context, "formal_origin_occurrences_completed": bad})
+        self.server.director.fail_run(run_id, "test", failure_context=context)
+        state = self.server.director.state(run_id)
+        self.assertEqual(state.run.status.value, "failed")
+        self.assertEqual(state.events[-1].payload["failure_context"], context)
+
+    def test_parallel_protocol_failure_terminates_without_retrying_cancelled_runtime(self):
+        from ecologyrsi_dsh.application.candidate_scheduler import CandidateEvaluationTask, run_candidate_evaluations
+        status, created = self.request("/runs", "POST", {
+            "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
+            "rounds": 1, "candidates_per_generation": 1, "max_candidates": 1,
+            "auto_progress": True, "auto_advance": 0, "start": False,
+            "idempotency_key": "fatal-parallel-protocol",
+        })
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        self.server.director.start_run(run_id)
+        barrier = threading.Barrier(2)
+        def evaluate(candidate_id):
+            barrier.wait(timeout=3)
+            raise DshNativeRuntimeUnavailableError(
+                error_code="structured_child_tool_protocol_error" if candidate_id == "b" else "dsh_native_runtime_unavailable",
+                status_code=422 if candidate_id == "b" else 502)
+        def execute(*_args):
+            run_candidate_evaluations((CandidateEvaluationTask(0, "a"), CandidateEvaluationTask(1, "b")),
+                max_concurrency=2, evaluate=evaluate, admission_open=lambda: True)
+        with patch.object(auto_progress_module, "execute_generation", side_effect=execute) as generation:
+            self.assertFalse(self.server.auto_progress._run_one_generation(run_id))
+        generation.assert_called_once()
+        state = self.server.director.state(run_id)
+        self.assertEqual(state.run.status.value, "failed")
+        self.assertFalse(any(e.kind == "GatewayRetryScheduled" for e in state.events))
+        failure = next(e for e in state.events if e.kind == "RunFailed")
+        self.assertEqual(failure.payload["error_code"], "structured_child_tool_protocol_error")
+
     def test_transient_dsh_outage_keeps_run_running_for_delayed_retry(self) -> None:
         status, created = self.request(
             "/runs",
@@ -1635,6 +1682,35 @@ class AutoProgressHTTPTests(unittest.TestCase):
             "dsh_native_runtime_transport_error",
         )
         self.assertIn("DSH 智能体运行时暂时不可用", retry_event.payload["reason"])
+
+    def test_typed_provider_tool_protocol_fault_keeps_checkpoint_and_schedules_recovery(self):
+        from ecologyrsi_dsh.core.errors import dsh_native_runtime_retryable, dsh_native_runtime_evaluation_fatal
+        code = "structured_child_tool_protocol_error"
+        for kwargs in ({"status_code": 422}, {"status_code": 503}):
+            legacy = DshNativeRuntimeUnavailableError(error_code=code, **kwargs)
+            self.assertFalse(dsh_native_runtime_retryable(legacy))
+            self.assertTrue(dsh_native_runtime_evaluation_fatal(legacy))
+        outage = DshNativeRuntimeUnavailableError(error_code=code, status_code=503, failure_domain="provider")
+        self.assertTrue(dsh_native_runtime_retryable(outage))
+        self.assertFalse(dsh_native_runtime_evaluation_fatal(outage))
+        status, created = self.request("/runs", "POST", {
+            "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
+            "rounds": 1, "candidates_per_generation": 1, "max_candidates": 1,
+            "auto_progress": True, "auto_advance": 0, "start": False,
+            "idempotency_key": "typed-tool-protocol-recovery",
+        })
+        self.assertEqual(status, 201, created)
+        run_id = created["projection"]["run_id"]
+        self.server.director.start_run(run_id)
+        with patch.object(auto_progress_module, "execute_generation", side_effect=outage), \
+             patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0):
+            self.assertTrue(self.server.auto_progress._run_one_generation(run_id))
+        state = self.server.director.state(run_id)
+        self.assertEqual(state.run.status.value, "running")
+        self.assertFalse(any(e.kind in {"RunFailed", "RunPaused"} for e in state.events))
+        retry = next(e for e in reversed(state.events) if e.kind == "GatewayRetryScheduled")
+        self.assertEqual(retry.payload["error_code"], code)
+        self.assertEqual(retry.payload["retry_limit"], 12)
 
     def test_sibling_dsh_success_cannot_orphan_a_failed_parallel_attempt(
         self,
@@ -1740,7 +1816,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         self.assertEqual(state.run.status.value, "running")
         self.assertFalse(any(event.kind == "RunFailed" for event in state.events))
 
-    def test_six_dsh_runtime_failures_open_independent_durable_circuit(self) -> None:
+    def test_native_outage_retries_are_finite_and_close_both_admissions_at_limit(self) -> None:
         status, created = self.request(
             "/runs",
             "POST",
@@ -1802,17 +1878,17 @@ class AutoProgressHTTPTests(unittest.TestCase):
         ):
             outcomes = [
                 self.server.auto_progress._run_one_generation(run_id)
-                for _ in range(6)
+                for _ in range(12)
             ]
 
-        self.assertEqual(outcomes, [True, True, True, True, True, False])
-        self.assertEqual(execute_generation.call_count, 6)
+        self.assertEqual(outcomes, [True] * 11 + [False])
+        self.assertEqual(execute_generation.call_count, 12)
         state = self.server.director.state(run_id)
         self.assertEqual(state.run.status.value, "paused")
         retries = [
             event for event in state.events if event.kind == "GatewayRetryScheduled"
         ]
-        self.assertEqual(len(retries), 5)
+        self.assertEqual(len(retries), 11)
         self.assertTrue(
             all(event.payload["retry_class"] == "dsh_native_runtime" for event in retries)
         )

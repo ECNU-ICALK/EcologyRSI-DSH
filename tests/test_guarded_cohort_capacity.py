@@ -17,7 +17,8 @@ from tests import test_runtime_integration as runtime_test_helpers
 
 
 def schedule(batch):
-    return replace(OptimizationSchedule.for_new_run(),
+    return replace(OptimizationSchedule.default(),
+                   schema_version="ecologyrsi-dsh.top2-adaptive-epoch-schedule/3",
                    formal_origin_count_per_finalist=batch * 2, local_batch_origin_count=batch)
 
 
@@ -135,11 +136,29 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
             state = self.server.director.state(created["projection"]["run_id"])
             self.assertNotIn("guarded_cohort_evidence_capacity", state.task_manifest.metadata)
             body.update(prediction_model_id=BASELINE_ALIGNED_RIDGE_MODEL_ID,
-                        optimization_schedule=schedule(72).to_dict(), idempotency_key="guard-valid-blocks")
+                        optimization_schedule=OptimizationSchedule.for_comparison_run().to_dict(), idempotency_key="guard-valid-blocks")
             status, created = self.request("/runs", "POST", body)
             self.assertEqual(status, 201, created)
             state = self.server.director.state(created["projection"]["run_id"])
             report = state.task_manifest.metadata["guarded_cohort_evidence_capacity"]
             self.assertTrue(report["sufficient"])
-            self.assertTrue(all(row["day_block_count"] >= 3 for row in report["formal_batches"]))
+            self.assertTrue(all(row["day_block_count"] >= 2 for row in report["formal_batches"]))
+            self.assertTrue(all(row["day_block_count"] >= 8 for row in report["selection_holdouts"]))
+            self.assertEqual(state.task_manifest.metadata["sample_budget_class"], "selection_eligible")
+            self.assertEqual(state.task_manifest.metadata["minimum_selection_origin_samples_per_update"], 40)
+            self.assertEqual(state.task_manifest.metadata["optimization_schedule"], OptimizationSchedule.for_comparison_run().to_dict())
+            # Explicit budgets must survive normalization and receive the same
+            # rejection before preflight as before actual run creation.
+            invalid_budgets = (
+                {"max_generations": 51, "max_candidates": 204, "candidates_per_generation": 4},
+                {"max_generations": 1, "max_candidates": 4, "candidates_per_generation": 3},
+                {"max_generations": 1, "max_candidates": 257, "candidates_per_generation": 4},
+            )
+            for index, invalid in enumerate(invalid_budgets):
+                body.update(budget=invalid, idempotency_key=f"invalid-new-budget-{index}")
+                with patch("ecologyrsi_dsh.api.handler.run_preflight") as preflight:
+                    for route in ("/model-preflight", "/runs"):
+                        status, rejected = self.request(route, "POST", body)
+                        self.assertEqual(status, 400, rejected)
+                    preflight.assert_not_called()
         native.run_stage.assert_not_called()

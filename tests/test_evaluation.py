@@ -846,13 +846,13 @@ class GreenhouseEvaluationTests(unittest.TestCase):
             evaluators[GREENHOUSE_MULTIHORIZON_EVALUATOR_ID][
                 "minimum_selection_samples_per_update"
             ],
-            1_521,
+            360,
         )
         self.assertEqual(
             registry.minimum_selection_samples_per_update(
                 GREENHOUSE_MULTIHORIZON_EVALUATOR_ID
             ),
-            1_521,
+            360,
         )
         self.assertEqual(
             evaluators[GREENHOUSE_MULTIHORIZON_EVALUATOR_ID]["prediction_model_ids"],
@@ -971,6 +971,51 @@ class GreenhouseEvaluationTests(unittest.TestCase):
             bundle.evaluation.metrics["promotion_block_evidence"]["block_hours"],
             24,
         )
+        # The per-cell gate publishes its own evidence, and it publishes it for
+        # every cell it judged -- a gate that reported on eight of nine cells
+        # could pass a candidate on a cell nobody looked at.
+        noninferiority = bundle.evaluation.metrics["cell_noninferiority_evidence"]
+        self.assertEqual(
+            noninferiority["gate_semantics_id"], "per_cell_noninferiority@1"
+        )
+        self.assertEqual(len(noninferiority["cells"]), 9)
+        self.assertEqual(
+            {cell["cell"] for cell in noninferiority["cells"]},
+            {
+                f"{item['target']}@{item['horizon_hours']}h"
+                for item in bundle.evaluation.metrics["targets"]
+            },
+        )
+        audit = bundle.evaluation.metrics["gate_relaxation_audit"]
+        self.assertEqual(audit["legacy_gate_id"], "all_targets_no_regression")
+        self.assertEqual(
+            audit["cells_strictly_better"]
+            + audit["cells_admitted_only_by_noninferiority"]
+            + audit["cells_failed"],
+            9,
+        )
+        # The debt gate travels with the audit it is conditioned on, and agrees
+        # with it: it applies exactly when the relaxation admitted a cell.
+        debt = bundle.evaluation.metrics["noninferiority_relaxation_debt"]
+        self.assertEqual(
+            debt["gate_semantics_id"], "noninferiority_relaxation_debt@1"
+        )
+        self.assertEqual(
+            debt["applies"], audit["requires_stronger_overall_evidence"]
+        )
+        self.assertEqual(
+            debt["cells_admitted_only_by_noninferiority"],
+            audit["cells_admitted_only_by_noninferiority"],
+        )
+        if not debt["applies"]:
+            self.assertTrue(debt["passed"])
+        # `paired_block_count` reaches the scored cells from production code now,
+        # not from a test fixture. The formal layer reads this field.
+        for item in bundle.evaluation.metrics["targets"]:
+            self.assertIsInstance(item["paired_block_count"], int)
+            self.assertLessEqual(
+                item["paired_block_count"], noninferiority["paired_block_count"]
+            )
         self.assertTrue(bundle.sample_results)
         self.assertTrue(
             all(
@@ -1151,6 +1196,10 @@ class GreenhouseEvaluationTests(unittest.TestCase):
             ),
             "greenhouse_multihorizon_time_forward@4": (
                 "greenhouse-runtime-model-selection-forward/1",
+                "greenhouse-baseline-aligned-multihorizon-forward/1",
+            ),
+            "greenhouse_recipe_multihorizon_forward@1": (
+                "greenhouse-recipe-multihorizon-forward/1",
                 "greenhouse-baseline-aligned-multihorizon-forward/1",
             ),
         }

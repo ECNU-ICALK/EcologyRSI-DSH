@@ -110,6 +110,7 @@ class LocalEditTests(unittest.TestCase):
         context_data["parameter_schemas"][
             "co2_concentration_1h_residual_scale"
         ] = {"type": "number", "minimum": 0.0, "maximum": 1.0}
+        context_data["allowed_effect_cells"].append("co2_concentration@1h")
         context = LocalEditContext(**context_data)
         proposal = LocalEditProposal(
             decision="mutate",
@@ -121,7 +122,7 @@ class LocalEditTests(unittest.TestCase):
                 },
             ),
             evidence_refs=("metric:overall",),
-            expected_effect_cells=("co2_concentration@24h",),
+            expected_effect_cells=("co2_concentration@1h",),
             risk_cells=(),
         )
 

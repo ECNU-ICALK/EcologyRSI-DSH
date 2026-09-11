@@ -131,7 +131,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
                 evaluators["greenhouse_multihorizon_time_forward@1"][
                     "minimum_selection_samples_per_update"
                 ],
-                1_521,
+                360,
             )
         self.assertEqual(
             evaluators["toy_time_forward@1"]["prediction_task_count"],
@@ -757,8 +757,8 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     "evaluator_id": "greenhouse_multihorizon_time_forward@2",
                     "budget": {
                         "max_generations": 1,
-                        "candidates_per_generation": 1,
-                        "max_candidates": 1,
+                        "candidates_per_generation": 4,
+                        "max_candidates": 4,
                     },
                     "auto_advance": 0,
                     "idempotency_key": "autonomous-runtime-strict-default-sampling",
@@ -778,8 +778,8 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     "evaluator_id": "greenhouse_multihorizon_time_forward@2",
                     "budget": {
                         "max_generations": 1,
-                        "candidates_per_generation": 1,
-                        "max_candidates": 1,
+                        "candidates_per_generation": 4,
+                        "max_candidates": 4,
                     },
                     "optimization_schedule": {
                         "schema_version": "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
@@ -812,8 +812,8 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     "evaluator_id": "greenhouse_multihorizon_time_forward@2",
                     "budget": {
                         "max_generations": 1,
-                        "candidates_per_generation": 1,
-                        "max_candidates": 1,
+                        "candidates_per_generation": 4,
+                        "max_candidates": 4,
                     },
                     "optimization_schedule": {
                         "schema_version": "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1",
@@ -1042,18 +1042,51 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
         )
         gates = context["hard_gates"]
         self.assertEqual(
-            [(item["metric"], item["operator"]) for item in gates],
+            [(item["id"], item["metric"], item["operator"]) for item in gates],
             [
-                ("objective_score", ">"),
-                ("normalized_rmse", "<="),
-                ("constraint_violations", "<="),
-                ("sample_execution_coverage", ">="),
+                ("positive_overall_skill", "objective_score", ">"),
+                # Sufficiency precedes the interval on purpose: a candidate must
+                # not be able to widen its own tolerance by collecting fewer
+                # paired blocks.
+                (
+                    "noninferiority_evidence_sufficient@1",
+                    "paired_block_count",
+                    ">=",
+                ),
+                ("per_cell_noninferiority@1", "d_lcb", "<="),
+                # Conditional escalation, declared after the gate it is
+                # conditioned on. Dormant for a strictly-better candidate.
+                ("noninferiority_relaxation_debt@1", "objective_score", ">"),
+                ("no_constraint_violations", "constraint_violations", "<="),
+                (
+                    "minimum_sample_execution_coverage",
+                    "sample_execution_coverage",
+                    ">=",
+                ),
             ],
         )
+        # Overall superiority is untouched by the per-cell change. This threshold
+        # moving would mean the gate really had been loosened.
         self.assertEqual(gates[0]["threshold"], 1e-9)
-        self.assertEqual(gates[1]["tolerance"], 1e-12)
-        self.assertEqual(gates[2]["threshold"], 0)
-        self.assertEqual(gates[3]["threshold"], 0.8)
+        self.assertEqual(gates[1]["threshold"], 8)
+        self.assertEqual(gates[1]["companion_threshold"], 4)
+        self.assertEqual(gates[2]["threshold"], 0.0)
+        self.assertEqual(gates[2]["absolute_cap_ratio"], 0.03)
+        self.assertEqual(gates[2]["confidence_level"], 0.95)
+        self.assertEqual(
+            gates[2]["prerequisite_gate"], "noninferiority_evidence_sufficient@1"
+        )
+        # The retired rule is named in the contract the Agent reads, so the model
+        # is never left inferring which per-cell rule is in force.
+        self.assertEqual(gates[2]["replaces"], "all_targets_no_regression")
+        self.assertEqual(gates[2]["legacy_tolerance"], 1e-12)
+        # The debt escalates to the practical delta -- three orders of magnitude
+        # above the 1e-9 floor at gates[0], which is the whole point.
+        self.assertEqual(gates[3]["threshold"], 0.005)
+        self.assertEqual(gates[3]["conditioned_on_gate"], "per_cell_noninferiority@1")
+        self.assertEqual(gates[3]["escalates_gate"], "positive_overall_skill")
+        self.assertEqual(gates[4]["threshold"], 0)
+        self.assertEqual(gates[5]["threshold"], 0.8)
         self.assertEqual(context["objective_profile"]["hard_gates"], gates)
         self.assertEqual(
             set(context["allowed_parameter_schemas"]),

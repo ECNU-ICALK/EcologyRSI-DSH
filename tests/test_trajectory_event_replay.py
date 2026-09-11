@@ -1497,6 +1497,27 @@ class TrajectoryEventReplayTests(unittest.TestCase):
         }
         return incumbent, scope, checkpoint
 
+    def test_invalid_first_holdout_replica_cannot_launch_second_or_seal_evidence(self):
+        from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
+        candidate, scope, _checkpoint = self._incumbent_holdout_checkpoint()
+        state = self.director.state(self.run_id)
+        task_data = state.task_manifest.to_dict()
+        task_data["metadata"]["sample_agent_mode"] = "dsh_native_agent"
+        task = TaskManifest.from_dict(task_data)
+        evaluator = Mock()
+        evaluator.evaluate_scientific.return_value = SimpleNamespace(evaluation=SimpleNamespace(metrics={
+            "sample_execution": {"attempted_origin_samples": scope.origin_count, "succeeded_origin_samples": 0}}))
+        services = SimpleNamespace(director=self.director, ledger=self.ledger, evaluators=evaluator)
+        binding = {"candidate_id": candidate.candidate_id, "candidate_revision_id": scope.candidate_revision_id}
+        with patch.object(generation_execution, "_phase_task_manifest", return_value=task), patch.object(
+            generation_execution, "_holdout_replay_inputs", return_value=(candidate, object(), object())):
+            with self.assertRaises(DshNativeRuntimeUnavailableError) as raised:
+                generation_execution._execute_adaptive_holdout_arm(services, self.run_id, 0,
+                    HoldoutArm.INCUMBENT, binding, self.generation_cohorts.holdout)
+        self.assertEqual(raised.exception.error_code, "evaluation_execution_incomplete")
+        self.assertEqual(evaluator.evaluate_scientific.call_count, 1)
+        self.assertFalse(self.director.replay(self.run_id).holdout_evaluations)
+
     def test_screened_out_incumbent_holdout_opens_scoped_checkpoint(self) -> None:
         incumbent, scope, checkpoint = self._incumbent_holdout_checkpoint()
 

@@ -71,6 +71,63 @@ class AdmittedAgent:
 
 
 class AgentOwnedPredictionTests(unittest.TestCase):
+    def test_critic_recovery_reuses_accepted_planner_and_tools_after_service_recreation(self):
+        from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
+        from unittest.mock import patch
+        def policy(context, call):
+            call('candidate-model', 'fit')
+            return result(context, method='model', refs=('fit',))
+        adapter, plan, native, ledger = self.setup_agent(policy)
+        adapter.require_remote_critic = True
+        original = native.run_stage
+        failures = []
+        def interrupted(request):
+            if request['stage'] == 'sample.critic' and not failures:
+                failures.append(True)
+                raise DshNativeRuntimeUnavailableError(error_code='structured_child_model_error', status_code=503)
+            return original(request)
+        with patch.object(native, 'run_stage', side_effect=interrupted):
+            with self.assertRaises(DshNativeRuntimeUnavailableError):
+                self.predict(adapter, plan)
+            # Discard the in-memory admission/binding service, retaining only ledger evidence.
+            service = DshToolService(ledger)
+            native.service = service
+            adapter._prediction_tool_binder = service.bind_prediction_tool
+            adapter._decision_client.runtime_provider = lambda: DshStructuredRoleRuntime(native, admission=service)
+            recovered = self.predict(adapter, plan)
+        self.assertIsNone(recovered.error)
+        self.assertEqual([r['stage'] for r in native.requests], ['sample.plan', 'sample.critic'])
+        self.assertEqual(len(ledger.events_by_kind('run-agent', 'DshPredictionToolExecuted')), 1)
+        self.assertEqual(len(ledger.events_by_kind('run-agent', 'DshStructuredResultAccepted')), 2)
+
+    def test_successful_provenance_is_separate_from_missing_origins(self):
+        from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
+        def policy(context, call):
+            if context['samples'][0]['origin_timestamp'] == 10:
+                raise ValueError('invalid numeric prediction')
+            return result(context)
+        adapter, _, _, _ = self.setup_agent(policy)
+        rows = []
+        for origin in (10, 20):
+            row = _request('origin-' + str(origin)).to_dict()
+            row.update(origin_timestamp=origin, target_timestamp=origin + 1, observed=21.)
+            row['label_free_context']['causal_provenance'].update(origin_cutoff_timestamp=origin,
+                latest_context_timestamp=origin, history_timestamps=[origin - 1, origin])
+            rows.append(row)
+        batch = CollaborativeSampleExecutor(adapter).execute(
+            rows, context={'run_id': 'run-agent', 'candidate_id': 'candidate-1', 'dataset_digest': 'd'*64,
+                           'partition': 'training_feedback', 'algorithm_id': 'registered-predictor',
+                           'algorithm_version': '1', 'sample_concurrency': 2},
+            target_bounds={'air_temperature': {'minimum': -20., 'maximum': 80.}},
+            policy=SampleExecutionPolicy(minimum_coverage=.5, minimum_task_coverage=.5),
+            algorithm_id='registered-predictor', algorithm_version='1')
+        self.assertEqual(batch.summary['succeeded_origin_samples'], 1)
+        self.assertEqual(batch.summary['failed_origin_samples'], 1)
+        self.assertTrue(batch.summary['successful_agent_provenance_pass'])
+        self.assertEqual(batch.summary['successful_agent_provenance_coverage'], 1.)
+        self.assertFalse(batch.summary['execution_complete'])
+        self.assertFalse(batch.summary['strict_agent_chain_pass'])
+
     def test_origin_failure_drains_and_persists_completed_sibling(self):
         import threading
         import time
@@ -110,7 +167,47 @@ class AgentOwnedPredictionTests(unittest.TestCase):
         self.assertEqual([row['origin_timestamp'] for row in publications], [20])
         self.assertEqual(publications[0]['sample_execution_status'], 'succeeded')
 
-    def test_output_budget_failure_is_penalized_without_repeating_tools(self):
+    def test_later_fatal_origin_is_not_hidden_by_first_transient_error(self):
+        import threading
+        import time
+        from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
+        second_started, first_failed = threading.Event(), threading.Event()
+        failure = DshNativeRuntimeUnavailableError(
+            error_code='structured_child_model_error', status_code=503)
+        fatal = DshNativeRuntimeUnavailableError(error_code="structured_child_tool_protocol_error", status_code=422)
+        def policy(c, call):
+            if c['samples'][0]['origin_timestamp'] == 10:
+                self.assertTrue(second_started.wait(3))
+                first_failed.set()
+                raise failure
+            second_started.set()
+            self.assertTrue(first_failed.wait(3))
+            time.sleep(.04)
+            raise fatal
+        adapter, plan, native, ledger = self.setup_agent(policy)
+        rows = []
+        for index, name in enumerate(('sample-fails', 'sample-succeeds')):
+            row = _request(name).to_dict()
+            origin = 10 + index * 10
+            row.update(origin_timestamp=origin, target_timestamp=origin+1, observed=21.0)
+            row['label_free_context']['causal_provenance'].update(
+                origin_cutoff_timestamp=origin, latest_context_timestamp=origin,
+                history_timestamps=[origin-1, origin])
+            rows.append(row)
+        publications = []
+        with self.assertRaises(DshNativeRuntimeUnavailableError) as caught:
+            CollaborativeSampleExecutor(adapter).execute(
+                rows, context={'run_id': 'run-agent', 'candidate_id': 'candidate-1',
+                    'dataset_digest': 'd'*64, 'partition': 'training_feedback',
+                    'algorithm_id': 'registered-predictor', 'algorithm_version': '1',
+                    'sample_concurrency': 2},
+                target_bounds={'air_temperature': {'minimum': -20.0, 'maximum': 80.0}},
+                algorithm_id='registered-predictor', algorithm_version='1',
+                result_callback=publications.extend)
+        self.assertIs(caught.exception, fatal)
+        self.assertEqual(publications, [])
+
+    def test_output_budget_failure_stops_without_scoring_or_repeating_tools(self):
         from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
         def policy(c, call):
             call('candidate-model', 'fit')
@@ -121,16 +218,15 @@ class AgentOwnedPredictionTests(unittest.TestCase):
         row = _request('sample-budget').to_dict()
         row['observed'] = 21.0
         publications = []
-        CollaborativeSampleExecutor(adapter).execute(
+        with self.assertRaises(DshNativeRuntimeUnavailableError):
+            CollaborativeSampleExecutor(adapter).execute(
                 (row,), context={'run_id': 'run-agent', 'candidate_id': 'candidate-1',
                     'dataset_digest': 'd'*64, 'partition': 'training_feedback',
                     'algorithm_id': 'registered-predictor', 'algorithm_version': '1'},
                 target_bounds={'air_temperature': {'minimum': -20.0, 'maximum': 80.0}},
                 algorithm_id='registered-predictor', algorithm_version='1',
                 result_callback=publications.extend)
-        self.assertEqual(len(publications), 1)
-        self.assertEqual(publications[0]['sample_execution_status'], 'failed')
-        self.assertEqual(publications[0]['scoring_fallback'], 'failure_non_improvement_penalty')
+        self.assertEqual(publications, [])
         self.assertEqual(len(native.requests), 1)
         self.assertEqual(len(ledger.events_by_kind('run-agent', 'DshPredictionToolExecuted')), 1)
         self.assertFalse(ledger.events_by_kind('run-agent', 'DshStructuredResultAccepted'))
@@ -243,11 +339,11 @@ class AgentOwnedPredictionTests(unittest.TestCase):
                 adapter, plan, _, _ = self.setup_agent(policy)
                 self.assertIsNotNone(self.predict(adapter, plan).error)
 
-    def test_six_calls_budget_counts_failures_and_same_call_is_idempotent(self):
+    def test_two_receipts_share_equivalent_computation_and_preserve_call_budget(self):
         calls = []
         def policy(c, call):
-            for i in range(6):
-                self.assertEqual(call('candidate-model', str(i))['remaining_calls'], 5-i)
+            for i in range(2):
+                self.assertEqual(call('candidate-model', str(i))['remaining_calls'], 1-i)
             self.assertEqual(call('candidate-model', '0')['remaining_calls'], 0)
             with self.assertRaisesRegex(ValueError, 'budget'): call('candidate-model', '7')
             with self.assertRaisesRegex(ValueError, 'reused'): call('candidate-model', '0', {'x': 1})
@@ -255,9 +351,10 @@ class AgentOwnedPredictionTests(unittest.TestCase):
         def tool(reqs):
             calls.append(True)
             return _constant_forecast_bundle(21.5)(reqs)
-        adapter, plan, _, _ = self.setup_agent(policy, tool=tool)
+        adapter, plan, _, ledger = self.setup_agent(policy, tool=tool)
         self.assertIsNone(self.predict(adapter, plan).error)
-        self.assertEqual(len(calls), 6)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(ledger.events_by_kind('run-agent', 'DshPredictionToolExecuted')), 2)
 
     def test_validation_rejects_nonfinite_duplicate_missing_and_bad_blend(self):
         context = {'wave_digest': 'a'*64, 'samples': [{'sample_id': 'one'}]}

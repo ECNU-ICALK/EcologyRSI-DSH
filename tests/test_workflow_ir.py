@@ -4,6 +4,7 @@ import json
 import unittest
 
 from ecologyrsi_dsh.core.models import TaskManifest
+from ecologyrsi_dsh.evaluators.feature_recipe import MAX_RECIPE_TERMS
 from ecologyrsi_dsh.evolution.genome import (
     FrozenRunInitialization,
     GenomeMutationContextV1,
@@ -12,6 +13,7 @@ from ecologyrsi_dsh.evolution.genome import (
 )
 from ecologyrsi_dsh.evolution.workflow_ir import (
     CompilationInstanceContext,
+    _compile_feature_recipe,
     bind_phenotype_instance,
     compile_dsh_workflow_spec,
     compile_plugin_behavior,
@@ -43,6 +45,43 @@ def _task() -> TaskManifest:
             "selection_reviewer_program_digest": "9" * 64,
         },
     )
+
+
+def _recipe_task() -> TaskManifest:
+    """The same run, bound to the recipe predictor and its own evaluator."""
+
+    task = _task()
+    return TaskManifest(
+        task_id=task.task_id,
+        objective=task.objective,
+        domain_pack=task.domain_pack,
+        visible_datasets=task.visible_datasets,
+        budget=task.budget,
+        metadata={
+            **task.metadata,
+            "prediction_model_id": "greenhouse-recipe-ridge@1",
+            "evaluator_id": "greenhouse_recipe_multihorizon_forward@1",
+        },
+    )
+
+
+def _feature_policy_ref(
+    registry: ProgramRegistrySnapshot, policy_id: str
+) -> dict[str, object]:
+    """The compiled feature-policy shape the recipe validator consumes."""
+
+    program = registry.program("feature_policies", policy_id)
+    return {
+        "id": policy_id,
+        "catalog_digest": registry.program_ref("feature_policies", policy_id)[
+            "catalog_digest"
+        ],
+        "version": program["version"],
+        "effective_parameters": {
+            name: contract["default"]
+            for name, contract in program["parameters"].items()
+        },
+    }
 
 
 def _initialization(task: TaskManifest) -> FrozenRunInitialization:
@@ -162,6 +201,95 @@ class WorkflowIRTests(unittest.TestCase):
             behavior.algorithm_behavior["evaluator_id"],
             "greenhouse_multihorizon_time_forward@2",
         )
+
+    def test_recipe_seed_compiles_with_baseline_symmetric_reads(self) -> None:
+        task = _recipe_task()
+        behavior = compile_plugin_behavior(
+            _seed(task, template_id="greenhouse-recipe-default@1"),
+            task,
+            None,
+            current_program_registry(),
+        )
+
+        recipe = behavior.feature_training_spec["feature_recipe"]
+        self.assertEqual(
+            behavior.algorithm_behavior["predictor_id"],
+            "greenhouse-recipe-ridge@1",
+        )
+        # The information-symmetry guarantee, checked on the compiled behavior
+        # rather than on the seed literal: at h=6 the selected seasonal_24h
+        # baseline reads origin-18h, so a candidate that cannot read that offset
+        # is structurally unable to match it. Root cause (B).
+        self.assertIn(-18, recipe["per_horizon"]["6"]["required_timestamp_offsets"])
+        self.assertEqual(recipe["per_horizon"]["6"]["max_history_hours"], 24)
+        self.assertEqual(
+            behavior.feature_training_spec["feature_policy"]["id"],
+            "authored_causal_features@1",
+        )
+
+    def test_recipe_beyond_the_policy_term_ceiling_is_refused(self) -> None:
+        # Exercised against the compiler's validation boundary rather than a
+        # tampered genome: EcologyEvolutionPluginGenome.from_dict re-derives and
+        # verifies behavior_digest, so an over-long recipe cannot be smuggled
+        # into a materialized genome in the first place. That is the outer
+        # defense; this is the inner one.
+        registry = current_program_registry()
+        policy = _feature_policy_ref(registry, "authored_causal_features@1")
+        recipe = {
+            "features": [
+                {"op": "target_lag", "k": lag} for lag in range(MAX_RECIPE_TERMS + 1)
+            ],
+            "model": {
+                "kind": "ridge",
+                "alpha": 0.1,
+                "anchor": "fit_selected_baseline",
+            },
+            "per_horizon": {"1": {"residual_scale": 0.2}},
+        }
+
+        with self.assertRaisesRegex(ValueError, "terms"):
+            _compile_feature_recipe(
+                recipe,
+                predictor_id="greenhouse-recipe-ridge@1",
+                predictor=registry.program("predictors", "greenhouse-recipe-ridge@1"),
+                feature_policy=policy,
+            )
+
+    def test_predictor_without_a_recipe_axis_refuses_one(self) -> None:
+        registry = current_program_registry()
+
+        with self.assertRaisesRegex(ValueError, "does not accept a feature_recipe"):
+            _compile_feature_recipe(
+                {
+                    "features": [{"op": "target_lag", "k": 0}],
+                    "model": {
+                        "kind": "ridge",
+                        "alpha": 0.1,
+                        "anchor": "fit_selected_baseline",
+                    },
+                    "per_horizon": {"1": {"residual_scale": 0.2}},
+                },
+                predictor_id="greenhouse-baseline-aligned-ridge@1",
+                predictor=registry.program(
+                    "predictors", "greenhouse-baseline-aligned-ridge@1"
+                ),
+                feature_policy=_feature_policy_ref(
+                    registry, "registered_greenhouse_features@1"
+                ),
+            )
+
+    def test_recipe_predictor_without_a_recipe_is_refused(self) -> None:
+        registry = current_program_registry()
+
+        with self.assertRaisesRegex(ValueError, "requires a scientific_program"):
+            _compile_feature_recipe(
+                None,
+                predictor_id="greenhouse-recipe-ridge@1",
+                predictor=registry.program("predictors", "greenhouse-recipe-ridge@1"),
+                feature_policy=_feature_policy_ref(
+                    registry, "authored_causal_features@1"
+                ),
+            )
 
     def test_rolling_residual_rejects_multihorizon_evaluator(self) -> None:
         task = _task()

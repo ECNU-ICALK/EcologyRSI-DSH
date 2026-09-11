@@ -27,6 +27,7 @@ from ecologyrsi_dsh.evolution.schedule import (
     PREQUENTIAL_LOCAL_EVALUATION_MODE,
     SCHEDULE_SCHEMA_VERSION,
     ISOLATED_SCHEDULE_SCHEMA_VERSION,
+    TRAINING_SCHEDULE_SCHEMA_VERSION,
     PAIRED_LOCAL_EVALUATION_MODE,
     OptimizationSchedule,
 )
@@ -160,7 +161,22 @@ class HTTPContractTests(unittest.TestCase):
         self.assertGreaterEqual(payload["reused_origin_occurrences"], 0)
         self.assertFalse(payload["capacity_enforced_for_run_creation"])
 
-    def test_create_defaults_to_v3_and_explicit_legacy_schedule_round_trips(self) -> None:
+    def test_independent_evaluation_routes_are_separate_from_training(self) -> None:
+        status, created = self.request("/api/runs", method="POST", body={
+            "dataset_id": "generated-toy-series@1", "optimization_protocol": OPTIMIZATION_PROTOCOL,
+            "rounds": 1, "candidates_per_generation": 4, "max_candidates": 4,
+            "auto_advance": 0, "idempotency_key": "independent-http"})
+        self.assertEqual(status, 201, created)
+        path = "/api/runs/" + created["projection"]["run_id"] + "/independent-evaluation"
+        status, report = self.request(path)
+        self.assertEqual(status, 200, report)
+        self.assertFalse(report["feedback_to_evolution"])
+        self.assertTrue(all(not stage["available"] for stage in report["stages"]))
+        for body in ({"stage": "validation"}, {"stage": "training"}, {"stage": "validation", "candidate_id": "replace"}):
+            status, _ = self.request(path, method="POST", body=body)
+            self.assertEqual(status, 400)
+
+    def test_create_defaults_to_training_epochs_and_explicit_legacy_schedule_round_trips(self) -> None:
         base = {
             "dataset_id": "generated-toy-series@1",
             "optimization_protocol": OPTIMIZATION_PROTOCOL,
@@ -179,7 +195,7 @@ class HTTPContractTests(unittest.TestCase):
         default_schedule = created["projection"]["configuration"][
             "optimization_schedule"
         ]
-        self.assertEqual(default_schedule["schema_version"], ISOLATED_SCHEDULE_SCHEMA_VERSION)
+        self.assertEqual(default_schedule["schema_version"], TRAINING_SCHEDULE_SCHEMA_VERSION)
         self.assertEqual(
             default_schedule["local_evaluation_mode"],
             PAIRED_LOCAL_EVALUATION_MODE,
@@ -480,13 +496,14 @@ class HTTPContractTests(unittest.TestCase):
                 response.geturl(),
                 self.base + "/plugins/ecology/evolution/?api=/api/ecology-evolution",
             )
-            self.assertIn('href="styles.css"', response.read().decode("utf-8"))
+            html = response.read().decode("utf-8")
+            self.assertIn('href="styles.css"', html)
 
-        for asset, content_type in (
-            ("styles.css", "text/css"),
-            ("app.js", "text/javascript"),
-            ("assets/js/host.js", "text/javascript"),
-        ):
+        import re
+        assets = re.findall(r'(?:src|href)="([^" ]+\.(?:js|css))"', html)
+        self.assertGreater(len(assets), 10)
+        for asset in assets:
+            content_type = 'text/css' if asset.endswith('.css') else 'text/javascript'
             with urlopen(
                 self.base + f"/plugins/ecology/evolution/{asset}", timeout=3
             ) as response:
@@ -1298,6 +1315,23 @@ class HTTPContractTests(unittest.TestCase):
         paused = [item for item in events["events"] if item["kind"] == "RunPaused"]
         self.assertEqual(paused[-1]["payload"]["reason"], "等待上游队列降压")
         self.assertEqual(paused[-1]["payload"]["code"], "operator_backpressure")
+
+    def test_pause_control_records_default_cause_and_clears_it_on_resume(self) -> None:
+        run_id, _created = self._create_running_run_for_boundary("pause-default-cause")
+        path = "/api/runs/" + quote(run_id, safe="") + "/control"
+        status, payload = self.request(path, "POST", {
+            "action": "pause", "idempotency_key": "pause-default-cause",
+        })
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["projection"]["pause_code"], "operator_pause")
+        self.assertIn("控制接口收到暂停请求", payload["projection"]["pause_reason"])
+        status, payload = self.request(path, "POST", {
+            "action": "resume", "idempotency_key": "resume-default-cause",
+        })
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["projection"]["status"], "running")
+        self.assertIsNone(payload["projection"]["pause_code"])
+        self.assertIsNone(payload["projection"]["pause_reason"])
 
     def _create_running_run_for_boundary(self, key: str) -> tuple[str, dict]:
         status, payload = self.request(

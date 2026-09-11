@@ -54,6 +54,22 @@ class _Director:
 
 
 class CandidateParallelEvaluationTests(unittest.TestCase):
+    def test_fatal_sibling_wins_over_lower_slot_transport_failure(self):
+        from threading import Barrier
+        from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
+        from ecologyrsi_dsh.application.candidate_scheduler import CandidateEvaluationTask, run_candidate_evaluations
+        barrier = Barrier(2)
+        fatal = DshNativeRuntimeUnavailableError(error_code="structured_child_tool_protocol_error", status_code=422)
+        def evaluate(candidate_id):
+            barrier.wait(timeout=3)
+            if candidate_id == "a":
+                raise DshNativeRuntimeUnavailableError(status_code=502)
+            raise fatal
+        with self.assertRaises(DshNativeRuntimeUnavailableError) as caught:
+            run_candidate_evaluations((CandidateEvaluationTask(0, "a"), CandidateEvaluationTask(1, "b")),
+                max_concurrency=2, evaluate=evaluate, admission_open=lambda: True)
+        self.assertIs(caught.exception, fatal)
+
     def test_paired_holdout_uses_retained_final_champion(self) -> None:
         retained_champion_id = "revision:finalist:champion"
         rejected_challenger_id = "revision:finalist:challenger"

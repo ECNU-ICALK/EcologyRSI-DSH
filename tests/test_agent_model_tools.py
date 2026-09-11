@@ -23,13 +23,57 @@ class AgentModelToolsTests(unittest.TestCase):
             self.assertIsInstance(output['predicted'], float)
             self.assertNotIn('observed', str(output))
             self.assertEqual(output['metadata']['training_partition'], 'training_fit')
-        self.assertEqual(len(bank._fits), 4)
+        self.assertEqual(len(bank._fits), len(bank.catalog()))
         bank.execute((request,), 'greenhouse-exogenous-ridge@1', {'residual_scale': 0})
         bank.execute((request,), 'greenhouse-baseline-aligned-ridge@1', {'residual_scale_1h': .3, 'residual_scale_6h': .7})
-        self.assertEqual(len(bank._fits), 4)
+        self.assertEqual(len(bank._fits), len(bank.catalog()))
         for params in ({'ridge_alpha': -1}, {'history_steps': 20}, {'observed': 100}, {'residual_scale': True}):
             with self.assertRaises((ValueError, TypeError)):
                 bank.execute((request,), 'greenhouse-exogenous-ridge@1', params)
+
+    def test_recipe_residual_scale_changes_reuse_the_same_fit(self):
+        """Residual scaling is applied after the fit, so it must not refit."""
+        series = periodic_series()
+        bank = AgentModelTools(series, targets=('air_temperature',), horizons=(1,))
+        base = bank.catalog()
+        recipe = next(item for item in base
+                      if item['tool_id'] == 'greenhouse-recipe-ridge@1'
+                      )['parameters']['feature_recipe']['default']
+        bank.execute((self.request(series),), 'greenhouse-recipe-ridge@1',
+                     {'feature_recipe': recipe})
+        self.assertEqual(len(bank._fits), 1)
+        rescaled = {**recipe, 'per_horizon': {'1': {'residual_scale': 0.9}}}
+        bank.execute((self.request(series),), 'greenhouse-recipe-ridge@1',
+                     {'feature_recipe': rescaled})
+        self.assertEqual(len(bank._fits), 1)
+        # A structural change is a different model and must refit.
+        restructured = {**recipe, 'features': [
+            *recipe['features'], {'op': 'rolling_std', 'w': 6}]}
+        bank.execute((self.request(series),), 'greenhouse-recipe-ridge@1',
+                     {'feature_recipe': restructured})
+        self.assertEqual(len(bank._fits), 2)
+
+    def test_recipe_grammar_is_advertised_instead_of_scalar_bounds(self):
+        series = periodic_series()
+        bank = AgentModelTools(series, targets=('air_temperature',), horizons=(1, 6, 24))
+        entry = next(item for item in bank.catalog()
+                     if item['tool_id'] == 'greenhouse-recipe-ridge@1')
+        self.assertEqual(list(entry['parameters']), ['feature_recipe'])
+        grammar = entry['parameters']['feature_recipe']['grammar']
+        self.assertIn('seasonal_reference', grammar['allowed_ops'])
+        self.assertEqual(grammar['allowed_ops']['seasonal_reference']['parameters'],
+                         ['period'])
+        # Bounds live in a flat sibling map so the grammar stays inside the
+        # sample-contract depth fence when it travels in plan.tools[*].
+        self.assertEqual(grammar['op_parameters']['seasonal_reference.period'],
+                         {'kind': 'integer', 'choices': [24, 168]})
+        self.assertEqual(grammar['numeric_bounds_enforced_by'], 'host')
+        seed = entry['parameters']['feature_recipe']['default']
+        # The reachability guarantee: the seed already carries the reads the
+        # selected seasonal baseline uses, so no trust-region step is needed.
+        self.assertIn({'op': 'seasonal_reference', 'period': 24}, seed['features'])
+        self.assertIn({'op': 'target_lag', 'k': 24}, seed['features'])
+        self.assertEqual(sorted(seed['per_horizon']), ['1', '24', '6'])
 
     def test_changing_future_labels_cannot_change_tool_prediction(self):
         series = periodic_series()

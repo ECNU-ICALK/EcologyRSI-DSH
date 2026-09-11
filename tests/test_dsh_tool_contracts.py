@@ -1237,6 +1237,25 @@ class DshToolServiceTests(unittest.TestCase):
             allocated["launch"]["reservation_id"],
         )
 
+    def test_child_failure_preserves_safe_provider_contract_and_rejects_extra_data(self):
+        fence = self.service.open_admission("run:tool-test", 3, 2, role="sample-planner",
+            stage="sample.plan", idempotency_key="sample-provider-failure")
+        request = _reservation_request(fence.admission_id, request_id="provider-failure-reservation")
+        request.update(role="sample-planner", stage="sample.plan", idempotency_key="sample-provider-failure")
+        self.service.allocate_child_reservation(request)
+        details = {"schema_version": "ecology-runtime-failure/1", "error_code": "structured_child_model_error",
+            "failure_domain": "provider", "retryable": True, "provider_status": 503,
+            "retry_after_ms": 12000, "affected_scope": "model_route"}
+        failure = {"run_id": "run:tool-test", "stage": "sample.plan", "idempotency_key": "sample-provider-failure",
+            "error_code": details["error_code"], "runtime_failure": {**details, "message": "private"}}
+        with self.assertRaises(ValueError):
+            self.service.record_child_failure(failure)
+        failure["runtime_failure"] = details
+        self.assertTrue(self.service.record_child_failure(failure)["accepted"])
+        event = next(e for e in reversed(self.ledger.events("run:tool-test")) if e.kind == "DshChildExecutionFailed")
+        self.assertEqual(event.payload["runtime_failure"], details)
+        self.assertEqual(event.payload["schema_version"], "ecologyrsi-dsh.child-execution-failed/2")
+
     def test_child_failure_rejects_unknown_or_invalid_request(self) -> None:
         missing = self.service.record_child_failure({
             "run_id": "run:tool-test",

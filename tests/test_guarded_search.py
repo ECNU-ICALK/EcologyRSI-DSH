@@ -37,6 +37,25 @@ def evaluation(arm, gain, blocks=3):
 
 
 class GuardedSearchTests(unittest.TestCase):
+    def test_small_training_batch_can_explore_but_cannot_certify_improvement(self):
+        from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
+        policy = local_challenger_policy({"search_guard_policy": SEARCH_GUARD_POLICY,
+            "local_comparison_policy": "exploratory_paired_point_comparison",
+            "optimization_schedule": OptimizationSchedule.for_comparison_run().to_dict()})
+        champion = evaluation(FormalBatchArm.CHAMPION, 0, blocks=2)
+        challenger = evaluation(FormalBatchArm.CHALLENGER, .02, blocks=2)
+        local = assess_local_challenger(champion, challenger,
+                                       challenger_safety_gate_passed=True, **policy)
+        self.assertEqual(local.champion_after_revision_id, "rev:challenger")
+        confirmation = assess_promotion_improvement(challenger, champion)
+        self.assertFalse(confirmation["improved"])
+        self.assertEqual(confirmation["reason_code"], "insufficient_evidence")
+        incomplete = challenger.to_dict()["metrics"]
+        incomplete["sample_execution"]["succeeded_origin_samples"] = 1
+        rejected = assess_local_challenger(champion, replace(challenger, metrics=incomplete),
+                                          challenger_safety_gate_passed=True, **policy)
+        self.assertEqual(rejected.champion_after_revision_id, "rev:champion")
+
     def assess(self, gain=.02, blocks=3):
         return assess_local_challenger(evaluation(FormalBatchArm.CHAMPION,0,blocks),
             evaluation(FormalBatchArm.CHALLENGER,gain,blocks),challenger_safety_gate_passed=True,

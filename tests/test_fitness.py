@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
+import ecologyrsi_dsh
 from ecologyrsi_dsh.core.models import Evaluation, TaskManifest, canonical_json, digest
 from ecologyrsi_dsh.evaluators.fitness import (
     EXPLORATORY_EVIDENCE_CLASS,
@@ -376,6 +378,56 @@ class FitnessTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "inconclusive")
         self.assertFalse(result.formal_confirmation)
+
+    def test_formal_evidence_fields_have_no_production_writer_yet(self) -> None:
+        """Pin the formal layer's unfed state so a fixture cannot hide it.
+
+        ``test_formal_gate_uses_frozen_baseline_and_requires_point_and_uq`` above
+        hand-builds every metric the formal gate reads, which made a fully
+        unimplemented layer look exercised. None of the five top-level required
+        metrics, nor the per-cell ``interval_coverage_lcb``, is written anywhere
+        in ``src/``: the formal path needs holdout scoring and calibrated
+        prediction intervals that do not exist yet.
+
+        Fail-closed is therefore the correct behaviour, and this test asserts it
+        directly. When a real producer lands, this test is what will fail and
+        tell whoever wrote it to come update the claim.
+        """
+
+        source = Path(ecologyrsi_dsh.__file__).parent
+        unwritten = (
+            "formal_score",
+            "formal_score_lcb",
+            "formal_valid_three_day_start_count",
+            "formal_baseline_uq_artifact_digest",
+            "paired_interval_score_delta_ucb",
+            "interval_coverage_lcb",
+        )
+        producers = {name: [] for name in unwritten}
+        for path in sorted(source.rglob("*.py")):
+            if path.name == "fitness.py":
+                continue  # The reader, not a writer.
+            text = path.read_text(encoding="utf-8")
+            for name in unwritten:
+                if f'"{name}"' in text:
+                    producers[name].append(path.name)
+        self.assertEqual(
+            {name: files for name, files in producers.items() if files}, {}
+        )
+
+        # And so the gate refuses rather than assuming the best.
+        candidate = _evaluation("formal-unfed", 0.2, (0.1,) * 14)
+        result = build_formal_fitness_assessment(
+            candidate,
+            {
+                "artifact_digest": "9" * 64,
+                "policy_id": "cellwise_time_block_calibrated_residual@1",
+                "alpha": 0.1,
+            },
+            FitnessProfile.from_task(_task()),
+        )
+        self.assertFalse(result.formal_confirmation)
+        self.assertEqual(result.status, "inconclusive")
 
 
 if __name__ == "__main__":

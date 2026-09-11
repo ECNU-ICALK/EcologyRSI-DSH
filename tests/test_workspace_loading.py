@@ -15,6 +15,23 @@ from ecologyrsi_dsh.presentation.training_assets import training_assets
 
 
 class WorkspaceHTTPTests(unittest.TestCase):
+    def test_candidate_list_defers_details_and_artifacts_until_selected(self):
+        from ecologyrsi_dsh.api.projection import _candidate_projection
+        run, candidate = self.seed()
+        with patch('ecologyrsi_dsh.api.workspaces._artifact_projection', side_effect=AssertionError('eager artifact')):
+            status, payload = self.request('/api/runs/' + quote(run) + '?view=candidates')
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload['projection']['artifacts'], [])
+        self.assertFalse(payload['projection']['candidates'][0]['details_loaded'])
+        status, payload = self.request('/api/runs/' + quote(run) + '?view=candidate&candidate_id=' + quote(candidate))
+        self.assertEqual(status, 200, payload)
+        detail = payload['projection']['candidate']
+        self.assertTrue(detail['details_loaded'])
+        self.assertEqual(detail['candidate_id'], candidate)
+        state = self.server.director.state(run)
+        self.assertEqual(detail, {**_candidate_projection(state, state.candidate(candidate)), 'details_loaded': True})
+        self.assertEqual(self.request('/api/runs/' + quote(run) + '?view=candidate&candidate_id=foreign')[0], 404)
+
     setUp = http_helpers.HTTPContractTests.setUp
     tearDown = http_helpers.HTTPContractTests.tearDown
     request = http_helpers.HTTPContractTests.request

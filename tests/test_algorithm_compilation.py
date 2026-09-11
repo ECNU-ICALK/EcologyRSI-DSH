@@ -136,6 +136,9 @@ class AlgorithmCompilationTests(unittest.TestCase):
                     "greenhouse-baseline-aligned-multihorizon-time-forward/1"
                 ),
                 "greenhouse_multihorizon_time_forward@4": "greenhouse-runtime-model-selection-forward/1",
+                "greenhouse_recipe_multihorizon_forward@1": (
+                    "greenhouse-recipe-multihorizon-forward/1"
+                ),
             },
         )
 

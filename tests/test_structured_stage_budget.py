@@ -47,6 +47,21 @@ class StructuredStageBudgetTests(unittest.TestCase):
         _result, request = self.request("generation.research-synthesis", {}, 8192)
         self.assertEqual(request["max_tokens"], 8192)
 
+    def test_fatal_cause_wins_over_wrapper_and_cancelled_sibling(self):
+        from ecologyrsi_dsh.core.errors import dsh_native_runtime_error_in_chain, preferred_execution_failure
+        from ecologyrsi_dsh.api.auto_progress import _retry_later_error
+        fatal = DshNativeRuntimeUnavailableError(error_code="structured_child_tool_protocol_error", status_code=422)
+        outage = DshNativeRuntimeUnavailableError(status_code=502)
+        outage.__cause__ = fatal
+        self.assertIs(dsh_native_runtime_error_in_chain(outage), fatal)
+        self.assertFalse(_progress_failure_retryable(outage))
+        self.assertTrue(_progress_failure_irrecoverable(outage))
+        self.assertIsNone(_retry_later_error(outage))
+        earlier = DshNativeRuntimeUnavailableError(status_code=503)
+        self.assertIs(preferred_execution_failure(earlier, fatal), fatal)
+        self.assertIs(preferred_execution_failure(fatal, earlier), fatal)
+        self.assertIs(preferred_execution_failure(earlier, RuntimeError()), earlier)
+
     def test_deterministic_failures_override_http_503_retry_classification(self):
         for code in ("structured_child_output_budget_exhausted", "structured_child_tool_protocol_error",
                      "structured_child_output_schema_invalid", "dsh_native_runtime_contract_error"):

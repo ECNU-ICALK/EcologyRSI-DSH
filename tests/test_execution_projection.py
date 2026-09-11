@@ -3072,6 +3072,17 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(running["started_at"], launch.created_at)
         self.assertNotIn("reservation_id", running)
 
+        remote = {"kind": "streaming", "log_revision": 40, "updated_at": "2026-08-25T13:54:20+00:00"}
+        telemetry = SimpleNamespace(seq=21, kind="DshSessionUsageRecorded", created_at="2026-08-25T13:54:25+00:00",
+                                    payload={"identity": {"child_reservation_id": "reservation-critic-2"},
+                                             "session_metrics": {"activity": remote}})
+        unrelated = SimpleNamespace(seq=22, kind="DshSessionUsageRecorded", created_at="2026-08-25T14:10:00+00:00",
+                                    payload={"identity": {"child_reservation_id": "another"}, "session_metrics": {}})
+        observed = _dsh_activity_projection(SimpleNamespace(events=(stage_started, launch, telemetry, unrelated)),
+                                           current_stage="evaluation", run_status="running")
+        self.assertEqual(observed["remote_activity"], remote)
+        self.assertEqual(observed["updated_at"], remote["updated_at"])
+
         accepted = SimpleNamespace(
             seq=21,
             kind="DshStructuredResultAccepted",
@@ -3460,8 +3471,8 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertTrue(projected["provider_usage"]["available"])
         self.assertEqual(projected["provider_usage"]["total_tokens"], 150)
         self.assertEqual(projected["provider_usage"]["session_count"], 1)
-        self.assertTrue(projected["context_pressure"]["available"])
-        self.assertEqual(projected["context_pressure"]["maximum_total_tokens"], 120)
+        self.assertFalse(projected["context_pressure"]["available"])
+        self.assertEqual(projected["context_pressure"]["historical_last_snapshot_maximum_tokens"], 120)
         self.assertEqual(projected["retrieval"]["call_count"], 2)
         self.assertEqual(projected["retrieval"]["fallback_count"], 1)
         self.assertEqual(
@@ -5411,7 +5422,7 @@ class NativeReplicaProgressTests(unittest.TestCase):
 
     def test_native_progress_uses_the_same_execution_budget_as_capacity(self):
         from dataclasses import replace
-        schedule = replace(OptimizationSchedule.for_new_run(), formal_origin_count_per_finalist=144, local_batch_origin_count=72)
+        schedule = replace(OptimizationSchedule.for_comparison_run(), formal_origin_count_per_finalist=144, local_batch_origin_count=72, selection_holdout_origin_count=169)
         state = SimpleNamespace(task_manifest=SimpleNamespace(metadata={
             'sample_agent_mode':'dsh_native_agent', 'optimization_protocol':'top2_adaptive_epoch@1',
             'optimization_schedule':schedule.to_dict(), 'prediction_cells_per_origin':9}),

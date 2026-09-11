@@ -75,7 +75,7 @@ class _PairedLaneEvaluator:
     def evaluate_scientific(self, _task, _candidate, _proposal, *, scope, **_kwargs):
         revision_id = scope.candidate_revision_id
         batch_index = int(scope.batch_index)
-        arm = scope.formal_batch_arm.value
+        arm = scope.formal_batch_arm.value if scope.formal_batch_arm else "prequential"
         self.calls.append((batch_index, arm, revision_id))
         if batch_index == 0:
             score = 0.2
@@ -146,6 +146,7 @@ class FormalTrajectoryTests(unittest.TestCase):
             _local_challenger_policy((endpoint).server, "run:v3"),
             {
                 "minimum_score_delta": 1e-12,
+                "cell_regression_tolerance": 1e-12,
                 "cell_regression_blocks": False,
                 "require_paired_evidence": False,
                 "require_paired_strict_chain": False,
@@ -858,6 +859,30 @@ class FormalTrajectoryTests(unittest.TestCase):
 
 
 class PairedFormalTrajectoryTests(unittest.TestCase):
+    def test_failed_batch_stops_before_scientific_editor_or_next_batch(self):
+        candidate_id = self.finalist.candidate_id
+        initial_id = self.revisions[candidate_id].revision_id
+        evaluate = self.evaluator.evaluate_scientific
+        def failed_batch(*args, **kwargs):
+            result = evaluate(*args, **kwargs)
+            sample = result.evaluation.metrics['sample_execution']
+            sample.update(succeeded_origin_samples=9, failed_origin_samples=1,
+                          coverage=.9, strict_agent_chain_pass=False)
+            return result
+        patches = self._execution_patches(self._mutate_proposal())
+        with patches[0], patches[1], patches[2], patches[3], patches[4] as editor, patch.object(
+            self.evaluator, 'evaluate_scientific', side_effect=failed_batch
+        ):
+            from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
+            with self.assertRaises(DshNativeRuntimeUnavailableError) as raised:
+                formal_trajectory.execute_next_formal_batch(self.endpoint.server, self.run_id, candidate_id)
+            self.assertEqual(raised.exception.error_code, "evaluation_execution_incomplete")
+            editor.assert_not_called()
+        state = self.director.state(self.run_id)
+        self.assertFalse(state.local_edit_outcomes)
+        self.assertIsNone(state.batch_evaluation_for(candidate_id, 0))
+        self.assertIsNone(state.formal_batch_for(candidate_id, 1))
+
     def setUp(self) -> None:
         from tests.test_local_edits import _parent
 
@@ -868,7 +893,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
         )
         self.schedule = OptimizationSchedule.from_dict(
             {
-                **OptimizationSchedule.default().to_dict(),
+                **(OptimizationSchedule.for_new_run() if getattr(self, "quick_protocol", False) else OptimizationSchedule.default()).to_dict(),
                 "formal_origin_count_per_finalist": 30,
                 "local_batch_origin_count": 10,
             }
@@ -886,7 +911,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
             seed=23,
             metadata={
                 "episode_id": "episode:paired-formal",
-                "optimization_protocol": "top2_adaptive_epoch@1",
+                "optimization_protocol": self.schedule.protocol,
                 "optimization_schedule": self.schedule.to_dict(),
                 "prediction_cells_per_origin": 1,
             },
@@ -935,7 +960,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
             self.run_id,
             cohorts,
         )
-        for candidate in self.candidates:
+        for candidate in (() if self.schedule.quick else self.candidates):
             self.director.record_candidate_screening(
                 self.run_id,
                 candidate_id=candidate.candidate_id,
@@ -957,7 +982,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
             generation=0,
             selected_candidate_ids=[
                 self.candidates[0].candidate_id,
-                self.candidates[1].candidate_id,
+                *([self.candidates[1].candidate_id] if not self.schedule.quick else []),
             ],
             screening_digest=screening_cohort_digest(screening),
         )
