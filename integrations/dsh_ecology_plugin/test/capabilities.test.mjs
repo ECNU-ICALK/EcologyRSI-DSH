@@ -1,7 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { runtimeCapabilities } from "../lib/runtime/capabilities.js";
+import { runtimeCapabilities, inferenceConfigDigest } from "../lib/runtime/capabilities.js";
+
+test("wire and thinking config invalidate cached preflight without hashing credentials", async () => {
+  const config = { providers: { p: { api: "openai-completions", apiKeyEnv: "KEY",
+    baseURL: "https://example.test/v1?key=secret", headers: { authorization: "secret" },
+    models: [{ id: "model", compat: { supportsStrictMode: false } }] } } };
+  const initial = inferenceConfigDigest(config);
+  config.providers.p.headers.authorization = "rotated";
+  config.providers.p.baseURL = "https://example.test/v1?key=rotated";
+  assert.equal(inferenceConfigDigest(config), initial);
+  config.providers.p.models[0].compat.supportsStrictMode = true;
+  assert.notEqual(inferenceConfigDigest(config), initial);
+  const ctx = { settings: { get: () => config } };
+  const first = await runtimeCapabilities(ctx, [{ preset_id: "p" }]);
+  config.providers.p.reasoning = "off";
+  const second = await runtimeCapabilities(ctx, [{ preset_id: "p" }]);
+  assert.notEqual(first.presets[0].content_digest, second.presets[0].content_digest);
+});
 
 
 const ROOT_SERVICES = [
@@ -56,4 +73,23 @@ test("tool surface verification rejects undeclared extra tools", async () => {
   }]);
   assert.equal(result.presets[0].tool_surface_verified, false);
   assert.equal(result.ready, false);
+});
+
+
+test("runtime identity changes when a skill or execution limit changes", async () => {
+  const {runtimeContentDigest}=await import("../lib/runtime/capabilities.js");
+  const {mkdtemp,mkdir,writeFile,rm}=await import("node:fs/promises");
+  const {tmpdir}=await import("node:os");
+  const {pathToFileURL}=await import("node:url");
+  const root=await mkdtemp(tmpdir()+"/ecology-fingerprint-");
+  try {
+    for(const dir of ["lib","presets","schemas"]) await mkdir(root+"/"+dir);
+    await writeFile(root+"/presets/SKILL.md","two prediction calls");
+    await writeFile(root+"/lib/budget.js","10");
+    const url=pathToFileURL(root+"/");const initial=await runtimeContentDigest(url);
+    await writeFile(root+"/presets/SKILL.md","one prediction call");
+    const changedSkill=await runtimeContentDigest(url);assert.notEqual(initial,changedSkill);
+    await writeFile(root+"/lib/budget.js","5");
+    assert.notEqual(changedSkill,await runtimeContentDigest(url));
+  } finally {await rm(root,{recursive:true,force:true});}
 });

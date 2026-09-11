@@ -1391,10 +1391,10 @@ test("sample reflection binds the outer Host identity and retries one missing re
   }
 });
 
-test("serialized tool text is a terminal protocol error with no fabricated tool execution", async () => {
+test("repeated serialized tool text stops after one fresh probe without fabricated execution", async () => {
   for (const stopReason of ["completed", "error"]) {
     const harness = directSampleHarness({
-      stage: "sample.reflect", results: [{ stopReason }],
+      stage: "sample.reflect", results: [{ stopReason }, { stopReason }],
       sessionEvents: () => [
         { seq: 1, type: "turn/start", data: { turn: 1 } },
         { seq: 2, type: "step/start", data: { turn: 1, step: 0 } },
@@ -1408,7 +1408,7 @@ test("serialized tool text is a terminal protocol error with no fabricated tool 
       schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
       wave_digest: "d".repeat(64), sample: { sample_id: "origin-tool-text" }, outcome: { cells: [] },
     })), (error) => error?.code === "structured_child_tool_protocol_error");
-    assert.equal(harness.starts.length, 1);
+    assert.equal(harness.starts.length, 2);
     assert.equal(harness.failures[0].error_code, "structured_child_tool_protocol_error");
     assert.equal(harness.persisted.length, 0);
   }
@@ -1994,7 +1994,7 @@ test("sample planner uses a bounded native one-shot child and retries one missin
     );
     assert.match(
       plannerPrompt.instruction,
-      /call ecology_execute_prediction_tool zero to six times/i,
+      /call ecology_execute_prediction_tool zero to two times/i,
     );
     assert.match(
       plannerPrompt.instruction,
@@ -2351,4 +2351,49 @@ test('output correction rejects ambiguous evidence, operational errors, extra ca
     const events = correctedOutputEvents(); change(events);
     assert.throws(() => skillInvocationEvidence(events, { stage: 'sample.plan', skillName: 'origin-vector-forecasting-balanced', allowsPredictionTools: true }));
   }
+});
+
+
+test("SERVER 503 is recoverable and its bounded contract reaches failure accounting", async () => {
+  const harness = directSampleHarness({stage: "sample.plan", maxAttempts: 1,
+    results: [{stopReason: "error"}], sessionEvents: () => rc6ConsumedEvents("origin-vector-forecasting-balanced", {
+      prediction: true, terminalKind: "error", terminalError: {code: "SERVER", status: 503, providerRetryAfterMs: 12000, message: "private provider message"},
+    })});
+  await assert.rejects(harness.runner.run(directSampleBinding("sample.plan", samplePlanContext())), e => e.code === "structured_child_model_error");
+  assert.equal(harness.starts.length, 1);
+  assert.equal(harness.failures[0].runtime_failure.provider_status, 503);
+  assert.equal(harness.failures[0].runtime_failure.retryable, true);
+  assert.equal(harness.failures[0].runtime_failure.retry_after_ms, 12000);
+  assert.equal(harness.failures[0].runtime_failure.failure_domain, "provider");
+  assert.doesNotMatch(JSON.stringify(harness.failures), /private provider/);
+  assert.equal(harness.persisted.length, 0);
+});
+
+test("sample step exhaustion stops before structured acceptance without identical retry", async () => {
+  const harness = directSampleHarness({stage: "sample.critic",
+    results: [{stopReason: "completed", structured: {}}],
+    sessionEvents: () => [...Array.from({length: 5}, (_, i) => ({seq: i + 1, type: "step/start", data: {turn: 1, step: i}})),
+      ...skillFirstEvents("origin-vector-review").map(e => ({...e, seq: e.seq + 5}))]});
+  await assert.rejects(harness.runner.run(directSampleBinding("sample.critic", {
+    schema_version: "ecologyrsi-dsh.sample-review-wave/1", wave_digest: "a".repeat(64), samples: [{sample_id: "x"}],
+  })), e => e.code === "structured_child_execution_budget_exhausted");
+  assert.equal(harness.starts.length, 1);
+  assert.equal(harness.persisted.length, 0);
+});
+
+test("a real protocol probe recovers after Skill without accepting serialized text", async () => {
+  const context = {schema_version:"ecologyrsi-dsh.sample-reflection-context/1", wave_digest:"d".repeat(64), sample:{sample_id:"origin-probe"},outcome:{cells:[]}};
+  const structured = {schema_version:"ecology-sample-reflection@1",wave_digest:context.wave_digest,sample_id:"origin-probe",outcome_class:"neutral",error_source:"unknown",next_action:"keep",confidence:0.8,summary:"Keep."};
+  const harness = directSampleHarness({stage:"sample.reflect",results:[{stopReason:"completed"},{stopReason:"completed",structured}],
+    sessionEvents: attempt => attempt === 1 ? [
+      {seq:1,type:"turn/start",data:{turn:1}}, {seq:2,type:"step/start",data:{turn:1,step:0}},
+      {seq:3,type:"tool/call",data:{turn:1,callId:"skill",name:"skill"}},
+      {seq:4,type:"assistant/message",data:{turn:1,message:{content:[{type:"text",text:'<｜DSML｜tool_calls><｜DSML｜invoke name="structured_output"></｜DSML｜invoke></｜DSML｜tool_calls>'}]}}},
+      {seq:5,type:"turn/end",data:{turn:1,reason:{kind:"completed"}}}
+    ] : skillFirstEvents("origin-vector-review")});
+  const result = await harness.runner.run(directSampleBinding("sample.reflect",context));
+  assert.deepEqual(result.structured,structured);
+  assert.equal(harness.starts.length,2); assert.equal(harness.persisted.length,1);
+  assert.equal(harness.failures[0].error_code,"structured_child_tool_protocol_error");
+  assert.deepEqual(harness.starts[0].request.prompt,harness.starts[1].request.prompt);
 });

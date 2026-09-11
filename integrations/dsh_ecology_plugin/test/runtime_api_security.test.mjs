@@ -161,7 +161,9 @@ test("real HTTP structured POST preserves schema failure code without exposing p
       const text = await response.text();
       assert.equal(response.status, expectedStatus);
       assert.deepEqual(JSON.parse(text), knownSchemaFailure
-        ? { error: "runtime_stage_failed", error_code: "structured_child_output_schema_invalid" }
+        ? { error: "runtime_stage_failed", error_code: "structured_child_output_schema_invalid",
+          schema_version: "ecology-runtime-failure/1", failure_domain: "execution_contract",
+          retryable: false, provider_status: null, retry_after_ms: null, affected_scope: "stage" }
         : { error: "runtime_controller_failed", error_code: "dsh_native_runtime_unavailable" });
       assert.doesNotMatch(text, /private|fake-private-value|schema details|secret/);
       knownSchemaFailure = false;
@@ -170,6 +172,23 @@ test("real HTTP structured POST preserves schema failure code without exposing p
   } finally {
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test("trusted provider failures cross HTTP with status and bounded recovery metadata", async () => {
+  const body = { run_id: "run:1", run_state_revision: 2, stage_attempt: 1,
+    ledger_expected_revision: 3, idempotency_key: "idem:1" };
+  for (const status of [429, 503]) {
+    const res = new Response();
+    await route({ async startRun() {
+      throw structuredPhaseError("model", new Error("private token"),
+        { providerStatus: status, retryAfterMs: 17000 });
+    } }).handler(request("/api/ecology-agent-runtime/v1/runs/start", { body }), res);
+    assert.equal(res.statusCode, status);
+    assert.equal(res.json().provider_status, status);
+    assert.equal(res.json().retry_after_ms, 17000);
+    assert.equal(res.json().retryable, true);
+    assert.doesNotMatch(JSON.stringify(res.json()), /private|token/);
   }
 });
 

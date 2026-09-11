@@ -16,6 +16,11 @@ function schemaName(value) {
 }
 
 export async function runtimeCapabilities(ctx, presetCatalog = []) {
+  deployedContent ||= runtimeContentDigest();
+  const settings = ctx.get?.("settings") ?? ctx.settings;
+  const config = settings?.get?.("llm-pi-ai");
+  const contentDigest = createHash("sha256")
+    .update(await deployedContent).update("\0").update(inferenceConfigDigest(config)).digest("hex");
   const missing = ROOT_SERVICES.filter((name) => ctx?.[name] == null);
   const presets = [];
   for (const raw of presetCatalog) {
@@ -56,6 +61,7 @@ export async function runtimeCapabilities(ctx, presetCatalog = []) {
     }
     presets.push({
       preset_id: presetId,
+      content_digest: contentDigest,
       declared: Boolean(presetId),
       standing_key: standingKey,
       preset_mountable: presetMountable,
@@ -84,3 +90,42 @@ export async function runtimeCapabilities(ctx, presetCatalog = []) {
 }
 
 export { ROOT_SERVICES };
+import { createHash } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
+
+export async function runtimeContentDigest(root = new URL("../../", import.meta.url)) {
+  const hash = createHash("sha256");
+  async function visit(path) {
+    const entries = await readdir(new URL(path, root), { withFileTypes: true });
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name, "en"))) {
+      const relative = path + entry.name;
+      if (entry.isDirectory()) await visit(relative + "/");
+      else if (entry.isFile() && /\.(js|json|yml|md)$/.test(entry.name)) {
+        hash.update(relative + "\0").update(await readFile(new URL(relative, root))).update("\0");
+      }
+    }
+  }
+  for (const folder of ["lib/", "presets/", "schemas/"]) await visit(folder);
+  return hash.digest("hex");
+}
+
+let deployedContent;
+
+export function inferenceConfigDigest(config) {
+  const fields = ["api", "models", "modelOverrides", "compat", "reasoning", "thinkingBudgets",
+    "defaultContextWindow", "defaultMaxTokens", "defaultInput"];
+  const contracts = Object.fromEntries(Object.entries(config?.providers || {}).map(([id, provider]) => {
+    let endpoint = null;
+    if (provider.baseURL) {
+      const url = new URL(provider.baseURL);
+      endpoint = url.origin + url.pathname;
+    }
+    return [id, { endpoint, ...Object.fromEntries(fields.filter(k => provider[k] !== undefined).map(k => [k, provider[k]])) }];
+  }));
+  const canonical = value => value && typeof value === "object"
+    ? Array.isArray(value) ? value.map(canonical)
+      : Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical(value[k])])) : value;
+  // Never publish endpoints, headers or credentials. Only the contract digest
+  // enters the existing frozen identity and invalidates stale canary receipts.
+  return createHash("sha256").update(JSON.stringify(canonical(contracts))).digest("hex");
+}

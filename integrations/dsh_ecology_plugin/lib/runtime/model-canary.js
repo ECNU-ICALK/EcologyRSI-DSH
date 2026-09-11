@@ -6,6 +6,7 @@ import { PendingChildStarts } from "./pending-child-starts.js";
 import { runStructuredRole } from "./structured-roles.js";
 import { sessionUsageComplete } from "./session-usage.js";
 import { createStructuredDeadline, remainingStructuredDeadlineMs } from "./structured-deadline.js";
+import { structuredFailureContract } from "./structured-stage-errors.js";
 import {
   STAGES, dshCompatibleSchema, jsonDigest,
   synchronizedSkillInvocationEvidence, synchronizedStructuredCaptureDisposition,
@@ -16,6 +17,8 @@ export const CANARY_RECEIPT_SCHEMA = "ecologyrsi-dsh.model-contract-canary-recei
 const PRESETS = Object.freeze({
   "generation.search-plan": "ecology-researcher-v12",
   "generation.reflect": "ecology-generation-judge-v8",
+  "sample.critic": "ecology-sample-critic-v5",
+  "sample.plan": "ecology-sample-planner-v8",
 });
 const DIGEST_FIELDS = ["preset_content_digest", "standing_tool_surface_digest", "route_config_digest"];
 const IDENTITY_KEYS = ["provider_id", "model_id", "stage", "role", "preset_id", "output_schema_id", ...DIGEST_FIELDS];
@@ -35,10 +38,11 @@ export function validateCanaryRequest(request) {
   if (![identity.provider_id, identity.model_id].every(v => typeof v === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,119}$/.test(v))) throw invalid();
   if (!DIGEST_FIELDS.every(k => /^[a-f0-9]{64}$/.test(identity[k]))) throw invalid();
   if (!bounds || Object.keys(bounds).sort().join() !== ["max_attempts", "max_output_tokens", "max_reported_tokens", "total_timeout_ms", "ttl_seconds"].sort().join()
-    || !integer(bounds.max_attempts, 1, 2) || !integer(bounds.max_output_tokens, 512, 2048)
+    || !integer(bounds.max_attempts, 1, 4) || !integer(bounds.max_output_tokens, 512, 2048)
     || !integer(bounds.max_reported_tokens, 1024, 50000) || !integer(bounds.total_timeout_ms, 1000, 180000)
     || !integer(bounds.ttl_seconds, 60, 86400)) throw invalid();
-  return { identity: structuredClone(identity), bounds: structuredClone(bounds), contract: stage };
+  return { identity: structuredClone(identity), bounds: structuredClone(bounds),
+    contract: identity.stage === "sample.plan" ? { ...stage, skillName: "origin-vector-forecasting-balanced" } : stage };
 }
 
 // A schema-valid fixed transport fixture, not a scientific response. The Host
@@ -48,7 +52,7 @@ function fixture(schema) {
   if (schema.enum) return structuredClone(schema.enum[0]);
   if (schema.type === "object") return Object.fromEntries((schema.required || []).map(k => [k, fixture(schema.properties[k])]));
   if (schema.type === "array") return Array.from({length: schema.minItems || 1}, () => fixture(schema.items));
-  if (schema.type === "string") return "transport canary";
+  if (schema.type === "string") return schema.pattern === "^[0-9a-f]{64}$" ? "a".repeat(64) : "transport canary";
   if (schema.type === "boolean") return false;
   if (schema.type === "integer" || schema.type === "number") return schema.minimum || 0;
   if (schema.type === "null") return null;
@@ -70,9 +74,21 @@ function terminalCode(ctx, sessionId) {
   if (!Array.isArray(events)) return null;
   const terminal = [...events].reverse().find(e => e.type === "turn/end");
   const code = terminal?.data?.reason?.error?.code;
-  return ["TRANSPORT", "RATE_LIMIT", "TIMEOUT"].includes(code) ? code : null;
+  return ["TRANSPORT", "RATE_LIMIT", "TIMEOUT", "SERVER"].includes(code) ? code : null;
 }
 function safeFailure(error, terminal) {
+  const contract = structuredFailureContract(error);
+  if (contract?.error_code === "structured_child_tool_protocol_error") return {
+    code: contract.error_code, boundary: "tool_and_schema_contract", retry: true,
+  };
+  // Child disposal can remove its live session before this catch executes.
+  // Preserve the classification already verified at the child boundary.
+  if (contract?.retryable) return {
+    code: contract.provider_status === 429 ? "model_canary_rate_limited" : "model_canary_provider_unavailable",
+    boundary: "provider_service", retry: contract.provider_status !== 429,
+    provider_status: contract.provider_status, retry_after_ms: contract.retry_after_ms,
+  };
+  if (terminal === "SERVER") return { code: "model_canary_provider_unavailable", boundary: "provider_service", retry: true };
   if (terminal === "TRANSPORT" || terminal === "TIMEOUT") return { code: "model_canary_transport_failure", boundary: "provider_transport", retry: true };
   if (terminal === "RATE_LIMIT") return { code: "model_canary_rate_limited", boundary: "provider_admission", retry: false };
   const codes = new Set(["structured_child_tool_protocol_error", "structured_child_output_budget_exhausted", "structured_result_missing", "structured_child_model_error", "structured_role_operational_timeout", "model_canary_token_threshold", "model_canary_evidence_invalid", "model_canary_result_mismatch"]);

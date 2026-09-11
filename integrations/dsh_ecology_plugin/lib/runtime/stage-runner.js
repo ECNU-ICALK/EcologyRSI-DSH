@@ -28,9 +28,12 @@ import {
   isTrustedStructuredPhase,
   structuredPhaseError,
   structuredFailureCode,
+  structuredFailureContract,
   structuredRetryAfterMs,
 } from "./structured-stage-errors.js";
 import { PendingChildStarts } from "./pending-child-starts.js";
+import { RouteHealth } from "./route-health.js";
+import { checkSampleStageBudget, SAMPLE_STAGE_LIMITS } from "./sample-stage-budget.js";
 
 const STAGES = Object.freeze({
   "generation.research": Object.freeze({
@@ -136,7 +139,7 @@ const STAGES = Object.freeze({
     allowsPredictionTools: true,
     instruction: [
       "Analyze the label-free forecast origin using the candidate-selected Skill. You own the final numeric predictions.",
-      "Choose whether to use tools. Call ecology_execute_prediction_tool zero to six times using a catalog tool_id, unique call_id, exact wave_digest, and permitted parameters. Track remaining_calls returned by the Host; zero means submit now. Use parameters={} for defaults and never borrow parameter names from another tool. Compare results and revise your approach as needed.",
+      "Choose whether to use tools. Call ecology_execute_prediction_tool zero to two times using a catalog tool_id, unique call_id, exact wave_digest, and permitted parameters. Track remaining_calls returned by the Host; zero means submit now. Use parameters={} for defaults and never borrow parameter names from another tool. Compare results and revise your approach as needed.",
       "You may use a model result, blend multiple results, adjust a forecast, or predict directly from the observable context. Reference successful call_ids in evidence_call_ids for model, blend, and adjusted predictions.",
       "Submit exactly one structured_output with a finite predicted value, confidence, method, reason_code, and evidence_call_ids for each exact Host sample_id. Do not submit next_tool.",
       "Never access evaluation labels or future observations. Only one output argument correction is allowed; other failures end this turn for Host-owned retries.",
@@ -267,7 +270,8 @@ function retryableStructuredStageError(error, stage) {
   return isTrustedStructuredPhase(error, "model")
     || (
       ["sample.plan", "sample.critic", "sample.reflect"].includes(stage)
-      && isTrustedStructuredPhase(error, "capture")
+      && (isTrustedStructuredPhase(error, "capture")
+        || isTrustedStructuredPhase(error, "tool_protocol"))
     );
 }
 
@@ -511,11 +515,15 @@ function structuredCaptureDisposition(rawEvents) {
   const isRateLimitFailure = (failure) => (
     failure?.code === "RATE_LIMIT" || failure?.status === 429
   );
+  const isTransientFailure = (failure) => isRateLimitFailure(failure)
+    || ["SERVER", "TRANSPORT", "TIMEOUT"].includes(failure?.code)
+    || [408, 425].includes(failure?.status)
+    || (Number.isInteger(failure?.status) && failure.status >= 500 && failure.status <= 599);
   if (
     terminalData.reason?.kind === "error"
     && (
-      isRateLimitFailure(terminalError)
-      || retryFailures.some(isRateLimitFailure)
+      isTransientFailure(terminalError)
+      || (!terminalError && retryFailures.some(isTransientFailure))
     )
   ) {
     // DSH rc.6 retries provider failures internally, but its sub-second retry
@@ -558,7 +566,10 @@ function structuredCaptureDisposition(rawEvents) {
     ));
     return {
       kind: "retryable-provider",
-      limitKind: concurrencyLimited ? "concurrency" : "rate",
+      limitKind: concurrencyLimited ? "concurrency"
+        : isRateLimitFailure(terminalError) ? "rate" : "service",
+      providerStatus: terminalError?.status
+        ?? (isRateLimitFailure(terminalError) ? 429 : 503),
       retryAfterMs: retryAfterValues.length
         ? Math.max(...retryAfterValues)
         : null,
@@ -566,20 +577,18 @@ function structuredCaptureDisposition(rawEvents) {
   }
   if (terminalData.reason?.kind !== "completed") return "non-missing";
   // Some model gateways emit serialized tool calls as ordinary assistant
-  // text. No tool actually ran. Retrying the same endpoint cannot repair its
-  // wire protocol; never parse this text into an authorized tool invocation.
+  // text, including after a real Skill call. Classify the terminal assistant
+  // message, not whether any earlier tool ran. Never execute serialized text;
+  // a bounded fresh child must supply real tool events to recover.
   const terminalTurn = terminalData.turn;
   const terminalEvents = rawEvents.filter((event) => eventData(event).turn === terminalTurn);
-  if (!terminalEvents.some((event) => event?.type === "tool/call")
-      && terminalEvents.some((event) => {
-        if (event?.type !== "assistant/message") return false;
-        const content = eventData(event).message?.content;
-        return Array.isArray(content) && content.some((block) => block?.type === "text"
+  const lastAssistant = [...terminalEvents].reverse().find(event => event?.type === "assistant/message");
+  const terminalContent = eventData(lastAssistant).message?.content;
+  if (Array.isArray(terminalContent) && terminalContent.some((block) => block?.type === "text"
           && typeof block.text === "string"
           && block.text.includes("<｜DSML｜tool_calls>")
           && block.text.includes("<｜DSML｜invoke ")
-          && block.text.includes("</｜DSML｜tool_calls>"));
-      })) return "tool-protocol";
+          && block.text.includes("</｜DSML｜tool_calls>"))) return "tool-protocol";
   // A failed argument check may be corrected once in the same consumed turn.
   // Only a source-bound rejection followed by one successful submission is
   // recoverable; missing captures still retry through the bounded child path.
@@ -984,6 +993,8 @@ export class NativeStageRunner {
       "sampleCriticStageTimeoutMs",
     );
     this.structuredStageMaxAttempts = positiveStageAttempts(structuredStageMaxAttempts);
+    // Route outage recovery is longer than the provider's short request backoff.
+    this.routeHealth = new RouteHealth({ cooldownMs: Math.max(60_000, structuredStageFailureCooldownMs) });
     this.providerStageGate = providerStageGate || new ProviderStageGate({
       minimumIntervalMs: structuredStageMinIntervalMs,
       failureCooldownMs: structuredStageFailureCooldownMs,
@@ -1023,6 +1034,8 @@ export class NativeStageRunner {
   }
 
   async #recordChildFailure(binding, error) {
+    const contract = structuredFailureContract(error);
+    const details = contract ? (({ http_status, ...value }) => ({ runtime_failure: value }))(contract) : {};
     const supplied = String(structuredFailureCode(error) || "structured_stage_failed");
     const errorCode = /^[a-z0-9_]{1,80}$/i.test(supplied)
       ? supplied
@@ -1038,6 +1051,7 @@ export class NativeStageRunner {
             stage: binding.stage,
             idempotency_key: binding.idempotency_key,
             error_code: errorCode,
+            ...details,
           },
         },
       );
@@ -1128,7 +1142,9 @@ export class NativeStageRunner {
             throw error;
           }
         };
-        const runAttempt = () => this.providerStageGate.run(provider, executeReservedStage, {
+        const runAttempt = () => this.providerStageGate.run(provider,
+          (signal) => this.routeHealth.run(String(roleHost.binding?.model || provider),
+            () => executeReservedStage(signal)), {
           runId: binding.run_id,
           deadline: lifecycle.deadline,
         });
@@ -1140,7 +1156,8 @@ export class NativeStageRunner {
       } catch (error) {
         lastError = error;
         const retryable = retryableStructuredStageError(error, binding.stage);
-        if (!retryable || attempt >= this.structuredStageMaxAttempts) {
+        if (!retryable || attempt >= this.structuredStageMaxAttempts
+          || (isTrustedStructuredPhase(error, "tool_protocol") && attempt >= 2)) {
           throw error;
         }
       }
@@ -1226,6 +1243,9 @@ export class NativeStageRunner {
     const reservation = this.childBindings.reserve(roleHost.sessionId, launch, frozenIdentity);
     const skillName = expectedSkillName(contract, request);
     let persistedSkillEvidence = null;
+    const budgetController = new AbortController();
+    let budgetTimer = null;
+    let budgetError = null;
     try {
       requireStructuredDeadline(lifecycle.deadline);
       let outputSchema = await withinStructuredDeadline(
@@ -1246,7 +1266,7 @@ export class NativeStageRunner {
           "After the Skill result, make zero to three web_search calls only when current reasoning needs external evidence; submit queries and retrieval_key only, and never choose a provider.",
         ] : []),
         ...(contract.allowsPredictionTools ? [
-          "After the Skill result, analyze the sample and optionally call prediction tools up to six times, interleaving searches when useful. Use unique call_ids; wait for each tool result before continuing.",
+          "After the Skill result, analyze the sample and optionally call prediction tools up to two times, interleaving searches when useful. Use unique call_ids; wait for each tool result before continuing.",
           "When ready, call structured_output once with your final numerical predictions and evidence references. Emit no prose.",
         ] : [
           `${dynamicRetrieval ? "Then" : "After the Skill result,"} call structured_output exactly once with one concise object matching the supplied output schema.`,
@@ -1277,6 +1297,9 @@ export class NativeStageRunner {
         capturedSessionEvents = null,
         persistenceDeadline = null,
       ) => {
+        if (budgetError) throw budgetError;
+        try { checkSampleStageBudget(this.ctx, sessionId, binding.stage); }
+        catch (error) { budgetError = error; throw error; }
         if (
           typeof persistenceDeadline?.throwIfExpired !== "function"
           || typeof persistenceDeadline?.remainingTimeoutMs !== "function"
@@ -1365,12 +1388,20 @@ export class NativeStageRunner {
         {
           pendingStarts: this.pendingStarts,
           admission,
-          observeChild: (child) => observeSessionUsage(this.ctx, this.sidecar, {
-            run_id: binding.run_id, stage: binding.stage,
-            idempotency_key: binding.idempotency_key,
-            child_reservation_id: reservation.launch.reservation_id,
-            session_id: String(child?.id || ""),
-          }),
+          observeChild: (child) => {
+            const sessionId = String(child?.id || "");
+            if (SAMPLE_STAGE_LIMITS[binding.stage]) {
+              budgetTimer = setInterval(() => {
+                try { checkSampleStageBudget(this.ctx, sessionId, binding.stage); }
+                catch (error) { budgetError = error; budgetController.abort(error); clearInterval(budgetTimer); }
+              }, 250);
+            }
+            return observeSessionUsage(this.ctx, this.sidecar, {
+              run_id: binding.run_id, stage: binding.stage,
+              idempotency_key: binding.idempotency_key,
+              child_reservation_id: reservation.launch.reservation_id, session_id: sessionId,
+            });
+          },
           persist: async ({ structured, session_id }, persistenceDeadline) => persist(
             structured,
             session_id,
@@ -1379,7 +1410,7 @@ export class NativeStageRunner {
             persistenceDeadline,
           ),
           deadline: lifecycle.deadline,
-          signal,
+          signal: signal ? AbortSignal.any([signal, budgetController.signal]) : budgetController.signal,
           classifyMissingCapture: ({ run }, classificationDeadline) => synchronizedStructuredCaptureDisposition(
             this.ctx,
             String(run?.id || ""),
@@ -1400,7 +1431,11 @@ export class NativeStageRunner {
         session_id: returnedSessionId,
         skill_invocation_evidence: persistedSkillEvidence,
       };
+    } catch (error) {
+      if (budgetError) throw budgetError;
+      throw error;
     } finally {
+      if (budgetTimer !== null) clearInterval(budgetTimer);
       if (reservation.claimed_child_id) this.childBindings.releaseChild(reservation.claimed_child_id);
       else this.childBindings.revoke(roleHost.sessionId, reservation.label);
     }

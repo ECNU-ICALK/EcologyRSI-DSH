@@ -6,8 +6,10 @@ const PHASE_CODES = Object.freeze({
   aborted: "structured_child_aborted",
   model: "structured_child_model_error",
   model_terminal: "structured_child_model_error",
+  route_cooldown: "provider_route_cooling_down",
   tool_protocol: "structured_child_tool_protocol_error",
   output_budget: "structured_child_output_budget_exhausted",
+  execution_budget: "structured_child_execution_budget_exhausted",
   capture: "structured_result_missing",
   admission: "structured_result_admission_failed",
   admission_closed: "structured_result_admission_closed",
@@ -64,6 +66,31 @@ export function structuredRetryAfterMs(error) {
 
 export function isStructuredProviderRateLimit(error) {
   return trustedStructuredErrors.get(error)?.metadata?.providerRateLimit === true;
+}
+
+// Only errors created at the trusted child boundary can supply HTTP semantics.
+// Never forward provider messages or accept metadata attached by a tool.
+export function structuredFailureContract(error) {
+  const trusted = trustedStructuredErrors.get(error);
+  if (!trusted || !["model", "model_terminal", "route_cooldown", "tool_protocol",
+    "output_budget", "execution_budget", "output_schema", "capture"].includes(trusted.phase)) return null;
+  // A malformed tool envelope is a failed provider attempt, not a scientific
+  // result. Mixed upstream replicas can alternate valid calls and DSML prose;
+  // allow bounded Host recovery without accepting or executing that prose.
+  const retryable = ["model", "route_cooldown", "tool_protocol"].includes(trusted.phase);
+  const supplied = trusted.metadata?.providerStatus;
+  const providerStatus = Number.isSafeInteger(supplied) && supplied >= 400 && supplied <= 599
+    ? supplied : null;
+  return {
+    schema_version: "ecology-runtime-failure/1",
+    error_code: structuredFailureCode(error),
+    failure_domain: retryable ? "provider" : "execution_contract",
+    retryable,
+    provider_status: providerStatus,
+    retry_after_ms: structuredRetryAfterMs(error),
+    affected_scope: retryable ? "model_route" : "stage",
+    http_status: retryable ? (providerStatus === 429 ? 429 : 503) : 422,
+  };
 }
 
 const PERSISTENCE_BOUNDARIES = Object.freeze({

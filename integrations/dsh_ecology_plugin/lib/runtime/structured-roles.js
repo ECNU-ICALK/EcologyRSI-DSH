@@ -234,7 +234,8 @@ export async function runStructuredRole(
       }
       if (captureKind === "retryable-provider") {
         throw structuredPhaseError("model", null, {
-          providerRateLimit: captureDisposition?.limitKind !== "concurrency",
+          providerRateLimit: captureDisposition?.limitKind === "rate",
+          providerStatus: captureDisposition?.providerStatus,
           retryAfterMs: captureDisposition?.retryAfterMs,
         });
       }

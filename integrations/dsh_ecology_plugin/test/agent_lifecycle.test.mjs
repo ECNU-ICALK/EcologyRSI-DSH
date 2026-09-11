@@ -1,7 +1,73 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { RoleAgentManager, tokenSemantics } from "../lib/runtime/agents.js";
+import { RoleAgentManager, roleRequestOptions, tokenSemantics } from "../lib/runtime/agents.js";
+import { withThinkingCapabilities } from "../../../scripts/configure_dsh_reasoning.mjs";
+import { installRoleReasoning } from "../lib/tools/agent-plugin.js";
+
+test("preset binds thinking at the real request waterfall for hosts and descendants", async () => {
+  let listener, lookups = 0, disposed = false;
+  const dispose = installRoleReasoning({
+    on: (event, callback) => {
+      assert.equal(event, "agent/request"); listener = callback;
+      return () => { disposed = true; };
+    },
+    llm: { resolveModelInfo: async () => {
+      lookups++;
+      return { reasoning: { efforts: [{ id: "off" }, { id: "high" }] } };
+    } },
+  }, "sample-planner");
+  const config = { provider: "p", model: "m", maxTokens: 8192, reasoningEffort: "high" };
+  const requests = await Promise.all([listener({}, async () => config), listener({}, async () => config)]);
+  assert.equal(lookups, 1);
+  for (const request of requests) assert.deepEqual(request, { ...config, reasoningEffort: "off" });
+  assert.equal(config.reasoningEffort, "high");
+  dispose(); assert.equal(disposed, true);
+});
+
+test("sample reasoning uses declared off support and research keeps deep thinking", async () => {
+  const ctx = { llm: { resolveModelInfo: async (provider, model, signal) => {
+    assert.equal(provider, "p"); assert.equal(model, "m");
+    assert.ok(signal instanceof AbortSignal);
+    return { reasoning: { efforts: [{ id: "off" }, { id: "low" }, { id: "high" }] } };
+  } } };
+  for (const role of ["sample-planner", "sample-critic", "researcher", "candidate-proposer"]) {
+    const options = await roleRequestOptions(ctx, { model: "p/m", role });
+    assert.equal(options.reasoningEffort, role.startsWith("sample-") ? "off" : "high");
+  }
+  assert.equal((await roleRequestOptions(ctx, { model: "p/m", role: "generation-judge" })).reasoningEffort, "low");
+  for (const reasoning of [undefined, { efforts: [{ id: "medium" }], defaultEffort: "medium" }]) {
+    ctx.llm.resolveModelInfo = async () => ({ reasoning });
+    const options = await roleRequestOptions(ctx, { model: "p/m", role: "sample-planner" });
+    assert.equal(options.reasoningEffort, reasoning?.defaultEffort);
+  }
+});
+
+test("GLM instance settings declare its actual thinking wire format without mutating other routes", () => {
+  const settings = { "llm-pi-ai": { providers: {
+    p: { api: "openai-completions", apiKeyEnv: "TEST_KEY", models: [{ id: "glm-5.2" }, { id: "another" }] },
+  } } };
+  const configured = withThinkingCapabilities(settings, "p/glm-5.2");
+  assert.deepEqual(settings["llm-pi-ai"].providers.p.models[0], { id: "glm-5.2" });
+  const provider = configured["llm-pi-ai"].providers.p;
+  assert.equal(provider.apiKeyEnv, "TEST_KEY");
+  assert.deepEqual(provider.models[1], { id: "another" });
+  assert.deepEqual(provider.models[0].reasoningEfforts, { off: null, high: "high" });
+  assert.equal(provider.models[0].compat.thinkingFormat, "zai");
+  assert.equal(provider.models[0].compat.supportsReasoningEffort, false);
+  assert.equal(provider.models[0].compat.supportsStrictMode, false);
+  assert.equal(provider.models[0].compat.supportsDeveloperRole, false);
+  assert.equal(provider.models[0].compat.maxTokensField, "max_tokens");
+  assert.throws(() => withThinkingCapabilities(settings, "p/another"));
+  assert.throws(() => withThinkingCapabilities(settings, "missing/glm-5.2"));
+  settings["llm-pi-ai"].providers.p.models.push({ id: "deepseek-v4-flash-0731" });
+  const dsk = withThinkingCapabilities(settings, "p/deepseek-v4-flash-0731")["llm-pi-ai"].providers.p.models[2];
+  assert.deepEqual(dsk.reasoningEfforts, { off: null, low: "low", high: "high" });
+  assert.equal(dsk.compat.thinkingFormat, "deepseek");
+  assert.equal(dsk.compat.supportsReasoningEffort, true);
+  assert.equal(dsk.compat.requiresReasoningContentOnAssistantMessages, true);
+  assert.equal(dsk.compat.supportsStrictMode, false);
+});
 
 function deferred() {
   let resolve;

@@ -76,3 +76,27 @@ test('a failed partial provider stream is never marked complete from earlier mes
   assert.equal(calls.at(-1).usage_complete, false);
   assert.equal(calls.at(-1).session_metrics.provider_usage.totals.total_tokens, 10);
 });
+
+test('streaming and provider retry activity is visible without new billing or idle heartbeats', async () => {
+  const session = {events: [{seq: 1, time: 300001, type: 'assistant/chunk', data: {privateText: 'never export'}}]};
+  const ctx = {sessions: {get: () => session}, sessionProjections: {snapshot: () => ({values: {tokenUsage: {uncachedInputTokens: 10}}})}};
+  const calls = [];
+  const observer = observeSessionUsage(ctx, {request: async (_, {body}) => {calls.push(body); return {accepted: true};}},
+    {session_id: 'stream'}, {intervalMs: 5});
+  const waitFor = async (count) => {for (let i=0; i<100 && calls.length<count; i++) await new Promise(r=>setTimeout(r,5)); assert.equal(calls.length,count);};
+  try {
+    await waitFor(1);
+    session.events.push({seq: 2, time: 300002, type: 'assistant/chunk'});
+    await new Promise(r=>setTimeout(r,25));
+    assert.equal(calls.length,1, 'chunks in one interval must be coalesced');
+    session.events.push({seq: 3, time: 330001, type: 'assistant/chunk'});
+    await waitFor(2);
+    session.events.push({seq: 4, time: 330002, type: 'llm/retry', data: {failure: {message: 'private'}}});
+    await waitFor(3);
+    assert.equal(calls.at(-1).session_metrics.activity.kind,'retrying');
+    assert.equal(calls.at(-1).session_metrics.provider_usage.totals.total_tokens,10);
+    assert.equal(JSON.stringify(calls).includes('private'),false);
+    await new Promise(r=>setTimeout(r,25));
+    assert.equal(calls.length,3, 'a timer must not pretend a silent model progressed');
+  } finally {await observer.settle('succeeded');}
+});

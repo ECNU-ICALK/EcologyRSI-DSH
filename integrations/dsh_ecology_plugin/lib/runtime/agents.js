@@ -14,6 +14,24 @@ function agentOptionsFor(modelRoute) {
   };
 }
 
+async function roleRequestOptions(ctx, binding) {
+  const options = agentOptionsFor(binding.model);
+  if (!options.provider || typeof ctx.llm?.resolveModelInfo !== "function") return options;
+  const info = await ctx.llm.resolveModelInfo(
+    options.provider, options.model, AbortSignal.timeout(10_000),
+  );
+  const reasoning = info?.reasoning;
+  const efforts = new Set(reasoning?.efforts?.map((effort) => effort.id) || []);
+  // Numerical sample work still uses the real Agent and its tools. Disable
+  // optional deep thinking only when the route explicitly advertises it;
+  // research/proposal work retains the declared default (or high reasoning).
+  const sampleRole = ["sample-planner", "sample-critic"].includes(binding.role);
+  const effort = sampleRole && efforts.has("off") ? "off"
+    : binding.role === "generation-judge" && efforts.has("low") ? "low"
+      : reasoning?.defaultEffort || (efforts.has("high") ? "high" : undefined);
+  return effort === undefined ? options : { ...options, reasoningEffort: effort };
+}
+
 function presetSetup(ctx, presetId) {
   return async (agentCtx) => {
     const mounted = await ctx.agentPresets.mount(agentCtx, presetId);
@@ -297,4 +315,4 @@ export function dshSessionMetrics(ctx, sessionId) {
   };
 }
 
-export { agentOptionsFor, persistPresetBoundary };
+export { agentOptionsFor, persistPresetBoundary, roleRequestOptions };

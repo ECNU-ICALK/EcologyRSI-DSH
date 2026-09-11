@@ -96,7 +96,7 @@
           },
           "evidence_call_ids": {
             "type": "array",
-            "maxItems": 6,
+            "maxItems": 2,
             "uniqueItems": true,
             "items": {
               "type": "string",

@@ -1,7 +1,27 @@
 import { registerRoleToolGuard, registerRoleTools, roleToolNames } from "./roles.js";
+import { roleRequestOptions } from "../runtime/agents.js";
 
 export const name = "ecologyrsi-dsh-agent-plane";
-export const inject = ["tools", "web", "ecologyAgentTools"];
+export const inject = ["tools", "web", "ecologyAgentTools", "llm"];
+
+export function installRoleReasoning(ctx, role) {
+  if (typeof ctx.on !== "function") return () => {};
+  const policies = new Map();
+  // AgentOptions supports provider/model/maxTokens, not reasoningEffort.
+  // The preset's request waterfall is inherited by its role host AND children;
+  // DSH records the resolved effort in each child's native request/header.
+  return ctx.on("agent/request", async (_payload, next) => {
+    const resolved = await next();
+    const model = `${resolved.provider}/${resolved.model}`;
+    if (!policies.has(model)) {
+      const policy = roleRequestOptions(ctx, { model, role });
+      policies.set(model, policy);
+      policy.catch(() => policies.delete(model));
+    }
+    const { reasoningEffort } = await policies.get(model);
+    return reasoningEffort === undefined ? resolved : { ...resolved, reasoningEffort };
+  });
+}
 
 export function apply(ctx, config = {}) {
   const role = String(config.role || "");
@@ -16,10 +36,12 @@ export function apply(ctx, config = {}) {
   const disposeGuard = registerRoleToolGuard(ctx, role, {
     toolProfile: config.toolProfile,
   });
+  const disposeReasoning = installRoleReasoning(ctx, role);
   let disposed = false;
   const dispose = () => {
     if (disposed) return;
     disposed = true;
+    disposeReasoning?.();
     disposeGuard?.();
     disposeTools?.();
   };

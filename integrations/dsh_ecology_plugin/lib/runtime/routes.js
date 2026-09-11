@@ -4,6 +4,7 @@ import {
   readBoundedJson,
   safeJsonError,
 } from "../security.js";
+import { structuredFailureContract } from "./structured-stage-errors.js";
 
 export const RUNTIME_API_BASE = "/api/ecology-agent-runtime/v1";
 
@@ -50,6 +51,12 @@ function sendJson(res, status, value) {
 }
 
 function sendControllerError(res, error) {
+  const contract = structuredFailureContract(error);
+  if (contract) {
+    const { http_status, ...failure } = contract;
+    sendJson(res, http_status, { error: "runtime_stage_failed", ...failure });
+    return;
+  }
   const supplied = typeof error?.code === "string" ? error.code : "";
   if (PUBLIC_STAGE_FAILURE_CODES.has(supplied)) {
     sendJson(res, 422, {
