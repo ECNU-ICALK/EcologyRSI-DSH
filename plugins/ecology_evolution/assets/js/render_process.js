@@ -74,8 +74,8 @@
       var pressureText = pressure.available === true && Number.isFinite(pressureRatio)
         ? "DSH 上下文压力（当前值）：" + formatNumber(pressureRatio * 100, 1) + "%"
         : pressure.available === true && Number.isFinite(maximumCurrentTokens)
-          ? "DSH 上下文压力（会话最大当前值）：" + formatNumber(maximumCurrentTokens) + " Token"
-          : "DSH 上下文压力：等待 Session 计量";
+          ? "DSH 上下文压力（活跃会话最大值）：" + formatNumber(maximumCurrentTokens) + " Token"
+          : pressure.scope === "active_sessions" && pressure.session_count === 0 ? "DSH 上下文压力：无活跃计量会话" : "DSH 上下文压力：等待 Session 计量";
       var parts = [pressureText];
       if (Number.isFinite(pressureRatio)) {
         if (pressureRatio >= 1) { parts.push("硬上限已到达，停止新请求"); }
@@ -227,7 +227,7 @@
       var childErrorCode = String(payload.error_code || "");
       var childErrorText = {
         structured_child_model_error: "模型未返回可验收的结构化结果",
-        structured_child_tool_protocol_error: "工具协议不匹配：模型只输出了调用文本，未真正调用工具；已停止原样重试",
+        structured_child_tool_protocol_error: "模型返回了非标准工具调用文本，本次输出未被采用；临时接口故障将按恢复预算重试",
         structured_child_output_budget_exhausted: "模型输出预算耗尽，未提交完整结果；已停止相同预算下的重试"
       }[childErrorCode] || "DSH 子任务未完成";
       return [payload.stage ? "阶段 " + payload.stage : "", childErrorText, "不计为模型成功；最终失败预测时点按宿主结算口径记录"].filter(Boolean).join(" · ");
@@ -300,7 +300,7 @@
     // Candidate scores are raw observations. Only the server-recorded
     // incumbent fields may form the green promotion sequence.
     var node = $("#trajectory-chart");
-    var run = pendingCreateStatus() ? null : state.activeRun;
+    var run = createDisplayStatus() ? null : state.activeRun;
     var legend = node && node.parentElement && node.parentElement.querySelector(".chart-legend span:last-child");
     var points = run && Array.isArray(run.trajectory) ? run.trajectory.filter(function (point) { var value = point.score != null ? point.score : point.candidate_score; return !isBlank(value) && Number.isFinite(Number(value)); }).slice().sort(function (left, right) {
       return Number(left.generation || 0) - Number(right.generation || 0) || Number(left.slot_index || 0) - Number(right.slot_index || 0) || String(left.candidate_id || "").localeCompare(String(right.candidate_id || ""));
@@ -602,7 +602,7 @@
     return "<section class=\"round-research-evidence\" aria-label=\"分析总结、最终方案、实现与测试证据链\"><div class=\"round-research-heading\"><div><span>研究迭代证据</span><strong>分析总结 → 最终方案 → 实现 → 测试</strong></div><code title=\"" + escapeHTML(iteration.iteration_digest || "") + "\">" + escapeHTML(shortId(iteration.iteration_digest || "未生成迭代校验值")) + "</code></div><ol class=\"round-research-chain\">" + steps + "</ol>" + renderResearchDiagnosis(iteration) + "</section>";
   }
   function renderRoundStages() {
-    var run = pendingCreateStatus() ? null : state.activeRun;
+    var run = createDisplayStatus() ? null : state.activeRun;
     var rounds = run && Array.isArray(run.rounds) ? run.rounds : [];
     var node = $("#round-stage-list");
     if (!rounds.length) { node.innerHTML = "<div class=\"empty-state\">运行提交首个提案后，将在这里展示逐轮阶段。</div>"; return; }
@@ -717,6 +717,7 @@
     var elapsedMs = Number.isFinite(startedAt) && startedAt <= Date.now() ? Date.now() - startedAt : null;
     var retrying = executionRunAllowsLiveStatus(run) && status === "running" && phase === "gateway_retry" && Boolean(progress.retry_wait);
     var waitingRemote = executionRunAllowsLiveStatus(run) && status === "running" && !retrying;
+    var remote = waitingRemote && executionDshActivityPresentation(progress.dsh_activity);
     var detail;
     if (status === "completed") {
       detail = iteration && iteration.status === "model_generated" ? "远端研究方案已返回并冻结"
@@ -733,6 +734,7 @@
         detail += " · 目录策略单次调用超时上限 " + autonomyTimeoutDurationText(policy.timeoutSeconds);
         if (policy.maxAttempts != null && policy.maxAttempts > 1) { detail += "，最多 " + formatNumber(policy.maxAttempts) + " 次尝试"; }
       }
+      if (remote) { detail = remote.detail; }
     } else if (status === "failed") {
       detail = "远端研究请求失败，等待既定恢复策略处理";
     } else if (status === "paused") {
@@ -749,7 +751,7 @@
     return {
       status: status,
       detail: detail,
-      statusText: retrying ? "等待重试" : waitingRemote ? "等待远端响应" : autonomyStepText(status),
+      statusText: retrying ? "等待重试" : remote && remote.statusText ? remote.statusText : waitingRemote ? "等待远端响应" : autonomyStepText(status),
       waitingRemote: waitingRemote,
       retrying: retrying
     };
@@ -855,7 +857,7 @@
     var heartbeatStalled = heartbeatState.stalled && !research.retrying && !research.waitingRemote && !dshActivity;
     var automatic = runHasContinuousAutoProgress(run);
     statusNode.className = "pill " + (heartbeatStalled ? "pill-amber" : overall === "completed" ? "pill-green" : overall === "running" ? "pill-blue" : overall === "paused" || overall === "cancelled" ? "pill-amber" : overall === "failed" ? "pill-red" : "pill-neutral");
-    statusNode.textContent = heartbeatStalled ? "疑似停滞，正在核验" : overall === "completed" ? "本轮已完成" : overall === "running" ? research.retrying ? "远端请求等待重试" : research.waitingRemote ? "等待远端模型响应" : dshActivity && dshActivity.statusText || "模型执行中" : overall === "paused" ? (pausedDrained ? "已暂停，请求已排空" : "已暂停") : overall === "cancelled" ? "已取消" : overall === "failed" ? "执行失败" : automatic ? "后台排队中" : "等待推进";
+    statusNode.textContent = heartbeatStalled ? "较长时间未收到进度" : overall === "completed" ? "本轮已完成" : overall === "running" ? research.retrying ? "远端请求等待重试" : research.waitingRemote ? research.statusText : dshActivity && dshActivity.statusText || "模型执行中" : overall === "paused" ? (pausedDrained ? "已暂停，请求已排空" : "已暂停") : overall === "cancelled" ? "已取消" : overall === "failed" ? "执行失败" : automatic ? "后台排队中" : "等待推进";
     node.innerHTML = steps.map(function (step, index) {
       var status = statuses[index];
       var tone = executionStatusClass(status);
@@ -1694,10 +1696,16 @@
       waiting_for_model_slot: "等待 DSH provider 槽位",
     };
     if (!labels[stateValue]) { return null; }
+    var remote = activity.remote_activity;
+    var remoteLabels = {streaming: "模型正在生成", retrying: "模型请求重试中", tool: "模型正在调用工具", waiting: "等待模型输出", settling: "模型输出已结束，等待校验"};
+    var lastActivityAt = Date.parse(remote && remote.updated_at || activity.updated_at || "");
+    var silent = Number.isFinite(lastActivityAt) && Date.now() - lastActivityAt > 120000;
+    var statusText = silent ? "较长时间未收到模型进度" : remoteLabels[remote && remote.kind] || (stateValue === "model_retry_running" ? "模型重试中" : null);
+    var waitNote = silent ? " · 最近回执 " + autonomyWaitDurationText(Date.now() - lastActivityAt) + "前；尚不能确认模型是否仍在输出" : "";
     return {
-      retrying: stateValue === "model_retry_running",
-      statusText: stateValue === "model_retry_running" ? "模型重试中" : null,
-      detail: "DSH 子阶段 " + stage + stageMeaning + roleText + attemptText + " · " + labels[stateValue] + elapsedText + parallelText,
+      retrying: stateValue === "model_retry_running" || remote && remote.kind === "retrying",
+      statusText: statusText,
+      detail: "DSH 子阶段 " + stage + stageMeaning + roleText + attemptText + " · " + (statusText || labels[stateValue]) + elapsedText + parallelText + waitNote,
       heartbeat: "DSH " + stage + stageMeaning + roleText + " · " + labels[stateValue] + updatedText + parallelText,
     };
   }
@@ -1719,9 +1727,9 @@
     var stageNode = $("#execution-stage-strip");
     if (!statusNode || !labelNode || !track || !fill || !stageNode) { return; }
     if (!run) {
-      var creation = pendingCreateStatus();
+      var creation = createDisplayStatus();
       var submitting = Boolean(creation);
-      statusNode.className = submitting ? "pill pill-blue" : "pill pill-neutral";
+      statusNode.className = creation && creation.state === "failed" ? "pill pill-red" : submitting ? "pill pill-blue" : "pill pill-neutral";
       statusNode.textContent = submitting ? createPhaseLabel(creation) : "等待运行";
       labelNode.textContent = submitting ? createPhaseLabel(creation) : "尚未开始";
       percentNode.textContent = "0%";
@@ -1732,7 +1740,7 @@
       generationNode.textContent = "进化轮次：0 / 0";
       if (epochNode) { epochNode.textContent = "本轮进度：—"; }
       candidateNode.textContent = "候选版本：0";
-      sampleNode.textContent = submitting ? creation.state === "preflight" ? "预测样本：模型预检通过后开始创建" : "预测样本：等待运行 ID" : "预测样本：0";
+      sampleNode.textContent = creation && creation.state === "failed" ? "预测样本：尚未创建新运行，未执行训练样本" : submitting ? creation.state === "preflight" ? "预测样本：模型预检通过后开始创建" : "预测样本：等待运行 ID" : "预测样本：0";
       if (tokenNode) { tokenNode.textContent = "逐样本智能体 Token：等待真实账本"; }
       if (heartbeatNode) { heartbeatNode.textContent = "评测心跳：—"; }
       activityNode.textContent = submitting ? "最近活动：" + createPhaseLabel(creation) : "最近活动：—";
@@ -1809,7 +1817,7 @@
         ? " · 批次 " + formatNumber(stageProgress.batch_index) + " / " + formatNumber(stageProgress.batch_count)
         : "";
     var terminalEvidenceText = (failed || cancelled) && retainedEvidence ? " · " + executionEvidenceQualifier(run) : "";
-    detailNode.textContent = hardTokenPause ? "逐样本智能体 Token 硬预算已耗尽；逐样本 checkpoint 已保留。" : retryCircuitPaused ? retryCircuitDetailText(run) : paused ? "暂停阶段：" + (stageText || "等待阶段状态") + (candidate ? " · " + shortId(candidate.id || candidate.candidate_id) : "") + batchText + (pausedDrained ? " · 请求已排空" : " · 已停止提交新请求") : retryWait ? retryWaitDetailText(retryWait) : schedulerQueue ? schedulerQueue.detail : heartbeatStalled ? "超过 120 秒没有新的执行心跳（最后更新 " + heartbeatState.age_text + "），正在核验模型与宿主状态。" : displayActive ? "当前阶段：" + (stageText || "等待事件回执") + (candidate ? " · " + shortId(candidate.id || candidate.candidate_id) : "") + batchText + (dshActivity ? " · " + dshActivity.detail : "") + elapsedText : statusText + terminalEvidenceText + (exhausted ? observedDetail + "；该分数不代表保留结果" : candidate ? " · 最近候选 " + shortId(candidate.id || candidate.candidate_id) : "") + (autoActive ? elapsedText : "");
+    detailNode.textContent = hardTokenPause ? "逐样本智能体 Token 硬预算已耗尽；逐样本 checkpoint 已保留。" : retryCircuitPaused ? retryCircuitDetailText(run) : paused ? (runPauseReason(run) || "暂停原因未记录。") + " 暂停阶段：" + (stageText || "等待阶段状态") + (candidate ? " · " + shortId(candidate.id || candidate.candidate_id) : "") + batchText + (pausedDrained ? " · 请求已排空" : " · 已停止提交新请求") : retryWait ? retryWaitDetailText(retryWait) : schedulerQueue ? schedulerQueue.detail : heartbeatStalled ? "超过 120 秒没有新的执行心跳（最后更新 " + heartbeatState.age_text + "），正在核验模型与宿主状态。" : displayActive ? "当前阶段：" + (stageText || "等待事件回执") + (candidate ? " · " + shortId(candidate.id || candidate.candidate_id) : "") + batchText + (dshActivity ? " · " + dshActivity.detail : "") + elapsedText : statusText + terminalEvidenceText + (exhausted ? observedDetail + "；该分数不代表保留结果" : candidate ? " · 最近候选 " + shortId(candidate.id || candidate.candidate_id) : "") + (autoActive ? elapsedText : "");
     track.className = "execution-progress-track" + (failed ? " is-failed" : paused ? " is-paused" : heartbeatStalled ? " is-stalled" : displayActive ? " is-running" : "");
     track.setAttribute("aria-valuenow", String(roundedPercent));
     fill.style.width = Math.max(0, Math.min(100, progress.percent)).toFixed(1) + "%";
@@ -1931,6 +1939,10 @@
     }
     var latestEvent = state.events && state.events[0];
     activityNode.textContent = "最近活动：" + (latestEvent ? formatTime(latestEvent.occurred_at) + " · " + compactTechnicalText(eventTitle(latestEvent, run)) : formatTime(run.updated_at));
+    var plan = run.execution_plan || run.configuration && run.configuration.execution_plan;
+    if (plan && plan.generation_budget && (!stageProgress || Number(stageProgress.total_samples) === 0)) {
+      sampleNode.textContent = "样本执行尚未开始 · 冻结预算 " + formatNumber(plan.generation_budget.total_candidate_origins) + " 次/轮，" + formatNumber(plan.run_budget.total_candidate_origins) + " 次/全程";
+    }
     renderExecutionDiagnostics(run);
     stageNode.innerHTML = stages.map(function (item) {
       var presented = executionStatusForRun(run, item.value);
@@ -1990,7 +2002,7 @@
     if (!rows.length) {
       table.innerHTML = lanes.length
         ? "<tr><td colspan=\"6\" class=\"empty-state\">入围方案已开始优化，正在等待首批比较结果。</td></tr>"
-        : "<tr><td colspan=\"6\" class=\"empty-state\">选出 2 个入围方案后，这里会显示每批修改、效果比较和选择结果。</td></tr>";
+        : "<tr><td colspan=\"6\" class=\"empty-state\">训练主线确定后，这里显示每批执行与修订；快速模式在轮末共同验证。</td></tr>";
       return;
     }
     table.innerHTML = rows.map(function (entry) {
@@ -2201,7 +2213,7 @@
     if (!capacity.available) {
       capacityNode.innerHTML = "历史运行未记录数据容量与复用范围。" + finalValidationText;
     } else if (capacity.evidence_scope === "engineering_exploration_with_reused_origins") {
-      capacityNode.innerHTML = "<strong>工程探索证据：</strong>" + escapeHTML(formatNumber(capacity.available_eligible_origins || capacity.available_source_origins || 0)) + " 个可用独立源，计划 " + escapeHTML(formatNumber(capacity.required_unique_origins || capacity.planned_origin_occurrences || 0)) + " 个 origin occurrences，其中 " + escapeHTML(formatNumber(capacity.reused_origin_occurrences || 0)) + " 次复用。结果可用于工程优化，不宣称为完全独立的科学验证。" + finalValidationText;
+      capacityNode.innerHTML = "<strong>工程探索证据：</strong>" + escapeHTML(formatNumber(capacity.available_eligible_origins || capacity.available_source_origins || 0)) + " 个可用源时点，本次需要 " + escapeHTML(formatNumber(capacity.required_unique_origins || 0)) + " 个不同起点，另有 " + escapeHTML(formatNumber(capacity.reused_origin_occurrences || 0)) + " 次复用。结果可用于工程优化，不宣称为完全独立的科学验证。" + finalValidationText;
     } else {
       capacityNode.innerHTML = "<strong>独立源证据：</strong>本轮规划未复用 origin，仍只在当前冻结选择集边界内解释。" + finalValidationText;
     }
@@ -2230,7 +2242,7 @@
   function renderProcessSummary(run) {
     var node = $("#process-summary");
     if (!run) {
-      var creation = pendingCreateStatus();
+      var creation = createDisplayStatus();
       node.innerHTML = creation
         ? "<div class=\"empty-state process-submit-progress\"><strong>" + escapeHTML(createPhaseLabel(creation)) + "</strong><span>" + escapeHTML(creation.message) + "</span></div>"
         : "<div class=\"empty-state\">创建进化运行后可查看模型、时距、保留方案得分与人工协作摘要。</div>";
@@ -2257,10 +2269,12 @@
     var vectorTargetCount = Array.isArray(fitnessProfile.expected_targets) ? fitnessProfile.expected_targets.length : 0;
     var vectorHorizonCount = Array.isArray(fitnessProfile.expected_horizons) ? fitnessProfile.expected_horizons.length : 0;
     var vectorCellCount = vectorTargetCount > 0 && vectorHorizonCount > 0 ? vectorTargetCount * vectorHorizonCount : null;
-    var generationCandidateOrigins = formalOrigins > 0 && holdoutOrigins > 0
-      ? 4 * 64 + formalCandidateOrigins + 3 * holdoutOrigins
-      : 0;
-    var generationScoringCells = generationCandidateOrigins > 0 && vectorCellCount != null ? generationCandidateOrigins * vectorCellCount : null;
+    var frozenPlan = run.execution_plan || configuration.execution_plan || {};
+    var frozenBudget = frozenPlan.generation_budget || run.derived_execution_budget || configuration.derived_execution_budget || {};
+    var generationCandidateOrigins = Number(frozenBudget.total_candidate_origins || 0);
+    var generationScoringCells = frozenBudget.total_scoring_cells || null;
+    var quick = schedule.finalist_count === 1;
+    var failure = run.latest_runtime_failure;
     var values = [
       ["研究领域", catalogReferenceLabel("domain_packs", configuration.domain_pack_id, configuration.domain_pack_id || "未提供")],
       ["策略模型（API）", modelReferenceLabel(configuration.policy_model_id)],
@@ -2269,17 +2283,18 @@
       ["独立评测器", catalogReferenceLabel("evaluators", configuration.evaluator_id, configuration.evaluator_id || "历史运行未记录")],
       ["局部搜索门槛", (run.search_guard_policy || configuration.search_guard_policy) === "practical_delta_cell_noninferiority_paired_blocks@1" ? "提高值须超过 0.005，各分项不退化，配对时间块与置信区间通过检查；证据不足则待复核" : run.search_guard_policy || configuration.search_guard_policy || "沿用该运行冻结的比较规则"],
       ["创建前模型预检", modelContractPreflightText(run)],
+      ["最近执行故障（账本）", failure ? (failure.model_route || "") + " · " + failure.stage + " · " + failure.error_code + (failure.provider_status ? " · HTTP " + failure.provider_status : "") + (failure.retryable ? " · 可恢复" : " · 执行契约未通过") : "尚无本协议的故障记录"],
       ["研究执行约束", run.research_execution_policy && run.research_execution_policy.schema_version === "ecologyrsi-dsh.research-execution-policy/1" ? "紧凑研究上下文；综合单次输出上限 " + formatNumber(run.research_execution_policy.synthesis_max_output_tokens) + " tokens；相同预算耗尽请求不重试" : "沿用该运行冻结的研究契约"],
       ["每轮候选", formatNumber(run.candidates_per_generation || 1) + " 个版本"],
       ["候选并发", Number(run.candidate_concurrency) > 0 ? formatNumber(run.candidate_concurrency) + " 个候选" : "历史运行按串行执行"],
-      ["入围候选轨迹", batchCount > 0 ? pairedMode
+      ["入围候选轨迹", quick ? "单主线 " + formatNumber(batchCount) + " × " + formatNumber(batchOrigins) + "；批次修订待轮末共同验证" : batchCount > 0 ? pairedMode
         ? "Top 2 各 1 个 warm-up 批次 + " + formatNumber(Math.max(0, batchCount - 1)) + " 个冠军/挑战者配对微批；两条 lane 共用 " + formatNumber(formalOrigins) + " 个 formal origin occurrences"
         : "Top 2 各 " + formatNumber(batchCount) + " × " + formatNumber(batchOrigins) + " 个预测时点；每批最多 " + formatNumber(schedule.max_local_edits_per_batch) + " 处改动"
         : "等待冻结 schedule"],
       [pairedMode ? "正式配对上限" : "轨迹策略", pairedMode
         ? formatNumber(formalCandidateOrigins) + " candidate-origin occurrences；同 cohort 双臂复用上述 " + formatNumber(formalOrigins) + " 个 shared cohort occurrences，不是新的独立源数据"
-        : schedule.strategy_label || "旧版连续更新策略"],
-      ["轮末同 cohort 比较", holdoutOrigins > 0 ? "F1 / F2 / 上一冠军各 " + formatNumber(holdoutOrigins) + " 个预测时点" : "等待冻结 holdout"],
+        : quick ? "探索修订；最后合法版本进入轮末比较" : schedule.strategy_label || "连续更新策略"],
+      ["轮末同 cohort 比较", holdoutOrigins > 0 ? (quick ? "候选 / 轮初冠军各 " : "F1 / F2 / 上一冠军各 ") + formatNumber(holdoutOrigins) + " 个预测时点" : "等待冻结 holdout"],
       ["单轮执行预算", generationCandidateOrigins > 0 ? pairedMode
         ? formatNumber(generationCandidateOrigins) + " candidate-origin execution occurrences" + (generationScoringCells != null ? " = " + formatNumber(generationScoringCells) + " scoring cells" : "")
         : formatNumber(generationCandidateOrigins) + " candidate-origins"
@@ -2298,7 +2313,7 @@
   }
 
   function renderProcess() {
-    var creation = pendingCreateStatus();
+    var creation = createDisplayStatus();
     var run = creation ? null : state.activeRun;
     var pill = $("#process-status-pill");
     var liveAllowed = executionRunAllowsLiveStatus(run);
@@ -2307,9 +2322,9 @@
     var autoBlocked = false;
     var submitting = Boolean(creation);
     var schedulerQueue = executionSchedulerQueueInfo(run);
-    pill.className = "pill " + (submitting || advancing || schedulerQueue ? "pill-blue" : autoBlocked ? "pill-red" : autoActive ? "pill-blue" : run ? displayRunStatusClass(run, state.events) : "pill-neutral");
+    pill.className = "pill " + (creation && creation.state === "failed" ? "pill-red" : submitting || advancing || schedulerQueue ? "pill-blue" : autoBlocked ? "pill-red" : autoActive ? "pill-blue" : run ? displayRunStatusClass(run, state.events) : "pill-neutral");
     pill.textContent = submitting ? createPhaseLabel(creation) : advancing ? "正在执行第 " + (Number(run.generation || 0) + 1) + " 轮" : schedulerQueue ? "后台排队中" : autoBlocked ? "自动推进已暂停" : autoActive ? "自动连续推进" : run ? displayRunStatusText(run, state.events) : "暂无运行";
-    $("#workspace-process").setAttribute("aria-busy", String(submitting || advancing || autoActive));
+    $("#workspace-process").setAttribute("aria-busy", String((submitting && creation.state !== "failed") || advancing || autoActive));
     $("#projection-revision").textContent = run ? "状态视图版本 " + (run.projection_revision || "—") : "状态视图版本 —";
     renderProcessSummary(run);
     renderAutonomyProgress(run);

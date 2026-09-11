@@ -77,10 +77,6 @@
       return "<div class=\"change-row\"><span title=\"" + escapeHTML(key) + "\">" + escapeHTML(artifactFieldLabel(key)) + "</span><strong>" + escapeHTML(artifactValueText(values[key])) + "</strong></div>";
     }).join("") : "<span class=\"empty-state\">未提供。</span>";
   }
-  function artifactForCandidate(candidateId) {
-    var artifacts = state.activeRun && state.activeRun.artifacts || [];
-    return artifacts.find(function (item) { return item && item.candidate_id === candidateId; }) || null;
-  }
   function renderArtifactIdentity(artifact) {
     var binding = artifact.artifact_revision_binding || {};
     var verified = artifact.identity_status === "revision_verified" && artifact.artifact_event_schema === "ecologyrsi-dsh.artifact-recorded/2" && binding.candidate_revision_id === artifact.candidate_revision_id;
@@ -687,7 +683,7 @@
       var skill = candidateFiniteNumber(target.skill_score);
       var violation = candidateFiniteNumber(target.constraint_violations);
       var skillClass = skill == null ? "pill-amber" : skill >= 0 ? "pill-green" : "pill-red";
-      return "<article class=\"target-result\"><div class=\"candidate-target-header\"><strong>" + escapeHTML(targetLabels[target.target] || target.target || "预测目标") + "</strong><span>" + escapeHTML(target.horizon_hours != null ? formatNumber(target.horizon_hours) + " 小时" : "时距未提供") + "</span><b class=\"pill " + skillClass + "\">技能 " + escapeHTML(skill == null ? "待评测" : signedNumber(skill, 3)) + "</b></div><div class=\"candidate-target-metrics\"><span>样本<strong>" + escapeHTML(formatNumber(target.n)) + "</strong></span><span>MAE<strong>" + escapeHTML(formatNumber(target.mae)) + "</strong></span><span>RMSE<strong>" + escapeHTML(formatNumber(target.rmse)) + "</strong></span><span>基线 RMSE<strong>" + escapeHTML(formatNumber(target.baseline_rmse)) + "</strong></span><span>违规<strong class=\"" + (violation != null && violation > 0 ? "is-warning" : "") + "\">" + escapeHTML(violation == null ? "—" : formatNumber(violation)) + "</strong></span><span>单位<strong>" + escapeHTML(unitText(target.unit)) + "</strong></span></div></article>";
+      return "<article class=\"target-result\"><div class=\"candidate-target-header\"><strong>" + escapeHTML(targetLabels[target.target] || target.target || "预测目标") + "</strong><span>" + escapeHTML(target.horizon_hours != null ? formatNumber(target.horizon_hours) + " 小时" : "时距未提供") + "</span><b class=\"pill " + skillClass + "\">技能 " + escapeHTML(skill == null ? "待评测" : signedNumber(skill, 3)) + "</b></div><div class=\"candidate-target-metrics\"><span>样本<strong>" + escapeHTML(formatNumber(target.n)) + "</strong></span><span>MAE<strong>" + escapeHTML(formatNumber(target.mae)) + "</strong></span><span>RMSE<strong>" + escapeHTML(formatNumber(target.rmse)) + "</strong></span><span>Bias<strong>" + escapeHTML(target.bias == null ? "—" : signedNumber(target.bias, 4)) + "</strong></span><span>基线 RMSE<strong>" + escapeHTML(formatNumber(target.baseline_rmse)) + "</strong></span><span>违规<strong class=\"" + (violation != null && violation > 0 ? "is-warning" : "") + "\">" + escapeHTML(violation == null ? "—" : formatNumber(violation)) + "</strong></span><span>单位<strong>" + escapeHTML(unitText(target.unit)) + "</strong></span></div></article>";
     }).join("");
   }
   function candidateSampleStatusDescriptor(row) {
@@ -863,6 +859,19 @@
     var node = $("#candidate-detail");
     if (!candidate) { node.innerHTML = "<div class=\"empty-state\">选择一个候选方案查看评测详情。</div>"; return; }
     run = run || state.activeRun || {};
+    var detail = null;
+    if (candidate.details_loaded === false && !state.usingDemo) {
+      if (state.workspace !== "candidates") { return; }
+      var key = workspaceRequestKey(run.id, "candidate:" + candidate.id);
+      detail = state.candidateDetails && state.candidateDetails[key];
+      if (!detail || detail.revision < workspaceRevision(run, "candidate")) {
+        node.innerHTML = "<div class=\"empty-state\">正在加载所选候选的评测详情与产物…</div>";
+        loadCandidateDetail(candidate.id);
+        return;
+      }
+      if (detail.error) { node.innerHTML = "<div class=\"empty-state\">详情加载失败，请刷新本区域重试：" + escapeHTML(detail.error) + "</div>"; return; }
+      candidate = detail.candidate;
+    }
     candidates = Array.isArray(candidates) ? candidates : run.candidates || [];
     var metricOrder = ["score", "passed", "skill_score", "normalized_rmse", "baseline_normalized_rmse", "improvement", "objective_profile", "objective_target_weights", "objective_horizon_weighting", "mae", "rmse", "mean_target_mae_unscaled", "mean_target_rmse_unscaled", "per_target_no_regression", "raw_units_comparable_across_targets", "water_balance_error", "n", "missing_or_nonfinite_rows", "constraint_violations", "non_negative_state", "scientific_pass", "judge_model_id", "judge_accepted", "judge_guidance", "evaluation_scope", "selection_scope", "formal_validation_status", "dataset_digest", "split_manifest_digest_sha256", "causal_interpretation"];
     var candidateMetrics = candidate.metrics || {};
@@ -871,7 +880,7 @@
     var targets = candidate.metrics && Array.isArray(candidate.metrics.targets) ? candidate.metrics.targets : [];
     var predictionRows = candidate.metrics && Array.isArray(candidate.metrics.prediction_preview) ? candidate.metrics.prediction_preview : [];
     var promotion = candidate.promotion || {};
-    var artifact = artifactForCandidate(candidate.id);
+    var artifact = (detail ? detail.artifacts : run.artifacts || []).find(function (item) { return item && item.candidate_id === candidate.id; }) || null;
     var score = candidateScoreValue(candidate);
     var delta = candidateDelta(candidate, candidates, run);
     var skill = candidateMetricValue(candidate, "skill_score");

@@ -13,7 +13,7 @@ function sandbox() {
     window: {location:{search:''},setTimeout,clearTimeout}, document:{querySelector:node,querySelectorAll:()=>[]},
     EcologyDSHHost:{getPublicContext:()=>({apiBase:'/api'}),request:async()=>({})}};
   vm.createContext(c);
-  for (const file of ['core','catalog','data']) vm.runInContext(readFileSync(new URL('../assets/js/'+file+'.js',import.meta.url),'utf8'),c);
+  for (const file of ['core','catalog','data','commands']) vm.runInContext(readFileSync(new URL('../assets/js/'+file+'.js',import.meta.url),'utf8'),c);
   c.renderAll=()=>{};c.renderProcess=()=>{};c.renderTrainingAssets=()=>{};c.showToast=()=>{};
   c.refreshEventsForRun=async()=>true;c.refreshCandidateSamples=async()=>true;c.loadSelectedDataset=async()=>true;
   c.state.activeRun=c.normalizeRun({run_id:'run:a',status:'running',projection_revision:5,candidates_count:1,candidates:[{id:'candidate:a',status:'evaluating'}]});
@@ -36,7 +36,8 @@ test('dataset adapters control the training selector and per-dataset evaluation 
     c.alignDatasetBinding();
     assert.equal(c.document.querySelector('#evaluator-id').value,'engine');
     assert.equal(c.predictionCellsPerOrigin(),cells);
-    assert.equal(c.samplesPerUpdateMinimum(),cells);
+    assert.equal(c.runParameterRule('sample_agent_batch_size').minimum,cells);
+    assert.equal(c.runParameterRule('sample_agent_batch_size').maximum,cells);
   }
   c.state.catalog.datasets[1].task_adapter.evaluator_id='missing';
   c.alignDatasetBinding();

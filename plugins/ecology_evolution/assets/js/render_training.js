@@ -171,7 +171,7 @@
   function renderTrainingEpisodeDetails(asset) {
     if (asset && asset.details_loaded === false) {
       var saved = state.trainingAssetDetails && state.trainingAssetDetails[asset.candidate_id];
-      if (saved && saved.revision === (state.activeRun && state.activeRun.projection_revision)) { asset = saved.asset; }
+      if (saved && state.activeRun && saved.revision >= workspaceRevision(state.activeRun, "asset")) { asset = saved.asset; }
       else {
         var pending = state.trainingAssetRequests && state.trainingAssetRequests[workspaceRequestKey(state.activeRun.id, "asset:" + asset.candidate_id)];
         return "<tr class=\"training-episode-row\"><td colspan=\"7\"><button type=\"button\" class=\"button button-secondary\" data-load-training-asset=\"" + escapeHTML(asset.candidate_id) + "\"" + (pending ? " disabled" : "") + ">" + (pending ? "正在读取完整轨迹…" : "加载完整训练轨迹与复现证据") + "</button></td></tr>";

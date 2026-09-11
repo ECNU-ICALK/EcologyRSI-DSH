@@ -35,18 +35,18 @@ const commandsSource = read("assets/js/commands.js");
 // The parameter page is the public source of truth for the adaptive finalist
 // schedule. These defaults are complete forecast 个预测时点, never scoring cells.
 for (const [id, value] of [
-  ["formal-origin-count", "200"],
-  ["local-batch-origin-count", "50"],
+  ["formal-origin-count", "100"],
+  ["local-batch-origin-count", "10"],
   ["max-local-edits-per-batch", "2"],
-  ["selection-holdout-origin-count", "169"],
+  ["selection-holdout-origin-count", "50"],
 ]) {
   assert.match(html, new RegExp(`id="${id}"[^>]*value="${value}"`));
 }
-assert.match(html, /id="max-generations"[^>]*value="1"/);
-assert.match(html, /默认先运行 1 轮/);
+assert.match(html, /id="max-generations"[^>]*value="5"/);
+assert.match(html, /默认先运行 5 轮/);
 assert.doesNotMatch(html, /id="samples-per-update"/);
 assert.match(commandsSource, /function normalizedOptimizationSchedule\(values\)/);
-assert.match(commandsSource, /optimization_protocol: "top2_adaptive_epoch@1"/);
+assert.match(commandsSource, /optimization_protocol: optimizationSchedule\.finalist_count === 1 \? "quick_adaptive_epoch@1" : "top2_adaptive_epoch@1"/);
 assert.match(commandsSource, /optimization_schedule: optimizationSchedule/);
 assert.doesNotMatch(commandsSource, /samples_per_update:/);
 
@@ -1367,6 +1367,7 @@ assert.equal(
 const processSummaryNode = modelNode();
 const modelQuerySelector = modelSandbox.document.querySelector;
 modelSandbox.document.querySelector = (selector) => selector === "#process-summary" ? processSummaryNode : modelQuerySelector(selector);
+waitingRun.derived_execution_budget = {total_candidate_origins: 1763, total_scoring_cells: 15867};
 modelSandbox.renderProcessSummary(waitingRun);
 assert.ok(processSummaryNode.innerHTML.includes("逐样本智能体 Token 硬预算"));
 assert.ok(processSummaryNode.innerHTML.includes("仅计 planner / repair / critic；不含 research / proposal / judge"));
@@ -1386,6 +1387,7 @@ const pairedWaitingSchedule = {
 modelSandbox.renderProcessSummary({
   ...waitingRun,
   optimization_schedule: pairedWaitingSchedule,
+  derived_execution_budget: {total_candidate_origins: 2663, total_scoring_cells: 23967},
   configuration: {...waitingRun.configuration, optimization_schedule: pairedWaitingSchedule},
 });
 for (const pairedCapacityDetail of [
@@ -1506,7 +1508,7 @@ const nativeDshUsageText = modelSandbox.modelUsageTokenProgressText({
     },
   },
 });
-assert.ok(nativeDshUsageText.includes("DSH 上下文压力（会话最大当前值）：4,096 Token"));
+assert.ok(nativeDshUsageText.includes("DSH 上下文压力（活跃会话最大值）：4,096 Token"));
 assert.ok(nativeDshUsageText.includes("供应商报告累计用量：8,192 Token"));
 
 // A paused run can retain a durable active phase so it can resume from the
@@ -1604,7 +1606,7 @@ for (const text of ["知识快照已冻结，正在等待远端模型响应", "�
   assert.ok(activeResearchPresentation.detail.includes(text), `missing active research detail: ${text}`);
 }
 modelSandbox.renderAutonomyProgress(activeResearchRun);
-assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "等待远端模型响应");
+assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "等待远端响应");
 assert.equal(monitorNodes["#autonomy-progress-status"].className, "pill pill-blue");
 for (const text of ["等待远端响应", "正在等待远端模型响应", "目录策略单次调用超时上限 15 分钟"]) {
   assert.ok(monitorNodes["#autonomy-progress"].innerHTML.includes(text), `missing rendered research detail: ${text}`);
@@ -1728,8 +1730,8 @@ modelSandbox.renderExecutionMonitor(pausedDrainedRun);
 assert.equal(monitorNodes["#execution-monitor-status"].textContent, "已暂停，请求已排空");
 assert.equal(monitorNodes["#execution-monitor-status"].className, "pill pill-amber");
 assert.equal(monitorNodes["#execution-progress-label"].textContent, "第 1 轮已暂停");
-assert.ok(monitorNodes["#execution-progress-detail"].textContent.startsWith("暂停阶段："));
-assert.ok(monitorNodes["#execution-progress-detail"].textContent.includes("独立评测"));
+assert.match(monitorNodes["#execution-progress-detail"].textContent, /暂停原因未记录。 暂停阶段：/);
+assert.ok(monitorNodes["#execution-progress-detail"].textContent.includes("样本评测"));
 assert.ok(monitorNodes["#execution-progress-detail"].textContent.includes("请求已排空"));
 assert.equal(monitorNodes["#execution-progress-detail"].textContent.includes("当前阶段"), false);
 assert.equal(monitorNodes["#execution-progress-track"].className, "execution-progress-track is-paused");
@@ -1922,7 +1924,7 @@ const screeningRun = {
 };
 modelSandbox.renderExecutionMonitor(screeningRun);
 assert.equal(monitorNodes["#execution-monitor-status"].textContent, "模型执行中");
-assert.ok(monitorNodes["#execution-progress-detail"].textContent.includes("独立评测"));
+assert.ok(monitorNodes["#execution-progress-detail"].textContent.includes("样本评测"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("全轮预测时点进度：1 / 1,763"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("当前初筛 1 / 256 个预测时点"));
 assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("宿主并发 64 / 64"));
@@ -1989,7 +1991,7 @@ const staleCandidateStage = {
   execution: {...screeningCandidate.execution, current_stage: "training"},
 };
 modelSandbox.renderExecutionMonitor({...screeningRun, candidates: [staleCandidateStage]});
-assert.ok(monitorNodes["#execution-progress-detail"].textContent.includes("独立评测"));
+assert.ok(monitorNodes["#execution-progress-detail"].textContent.includes("样本评测"));
 assert.equal(monitorNodes["#execution-progress-detail"].textContent.includes("候选训练"), false);
 modelSandbox.renderAutonomyProgress(screeningRun);
 assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "模型执行中");
@@ -2052,7 +2054,7 @@ const staleButActiveDshRun = {
 };
 assert.equal(modelSandbox.executionHeartbeatState(staleButActiveDshRun).stalled, true);
 modelSandbox.renderAutonomyProgress(staleButActiveDshRun);
-assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "模型执行中");
+assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "较长时间未收到模型进度");
 assert.equal(monitorNodes["#autonomy-progress-status"].textContent.includes("疑似停滞"), false);
 
 // Native research can start before the first round/candidate is projected.
@@ -2074,7 +2076,7 @@ modelSandbox.renderExecutionMonitor(nativeResearchBeforeCandidate);
 assert.equal(monitorNodes["#execution-monitor-status"].textContent, "模型执行中");
 assert.equal(monitorNodes["#execution-progress-label"].textContent, "正在处理第 1 轮");
 modelSandbox.renderAutonomyProgress(nativeResearchBeforeCandidate);
-assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "等待远端模型响应");
+assert.equal(monitorNodes["#autonomy-progress-status"].textContent, "等待远端响应");
 for (const status of ["paused", "cancelled", "failed", "completed"]) {
   const stopped = {...nativeResearchBeforeCandidate, status};
   assert.equal(modelSandbox.executionDshActiveStage(stopped), null);
@@ -2610,7 +2612,7 @@ const insufficientBudgetRun = await modelSandbox.createRun({
   rounds: 2, candidates_per_generation: 3, max_candidates: 1, fixed_seed: true, auto_advance: 0,
 });
 assert.equal(insufficientBudgetRun, null);
-assert.match(reuseToasts.at(-1), /候选总预算不足/);
+assert.match(reuseToasts.at(-1), /候选总预算不得小于 4/);
 
 const createRunQuerySelector = modelSandbox.document.querySelector;
 const originalEvaluators = modelSandbox.state.catalog.evaluators;
@@ -2629,7 +2631,7 @@ modelSandbox.state.catalog.evaluators = [{
   minimum_selection_origin_samples_per_update: 169,
 }];
 modelSandbox.updateOptimizationScheduleBoundary();
-assert.equal(selectionHoldoutNode.min, "169");
+assert.equal(selectionHoldoutNode.min, "40");
 const requestBeforeSampleBoundaryTest = modelSandbox.request;
 let rejectedSampleBoundaryRequestCount = 0;
 modelSandbox.request = async () => { rejectedSampleBoundaryRequestCount += 1; return {}; };
@@ -2683,15 +2685,15 @@ modelSandbox.request = async (path, options) => {
   queuedCreateBody = options.body;
   assert.equal(Object.hasOwn(options.body.budget, "token_limit"), false);
   assert.equal(Object.hasOwn(options.body, "samples_per_update"), false);
-  assert.equal(options.body.optimization_protocol, "top2_adaptive_epoch@1");
-  assert.equal(options.body.optimization_schedule.schema_version, "ecologyrsi-dsh.top2-adaptive-epoch-schedule/3");
-  assert.equal(options.body.optimization_schedule.screening_origin_count, 64);
-  assert.equal(options.body.optimization_schedule.finalist_count, 2);
+  assert.equal(options.body.optimization_protocol, "quick_adaptive_epoch@1");
+  assert.equal(options.body.optimization_schedule.schema_version, "ecologyrsi-dsh.quick-adaptive-epoch-schedule/1");
+  assert.equal(options.body.optimization_schedule.screening_origin_count, 0);
+  assert.equal(options.body.optimization_schedule.finalist_count, 1);
   assert.equal(options.body.optimization_schedule.formal_origin_count_per_finalist, 500);
   assert.equal(options.body.optimization_schedule.local_batch_origin_count, 50);
   assert.equal(options.body.optimization_schedule.max_local_edits_per_batch, 2);
   assert.equal(options.body.optimization_schedule.selection_holdout_origin_count, 169);
-  assert.equal(options.body.optimization_schedule.local_evaluation_mode, "paired_champion_challenger");
+  assert.equal(options.body.optimization_schedule.local_evaluation_mode, "prequential");
   assert.equal(options.body.candidate_concurrency, 4);
   assert.equal(options.body.sample_agent_batch_size, 9);
   assert.equal(options.body.sample_concurrency, 64);
@@ -3875,19 +3877,19 @@ budgetSandbox.syncCandidateBudget({markManual: true});
 budgetNodes["#candidates-per-generation"].value = "6";
 budgetSandbox.syncCandidateBudget();
 assert.equal(budgetNodes["#max-candidates"].value, "30");
-assert.match(budgetNodes["#max-candidates"].validationMessage, /至少 36/);
+assert.match(budgetNodes["#max-candidates"].validationMessage, /每轮候选数不得大于 4/);
 assert.equal(budgetSandbox.candidateBudgetStatus().budget_sufficient, false);
 const defaultSchedule = budgetSandbox.optimizationScheduleFromControls();
-assert.equal(defaultSchedule.schema_version, "ecologyrsi-dsh.top2-adaptive-epoch-schedule/3");
+assert.equal(defaultSchedule.schema_version, "ecologyrsi-dsh.quick-adaptive-epoch-schedule/1");
 assert.equal(defaultSchedule.formal_origin_count_per_finalist, 500);
 assert.equal(defaultSchedule.local_batch_origin_count, 50);
 assert.equal(defaultSchedule.max_local_edits_per_batch, 2);
 assert.equal(defaultSchedule.selection_holdout_origin_count, 169);
-assert.equal(defaultSchedule.local_evaluation_mode, "paired_champion_challenger");
+assert.equal(defaultSchedule.local_evaluation_mode, "prequential");
 for (const [patch, pattern] of [
   [{formal_origin_count: 500, local_batch_origin_count: 64}, /必须整除/],
   [{max_local_edits_per_batch: 6}, /不得大于 5/],
-  [{selection_holdout_origin_count: 168}, /不得小于 169/],
+  [{selection_holdout_origin_count: 39}, /不得小于 40/],
   [{formal_origin_count: ""}, /必须是整数/],
   [{formal_origin_count: true}, /必须是整数/],
 ]) {
@@ -3929,6 +3931,7 @@ completedAdaptiveRun.rounds[0].adaptive_completion.advisory_review_recorded = fa
 assert.notEqual(modelSandbox.autonomyStepStatus(completedAdaptiveRun, "evaluation"), "completed");
 
 const parameterNodes = {
+  "#experiment-mode": makeControlNode("comparison"),
   "#max-generations": makeControlNode("5"),
   "#candidates-per-generation": makeControlNode("4"),
   "#max-candidates": makeControlNode("20"),
@@ -3958,11 +3961,18 @@ vm.createContext(parameterSandbox);
 vm.runInContext(read("assets/js/core.js"), parameterSandbox);
 vm.runInContext(read("assets/js/commands.js"), parameterSandbox);
 vm.runInContext(read("assets/js/render_shell.js"), parameterSandbox);
+parameterSandbox.state.cohortCapacityReport = {sufficient: true, execution_plan: {
+  schedule: parameterSandbox.optimizationScheduleFromControls(), generations: 5,
+  holdout_inference_replicas: 2, required_unique_origins: 733, fresh_epoch_holdout: false,
+  generation_budget: {screening_candidate_origins: 256, formal_candidate_origins: 1900, holdout_candidate_origins: 1014, total_candidate_origins: 3170, total_scoring_cells: 28530},
+  run_budget: {total_candidate_origins: 15850, total_scoring_cells: 142650}
+}};
+parameterSandbox.cohortCapacityLabel = () => "已核验";
 parameterSandbox.renderParameters();
 assert.equal(parameterNodes["#parameter-summary-pill"].textContent, "每个入围候选 10 × 50");
 assert.equal(parameterNodes["#agent-update-scope"].textContent, "每个入围候选 10 × 50");
 assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("256 + 1,900 + 1,014 = 3,170 次时点预测 = 28,530 个评分项"));
-assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("15,850 次时点预测 / 142,650 个评分项；需要 1,665 个起点 occurrence"));
+assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("15,850 次时点预测 / 142,650 个评分项；需要 733 个不同起点"));
 assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("独立观测数保持不变"));
 assert.ok(parameterNodes["#parameter-summary"].innerHTML.includes("500 个预测时点"));
 assert.equal(parameterNodes["#parameter-summary"].innerHTML.includes("formal unique origins"), false);
@@ -4129,7 +4139,7 @@ assert.doesNotMatch(html, /id="workspace-settings"[\s\S]*id="workspace-parameter
 assert.ok(html.includes("DSH 上下文：等待 Session 计量"));
 assert.doesNotMatch(html, /name="token_limit"/);
 assert.ok(html.includes("完整训练拟合分区"));
-assert.ok(html.includes("每个入围候选 10 × 50"));
+assert.ok(html.includes("每个入围候选 10 × 10"));
 assert.match(html, /<label><span>训练数据集<\/span><select id="dataset-id" name="dataset_id" required>/);
 assert.match(html, /<label hidden><span>研究领域（自动推导）/);
 assert.match(html, /预测方案由模型自主选择/);
@@ -4188,14 +4198,14 @@ for (const contractField of ["descriptor", "readiness", "profile", "features", "
 }
 assert.match(app, /request\("\/runs"/);
 assert.match(html, /id="candidates-per-generation"[^>]*value="4"/);
-assert.match(html, /id="formal-origin-count"[^>]*name="formal_origin_count"[^>]*value="200"/);
-assert.match(html, /id="local-batch-origin-count"[^>]*name="local_batch_origin_count"[^>]*value="50"/);
+assert.match(html, /id="formal-origin-count"[^>]*name="formal_origin_count"[^>]*value="100"/);
+assert.match(html, /id="local-batch-origin-count"[^>]*name="local_batch_origin_count"[^>]*value="10"/);
 assert.match(html, /id="max-local-edits-per-batch"[^>]*name="max_local_edits_per_batch"[^>]*value="2"/);
-assert.match(html, /id="selection-holdout-origin-count"[^>]*name="selection_holdout_origin_count"[^>]*value="169"/);
+assert.match(html, /id="selection-holdout-origin-count"[^>]*name="selection_holdout_origin_count"[^>]*value="50"/);
 assert.match(html, /id="candidate-concurrency"[^>]*value="4"/);
 assert.match(html, /id="sample-agent-batch-size"[^>]*value="9"[^>]*readonly/);
 assert.match(html, /id="sample-concurrency"[^>]*max="128"[^>]*value="64"/);
-assert.ok(html.includes("每个入围候选 10 × 50"));
+assert.ok(html.includes("每个入围候选 10 × 10"));
 assert.match(html, /id="max-candidates"[^>]*value="20"/);
 assert.doesNotMatch(html, /id="token-limit"/);
 assert.ok(html.includes("单个预测时点始终由一条向量链原子处理"));
@@ -4226,7 +4236,7 @@ for (const adaptiveEventLabel of [
   assert.ok(app.includes(`\"${adaptiveEventLabel}\"`), `${adaptiveEventLabel} should have a UI event label`);
 }
 assert.match(app, /function normalizedOptimizationSchedule\(values\)/);
-assert.match(app, /optimization_protocol: "top2_adaptive_epoch@1"/);
+assert.match(app, /optimization_protocol: optimizationSchedule\.finalist_count === 1 \? "quick_adaptive_epoch@1" : "top2_adaptive_epoch@1"/);
 assert.match(app, /optimization_schedule: optimizationSchedule/);
 assert.doesNotMatch(commandsSource, /samples_per_update:/);
 assert.match(app, /formal_origin_count: Number\(form\.get\("formal_origin_count"\)\)/);
@@ -4279,7 +4289,6 @@ for (const capability of ["evolution.run.create", "evolution.run.advance", "evol
   assert.ok(app.includes(`hasCapability("${capability}")`), `missing capability gate: ${capability}`);
 }
 assert.match(app, /unavailable_datasets: normalizeList\(value\.unavailable_datasets\)/);
-assert.match(app, /artifactForCandidate\(candidate\.id\)/);
 assert.match(app, /candidate\.metrics\.prediction_preview/);
 assert.match(app, /var selectedTarget = targetSelect\.value/);
 assert.match(app, /item\.parameter_overrides/);
@@ -4518,6 +4527,8 @@ vm.runInContext(read("app.js").split("\n    bindEvents();")[0], formSubmissionSa
 formSubmissionSandbox.readiness = () => [{ready: true}];
 formSubmissionSandbox.hasCapability = () => true;
 formSubmissionSandbox.showToast = () => {};
+submitNode("#evaluator-id").value = "greenhouse_multihorizon_time_forward@3";
+formSubmissionSandbox.state.catalog.evaluators = [{id: "greenhouse_multihorizon_time_forward@3", prediction_cells_per_origin: 9}];
 formSubmissionSandbox.renderAll = () => {};
 formSubmissionSandbox.adoptCreatedRun = async (data) => data.projection;
 formSubmissionSandbox.bindEvents();
@@ -4564,6 +4575,41 @@ assert.deepEqual(submittedRequests, ["/model-preflight"]);
 assert.equal(formSubmissionSandbox.state.activeRun.id, "run:old-history");
 assert.equal(formSubmissionSandbox.state.createStatus.state, "failed");
 assert.equal(formSubmissionSandbox.pendingCreateStatus(), null);
+assert.equal(formSubmissionSandbox.createDisplayStatus().state, "failed");
+assert.equal(formSubmissionSandbox.createPhaseLabel(formSubmissionSandbox.createDisplayStatus()), "本次启动未成功");
+assert.equal(formSubmissionSandbox.state.createStatus.runId, null);
+
+assert.equal(formSubmissionSandbox.pendingCreateStatus(), null);
+// A lost preflight response must be reconciled before creating exactly once.
+const recoveryRequests = [];
+let preflightPolls = 0;
+formSubmissionSandbox.request = async (route, options) => {
+  recoveryRequests.push({route, body: options.body});
+  if (route === "/model-preflight" && !options.body.check_only) {
+    const error = new Error("请求超时。"); error.name = "AbortError"; throw error;
+  }
+  if (route === "/model-preflight") {
+    preflightPolls += 1;
+    return preflightPolls === 1 ? {passed: false, pending: true} : {passed: true};
+  }
+  return {projection: {id: "run:preflight-recovered", status: "running"}};
+};
+const recoveredPreflightRun = await submitNode("#start-form").listeners.submit({preventDefault() {}, currentTarget: {fields: submittedFields}});
+assert.equal(recoveredPreflightRun.id, "run:preflight-recovered");
+assert.equal(recoveryRequests.filter(r => r.route === "/runs").length, 1);
+assert.equal(recoveryRequests.filter(r => r.body.check_only === true).length, 2);
+assert.equal(new Set(recoveryRequests.map(r => r.body.idempotency_key)).size, 1);
+// Missing/failed receipts never permit creation, including after a timeout.
+recoveryRequests.length = 0;
+formSubmissionSandbox.request = async (route, options) => {
+  recoveryRequests.push(route);
+  if (!options.body.check_only) { const e = new Error("请求超时。"); e.name = "AbortError"; throw e; }
+  return {passed: false, pending: false};
+};
+const unconfirmedPreflightRun = await submitNode("#start-form").listeners.submit({preventDefault() {}, currentTarget: {fields: submittedFields}});
+assert.equal(unconfirmedPreflightRun, null);
+assert.equal(recoveryRequests.includes("/runs"), false);
+assert.match(formSubmissionSandbox.state.commandError, /模型预检未完成.*尚未提交创建请求/);
 formSubmissionSandbox.renderSearchProbation({search_probation: {count: 2, entries: [{candidate_id: "candidate:a", revision_id: "revision:<script>", generation: 0, batch_index: 1, score_delta: 0.001, reason: "probation_below_practical_delta"}]}});
 assert.match(submitNode("#search-probation-list").innerHTML, /显示最近 1 项/);
 assert.match(submitNode("#search-probation-list").innerHTML, /记录不会自动发起重评/);
@@ -4631,7 +4677,72 @@ assert.match(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML, /�
 assert.doesNotMatch(adaptiveTrajectoryNodes["#adaptive-trajectory-table"].innerHTML, /等待同批效果比较/);
 modelSandbox.document.querySelector = adaptiveTrajectoryQuerySelector;
 
+await import("./independent-evaluation.mjs");
+await import("./workspace-loading.mjs");
 console.log("ecology_evolution plugin smoke test: ok");
 
-assert.equal(budgetSandbox.normalizedOptimizationSchedule({}).formal_origin_count_per_finalist, 200);
+assert.match(html, /id="max-generations"[^>]*value="5"/);
+const smallSchedule = budgetSandbox.normalizedOptimizationSchedule({});
+assert.equal(smallSchedule.formal_origin_count_per_finalist, 100);
+assert.equal(smallSchedule.local_batch_origin_count, 10);
+assert.equal(smallSchedule.selection_holdout_origin_count, 50);
 assert.throws(() => budgetSandbox.normalizedOptimizationSchedule({formal_origin_count: 20, local_batch_origin_count: 1}), /不得小于 2/);
+
+// Backend-published limits override the offline bootstrap for every validator.
+const savedParameterCatalog = budgetSandbox.state.catalog;
+const publishedParameters = JSON.parse(JSON.stringify(budgetSandbox.bootstrapRunParameters));
+publishedParameters.parameters.selection_holdout_origin_count = {default: 60, minimum: 60};
+budgetSandbox.state.catalog = {run_parameters: publishedParameters};
+assert.equal(budgetSandbox.normalizedOptimizationSchedule({}).selection_holdout_origin_count, 60);
+assert.throws(() => budgetSandbox.normalizedOptimizationSchedule({selection_holdout_origin_count: 50}), /不得小于 60/);
+assert.equal(budgetSandbox.normalizedEvolutionBudget(5.5, 4, 24).budget_sufficient, false);
+assert.equal(budgetSandbox.normalizedEvolutionBudget(51, 4, 204).budget_sufficient, false);
+assert.equal(budgetSandbox.normalizedEvolutionBudget(5, 4, 257).budget_sufficient, false);
+assert.equal(budgetSandbox.normalizedEvolutionBudget(5, 4, 20).budget_sufficient, true);
+budgetSandbox.state.catalog = savedParameterCatalog;
+const savedCells = formSubmissionSandbox.predictionCellsPerOrigin;
+formSubmissionSandbox.predictionCellsPerOrigin = () => 1;
+assert.equal(formSubmissionSandbox.normalizedExecutionParameters({}).sample_agent_batch_size, 1);
+assert.throws(() => formSubmissionSandbox.normalizedExecutionParameters({sample_agent_batch_size: 9}), /不得大于 1/);
+formSubmissionSandbox.predictionCellsPerOrigin = savedCells;
+
+// Dataset-specific rules take precedence over a generic evaluator directory.
+const savedDatasetCatalog = formSubmissionSandbox.state.catalog;
+formSubmissionSandbox.state.catalog = {datasets: [{id: "dataset:single", evaluation: {
+  id: "eval:shared", prediction_cells_per_origin: 1, run_parameters: publishedParameters
+}}], evaluators: [{id: "eval:shared", prediction_cells_per_origin: 9}]};
+submitNode("#dataset-id").value = "dataset:single";
+submitNode("#evaluator-id").value = "eval:shared";
+assert.equal(formSubmissionSandbox.predictionCellsPerOrigin(), 1);
+assert.equal(formSubmissionSandbox.normalizedOptimizationSchedule({}).selection_holdout_origin_count, 60);
+formSubmissionSandbox.state.catalog = savedDatasetCatalog;
+
+// A pause must identify its source and keep that cause visible in the UI.
+modelSandbox.state.busy = false;
+modelSandbox.state.usingDemo = false;
+modelSandbox.hasCapability = () => true;
+modelSandbox.state.activeRun = modelSandbox.normalizeRun({id: 'run:pause-source', status: 'running', projection_revision: 1});
+modelSandbox.state.runs = [modelSandbox.state.activeRun];
+modelSandbox.renderAll = () => {};
+modelSandbox.refreshEventsForRun = async () => true;
+modelSandbox.reconcileVisibleRunSelection = () => false;
+let pauseBody;
+modelSandbox.request = async (_path, options) => {
+  pauseBody = options.body;
+  return {projection: {run_id: 'run:pause-source', status: 'paused', projection_revision: 2,
+    pause_code: pauseBody.code, pause_reason: pauseBody.reason}};
+};
+assert.equal(await modelSandbox.controlRun('pause'), true);
+assert.equal(pauseBody.code, 'web_operator_pause');
+assert.match(pauseBody.reason, /网页端暂停按钮/);
+assert.match(modelSandbox.runStatusExplanation(modelSandbox.state.activeRun, []).detail, /网页端暂停按钮/);
+assert.match(modelSandbox.runStatusExplanation({status: 'paused'}, []).detail, /原因未记录/);
+
+const liveRemote = {state: 'model_running', dsh_stage: 'generation.research-synthesis',
+  updated_at: new Date().toISOString(), remote_activity: {kind: 'streaming', updated_at: new Date().toISOString()}};
+assert.equal(modelSandbox.executionDshActivityPresentation(liveRemote).statusText, '模型正在生成');
+liveRemote.remote_activity.kind = 'retrying';
+assert.equal(modelSandbox.executionDshActivityPresentation(liveRemote).statusText, '模型请求重试中');
+liveRemote.remote_activity.updated_at = new Date(Date.now()-180000).toISOString();
+assert.match(modelSandbox.executionDshActivityPresentation(liveRemote).statusText, /未收到模型进度/);
+assert.match(modelSandbox.executionDshActivityPresentation(liveRemote).detail, /尚不能确认/);

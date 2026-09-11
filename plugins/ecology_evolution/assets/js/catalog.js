@@ -9,6 +9,10 @@
   var workspaceLastRead = {};
 
   function workspaceRequestKey(runId, view) { return state.contextEpoch + "|" + runId + "|" + view; }
+  function workspaceRevision(run, view) {
+    var revisions = run.workspace_revisions || {};
+    return revisions[view] == null ? run.projection_revision : Number(revisions[view]);
+  }
 
   function renderWorkspaceLoadState() {
     var node = $("#workspace-data-status");
@@ -17,7 +21,7 @@
     var pending = run && state.workspaceRequests && state.workspaceRequests[workspaceRequestKey(run.id, view)];
     var error = state.workspaceErrors && state.workspaceErrors[view];
     var version = state.workspaceVersions && state.workspaceVersions[view];
-    var stale = run && version != null && version < run.projection_revision;
+    var stale = run && version != null && version < workspaceRevision(run, view);
     node.hidden = !pending && !error && !stale;
     $("#workspace-data-message").textContent = error ? "本区域暂时加载失败，已保留已有数据：" + error : pending ? "正在加载本区域的数据，其他页面仍可使用。" : stale ? "本区域详情为较早快照，运行状态已更新；可刷新详情。" : "";
     $("#workspace-data-retry").hidden = (!error && !stale) || Boolean(pending);
@@ -25,6 +29,8 @@
 
   function ensureWorkspaceData(options) {
     var settings = options || {}, view = state.workspace, run = state.activeRun;
+    if (settings.force && view === "candidates") { state.candidateDetails = {}; }
+    if (view === "evaluation") { return loadIndependentEvaluation(); }
     if (view === "training" && (!state.datasetPage || !sameDatasetContext(state.datasetContext, trainingDatasetContext()) || settings.force)) {
       loadSelectedDataset(state.pageOffset);
     }
@@ -32,7 +38,7 @@
     state.workspaceVersions = state.workspaceVersions || {};
     state.workspaceRequests = state.workspaceRequests || {};
     state.workspaceErrors = state.workspaceErrors || {};
-    var key = workspaceRequestKey(run.id, view), revision = run.projection_revision;
+    var key = workspaceRequestKey(run.id, view), revision = workspaceRevision(run, view);
     if (state.workspaceRequests[key]) { return state.workspaceRequests[key]; }
     if (!settings.force && state.workspaceVersions[view] === revision) { return Promise.resolve(true); }
     if (!settings.force && !settings.navigation && state.workspaceVersions[view] != null && Date.now() - (workspaceLastRead[key] || 0) < 15000) { return Promise.resolve(false); }
@@ -51,7 +57,7 @@
       else { workspaceFieldNames[view].forEach(function (name) { if (Object.prototype.hasOwnProperty.call(projection, name)) { incoming[name] = projection[name]; } }); }
       state.activeRun = normalizeRun(incoming);
       state.runs = state.runs.map(function (item) { return item.id === run.id ? state.activeRun : item; });
-      state.workspaceVersions[view] = Number(projection.projection_revision);
+      state.workspaceVersions[view] = workspaceRevision(projection, view);
       syncCandidateSelection(state.activeRun);
       if (state.workspace === view && (view === "process" || view === "candidates")) { refreshCandidateSamples({silent: true}); }
       return true;
@@ -67,6 +73,39 @@
     return operation;
   }
 
+  function loadCandidateDetail(candidateId) {
+    var run = state.activeRun, epoch = state.contextEpoch;
+    if (!run || state.usingDemo || state.workspace !== "candidates") { return Promise.resolve(false); }
+    var key = workspaceRequestKey(run.id, "candidate:" + candidateId);
+    state.candidateDetails = state.candidateDetails || {};
+    state.candidateDetailRequests = state.candidateDetailRequests || {};
+    if (state.candidateDetailRequests[key]) { return state.candidateDetailRequests[key]; }
+    var revision = workspaceRevision(run, "candidate");
+    var operation = request("/runs/" + encodeURIComponent(run.id) + "?view=candidate&candidate_id=" + encodeURIComponent(candidateId), {timeout: dataRequestTimeout}).then(function (payload) {
+      if (epoch !== state.contextEpoch || !state.activeRun || state.activeRun.id !== run.id) { return false; }
+      var projection = payload.projection || {}, candidate = projection.candidate;
+      if (payload.view !== "candidate" || projection.run_id !== run.id || !candidate || candidate.candidate_id !== candidateId) { throw new Error("候选详情身份不匹配"); }
+      state.candidateDetails[key] = {revision: workspaceRevision(projection, "candidate"), candidate: normalizeCandidate(candidate), artifacts: projection.artifacts || []};
+      return true;
+    }).catch(function (error) {
+      if (epoch === state.contextEpoch) {
+        state.candidateDetails[key] = {revision: revision, error: errorMessage(error)};
+        if (state.activeRun && state.activeRun.id === run.id && state.selectedCandidateId === candidateId) {
+          state.workspaceErrors = state.workspaceErrors || {};
+          state.workspaceErrors.candidates = errorMessage(error);
+        }
+      }
+      return false;
+    }).finally(function () {
+      delete state.candidateDetailRequests[key];
+      var keys = Object.keys(state.candidateDetails);
+      while (keys.length > 4) { delete state.candidateDetails[keys.shift()]; }
+      if (epoch === state.contextEpoch && state.activeRun && state.activeRun.id === run.id && state.workspace === "candidates" && state.selectedCandidateId === candidateId) { renderCandidates(); }
+    });
+    state.candidateDetailRequests[key] = operation;
+    return operation;
+  }
+
   function loadTrainingAsset(candidateId) {
     var run = state.activeRun;
     if (!run || state.usingDemo) { return Promise.resolve(false); }
@@ -78,7 +117,7 @@
       if (epoch !== state.contextEpoch || !state.activeRun || state.activeRun.id !== run.id) { return false; }
       var projection = payload.projection || {}, asset = projection.training_asset;
       if (projection.run_id !== run.id || !asset || asset.candidate_id !== candidateId) { throw new Error("训练轨迹身份不匹配"); }
-      state.trainingAssetDetails[candidateId] = {revision: projection.projection_revision, asset: Object.assign({}, asset, {details_loaded: true})};
+      state.trainingAssetDetails[candidateId] = {revision: workspaceRevision(projection, "asset"), asset: Object.assign({}, asset, {details_loaded: true})};
       // Bound the retained full traces independently of the lightweight list.
       var keys = Object.keys(state.trainingAssetDetails);
       while (keys.length > 4) { delete state.trainingAssetDetails[keys.shift()]; }
@@ -483,6 +522,10 @@
   function selectedCatalogItem(collection, selector) {
     var value = $(selector).value;
     if (collection === "evaluators") {
+      var dataset = state.catalog.datasets.find(function (item) { return itemId(item) === $("#dataset-id").value; });
+      if (dataset && dataset.evaluation && itemId(dataset.evaluation) === value) { return dataset.evaluation; }
+    }
+    if (collection === "evaluators") {
       var dataset = selectedCatalogItem("datasets", "#dataset-id");
       if (dataset && dataset.evaluation && itemId(dataset.evaluation) === value) { return dataset.evaluation; }
     }
@@ -543,35 +586,28 @@
     var status = modelConnectionStateText(item);
     $(selector).textContent = [itemDescription(item) || fallback, status ? "调用状态：" + status + "。" : ""].filter(Boolean).join(" ");
   }
-  function samplesPerUpdateMinimum() {
-    var evaluator = selectedCatalogItem("evaluators", "#evaluator-id");
-    var value = Number(evaluator && evaluator.minimum_samples_per_update);
-    return Number.isInteger(value) && value > 0 ? value : 1;
-  }
-
-  function samplesPerUpdateSelectionMinimum() {
-    var evaluator = selectedCatalogItem("evaluators", "#evaluator-id");
-    var value = Number(evaluator && evaluator.minimum_selection_samples_per_update);
-    return Number.isInteger(value) && value > 0 ? value : samplesPerUpdateMinimum();
-  }
-
   function predictionCellsPerOrigin() {
     var evaluator = selectedCatalogItem("evaluators", "#evaluator-id");
     var value = Number(evaluator && (evaluator.prediction_cells_per_origin || evaluator.prediction_task_count));
     return Number.isInteger(value) && value > 0 ? value : 1;
   }
 
-  function predictionOriginsPerUpdateSelectionMinimum() {
-    var evaluator = selectedCatalogItem("evaluators", "#evaluator-id");
-    var value = Number(evaluator && evaluator.minimum_selection_origin_samples_per_update);
-    return Number.isInteger(value) && value > 0
-      ? value
-      : Math.ceil(samplesPerUpdateSelectionMinimum() / predictionCellsPerOrigin());
-  }
-
   function updateOptimizationScheduleBoundary() {
-    var input = $("#selection-holdout-origin-count");
-    input.min = String(Math.max(169, predictionOriginsPerUpdateSelectionMinimum()));
+    var controls = {rounds: "max-generations", candidates_per_generation: "candidates-per-generation",
+      max_candidates: "max-candidates", formal_origin_count: "formal-origin-count",
+      local_batch_origin_count: "local-batch-origin-count", max_local_edits_per_batch: "max-local-edits-per-batch",
+      selection_holdout_origin_count: "selection-holdout-origin-count", candidate_concurrency: "candidate-concurrency",
+      sample_concurrency: "sample-concurrency", sample_agent_batch_size: "sample-agent-batch-size"};
+    Object.keys(controls).forEach(function (name) {
+      var input = $("#" + controls[name]);
+      if (!input) { return; }
+      var rule = runParameterRule(name);
+      if (!state.runParameterDefaultsApplied && input.value === input.defaultValue) { input.value = String(rule.default); }
+      input.min = String(rule.minimum);
+      input.max = rule.maximum == null ? "" : String(rule.maximum);
+      if (name === "sample_agent_batch_size") { input.value = String(rule.default); }
+    });
+    state.runParameterDefaultsApplied = true;
   }
   function updateSelectionHelp() {
     setHelp("#domain-pack-help", selectedCatalogItem("domain_packs", "#domain-pack"), "由所选训练数据集自动推导知识检索范围、科学约束和数据适配器。");
@@ -585,6 +621,7 @@
         task.label,
         "预测目标：" + task.targets.map(function (target) { return target.label + "（" + target.unit + "，权重 " + Math.round(target.weight * 1000) / 10 + "%）"; }).join("、"),
         "预测时距：" + task.horizons_hours.join(" / ") + " 小时；按目标权重汇总相对基线的 RMSE 改善，各时距等权。",
+        "评测指标：" + task.diagnostic_metrics.map(function (name) { return ({mae: "MAE（平均绝对误差）", rmse: "RMSE（均方根误差）", bias: "Bias（预测减观测的平均偏差）", normalized_rmse: "归一化 RMSE", skill_score: "相对基线改善", sample_execution_coverage: "预测覆盖率", constraint_violations: "越界数"})[name] || name; }).join("、"),
         "通过要求：整体优于基线，各目标与时距不退化；预测覆盖率至少 " + Math.round(task.minimum_coverage * 100) + "%（候选选择至少 " + Math.round(task.selection_minimum_coverage * 100) + "%）；越界预测最多 " + task.maximum_constraint_violations + " 个。",
         task.label_semantics.join(" ")
       ].join("\n") : "";
@@ -684,9 +721,18 @@
     var required = formatNumber(capacity.planned_origin_occurrences == null ? capacity.required_unique_origins : capacity.planned_origin_occurrences);
     var available = formatNumber(capacity.available_source_origins == null ? capacity.available_eligible_origins : capacity.available_source_origins);
     var maximum = formatNumber(capacity.max_feasible_generations);
+    if (capacity.cohort_reuse_policy === "training_replay_fresh_epoch_holdouts@1") {
+      return (capacity.sufficient ? "数据量可满足运行" : "可用数据量不足") + "（需要 " + formatNumber(capacity.required_unique_origins) + " 个不同起点 / 可用 " + available + "；训练回放 " + formatNumber(capacity.reused_origin_occurrences || 0) + " 次，每轮比较使用新时点；最多 " + maximum + " 轮）";
+    }
     if (capacity.sufficient !== true) {
       if (capacity.rejection_reason) { return String(capacity.rejection_reason); }
+      if (capacity.cohort_reuse_policy === "training_epochs_fixed_partitions@1") {
+        return "单轮训练配置超过可用时间窗口（不同起点 " + formatNumber(capacity.required_unique_origins) + "，另需预测时距隔离 / 可用 " + available + "）。请减少每个方案的优化时点数；增加训练轮数不会消耗独立评测区。";
+      }
       return "可用数据量不足（需要 " + required + " / 可用 " + available + "；最多 " + maximum + " 轮）";
+    }
+    if (capacity.cohort_reuse_policy === "training_epochs_fixed_partitions@1") {
+      return "训练数据充足（本轮需要 " + formatNumber(capacity.required_unique_origins) + " 个不同起点 / 可用 " + available + "）；" + formatNumber(capacity.planned_generations) + " 轮复用训练区，独立评测另行执行。";
     }
     var reused = Number(capacity.reused_origin_occurrences || 0);
     var reuseNote = reused > 0
@@ -710,6 +756,7 @@
   function renderEvolutionCapacityState() {
     if (typeof renderReadiness === "function") { renderReadiness(); }
     if (typeof renderParameters === "function") { renderParameters(); }
+    renderDataPartitions();
   }
 
   function capacityVerificationPending() {
@@ -736,10 +783,11 @@
     if (state.usingDemo) {
       state.cohortCapacityReport = {
         sufficient: true,
-        required_unique_origins: body.optimization_schedule.formal_origin_count_per_finalist + body.planned_generations * (body.optimization_schedule.screening_origin_count + body.optimization_schedule.selection_holdout_origin_count),
+        required_unique_origins: body.optimization_schedule.formal_origin_count_per_finalist + body.optimization_schedule.screening_origin_count + body.optimization_schedule.selection_holdout_origin_count,
+        planned_generations: body.planned_generations,
         available_eligible_origins: 999999,
         max_feasible_generations: body.planned_generations,
-        cohort_reuse_policy: "cycle_after_exhaustion@1",
+        cohort_reuse_policy: "training_epochs_fixed_partitions@1",
         reused_origin_occurrences: 0
       };
       state.cohortCapacitySignature = planned.signature;
@@ -826,4 +874,13 @@
       return true;
     }).catch(function (error) { showToast("历史运行读取失败：" + errorMessage(error)); return false; })
       .finally(function () { state.loadingOlderRuns = false; renderContext(); });
+  }
+
+  function renderDataPartitions() {
+    var element = $("#data-partition-summary");
+    if (!element) { return; }
+    var summary = state.cohortCapacityReport && state.cohortCapacityReport.data_partition_summary;
+    element.textContent = summary ? "按时间划分 · " + summary.episode_id + "\n" + summary.partitions.map(function (p) {
+      return p.label + "：" + p.row_count + " 小时记录，" + p.start.replace("T", " ") + " 至 " + p.end_exclusive.replace("T", " ") + "（结束时间不含）；" + (p.purpose === "training" ? "训练使用" : "独立流程，训练不可读取");
+    }).join("\n") : "正在读取训练与独立评测的时间分区。";
   }

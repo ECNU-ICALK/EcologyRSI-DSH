@@ -21,7 +21,7 @@
     paused: "已暂停", aborted: "已中止", not_recorded: "未封存"
   };
   var metricLabels = {
-    score: "综合得分", passed: "训练反馈检查结果", mae: "平均绝对误差", rmse: "均方根误差",
+    score: "综合得分", passed: "训练反馈检查结果", mae: "平均绝对误差", rmse: "均方根误差", bias: "平均偏差（预测减观测）",
     water_balance_error: "水量平衡误差", constraint_violations: "约束违规数",
     n: "反馈样本数", non_negative_state: "状态非负约束", partition: "反馈数据分区",
     dataset_digest: "数据集校验值", evaluator_digest: "评测器校验值",
@@ -53,7 +53,7 @@
   var evolutionStageLabels = {
     research: "自主调研", knowledge: "知识检索", implementation: "能力编译",
     proposal: "变更提案", candidate: "候选生成", training: "候选训练",
-    evaluation: "独立评测", judge: "独立评审", decision: "搜索保留决策", optimization: "迭代优化"
+    evaluation: "样本评测", judge: "独立评审", decision: "搜索保留决策", optimization: "迭代优化"
   };
   var knownModelLabels = {
     "host_parameter_generator@1": "内置有界参数生成器",
@@ -663,7 +663,7 @@
       return {label: "执行中", detail: "系统正在处理当前轮次，进度会自动更新。", nextAction: "可以暂停，或等待本轮完成。", tone: "running"};
     }
     if (status === "paused") {
-      return {label: "已暂停", detail: runPauseReason(run) || "当前进度已保存，运行暂时停止。", nextAction: "点击“恢复运行”继续执行。", tone: "waiting"};
+      return {label: "已暂停", detail: runPauseReason(run) || "暂停原因未记录，当前进度已保存。", nextAction: "点击“恢复运行”检查配置并继续；配置已变更时需新建运行。", tone: "waiting"};
     }
     if (status === "failed") {
       return {label: "执行失败", detail: runFailureMessage(run, events), nextAction: "查看失败阶段，修正配置后新建运行。", tone: "failed"};
@@ -942,6 +942,7 @@
       prediction_models: normalizeList(value.prediction_models),
       runtime_evaluator_id: value.runtime_evaluator_id,
       prediction_selection_policy: value.prediction_selection_policy,
+      run_parameters: value.run_parameters || null,
       strategies: normalizeList(value.strategies), evaluators: normalizeList(value.evaluators),
       models: models,
       dsh_models: dshModels,
@@ -1054,6 +1055,7 @@
       sample_agent_batch_size: Number(item.sample_agent_batch_size || configuration.sample_agent_batch_size || 0),
       sample_concurrency: Number(item.sample_concurrency || configuration.sample_concurrency || 0),
       projection_revision: Number(item.projection_revision || item.revision || 0),
+      workspace_revisions: item.workspace_revisions || {},
       configuration: Object.assign({
         domain_pack_id: task.domain_pack_id || item.domain_pack_id || item.domain,
         research_domain_id: task.research_domain_id || item.research_domain_id || item.domain_pack_id || item.domain,
@@ -1163,7 +1165,11 @@
   }
   function createPhaseLabel(creation) {
     if (!creation) { return "等待运行"; }
-    return {preflight: "模型能力预检中", submitting: "正在创建运行", verifying: "正在核对创建状态", pending: "等待后台确认创建"}[creation.state] || "正在创建运行";
+    return {preflight: "模型能力预检中", submitting: "正在创建运行", verifying: "正在核对创建状态", pending: "等待后台确认创建", failed: "本次启动未成功"}[creation.state] || "正在创建运行";
+  }
+  function createDisplayStatus() {
+    var creation = state.createStatus;
+    return creation && creation.state === "failed" && !creation.runId ? creation : pendingCreateStatus();
   }
 
   function localizeError(message, errorCode) {

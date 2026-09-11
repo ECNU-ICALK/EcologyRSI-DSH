@@ -21,10 +21,10 @@
         detail.textContent = notice.message; return;
       }
     }
-    var creation = pendingCreateStatus();
+    var creation = createDisplayStatus();
     if (creation) {
-      banner.hidden = false; banner.classList.add("is-loading"); title.textContent = createPhaseLabel(creation);
-      detail.textContent = creation.message + "请勿重复提交。"; return;
+      banner.hidden = false; banner.classList.add(creation.state === "failed" ? "is-error" : "is-loading"); title.textContent = createPhaseLabel(creation);
+      detail.textContent = creation.message + (creation.state === "failed" ? " 可调整模型后重试；历史记录可从运行列表查看。" : "请勿重复提交。"); return;
     }
     if (state.loadState === "loading") {
       banner.hidden = false; banner.classList.add("is-loading"); title.textContent = "正在连接"; detail.textContent = "正在读取数据集、模型和运行记录。"; return;
@@ -69,7 +69,7 @@
 
   function renderContext() {
     var select = $("#run-select");
-    var creation = pendingCreateStatus();
+    var creation = createDisplayStatus();
     var runs = visibleRuns();
     var cancelledCount = cancelledEmptyRunCount();
     select.innerHTML = runs.length ? runs.map(function (run) {
@@ -80,7 +80,7 @@
       return "<option value=\"" + escapeHTML(run.id) + "\"" + (isCurrent ? " selected" : "") + ">" + escapeHTML(shortId(run.id)) + " · " + archivePrefix + escapeHTML(statusLabel) + "</option>";
     }).join("") : "<option value=\"\">暂无进化运行</option>";
     if (creation) { select.innerHTML = "<option value=\"\" selected>新运行：" + escapeHTML(createPhaseLabel(creation)) + "</option>" + select.innerHTML; }
-    select.disabled = !runs.length || state.busy || state.refreshing || Boolean(creation);
+    select.disabled = !runs.length || state.busy || state.refreshing || Boolean(creation && creation.state !== "failed");
     $("#load-older-runs").hidden = !state.runListCursor;
     $("#load-older-runs").disabled = Boolean(state.loadingOlderRuns || state.busy || state.refreshing);
     $("#show-cancelled-empty-runs").checked = state.showCancelledEmptyRuns;
@@ -153,6 +153,7 @@
 
   function optimizationControlSnapshot() {
     var raw = {
+      experiment_mode: $("#experiment-mode") ? $("#experiment-mode").value : "quick",
       formal_origin_count: $("#formal-origin-count").value,
       local_batch_origin_count: $("#local-batch-origin-count").value,
       max_local_edits_per_batch: $("#max-local-edits-per-batch").value,
@@ -162,14 +163,8 @@
       sample_concurrency: $("#sample-concurrency").value
     };
     try {
-      return {
-        valid: true,
-        raw: raw,
-        schedule: normalizedOptimizationSchedule(raw),
-        sample_agent_batch_size: strictInteger(raw.sample_agent_batch_size, "单时点向量单元容量", 9, 9),
-        candidate_concurrency: strictInteger(raw.candidate_concurrency, "候选并发数", 1, 8),
-        sample_concurrency: strictInteger(raw.sample_concurrency, "逐样本并发请求数", 1, sampleConcurrencyMaximum)
-      };
+      return Object.assign({valid: true, raw: raw, schedule: normalizedOptimizationSchedule(raw)},
+        normalizedExecutionParameters(raw));
     } catch (error) {
       return {valid: false, raw: raw, message: error && error.message ? error.message : "请检查输入参数"};
     }
@@ -270,25 +265,21 @@
     var budget = candidateBudgetStatus();
     var batchCount = schedule.formal_origin_count_per_finalist / schedule.local_batch_origin_count;
     var pairedMode = String(schedule.local_evaluation_mode || "").toLowerCase() === "paired_champion_challenger";
-    var screeningCandidateOrigins = 4 * schedule.screening_origin_count;
-    var formalOriginsPerFinalist = pairedMode
-      ? schedule.local_batch_origin_count + 2 * Math.max(0, batchCount - 1) * schedule.local_batch_origin_count
-      : schedule.formal_origin_count_per_finalist;
-    var formalCandidateOrigins = schedule.finalist_count * formalOriginsPerFinalist;
-    var holdoutReplicas = state.usingDemo ? 1 : 2;
-    var holdoutCandidateOrigins = holdoutReplicas * (schedule.finalist_count + 1) * schedule.selection_holdout_origin_count;
-    var generationCandidateOrigins = screeningCandidateOrigins + formalCandidateOrigins + holdoutCandidateOrigins;
-    var generationScoringCells = generationCandidateOrigins * cellsPerOrigin;
-    var runCandidateOrigins = generationCandidateOrigins * budget.max_generations;
-    var runScoringCells = generationScoringCells * budget.max_generations;
-    var uniqueOrigins = schedule.formal_origin_count_per_finalist + budget.max_generations * (schedule.screening_origin_count + schedule.selection_holdout_origin_count);
+    var quick = schedule.finalist_count === 1;
     var capacity = state.cohortCapacityReport;
-    var capacityOriginText = capacity && capacity.sufficient === true && Number(capacity.reused_origin_occurrences || 0) > 0
-      ? "计划 " + formatNumber(capacity.planned_origin_occurrences == null ? uniqueOrigins : capacity.planned_origin_occurrences) + " 个起点；不足部分按 occurrence 循环复用"
-      : "需要 " + formatNumber(capacity && capacity.planned_origin_occurrences != null ? capacity.planned_origin_occurrences : uniqueOrigins) + " 个起点 occurrence";
-    if (capacity && capacity.cohort_reuse_policy === "purged_no_reuse@1") {
-      capacityOriginText += "；按目标成熟时间隔离，禁止循环复用；适应数据跨 " + formatNumber(Number((capacity.maturity_gaps || {}).adaptation_day_buckets) || 0) + " 个自然日";
-    }
+    var plan = capacity && capacity.execution_plan;
+    var matchingPlan = plan && plan.schedule && Object.keys(schedule).every(function (key) { return plan.schedule[key] === schedule[key]; }) && plan.generations === budget.max_generations;
+    var executionBudget = matchingPlan ? plan.generation_budget : {};
+    var totalBudget = matchingPlan ? plan.run_budget : {};
+    var screeningCandidateOrigins = executionBudget.screening_candidate_origins;
+    var formalCandidateOrigins = executionBudget.formal_candidate_origins;
+    var holdoutCandidateOrigins = executionBudget.holdout_candidate_origins;
+    var holdoutReplicas = matchingPlan ? plan.holdout_inference_replicas : (quick || state.usingDemo ? 1 : 2);
+    var generationCandidateOrigins = executionBudget.total_candidate_origins;
+    var generationScoringCells = executionBudget.total_scoring_cells;
+    var runCandidateOrigins = totalBudget.total_candidate_origins;
+    var runScoringCells = totalBudget.total_scoring_cells;
+    var capacityOriginText = matchingPlan ? "需要 " + formatNumber(plan.required_unique_origins) + " 个不同起点；" + (plan.fresh_epoch_holdout ? "训练回放复用，每轮比较使用新时点；" : "按冻结时间分区复用；") + "独立认证区另计" : "等待后端核验冻结执行计划";
     var maximumEdits = Math.max(0, batchCount - (pairedMode ? 1 : 0)) * schedule.max_local_edits_per_batch;
     $("#parameter-summary-pill").textContent = "每个入围候选 " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count);
     $("#agent-update-scope").textContent = "每个入围候选 " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count);
@@ -298,18 +289,18 @@
     budgetState.textContent = !budget.budget_sufficient ? "预算不足" : capacityPending ? "正在核验数据容量" : capacitySufficient ? "预算与数据容量完整" : state.cohortCapacityError ? "数据容量暂不可用" : "数据容量不足";
     budgetState.className = budget.budget_sufficient && (capacitySufficient || capacityPending) ? "" : "is-insufficient";
     var values = [
-      ["迭代结构", formatNumber(budget.max_generations) + " 轮 · 每轮固定 4 个候选 · 同组 64 个时点评测后选出 2 个"],
+      ["迭代结构", quick ? formatNumber(budget.max_generations) + " 轮 · 1 条训练主线 · 轮末候选与冠军共同评测" : formatNumber(budget.max_generations) + " 轮 · 4 个候选预筛后选出 2 个"],
       ["局部持续优化", pairedMode
-        ? "两个入围候选共享 " + formatNumber(schedule.formal_origin_count_per_finalist) + " 个预测时点；每个方案包含 1 个初始批次和 " + formatNumber(Math.max(0, batchCount - 1)) + " 个新旧版本同批比较；" + "通过实际增益、分项不退化及配对证据检查后保留；证据不足待复核" + "；最多 " + formatNumber(maximumEdits) + " 处局部改动"
-        : "每个入围候选 " + formatNumber(schedule.formal_origin_count_per_finalist) + " 个时点 = " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count) + "；最多 " + formatNumber(maximumEdits) + " 处局部改动"],
-      ["单轮执行预算", formatNumber(screeningCandidateOrigins) + " + " + formatNumber(formalCandidateOrigins) + " + " + formatNumber(holdoutCandidateOrigins) + " = " + formatNumber(generationCandidateOrigins) + " 次时点预测 = " + formatNumber(generationScoringCells) + " 个评分项"],
+        ? "两个入围候选共享 " + formatNumber(schedule.formal_origin_count_per_finalist) + " 个预测时点；每个方案包含 1 个初始批次和 " + formatNumber(Math.max(0, batchCount - 1)) + " 个新旧版本同批比较；" + "局部按完整配对增益与分项不退化作探索性选择，轮末统一确认" + "；最多 " + formatNumber(maximumEdits) + " 处局部改动"
+        : "每批完整执行后反思，修订应用后待轮末验证；" + formatNumber(schedule.formal_origin_count_per_finalist) + " 个时点 = " + formatNumber(batchCount) + " × " + formatNumber(schedule.local_batch_origin_count) + "；最多 " + formatNumber(maximumEdits) + " 处局部改动"],
+      ["单轮执行预算", !matchingPlan ? "等待后端核验" : formatNumber(screeningCandidateOrigins) + " + " + formatNumber(formalCandidateOrigins) + " + " + formatNumber(holdoutCandidateOrigins) + " = " + formatNumber(generationCandidateOrigins) + " 次时点预测 = " + formatNumber(generationScoringCells) + " 个评分项"],
       ["留出重复推理", "每个方案独立推理 " + formatNumber(holdoutReplicas) + " 次，已计入执行预算；独立观测数保持不变"],
-      ["全程执行预算", formatNumber(runCandidateOrigins) + " 次时点预测 / " + formatNumber(runScoringCells) + " 个评分项；" + capacityOriginText],
+      ["全程执行预算", !matchingPlan ? "等待后端核验" : formatNumber(runCandidateOrigins) + " 次时点预测 / " + formatNumber(runScoringCells) + " 个评分项；" + capacityOriginText],
       ["数据容量", state.cohortCapacityLoading ? "正在核验" : capacity ? cohortCapacityLabel(capacity) : state.cohortCapacityError || "等待核验"],
       ["请求组织", "每个预测时点使用一条完整向量链 · " + formatNumber(microbatch) + " 个评分单元原子提交"],
       ["并发上限", formatNumber(candidateConcurrency) + " 个方案；全运行共享 " + formatNumber(concurrency) + " 个同时预测的时点"],
       ["候选总预算", formatNumber(budget.requested_max_candidates) + " 个（至少 " + formatNumber(budget.required_candidates) + " 个）"],
-      ["上下文与输出", "不设跨调用的逐样本 Token 总预算；Planner/Repair 最多 4,096 tokens，Critic 最多 2,048 tokens"],
+      ["上下文与输出", "单次生成额度：Planner/Repair 8,192，Critic 4,096 tokens；多步会话累计用量单独记录"],
       ["复现与检索", ($("#fixed-seed").checked ? "固定种子" : "记录生成种子") + " · " + ($("#knowledge-online-enabled").checked ? "在线检索" : "内置目录")]
     ];
     $("#parameter-summary").innerHTML = values.map(function (item) {

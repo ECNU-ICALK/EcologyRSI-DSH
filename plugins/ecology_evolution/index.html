@@ -32,8 +32,9 @@
             <button id="tab-process" class="nav-item" data-workspace="process" type="button" role="tab" aria-selected="false" aria-controls="workspace-process" tabindex="-1"><span>04</span>运行过程</button>
             <button id="tab-candidates" class="nav-item" data-workspace="candidates" type="button" role="tab" aria-selected="false" aria-controls="workspace-candidates" tabindex="-1"><span>05</span>候选方案</button>
             <button id="tab-collaboration" class="nav-item" data-workspace="collaboration" type="button" role="tab" aria-selected="false" aria-controls="workspace-collaboration" tabindex="-1"><span>06</span>人工审核</button>
+            <button id="tab-evaluation" class="nav-item" data-workspace="evaluation" type="button" role="tab" aria-selected="false" aria-controls="workspace-evaluation" tabindex="-1"><span>07</span>独立评测</button>
           </nav>
-          <div class="sidebar-note"><strong>数据边界</strong><span>训练拟合分区可查看；隐藏评测集、最终评测集和正式发布均由外部治理服务控制。</span></div>
+          <div class="sidebar-note"><strong>数据边界</strong><span>训练区可重复迭代；后续时间的验证集与测试集在独立评测流程中使用，不回流训练。</span></div>
         </aside>
 
         <main id="main-content" class="main-content" tabindex="-1">
@@ -103,6 +104,7 @@
                   <label hidden><span>进化策略</span><select id="strategy-id" name="strategy_id"></select><small id="strategy-help">由策略模型提出搜索方向，宿主只执行已登记且有界的进化策略。</small></label>
                   <label hidden><span>独立评测器</span><select id="evaluator-id"></select><small id="evaluator-help">由系统依据数据和模型输出自动绑定。</small></label>
                 </div>
+                <div id="data-partition-summary" class="dataset-task-summary" aria-live="polite"></div>
                 <input id="autonomous-mode" name="autonomous_mode" type="hidden" value="true">
                 <input id="research-domain-id" name="research_domain_id" type="hidden" value="">
                 <input id="model-workflow" name="model_workflow" type="hidden" value="research_compile_evolve@1">
@@ -121,27 +123,41 @@
             </div>
           </section>
 
+          <section id="workspace-evaluation" class="workspace-panel" data-panel="evaluation" role="tabpanel" aria-labelledby="tab-evaluation" tabindex="0" hidden>
+            <header class="page-heading"><div><span>07</span><h1>独立评测</h1><p>完成进化后冻结候选版本，依次进行独立验证和最终测试。评测使用后续时间的数据，不修改候选，也不回流训练。</p></div></header>
+            <div class="panel settings-form">
+              <p>两个阶段分别执行，每个预测时点仍由 Agent 分析。每个阶段进行两次独立推理，只展示汇总报告；同一评测分区只允许锁定一个候选。</p>
+              <div class="form-actions"><button id="independent-evaluation-refresh" class="button button-quiet" type="button">读取评测状态</button></div>
+              <div id="independent-evaluation-status" aria-live="polite">请先完成一个进化运行。</div>
+              <div class="form-actions">
+                <button id="independent-validation-start" class="button button-primary" type="button" disabled>启动独立验证</button>
+                <button id="independent-final-test-start" class="button button-primary" type="button" disabled>启动最终测试</button>
+              </div>
+            </div>
+          </section>
+
           <section id="workspace-parameters" class="workspace-panel" data-panel="parameters" role="tabpanel" aria-labelledby="tab-parameters" tabindex="0" hidden>
-            <header class="page-heading"><div><span>02</span><h1>运行参数</h1><p>设置下一次运行的轮数、候选数量和并发数。运行开始后，这些参数会固定，不会被页面修改。</p></div><span id="parameter-summary-pill" class="pill pill-blue">每个入围候选 10 × 50</span></header>
+            <header class="page-heading"><div><span>02</span><h1>运行参数</h1><p>设置下一次运行的轮数、候选数量和并发数。运行开始后，这些参数会固定，不会被页面修改。</p></div><span id="parameter-summary-pill" class="pill pill-blue">每个入围候选 10 × 10</span></header>
             <div class="parameters-layout">
               <section class="panel parameter-form-panel" aria-labelledby="parameter-form-title">
                 <div class="panel-heading"><div><span>运行超参数</span><h2 id="parameter-form-title">更新与执行预算</h2></div><strong>应用于下次创建</strong></div>
                 <div class="parameter-groups">
                   <section class="parameter-group" data-group="outer-search"><header><strong>每轮生成与筛选</strong><span>4 个方案 → 同组 64 个时点评测 → 2 个入围</span></header><div class="form-grid parameter-grid">
-                    <label><span>最大进化轮数</span><input id="max-generations" name="rounds" form="start-form" type="number" min="1" max="50" value="1" required><small>默认先运行 1 轮；增加轮数前请核对时间隔离后的数据容量，发布前还需独立最终验证。</small></label>
-                    <label><span>每轮生成方案数</span><input id="candidates-per-generation" name="candidates_per_generation" form="start-form" type="number" value="4" readonly aria-readonly="true" required><small>固定生成 4 个方案，按统一规则选出 2 个继续优化。</small></label>
+                    <label><span>最大进化轮数</span><input id="max-generations" name="rounds" form="start-form" type="number" min="1" max="50" value="5" required><small>默认先运行 5 轮；快速模式复用训练时点，每轮使用新评测时点。独立验证和最终测试另行启动。</small></label>
+                    <label><span>每轮生成方案数</span><input id="candidates-per-generation" name="candidates_per_generation" form="start-form" type="number" value="4" readonly aria-readonly="true" required><small>固定生成 4 个提案。快速模式预先指定首个提案进入单主线；正式对照才预筛 Top 2。</small></label>
                     <label><span>候选总预算</span><input id="max-candidates" name="max_candidates" form="start-form" type="number" min="4" max="256" value="20" aria-describedby="max-candidates-help" required><small id="max-candidates-help">默认随轮数同步；当前完整预算需要 20 个候选。</small></label>
                   </div></section>
                   <section class="parameter-group" data-group="finalist-adaptation"><header><strong>入围方案逐批优化</strong><span>每个方案依次完成各批次</span></header><div class="form-grid parameter-grid">
-                    <label><span>每个入围方案的优化时点数</span><input id="formal-origin-count" name="formal_origin_count" form="start-form" type="number" min="1" step="1" value="200" required><small>每个方案用于逐批优化的预测时点总数；新旧版本对照会增加实际预测次数。</small></label>
-                    <label><span>每批预测时点数</span><input id="local-batch-origin-count" name="local_batch_origin_count" form="start-form" type="number" min="2" step="1" value="50" required><small>总时点数须能整除本数值。新修改先生成待比较版本，不会直接视为改进。</small></label>
+                    <label><span>实验模式</span><select id="experiment-mode" name="experiment_mode" form="start-form"><option value="quick" selected>快速实验：单主线，轮末双臂单次比较</option><option value="comparison">正式对照：预筛、Top 2、重复推理</option></select><small>快速实验选出工作版本；科学认证须另行使用独立评测数据。</small></label>
+                    <label><span>每个 epoch 的训练样本数</span><input id="formal-origin-count" name="formal_origin_count" form="start-form" type="number" min="2" step="1" value="100" required><small>默认 100 个训练时点，分为 10 个 batch。快速模式另加候选与冠军各 50 次评测，合计 200 次时点执行。</small></label>
+                    <label><span>每批预测时点数</span><input id="local-batch-origin-count" name="local_batch_origin_count" form="start-form" type="number" min="2" step="1" value="10" required><small>默认每批 10 个样本。快速模式按时间连续取样，上一批目标成熟后再进入下一批；反思修订在轮末统一比较。</small></label>
                     <label><span>每批最多改动几处</span><input id="max-local-edits-per-batch" name="max_local_edits_per_batch" form="start-form" type="number" min="0" max="5" step="1" value="2" required><small>填 0 表示不修改；填 1–5 表示每批最多允许的改动数。</small></label>
-                    <label><span>轮末比较时点数</span><input id="selection-holdout-origin-count" name="selection_holdout_origin_count" form="start-form" type="number" min="169" step="1" value="169" required><small>两个入围方案与上一轮保留版本，使用同一组留出数据比较效果。</small></label>
+                    <label><span>轮末评测样本数（训练区）</span><input id="selection-holdout-origin-count" name="selection_holdout_origin_count" form="start-form" type="number" min="40" step="1" value="50" required><small>默认 50 个样本。快速模式每轮使用新时点，由候选和轮初冠军各评一次；正式对照要求跨日与重复推理，独立认证另行启动。</small></label>
                   </div></section>
                   <section class="parameter-group" data-group="throughput"><header><strong>执行速度</strong><span>所有方案共享样本并发上限</span></header><div class="form-grid parameter-grid">
                     <label><span>同时处理的方案数</span><input id="candidate-concurrency" name="candidate_concurrency" form="start-form" type="number" min="1" max="8" step="1" value="4" required><small>控制同时处理多少个方案；不会成倍放大样本请求上限。</small></label>
                     <label><span>单时点向量单元容量</span><input id="sample-agent-batch-size" name="sample_agent_batch_size" form="start-form" type="number" value="9" readonly aria-readonly="true" required><small>固定为 3 个目标 × 3 个时距；单个预测时点始终由一条向量链原子处理。</small></label>
-                    <label><span>同时预测的时点数</span><input id="sample-concurrency" name="sample_concurrency" form="start-form" type="number" min="1" max="128" step="1" value="64" required><small>默认同时处理 64 个时点，最高 128；实际速度还受模型服务限流影响。</small></label>
+                    <label><span>同时预测的时点数</span><input id="sample-concurrency" name="sample_concurrency" form="start-form" type="number" min="1" max="128" step="1" value="64" required><small>默认并发上限 64，最高 128；从 8 个时点起步，按模型服务负载自动调整。</small></label>
                   </div></section>
                   <section class="parameter-group parameter-policy" data-group="scientific-policy"><header><strong>科学策略（只读）</strong><span>完整 origin 原子提交</span></header><div class="parameter-policy-grid"><span>64 时点初筛</span><span>现有确定性 Top 2</span><span>完整 9 评分单元</span><span>轮末三臂同 cohort</span></div></section>
                 </div>
@@ -155,7 +171,7 @@
                   <div class="panel-heading"><div><span>数据使用边界</span><h2 id="parameter-scope-title">拟合与更新分离</h2></div><span class="pill pill-green">同轮公平比较</span></div>
                   <div class="parameter-scope-list">
                     <div><span>训练预测器</span><strong>完整训练拟合分区</strong><small>用于拟合数值模型的参数，与后续选择版本的数据分开。</small></div>
-                    <div><span>逐批优化方案</span><strong id="agent-update-scope">每个入围候选 10 × 50</strong><small>新修改与当前版本在同批数据上比较，轮末再统一选择；不等于最终验证。</small></div>
+                    <div><span>逐批优化方案</span><strong id="agent-update-scope">每个入围候选 10 × 10</strong><small>新修改与当前版本在同批数据上比较，轮末再统一选择；不等于最终验证。</small></div>
                   </div>
                 </section>
                 <section class="panel parameter-summary-panel" aria-labelledby="parameter-summary-title">
@@ -235,7 +251,7 @@
             </section>
             <section class="panel adaptive-trajectory-panel" aria-labelledby="adaptive-trajectory-title">
               <div class="panel-heading"><div><span>候选内持续优化</span><h2 id="adaptive-trajectory-title">逐批优化记录</h2></div><span id="adaptive-trajectory-count" class="technical-value">等待入围方案</span></div>
-              <p class="adaptive-trajectory-note"><strong>如何看结果：</strong>提高值＝同一批数据上的新版本得分－原版本得分。“已生成”不等于“已保留”，请以每行选择结果为准。不同批次的数据不同，分数不能直接连起来判断是否退化。优化版本与认证版本分别选择，发布前还需独立最终验证。</p>
+              <p class="adaptive-trajectory-note"><strong>如何看结果：</strong>对照模式比较同批新旧版本；快速模式的批次修订待轮末共同评测。“已生成”不等于“已保留”，请以每行选择结果为准。不同批次的数据不同，分数不能直接连起来判断是否退化。优化版本与认证版本分别选择，发布前还需独立最终验证。</p>
               <details id="search-probation-list" class="search-probation-list" hidden></details>
               <div class="table-wrap" tabindex="0" aria-label="逐批优化记录表，可横向滚动"><table class="adaptive-trajectory-table"><thead><tr><th>轮次／方案</th><th>批次／数据</th><th>版本详情</th><th>得分与提高值</th><th>修改内容</th><th>选择结果</th></tr></thead><tbody id="adaptive-trajectory-table"></tbody></table></div>
             </section>

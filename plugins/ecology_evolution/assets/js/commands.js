@@ -1,9 +1,40 @@
 "use strict";
 
+  // Offline/bootstrap copy of the Python contract; catalog rules take precedence.
+  var bootstrapRunParameters = {"schema_version":"ecologyrsi-dsh.run-parameters/1","parameters":{"rounds":{"default":5,"minimum":1,"maximum":50},"candidates_per_generation":{"default":4,"minimum":4,"maximum":4},"max_candidates":{"default":20,"minimum":4,"maximum":256},"formal_origin_count":{"default":100,"minimum":2},"local_batch_origin_count":{"default":10,"minimum":2},"max_local_edits_per_batch":{"default":2,"minimum":0,"maximum":5},"selection_holdout_origin_count":{"default":50,"minimum":40},"candidate_concurrency":{"default":4,"minimum":1,"maximum":8},"sample_concurrency":{"default":64,"minimum":1,"maximum":128}},"local_comparison_mode":"exploratory_paired_point_comparison","constraints":["formal_origins_divisible_by_batch","candidate_budget_covers_epochs","target_time_purged","epoch_temporal_evidence_required"]};
+  function runParameterContract() {
+    var evaluator = typeof selectedCatalogItem === "function" ? selectedCatalogItem("evaluators", "#evaluator-id") : null;
+    return evaluator && evaluator.run_parameters || state.catalog.run_parameters || bootstrapRunParameters;
+  }
+  function runParameterRule(name) {
+    if (name === "sample_agent_batch_size") {
+      var cells = typeof predictionCellsPerOrigin === "function" ? predictionCellsPerOrigin() : 9;
+      return {default: cells, minimum: cells, maximum: cells};
+    }
+    return runParameterContract().parameters[name];
+  }
+  function runParameterInteger(value, name, label) {
+    var rule = runParameterRule(name);
+    return strictInteger(value == null ? rule.default : value, label, rule.minimum, rule.maximum);
+  }
+  function normalizedExecutionParameters(values) {
+    return {
+      candidate_concurrency: runParameterInteger(values.candidate_concurrency, "candidate_concurrency", "候选并发数"),
+      sample_agent_batch_size: runParameterInteger(values.sample_agent_batch_size, "sample_agent_batch_size", "单时点向量单元容量"),
+      sample_concurrency: runParameterInteger(values.sample_concurrency, "sample_concurrency", "逐样本并发请求数")
+    };
+  }
+
   function normalizedEvolutionBudget(generationsValue, candidatesValue, maximumValue) {
-    var generations = Math.max(1, Math.floor(Number(generationsValue) || 1));
-    var candidatesPerGeneration = Math.max(1, Math.floor(Number(candidatesValue) || 1));
-    var requestedMaximum = Math.max(1, Math.floor(Number(maximumValue) || 1));
+    var parameterError = null;
+    try {
+      runParameterInteger(generationsValue, "rounds", "进化轮数");
+      runParameterInteger(candidatesValue, "candidates_per_generation", "每轮候选数");
+      runParameterInteger(maximumValue, "max_candidates", "候选总预算");
+    } catch (error) { parameterError = error.message; }
+    var generations = Math.max(1, Math.floor(Number(generationsValue == null ? runParameterRule("rounds").default : generationsValue) || 1));
+    var candidatesPerGeneration = Math.max(1, Math.floor(Number(candidatesValue == null ? runParameterRule("candidates_per_generation").default : candidatesValue) || 1));
+    var requestedMaximum = Math.max(1, Math.floor(Number(maximumValue == null ? runParameterRule("max_candidates").default : maximumValue) || 1));
     var requiredCandidates = generations * candidatesPerGeneration;
     return {
       max_generations: generations,
@@ -11,12 +42,13 @@
       max_candidates: Math.max(requestedMaximum, requiredCandidates),
       requested_max_candidates: requestedMaximum,
       required_candidates: requiredCandidates,
-      budget_sufficient: requestedMaximum >= requiredCandidates
+      budget_sufficient: !parameterError && requestedMaximum >= requiredCandidates,
+      parameter_error: parameterError
     };
   }
 
   function strictInteger(value, label, minimum, maximum) {
-    if (typeof value === "boolean" || value === "" || value == null || !Number.isInteger(Number(value))) {
+    if (typeof value === "boolean" || value === "" || value == null || !Number.isSafeInteger(Number(value))) {
       throw new Error(label + "必须是整数");
     }
     var parsed = Number(value);
@@ -27,25 +59,27 @@
 
   function normalizedOptimizationSchedule(values) {
     var input = values || {};
-    var formal = strictInteger(input.formal_origin_count == null ? 200 : input.formal_origin_count, "每个入围候选更新时点数", 1);
-    var batch = strictInteger(input.local_batch_origin_count == null ? 50 : input.local_batch_origin_count, "局部 batch 时点数", 2);
-    var edits = strictInteger(input.max_local_edits_per_batch == null ? 2 : input.max_local_edits_per_batch, "每批最大局部改动数", 0, 5);
-    var holdout = strictInteger(input.selection_holdout_origin_count == null ? 169 : input.selection_holdout_origin_count, "轮末比较时点数", 169);
+    var quick = input.experiment_mode !== "comparison";
+    var formal = runParameterInteger(input.formal_origin_count, "formal_origin_count", "每个入围候选更新时点数");
+    var batch = runParameterInteger(input.local_batch_origin_count, "local_batch_origin_count", "局部 batch 时点数");
+    var edits = runParameterInteger(input.max_local_edits_per_batch, "max_local_edits_per_batch", "每批最大局部改动数");
+    var holdout = runParameterInteger(input.selection_holdout_origin_count, "selection_holdout_origin_count", "轮末比较时点数");
     if (formal % batch !== 0) { throw new Error("局部 batch 必须整除每个入围候选的更新时点数"); }
     return {
-      schema_version: "ecologyrsi-dsh.top2-adaptive-epoch-schedule/3",
-      screening_origin_count: 64,
-      finalist_count: 2,
+      schema_version: quick ? "ecologyrsi-dsh.quick-adaptive-epoch-schedule/1" : "ecologyrsi-dsh.top2-adaptive-epoch-schedule/4",
+      screening_origin_count: quick ? 0 : 64,
+      finalist_count: quick ? 1 : 2,
       formal_origin_count_per_finalist: formal,
       local_batch_origin_count: batch,
       max_local_edits_per_batch: edits,
       selection_holdout_origin_count: holdout,
-      local_evaluation_mode: "paired_champion_challenger"
+      local_evaluation_mode: quick ? "prequential" : "paired_champion_challenger"
     };
   }
 
   function optimizationScheduleFromControls() {
     return normalizedOptimizationSchedule({
+      experiment_mode: $("#experiment-mode") ? $("#experiment-mode").value : "quick",
       formal_origin_count: $("#formal-origin-count").value,
       local_batch_origin_count: $("#local-batch-origin-count").value,
       max_local_edits_per_batch: $("#max-local-edits-per-batch").value,
@@ -74,7 +108,7 @@
       budget = candidateBudgetStatus();
     }
     var valid = budget.budget_sufficient;
-    field.setCustomValidity(valid ? "" : "最大候选方案数不能小于轮数乘以每轮候选数（当前至少 " + budget.required_candidates + "）。");
+    field.setCustomValidity(valid ? "" : budget.parameter_error || "最大候选方案数不能小于轮数乘以每轮候选数（当前至少 " + budget.required_candidates + "）。");
     if (help) {
       help.textContent = valid
         ? (state.candidateBudgetManual === true ? "已使用手工总预算；完整执行当前轮数至少需要 " : "默认随轮数和每轮候选数同步；当前完整预算需要 ") + formatNumber(budget.required_candidates) + " 个候选。"
@@ -179,6 +213,55 @@
     });
   }
 
+  function reconcileModelPreflight(body, attempts) {
+    return request("/model-preflight", {
+      method: "POST", body: Object.assign({}, body, {check_only: true}), timeout: 5000
+    }).then(function (result) {
+      if (result && result.passed === true) { return result; }
+      if (!result || result.pending !== true) {
+        throw new Error("未查到所选模型的有效预检通过记录，尚未提交创建请求，请重试预检。");
+      }
+      return null;
+    }, function (error) {
+      if (!createRequestMayHaveCommitted(error)) { throw error; }
+      return null;
+    }).then(function (result) {
+      if (result) { return result; }
+      if (attempts <= 1) {
+        throw new Error("暂时无法确认后台预检结果，尚未提交创建请求；恢复连接后可重试，有效预检结果会复用。");
+      }
+      return new Promise(function (resolve) { window.setTimeout(resolve, 1000); })
+        .then(function () { return reconcileModelPreflight(body, attempts - 1); });
+    });
+  }
+
+  function prepareModelsForCreate(body) {
+    function reconcile() {
+      state.createStatus.message = "预检响应尚未确认，正在核对后台结果，通过后自动继续创建。";
+      renderAll();
+      return reconcileModelPreflight(body, 30);
+    }
+    return request("/model-preflight", {method: "POST", body: body, timeout: 490000})
+      .then(function (result) {
+        if (result && result.pending === true) { return reconcile(); }
+        if (!result || result.passed !== true) {
+          var receipt = result && Array.isArray(result.receipts) && result.receipts.find(function (item) { return item.passed !== true; });
+          var failure = receipt && receipt.failure;
+          var identity = receipt && receipt.identity || {};
+          var context = receipt ? (identity.model_id || "所选模型") + " / " + (identity.stage || "预检") + "：" : "";
+          var reason = failure && failure.code;
+          if (reason === "model_canary_provider_unavailable" || reason === "model_canary_rate_limited" || reason === "model_canary_transport_failure") {
+            throw new Error(context + "模型服务暂不可用" + (failure.provider_status ? "（HTTP " + failure.provider_status + "）" : "") + "，尚未创建运行；服务恢复后可重试。");
+          }
+          throw new Error(context + "模型工具与结构化输出预检未通过" + (reason ? "（" + reason + "）" : "") + "，尚未创建运行，请检查模型配置后重试。");
+        }
+        return result;
+      }, function (error) {
+        if (createRequestMayHaveCommitted(error)) { return reconcile(); }
+        throw error;
+      });
+  }
+
   function createRun(payload) {
     if (!hasCapability("evolution.run.create")) { showToast("当前 DSH 会话未授予创建进化运行的能力。"); return Promise.resolve(null); }
     var optimizationSchedule;
@@ -187,17 +270,21 @@
     var sampleConcurrency;
     try {
       optimizationSchedule = normalizedOptimizationSchedule(payload);
-      candidateConcurrency = strictInteger(payload.candidate_concurrency == null ? 4 : payload.candidate_concurrency, "候选并发数", 1, 8);
-      sampleAgentBatchSize = strictInteger(payload.sample_agent_batch_size == null ? 9 : payload.sample_agent_batch_size, "单时点向量单元容量", 9, 9);
-      sampleConcurrency = strictInteger(payload.sample_concurrency == null ? 64 : payload.sample_concurrency, "逐样本并发请求数", 1, 128);
+      var execution = normalizedExecutionParameters(payload);
+      candidateConcurrency = execution.candidate_concurrency;
+      sampleAgentBatchSize = execution.sample_agent_batch_size;
+      sampleConcurrency = execution.sample_concurrency;
+      runParameterInteger(payload.rounds == null ? payload.max_generations : payload.rounds, "rounds", "进化轮数");
+      runParameterInteger(payload.max_candidates, "max_candidates", "候选总预算");
+      runParameterInteger(payload.candidates_per_generation, "candidates_per_generation", "每轮候选数");
     } catch (error) {
       showToast(error.message);
       return Promise.resolve(null);
     }
     var effectiveBudget = normalizedEvolutionBudget(
-      payload.rounds || payload.max_generations,
-      4,
-      payload.max_candidates
+      payload.rounds == null ? (payload.max_generations == null ? runParameterRule("rounds").default : payload.max_generations) : payload.rounds,
+      runParameterRule("candidates_per_generation").default,
+      payload.max_candidates == null ? runParameterRule("max_candidates").default : payload.max_candidates
     );
     if (!effectiveBudget.budget_sufficient) {
       showToast("候选总预算不足：" + formatNumber(effectiveBudget.max_generations) + " 轮 × 每轮 " + formatNumber(effectiveBudget.candidates_per_generation) + " 个候选，至少需要 " + formatNumber(effectiveBudget.required_candidates) + " 个。");
@@ -211,7 +298,7 @@
       dataset_id: payload.dataset_id || payload.datasetId,
       episode_id: payload.episode_id || payload.episodeId,
       execution_protocol: "dsh_native_plugin_evolution@1",
-      optimization_protocol: "top2_adaptive_epoch@1",
+      optimization_protocol: optimizationSchedule.finalist_count === 1 ? "quick_adaptive_epoch@1" : "top2_adaptive_epoch@1",
       optimization_schedule: optimizationSchedule,
       strategy_model_id: payload.strategy_model_id || payload.policy_model_id,
       review_model_id: payload.review_model_id || payload.judge_model_id,
@@ -260,9 +347,7 @@
         state.createStatus.message = "正在检查所选模型的工具调用与结构化输出能力，通过后创建运行。";
         showToast(state.createStatus.message);
         renderAll();
-        ready = request("/model-preflight", {method: "POST", body: body, timeout: 250000}).then(function (result) {
-          if (!result || result.passed !== true) { throw new Error("模型工具与结构化输出预检未通过，请检查模型配置后重试。"); }
-        });
+        ready = prepareModelsForCreate(body);
       }
       operation = ready.then(function () {
         state.createStatus = {state: "submitting", runId: null, message: "创建请求正在提交，收到运行编号后会自动连接实时进度。"};
@@ -298,7 +383,7 @@
           return null;
         });
       }
-      state.commandError = "创建失败：" + errorMessage(error);
+      state.commandError = (createSubmitted ? "创建失败：" : "模型预检未完成：") + errorMessage(error);
       state.createStatus = {state: "failed", runId: null, message: state.commandError};
       showToast(state.commandError);
       return null;
@@ -439,15 +524,12 @@
       return Promise.resolve(false);
     }
     var runId = state.activeRun.id;
-    if (action === "pause" || action === "cancel") {
-      // A user control action is an explicit hand-off from the autonomous
-      // scheduler.  Do not let a queued timer issue another advance after the
-      // pause/cancel command has been accepted.
-    }
-    if (action === "resume") {
-    }
     var signature = JSON.stringify({ run_id: runId, action: action });
     var body = { action: action, idempotency_key: commandKey("control", signature) };
+    if (action === "pause") {
+      body.code = "web_operator_pause";
+      body.reason = "网页端暂停按钮发起暂停，当前进度已保存。";
+    }
     state.busy = true;
     state.pendingAction = action;
     state.commandError = null;
@@ -853,4 +935,53 @@
       }
       return state.activeRun && !state.runMonitorRunId ? refreshProgressForRun(state.activeRun.id) : true;
     }).catch(function () { return false; }).finally(function () { state.refreshing = false; });
+  }
+
+  var independentEvaluationTimer = null;
+  var independentEvaluationRequest = 0;
+  function independentTargetReport(assessment) {
+    if (!assessment || !assessment.replicas) { return ""; }
+    return "<details><summary>按预测目标与时距查看误差</summary><div class=\"table-wrap\"><table><thead><tr>" +
+      ["推理", "目标", "时距", "有效数", "MAE", "RMSE", "Bias", "基线 RMSE", "改善分数", "覆盖率"].map(function (s) { return "<th>" + s + "</th>"; }).join("") +
+      "</tr></thead><tbody>" + assessment.replicas.map(function (replica) {
+        return (replica.targets || []).map(function (row) {
+          return "<tr>" + [replica.replica, (targetLabels[row.target] || row.target) + " (" + row.unit + ")", row.horizon_hours + " h", row.n,
+            formatNumber(row.mae, 3), formatNumber(row.rmse, 3), formatNumber(row.bias, 3), formatNumber(row.baseline_rmse, 3),
+            formatNumber(row.skill_score, 4), formatNumber(Number(row.sample_execution_coverage) * 100, 1) + "%"].map(function (v) {
+              return "<td>" + escapeHTML(v == null ? "—" : String(v)) + "</td>";
+            }).join("") + "</tr>";
+        }).join("");
+      }).join("") + "</tbody></table></div></details>";
+  }
+  function loadIndependentEvaluation() {
+    clearTimeout(independentEvaluationTimer);
+    var runId = state.activeRun && state.activeRun.id;
+    var requestId = ++independentEvaluationRequest;
+    $("#independent-validation-start").disabled = true;
+    $("#independent-final-test-start").disabled = true;
+    if (!runId || state.usingDemo) { $("#independent-evaluation-status").textContent = "请先完成一个真实数据集的进化运行。"; return Promise.resolve(); }
+    return request("/runs/" + encodeURIComponent(runId) + "/independent-evaluation").then(function (report) {
+      if (independentEvaluationRequest !== requestId || !state.activeRun || state.activeRun.id !== runId) { return; }
+      $("#independent-evaluation-status").innerHTML = report.stages.map(function (stage) {
+        var assessment = stage.assessment;
+        var outcomes = {passed: "通过", failed: "未通过", inconclusive: "证据不足"};
+        var status = stage.status === "running" ? "正在执行" : stage.status === "completed" ? outcomes[stage.outcome] || stage.outcome : stage.status === "sealed" ? "已封存" : "尚未执行";
+        var result = assessment ? "<p>预测时点：" + escapeHTML(String(assessment.origin_count)) + "；两次推理分数：" + assessment.replicas.map(function (r) { return escapeHTML(formatNumber(r.score, 4)); }).join(" / ") + "</p>" : "";
+        var progress = stage.status === "running" && stage.progress && stage.progress.origin_count ? "<p>第 " + escapeHTML(stage.progress.replica) + " / " + escapeHTML(stage.progress.replicas) + " 次推理，已完成 " + escapeHTML(stage.progress.completed_origin_samples || 0) + " / " + escapeHTML(stage.progress.origin_count) + " 个时点。</p>" : "";
+        return "<article class=\"target-result\"><h2>" + escapeHTML(stage.label) + " · " + escapeHTML(status) + "</h2><p>" + escapeHTML(stage.reason || "候选已就绪，可启动该阶段。") + "</p>" + result + progress + independentTargetReport(assessment) + (stage.error ? "<p>" + escapeHTML(stage.error) + "</p>" : "") + "</article>";
+      }).join("");
+      report.stages.forEach(function (stage) { $(stage.stage === "validation" ? "#independent-validation-start" : "#independent-final-test-start").disabled = !stage.available; });
+      if (state.workspace === "evaluation" && report.stages.some(function (s) { return s.status === "running"; })) { independentEvaluationTimer = setTimeout(loadIndependentEvaluation, 4000); }
+    }).catch(function () {
+      if (independentEvaluationRequest === requestId) { $("#independent-evaluation-status").textContent = "当前运行无法读取独立评测状态，请检查运行是否按当前数据协议完成。"; }
+    });
+  }
+  function startIndependentEvaluation(stage) {
+    var runId = state.activeRun && state.activeRun.id;
+    if (!runId) { return; }
+    $("#independent-validation-start").disabled = true;
+    $("#independent-final-test-start").disabled = true;
+    request("/runs/" + encodeURIComponent(runId) + "/independent-evaluation", {method: "POST", body: {stage: stage}}).then(loadIndependentEvaluation).catch(function (error) {
+      $("#independent-evaluation-status").textContent = "无法启动独立评测：" + (error.message || String(error));
+    });
   }
