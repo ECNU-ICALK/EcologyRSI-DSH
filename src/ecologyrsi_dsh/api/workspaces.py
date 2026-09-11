@@ -6,7 +6,7 @@ from .projection import (
 )
 from ..presentation.training_assets import training_assets
 
-WORKSPACE_VIEWS = frozenset({'overview', 'process', 'candidates', 'training', 'collaboration', 'asset'})
+WORKSPACE_VIEWS = frozenset({'overview', 'process', 'candidates', 'candidate', 'training', 'collaboration', 'asset'})
 
 
 def overview_projection(state):
@@ -28,9 +28,30 @@ def workspace_section(state, view, candidate_id=None):
             ],
         }
     if view == 'candidates':
+        summaries = []
+        for candidate in reversed(_search_candidates(state)):
+            item = _candidate_projection(state, candidate, summary_only=True)
+            evaluation = state.evaluation_for(candidate.candidate_id)
+            item['metrics'] = {
+                key: evaluation.metrics[key] for key in (
+                    'skill_score', 'rmse', 'n', 'constraint_violations',
+                    'scientific_pass', 'judge_accepted', 'judge_status',
+                ) if evaluation is not None and key in evaluation.metrics
+            }
+            item['details_loaded'] = False
+            summaries.append(item)
         return {
-            'candidates': [_candidate_projection(state, c) for c in reversed(_search_candidates(state))],
-            'artifacts': [_artifact_projection(state, a) for a in reversed(state.artifacts)],
+            'candidates': summaries,
+            'artifacts': [],
+        }
+    if view == 'candidate':
+        candidate = next((c for c in _search_candidates(state) if c.candidate_id == candidate_id), None)
+        if candidate is None:
+            raise KeyError('unknown candidate')
+        return {
+            'candidate': {**_candidate_projection(state, candidate), 'details_loaded': True},
+            'artifacts': [_artifact_projection(state, a) for a in reversed(state.artifacts)
+                          if a.candidate_id == candidate_id],
         }
     if view == 'training':
         return {'training_assets': training_assets(state, summary_only=True)}

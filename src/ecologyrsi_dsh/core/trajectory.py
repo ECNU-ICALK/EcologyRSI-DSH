@@ -24,6 +24,8 @@ class EvaluationPhase(str, Enum):
     SCREENING = "screening"
     FORMAL_BATCH = "formal_batch"
     HOLDOUT = "holdout"
+    VALIDATION = "validation"
+    FINAL_TEST = "final_test"
 
 
 class FormalBatchArm(str, Enum):
@@ -260,14 +262,14 @@ class EvaluationScope:
                     "formal_batch_arm",
                 ),
             )
-        if self.phase is EvaluationPhase.SCREENING:
+        if self.phase in {EvaluationPhase.SCREENING, EvaluationPhase.VALIDATION, EvaluationPhase.FINAL_TEST}:
             if (
                 self.batch_index is not None
                 or self.holdout_arm is not None
                 or self.formal_batch_arm is not None
             ):
                 raise ValueError(
-                    "screening scope cannot have batch_index, holdout_arm, "
+                    f"{self.phase.value} scope cannot have batch_index, holdout_arm, "
                     "or formal_batch_arm"
                 )
         elif self.phase is EvaluationPhase.FORMAL_BATCH:
@@ -805,11 +807,11 @@ class GenerationHoldout:
         if not isinstance(self.arm_bindings, Mapping):
             raise TypeError("arm_bindings must be a mapping")
         expected = {arm.value for arm in HoldoutArm}
-        if set(self.arm_bindings) != expected:
+        if set(self.arm_bindings) not in (expected, {"finalist_1", "incumbent"}):
             raise ValueError("holdout requires exactly three holdout arms")
         normalized: dict[str, Mapping[str, str]] = {}
         identities: set[tuple[str, str]] = set()
-        for arm in HoldoutArm:
+        for arm in map(HoldoutArm, self.arm_bindings):
             raw = self.arm_bindings[arm.value]
             if not isinstance(raw, Mapping) or set(raw) != {
                 "candidate_id",
@@ -827,7 +829,7 @@ class GenerationHoldout:
                     "candidate_revision_id": revision_id,
                 }
             )
-        if len(identities) != len(HoldoutArm):
+        if len(identities) != len(self.arm_bindings):
             raise ValueError("holdout arms require unique candidate revisions")
         object.__setattr__(self, "arm_bindings", MappingProxyType(normalized))
 
@@ -932,7 +934,8 @@ class GenerationComparison:
         )
         if not all(isinstance(item, HoldoutEvaluation) for item in evaluations):
             raise TypeError("holdout_evaluations must contain HoldoutEvaluation")
-        if {item.scope.holdout_arm for item in evaluations} != set(HoldoutArm):
+        arms = {item.scope.holdout_arm for item in evaluations}
+        if len(arms) != len(evaluations) or arms not in (set(HoldoutArm), {HoldoutArm.FINALIST_1, HoldoutArm.INCUMBENT}):
             raise ValueError("comparison requires exactly three holdout arms")
         if any(item.scope.cohort_digest != self.cohort_digest for item in evaluations):
             raise ValueError("comparison evaluations must use the same cohort")

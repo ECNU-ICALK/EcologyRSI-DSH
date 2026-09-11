@@ -18,6 +18,15 @@ def guarded_search(metadata: Mapping[str, Any]) -> bool:
 
 def local_challenger_policy(metadata: Mapping[str, Any]) -> dict[str, Any]:
     guarded = guarded_search(metadata)
+    from ..evolution.schedule import OptimizationSchedule
+    raw_schedule = metadata.get("optimization_schedule")
+    local_policy = metadata.get("local_comparison_policy")
+    if local_policy not in (None, "exploratory_paired_point_comparison"):
+        raise ValueError("unsupported local comparison policy")
+    exploratory = local_policy == "exploratory_paired_point_comparison"
+    if exploratory and (raw_schedule is None
+            or not OptimizationSchedule.from_dict(raw_schedule).exploratory_local_comparison):
+        raise ValueError("exploratory local comparison requires a training epoch schedule")
     runtime = metadata.get("host_runtime_build")
     positive_only = (
         not guarded
@@ -25,10 +34,30 @@ def local_challenger_policy(metadata: Mapping[str, Any]) -> dict[str, Any]:
         and isinstance(runtime, Mapping)
         and runtime.get("evolution_runtime_schema") == "ecologyrsi-dsh.evolution-runtime/3"
     )
+    profile = metadata.get("fitness_profile", {})
     return {
-        "minimum_score_delta": 1e-12 if positive_only else 0.005,
+        "minimum_score_delta": (
+            1e-12 if positive_only else profile.get("selection_minimum_score_delta", 0.005)
+        ),
+        # A *selection* tolerance on the per-cell skill delta against the
+        # incumbent -- not the certification gate. Certification uses
+        # `per_cell_noninferiority@1`, whose boundary is derived per cell from
+        # the paired bootstrap, and `evaluators/generation_comparison.py` labels
+        # its own check with `no_regression_scope` for the same reason.
+        #
+        # The 1e-12 fallback stays 1e-12 deliberately. Every live run carries a
+        # fitness profile, so this only applies to the legacy runtime-v3
+        # positive-delta path, and moving it would change what that path decided
+        # on archived runs. This returned mapping is also splatted into
+        # `validate_formal_batch_comparison(**policy)`, so it is a keyword
+        # bundle, not a place to add descriptive keys -- the Agent-facing wording
+        # belongs in the mutation contract catalog instead.
+        "cell_regression_tolerance": profile.get("selection_cell_regression_tolerance", 1e-12),
         "cell_regression_blocks": not positive_only,
-        "require_paired_evidence": guarded,
+        # Local small-batch edits are exploratory. Complete paired execution,
+        # practical gain and cell noninferiority still apply; the unchanged
+        # epoch gate supplies the cross-day statistical confirmation.
+        "require_paired_evidence": guarded and not exploratory,
         "require_paired_strict_chain": guarded,
     }
 

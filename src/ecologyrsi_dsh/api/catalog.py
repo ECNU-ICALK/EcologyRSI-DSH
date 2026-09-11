@@ -28,10 +28,12 @@ from .projection import (
     _state_payload,
 )
 from .workspaces import WORKSPACE_VIEWS, overview_projection, workspace_section
+from .projection import _workspace_revisions
 
 
 class CatalogEndpointsMixin:
     def _catalog_payload(self) -> dict[str, Any]:
+        from ..evolution.parameters import run_parameter_contract
         raw_catalog = self.server.datasets.catalog()
         ready_datasets: list[dict[str, Any]] = []
         unavailable_datasets: list[dict[str, Any]] = []
@@ -238,6 +240,7 @@ class CatalogEndpointsMixin:
         )
         return {
             "schema_version": "ecologyrsi-dsh.runtime-catalog/5",
+            "run_parameters": run_parameter_contract(),
             "domain_packs": domain_packs,
             "datasets": ready_datasets,
             "unavailable_datasets": unavailable_datasets,
@@ -507,7 +510,7 @@ class CatalogEndpointsMixin:
         if (set(query) - {"view", "candidate_id"}
                 or any(len(values) != 1 for values in query.values())
                 or view not in {"detail", "monitor"} | WORKSPACE_VIEWS
-                or ('candidate_id' in query and view != 'asset')):
+                or ('candidate_id' in query and view not in {'asset', 'candidate'})):
             raise ValueError("invalid run view query")
         admission_snapshot = self.server.sample_admission.snapshot(run_id)
         if view == 'overview':
@@ -523,12 +526,13 @@ class CatalogEndpointsMixin:
                 _assert_http_scope(state)
                 revision = state.events[-1].seq if state.events else 0
                 section = self.server.workspace_cache.get_or_build(
-                    (run_id, revision, view, candidate_id),
+                    (run_id, _workspace_revisions(state)[view], view, candidate_id),
                     lambda: workspace_section(state, view, candidate_id),
                 )
                 base = ({'id': run_id, 'run_id': run_id, 'projection_revision': revision,
+                         'workspace_revisions': _workspace_revisions(state),
                          'status': state.run.status.value}
-                        if view == 'asset' else _projection_json(state, admission_snapshot, overview_only=True))
+                        if view in {'asset', 'candidate'} else _projection_json(state, admission_snapshot, overview_only=True))
                 return {**base, **section}
             projection = RunQueries(self.server.director).completed_projection(
                 run_id, build_workspace,

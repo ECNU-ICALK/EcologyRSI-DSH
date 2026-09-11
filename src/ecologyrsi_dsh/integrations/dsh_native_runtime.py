@@ -365,17 +365,23 @@ class DshNativeAgentRuntimeClient:
         except HTTPError as exc:
             raw = exc.read(self.max_response_bytes + 1)
             code = "dsh_native_runtime_http_error"
+            metadata = {}
             try:
                 parsed = json.loads(raw)
                 supplied = parsed.get("error_code") if isinstance(parsed, Mapping) else None
                 if isinstance(supplied, str) and supplied.replace("_", "").isalnum():
                     code = supplied[:80]
+                if isinstance(parsed, Mapping) and parsed.get("schema_version") == "ecology-runtime-failure/1":
+                    metadata = {name: parsed.get(name) for name in (
+                        "failure_domain", "provider_status", "retry_after_ms",
+                    )}
             except (UnicodeDecodeError, json.JSONDecodeError):
                 pass
             raise DshNativeRuntimeUnavailableError(
                 "DSH 原生智能体运行时拒绝了请求。",
                 error_code=code,
                 status_code=exc.code,
+                **metadata,
             ) from None
         except (URLError, TimeoutError, socket.timeout, OSError):
             raise DshNativeRuntimeUnavailableError(

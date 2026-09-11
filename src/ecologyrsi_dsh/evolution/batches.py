@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..evolution.schedule import ADAPTIVE_PROTOCOLS
+
 from .diagnosis import diagnose_generation
 
 import json
@@ -48,6 +50,7 @@ from .analysis import (
 from .genome import EcologyEvolutionPluginGenome, deep_thaw_json
 from .schedule import (
     OPTIMIZATION_PROTOCOL,
+    QUICK_OPTIMIZATION_PROTOCOL,
     PAIRED_LOCAL_EVALUATION_MODE,
     OptimizationSchedule,
 )
@@ -244,7 +247,7 @@ def _adaptive_effective_parent_revision(state: Any):
     if (
         generation == 0
         or state.task_manifest.metadata.get("optimization_protocol")
-        != OPTIMIZATION_PROTOCOL
+        not in ADAPTIVE_PROTOCOLS
     ):
         return None
     selected_revision_id = state.effective_revision_for(generation - 1)
@@ -449,6 +452,32 @@ def _research_contract_fallback_enabled(state: Any) -> bool:
         and runtime.get("evolution_runtime_schema")
         == "ecologyrsi-dsh.evolution-runtime/3"
     )
+
+
+def _research_contract_fallback_allowed(
+    state: Any, validation_error: BaseException | None = None
+) -> bool:
+    """Allow recovery for bounded payload overflow in native quick runs.
+
+    Native runs deliberately reject gateway/model fallback.  A model can still
+    return a syntactically valid but oversized research plan, though; treating
+    that local contract violation as a fatal run pause makes the small-batch
+    experiment unnecessarily brittle.  In the quick protocol we retain the
+    current plan and record a deterministic host fallback, while malformed
+    contracts and all remote failures remain governed by the existing policy.
+    """
+
+    if _research_contract_fallback_enabled(state):
+        return True
+    metadata = state.task_manifest.metadata
+    if metadata.get("execution_protocol") != "dsh_native_plugin_evolution@1":
+        return False
+    if metadata.get("optimization_protocol") != QUICK_OPTIMIZATION_PROTOCOL:
+        return False
+    if validation_error is None:
+        return False
+    detail = str(validation_error).lower()
+    return "exceeds the bounded contract" in detail
 
 
 def _historical_experience_states(director: Any, state: Any) -> tuple[Any, ...]:
@@ -679,7 +708,7 @@ def _ensure_generation_research_iteration(
                 record_research_failure(
                     "远程研究计划响应未通过宿主契约校验。"
                 )
-                if _research_contract_fallback_enabled(state):
+                if _research_contract_fallback_allowed(state, exc):
                     raw_result = fallback_result(str(exc))
                 else:
                     raise ResearchResponseContractError(
@@ -715,7 +744,7 @@ def _ensure_generation_research_iteration(
                 record_research_failure(
                     "远程研究计划响应未通过宿主契约校验。"
                 )
-                if _research_contract_fallback_enabled(state):
+                if _research_contract_fallback_allowed(state, exc):
                     fallback = fallback_result(str(exc))
                     plan = dict(fallback["plan"])
                     status = "host_fallback"
@@ -732,7 +761,7 @@ def _ensure_generation_research_iteration(
         adoption = resolve_predictor_adoption(state.task_manifest, plan)
     except AlgorithmCompileError as exc:
         record_research_failure("宿主冻结的预测器配置未通过校验。")
-        if _research_contract_fallback_enabled(state):
+        if _research_contract_fallback_allowed(state, exc):
             fallback = fallback_result(str(exc))
             plan = dict(fallback["plan"])
             status = "host_fallback"
@@ -741,7 +770,7 @@ def _ensure_generation_research_iteration(
             raise
     except (TypeError, ValueError) as exc:
         record_research_failure("远程研究计划响应未通过宿主契约校验。")
-        if _research_contract_fallback_enabled(state):
+        if _research_contract_fallback_allowed(state, exc):
             fallback = fallback_result(str(exc))
             plan = dict(fallback["plan"])
             status = "host_fallback"
@@ -770,7 +799,7 @@ def _ensure_generation_research_iteration(
         )
     except (TypeError, ValueError) as exc:
         record_research_failure("远程研究计划响应未通过宿主契约校验。")
-        if not _research_contract_fallback_enabled(state):
+        if not _research_contract_fallback_allowed(state, exc):
             raise ResearchResponseContractError(
                 "research response failed host contract validation",
                 validation_detail=str(exc),
@@ -1260,7 +1289,7 @@ def _adaptive_reflection_analysis(
     reflection_analysis.pop("ranking", None)
     if (
         state.task_manifest.metadata.get("optimization_protocol")
-        != OPTIMIZATION_PROTOCOL
+        not in ADAPTIVE_PROTOCOLS
     ):
         return reflection_analysis
     schedule_value = state.task_manifest.metadata.get("optimization_schedule")

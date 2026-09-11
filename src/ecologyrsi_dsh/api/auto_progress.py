@@ -17,6 +17,8 @@ an entire 500-origin finalist trajectory.
 
 from __future__ import annotations
 
+from ..evolution.schedule import ADAPTIVE_PROTOCOLS
+
 import math
 import os
 import sqlite3
@@ -137,7 +139,7 @@ def _failure_diagnostics(
     generation = int(state.run.generation)
     adaptive = (
         state.task_manifest.metadata.get("optimization_protocol")
-        == "top2_adaptive_epoch@1"
+        in ADAPTIVE_PROTOCOLS
     )
     context: dict[str, Any] = {
         "generation": generation,
@@ -149,20 +151,20 @@ def _failure_diagnostics(
         # records do not mean that a research failure happened in screening.
         context["work_unit_kind"] = stage
     elif adaptive:
+        schedule = OptimizationSchedule.from_dict(
+            state.task_manifest.metadata["optimization_schedule"]
+        )
         screening_count = sum(
             int(event.payload.get("generation", -1)) == generation
             for event in state.candidate_screening_events
         )
-        if screening_count < 4:
+        if not schedule.quick and screening_count < 4:
             context.update(stage="screening", work_unit_kind="candidate_screening")
         else:
             formal_total = sum(
                 item.scope.origin_count
                 for item in state.formal_batch_evaluations
                 if item.scope.generation == generation
-            )
-            schedule = OptimizationSchedule.from_dict(
-                state.task_manifest.metadata["optimization_schedule"]
             )
             expected_formal = schedule.generation_execution_budget(
                 cells_per_origin=1
@@ -176,7 +178,7 @@ def _failure_diagnostics(
                 and getattr(item.status, "value", item.status) == "completed"
                 for item in state.formal_trajectories
             )
-            if completed_trajectories < 2:
+            if completed_trajectories < schedule.finalist_count:
                 batch = next(
                     (
                         item
@@ -233,7 +235,7 @@ def _failure_diagnostics(
                     )
             elif len(
                 [item for item in state.holdout_evaluations if item.scope.generation == generation]
-            ) < 3:
+            ) < schedule.finalist_count + 1:
                 context.update(stage="holdout", work_unit_kind="selection_holdout")
             else:
                 context.update(stage="decision", work_unit_kind="epoch_closeout")
@@ -244,6 +246,8 @@ def _failure_diagnostics(
     if native_error is not None and native_error.error_code in {
         "structured_child_tool_protocol_error", "structured_child_output_budget_exhausted",
         "structured_result_missing", "structured_child_output_schema_invalid",
+        "evaluation_execution_incomplete",
+        "structured_child_execution_budget_exhausted",
     }:
         context["failure_domain"] = "model_execution"
         return native_error.error_code, context
@@ -292,11 +296,20 @@ def _host_fault_pause(
         for character in str(context.get("work_unit_kind") or "generation")[:80]
         if character.isalnum() or character in {"_", "-"}
     ) or "generation"
+    native_error = dsh_native_runtime_error_in_chain(exc)
+    fault_detail = public_exception_summary(exc)
+    if native_error is not None:
+        native_code = str(getattr(native_error, "error_code", "") or "")[:80]
+        native_status = getattr(native_error, "status_code", None)
+        if native_code:
+            fault_detail = native_code
+            if isinstance(native_status, int):
+                fault_detail += f"/HTTP{native_status}"
     return _DeferredPause(
         reason=(
             "自动推进检测到宿主异常，已暂停并保留当前检查点；"
             f"阶段={safe_stage}，工作单元={safe_work_unit}，"
-            f"异常={public_exception_summary(exc)}。"
+            f"异常={fault_detail}。"
         )[:500]
     )
 
@@ -1207,7 +1220,7 @@ class AutoProgressManager:
                 # executor and is not changed here.
                 adaptive_protocol = (
                     state.task_manifest.metadata.get("optimization_protocol")
-                    == "top2_adaptive_epoch@1"
+                    in ADAPTIVE_PROTOCOLS
                 )
                 if adaptive_protocol:
                     from ..application.work_units import execute_next_adaptive_work_unit
@@ -1823,8 +1836,8 @@ class AutoProgressManager:
             else None
         )
         retry_after = (
-            getattr(gateway_error, "retry_after_seconds", None)
-            if gateway_error is not None
+            getattr(dsh_error or gateway_error, "retry_after_seconds", None)
+            if dsh_error is not None or gateway_error is not None
             else None
         )
         if (

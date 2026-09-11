@@ -12,7 +12,7 @@ from ..core.models import digest
 
 _VISIBLE_PARTITIONS = ("training_fit", "training_feedback")
 _RESTRICTED_PARTITIONS = frozenset(
-    {"development", "gate", "external", "external_holdout", "hidden", "test", "final"}
+    {"development", "gate", "external", "external_holdout", "hidden", "test", "final", "validation", "final_test"}
 )
 _TOY_DATASET_ID = "generated-toy-series@1"
 _PREPARABLE_DATASET_IDS = frozenset({"agc_cucumber_2018", "agc_tomato_2019"})

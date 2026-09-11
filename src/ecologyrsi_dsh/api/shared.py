@@ -72,6 +72,7 @@ _PLUGIN_FILES = {
     "assets/js/commands.js": "text/javascript; charset=utf-8",
     "assets/js/render_shell.js": "text/javascript; charset=utf-8",
     "assets/js/render_training.js": "text/javascript; charset=utf-8",
+    "assets/js/render_training_trace.js": "text/javascript; charset=utf-8",
     "assets/js/render_process.js": "text/javascript; charset=utf-8",
     "assets/js/render_candidates.js": "text/javascript; charset=utf-8",
     "assets/js/render_collaboration.js": "text/javascript; charset=utf-8",

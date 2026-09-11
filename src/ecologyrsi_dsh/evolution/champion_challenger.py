@@ -7,6 +7,7 @@ import math
 from typing import Any, Mapping
 
 from ..core.models import digest
+from ..core.agent_prediction import successful_agent_provenance_passes
 from ..core.trajectory import (
     BatchEvaluation,
     EvaluationPhase,
@@ -92,7 +93,9 @@ def local_challenger_safety_reason(metrics: Mapping[str, Any]) -> str | None:
         and rejected > 0
     )
     if isinstance(sample, Mapping):
-        strict_chain_pass = sample.get("strict_agent_chain_pass")
+        strict_chain_pass = sample.get("successful_agent_provenance_pass")
+        if strict_chain_pass is None:
+            strict_chain_pass = sample.get("strict_agent_chain_pass")
         if strict_chain_pass is not True:
             if constraint_rejected:
                 return "sample_constraint_guardrail_failed"
@@ -308,6 +311,7 @@ def assess_local_challenger(
     challenger_safety_gate_passed: bool,
     minimum_score_delta: float = LOCAL_MINIMUM_SCORE_DELTA,
     cell_regression_blocks: bool = True,
+    cell_regression_tolerance: float = LOCAL_CELL_REGRESSION_TOLERANCE,
     require_paired_evidence: bool = False,
     require_paired_strict_chain: bool = False,
 ) -> LocalChallengerAssessment:
@@ -328,6 +332,9 @@ def assess_local_challenger(
         raise ValueError("minimum_score_delta must be a finite non-negative number")
     if not isinstance(cell_regression_blocks, bool):
         raise TypeError("cell_regression_blocks must be a bool")
+    tolerance = _finite_number(cell_regression_tolerance)
+    if tolerance is None or not 0 <= tolerance <= 1:
+        raise ValueError("cell_regression_tolerance must be in [0, 1]")
 
     if not isinstance(require_paired_evidence, bool):
         raise TypeError("require_paired_evidence must be a bool")
@@ -338,6 +345,11 @@ def assess_local_challenger(
         champion,
         challenger,
     )
+    if tolerance != LOCAL_CELL_REGRESSION_TOLERANCE:
+        contract_digest = digest({
+            "comparison_contract_digest": contract_digest,
+            "cell_regression_tolerance": tolerance,
+        })
     if require_paired_strict_chain:
         contract_digest = digest({
             "comparison_contract_digest": contract_digest,
@@ -358,7 +370,7 @@ def assess_local_challenger(
         champion_cells is not None
         and challenger_cells is not None
         and all(
-            challenger_cells[key] + LOCAL_CELL_REGRESSION_TOLERANCE
+            challenger_cells[key] + tolerance
             >= champion_cells[key]
             for key in champion_cells
         )
@@ -373,8 +385,7 @@ def assess_local_challenger(
     elif not challenger_safety_gate_passed:
         reason = "challenger_safety_gate_failed"
     elif require_paired_strict_chain and not all(
-        isinstance(item.metrics.get("sample_execution"), Mapping)
-        and item.metrics["sample_execution"].get("strict_agent_chain_pass") is True
+        successful_agent_provenance_passes(item.metrics.get("sample_execution"))
         for item in (champion, challenger)
     ):
         # Operational failure penalties must not supply scientific improvement.
@@ -440,6 +451,7 @@ def validate_formal_batch_comparison(
     *,
     minimum_score_delta: float = LOCAL_MINIMUM_SCORE_DELTA,
     cell_regression_blocks: bool = True,
+    cell_regression_tolerance: float = LOCAL_CELL_REGRESSION_TOLERANCE,
     require_paired_evidence: bool = False,
     require_paired_strict_chain: bool = False,
 ) -> None:
@@ -461,6 +473,7 @@ def validate_formal_batch_comparison(
         challenger_safety_gate_passed=safety_gate_passed,
         minimum_score_delta=minimum_score_delta,
         cell_regression_blocks=cell_regression_blocks,
+        cell_regression_tolerance=cell_regression_tolerance,
         require_paired_evidence=require_paired_evidence,
         require_paired_strict_chain=marked_qualification,
     )

@@ -132,6 +132,18 @@ class ScientificExposureRegistry:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def formal_stage_tokens(self) -> tuple[FormalStageToken, ...]:
+        """Read durable identities for interrupted job recovery, without data access."""
+        with self.ledger._lock:
+            rows = self.ledger._connection.execute("""
+                SELECT e.*, f.objective_family_digest
+                FROM formal_holdout_exposures e JOIN formal_analysis_families f
+                  ON e.holdout_exposure_key = f.holdout_exposure_key
+                 AND e.analysis_plan_digest = f.analysis_plan_digest
+            """).fetchall()
+        return tuple(FormalStageToken(**{name: row[name] for name in FormalStageToken.__dataclass_fields__})
+                     for row in rows)
+
     def reserve_formal_stage(
         self,
         *,

@@ -26,6 +26,7 @@ from ..core.errors import (
     dsh_native_runtime_error_in_chain,
     dsh_native_runtime_retryable,
     dsh_native_runtime_evaluation_fatal,
+    preferred_execution_failure,
 )
 from ..core.models import canonical_json, digest
 from ..core.trajectory import EvaluationScope
@@ -1380,8 +1381,7 @@ class CollaborativeSampleExecutor:
                         # origins so their completed predictions become durable.
                         # Discarding these results repeats paid Agent work on
                         # resume and makes progress appear stuck after one error.
-                        if origin_failure is None:
-                            origin_failure = exc
+                        origin_failure = preferred_execution_failure(origin_failure, exc)
                         continue
                     except BaseException:
                         if origin_executor is not None:
@@ -2277,6 +2277,18 @@ class CollaborativeSampleExecutor:
             ),
             "host_route_bypass_count": host_route_bypass_count,
             "complete_agent_chains": complete_agent_chains,
+            # Provenance and availability answer different questions. A failed
+            # origin remains failed; it does not invalidate other receipts.
+            "successful_agent_provenance_pass": (
+                bool(succeeded_sample_ids)
+                and succeeded_sample_ids.issubset(complete_chain_sample_ids)
+                and host_route_bypass_count == 0
+            ) if strict_agent_contract else None,
+            "successful_agent_provenance_coverage": (
+                len(succeeded_sample_ids & complete_chain_sample_ids) / len(succeeded_sample_ids)
+                if succeeded_sample_ids and strict_agent_contract else None
+            ),
+            "execution_complete": attempted > 0 and succeeded == attempted,
             "complete_origin_agent_chains": (
                 complete_origin_agent_chains
                 if strict_origin_contract
@@ -2477,7 +2489,7 @@ class CollaborativeSampleExecutor:
             if self.origin_admission is not None
             else nullcontext()
         )
-        with admission:
+        with admission as admission_outcome:
             first_attempt_outcomes = self._prepare_first_attempt_batch(
                 bundle.rows,
                 context=context,
@@ -2505,6 +2517,8 @@ class CollaborativeSampleExecutor:
                 if getattr(self.adapter, "sample_reflection_enabled", True)
                 else {}
             )
+            if admission_outcome is not None and hasattr(admission_outcome, "healthy"):
+                admission_outcome.healthy = all(item.error is None for item in origin_outcomes.values())
             return (
                 origin_outcomes,
                 origin_reflections,

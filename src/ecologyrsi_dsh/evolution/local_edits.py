@@ -254,6 +254,24 @@ def validate_local_edit_proposal(
         context.allowed_effect_cells
     ) or not set(result.risk_cells).issubset(context.allowed_effect_cells):
         raise ValueError("local edit effect/risk cells are outside the frozen objective")
+    if result.decision is LocalEditProposalDecision.MUTATE:
+        if not result.evidence_refs or not result.expected_effect_cells:
+            raise ValueError("mutation requires training evidence and expected effect cells")
+        # A horizon/target-specific coefficient has a known direct effect domain.
+        # General model and Agent-policy changes may affect the entire grid.
+        effects: set[str] = set()
+        for operation in result.operations:
+            name = str(operation.get("name", ""))
+            if operation.get("op") != "set_bounded_parameter" or "residual_scale" not in name:
+                effects.update(context.allowed_effect_cells)
+                continue
+            for cell in context.allowed_effect_cells:
+                target, horizon = cell.rsplit("@", 1)
+                if name in {"residual_scale", f"residual_scale_{horizon}",
+                            f"{target}_residual_scale", f"{target}_{horizon}_residual_scale"}:
+                    effects.add(cell)
+        if not set(result.expected_effect_cells).issubset(effects):
+            raise ValueError("expected effect cells do not match the executable parameter change")
     return result
 
 

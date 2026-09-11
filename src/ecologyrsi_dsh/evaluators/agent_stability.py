@@ -21,7 +21,7 @@ def capacity_with_inference_replicas(report, schedule):
         candidate_origin_executions_for_run=report.candidate_origin_executions_for_run + extra_origins * report.planned_generations,
         scoring_cells_for_run=report.scoring_cells_for_run + extra_origins * cells * report.planned_generations,
     ).to_dict()
-    result['holdout_inference_replicas'] = REPLICA_COUNT
+    result['holdout_inference_replicas'] = 1 if schedule.quick else REPLICA_COUNT
     return result
 
 

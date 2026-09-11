@@ -14,7 +14,8 @@ from .sample_execution import SampleExecutionPausedError, SampleExecutionCancell
 from ..core.errors import dsh_native_runtime_error_in_chain, dsh_native_runtime_retryable
 from ..core.model_execution_policy import NATIVE_SAMPLE_OPERATION_MAX_TOKENS
 from ..core.errors import dsh_native_runtime_evaluation_fatal
-from ..core.agent_prediction import MAX_PREDICTION_CALLS, validate_predictions, validate_agent_review
+from ..core.agent_prediction import PREDICTION_TOOL_CALL_BUDGET, validate_predictions, validate_agent_review
+from .origin_prompt import compact_origin_contexts
 from ..core.redaction import REMOTE_REASON_CODES
 from ..integrations.dsh_structured_roles import DshStructuredRoleRuntime
 from .sample_execution import (
@@ -284,6 +285,7 @@ class DshSampleCollaborationAdapter:
             None,
             "always_remote_post_score@1",
             "candidate_aggregate_post_score@1",
+            "disabled_for_independent_evaluation@1",
         }:
             raise ValueError("unsupported DSH sample reflection policy")
         # A missing policy belongs to historical manifests and preserves the
@@ -813,10 +815,26 @@ class DshSampleCollaborationAdapter:
             "evolution_context": {key: decision_context[key] for key in
                                   ("candidate_parameters", "tool_experience", "agent_policy") if key in decision_context},
         }
+        compact, shared = compact_origin_contexts(origin_contexts)
+        if shared:
+            context["origin_contexts"] = compact
+            context["shared_origin_values"] = shared
+            context["context_resolution"] += (
+                "; within origin_contexts, {shared_origin_ref: key} means the exact value in "
+                "shared_origin_values[key]. Resolve references without repeating the data or its analysis."
+            )
         context["prediction_contract"] = {
-            "owner": "sample_agent", "max_prediction_tool_calls": MAX_PREDICTION_CALLS,
+            "owner": "sample_agent", "max_prediction_tool_calls": PREDICTION_TOOL_CALL_BUDGET,
             "model_fit_cache_capacity": 8,
             "exploration_budget": "Per-attempt tool calls only; cache eviction does not remove capabilities",
+            "analysis_stopping_rule": (
+                "Use inherited policy and causal observations first. Direct prediction is allowed. "
+                "Analyze the origin vector once, not each cell as a separate research task. "
+                "Use a second numerical call only for an unresolved discrepancy or uncertainty. "
+                "Two is the hard call limit, not a target. Do not manually reconstruct model fits. "
+                "Do not repeat equivalent parameter requests. Stop when evidence is sufficient "
+                "and submit the full prediction vector with concise reason codes."
+            ),
             "final_prediction": "Agent submits numeric predictions; tools are optional evidence",
             "allowed_methods": ["direct", "model", "blend", "adjusted"],
             "training_boundary": "Models fit training_fit only; evaluation labels are unavailable",

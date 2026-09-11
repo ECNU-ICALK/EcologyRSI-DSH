@@ -15,6 +15,7 @@ from typing import Any
 from ..core.models import digest
 from ..core.prediction_policy import RUNTIME_EVALUATOR_ID
 from .greenhouse import GreenhouseDatasetAdapter
+from .definitions import DATASET_DEFINITIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,11 +52,31 @@ class DatasetAdapter:
     minimum_coverage: float = 0.80
     selection_minimum_coverage: float = 0.90
     minimum_skill: float = 1e-9
+    # Retained, but no longer decides anything. The per-cell gate is now
+    # `per_cell_noninferiority@1`; this tolerance survives so archived runs stay
+    # replayable and so `would_pass_under_legacy_zero_tolerance` can be computed
+    # against the exact rule it names.
     no_regression_tolerance: float = 1e-12
+    # The absolute ceiling on a per-cell regression, as a fraction of that
+    # cell's baseline normalized RMSE. A wide bootstrap interval can excuse a
+    # small regression; nothing excuses one above this line.
+    cell_regression_hard_cap: float = 0.03
+    # One minus the confidence level of the per-cell paired interval.
+    cell_noninferiority_alpha: float = 0.05
     maximum_constraint_violations: int = 0
     selection_minimum_score_delta: float = 0.005
 
+    primary_metric: str = "weighted_symmetric_rmse_skill@1"
+    diagnostic_metrics: tuple[str, ...] = ("mae", "rmse", "bias", "normalized_rmse", "skill_score", "sample_execution_coverage", "constraint_violations")
+    definition_digest: str = ""
+
     def __post_init__(self) -> None:
+        object.__setattr__(self, "diagnostic_metrics", tuple(self.diagnostic_metrics))
+        supported = {"mae", "rmse", "bias", "normalized_rmse", "skill_score", "sample_execution_coverage", "constraint_violations"}
+        if self.primary_metric != "weighted_symmetric_rmse_skill@1":
+            raise ValueError("unsupported dataset primary metric")
+        if not self.diagnostic_metrics or not set(self.diagnostic_metrics) <= supported or len(set(self.diagnostic_metrics)) != len(self.diagnostic_metrics):
+            raise ValueError("unsupported or duplicate dataset diagnostic metrics")
         object.__setattr__(self, "targets", tuple(self.targets))
         object.__setattr__(self, "horizons_hours", tuple(self.horizons_hours))
         object.__setattr__(self, "label_semantics", tuple(self.label_semantics))
@@ -72,8 +93,13 @@ class DatasetAdapter:
         if self.selection_minimum_coverage < self.minimum_coverage:
             raise ValueError("selection coverage cannot weaken prediction coverage")
         if any(not math.isfinite(v) or v < 0 for v in (
-                self.minimum_skill, self.no_regression_tolerance, self.selection_minimum_score_delta)):
+                self.minimum_skill, self.no_regression_tolerance, self.selection_minimum_score_delta,
+                self.cell_regression_hard_cap)):
             raise ValueError("dataset adapter scoring thresholds must be finite and nonnegative")
+        if (isinstance(self.cell_noninferiority_alpha, bool)
+                or not isinstance(self.cell_noninferiority_alpha, (int, float))
+                or not 0 < float(self.cell_noninferiority_alpha) < 0.5):
+            raise ValueError("dataset adapter noninferiority alpha must lie in (0, 0.5)")
         if (isinstance(self.maximum_constraint_violations, bool)
                 or not isinstance(self.maximum_constraint_violations, int)
                 or self.maximum_constraint_violations < 0):
@@ -100,7 +126,8 @@ class DatasetAdapter:
             "label_semantics": list(self.label_semantics),
             "evaluation_mode": "historical_replay_prediction_non_causal",
             "sampling": "hourly_mean",
-            "primary_metric": "weighted_symmetric_rmse_skill@1",
+            "primary_metric": self.primary_metric,
+            "diagnostic_metrics": list(self.diagnostic_metrics),
             "horizon_weighting": "equal",
             "missing_label_policy": "keep_missing_no_interpolation",
             "fit_partition": "calibration_fit",
@@ -130,28 +157,19 @@ class DatasetAdapter:
                 raise ValueError(f"dataset adapter target missing or unit mismatch: {target.name}")
 
 
-_CLIMATE_TARGETS = (
-    PredictionTarget("air_temperature", "室内气温", "degC", -10.0, 60.0, 1 / 3),
-    PredictionTarget("relative_humidity", "室内相对湿度", "percent", 0.0, 100.0, 1 / 3),
-    PredictionTarget("co2_concentration", "室内 CO₂ 浓度", "ppm", 0.0, 5000.0, 1 / 3),
-)
+def adapter_from_definition(definition: dict[str, Any]) -> DatasetAdapter:
+    task = definition["prediction_task"]
+    return DatasetAdapter(
+        **{**task, "targets": tuple(PredictionTarget(**t) for t in task["targets"])},
+        definition_digest=digest(definition),
+    )
 
-CUCUMBER_2018 = DatasetAdapter(
-    adapter_id="agc_cucumber_2018@1", dataset_id="agc_cucumber_2018",
-    domain_id="greenhouse_cucumber_2018", label="2018 黄瓜 · 环境预测",
-    climate_filename="Greenhouse_climate.csv", targets=_CLIMATE_TARGETS,
-    label_semantics=("黄瓜一级果产量为累计产量（kg/m²），保留原始稀疏观测。",
-                     "供热能耗单位为 kWh/m²/日；产量、资源和作物数据不计入本任务评分。"),
-)
-TOMATO_2019 = DatasetAdapter(
-    adapter_id="agc_tomato_2019@1", dataset_id="agc_tomato_2019",
-    domain_id="greenhouse_tomato_2019", label="2019 番茄 · 环境预测",
-    climate_filename="GreenhouseClimate.csv", targets=_CLIMATE_TARGETS,
-    label_semantics=("番茄一级果产量为单次采收量（kg/m²），不能与黄瓜累计产量混用。",
-                     "供热能耗单位为 MJ/m²/日；稀疏产量和品质标签不插值，也不计入本任务评分。"),
-)
 
-DATASET_ADAPTERS = MappingProxyType({item.dataset_id: item for item in (CUCUMBER_2018, TOMATO_2019)})
+DATASET_ADAPTERS = MappingProxyType({
+    key: adapter_from_definition(value) for key, value in DATASET_DEFINITIONS.items()
+})
+CUCUMBER_2018 = DATASET_ADAPTERS["agc_cucumber_2018"]
+TOMATO_2019 = DATASET_ADAPTERS["agc_tomato_2019"]
 
 
 def dataset_adapter(dataset_id: str) -> DatasetAdapter:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from ..core.dsh_usage import session_usage_projection
+from ..evolution.schedule import ADAPTIVE_PROTOCOLS, QUICK_OPTIMIZATION_PROTOCOL
+
+from ..core.dsh_usage import active_session_ids, session_usage_projection
 from ..core.model_preflight import model_preflight_projection
 from ..core.prediction_policy import prediction_usage
 from ..core.state import persisted_genome_from_proposal
@@ -51,6 +53,7 @@ from ..evolution.schedule import (
     PAIRED_LOCAL_EVALUATION_MODE,
     SCHEDULE_SCHEMA_VERSION,
     ISOLATED_SCHEDULE_SCHEMA_VERSION,
+    TRAINING_SCHEDULE_SCHEMA_VERSION,
     OptimizationSchedule,
 )
 from ..integrations.model_bindings import HOST_PARAMETER_GENERATOR_ID, RULE_JUDGE_ID
@@ -150,7 +153,7 @@ def _paired_optimization_schedule(state: Any) -> OptimizationSchedule | None:
     except (TypeError, ValueError):
         return None
     if (
-        schedule.schema_version not in {SCHEDULE_SCHEMA_VERSION, ISOLATED_SCHEDULE_SCHEMA_VERSION}
+        schedule.schema_version not in {SCHEDULE_SCHEMA_VERSION, ISOLATED_SCHEDULE_SCHEMA_VERSION, TRAINING_SCHEDULE_SCHEMA_VERSION}
         or schedule.local_evaluation_mode != PAIRED_LOCAL_EVALUATION_MODE
     ):
         return None
@@ -414,7 +417,7 @@ def _rounds_projection(state: Any) -> list[dict[str, Any]]:
     """Apply operational run lifecycle semantics to the audit-derived rounds."""
 
     projected = rounds(state)
-    adaptive = state.task_manifest.metadata.get("optimization_protocol") == "top2_adaptive_epoch@1"
+    adaptive = state.task_manifest.metadata.get("optimization_protocol") in ADAPTIVE_PROTOCOLS
     comparisons = {item.generation for item in getattr(state, "generation_comparisons", ())}
     screened = {event.payload.get("candidate_id") for event in getattr(state, "candidate_screening_events", ())}
     for round_item in projected:
@@ -458,6 +461,19 @@ def _rounds_projection(state: Any) -> list[dict[str, Any]]:
                     candidate_stages,
                 )
     return projected
+
+
+def _runtime_failure_projection(state: Any) -> dict[str, Any] | None:
+    """Latest durable diagnostic, not an inference of current route health."""
+    for event in reversed(state.events):
+        if event.kind == "DshChildExecutionFailed" and isinstance(event.payload.get("runtime_failure"), Mapping):
+            failure = event.payload["runtime_failure"]
+            stage = event.payload["identity"]["stage"]
+            metadata = state.task_manifest.metadata
+            route = metadata.get("review_model_id" if stage in {"sample.critic", "sample.reflect", "generation.reflect"} else "strategy_model_id")
+            return {**dict(failure), "recorded_at": event.created_at,
+                    "stage": stage, "model_route": route, "source": "child_failure_ledger"}
+    return None
 
 
 def _execution_diagnostics(state: Any) -> dict[str, Any]:
@@ -2484,9 +2500,15 @@ def _dsh_activity_projection(
         None,
     )
     attempt = int(launch.get("launch_attempt") or 1)
+    usage_event = next((event for event in reversed(state.events)
+                        if event.kind == "DshSessionUsageRecorded"
+                        and event.payload.get("identity", {}).get("child_reservation_id") == reservation_id), None)
+    remote_activity = (usage_event.payload.get("session_metrics", {}).get("activity")
+                       if usage_event is not None and accepted_event is None else None)
     if accepted_event is None:
         activity_state = "model_retry_running" if attempt > 1 else "model_running"
-        updated_at = state.events[-1].created_at
+        updated_at = (remote_activity["updated_at"] if remote_activity else
+                      usage_event.created_at if usage_event is not None else launch_event.created_at)
         event_seq = int(launch_event.seq)
     elif int(accepted_event.seq) == int(state.events[-1].seq):
         activity_state = "host_validating"
@@ -2507,6 +2529,7 @@ def _dsh_activity_projection(
         "updated_at": updated_at,
         "event_seq": event_seq,
         "evidence": "append_only_dsh_child_events",
+        "remote_activity": remote_activity,
         **unresolved_summary,
     }
 
@@ -3049,6 +3072,8 @@ def _formal_batch_live_projection(state: Any) -> dict[str, Any] | None:
 
 
 def _holdout_replica_count(state: Any) -> int:
+    if state.task_manifest.metadata.get("optimization_protocol") == "quick_adaptive_epoch@1":
+        return 1
     return REPLICA_COUNT if state.task_manifest.metadata.get("sample_agent_mode") == "dsh_native_agent" else 1
 
 
@@ -3168,16 +3193,27 @@ def _adaptive_progress_projection(
     """
 
     metadata = state.task_manifest.metadata
-    if metadata.get("optimization_protocol") != "top2_adaptive_epoch@1":
+    if metadata.get("optimization_protocol") not in ADAPTIVE_PROTOCOLS:
         return None
     schedule = metadata.get("optimization_schedule")
     if not isinstance(schedule, Mapping):
         return None
     try:
+        if "schema_version" in schedule:
+            execution_budget = OptimizationSchedule.from_dict(schedule).generation_execution_budget(
+                cells_per_origin=1, holdout_inference_replicas=_holdout_replica_count(state))
+        else:
+            # Read-only projection of early, unversioned run manifests. New
+            # creation always validates and freezes the complete schedule.
+            execution_budget = {
+                "screening_candidate_origins": int(schedule["screening_origin_count"]) * 4,
+                "formal_candidate_origins": int(schedule["formal_origin_count_per_finalist"]) * 2,
+                "holdout_candidate_origins": int(schedule["selection_holdout_origin_count"]) * 3 * _holdout_replica_count(state),
+            }
         screening_origin_count = int(schedule["screening_origin_count"])
-        screening_total = 4 * screening_origin_count
-        formal_total = 2 * int(schedule["formal_origin_count_per_finalist"])
-        holdout_total = _holdout_replica_count(state) * 3 * int(schedule["selection_holdout_origin_count"])
+        screening_total = execution_budget["screening_candidate_origins"]
+        formal_total = execution_budget["formal_candidate_origins"]
+        holdout_total = execution_budget["holdout_candidate_origins"]
     except (KeyError, TypeError, ValueError):
         return None
     paired_schedule = _paired_optimization_schedule(state)
@@ -3859,7 +3895,11 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
     """
 
     paired = _paired_optimization_schedule(state) is not None
+    metadata = getattr(getattr(state, "task_manifest", None), "metadata", {})
     strategy_label = (
+        "单主线逐批更新，轮末共同验证"
+        if metadata.get("optimization_protocol") == QUICK_OPTIMIZATION_PROTOCOL
+        else
         "同 cohort 冠军—挑战者配对策略"
         if paired
         else "旧版连续更新策略"
@@ -5361,11 +5401,17 @@ def _dsh_runtime_projection(state: Any) -> dict[str, Any]:
             },
         }
     metrics_by_session, accounting_coverage = session_usage_projection(state.events)
-    pressure_rows = [
+    active_sessions = active_session_ids(state.events)
+    historical_pressure_rows = [
         metrics["context_pressure"]
         for _seq, metrics in metrics_by_session.values()
         if isinstance(metrics.get("context_pressure"), Mapping)
         and metrics["context_pressure"].get("available") is True
+    ]
+    pressure_rows = [
+        metrics["context_pressure"] for session, (_seq, metrics) in metrics_by_session.items()
+        if session in active_sessions
+        and metrics.get("context_pressure", {}).get("available") is True
     ]
     usage_rows = [
         metrics["provider_usage"]["totals"]
@@ -5378,12 +5424,15 @@ def _dsh_runtime_projection(state: Any) -> dict[str, Any]:
         "available": False,
         "source": "dsh_token_meter",
         "measurement": "current_context_pressure",
+        "scope": "active_sessions",
+        "session_count": len(active_sessions),
     }
     if pressure_rows:
         context_pressure = {
             "available": True,
             "source": "dsh_token_meter",
             "measurement": "current_context_pressure",
+            "scope": "active_sessions",
             "session_count": len(pressure_rows),
             "maximum_total_tokens": max(
                 int(item.get("total_tokens", 0)) for item in pressure_rows
@@ -5392,6 +5441,9 @@ def _dsh_runtime_projection(state: Any) -> dict[str, Any]:
                 int(item.get("surface_tokens", 0)) for item in pressure_rows
             ),
         }
+    context_pressure["historical_last_snapshot_maximum_tokens"] = max(
+        (int(item.get("total_tokens", 0)) for item in historical_pressure_rows), default=None
+    )
     provider_usage = {
         "available": False,
         "source": "dsh_session_projection_token_usage",
@@ -5834,11 +5886,13 @@ def _projection_json(
         "candidates_per_generation": task.candidates_per_generation,
         "optimization_protocol": metadata.get("optimization_protocol"),
         "optimization_schedule": metadata.get("optimization_schedule"),
+        "local_comparison_policy": metadata.get("local_comparison_policy"),
         "search_guard_policy": metadata.get("search_guard_policy"),
         "research_execution_policy": metadata.get("research_execution_policy"),
         "search_probation": search_probation_projection(state),
         "require_model_contract_preflight": metadata.get("require_model_contract_preflight", False),
         "model_contract_preflight": model_preflight_projection(state),
+        "latest_runtime_failure": _runtime_failure_projection(state),
         "samples_per_update": metadata.get("samples_per_update"),
         "minimum_selection_samples_per_update": metadata.get(
             "minimum_selection_samples_per_update"
@@ -5892,6 +5946,7 @@ def _projection_json(
         "allow_host_fallback": metadata.get("allow_host_fallback") is True,
         "remote_fallback_policy": metadata.get("remote_fallback_policy"),
         "projection_revision": state.events[-1].seq if state.events else 0,
+        "workspace_revisions": _workspace_revisions(state),
         "task": {
             "task_id": task.task_id,
             "objective": task.objective,
@@ -6044,6 +6099,14 @@ def _state_payload(
     }
 
 
+def _workspace_revisions(state: Any) -> dict[str, int]:
+    # Usage receipts change live monitoring, never scientific workspaces.
+    # Unknown/new event kinds invalidate conservatively instead of hiding data.
+    revision = next((event.seq for event in reversed(state.events)
+                     if event.kind != "DshSessionUsageRecorded"), 0)
+    return {view: revision for view in ("process", "candidates", "candidate", "training", "asset", "collaboration")}
+
+
 def _monitor_payload(
     state: Any,
     admission_snapshot: Mapping[str, Any] | None = None,
@@ -6079,6 +6142,7 @@ def _monitor_payload(
             "retry_circuit": retry_circuit,
             "updated_at": latest_at,
             "projection_revision": state.events[-1].seq if state.events else 0,
+            "workspace_revisions": _workspace_revisions(state),
             "generation": state.run.generation,
             "total_generations": _max_generations(task),
             "candidates_count": len(search_candidates),

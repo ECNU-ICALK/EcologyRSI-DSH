@@ -257,11 +257,8 @@ def _evaluate_formal_batch_arm(
             **callbacks.evaluation_kwargs(),
         )
     metrics = dict(bundle.evaluation.metrics)
-    summary = metrics.get("sample_execution")
-    if not isinstance(summary, Mapping) or int(
-        summary.get("attempted_origin_samples", 0)
-    ) < scope.origin_count:
-        raise RuntimeError("formal batch did not complete its frozen origin cohort")
+    from ..evaluators.execution_validity import require_valid_execution
+    require_valid_execution(metrics, scope.origin_count, phase="formal_batch")
     suffix = f":{arm.value}" if arm is not None else ""
     evaluation = BatchEvaluation(
         evaluation_id=(
@@ -671,9 +668,11 @@ def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRev
         "workflow_parameter": tuple(
             sorted(registry.program("workflow_templates", workflow_id)["parameters"])
         ),
-        "feature_policy": registry.program_ids("feature_policies"),
-        "fit_policy": registry.program_ids("fit_policies"),
-        "uncertainty_policy": registry.program_ids("uncertainty_policies"),
+        # Current feature/fit policies have no alternative implementation;
+        # the registered UQ program is not connected to native prediction.
+        "feature_policy": (),
+        "fit_policy": (),
+        "uncertainty_policy": (),
         "instruction_tool_policy": tuple(
             sorted(
                 str(profile["role"])
@@ -1036,8 +1035,20 @@ def _execute_next_paired_local_edit(
     revision = state.revision(comparison.champion_after_revision_id)
     context = _local_edit_context(state, candidate, revision, pending)
     recorded = state.local_edit_proposal_for(candidate_id, pending.batch_index)
+    evaluation = next(
+        item for item in state.formal_batch_evaluations
+        if item.evaluation_id == (
+            comparison.challenger_evaluation_id
+            if comparison.champion_after_revision_id == comparison.challenger_revision_id
+            else comparison.champion_evaluation_id
+        )
+    )
+    execution_reason = _local_edit_execution_reason(evaluation.metrics)
     proposal = (
-        _local_edit_proposal(services, state, candidate, pending, context)
+        LocalEditProposal(decision="keep", operations=(), evidence_refs=context.allowed_evidence_refs[:1],
+                          expected_effect_cells=(), risk_cells=())
+        if recorded is None and execution_reason is not None
+        else _local_edit_proposal(services, state, candidate, pending, context)
         if recorded is None
         else LocalEditProposal.from_dict(recorded["proposal"])
     )
@@ -1063,6 +1074,8 @@ def _execute_next_paired_local_edit(
                 "proposal": proposal.to_dict(),
             },
         )
+    if execution_reason is not None and proposal.decision.value == "mutate":
+        policy_rejection_reason = execution_reason
     if policy_rejection_reason is not None:
         validated = LocalEditResult(
             outcome=LocalEditOutcome.REJECTED,
@@ -1126,6 +1139,7 @@ def _execute_next_paired_local_edit(
                 or validated.rejection_reason is not None
                 else {}
             ),
+            **({"reason": execution_reason} if execution_reason is not None else {}),
         },
     )
     _director_mutation(
@@ -1519,6 +1533,23 @@ def _local_edit_bundle_signature(operations: Any) -> str:
     return digest({"operations": sorted(canonical_operations)})
 
 
+def _local_edit_execution_reason(metrics: Mapping[str, Any]) -> str | None:
+    """Do not ask the scientific editor to learn from unavailable predictions."""
+    sample = metrics.get("sample_execution")
+    if not isinstance(sample, Mapping):
+        return None
+    failed = sample.get("failed_origin_samples", sample.get("failed_examples", 0))
+    if isinstance(failed, (int, float)) and not isinstance(failed, bool) and failed > 0:
+        return "batch_execution_incomplete_keep_champion"
+    if sample.get("successful_agent_provenance_pass") is False:
+        return "batch_agent_provenance_invalid"
+    if sample.get("strict_agent_chain_pass") is False:
+        return "batch_agent_provenance_invalid"
+    if sample.get("coverage_pass") is False:
+        return "batch_execution_coverage_insufficient"
+    return None
+
+
 def _local_edit_policy_rejection_reason(
     state: Any,
     candidate_id: str,
@@ -1586,6 +1617,9 @@ def _local_edit_evidence_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
                 "coverage_pass",
                 "minimum_coverage",
                 "strict_agent_chain_pass",
+                "successful_agent_provenance_pass",
+                "successful_agent_provenance_coverage",
+                "execution_complete",
                 "strict_agent_chain_coverage",
                 "complete_origin_agent_chains",
                 "failed_examples",

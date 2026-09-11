@@ -84,7 +84,10 @@ _CAPABILITIES: dict[str, dict[str, dict[str, Any]]] = {
             "parameter_names": ("history_steps", "ridge_alpha",
                                 "residual_scale_1h", "residual_scale_6h", "residual_scale_24h"),
             "tool_ids": ("host.predictor.greenhouse-baseline-aligned-ridge.fit-predict@1",),
-            "evaluator_ids": ("greenhouse_multihorizon_time_forward@3", RUNTIME_EVALUATOR_ID),
+            # Also admissible on the recipe evaluator, where it is the
+            # incumbent a recipe challenger is compared against.
+            "evaluator_ids": ("greenhouse_multihorizon_time_forward@3", RUNTIME_EVALUATOR_ID,
+                              "greenhouse_recipe_multihorizon_forward@1"),
         },
         "greenhouse-targetwise-ridge@1": {
             "version": "greenhouse-targetwise-ridge/1",
@@ -124,6 +127,20 @@ _CAPABILITIES: dict[str, dict[str, dict[str, Any]]] = {
             ),
             "evaluator_ids": ("greenhouse_multihorizon_time_forward@2", RUNTIME_EVALUATOR_ID,),
         },
+        "greenhouse-recipe-ridge@1": {
+            "version": "greenhouse-recipe-ridge/1",
+            # Deliberately empty. Every tunable — ridge alpha, the anchor and
+            # each per-cell residual scale — lives inside the declarative
+            # recipe, which the feature policy grammar bounds. Declaring a
+            # scalar here would promise an override the config cannot accept,
+            # and _validated_catalog_predictor requires this key set to equal
+            # the registry's parameter_schemas exactly.
+            "parameter_names": (),
+            "tool_ids": (
+                "host.predictor.greenhouse-recipe-ridge.fit-predict@1",
+            ),
+            "evaluator_ids": ("greenhouse_recipe_multihorizon_forward@1",),
+        },
     },
     "evaluator": {
         RUNTIME_EVALUATOR_ID: {"version": "greenhouse-runtime-model-selection-forward/1",
@@ -152,6 +169,12 @@ _CAPABILITIES: dict[str, dict[str, dict[str, Any]]] = {
             "version": "greenhouse-baseline-aligned-multihorizon-time-forward/1",
             "tool_ids": (
                 "host.evaluator.greenhouse-baseline-aligned-multihorizon-time-forward.score@1",
+            ),
+        },
+        "greenhouse_recipe_multihorizon_forward@1": {
+            "version": "greenhouse-recipe-multihorizon-forward/1",
+            "tool_ids": (
+                "host.evaluator.greenhouse-recipe-multihorizon-forward.score@1",
             ),
         },
     },

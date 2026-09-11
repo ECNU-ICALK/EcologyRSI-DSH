@@ -182,12 +182,18 @@ def _finite_number(value: Any, name: str) -> int | float:
     return value
 
 
-def _exact_mapping(value: Any, name: str, allowed: set[str]) -> dict[str, Any]:
+def _exact_mapping(
+    value: Any,
+    name: str,
+    allowed: set[str],
+    *,
+    optional: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{name} must be an object")
     result = dict(value)
     unknown = set(result) - allowed
-    missing = allowed - set(result)
+    missing = allowed - optional - set(result)
     if unknown:
         raise ValueError(f"{name} has unsupported fields: {', '.join(sorted(unknown))}")
     if missing:
@@ -253,7 +259,13 @@ def _scientific_program(value: Any) -> dict[str, Any]:
             "feature_policy_ref",
             "fit_policy_ref",
             "uncertainty_policy_ref",
+            "feature_recipe",
         },
+        # Optional, and omitted from the normalized result when absent rather
+        # than stored as null or {}. That keeps the historical five-key
+        # projection byte-identical, so every archived genome_digest,
+        # behavior_digest and genome_id stays reproducible and replayable.
+        optional=frozenset({"feature_recipe"}),
     )
     parameters = _bounded_overrides(
         raw["parameter_overrides"], "parameter_overrides"
@@ -279,6 +291,19 @@ def _scientific_program(value: Any) -> dict[str, Any]:
             ),
             "overrides": _bounded_overrides(ref["overrides"], f"{field_name}.overrides"),
         }
+    if "feature_recipe" in raw:
+        # Validated by the host grammar, which is the single source of the
+        # primitive whitelist and of every numeric bound. Deferred import: the
+        # recipe module reaches back into knowledge/ for the executable-field
+        # rejection, and genome.py is imported from there.
+        from ..evaluators.feature_recipe import validate_feature_recipe
+
+        # to_dict() is the canonical, key-sorted projection, so two genomes
+        # carrying the same recipe written in different key order share one
+        # behavior_digest.
+        result["feature_recipe"] = validate_feature_recipe(
+            raw["feature_recipe"]
+        ).to_dict()
     return result
 
 
@@ -1067,6 +1092,11 @@ def apply_genome_mutation(
             "select_registered_fit_policy",
             "select_registered_uncertainty_policy",
         }:
+            if op == "select_registered_uncertainty_policy":
+                raise ValueError(
+                    "uncertainty_policy_not_executable: interval calibration is not "
+                    "connected to the prediction runtime; it cannot optimize point forecasts"
+                )
             field_by_op = {
                 "select_registered_feature_policy": ("feature_policy_ref", "feature_policies"),
                 "select_registered_fit_policy": ("fit_policy_ref", "fit_policies"),

@@ -15,11 +15,12 @@ from .agent_stability import paired_stability_gate
 from .fitness import FitnessProfile, assess_generation_selection
 from ..core.search_policy import PAIRED_EXECUTION_QUALIFICATION
 from ..core.finalist_review import FINALIST_REVIEW_QUALIFICATION
+from ..core.agent_prediction import successful_agent_provenance_passes
 from ..evolution.execution_qualification import paired_scoring_evidence_complete
 
 
-PROMOTION_CELL_REGRESSION_FLOOR = -0.01
-PROMOTION_REQUIRED_COVERAGE = 0.95
+PROMOTION_CELL_REGRESSION_FLOOR = -FitnessProfile().selection_cell_regression_tolerance
+PROMOTION_REQUIRED_COVERAGE = FitnessProfile().selection_minimum_coverage
 POSITIVE_SEARCH_MINIMUM_SCORE_DELTA = 1e-12
 
 
@@ -89,6 +90,7 @@ def _cell_gate(
     evaluation: HoldoutEvaluation,
     incumbent: HoldoutEvaluation,
     expected: set[tuple[str, int]],
+    profile: FitnessProfile,
 ) -> dict[str, Any]:
     current, current_well_formed = _cell_map(evaluation)
     baseline, baseline_well_formed = _cell_map(incumbent)
@@ -123,17 +125,28 @@ def _cell_gate(
             failures.append(f"cell_skill_missing:{key[0]}:{key[1]}")
         else:
             deltas[f"{key[0]}@{key[1]}h"] = candidate_skill - incumbent_skill
-        if candidate_coverage is None or candidate_coverage < PROMOTION_REQUIRED_COVERAGE:
+        if candidate_coverage is None or candidate_coverage < profile.selection_minimum_coverage:
             failures.append(f"cell_coverage_insufficient:{key[0]}:{key[1]}")
-        if incumbent_coverage is None or incumbent_coverage < PROMOTION_REQUIRED_COVERAGE:
+        if incumbent_coverage is None or incumbent_coverage < profile.selection_minimum_coverage:
             failures.append(f"incumbent_cell_coverage_insufficient:{key[0]}:{key[1]}")
     worst = min(deltas.values()) if deltas else None
-    if worst is None or worst < PROMOTION_CELL_REGRESSION_FLOOR:
+    # This is the *selection* no-regression check: a per-cell skill delta against
+    # the incumbent, tolerated up to `selection_cell_regression_tolerance`. It is
+    # a heuristic for choosing among siblings, and it is deliberately not the
+    # certification gate -- that is `per_cell_noninferiority@1`, which compares
+    # each cell against the frozen baseline and derives its own boundary from the
+    # paired bootstrap. Two different references, two different purposes; the
+    # scope key below exists so a reader of the evidence never has to guess which
+    # one produced a given `no_regression`.
+    if worst is None or worst < -profile.selection_cell_regression_tolerance:
         failures.append("cell_regression")
     return {
         "complete": True,
         "coverage_pass": not any("coverage" in item for item in failures),
-        "no_regression": worst is not None and worst >= PROMOTION_CELL_REGRESSION_FLOOR,
+        "no_regression": worst is not None and worst >= -profile.selection_cell_regression_tolerance,
+        "no_regression_scope": "generation_selection_heuristic",
+        "no_regression_reference": "incumbent_cell_skill",
+        "cell_regression_tolerance": profile.selection_cell_regression_tolerance,
         "worst_cell_delta": worst,
         "cell_deltas": deltas,
         "failures": failures,
@@ -174,30 +187,37 @@ def _coverage_pass(evaluation: HoldoutEvaluation) -> bool:
 
 
 def _strict_chain_pass(evaluation: HoldoutEvaluation) -> bool:
-    sample_execution = evaluation.metrics.get("sample_execution")
-    return bool(
-        isinstance(sample_execution, Mapping)
-        and sample_execution.get("strict_agent_chain_pass") is True
-    )
+    return successful_agent_provenance_passes(evaluation.metrics.get("sample_execution"))
 
 
 def _gate(
     evaluation: HoldoutEvaluation,
     *,
     legacy_runtime_v2_shape: bool = False,
+    minimum_coverage: float = PROMOTION_REQUIRED_COVERAGE,
 ) -> dict[str, Any]:
     constraints = _constraint_violations(
         evaluation,
         legacy_runtime_v2_shape=legacy_runtime_v2_shape,
     )
     coverage_pass = _coverage_pass(evaluation)
+    sample = evaluation.metrics.get("sample_execution")
+    # Objective weights can sum to one even when most executions failed.
     overall_coverage = _finite_number(
-        evaluation.metrics.get(
-            "objective_weight_coverage",
-            evaluation.metrics.get("sample_execution_coverage"),
-        )
+        sample.get("coverage") if isinstance(sample, Mapping)
+        else evaluation.metrics.get("sample_execution_coverage")
     )
-    if overall_coverage is None or overall_coverage < PROMOTION_REQUIRED_COVERAGE:
+    if isinstance(sample, Mapping):
+        attempted = _finite_number(sample.get("attempted_origin_samples"))
+        succeeded = _finite_number(sample.get("succeeded_origin_samples"))
+        if (attempted is not None and succeeded is not None and attempted > 0
+                and attempted.is_integer() and succeeded.is_integer() and 0 <= succeeded <= attempted):
+            overall_coverage = succeeded / attempted
+        elif 'attempted_origin_samples' in sample or 'succeeded_origin_samples' in sample:
+            overall_coverage = None
+    if legacy_runtime_v2_shape:
+        overall_coverage = _finite_number(evaluation.metrics.get("objective_weight_coverage"))
+    if overall_coverage is None or overall_coverage < minimum_coverage:
         coverage_pass = False
     passed = bool(evaluation.passed)
     return {
@@ -223,6 +243,7 @@ def build_generation_comparison(
     legacy_runtime_v2_shape: bool = False,
     require_paired_strict_chain: bool = False,
     finalist_reviews: Mapping[str, Mapping[str, Any]] | None = None,
+    quick_experiment: bool = False,
 ) -> GenerationComparison:
     """Build one immutable three-arm comparison without model-authored ranking."""
 
@@ -231,10 +252,13 @@ def build_generation_comparison(
     if require_paired_strict_chain and legacy_runtime_v2_shape:
         raise ValueError("paired execution qualification cannot use a legacy gate shape")
     evaluations = tuple(holdout_evaluations)
-    if len(evaluations) != len(HoldoutArm):
+    expected_arms = {HoldoutArm.FINALIST_1, HoldoutArm.INCUMBENT} if quick_experiment else set(HoldoutArm)
+    if quick_experiment:
+        positive_delta_search = True
+    if len(evaluations) != len(expected_arms):
         raise ValueError("generation comparison requires exactly three holdout evaluations")
     arms = {item.scope.holdout_arm for item in evaluations}
-    if arms != set(HoldoutArm):
+    if arms != expected_arms:
         raise ValueError("generation comparison requires finalist_1, finalist_2, and incumbent")
     if any(item.scope.run_id != run_id for item in evaluations):
         raise ValueError("holdout evaluation belongs to another run")
@@ -244,10 +268,7 @@ def build_generation_comparison(
         raise ValueError("holdout evaluations must use one frozen cohort")
 
     by_arm = {item.scope.holdout_arm: item for item in evaluations}
-    finalist_evaluations = [
-        by_arm[HoldoutArm.FINALIST_1],
-        by_arm[HoldoutArm.FINALIST_2],
-    ]
+    finalist_evaluations = [by_arm[arm] for arm in HoldoutArm if arm in arms and arm is not HoldoutArm.INCUMBENT]
     incumbent = by_arm[HoldoutArm.INCUMBENT]
     if len({item.evaluator_digest for item in evaluations}) != 1:
         raise ValueError("holdout evaluations must share one evaluator digest")
@@ -258,7 +279,7 @@ def build_generation_comparison(
         for horizon in profile.expected_horizons
     }
     if finalist_reviews is not None:
-        if legacy_runtime_v2_shape or set(finalist_reviews) != {"finalist_1", "finalist_2"}:
+        if legacy_runtime_v2_shape or set(finalist_reviews) != {item.scope.holdout_arm.value for item in finalist_evaluations}:
             raise ValueError("independent review requires the two current finalist arms")
         for item in finalist_evaluations:
             review = finalist_reviews[item.scope.holdout_arm.value]
@@ -279,8 +300,9 @@ def build_generation_comparison(
         scientific_gate = _gate(
             item,
             legacy_runtime_v2_shape=legacy_runtime_v2_shape,
+            minimum_coverage=profile.selection_minimum_coverage,
         )
-        cell_gate = _cell_gate(item, incumbent, expected_grid)
+        cell_gate = _cell_gate(item, incumbent, expected_grid, profile)
         selection = assessment_by_candidate[item.scope.candidate_id]
         stability_floor = selection.selection_stability_floor
         delta = item.score - incumbent.score
@@ -329,6 +351,13 @@ def build_generation_comparison(
             search_failures.append("strict_agent_chain_failed")
         if delta <= POSITIVE_SEARCH_MINIMUM_SCORE_DELTA:
             search_failures.append("no_positive_score_delta")
+        if quick_experiment:
+            if delta <= profile.selection_minimum_score_delta:
+                search_failures.append("below_practical_score_delta")
+            if not cell_gate["no_regression"]:
+                search_failures.append("cell_regression")
+            if not paired_scoring_evidence_complete(incumbent, item):
+                search_failures.append("paired_scoring_evidence_incomplete")
         search_eligible = bool(
             not search_failures
             if positive_delta_search
@@ -338,7 +367,14 @@ def build_generation_comparison(
         if item.metrics.get("prediction_owner") == "sample_agent" or item.metrics.get("agent_inference_stability") is not None or incumbent.metrics.get("agent_inference_stability") is not None:
             inference_stability = paired_stability_gate(item, incumbent, minimum_delta=profile.selection_minimum_score_delta)
             certification_eligible = certification_eligible and inference_stability["passed"]
+        if not positive_delta_search:
+            # All epoch gates must settle before selecting the next parent.
+            # A successful first replica cannot bypass a failing second one.
+            search_eligible = certification_eligible
         certification_failures = list(cell_gate.get("failures", ()))
+        if quick_experiment:
+            certification_eligible = False
+            certification_failures.append("quick_experiment_requires_independent_certification")
         if inference_stability is not None and not inference_stability["passed"]:
             certification_failures.append(inference_stability["reason"])
         if not review_pass:
@@ -457,6 +493,7 @@ def build_generation_comparison(
     incumbent_scientific_gate = _gate(
         incumbent,
         legacy_runtime_v2_shape=legacy_runtime_v2_shape,
+        minimum_coverage=profile.selection_minimum_coverage,
     )
     incumbent_scoring_complete = (
         paired_scoring_evidence_complete(incumbent, incumbent)
@@ -508,7 +545,7 @@ def build_generation_comparison(
                 if arm in {HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2}
                 else incumbent_gate
             )
-            for arm in HoldoutArm
+            for arm in HoldoutArm if arm in arms
         },
         "eligible_finalist_count": len(search_eligible_finalists),
         "search_eligible_finalist_count": len(search_eligible_finalists),
@@ -534,6 +571,9 @@ def build_generation_comparison(
         ),
         "challenger_promotion_allowed": challenger_promotion_allowed,
     }
+    if quick_experiment:
+        gate_results["experiment_protocol"] = "quick_adaptive_epoch@1"
+        gate_results["selection_rule"] = "complete_paired_practical_delta_cell_nonregression_else_incumbent"
     if not legacy_runtime_v2_shape:
         gate_results.update(
             {

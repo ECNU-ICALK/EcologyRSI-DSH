@@ -36,7 +36,7 @@ where = ["src"]
 
 [tool.setuptools.data-files]
 "share/ecologyrsi-dsh/datasets" = [
-    "datasets/autonomous_greenhouse.json",
+    "datasets/*.json",
 ]
 "share/ecologyrsi-dsh/plugins/ecology_evolution" = [
     "plugins/ecology_evolution/README.md",

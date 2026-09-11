@@ -42,6 +42,9 @@ class DiagnosticCandidate:
         aligned = getattr(prediction, "BaselineAlignedRidgeConfig", None)
         if aligned is not None:
             classes["greenhouse-baseline-aligned-ridge@1"] = aligned
+        recipe = getattr(prediction, "RecipeRidgeConfig", None)
+        if recipe is not None:
+            classes[prediction.RECIPE_RIDGE_MODEL_ID] = recipe
         if self.model_id not in classes:
             raise ValueError("diagnostic model is not a supported local ridge")
         return classes[self.model_id].from_mapping(self.parameters)
@@ -55,7 +58,7 @@ def default_candidates() -> tuple[DiagnosticCandidate, ...]:
     """Small explicit presets; names do not assert a historical run identity."""
     base = {"history_steps": 6, "ridge_alpha": .1, "residual_scale": .5}
     model = prediction.EXOGENOUS_RIDGE_MODEL_ID
-    return tuple(DiagnosticCandidate(name, model, parameters) for name, parameters in (
+    scalar = tuple(DiagnosticCandidate(name, model, parameters) for name, parameters in (
         ("seed", base),
         ("champion", {**base, "ridge_alpha": .3}),
         ("scale_0", {**base, "residual_scale": 0.0}),
@@ -63,6 +66,21 @@ def default_candidates() -> tuple[DiagnosticCandidate, ...]:
         ("scale_1", {**base, "residual_scale": 1.0}),
         ("alpha_1", {**base, "ridge_alpha": 1.0}),
     ))
+    # The recipe seed is the cheap, model-free answer to "does a winner exist in
+    # the search space at all". A fixed-window candidate cannot read the cell
+    # the selected seasonal_24h baseline reads at h=6, so its skill there is
+    # negative by construction; the recipe seed can. Running both here means
+    # the question is settled deterministically before a run is paid for.
+    return scalar + (
+        DiagnosticCandidate(
+            "recipe_seed",
+            prediction.RECIPE_RIDGE_MODEL_ID,
+            prediction.seed_recipe_parameters(
+                horizons=HORIZONS,
+                exogenous_columns=prediction.GREENHOUSE_SEED_EXOGENOUS_COLUMNS,
+            ),
+        ),
+    )
 
 
 def candidates_from_payload(payload: Any) -> tuple[DiagnosticCandidate, ...]:
@@ -143,9 +161,8 @@ def _case(row: Mapping[str, Any]) -> tuple[int, str, int]:
 
 
 def _fitted_identity(models: Sequence[Mapping[str, Any]]) -> str:
-    # Feedback row counts/label availability are not fitted model parameters.
-    excluded = {"feedback_rows", "prediction_fallback_rows", "fit_digest_sha256"}
-    return digest([{k: v for k, v in model.items() if k not in excluded} for model in models])
+    from ..evaluators.greenhouse_prediction import fitted_model_identity
+    return fitted_model_identity(models)
 
 
 def _metrics(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

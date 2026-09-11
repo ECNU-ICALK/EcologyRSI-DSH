@@ -5,13 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
+from .parameters import PARAMETER_RULES
+
 
 LEGACY_SCHEDULE_SCHEMA_VERSION = (
     "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1"
 )
 SCHEDULE_SCHEMA_VERSION = "ecologyrsi-dsh.top2-adaptive-epoch-schedule/2"
 ISOLATED_SCHEDULE_SCHEMA_VERSION = "ecologyrsi-dsh.top2-adaptive-epoch-schedule/3"
+TRAINING_SCHEDULE_SCHEMA_VERSION = "ecologyrsi-dsh.top2-adaptive-epoch-schedule/4"
 OPTIMIZATION_PROTOCOL = "top2_adaptive_epoch@1"
+QUICK_OPTIMIZATION_PROTOCOL = "quick_adaptive_epoch@1"
+ADAPTIVE_PROTOCOLS = (OPTIMIZATION_PROTOCOL, QUICK_OPTIMIZATION_PROTOCOL)
+QUICK_SCHEDULE_SCHEMA_VERSION = "ecologyrsi-dsh.quick-adaptive-epoch-schedule/1"
 PREQUENTIAL_LOCAL_EVALUATION_MODE = "prequential"
 PAIRED_LOCAL_EVALUATION_MODE = "paired_champion_challenger"
 
@@ -19,6 +25,8 @@ _SCHEDULE_MODES = {
     LEGACY_SCHEDULE_SCHEMA_VERSION: PREQUENTIAL_LOCAL_EVALUATION_MODE,
     SCHEDULE_SCHEMA_VERSION: PAIRED_LOCAL_EVALUATION_MODE,
     ISOLATED_SCHEDULE_SCHEMA_VERSION: PAIRED_LOCAL_EVALUATION_MODE,
+    TRAINING_SCHEDULE_SCHEMA_VERSION: PAIRED_LOCAL_EVALUATION_MODE,
+    QUICK_SCHEDULE_SCHEMA_VERSION: PREQUENTIAL_LOCAL_EVALUATION_MODE,
 }
 
 _FIELDS = frozenset(
@@ -63,10 +71,10 @@ class OptimizationSchedule:
                 "schema_version must be one of "
                 f"{tuple(_SCHEDULE_MODES)!r}"
             )
-        if self.screening_origin_count != 64:
-            raise ValueError("screening_origin_count must be 64")
-        if self.finalist_count != 2:
-            raise ValueError("finalist_count must be 2")
+        if type(self.screening_origin_count) is not int or self.screening_origin_count != (0 if self.quick else 64):
+            raise ValueError("screening_origin_count differs from protocol")
+        if type(self.finalist_count) is not int or self.finalist_count != (1 if self.quick else 2):
+            raise ValueError("finalist_count differs from protocol")
         if self.local_evaluation_mode != expected_mode:
             raise ValueError(
                 "local_evaluation_mode must be "
@@ -87,17 +95,19 @@ class OptimizationSchedule:
             self.selection_holdout_origin_count,
             "selection_holdout_origin_count",
         )
-        if self.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION and batch < 2:
+        if self.schema_version in {ISOLATED_SCHEDULE_SCHEMA_VERSION, TRAINING_SCHEDULE_SCHEMA_VERSION, QUICK_SCHEDULE_SCHEMA_VERSION} and batch < 2:
             raise ValueError("isolated adaptation batches require at least two origins")
         if formal % batch:
             raise ValueError(
                 "local_batch_origin_count must divide "
                 "formal_origin_count_per_finalist"
             )
-        if not 0 <= edits <= 5:
+        if not 0 <= edits <= PARAMETER_RULES["max_local_edits_per_batch"]["maximum"]:
             raise ValueError("max_local_edits_per_batch must be between 0 and 5")
-        if holdout < 169:
-            raise ValueError("selection_holdout_origin_count must be at least 169")
+        minimum_holdout = (PARAMETER_RULES["selection_holdout_origin_count"]["minimum"]
+                           if self.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION or self.quick else 169)
+        if holdout < minimum_holdout:
+            raise ValueError(f"selection_holdout_origin_count must be at least {minimum_holdout}")
 
     @classmethod
     def default(cls) -> "OptimizationSchedule":
@@ -114,9 +124,54 @@ class OptimizationSchedule:
 
     @classmethod
     def for_new_run(cls) -> "OptimizationSchedule":
-        """Time-purged schedule; legacy defaults remain for historical readers."""
-        return replace(cls.default(), schema_version=ISOLATED_SCHEDULE_SCHEMA_VERSION,
-                       formal_origin_count_per_finalist=200)
+        """Repeated training epochs, with independent evaluation kept outside search."""
+        return replace(cls.default(), schema_version=QUICK_SCHEDULE_SCHEMA_VERSION,
+                       screening_origin_count=0, finalist_count=1,
+                       local_evaluation_mode=PREQUENTIAL_LOCAL_EVALUATION_MODE,
+                       formal_origin_count_per_finalist=PARAMETER_RULES["formal_origin_count"]["default"],
+                       local_batch_origin_count=PARAMETER_RULES["local_batch_origin_count"]["default"],
+                       selection_holdout_origin_count=PARAMETER_RULES["selection_holdout_origin_count"]["default"])
+
+    @property
+    def quick(self) -> bool:
+        return self.schema_version == QUICK_SCHEDULE_SCHEMA_VERSION
+
+    @classmethod
+    def for_comparison_run(cls) -> "OptimizationSchedule":
+        return replace(cls.for_new_run(), schema_version=TRAINING_SCHEDULE_SCHEMA_VERSION,
+                       screening_origin_count=64, finalist_count=2,
+                       local_evaluation_mode=PAIRED_LOCAL_EVALUATION_MODE)
+
+    def execution_plan(self, generations: int, *, cells_per_origin: int, native: bool = True) -> dict[str, Any]:
+        replicas = 1 if self.quick or not native else 2
+        return {
+            "schema_version": "ecologyrsi-dsh.execution-plan/1",
+            "protocol": self.protocol,
+            "schedule": self.to_dict(),
+            "generations": generations,
+            "holdout_inference_replicas": replicas,
+            "cells_per_origin": cells_per_origin,
+            "generation_budget": self.generation_execution_budget(cells_per_origin=cells_per_origin, holdout_inference_replicas=replicas),
+            "run_budget": self.run_execution_budget(generations, cells_per_origin=cells_per_origin, holdout_inference_replicas=replicas),
+            "required_unique_origins": self.required_unique_origins(generations),
+            "training_replay": True,
+            "fresh_epoch_holdout": self.quick,
+            "qualification": "exploratory_only" if self.quick else "comparison_requires_certification_gates",
+            "comparison_evidence": "complete_pair_practical_delta_cell_nonregression" if self.quick else "paired_time_blocks_and_inference_replicas",
+            "output_tokens_per_llm_call": {"planner": 8192, "critic": 4096},
+            "sample_execution_limits": {"prediction_tool_calls_per_attempt": 2,
+                "planner_steps": 10, "critic_steps": 4,
+                "planner_reported_output_threshold": 24576, "critic_reported_output_threshold": 8192},
+        }
+
+    @property
+    def protocol(self) -> str:
+        return QUICK_OPTIMIZATION_PROTOCOL if self.quick else OPTIMIZATION_PROTOCOL
+
+    @property
+    def exploratory_local_comparison(self) -> bool:
+        """Small training batches screen edits; epoch evidence confirms retention."""
+        return self.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "OptimizationSchedule":
@@ -174,6 +229,8 @@ class OptimizationSchedule:
     ) -> dict[str, int]:
         cells = _positive_integer(cells_per_origin, "cells_per_origin")
         replicas = _positive_integer(holdout_inference_replicas, "holdout_inference_replicas")
+        if self.quick:
+            replicas = 1
         screening = self.screening_origin_count * 4
         if self.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
             formal_per_finalist = self.local_batch_origin_count + (
@@ -219,16 +276,16 @@ class OptimizationSchedule:
         generations = _positive_integer(
             planned_generations, "planned_generations"
         )
+        if self.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
+            return self.formal_origin_count_per_finalist + self.screening_origin_count + self.selection_holdout_origin_count
         return self.formal_origin_count_per_finalist + generations * (
             self.screening_origin_count + self.selection_holdout_origin_count
         )
 
     def planned_origin_occurrences(self, planned_generations: int) -> int:
-        """Return executable origin occurrences, including deterministic reuse.
-
-        The historical method name is retained internally for now, but the
-        public contract is occurrence-based: a reused source origin is a new
-        execution occurrence, not a new independent source.
-        """
-
+        """Count training uses separately from distinct source observations."""
+        if self.quick:
+            return self.required_unique_origins(planned_generations) + (planned_generations - 1) * self.formal_origin_count_per_finalist
+        if self.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
+            return self.required_unique_origins(planned_generations) * planned_generations
         return self.required_unique_origins(planned_generations)

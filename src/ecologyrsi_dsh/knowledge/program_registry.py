@@ -14,6 +14,16 @@ from ..evolution.genome import (
     deep_freeze_json,
     deep_thaw_json,
 )
+from ..evaluators.feature_recipe import (
+    MAX_RECIPE_LAG_HOURS,
+    MAX_RECIPE_TERMS,
+    MAX_ROLLING_WINDOW_HOURS,
+    recipe_grammar,
+)
+from ..evaluators.greenhouse_prediction import (
+    GREENHOUSE_SEED_EXOGENOUS_COLUMNS,
+    seed_feature_recipe,
+)
 
 
 REGISTRY_SCHEMA_VERSION = "ecologyrsi-dsh.program-registry/1"
@@ -124,6 +134,17 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
                 },
             },
         },
+        "greenhouse-recipe-ridge@1": {
+            "version": "greenhouse-recipe-operator-graph/1",
+            # Intentionally empty. This predictor has no scalar tunables: the
+            # ridge alpha, the baseline anchor and every per-cell residual
+            # scale live inside scientific_program.feature_recipe, which the
+            # authored_causal_features@1 grammar below bounds. _parameter()
+            # entries can only express numeric scalars, so a recipe cannot be
+            # described here even in principle.
+            "parameters": {},
+            "feature_policy_id": "authored_causal_features@1",
+        },
     },
     "feature_policies": {
         "registered_greenhouse_features@1": {
@@ -133,6 +154,29 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
         "registered_toy_features@1": {
             "version": "registered-toy-causal-features/1",
             "parameters": {},
+        },
+        "authored_causal_features@1": {
+            "version": "authored-causal-feature-recipe/1",
+            # The scalar ceilings a mutation may legally target. The full
+            # primitive whitelist is carried as static grammar below, because
+            # per-op bounds are not numeric scalars of the recipe itself.
+            "parameters": {
+                "max_terms": _parameter(
+                    minimum=1, maximum=MAX_RECIPE_TERMS,
+                    default=MAX_RECIPE_TERMS, integer=True,
+                ),
+                "max_lag_hours": _parameter(
+                    minimum=1, maximum=MAX_RECIPE_LAG_HOURS,
+                    default=MAX_RECIPE_LAG_HOURS, integer=True,
+                ),
+                "max_rolling_window": _parameter(
+                    minimum=2, maximum=MAX_ROLLING_WINDOW_HOURS,
+                    default=MAX_ROLLING_WINDOW_HOURS, integer=True,
+                ),
+            },
+            # Content-addressed via _program_digest, so the grammar an Agent
+            # was shown is recoverable from the genome's catalog_digest alone.
+            "grammar": recipe_grammar(),
         },
     },
     "fit_policies": {
@@ -399,32 +443,38 @@ def _seed_template(
     template_id: str,
     predictor_id: str,
     feature_policy_id: str,
+    feature_recipe: Mapping[str, Any] | None = None,
 ) -> SeedGenomeTemplate:
     predictor = programs["predictors"][predictor_id]
     parameters = {
         name: contract["default"]
         for name, contract in predictor["parameters"].items()
     }
+    scientific_program = {
+        "predictor_ref": _program_ref(programs, "predictors", predictor_id),
+        "parameter_overrides": parameters,
+        "feature_policy_ref": {
+            **_program_ref(programs, "feature_policies", feature_policy_id),
+            "overrides": {},
+        },
+        "fit_policy_ref": {
+            **_program_ref(programs, "fit_policies", "time_forward_fit@1"),
+            "overrides": {},
+        },
+        "uncertainty_policy_ref": {
+            **_program_ref(programs, "uncertainty_policies", "none@1"),
+            "overrides": {},
+        },
+    }
+    # Absent rather than null when unset: the historical five-key shape has to
+    # project byte-identically or every archived genome digest moves.
+    if feature_recipe is not None:
+        scientific_program["feature_recipe"] = dict(feature_recipe)
     return SeedGenomeTemplate.from_dict(
         {
             "schema_version": "ecologyrsi-dsh.seed-genome-template/1",
             "template_id": template_id,
-            "scientific_program": {
-                "predictor_ref": _program_ref(programs, "predictors", predictor_id),
-                "parameter_overrides": parameters,
-                "feature_policy_ref": {
-                    **_program_ref(programs, "feature_policies", feature_policy_id),
-                    "overrides": {},
-                },
-                "fit_policy_ref": {
-                    **_program_ref(programs, "fit_policies", "time_forward_fit@1"),
-                    "overrides": {},
-                },
-                "uncertainty_policy_ref": {
-                    **_program_ref(programs, "uncertainty_policies", "none@1"),
-                    "overrides": {},
-                },
-            },
+            "scientific_program": scientific_program,
             "agent_program": _agent_program(programs),
             "evidence_refs": [],
         }
@@ -481,6 +531,21 @@ class ProgramRegistrySnapshot:
                 template_id="greenhouse-rolling-default@1",
                 predictor_id="greenhouse-rolling-residual@1",
                 feature_policy_id="registered_greenhouse_features@1",
+            ),
+            _seed_template(
+                thawed,
+                template_id="greenhouse-recipe-default@1",
+                predictor_id="greenhouse-recipe-ridge@1",
+                feature_policy_id="authored_causal_features@1",
+                # The information-symmetry seed: seasonal_reference reads the
+                # same cell the selected seasonal baseline reads, so a recipe
+                # candidate starts able to see everything its baseline sees
+                # instead of having to search its way there under a
+                # log-space trust region that cannot step 12 -> 24 lags.
+                feature_recipe=seed_feature_recipe(
+                    horizons=(1, 6, 24),
+                    exogenous_columns=GREENHOUSE_SEED_EXOGENOUS_COLUMNS,
+                ),
             ),
             _seed_template(
                 thawed,

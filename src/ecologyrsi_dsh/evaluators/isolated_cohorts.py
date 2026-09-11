@@ -7,27 +7,39 @@ decision cohort starts strictly after all earlier cohort labels have matured.
 from __future__ import annotations
 
 import math
+from bisect import bisect_left
 
 from .epoch_cohorts import (
     CohortCapacityError, CohortCapacityReport, GenerationCohorts, PlannedBatch,
     PlannedCohort, RunAdaptationCohort, ISOLATED_PLANNER_SCHEMA,
-    ISOLATED_REUSE_POLICY, _dataset_horizons, _eligible_origins,
+    ISOLATED_REUSE_POLICY, QUICK_REUSE_POLICY, _dataset_horizons, _eligible_origins,
     _dataset_identity, _selection_partition, _strict_integer,
 )
 from ..core.models import digest
+from ..evolution.schedule import TRAINING_SCHEDULE_SCHEMA_VERSION
 
 
 class _Cursor:
     def __init__(self, eligible):
         self.eligible = eligible
+        self.timestamps = tuple(origin.origin_timestamp for origin in eligible)
         self.index = 0
         self.purged = 0
 
-    def take(self, count, *, cross_day=False):
+    def take(self, count, *, cross_day=False, span_hours=0):
         start = self.index
+        if start >= len(self.eligible):
+            raise CohortCapacityError(required=start + count,
+                                      available=len(self.eligible), max_generations=0)
         # Small adaptation batches still span at least a complete daily cycle.
         stride = max(1, math.ceil(24 / (count - 1))) if cross_day else 1
         indices = range(start, start + count * stride, stride)
+        if span_hours:
+            # Spread a fixed number of requests over time, using timestamps
+            # alone. More temporal coverage must not inflate sample counts.
+            end = max(start + count - 1, bisect_left(
+                self.timestamps, self.timestamps[start] + span_hours, lo=start))
+            indices = tuple(start + i * (end - start) // (count - 1) for i in range(count))
         if indices[-1] >= len(self.eligible):
             raise CohortCapacityError(required=indices[-1] + 1,
                                       available=len(self.eligible), max_generations=0)
@@ -45,7 +57,8 @@ def _adaptation(eligible, schedule, seed, horizons):
     cursor = _Cursor(eligible)
     batches = tuple(PlannedBatch(i, PlannedCohort(
         role="adaptation_batch",
-        origins=cursor.take(schedule.local_batch_origin_count, cross_day=True),
+        origins=cursor.take(schedule.local_batch_origin_count, cross_day=not schedule.quick,
+                            span_hours=(24 if schedule.exploratory_local_comparison else 0)),
         maximum_horizon=max(horizons),
         shared_candidate_count=schedule.finalist_count,
     )) for i in range(schedule.batch_count))
@@ -63,10 +76,11 @@ def plan_adaptation(dataset, *, schedule, seed):
 
 
 def _selection(cursor, schedule, horizons):
-    screening = PlannedCohort("screening", cursor.take(schedule.screening_origin_count),
+    screening = PlannedCohort("screening", cursor.take(schedule.screening_origin_count) if schedule.screening_origin_count else (),
                               max(horizons), shared_candidate_count=4)
-    holdout = PlannedCohort("holdout", cursor.take(schedule.selection_holdout_origin_count),
-                            max(horizons), shared_arm_count=3)
+    holdout = PlannedCohort("holdout", cursor.take(schedule.selection_holdout_origin_count,
+                            span_hours=(168 if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION else 0)),
+                            max(horizons), shared_arm_count=schedule.finalist_count + 1)
     return screening, holdout
 
 
@@ -111,6 +125,7 @@ def estimate_capacity(dataset, *, schedule, planned_generations, seed, scoring_c
         budget["total_candidate_origins"], budget["total_scoring_cells"],
         budget["total_candidate_origins"] * planned_generations,
         budget["total_scoring_cells"] * planned_generations, digest(schedule.to_dict()), seed,
-        cohort_reuse_policy=ISOLATED_REUSE_POLICY, reused_origin_occurrences=0,
+        cohort_reuse_policy=QUICK_REUSE_POLICY if schedule.quick else ISOLATED_REUSE_POLICY,
+        reused_origin_occurrences=(planned_generations - 1) * schedule.formal_origin_count_per_finalist if schedule.quick else 0,
         planner_schema=ISOLATED_PLANNER_SCHEMA,
     )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..evolution.schedule import ADAPTIVE_PROTOCOLS
+
 from ..core.model_execution_policy import NATIVE_SAMPLE_OPERATION_MAX_TOKENS
 
 from ..data.adapters import dataset_adapter
@@ -60,10 +62,12 @@ from ..evaluators.epoch_cohorts import estimate_epoch_capacity
 from ..evaluators.registry import (
     GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
     GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID,
+    GREENHOUSE_RECIPE_EVALUATOR_ID,
     TOY_DATASET_ID,
     EvaluatorRegistry,
 )
-from ..evolution.schedule import OPTIMIZATION_PROTOCOL, OptimizationSchedule
+from ..evolution.schedule import OPTIMIZATION_PROTOCOL, TRAINING_SCHEDULE_SCHEMA_VERSION, OptimizationSchedule
+from ..evolution.parameters import PARAMETER_RULES, run_parameter_contract, validate_run_parameter
 from ..evolution.strategies import StrategyRouterDSHAdapter
 from ..core.search_policy import SEARCH_GUARD_POLICY
 from ..integrations.model_canary import run_preflight, require_model_preflight
@@ -116,8 +120,8 @@ _HOST_RUNTIME_COMPATIBILITY = {
     "generation_comparison_schema": "ecologyrsi-dsh.generation-comparison/1",
     "projection_schema": "ecologyrsi-dsh.execution-projection/2",
 }
-_DEFAULT_REAL_CANDIDATE_CONCURRENCY = 4
-_MAX_REAL_CANDIDATE_CONCURRENCY = 8
+_DEFAULT_REAL_CANDIDATE_CONCURRENCY = PARAMETER_RULES["candidate_concurrency"]["default"]
+_MAX_REAL_CANDIDATE_CONCURRENCY = PARAMETER_RULES["candidate_concurrency"]["maximum"]
 _DSH_SIDECAR_PUBLIC_ERROR_CODES = frozenset(
     {
         "dsh_tool_admission_closed",
@@ -186,6 +190,7 @@ _DSH_NATIVE_STABLE_PRESET_FIELDS = (
     "preset_mountable",
     "tool_surface_verified",
     "route_resolvable",
+    "content_digest",
 )
 _DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR = {
     "greenhouse-rolling-residual@1": "greenhouse-rolling-default@1",
@@ -473,6 +478,9 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
             self.auto_progress = AutoProgressManager(self)
             self.auto_progress.recover_native_quiescence()
             self.auto_progress.recover_running()
+            from ..application.independent_evaluation import IndependentEvaluationService
+            self.independent_evaluation = IndependentEvaluationService(self)
+            self.independent_evaluation.recover_interrupted()
         except BaseException:
             if hasattr(self, "socket"):
                 self.server_close()
@@ -831,12 +839,13 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
         }
 
     def close(self) -> None:
+        independent_stopped = self.independent_evaluation.close()
         worker_stopped = self.auto_progress.close()
         # A urllib request cannot be interrupted safely. If shutdown reaches
         # its bounded join timeout, leave the ledger owned by that daemon
         # worker instead of closing SQLite underneath an in-flight generation.
         # A later close call will reclaim it after the worker exits.
-        if worker_stopped:
+        if worker_stopped and independent_stopped:
             with self.mutation_lock:
                 self.ledger.close()
             self._owner_lease.release()
@@ -912,6 +921,9 @@ class EvolutionRequestHandler(
             return
         if len(path) == 2 and path[0] == "runs":
             self._call(lambda: self._run_payload(path[1]))
+            return
+        if len(path) == 3 and path[0] == "runs" and path[2] == "independent-evaluation":
+            self._call(lambda: self.server.independent_evaluation.status(path[1]))
             return
         if len(path) == 3 and path[0] == "runs" and path[2] == "events":
             self._call(lambda: self._events_payload(path[1]))
@@ -1105,6 +1117,11 @@ class EvolutionRequestHandler(
         if path == ["evolution-capacity"]:
             self._evolution_capacity(body)
             return
+        if len(path) == 3 and path[0] == "runs" and path[2] == "independent-evaluation":
+            if set(body) != {"stage"}:
+                raise ValueError("独立评测请求只接受 stage")
+            self._send(HTTPStatus.ACCEPTED, self.server.independent_evaluation.start(path[1], body["stage"]))
+            return
         if path == ["runs"]:
             self._create_run(body)
             return
@@ -1174,6 +1191,8 @@ class EvolutionRequestHandler(
         planned_generations = _request_integer(
             body["planned_generations"], "planned_generations", minimum=1
         )
+        if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION or schedule.quick:
+            validate_run_parameter("rounds", planned_generations)
         if dataset_id == TOY_DATASET_ID:
             dataset = self.server.datasets.series(dataset_id, episode_id)
         else:
@@ -1189,19 +1208,27 @@ class EvolutionRequestHandler(
         payload = report.to_dict()
         if dataset_id != TOY_DATASET_ID:
             from ..evolution.evidence_capacity import require_guarded_cohort_evidence_capacity
+            profile = self.server.evaluators.fitness_profile(dataset_adapter(dataset_id).evaluator_id, dataset_id)
             payload = capacity_with_inference_replicas(report, schedule)
             if report.sufficient:
                 try:
                     payload["guarded_evidence"] = require_guarded_cohort_evidence_capacity(
                         dataset=dataset, schedule=schedule,
                         planned_generations=planned_generations, seed=0,
+                        profile=profile,
                     )
                 except ValueError as exc:
                     payload = capacity_with_inference_replicas(replace(report, sufficient=False), schedule)
                     payload["rejection_reason"] = str(exc)
+            payload["run_parameters"] = run_parameter_contract(profile)
+        if dataset_id != TOY_DATASET_ID:
+            payload["data_partition_summary"] = self.server.datasets.partition_summary(dataset_id, episode_id)
         payload["capacity_enforced_for_run_creation"] = (
             dataset_id != TOY_DATASET_ID
         )
+        payload["execution_plan"] = schedule.execution_plan(planned_generations,
+            cells_per_origin=1 if dataset_id == TOY_DATASET_ID else dataset_adapter(dataset_id).contract()["prediction_cells_per_origin"],
+            native=dataset_id != TOY_DATASET_ID)
         self._send(HTTPStatus.OK, payload)
 
     def _archive_run(self, run_id: str, body: dict[str, Any]) -> None:
@@ -1305,6 +1332,9 @@ class EvolutionRequestHandler(
         return body[name] if name in body else metadata.get(name)
 
     def _model_preflight(self, body: dict[str, Any]) -> None:
+        check_only = body.get("check_only", False)
+        if not isinstance(check_only, bool):
+            raise TypeError("check_only must be a bool")
         if self._request_binding(body, "execution_protocol") != DSH_NATIVE_EXECUTION_PROTOCOL:
             raise ValueError("model preflight requires the native execution protocol")
         runtime = self.server.dsh_native_runtime
@@ -1313,13 +1343,25 @@ class EvolutionRequestHandler(
         self._dsh_native_capabilities = runtime.capabilities()
         task = self._task_from_request(body, defer_remote_plan=True)
         if not self.server.model_preflight_lock.acquire(blocking=False):
-            raise ValueError("已有模型预检正在运行，请等待其完成")
+            self._send(HTTPStatus.ACCEPTED, {"passed": False, "pending": True})
+            return
         try:
-            result = run_preflight(
-                runtime, metadata=task.metadata,
-                receipt_directory=self._model_preflight_directory(),
-                force=True,
-            )
+            if check_only:
+                # A browser timeout does not cancel the server's canaries.
+                # Reconcile their exact bound identities without more model calls.
+                try:
+                    receipts = require_model_preflight(
+                        task.metadata, self._model_preflight_directory(),
+                    )
+                    result = {"passed": True, "pending": False, "receipts": list(receipts)}
+                except (OSError, ValueError, TypeError):
+                    result = {"passed": False, "pending": False}
+            else:
+                result = run_preflight(
+                    runtime, metadata=task.metadata,
+                    receipt_directory=self._model_preflight_directory(),
+                    force=False,
+                )
         finally:
             self.server.model_preflight_lock.release()
         self._send(HTTPStatus.OK, result)
@@ -1837,7 +1879,7 @@ class EvolutionRequestHandler(
                     metadata["execution_protocol"] = str(body["execution_protocol"])
                 if "optimization_protocol" in body:
                     protocol = str(body["optimization_protocol"])
-                    if protocol != OPTIMIZATION_PROTOCOL:
+                    if protocol not in ADAPTIVE_PROTOCOLS:
                         raise ValueError(
                             f"optimization_protocol must be {OPTIMIZATION_PROTOCOL}"
                         )
@@ -2083,12 +2125,12 @@ class EvolutionRequestHandler(
         autonomous_default_budget = autonomous_requested and not explicit_budget_controls
         if autonomous_default_budget:
             budget = {
-                "max_generations": 5,
-                "candidates_per_generation": 4,
-                "max_candidates": 20,
+                "max_generations": PARAMETER_RULES["rounds"]["default"],
+                "candidates_per_generation": PARAMETER_RULES["candidates_per_generation"]["default"],
+                "max_candidates": PARAMETER_RULES["max_candidates"]["default"],
             }
         if native_protocol and candidates_value is None:
-            budget["candidates_per_generation"] = 4
+            budget.setdefault("candidates_per_generation", 4)
         if autonomous_requested and strategy_model_id is None:
             # ``policy_model_id`` is retained as a migration alias, but a new
             # request is expected to name it as the strategy model.
@@ -2438,7 +2480,7 @@ class EvolutionRequestHandler(
         if (
             native_protocol
             and dataset_id != TOY_DATASET_ID
-            and evaluator_id not in {GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID, GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID, RUNTIME_EVALUATOR_ID}
+            and evaluator_id not in {GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID, GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID, RUNTIME_EVALUATOR_ID, GREENHOUSE_RECIPE_EVALUATOR_ID}
         ):
             raise ValueError(
                 "DSH-native greenhouse runs require "
@@ -2804,15 +2846,17 @@ class EvolutionRequestHandler(
         requested_optimization_protocol = metadata.get("optimization_protocol")
         requested_schedule = metadata.get("optimization_schedule")
         if native_protocol or requested_optimization_protocol is not None or requested_schedule is not None:
-            if requested_optimization_protocol not in (None, OPTIMIZATION_PROTOCOL):
+            if requested_optimization_protocol not in (None, *ADAPTIVE_PROTOCOLS):
                 raise ValueError(
                     f"optimization_protocol must be {OPTIMIZATION_PROTOCOL}"
                 )
             schedule = (
-                OptimizationSchedule.for_new_run()
+                (OptimizationSchedule.for_comparison_run() if requested_optimization_protocol == OPTIMIZATION_PROTOCOL else OptimizationSchedule.for_new_run())
                 if requested_schedule is None
                 else OptimizationSchedule.from_dict(requested_schedule)
             )
+            if requested_optimization_protocol is not None and requested_optimization_protocol != schedule.protocol:
+                raise ValueError("optimization_protocol differs from the frozen schedule")
             if manifest.candidates_per_generation != 4:
                 raise ValueError(
                     "top2_adaptive_epoch@1 requires candidates_per_generation == 4"
@@ -2821,18 +2865,21 @@ class EvolutionRequestHandler(
         sample_concurrency = metadata.get("sample_concurrency")
         candidate_concurrency = metadata.get("candidate_concurrency")
         sample_agent_batch_size = metadata.get("sample_agent_batch_size")
-        minimum_selection_samples_per_update = (
-            self.server.evaluators.minimum_selection_samples_per_update(
-                evaluator_id, dataset_id
-            )
-        )
         selection_fitness_profile = self.server.evaluators.fitness_profile(
             evaluator_id, dataset_id
         )
+        if schedule is not None and (schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION or schedule.quick):
+            validate_run_parameter("rounds", manifest.max_generations)
+            validate_run_parameter("max_candidates", manifest.max_candidates)
+            validate_run_parameter("selection_holdout_origin_count", schedule.selection_holdout_origin_count,
+                                   profile=selection_fitness_profile)
         minimum_selection_origin_samples_per_update = (
-            selection_fitness_profile.minimum_balanced_origins_per_update()
+            selection_fitness_profile.minimum_origins_for_schedule(schedule)
         )
         prediction_cells_per_origin = selection_fitness_profile.prediction_cell_count
+        minimum_selection_samples_per_update = (
+            minimum_selection_origin_samples_per_update * prediction_cells_per_origin
+        )
         cohort_capacity_report = None
         if schedule is not None:
             if not toy_domain:
@@ -2863,7 +2910,8 @@ class EvolutionRequestHandler(
                         "max_generations="
                         f"{cohort_capacity_report.max_feasible_generations}"
                     )
-                if metadata.get("search_guard_policy") == SEARCH_GUARD_POLICY:
+                if (metadata.get("search_guard_policy") == SEARCH_GUARD_POLICY
+                        or schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION or schedule.quick):
                     # Count the actual planned day identities before launching
                     # paid stages. Origin count alone cannot establish paired
                     # evidence capacity for sparse or small local batches.
@@ -2873,6 +2921,7 @@ class EvolutionRequestHandler(
                         schedule=schedule,
                         planned_generations=manifest.max_generations,
                         seed=manifest.seed,
+                        profile=selection_fitness_profile,
                     )
             else:
                 cohort_capacity_report = estimate_epoch_capacity(
@@ -3000,10 +3049,14 @@ class EvolutionRequestHandler(
                 # this field and therefore remain serial on replay.
                 "candidate_concurrency": candidate_concurrency,
                 "optimization_protocol": (
-                    OPTIMIZATION_PROTOCOL if schedule is not None else None
+                    schedule.protocol if schedule is not None else None
                 ),
                 "optimization_schedule": (
                     schedule.to_dict() if schedule is not None else None
+                ),
+                "local_comparison_policy": (
+                    run_parameter_contract()["local_comparison_mode"]
+                    if schedule is not None and schedule.exploratory_local_comparison else None
                 ),
                 "cohort_capacity_report": (
                     (capacity_with_inference_replicas(cohort_capacity_report, schedule)
@@ -3022,6 +3075,8 @@ class EvolutionRequestHandler(
                     if schedule is not None
                     else None
                 ),
+                "execution_plan": schedule.execution_plan(manifest.max_generations,
+                    cells_per_origin=prediction_cells_per_origin, native=native_protocol) if schedule is not None else None,
                 "derived_run_execution_budget": (
                     schedule.run_execution_budget(
                         manifest.max_generations,
@@ -3427,15 +3482,19 @@ class EvolutionRequestHandler(
                 raise FrozenRuntimeBindingDriftError("fitness profile")
             if metadata.get("fitness_profile_digest") != expected_profile.profile_digest:
                 raise FrozenRuntimeBindingDriftError("fitness profile digest")
+            raw_schedule = metadata.get("optimization_schedule")
+            expected_origins = expected_profile.minimum_origins_for_schedule(
+                OptimizationSchedule.from_dict(raw_schedule) if raw_schedule is not None else None
+            )
             if metadata.get("minimum_selection_samples_per_update") != (
-                expected_profile.minimum_balanced_samples_per_update()
+                expected_origins * expected_profile.prediction_cell_count
             ):
                 raise FrozenRuntimeBindingDriftError("selection sample threshold")
             if is_strict_origin_protocol(
                 metadata.get("sample_agent_protocol")
             ) and (
                 metadata.get("minimum_selection_origin_samples_per_update")
-                != expected_profile.minimum_balanced_origins_per_update()
+                != expected_origins
                 or metadata.get("prediction_cells_per_origin")
                 != expected_profile.prediction_cell_count
             ):
@@ -3694,8 +3753,8 @@ class EvolutionRequestHandler(
                 raise TypeError("pause reason must be a string")
             if raw_pause_code is not None and not isinstance(raw_pause_code, str):
                 raise TypeError("pause code must be a string")
-            pause_reason = raw_pause_reason
-            pause_code = raw_pause_code
+            pause_reason = raw_pause_reason if raw_pause_reason is not None else "运行控制接口收到暂停请求，当前进度已保存。"
+            pause_code = raw_pause_code if raw_pause_code is not None else "operator_pause"
         if native_protocol and action in {"pause", "cancel"}:
             runtime = self.server.dsh_native_runtime
             native_marker = (id(runtime), object())

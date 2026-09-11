@@ -116,10 +116,16 @@ class DshNativeRuntimeUnavailableError(RuntimeError):
         *,
         error_code: str | None = None,
         status_code: int | None = None,
+        failure_domain: str | None = None,
+        provider_status: int | None = None,
+        retry_after_ms: int | None = None,
     ) -> None:
         if error_code:
             self.error_code = error_code
         self.status_code = status_code
+        self.failure_domain = failure_domain if failure_domain in {"provider", "execution_contract"} else None
+        self.provider_status = provider_status if type(provider_status) is int and 400 <= provider_status <= 599 else None
+        self.retry_after_seconds = retry_after_ms / 1000 if type(retry_after_ms) is int and 0 < retry_after_ms <= 3_600_000 else None
         super().__init__(message)
 
 
@@ -128,15 +134,28 @@ def dsh_native_runtime_retryable(
 ) -> bool:
     """Classify service outages separately from fail-closed DSH contracts."""
 
+    if exc.error_code == "structured_child_tool_protocol_error":
+        # A protocol error may be emitted by the DSH controller after a
+        # transient provider/tool stream interruption.  Retry untyped or 503
+        # envelopes; an explicit 422 is a deterministic contract rejection.
+        # This keeps malformed model output fail-closed while preventing a
+        # missing status field from pausing an otherwise recoverable run.
+        if exc.status_code == 422:
+            return False
+        return exc.status_code is None or (
+            exc.failure_domain == "provider" and exc.status_code >= 500
+        )
+
     # Runtime HTTP 503 is also the envelope for completed, deterministic
     # failures. Their Host-owned codes take precedence over transport status:
-    # replaying an unchanged output cap or tool protocol cannot repair them.
+    # replaying an unchanged output cap cannot repair it.
     if str(getattr(exc, "error_code", "") or "") in {
         "structured_child_output_budget_exhausted",
-        "structured_child_tool_protocol_error",
+        "structured_child_execution_budget_exhausted",
         "structured_child_output_schema_invalid",
         "structured_result_missing",
         "dsh_native_runtime_contract_error",
+        "evaluation_execution_incomplete",
     }:
         return False
     status_code = getattr(exc, "status_code", None)
@@ -156,23 +175,49 @@ def dsh_native_runtime_error_in_chain(
 ) -> DshNativeRuntimeUnavailableError | None:
     """Find the bounded DSH error that owns retry classification."""
 
+    first = None
     for candidate in walk_exception_graph(exc, max_depth=max_depth):
         if isinstance(candidate, DshNativeRuntimeUnavailableError):
-            return candidate
-    return None
+            if dsh_native_runtime_evaluation_fatal(candidate):
+                return candidate
+            if first is None:
+                first = candidate
+    return first
+
+
+def preferred_execution_failure(
+    first: BaseException | None, later: BaseException,
+) -> BaseException:
+    """Preserve fatal execution faults when draining parallel workers.
+
+    A sibling's transport error or cancellation can finish first. It must not
+    hide the fault that closed admission and cancelled the native evaluator.
+    Other failures keep their existing deterministic ordering.
+    """
+    if first is None:
+        return later
+    primary = dsh_native_runtime_error_in_chain(first)
+    secondary = dsh_native_runtime_error_in_chain(later)
+    if secondary is not None and dsh_native_runtime_evaluation_fatal(secondary):
+        if primary is None or not dsh_native_runtime_evaluation_fatal(primary):
+            return later
+    return first
 
 
 def dsh_native_runtime_evaluation_fatal(exc: DshNativeRuntimeUnavailableError) -> bool:
-    """An unsupported tool protocol is a run-wide execution fault.
+    """An irrecoverable origin makes a complete frozen cohort impossible.
 
-    Do not score it as a bad forecast or keep launching the remaining cohort
-    under the same configuration. An isolated output-budget exhaustion is a
-    failed origin, with no identical-budget retry: coverage and penalty scoring
-    decide whether the candidate is usable. One verbose critic must not cancel
-    every candidate's otherwise valid Agent predictions.
+    Stop admission immediately instead of spending on siblings/retries before
+    discovering the same invalid coverage at the batch boundary.
     """
+    if exc.error_code == "structured_child_tool_protocol_error":
+        return not dsh_native_runtime_retryable(exc)
     return exc.error_code in {
-        "structured_child_tool_protocol_error",
+        "structured_child_output_budget_exhausted",
+        "structured_child_execution_budget_exhausted",
+        "structured_child_output_schema_invalid",
+        "structured_result_missing",
+        "evaluation_execution_incomplete",
     }
 
 

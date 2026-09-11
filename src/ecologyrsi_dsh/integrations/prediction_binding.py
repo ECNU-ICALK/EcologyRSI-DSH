@@ -5,7 +5,7 @@ from threading import RLock
 import math
 from time import monotonic
 
-from ..core.agent_prediction import MAX_PREDICTION_CALLS, validate_predictions
+from ..core.agent_prediction import PREDICTION_TOOL_CALL_BUDGET, validate_predictions
 from ..core.models import digest
 
 
@@ -19,14 +19,33 @@ class DshPredictionToolBinding:
         self.catalog = {item['tool_id']: dict(item) for item in catalog}
         self.executor = executor
         self.calls = {}
+        self._predictions = {}
         self._session_calls = {}
         self._lock = RLock()
 
     def restore(self, event):
+        from ..core.agent_prediction import validate_tool_event
         p = event.payload
+        validate_tool_event(p)
         if p['wave_digest'] != self.wave_digest or p['sample_ids'] != list(self.sample_ids):
             raise ValueError('recorded tool call belongs to another wave')
         self.calls[p['call_id']] = (deepcopy(p), event.event_id)
+        if p['result']['status'] == 'completed':
+            self._predictions[self._computation_key(p['arguments'])] = (
+                deepcopy(p['result']['outputs']), event.event_id
+            )
+
+    def _computation_key(self, arguments):
+        tool = self.catalog[arguments['tool_id']]
+        parameters = {
+            name: spec['default'] for name, spec in tool.get('parameters', {}).items()
+            if isinstance(spec, Mapping) and 'default' in spec
+        }
+        parameters.update(arguments['parameters'])
+        # This cache belongs to exactly one immutable wave/executor. No reuse
+        # across origins, revisions, fitting data or independent Agent replicas.
+        return digest({'wave_digest': self.wave_digest, 'tool_id': arguments['tool_id'],
+                       'version': tool['version'], 'parameters': parameters})
 
     def execute(self, arguments, *, session_id, persist):
         if set(arguments) != {'tool_id', 'wave_digest', 'call_id', 'parameters'}:
@@ -42,12 +61,17 @@ class DshPredictionToolBinding:
                 if p['arguments'] != arguments:
                     raise ValueError('prediction call_id was reused with different arguments')
             else:
-                if len(self.calls) >= MAX_PREDICTION_CALLS:
+                if len(self.calls) >= PREDICTION_TOOL_CALL_BUDGET:
                     raise ValueError('prediction tool call budget exhausted')
                 result = {'tool_id': arguments['tool_id'], 'call_id': call_id, 'wave_digest': self.wave_digest}
                 started = monotonic()
+                computation_key = self._computation_key(arguments)
+                cached = self._predictions.get(computation_key)
                 try:
-                    raw = self.executor(arguments['tool_id'], dict(arguments['parameters']))
+                    raw = (
+                        {row['sample_id']: row for row in cached[0]} if cached is not None
+                        else self.executor(arguments['tool_id'], dict(arguments['parameters']))
+                    )
                     if not isinstance(raw, Mapping) or set(raw) != set(self.sample_ids):
                         raise ValueError('tool must return every sample exactly once')
                     outputs = []
@@ -58,6 +82,8 @@ class DshPredictionToolBinding:
                             raise ValueError('tool prediction must be finite')
                         outputs.append({'sample_id': sample_id, 'predicted': float(value), 'metadata': dict(item.get('metadata', {}))})
                     result.update(status='completed', outputs=outputs)
+                    if cached is not None:
+                        result['reused_from_event_id'] = cached[1]
                 except Exception as exc:
                     from ..evaluators.sample_execution import SampleExecutionControlError
                     if isinstance(exc, SampleExecutionControlError):
@@ -77,9 +103,11 @@ class DshPredictionToolBinding:
                 event = persist(p)
                 event_id = event.event_id
                 self.calls[call_id] = (p, event_id)
+                if result['status'] == 'completed':
+                    self._predictions.setdefault(computation_key, (deepcopy(result['outputs']), event_id))
             self._session_calls.setdefault(session_id, set()).add(call_id)
             return {'accepted': True, 'event_id': event_id, 'output_digest': p['output_digest'],
-                    'remaining_calls': MAX_PREDICTION_CALLS - len(self.calls), **deepcopy(p['result'])}
+                    'remaining_calls': max(0, PREDICTION_TOOL_CALL_BUDGET - len(self.calls)), **deepcopy(p['result'])}
 
     def final_receipt(self, structured, *, session_id):
         rows = validate_predictions(structured, self.sample_ids, wave_digest=self.wave_digest)

@@ -17,6 +17,13 @@ from typing import Any, Callable, ClassVar, Mapping, Sequence
 from ..data.registry import DatasetSeries
 from ..data.splits import IndexRange
 from .baselines import fit_baseline_profile
+from .feature_recipe import (
+    MAX_RECIPE_TERMS,
+    FeaturePlan,
+    FrozenRecipe,
+    compile_feature_plan,
+    validate_feature_recipe,
+)
 
 EXOGENOUS_RIDGE_MODEL_ID = "greenhouse-exogenous-ridge@1"
 BASELINE_ALIGNED_RIDGE_MODEL_ID = "greenhouse-baseline-aligned-ridge@1"
@@ -24,12 +31,15 @@ TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID = "greenhouse-targetwise-ridge@1"
 HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID = (
     "greenhouse-horizon-targetwise-ridge@1"
 )
+RECIPE_RIDGE_MODEL_ID = "greenhouse-recipe-ridge@1"
+RECIPE_FEATURE_POLICY_ID = "authored_causal_features@1"
 
 _RESULT_SCHEMA = "ecologyrsi-dsh.greenhouse-exogenous-ridge-result/1"
 _TARGETWISE_RESULT_SCHEMA = "ecologyrsi-dsh.greenhouse-targetwise-ridge-result/1"
 _HORIZON_TARGETWISE_RESULT_SCHEMA = (
     "ecologyrsi-dsh.greenhouse-horizon-targetwise-ridge-result/1"
 )
+_RECIPE_RESULT_SCHEMA = "ecologyrsi-dsh.greenhouse-recipe-ridge-result/1"
 _ALLOWED_EXOGENOUS_ROLES = frozenset(
     {"environment", "outside_weather", "action", "crop", "root_zone", "resource"}
 )
@@ -39,6 +49,10 @@ _FEATURE_COVERAGE_THRESHOLD = 0.2
 _MAX_EXOGENOUS_FEATURES = 32
 _CONSTANT_EPSILON = 1e-12
 MAX_EXOGENOUS_RIDGE_HISTORY_STEPS = 12
+# Every candidate's feedback cohort is aligned to this much complete target
+# history, so a recipe that reaches further back than a scalar candidate is
+# still scored on a byte-identical origin set instead of an easier one.
+COHORT_HISTORY_HOURS = 48
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,11 +342,152 @@ class HorizonTargetwiseExogenousRidgeConfig:
         return float(getattr(self, name))
 
 
+@dataclass(frozen=True, slots=True)
+class RecipeRidgeConfig:
+    """Ridge over a host-compiled declarative feature recipe.
+
+    This is a fifth implementation of the ``residual_scale_for`` interface, not
+    a replacement for the four fixed-field configurations: their field names are
+    already written into historical genomes and registry digests, and keeping
+    both lets one run compare a recipe candidate against a scalar incumbent on
+    the same cohort, baseline profile and paired blocks.
+
+    Unlike the fixed-field classes this one carries no per-target or per-horizon
+    fields of its own -- the recipe's ``per_horizon``/``per_cell`` maps are keyed
+    by name, so nothing here has to know that the grid happens to be 3x3.
+    """
+
+    recipe: FrozenRecipe
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.recipe, FrozenRecipe):
+            raise TypeError("recipe ridge parameters require a validated recipe")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "RecipeRidgeConfig":
+        if not isinstance(value, Mapping):
+            raise TypeError("recipe ridge parameters must be an object")
+        unknown = set(value).difference({"feature_recipe"})
+        if unknown:
+            raise ValueError(
+                "recipe ridge parameters are invalid: unsupported "
+                + ", ".join(sorted(unknown))
+            )
+        if "feature_recipe" not in value:
+            raise ValueError("recipe ridge parameters are invalid: missing feature_recipe")
+        return cls(recipe=validate_feature_recipe(value["feature_recipe"]))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"feature_recipe": self.recipe.to_dict()}
+
+    @property
+    def ridge_alpha(self) -> float:
+        return self.recipe.ridge_alpha
+
+    @property
+    def anchor(self) -> str:
+        return self.recipe.anchor
+
+    @property
+    def history_steps(self) -> int:
+        """The frozen cohort alignment, not a searchable parameter.
+
+        Reported so callers that only need "how much history does scoring
+        assume" keep working; the actual reads come from the compiled plan.
+        """
+
+        return COHORT_HISTORY_HOURS
+
+    def residual_scale_for(self, target: str, horizon_hours: int) -> float:
+        return self.recipe.residual_scale_for(target, horizon_hours)
+
+
+_RIDGE_CONFIG_TYPES = (
+    ExogenousRidgeConfig,
+    TargetwiseExogenousRidgeConfig,
+    HorizonTargetwiseExogenousRidgeConfig,
+    RecipeRidgeConfig,
+)
 RidgeConfig = (
     ExogenousRidgeConfig
     | TargetwiseExogenousRidgeConfig
     | HorizonTargetwiseExogenousRidgeConfig
+    | RecipeRidgeConfig
 )
+
+
+def _uses_selected_baseline(config: RidgeConfig) -> bool:
+    """Whether the config anchors on the fit-selected baseline profile."""
+
+    if isinstance(config, RecipeRidgeConfig):
+        return config.anchor == "fit_selected_baseline"
+    return isinstance(config, BaselineAlignedRidgeConfig)
+
+
+def _predictor_model_id(config: RidgeConfig) -> str:
+    if isinstance(config, RecipeRidgeConfig):
+        return RECIPE_RIDGE_MODEL_ID
+    if isinstance(config, BaselineAlignedRidgeConfig):
+        return BASELINE_ALIGNED_RIDGE_MODEL_ID
+    if isinstance(config, HorizonTargetwiseExogenousRidgeConfig):
+        return HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
+    if isinstance(config, TargetwiseExogenousRidgeConfig):
+        return TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
+    return EXOGENOUS_RIDGE_MODEL_ID
+
+
+def _fit_parameters_digest(config: RidgeConfig) -> str:
+    """Fingerprint only what changes the fitted coefficients."""
+
+    if isinstance(config, RecipeRidgeConfig):
+        return _digest(
+            {
+                "feature_recipe_features": [dict(term) for term in config.recipe.features],
+                "ridge_alpha": config.ridge_alpha,
+                "anchor": config.anchor,
+            }
+        )
+    return _digest(
+        {"history_steps": config.history_steps, "ridge_alpha": config.ridge_alpha}
+    )
+
+
+def _feature_policy(
+    config: RidgeConfig,
+    plans: Mapping[tuple[str, int], FeaturePlan],
+) -> dict[str, Any]:
+    """Describe how the feature rows were built, byte-identically for old paths.
+
+    The fixed-window branch reproduces the historical literal exactly so a
+    replay of a pre-recipe run yields the same result digest. The recipe branch
+    adds the compiled read plan per cell, which is what a reviewer needs to see
+    that the candidate's visible information is a superset of the baseline's.
+    """
+
+    policy: dict[str, Any] = {
+        "coverage_threshold": _FEATURE_COVERAGE_THRESHOLD,
+        "maximum_exogenous_features": _MAX_EXOGENOUS_FEATURES,
+        "short_forward_fill_hours": 6,
+        "long_forward_fill_hours": 168,
+        "target_lag_imputation": False,
+        "label_imputation": False,
+        "baseline_imputation": False,
+    }
+    if not isinstance(config, RecipeRidgeConfig):
+        return policy
+    policy.update(
+        {
+            "policy_id": RECIPE_FEATURE_POLICY_ID,
+            "maximum_recipe_terms": MAX_RECIPE_TERMS,
+            "cohort_history_hours": COHORT_HISTORY_HOURS,
+            "feature_recipe_digest": config.recipe.digest,
+            "feature_plans": [
+                plans[key].summary()
+                for key in sorted(plans, key=lambda item: (item[0], item[1]))
+            ],
+        }
+    )
+    return policy
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +560,83 @@ def validate_horizon_targetwise_exogenous_ridge_parameters(
     return HorizonTargetwiseExogenousRidgeConfig.from_mapping(value).to_dict()
 
 
+# Host-authored starting point, not a discovered one. Structural steps obey the
+# same log-space trust region as scalars, so 12 -> 24 lags is unreachable in one
+# move; seeding ``target_lag{k:24}`` and ``seasonal_reference{period:24}`` is what
+# makes "candidate-visible information superset of baseline-visible information"
+# true from generation zero. The agent's job is to improve on this, not to
+# rediscover it.
+#
+# The core reads the target's own history only, so it compiles against any
+# dataset. Exogenous columns are the per-dataset part and are supplied by the
+# adapter layer, which is why they are a parameter rather than a literal here.
+SEED_FEATURE_RECIPE_CORE: tuple[Mapping[str, Any], ...] = (
+    {"op": "target_lag", "k": 0},
+    {"op": "target_lag", "k": 1},
+    {"op": "target_lag", "k": 2},
+    {"op": "target_lag", "k": 3},
+    {"op": "target_lag", "k": 24},
+    {"op": "seasonal_reference", "period": 24},
+    {"op": "seasonal_delta", "period": 24},
+    {"op": "diurnal_sin_cos", "period": 24},
+    {"op": "rolling_mean", "w": 6},
+)
+SEED_RESIDUAL_SCALE = 0.2
+# The greenhouse adapter's exogenous contribution. Outside temperature is the
+# strongest causal driver of every indoor target and is available at lag 0.
+GREENHOUSE_SEED_EXOGENOUS_COLUMNS: tuple[str, ...] = ("outside_temperature",)
+
+
+def seed_feature_recipe(
+    *,
+    horizons: Sequence[int],
+    exogenous_columns: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Build the host-authored seed recipe for one task's horizon grid."""
+
+    return {
+        "features": [
+            *(dict(term) for term in SEED_FEATURE_RECIPE_CORE),
+            *(
+                {"op": "exogenous", "col": str(column), "lag": 0}
+                for column in exogenous_columns
+            ),
+        ],
+        "model": {"kind": "ridge", "alpha": 0.1, "anchor": "fit_selected_baseline"},
+        "per_horizon": {
+            str(int(horizon)): {"residual_scale": SEED_RESIDUAL_SCALE}
+            for horizon in sorted({int(horizon) for horizon in horizons})
+        },
+    }
+
+
+def validate_recipe_ridge_parameters(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a normalized recipe ridge parameter mapping.
+
+    Column admissibility is deliberately *not* checked here: it needs the
+    dataset series, so it is enforced by ``compile_feature_plan`` at fit time.
+    Everything the grammar can decide without the data is decided now.
+    """
+
+    return RecipeRidgeConfig.from_mapping(value).to_dict()
+
+
+def seed_recipe_parameters(
+    *,
+    horizons: Sequence[int] = (1, 6, 24),
+    exogenous_columns: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Return validated default parameters for the recipe predictor."""
+
+    return validate_recipe_ridge_parameters(
+        {
+            "feature_recipe": seed_feature_recipe(
+                horizons=horizons, exogenous_columns=exogenous_columns
+            )
+        }
+    )
+
+
 def fit_predict_exogenous_ridge(
     series: DatasetSeries,
     *,
@@ -431,25 +663,10 @@ def fit_predict_exogenous_ridge(
 
     resolved_config: RidgeConfig = (
         config
-        if isinstance(
-            config,
-            (
-                ExogenousRidgeConfig,
-                TargetwiseExogenousRidgeConfig,
-                HorizonTargetwiseExogenousRidgeConfig,
-            ),
-        )
+        if isinstance(config, _RIDGE_CONFIG_TYPES)
         else ExogenousRidgeConfig.from_mapping(config)
     )
-    model_id = (
-        BASELINE_ALIGNED_RIDGE_MODEL_ID
-        if isinstance(resolved_config, BaselineAlignedRidgeConfig)
-        else HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
-        if isinstance(resolved_config, HorizonTargetwiseExogenousRidgeConfig)
-        else TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
-        if isinstance(resolved_config, TargetwiseExogenousRidgeConfig)
-        else EXOGENOUS_RIDGE_MODEL_ID
-    )
+    model_id = _predictor_model_id(resolved_config)
     resolved_targets = _validate_targets(targets, series)
     resolved_horizons = _validate_horizons(horizons)
     _validate_series(series)
@@ -471,11 +688,11 @@ def fit_predict_exogenous_ridge(
         or not isinstance(evaluation_history_steps, int)
         or not resolved_config.history_steps
         <= evaluation_history_steps
-        <= MAX_EXOGENOUS_RIDGE_HISTORY_STEPS
+        <= COHORT_HISTORY_HOURS
     ):
         raise ValueError(
             "evaluation_history_steps must be an integer between the candidate "
-            "history_steps and the supported maximum"
+            "history requirement and the frozen cohort alignment"
         )
 
     requested_partitions = frozenset(prediction_partitions)
@@ -487,18 +704,35 @@ def fit_predict_exogenous_ridge(
         "training_fit": series.partitions["training_fit"],
         "training_feedback": series.partitions["training_feedback"],
     }
+    # One compiled plan per cell. Compiling before any fitting means a recipe
+    # that reaches past the frozen cohort alignment, or that would read the
+    # future, is rejected before a single model is trained.
+    recipe_plans: dict[tuple[str, int], FeaturePlan] = {}
+    if isinstance(resolved_config, RecipeRidgeConfig):
+        for target in resolved_targets:
+            for horizon in resolved_horizons:
+                recipe_plans[(target, horizon)] = compile_feature_plan(
+                    resolved_config.recipe,
+                    series=series,
+                    target=target,
+                    horizon_hours=horizon,
+                    allowed_roles=_ALLOWED_EXOGENOUS_ROLES,
+                    max_history_hours=COHORT_HISTORY_HOURS,
+                )
     baseline_profile = (
         fit_baseline_profile(
             series, targets=resolved_targets, horizons=resolved_horizons
         )
-        if isinstance(resolved_config, BaselineAlignedRidgeConfig)
+        if _uses_selected_baseline(resolved_config)
         else None
     )
-    baseline_index = {
+    # Shared by the baseline alignment and the recipe's sparse exogenous reads,
+    # so both resolve offsets against one identical timestamp index.
+    timestamp_index = {
         series.timestamps[index]: index
         for selected in ranges.values()
         for index in range(selected.start, selected.end)
-    } if baseline_profile is not None else {}
+    } if baseline_profile is not None or recipe_plans else {}
     external_features = _external_feature_roles(series)
     filled_by_partition = {
         partition: _causal_forward_fill(series, selected, external_features)
@@ -513,12 +747,17 @@ def fit_predict_exogenous_ridge(
         for horizon in resolved_horizons:
             if check_control is not None:
                 check_control()
+            plan = recipe_plans.get((target, horizon))
+            plan_offsets = (
+                plan.required_timestamp_offsets if plan is not None else None
+            )
             fit_samples = _base_samples(
                 series,
                 target,
                 ranges["training_fit"],
                 horizon,
                 resolved_config.history_steps,
+                offsets=plan_offsets,
             )
             feedback_samples = _base_samples(
                 series,
@@ -526,6 +765,7 @@ def fit_predict_exogenous_ridge(
                 ranges["training_feedback"],
                 horizon,
                 resolved_config.history_steps,
+                offsets=plan_offsets,
             ) if "training_feedback" in requested_partitions else ()
             if evaluation_history_steps is not None and "training_feedback" in requested_partitions:
                 cohort_pairs = {
@@ -546,11 +786,11 @@ def fit_predict_exogenous_ridge(
             if baseline_profile is not None:
                 fit_samples = _align_sample_baselines(
                     series, target, horizon, fit_samples,
-                    baseline_profile, baseline_index,
+                    baseline_profile, timestamp_index,
                 )
                 feedback_samples = _align_sample_baselines(
                     series, target, horizon, feedback_samples,
-                    baseline_profile, baseline_index,
+                    baseline_profile, timestamp_index,
                 )
             model, coefficients, statistics = _fit_model(
                 series,
@@ -560,6 +800,8 @@ def fit_predict_exogenous_ridge(
                 target_external_features,
                 filled_by_partition["training_fit"],
                 resolved_config, check_control=check_control,
+                plan=plan,
+                index_by_timestamp=timestamp_index,
             )
             if baseline_profile is not None:
                 selected_baseline = next(
@@ -569,7 +811,7 @@ def fit_predict_exogenous_ridge(
                 model.update({
                     "prediction_model_id": model_id,
                     "parameter_digest": _digest(resolved_config.to_dict()),
-                    "fit_parameters_digest": _digest({"history_steps": resolved_config.history_steps, "ridge_alpha": resolved_config.ridge_alpha}),
+                    "fit_parameters_digest": _fit_parameters_digest(resolved_config),
                     "baseline_profile_digest": baseline_profile["digest"],
                     "requested_baseline_id": selected_baseline,
                     "baseline_selection_partition": "training_fit",
@@ -616,6 +858,8 @@ def fit_predict_exogenous_ridge(
                 fitted.coefficients,
                 resolved_config,
                 defer_prediction=partition in deferred_partitions,
+                plan=recipe_plans.get((fitted.target, fitted.horizon)),
+                index_by_timestamp=timestamp_index,
             )
             prediction_rows.extend(rows)
             prediction_fallback_rows += fallback_rows
@@ -628,7 +872,9 @@ def fit_predict_exogenous_ridge(
 
     result = {
         "schema_version": (
-            "ecologyrsi-dsh.greenhouse-baseline-aligned-ridge-result/1"
+            _RECIPE_RESULT_SCHEMA
+            if model_id == RECIPE_RIDGE_MODEL_ID
+            else "ecologyrsi-dsh.greenhouse-baseline-aligned-ridge-result/1"
             if model_id == BASELINE_ALIGNED_RIDGE_MODEL_ID
             else _HORIZON_TARGETWISE_RESULT_SCHEMA
             if model_id == HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
@@ -640,15 +886,7 @@ def fit_predict_exogenous_ridge(
         "parameters": resolved_config.to_dict(),
         "training_partition": "training_fit",
         "evaluation_partition": "training_feedback",
-        "feature_policy": {
-            "coverage_threshold": _FEATURE_COVERAGE_THRESHOLD,
-            "maximum_exogenous_features": _MAX_EXOGENOUS_FEATURES,
-            "short_forward_fill_hours": 6,
-            "long_forward_fill_hours": 168,
-            "target_lag_imputation": False,
-            "label_imputation": False,
-            "baseline_imputation": False,
-        },
+        "feature_policy": _feature_policy(resolved_config, recipe_plans),
         "models": models,
         "prediction_rows": prediction_rows,
     }
@@ -661,6 +899,12 @@ def fit_predict_exogenous_ridge(
     # Keep this boundary strict even if future feature engineering changes.
     json.dumps(result, ensure_ascii=False, sort_keys=True, allow_nan=False)
     return result
+
+
+def fitted_model_identity(models: Sequence[Mapping[str, Any]]) -> str:
+    """Fingerprint learned parameters independently of prediction-batch counters."""
+    excluded = {"feedback_rows", "prediction_fallback_rows", "fit_digest_sha256"}
+    return _digest([{k: v for k, v in model.items() if k not in excluded} for model in models])
 
 
 def predict_fitted_exogenous_ridge(
@@ -692,14 +936,7 @@ def predict_fitted_exogenous_ridge(
         raise TypeError("ridge tool label_free_context must be an object")
     resolved_config: RidgeConfig = (
         config
-        if isinstance(
-            config,
-            (
-                ExogenousRidgeConfig,
-                TargetwiseExogenousRidgeConfig,
-                HorizonTargetwiseExogenousRidgeConfig,
-            ),
-        )
+        if isinstance(config, _RIDGE_CONFIG_TYPES)
         else ExogenousRidgeConfig.from_mapping(config)
     )
     matching = [
@@ -712,7 +949,7 @@ def predict_fitted_exogenous_ridge(
     if len(matching) != 1:
         raise ValueError("ridge tool requires exactly one fitted target-horizon model")
     model = matching[0]
-    if isinstance(resolved_config, BaselineAlignedRidgeConfig):
+    if _uses_selected_baseline(resolved_config):
         _validate_aligned_reference(
             model, label_free_context, baseline_value,
             target, horizon_hours, resolved_config,
@@ -786,18 +1023,27 @@ def _fit_model(
     filled: Mapping[str, tuple[float | None, ...]],
     config: RidgeConfig,
     *, check_control: Callable[[], None] | None = None,
+    plan: FeaturePlan | None = None,
+    index_by_timestamp: Mapping[int, int] | None = None,
 ) -> tuple[dict[str, Any], tuple[float, ...], tuple[_FeatureStatistic, ...]]:
-    if isinstance(config, BaselineAlignedRidgeConfig) and config.residual_scale_for(target, horizon) == 0:
+    if _uses_selected_baseline(config) and config.residual_scale_for(target, horizon) == 0:
         return _model_metadata(target, horizon, "baseline_only", None, (), (), ()), (), ()
-    selected, coverage, medians = _select_external_features(
-        samples, external_features, filled
-    )
-    feature_names = _feature_names(target, config.history_steps, selected)
-    feature_kinds = (
-        [("target_lag", None)] * config.history_steps
-        + [("exogenous", name) for name in selected]
-        + [("hour_cycle", None), ("hour_cycle", None)]
-    )
+    if plan is not None:
+        if index_by_timestamp is None:
+            raise ValueError("a compiled recipe fit requires a timestamp index")
+        selected: tuple[str, ...] = plan.exogenous_columns
+        feature_names: tuple[str, ...] = plan.feature_names
+        feature_kinds = _recipe_feature_kinds(plan)
+    else:
+        selected, coverage, medians = _select_external_features(
+            samples, external_features, filled
+        )
+        feature_names = _feature_names(target, config.history_steps, selected)
+        feature_kinds = (
+            [("target_lag", None)] * config.history_steps
+            + [("exogenous", name) for name in selected]
+            + [("hour_cycle", None), ("hour_cycle", None)]
+        )
 
     if not samples:
         model = _model_metadata(
@@ -811,12 +1057,21 @@ def _fit_model(
         )
         return model, (), ()
 
+    if plan is not None:
+        coverage, medians = _recipe_external_statistics(samples, selected, filled)
+
     try:
         raw_rows = []
         for index, sample in enumerate(samples):
             if check_control is not None and index % 128 == 0:
                 check_control()
-            raw_rows.append(_raw_feature_row(series, sample, target, selected, filled, medians))
+            raw_rows.append(
+                _recipe_feature_row(
+                    plan, series, sample, filled, medians, index_by_timestamp
+                )
+                if plan is not None
+                else _raw_feature_row(series, sample, target, selected, filled, medians)
+            )
         statistics: list[_FeatureStatistic] = []
         for column, (name, (kind, source_feature)) in enumerate(
             zip(feature_names, feature_kinds)
@@ -917,6 +1172,8 @@ def _predict_rows(
     config: RidgeConfig,
     *,
     defer_prediction: bool = False,
+    plan: FeaturePlan | None = None,
+    index_by_timestamp: Mapping[int, int] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     rows: list[dict[str, Any]] = []
     fallback_rows = 0
@@ -932,22 +1189,25 @@ def _predict_rows(
     }
     target_residual_scale = config.residual_scale_for(target, horizon)
     predictor_state: dict[str, Any] = {
-        "predictor_id": (
-            BASELINE_ALIGNED_RIDGE_MODEL_ID
-            if isinstance(config, BaselineAlignedRidgeConfig)
-            else HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
-            if isinstance(config, HorizonTargetwiseExogenousRidgeConfig)
-            else TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
-            if isinstance(config, TargetwiseExogenousRidgeConfig)
-            else EXOGENOUS_RIDGE_MODEL_ID
-        ),
+        "predictor_id": _predictor_model_id(config),
         "history_steps": int(config.history_steps),
         "ridge_alpha": float(config.ridge_alpha),
         "residual_scale": target_residual_scale,
         "target_residual_scale": target_residual_scale,
         "used_target_persistence": target_residual_scale == 0.0,
     }
-    if isinstance(config, TargetwiseExogenousRidgeConfig):
+    if isinstance(config, RecipeRidgeConfig):
+        if plan is None or index_by_timestamp is None:
+            raise ValueError("a recipe prediction requires a compiled plan and index")
+        predictor_state.pop("history_steps")
+        predictor_state.update({
+            "feature_recipe_digest": plan.recipe_digest,
+            "feature_recipe_anchor": config.anchor,
+            "recipe_term_count": config.recipe.term_count,
+            "required_timestamp_offsets": list(plan.required_timestamp_offsets),
+            "cohort_history_hours": COHORT_HISTORY_HOURS,
+        })
+    elif isinstance(config, TargetwiseExogenousRidgeConfig):
         predictor_state["targetwise_residual_scales"] = {
             name: value
             for name, value in config.to_dict().items()
@@ -965,13 +1225,17 @@ def _predict_rows(
             for horizon in (1, 6, 24)
         }
     for sample in samples:
-        baseline_only = isinstance(config, BaselineAlignedRidgeConfig) and target_residual_scale == 0
+        baseline_only = _uses_selected_baseline(config) and target_residual_scale == 0
         used_fallback = not baseline_only and (not coefficients or not statistics)
         predicted_residual = 0.0
         raw_features: tuple[float, ...] = ()
         if not used_fallback and not baseline_only:
-            raw_features = _raw_feature_row(
-                series, sample, target, selected, filled, medians
+            raw_features = (
+                _recipe_feature_row(
+                    plan, series, sample, filled, medians, index_by_timestamp
+                )
+                if plan is not None
+                else _raw_feature_row(series, sample, target, selected, filled, medians)
             )
             if not defer_prediction:
                 normalized = _standardize(raw_features, statistics)
@@ -1117,6 +1381,76 @@ def _feature_names(
         "time:hour_sin",
         "time:hour_cos",
     )
+
+
+def _recipe_external_statistics(
+    samples: Sequence[_BaseSample],
+    columns: Sequence[str],
+    filled: Mapping[str, tuple[float | None, ...]],
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Coverage and median for authored columns.
+
+    Authored columns are never silently dropped -- doing so would change the
+    feature width and break the guarantee that the fit path and the tool path
+    build identical rows -- so a column too sparse to impute is rejected.
+    """
+
+    coverage: dict[str, float] = {}
+    medians: dict[str, float] = {}
+    for name in columns:
+        observed = [
+            value
+            for sample in samples
+            if (value := filled[name][sample.origin_index]) is not None
+        ]
+        coverage[name] = len(observed) / len(samples) if samples else 0.0
+        if coverage[name] < _FEATURE_COVERAGE_THRESHOLD:
+            raise ValueError(
+                f"feature_recipe column {name} covers only "
+                f"{coverage[name]:.3f} of the fit partition, below the required "
+                f"{_FEATURE_COVERAGE_THRESHOLD}"
+            )
+        medians[name] = float(median(observed))
+    return coverage, medians
+
+
+def _recipe_feature_row(
+    plan: FeaturePlan,
+    series: DatasetSeries,
+    sample: _BaseSample,
+    filled: Mapping[str, tuple[float | None, ...]],
+    medians: Mapping[str, float],
+    index_by_timestamp: Mapping[int, int],
+) -> tuple[float, ...]:
+    origin_timestamp = series.timestamps[sample.origin_index]
+    target_reads = dict(zip(plan.required_timestamp_offsets, sample.target_lags))
+    exogenous_reads: dict[tuple[str, int], float] = {}
+    for column, offsets in plan.exogenous_timestamp_offsets.items():
+        for offset in offsets:
+            index = index_by_timestamp.get(origin_timestamp + offset)
+            value = None if index is None else filled[column][index]
+            exogenous_reads[(column, offset)] = (
+                float(value) if value is not None else medians[column]
+            )
+    return plan.row(
+        origin_timestamp=origin_timestamp,
+        target_reads=target_reads,
+        exogenous_reads=exogenous_reads,
+    )
+
+
+def _recipe_feature_kinds(
+    plan: FeaturePlan,
+) -> list[tuple[str, str | None]]:
+    kinds: list[tuple[str, str | None]] = []
+    for name in plan.feature_names:
+        if name.startswith("exogenous:"):
+            kinds.append(("exogenous", name.split(":", 2)[1]))
+        elif name.startswith("time:"):
+            kinds.append(("hour_cycle", None))
+        else:
+            kinds.append(("target_recipe", None))
+    return kinds
 
 
 def _standardize(
@@ -1267,9 +1601,14 @@ def _validate_aligned_reference(
     baseline: float,
     target: str,
     horizon: int,
-    config: BaselineAlignedRidgeConfig,
+    config: RidgeConfig,
 ) -> None:
-    """Fence deferred/replayed inference to the fitted baseline identity."""
+    """Fence deferred/replayed inference to the fitted baseline identity.
+
+    The expected model id and fit fingerprint are derived from ``config`` rather
+    than hardcoded, so a recipe candidate is fenced to *its* fit just as tightly
+    as a fixed-window one instead of being waved through.
+    """
 
     reference = context.get("baseline_reference")
     provenance = context.get("causal_provenance")
@@ -1285,8 +1624,8 @@ def _validate_aligned_reference(
         or reference.get("target") != target
         or reference.get("horizon_hours") != horizon
         or reference.get("selection_partition") != "training_fit"
-        or model.get("prediction_model_id") != BASELINE_ALIGNED_RIDGE_MODEL_ID
-        or model.get("fit_parameters_digest") != _digest({"history_steps": config.history_steps, "ridge_alpha": config.ridge_alpha})
+        or model.get("prediction_model_id") != _predictor_model_id(config)
+        or model.get("fit_parameters_digest") != _fit_parameters_digest(config)
         or not isinstance(model.get("baseline_profile_digest"), str)
         or reference.get("baseline_profile_digest") != model.get("baseline_profile_digest")
         or requested != model.get("requested_baseline_id")
@@ -1317,7 +1656,24 @@ def _base_samples(
     selected: IndexRange,
     horizon: int,
     history_steps: int,
+    *,
+    offsets: Sequence[int] | None = None,
 ) -> tuple[_BaseSample, ...]:
+    """Collect samples whose every required target read is inside ``selected``.
+
+    ``offsets`` are non-positive hour offsets from the forecast origin, in the
+    order the feature row expects them. The fixed-window path passes ``None``
+    and gets the contiguous ``0..history_steps-1`` lags; a compiled recipe
+    passes its own sparse offsets so both paths resolve one shared history.
+    """
+
+    resolved_offsets = (
+        tuple(-lag for lag in range(history_steps)) if offsets is None else tuple(offsets)
+    )
+    if not resolved_offsets or resolved_offsets[0] != 0 or any(
+        offset > 0 for offset in resolved_offsets
+    ):
+        raise ValueError("target read offsets must start at the origin and not look ahead")
     timestamp_to_index = {
         series.timestamps[index]: index for index in range(selected.start, selected.end)
     }
@@ -1329,8 +1685,8 @@ def _base_samples(
         if label_index is None:
             continue
         lag_indices = [
-            timestamp_to_index.get(origin_timestamp - lag)
-            for lag in range(history_steps)
+            timestamp_to_index.get(origin_timestamp + offset)
+            for offset in resolved_offsets
         ]
         if any(index is None for index in lag_indices):
             continue

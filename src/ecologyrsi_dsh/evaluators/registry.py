@@ -7,14 +7,17 @@ rows never enter this local adaptive loop.
 
 from __future__ import annotations
 
+from ..evolution.schedule import ADAPTIVE_PROTOCOLS
+
 from pathlib import Path
 
 from ..evolution.agent_policy import summarize_agent_tools, rebind_agent_policy
 
+from ..core.agent_prediction import successful_agent_provenance_passes
 from ..core.prediction_policy import RUNTIME_EVALUATOR_ID, prediction_usage
 
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, replace
 from statistics import fmean
 from typing import Any
@@ -66,6 +69,16 @@ from .gateway_sample_adapter import (
 from .dsh_sample_adapter import DshSampleCollaborationAdapter
 from .agent_model_tools import AgentModelTools
 from .fitness import FitnessProfile
+from .noninferiority import (
+    CELL_NONINFERIORITY_GATE_ID,
+    CELL_NONINFERIORITY_STATISTIC,
+    EVIDENCE_SUFFICIENCY_GATE_ID,
+    RELAXATION_DEBT_GATE_ID,
+    CellNoninferiorityAssessment,
+    NoninferiorityPolicy,
+    assess_cell_noninferiority,
+    assess_relaxation_debt,
+)
 from .epoch_cohorts import PlannedCohort
 from .shared_sample_context import sibling_stage_context_digest
 from .baselines import (
@@ -77,12 +90,17 @@ from .baselines import (
 from .greenhouse_prediction import (
     BASELINE_ALIGNED_RIDGE_MODEL_ID,
     BaselineAlignedRidgeConfig,
+    COHORT_HISTORY_HOURS,
     EXOGENOUS_RIDGE_MODEL_ID,
     HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
     MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
+    RECIPE_FEATURE_POLICY_ID,
+    RECIPE_RIDGE_MODEL_ID,
     TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
     ExogenousRidgeConfig,
     HorizonTargetwiseExogenousRidgeConfig,
+    RecipeRidgeConfig,
+    RidgeConfig,
     TargetwiseExogenousRidgeConfig,
     predict_fitted_exogenous_ridge,
 )
@@ -129,6 +147,13 @@ GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID = (
 GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID = (
     "greenhouse_multihorizon_time_forward@3"
 )
+# A separate id rather than a wider prediction_model_ids list on an existing
+# evaluator: the archived run's evidence is only replayable while every
+# historical catalog entry keeps its configuration_digest, and that digest
+# covers prediction_model_ids. Recipe candidates therefore get their own
+# evaluator, which also hosts the baseline-aligned predictor so an incumbent
+# and a recipe challenger share one cohort, baseline profile and block set.
+GREENHOUSE_RECIPE_EVALUATOR_ID = "greenhouse_recipe_multihorizon_forward@1"
 TOY_EVALUATOR_ID = "toy_time_forward@1"
 TOY_PREDICTOR_MODEL_ID = "toy-rolling-water@1"
 GREENHOUSE_ROLLING_PREDICTOR_ID = "greenhouse-rolling-residual@1"
@@ -639,6 +664,40 @@ def _feedback_update_limit(task: TaskManifest) -> int | None:
     return raw
 
 
+def _resolve_origin_history_alignment(
+    task: TaskManifest, config: RidgeConfig
+) -> int:
+    """How much complete target history every candidate's cohort is aligned to.
+
+    This is a *run-level* constant, not a searchable parameter: the feedback
+    cohort is intersected down to the origins obtainable at this depth, so an
+    incumbent reading 12 lags and a challenger reading 24 are scored on one
+    byte-identical origin set instead of the challenger silently getting an
+    easier one. Manifests without the key keep the historical 12-hour
+    alignment, so old runs stay replayable; a run that wants recipes must
+    freeze the wider alignment explicitly rather than have it widened for it.
+    """
+    raw = task.metadata.get("origin_history_alignment_hours")
+    alignment = MAX_EXOGENOUS_RIDGE_HISTORY_STEPS if raw is None else raw
+    if (
+        isinstance(alignment, bool)
+        or not isinstance(alignment, int)
+        or not 1 <= alignment <= COHORT_HISTORY_HOURS
+    ):
+        raise ValueError(
+            "origin_history_alignment_hours must be an integer between 1 and "
+            f"{COHORT_HISTORY_HOURS}"
+        )
+    if config.history_steps > alignment:
+        raise ValueError(
+            "predictor requires "
+            f"{config.history_steps} hours of origin history but this task is "
+            f"aligned to {alignment}; freeze "
+            "origin_history_alignment_hours before binding this predictor"
+        )
+    return alignment
+
+
 def _select_task_evaluation_cohort(
     task: TaskManifest,
     candidate: Candidate,
@@ -930,9 +989,101 @@ def _complete_scoring_rows(
     return completed
 
 
+def _noninferiority_policy(adapter: DatasetAdapter | None) -> NoninferiorityPolicy:
+    """Resolve the per-cell gate's constants from the dataset contract.
+
+    The defaults live in ``NoninferiorityPolicy`` so a dataset that predates the
+    two new adapter fields still describes a complete gate; the adapter is the
+    override, not the source.
+    """
+
+    default = NoninferiorityPolicy()
+    if adapter is None:
+        return default
+    return NoninferiorityPolicy(
+        hard_cap_ratio=float(
+            getattr(adapter, "cell_regression_hard_cap", default.hard_cap_ratio)
+        ),
+        alpha=float(
+            getattr(adapter, "cell_noninferiority_alpha", default.alpha)
+        ),
+    )
+
+
+def _per_cell_noninferiority(
+    promotion_block_evidence: Mapping[str, Any],
+    cell_metrics: Sequence[MutableMapping[str, Any]],
+    adapter: DatasetAdapter | None,
+    *,
+    effective_degrees_of_freedom: int | None = None,
+) -> CellNoninferiorityAssessment:
+    """The one per-cell regression check, shared by both evaluation paths.
+
+    Previously this was two byte-identical comprehensions a thousand lines apart
+    -- a standing invitation for the single-horizon and multi-horizon paths to
+    drift into judging candidates by different rules. There is now one call site
+    per path and one implementation.
+
+    It also stamps ``paired_block_count`` onto each scored cell row. That field
+    is read by ``build_formal_fitness_assessment`` and until now had no producer
+    anywhere in ``src/`` -- the formal tests passed only because a fixture filled
+    it in by hand. The count is a by-product of the interval this function
+    already computes, so writing it here costs nothing and removes one place
+    where a test could pass on data production never emits.
+    """
+
+    assessment = assess_cell_noninferiority(
+        promotion_block_evidence,
+        cell_metrics=cell_metrics,
+        policy=_noninferiority_policy(adapter),
+        legacy_tolerance=(
+            adapter.no_regression_tolerance
+            if adapter is not None
+            else GREENHOUSE_NO_REGRESSION_TOLERANCE
+        ),
+        effective_degrees_of_freedom=effective_degrees_of_freedom,
+    )
+    counts = {
+        (str(cell["target"]), int(cell["horizon_hours"])): int(
+            cell["paired_block_count"]
+        )
+        for cell in assessment.evidence["cells"]
+    }
+    for row in cell_metrics:
+        key = (str(row.get("target")), row.get("horizon_hours"))
+        if key in counts:
+            row["paired_block_count"] = counts[key]
+    return assessment
+
+
+def _relaxation_debt(
+    assessment: CellNoninferiorityAssessment,
+    objective_score: Any,
+    adapter: DatasetAdapter | None,
+) -> dict[str, Any]:
+    """Escalate the overall skill floor for a candidate that used the relaxation.
+
+    The escalated floor is the same practical delta the selection layer already
+    enforces, so this does not invent a threshold -- it reuses the one the
+    project already treats as "a real gain" and applies it where the evaluator
+    previously accepted 1e-9.
+    """
+
+    return assess_relaxation_debt(
+        assessment,
+        objective_score=objective_score,
+        escalated_minimum_skill=(
+            adapter.selection_minimum_score_delta
+            if adapter is not None
+            else V2_MINIMUM_SCORE_DELTA
+        ),
+    )
+
+
 def _greenhouse_hard_gates(adapter: DatasetAdapter | None = None) -> list[dict[str, Any]]:
     """Describe the exact evaluator checks in a machine-readable form."""
 
+    policy = _noninferiority_policy(adapter)
     return [
         {
             "id": "positive_overall_skill",
@@ -942,13 +1093,59 @@ def _greenhouse_hard_gates(adapter: DatasetAdapter | None = None) -> list[dict[s
             "threshold": adapter.minimum_skill if adapter else GREENHOUSE_MIN_SKILL_EXCLUSIVE,
         },
         {
-            "id": "all_targets_no_regression",
-            "scope": "per_target",
+            # Ordered before the per-cell gate on purpose. A per-cell interval
+            # widens as paired blocks are lost, so a candidate could otherwise
+            # buy tolerance by shrinking its own cohort. Sufficiency is decided
+            # first, on the cohort's shape alone.
+            "id": EVIDENCE_SUFFICIENCY_GATE_ID,
+            "scope": "cohort",
+            "metric": "paired_block_count",
+            "operator": ">=",
+            "threshold": policy.minimum_paired_blocks,
+            "companion_metric": "valid_three_day_start_count",
+            "companion_operator": ">=",
+            "companion_threshold": policy.minimum_valid_three_day_starts,
+            "moving_block_days": policy.moving_block_days,
+        },
+        {
+            "id": CELL_NONINFERIORITY_GATE_ID,
+            "scope": "per_prediction_cell",
             "reduction": "all",
-            "metric": "normalized_rmse",
+            "statistic": CELL_NONINFERIORITY_STATISTIC,
+            "metric": "d_lcb",
             "operator": "<=",
-            "reference_metric": "baseline_normalized_rmse",
-            "tolerance": adapter.no_regression_tolerance if adapter else GREENHOUSE_NO_REGRESSION_TOLERANCE,
+            "threshold": 0.0,
+            "absolute_cap_metric": "d",
+            "absolute_cap_operator": "<=",
+            "absolute_cap_ratio": policy.hard_cap_ratio,
+            "absolute_cap_reference_metric": "nrmse_base",
+            "confidence_level": policy.confidence_level,
+            "bootstrap_resamples": policy.bootstrap_resamples,
+            "minimum_paired_blocks": policy.minimum_paired_blocks,
+            "prerequisite_gate": EVIDENCE_SUFFICIENCY_GATE_ID,
+            # The rule this replaces, named so the audit trail is explicit about
+            # what changed rather than leaving it to be inferred from a diff.
+            "replaces": "all_targets_no_regression",
+            "legacy_tolerance": adapter.no_regression_tolerance
+            if adapter
+            else GREENHOUSE_NO_REGRESSION_TOLERANCE,
+        },
+        {
+            # Conditional, and deliberately so. It is dormant for a candidate
+            # whose every cell is strictly better, and escalates the overall
+            # requirement only for one that drew on the per-cell relaxation.
+            # Declared after the gate it is conditioned on so the ordering in
+            # this list reads as the implication it is.
+            "id": RELAXATION_DEBT_GATE_ID,
+            "scope": "overall",
+            "metric": "objective_score",
+            "operator": ">",
+            "threshold": adapter.selection_minimum_score_delta
+            if adapter
+            else V2_MINIMUM_SCORE_DELTA,
+            "applies_when": "gate_relaxation_audit.requires_stronger_overall_evidence",
+            "conditioned_on_gate": CELL_NONINFERIORITY_GATE_ID,
+            "escalates_gate": "positive_overall_skill",
         },
         {
             "id": "no_constraint_violations",
@@ -988,6 +1185,11 @@ def _greenhouse_scoring_contract(adapter: DatasetAdapter | None = None) -> dict[
         "minimum_paired_blocks": PROMOTION_MINIMUM_PAIRED_BLOCKS,
         "block_hours": PROMOTION_BLOCK_HOURS,
         "bootstrap_resamples": PROMOTION_BOOTSTRAP_RESAMPLES,
+        # The per-cell gate's constants ride into `evaluator_digest` here, so
+        # `_common_contract_matches` refuses to compare a candidate judged under
+        # these semantics against one judged under the retired 1e-12 rule. That
+        # machinery already exists; it only had to be told about the new numbers.
+        "cell_noninferiority": _noninferiority_policy(adapter).to_dict(),
         "hard_gates": _greenhouse_hard_gates(adapter),
     }
 
@@ -1513,6 +1715,25 @@ class EvaluatorRegistry:
                 "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
                 "implementation": "greenhouse-baseline-aligned-multihorizon-forward/1",
             },
+            {
+                "id": GREENHOUSE_RECIPE_EVALUATOR_ID,
+                "label": "温室声明式配方多时距评测",
+                "description": (
+                    "与基线对齐评测共用基底选择、cohort 与分块集合；候选可在基线"
+                    "对齐岭回归与声明式特征配方之间切换，因此配方层带来的改进可"
+                    "以在同一评测下直接归因。"
+                ),
+                "dataset_ids": ["agc_cucumber_2018", "agc_tomato_2019"],
+                "evaluation_partition": "training_feedback",
+                "scientific_scope": "historical_replay_prediction_non_causal",
+                "prediction_model_ids": [
+                    BASELINE_ALIGNED_RIDGE_MODEL_ID,
+                    RECIPE_RIDGE_MODEL_ID,
+                ],
+                "horizons_hours": [1, 6, 24],
+                "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
+                "implementation": "greenhouse-recipe-multihorizon-forward/1",
+            },
         ]
         adapter = dataset_adapter(dataset_id) if dataset_id and dataset_id != TOY_DATASET_ID else None
         if dataset_id is not None:
@@ -1531,12 +1752,16 @@ class EvaluatorRegistry:
                 target_count * len(item.get("horizons_hours", ())),
             )
             item["minimum_samples_per_update"] = item["prediction_task_count"]
+            from ..evolution.parameters import run_parameter_contract
+            from ..evolution.schedule import OptimizationSchedule
+            minimum_origins = profile.minimum_origins_for_schedule(OptimizationSchedule.for_new_run())
             item["minimum_selection_samples_per_update"] = (
-                profile.minimum_balanced_samples_per_update()
+                minimum_origins * profile.prediction_cell_count
             )
             item["minimum_selection_origin_samples_per_update"] = (
-                profile.minimum_balanced_origins_per_update()
+                minimum_origins
             )
+            item["run_parameters"] = run_parameter_contract(profile)
             item["prediction_cells_per_origin"] = profile.prediction_cell_count
             item["fitness_profile"] = profile.to_dict()
             item["fitness_profile_digest"] = profile.profile_digest
@@ -1656,16 +1881,38 @@ class EvaluatorRegistry:
                 "scientific_scope": "historical_replay_prediction_non_causal",
                 "implementation": "greenhouse-baseline-aligned-ridge/1",
             },
+            {
+                "id": RECIPE_RIDGE_MODEL_ID,
+                "label": "声明式特征配方岭回归残差模型",
+                "description": (
+                    "候选提交声明式特征配方（宿主白名单原语），宿主校验、编译并"
+                    "仅在训练拟合分区拟合；逐目标时距的残差缩放由配方自身承载，"
+                    "因此不再逐字段枚举本任务的目标名。"
+                ),
+                "dataset_ids": ["agc_cucumber_2018", "agc_tomato_2019"],
+                # Every other tunable lives inside the recipe, which the host
+                # grammar bounds. Only the scalar the recipe does not own is
+                # declared here, so this list stays independent of the 3x3 grid.
+                "parameter_names": ["ridge_alpha"],
+                "feature_policy_id": RECIPE_FEATURE_POLICY_ID,
+                "scientific_scope": "historical_replay_prediction_non_causal",
+                "implementation": "greenhouse-recipe-ridge/1",
+            },
         ]
         for item in items:
-            item["configuration_digest"] = digest(
-                {
-                    "prediction_model_id": item["id"],
-                    "implementation": item.pop("implementation"),
-                    "parameter_names": item["parameter_names"],
-                    "causal_interpretation": False,
-                }
-            )
+            body = {
+                "prediction_model_id": item["id"],
+                "implementation": item.pop("implementation"),
+                "parameter_names": item["parameter_names"],
+                "causal_interpretation": False,
+            }
+            # A predictor whose tunables live in a declarative recipe is only
+            # identified once the governing grammar is named, so the policy id
+            # joins its fingerprint. Predictors without one keep the historical
+            # body byte-for-byte, so their configuration_digest does not move.
+            if "feature_policy_id" in item:
+                body["feature_policy_id"] = item["feature_policy_id"]
+            item["configuration_digest"] = digest(body)
         return items
 
     def default_evaluator(self, dataset_id: str) -> str:
@@ -1797,6 +2044,17 @@ class EvaluatorRegistry:
                 else TOY_PREDICTOR_MODEL_ID
             )
         )
+        if predictor_model_id == RECIPE_RIDGE_MODEL_ID:
+            # Every tunable for this predictor lives inside the declarative
+            # recipe, which the host grammar validates. A scalar override has
+            # nowhere to land, so it is refused outright rather than silently
+            # checked against another predictor's schema by the chain below.
+            if overrides:
+                raise ValueError(
+                    "parameter_overrides is not supported by "
+                    f"{RECIPE_RIDGE_MODEL_ID}; change the feature_recipe instead"
+                )
+            return
         schemas = (
             {
                 "history_steps": (int, 1, 12),
@@ -1914,7 +2172,7 @@ class EvaluatorRegistry:
             if isinstance(cohort, Mapping)
             else None
         )
-        adaptive = task.metadata.get("optimization_protocol") == "top2_adaptive_epoch@1"
+        adaptive = task.metadata.get("optimization_protocol") in ADAPTIVE_PROTOCOLS
         if adaptive and (resolved_scope is None or resolved_cohort is None):
             raise ValueError(
                 "adaptive scientific evaluation requires scope and frozen cohort"
@@ -2009,6 +2267,7 @@ class EvaluatorRegistry:
             EXOGENOUS_RIDGE_MODEL_ID,
             TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
             HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
+            RECIPE_RIDGE_MODEL_ID,
         }:
             horizons = tuple(next(item for item in self.catalog(dataset_id)
                                   if item["id"] == evaluator_id)["horizons_hours"])
@@ -2397,7 +2656,7 @@ class EvaluatorRegistry:
             and float(evaluation_metrics.get("water_balance_error", 1.0)) <= 0.25
             and constraint_violations == 0
             and sample_coverage_pass
-            and bool(sample_batch.summary.get("strict_agent_chain_pass", True))
+            and successful_agent_provenance_passes(sample_batch.summary)
         )
         sample_execution_summary = dict(sample_batch.summary)
         sample_execution_summary.update(
@@ -2999,6 +3258,7 @@ class EvaluatorRegistry:
                         "failed_rows": len(failed_rows),
                         "normalization_scale": scale,
                         "mae": None,
+                        "bias": None,
                         "rmse": None,
                         "baseline_mae": None,
                         "baseline_rmse": None,
@@ -3066,6 +3326,7 @@ class EvaluatorRegistry:
                     "failed_rows": len(failed_rows),
                     "normalization_scale": scale,
                     "mae": candidate_mae,
+                    "bias": fmean(candidate_errors),
                     "rmse": candidate_rmse,
                     "baseline_mae": baseline_mae,
                     "baseline_rmse": baseline_rmse,
@@ -3120,13 +3381,11 @@ class EvaluatorRegistry:
             target_results, (1,), target_weights=target_weights
         )
         objective_score = objective_aggregate["weighted_skill_score"]
-        per_target_no_regression = all(
-            item["normalized_rmse"] is not None
-            and item["baseline_normalized_rmse"] is not None
-            and item["normalized_rmse"]
-            <= item["baseline_normalized_rmse"] + adapter.no_regression_tolerance
-            for item in target_results
+        cell_noninferiority = _per_cell_noninferiority(
+            promotion_block_evidence, target_results, adapter
         )
+        per_target_no_regression = cell_noninferiority.passed
+        relaxation_debt = _relaxation_debt(cell_noninferiority, objective_score, adapter)
         total_eligible_rows = total_rows + total_missing_rows
         sample_execution_coverage = (
             int(sample_batch.summary["succeeded_examples"]) / total_eligible_rows
@@ -3145,9 +3404,10 @@ class EvaluatorRegistry:
         scientific_pass = (
             objective_score > adapter.minimum_skill
             and per_target_no_regression
+            and relaxation_debt["passed"]
             and constraint_violations <= adapter.maximum_constraint_violations
             and sample_execution_coverage_pass
-            and bool(sample_batch.summary.get("strict_agent_chain_pass", True))
+            and successful_agent_provenance_passes(sample_batch.summary)
         )
         sample_execution_summary = dict(sample_batch.summary)
         sample_execution_summary["tool_performance"] = summarize_tool_performance(
@@ -3230,6 +3490,9 @@ class EvaluatorRegistry:
                 "reward_definition": SAMPLE_REWARD_DEFINITION,
                 "positive_reward_is_better": True,
                 "promotion_block_evidence": promotion_block_evidence,
+                "cell_noninferiority_evidence": cell_noninferiority.evidence,
+                "gate_relaxation_audit": cell_noninferiority.audit,
+                "noninferiority_relaxation_debt": relaxation_debt,
                 "mean_target_mae_unscaled": fmean(raw_mae) if raw_mae else None,
                 "mean_target_rmse_unscaled": fmean(raw_rmse) if raw_rmse else None,
                 "raw_units_comparable_across_targets": False,
@@ -3414,6 +3677,7 @@ class EvaluatorRegistry:
         on_sample_control: Callable[[], str] | None = None,
         execution_plan: DerivedExecutionPlan | None = None,
         predictor_model_id: str = EXOGENOUS_RIDGE_MODEL_ID,
+        frozen_artifact: ModelArtifact | None = None,
     ) -> EvaluationBundle:
         adapter = dataset_adapter(series.dataset_id)
         targets = adapter.target_bounds
@@ -3424,12 +3688,15 @@ class EvaluatorRegistry:
         parameters = (
             BaselineAlignedRidgeConfig.from_mapping(proposal.changes)
             if predictor_model_id == BASELINE_ALIGNED_RIDGE_MODEL_ID
+            else RecipeRidgeConfig.from_mapping(proposal.changes)
+            if predictor_model_id == RECIPE_RIDGE_MODEL_ID
             else HorizonTargetwiseExogenousRidgeConfig.from_mapping(proposal.changes)
             if predictor_model_id == HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
             else TargetwiseExogenousRidgeConfig.from_mapping(proposal.changes)
             if predictor_model_id == TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID
             else ExogenousRidgeConfig.from_mapping(proposal.changes)
         )
+        history_alignment = _resolve_origin_history_alignment(task, parameters)
         defer_feedback_prediction = (
             not self._sample_executor_injected
             and task.metadata.get("sample_agent_mode")
@@ -3440,19 +3707,40 @@ class EvaluatorRegistry:
             targets=tuple(item[0] for item in targets),
             horizons=horizons,
             config=parameters,
-            evaluation_history_steps=MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
+            evaluation_history_steps=history_alignment,
             defer_prediction_partitions=(
                 ("training_feedback",) if defer_feedback_prediction else ()
             ),
             on_fit_complete=on_training_complete,
             control=on_sample_control,
         )
+        if frozen_artifact is not None:
+            from .greenhouse_prediction import fitted_model_identity
+            # Formal labels are scored by the Host only. Do not send them
+            # back to a post-score learning/reflection Agent.
+            task = replace(task, metadata={**dict(task.metadata),
+                "sample_reflection_policy": "disabled_for_independent_evaluation@1"})
+            # Reconstruct numerical tools only from the original fit partition.
+            # No Agent executes if coefficients or parameters drifted from the
+            # selected artifact. Formal labels never participate in fitting.
+            if (frozen_artifact.model_id != predictor_model_id
+                    or thaw_json(frozen_artifact.parameters) != parameters.to_dict()
+                    or fitted_model_identity(thaw_json(frozen_artifact.learned_parameters.get("models", ())))
+                    != fitted_model_identity(prediction["models"])):
+                raise ValueError("frozen candidate fit differs from independent evaluation tools")
         agent_model_tools = AgentModelTools(
             series, targets=tuple(item[0] for item in targets), horizons=horizons,
             control=on_sample_control,
             cache_dir=Path.home() / ".cache" / "ecologyrsi-dsh" / "agent-fits-v2",
             default_fit=prediction, default_config=parameters,
         ) if task.metadata.get("sample_agent_mode") == "dsh_native_agent" else None
+        if frozen_artifact is not None and agent_model_tools is not None:
+            policy = rebind_agent_policy(proposal.metadata.get("agent_policy"),
+                genome_digest=proposal.metadata.get("genome_digest", "0" * 64),
+                profile=proposal.metadata.get("candidate_agent_profile", {}), parameters=parameters.to_dict())
+            if (frozen_artifact.learned_parameters.get("training_data_digest") != agent_model_tools.training_digest
+                    or thaw_json(frozen_artifact.learned_parameters.get("agent_policy")) != policy):
+                raise ValueError("frozen Agent policy or training data differs from independent evaluation")
         generated_rows = prediction["prediction_rows"]
         if agent_model_tools is not None:
             # Every Agent sees the same current observations regardless of its
@@ -3962,6 +4250,7 @@ class EvaluatorRegistry:
                             ),
                             "normalization_scale": scale,
                             "mae": None,
+                            "bias": None,
                             "rmse": None,
                             "baseline_mae": None,
                             "baseline_rmse": None,
@@ -4047,6 +4336,7 @@ class EvaluatorRegistry:
                         ),
                         "normalization_scale": scale,
                         "mae": candidate_mae,
+                    "bias": fmean(candidate_errors),
                         "rmse": candidate_rmse,
                         "baseline_mae": baseline_mae,
                         "baseline_rmse": baseline_rmse,
@@ -4117,12 +4407,12 @@ class EvaluatorRegistry:
             overall_nrmse = None
             overall_baseline_nrmse = None
             overall_skill = -1.0
-        per_task_no_regression = all(
-            item["normalized_rmse"] is not None
-            and item["baseline_normalized_rmse"] is not None
-            and item["normalized_rmse"]
-            <= item["baseline_normalized_rmse"] + adapter.no_regression_tolerance
-            for item in task_results
+        cell_noninferiority = _per_cell_noninferiority(
+            promotion_block_evidence, task_results, adapter
+        )
+        per_task_no_regression = cell_noninferiority.passed
+        relaxation_debt = _relaxation_debt(
+            cell_noninferiority, objective_aggregate["weighted_skill_score"], adapter
         )
         total_eligible_rows = total_rows + total_missing_rows
         sample_execution_coverage = (
@@ -4143,9 +4433,10 @@ class EvaluatorRegistry:
             objective_aggregate["weighted_skill_score"]
             > adapter.minimum_skill
             and per_task_no_regression
+            and relaxation_debt["passed"]
             and constraint_violations <= adapter.maximum_constraint_violations
             and sample_execution_coverage_pass
-            and bool(sample_batch.summary.get("strict_agent_chain_pass", True))
+            and successful_agent_provenance_passes(sample_batch.summary)
         )
         horizon_results = []
         for horizon in horizons:
@@ -4291,6 +4582,9 @@ class EvaluatorRegistry:
             "baseline_profile_digest": baseline_profile["digest"],
             "baseline_selection_partition": "training_fit",
             "promotion_block_evidence": promotion_block_evidence,
+            "cell_noninferiority_evidence": cell_noninferiority.evidence,
+            "gate_relaxation_audit": cell_noninferiority.audit,
+            "noninferiority_relaxation_debt": relaxation_debt,
             "mean_target_mae_unscaled": fmean(raw_mae) if raw_mae else None,
             "mean_target_rmse_unscaled": fmean(raw_rmse) if raw_rmse else None,
             "raw_units_comparable_across_targets": False,
@@ -4563,6 +4857,8 @@ __all__ = [
     "GREENHOUSE_MULTIHORIZON_EVALUATOR_ID",
     "GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID",
     "GREENHOUSE_ROLLING_PREDICTOR_ID",
+    "GREENHOUSE_RECIPE_EVALUATOR_ID",
+    "RECIPE_RIDGE_MODEL_ID",
     "RULE_JUDGE_ID",
     "TOY_EVALUATOR_ID",
     "TOY_PREDICTOR_MODEL_ID",

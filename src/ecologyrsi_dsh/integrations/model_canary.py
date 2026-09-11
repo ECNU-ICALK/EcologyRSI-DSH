@@ -23,6 +23,8 @@ SCOPE = "tool_and_schema_transport_only"
 _ROLES = (
     ("strategy_model_id", "resolved_policy_route_config_digest", "researcher", "ecology-researcher-v12", "generation.search-plan", "ecology-research-search-plan@1"),
     ("review_model_id", "resolved_review_route_config_digest", "generation-judge", "ecology-generation-judge-v8", "generation.reflect", "ecology-generation-reflection@1"),
+    ("review_model_id", "resolved_review_route_config_digest", "sample-critic", "ecology-sample-critic-v5", "sample.critic", "ecology-sample-review@2"),
+    ("strategy_model_id", "resolved_policy_route_config_digest", "sample-planner", "ecology-sample-planner-v8", "sample.plan", "ecology-sample-predictions@2"),
 )
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
 _ROUTE_PART = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,119}$")
@@ -30,15 +32,15 @@ _ROUTE_PART = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,119}$")
 
 @dataclass(frozen=True)
 class CanaryBounds:
-    max_attempts: int = 1
-    max_output_tokens: int = 1024
+    max_attempts: int = 4
+    max_output_tokens: int = 2048
     max_reported_tokens: int = 30000
     total_timeout_ms: int = 120000
     ttl_seconds: int = 3600
 
     def __post_init__(self) -> None:
         for name, lower, upper in (
-            ("max_attempts", 1, 2), ("max_output_tokens", 512, 2048),
+            ("max_attempts", 1, 4), ("max_output_tokens", 512, 2048),
             ("max_reported_tokens", 1024, 50000), ("total_timeout_ms", 1000, 180000),
             ("ttl_seconds", 60, 86400),
         ):
@@ -48,7 +50,7 @@ class CanaryBounds:
 
 
 def required_canary_identities(metadata: Mapping[str, Any]) -> tuple[dict[str, str], ...]:
-    """Derive the two transport identities from the Host-bound task metadata."""
+    """Derive the role transport identities from the Host-bound task metadata."""
     result = []
     for route_key, digest_key, role, preset, stage, schema in _ROLES:
         route = str(metadata.get(route_key) or "")
@@ -76,7 +78,7 @@ def _validate_identity(identity: Mapping[str, Any]) -> None:
     if not all(isinstance(identity[k], str) and _DIGEST.fullmatch(identity[k]) for k in ("preset_content_digest", "standing_tool_surface_digest", "route_config_digest")):
         raise ValueError("model canary requires Host-frozen content and route digests")
     if (identity["role"], identity["preset_id"], identity["stage"], identity["output_schema_id"]) not in {r[2:] for r in _ROLES}:
-        raise ValueError("model canary stage unsupported; sample.plan requires scientific Host admission")
+        raise ValueError("model canary stage unsupported")
 
 
 def canary_request(identity: Mapping[str, Any], bounds: CanaryBounds | None = None) -> dict[str, Any]:
@@ -182,10 +184,10 @@ def require_model_preflight(metadata: Mapping[str, Any], receipt_directory: str 
 
 
 def run_preflight(client: Any, *, metadata: Mapping[str, Any], receipt_directory: str | Path, bounds: CanaryBounds | None = None, force: bool = False) -> dict[str, Any]:
-    """Run at most two bounded real canaries, stopping at the first failure.
+    """Check four execution roles, stopping at the first exhausted role.
 
-    The bounds apply per role; the complete two-role operation has at most
-    2*max_attempts child attempts and 2*total_timeout_ms provider deadline.
+    The bounds apply per role; all four roles share no additional retries.
+    At most 4*max_attempts children and 4*total_timeout_ms are permitted.
     """
     store = ModelCanaryReceiptStore(receipt_directory)
     receipts = []

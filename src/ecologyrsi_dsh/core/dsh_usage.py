@@ -1,10 +1,37 @@
 """Provider usage contracts, independent of scientific result acceptance."""
 from __future__ import annotations
+from datetime import datetime
 from collections.abc import Mapping
 from typing import Any
 
 USAGE_SCHEMA = "ecologyrsi-dsh.session-usage/1"
 USAGE_EVENT = "DshSessionUsageRecorded"
+
+
+def active_session_ids(events) -> set[str]:
+    """A terminal child never becomes active again because telemetry arrived late."""
+    active: dict[str, str] = {}
+    terminal_reservations: set[str] = set()
+    terminal_sessions: set[str] = set()
+    for event in events:
+        if event.kind not in {USAGE_EVENT, "DshStructuredResultAccepted", "DshChildExecutionFailed"}:
+            continue
+        identity = event.payload.get("identity", {})
+        reservation = identity.get("child_reservation_id")
+        session = identity.get("session_id")
+        if event.kind == USAGE_EVENT:
+            if event.payload.get("settlement") == "active":
+                active[reservation] = session
+            else:
+                terminal_reservations.add(reservation)
+                terminal_sessions.add(session)
+        elif event.kind in {"DshStructuredResultAccepted", "DshChildExecutionFailed"}:
+            if reservation:
+                terminal_reservations.add(reservation)
+            if session:
+                terminal_sessions.add(session)
+    return {session for reservation, session in active.items()
+            if session and reservation not in terminal_reservations and session not in terminal_sessions}
 
 
 def validate_session_usage(payload: Any, *, run_id: str) -> None:
@@ -95,13 +122,31 @@ def session_usage_projection(events: Any) -> tuple[dict, dict]:
     }
 
 def validate_session_metrics(value: Any, *, session_id: str) -> None:
-    if not isinstance(value, Mapping) or set(value) != {
+    if not isinstance(value, Mapping) or set(value) - {"activity"} != {
         "schema_version",
         "session_id",
         "context_pressure",
         "provider_usage",
     }:
         raise ValueError("DSH session metrics have an invalid shape")
+    if "activity" in value:
+        activity = value["activity"]
+        if not isinstance(activity, Mapping) or set(activity) != {"kind", "log_revision", "updated_at"}:
+            raise ValueError("DSH session activity has an invalid shape")
+        if activity["kind"] not in {"streaming", "retrying", "tool", "waiting", "settling"}:
+            raise ValueError("DSH session activity kind is invalid")
+        revision = activity["log_revision"]
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise ValueError("DSH session activity revision is invalid")
+        stamp = activity["updated_at"]
+        if not isinstance(stamp, str) or len(stamp) > 40:
+            raise ValueError("DSH session activity timestamp is invalid")
+        try:
+            parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                raise ValueError("activity timestamp requires timezone")
+        except ValueError as exc:
+            raise ValueError("DSH session activity timestamp is invalid") from exc
     if value.get("schema_version") != "ecologyrsi-dsh.dsh-session-metrics/1":
         raise ValueError("unsupported DSH session metrics schema")
     if value.get("session_id") != session_id:

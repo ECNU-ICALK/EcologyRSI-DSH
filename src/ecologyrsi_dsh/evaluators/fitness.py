@@ -42,7 +42,8 @@ class FitnessProfile:
     expected_targets: tuple[str, ...] = DEFAULT_TARGETS
     expected_horizons: tuple[int, ...] = DEFAULT_HORIZONS
     selection_minimum_score_delta: float = 0.005
-    selection_minimum_coverage: float = 0.90
+    selection_minimum_coverage: float = 0.95
+    selection_cell_regression_tolerance: float = 0.01
     selection_minimum_cell_samples: int = 40
     selection_minimum_paired_blocks: int = PROMOTION_MINIMUM_PAIRED_BLOCKS
     selection_minimum_valid_three_day_starts: int = 4
@@ -86,6 +87,7 @@ class FitnessProfile:
         for name in (
             "selection_minimum_score_delta",
             "selection_minimum_coverage",
+            "selection_cell_regression_tolerance",
             "exploratory_quantile",
             "latency_reference_ms",
         ):
@@ -96,6 +98,8 @@ class FitnessProfile:
             raise ValueError("exploratory quantile must be in (0, 1)")
         if self.selection_minimum_score_delta < 0:
             raise ValueError("selection score delta must be non-negative")
+        if not 0 <= self.selection_cell_regression_tolerance <= 1:
+            raise ValueError("selection cell regression tolerance must be in [0, 1]")
         if self.latency_reference_ms <= 0:
             raise ValueError("latency_reference_ms must be positive")
         if not isinstance(self.require_predictive_intervals, bool):
@@ -132,6 +136,7 @@ class FitnessProfile:
             "expected_horizons": list(self.expected_horizons),
             "selection_minimum_score_delta": self.selection_minimum_score_delta,
             "selection_minimum_coverage": self.selection_minimum_coverage,
+            "selection_cell_regression_tolerance": self.selection_cell_regression_tolerance,
             "selection_minimum_cell_samples": self.selection_minimum_cell_samples,
             "selection_minimum_paired_blocks": self.selection_minimum_paired_blocks,
             "selection_minimum_valid_three_day_starts": self.selection_minimum_valid_three_day_starts,
@@ -181,6 +186,14 @@ class FitnessProfile:
             (required_blocks - 1) * block_hours + 1,
         )
         return samples_per_cell
+
+    def minimum_origins_for_schedule(self, schedule: Any = None) -> int:
+        """Count floor; sparse training cohorts also require actual day evidence."""
+        from ..evolution.schedule import TRAINING_SCHEDULE_SCHEMA_VERSION
+        if schedule is not None and (schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION or schedule.quick):
+            from ..evolution.parameters import run_parameter_contract
+            return run_parameter_contract(self)["parameters"]["selection_holdout_origin_count"]["minimum"]
+        return self.minimum_balanced_origins_per_update()
 
 
 @dataclass(frozen=True, slots=True)

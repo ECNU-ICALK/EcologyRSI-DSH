@@ -148,6 +148,24 @@ _REGISTERED_PIPELINES: dict[str, dict[str, Any]] = {
             ("host.postprocess.physical-bounds@1", "postprocess", ()),
         ),
     },
+    "greenhouse-recipe-ridge@1": {
+        "pipeline_version": "greenhouse-recipe-operator-graph/1",
+        # Deliberately empty, and every operator below declares no scalars for
+        # the same reason: the ridge alpha, the anchor and each per-cell
+        # residual scale live in scientific_program.feature_recipe, which the
+        # compiler projects into feature_training_spec.feature_recipe. The IR
+        # therefore names the operator graph, and the recipe names the knobs;
+        # neither restates the other, so they cannot disagree.
+        "parameter_names": (),
+        "operators": (
+            ("host.feature.compiled-feature-recipe@1", "feature", ()),
+            ("host.fit.partition-selected-baseline@1", "fit", ()),
+            ("host.fit.partition-statistics@1", "fit", ()),
+            ("host.fit.baseline-aligned-closed-form-ridge@1", "fit", ()),
+            ("host.predictor.fit-selected-baseline-residual@1", "predict", ()),
+            ("host.postprocess.physical-bounds@1", "postprocess", ()),
+        ),
+    },
 }
 
 

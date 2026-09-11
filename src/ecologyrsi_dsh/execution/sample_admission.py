@@ -16,6 +16,7 @@ from ..core.errors import (
 
 DEFAULT_SAMPLE_CONCURRENCY = 64
 MAX_SAMPLE_CONCURRENCY = 128
+INITIAL_SAMPLE_CONCURRENCY = 8
 HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK = 4
 
 
@@ -30,6 +31,11 @@ def validate_sample_concurrency(value: object) -> int:
             f"{MAX_SAMPLE_CONCURRENCY}"
         )
     return value
+
+
+@dataclass
+class AdmissionOutcome:
+    healthy: bool = True
 
 
 @dataclass
@@ -64,10 +70,9 @@ class RunSampleAdmission:
             if state is None:
                 state = _RunAdmissionState(
                     limit=limit,
-                    # The user's frozen run limit is effective immediately.
-                    # Retryable provider congestion may reduce this physical
-                    # window later, but candidate/lane count never pre-clamps it.
-                    adaptive_limit=limit,
+                    # Probe capacity before filling the configured ceiling.
+                    # The existing additive recovery also drives warmup.
+                    adaptive_limit=min(limit, INITIAL_SAMPLE_CONCURRENCY),
                 )
                 self._states[run_id] = state
             elif state.limit != limit:
@@ -93,7 +98,7 @@ class RunSampleAdmission:
             return True
 
     @contextmanager
-    def admit(self, run_id: str, limit: int) -> Iterator[None]:
+    def admit(self, run_id: str, limit: int) -> Iterator[AdmissionOutcome]:
         state = self._state_for(run_id, limit)
         with self._condition:
             state.waiting += 1
@@ -111,8 +116,9 @@ class RunSampleAdmission:
             state.active += 1
             admission_adjustment_epoch = state.adjustment_epoch
             admission_congestion_epoch = state.congestion_epoch
+        outcome = AdmissionOutcome()
         try:
-            yield
+            yield outcome
         except BaseException as exc:
             notify_failure = False
             with self._condition:
@@ -148,7 +154,9 @@ class RunSampleAdmission:
         else:
             with self._condition:
                 state.active -= 1
-                if admission_adjustment_epoch == state.adjustment_epoch:
+                if not outcome.healthy:
+                    state.successful_since_adjustment = 0
+                elif admission_adjustment_epoch == state.adjustment_epoch:
                     state.successful_since_adjustment += 1
                     if (
                         state.adaptive_limit < state.limit

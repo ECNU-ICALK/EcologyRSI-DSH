@@ -309,6 +309,80 @@ class DatasetRegistry:
         )
         return SelectionDatasetView.from_series(legacy, protocol)
 
+    def data_protocol(self, dataset_id: str, episode_id: str | None = None):
+        descriptor = self._descriptor(dataset_id)
+        canonical = self._load_series(descriptor)
+        manifest = self._split_manifest(descriptor, canonical)
+        episode = self._select_episode(canonical, manifest, episode_id)
+        adapter = dataset_adapter(dataset_id)
+        return build_four_stage_data_protocol(
+            dataset_id, episode, manifest.split_for(episode.episode_id),
+            dataset_digest=episode.content_sha256,
+            split_manifest_digest=manifest.split_manifest_digest_sha256,
+            target_names=adapter.target_names, horizons=adapter.horizons_hours, history_steps=3,
+        )
+
+    def partition_summary(self, dataset_id: str, episode_id: str | None = None) -> dict[str, Any]:
+        from datetime import datetime, timedelta
+        protocol = self.data_protocol(dataset_id, episode_id)
+        def date(hour):
+            return (datetime(1899, 12, 30) + timedelta(hours=hour)).isoformat(timespec="minutes")
+        rows = []
+        for name, label, purpose in (
+            ("calibration_fit", "模型拟合", "training"),
+            ("calibration_uq", "不确定性校准", "training"),
+            ("model_selection", "进化训练与轮末比较", "training"),
+            ("validation", "独立验证", "independent_evaluation"),
+            ("final_test", "最终测试", "independent_evaluation"),
+        ):
+            bounds = protocol.partition_timestamp_bounds[name]
+            rows.append({"partition": name, "label": label, "purpose": purpose,
+                         "row_count": protocol.range_for(name).size,
+                         "start": date(bounds[0]), "end_exclusive": date(bounds[1])})
+        return {"schema_version": "ecologyrsi-dsh.partition-summary/1",
+                "episode_id": protocol.episode_id, "protocol_digest": protocol.protocol_digest,
+                "split_policy": "time-forward-calendar/2", "partitions": rows,
+                "evaluation_workflow": "freeze_candidate_then_validation_then_final_test"}
+
+    def formal_view(self, dataset_id: str, token, exposures) -> DatasetSeries:
+        """Host-only labelled view, available solely inside an opened stage token.
+
+        The predictor kernel uses training_feedback as its numerical output
+        slot; this slot is bound exclusively to the reserved formal partition.
+        This view is never returned through sample/catalog HTTP endpoints.
+        """
+        from ..core.exposure_registry import FormalStageToken
+        if not isinstance(token, FormalStageToken):
+            raise PermissionError("formal dataset requires a stage token")
+        exposure = exposures.formal_exposure(token.holdout_exposure_key)
+        if not exposure or exposure["state"] != "opened" or exposure["token_digest"] != token.token_digest:
+            raise PermissionError("formal dataset token is not open")
+        descriptor = self._descriptor(dataset_id)
+        canonical = self._load_series(descriptor)
+        manifest = self._split_manifest(descriptor, canonical)
+        # The exposure key includes the episode; find its exact partition.
+        from ..core.exposure_registry import raw_holdout_exposure_key
+        for episode in canonical.episodes:
+            if manifest.split_for(episode.episode_id).role != "optimization":
+                continue
+            protocol = self.data_protocol(dataset_id, episode.episode_id)
+            key = raw_holdout_exposure_key(dataset_digest=episode.content_sha256,
+                split_manifest_digest=manifest.split_manifest_digest_sha256,
+                episode_id=episode.episode_id, stage=token.stage,
+                stage_partition_digest=protocol.partition_digests[token.stage])
+            if key != token.holdout_exposure_key:
+                continue
+            selected = protocol.range_for(token.stage)
+            return DatasetSeries(schema="ecologyrsi-dsh.formal-dataset-view/1",
+                dataset_id=dataset_id, domain_id=episode.domain_id, episode_id=episode.episode_id,
+                digest=episode.content_sha256, timestamps=episode.timestamps[:selected.end],
+                values={name: values[:selected.end] for name, values in episode.values.items()},
+                partitions={"training_fit": protocol.calibration_fit,
+                            "calibration_uq": protocol.calibration_uq, "training_feedback": selected},
+                features=episode.features, split_manifest_digest_sha256=manifest.split_manifest_digest_sha256,
+                evaluation_partition=token.stage)
+        raise PermissionError("formal token does not match the dataset partition")
+
     def sample(
         self,
         dataset_id: str,
@@ -527,7 +601,7 @@ class DatasetRegistry:
             **profile,
             "evaluation_partition": "training_feedback",
             "split_policy": {
-                "version": "time-forward-embargo/1",
+                "version": "time-forward-calendar/2",
                 "train_fraction": 0.6,
                 "training_feedback_fraction": 0.5,
                 "development_fraction": 0.2,

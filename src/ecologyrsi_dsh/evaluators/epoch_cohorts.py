@@ -10,7 +10,7 @@ from ..core.models import digest
 from ..core.trajectory import OriginOccurrence
 from ..data.splits import IndexRange
 from ..data.adapters import DATASET_ADAPTERS
-from ..evolution.schedule import OptimizationSchedule, ISOLATED_SCHEDULE_SCHEMA_VERSION
+from ..evolution.schedule import OptimizationSchedule, ISOLATED_SCHEDULE_SCHEMA_VERSION, TRAINING_SCHEDULE_SCHEMA_VERSION
 from .greenhouse_prediction import MAX_EXOGENOUS_RIDGE_HISTORY_STEPS
 
 
@@ -21,6 +21,8 @@ CAPACITY_REPORT_SCHEMA = "ecologyrsi-dsh.epoch-capacity-report/1"
 ISOLATED_PLANNER_SCHEMA = "ecologyrsi-dsh.epoch-cohort-planner/2"
 ISOLATED_REUSE_POLICY = "purged_no_reuse@1"
 COHORT_REUSE_POLICY = "cycle_after_exhaustion@1"
+TRAINING_REUSE_POLICY = "training_epochs_fixed_partitions@1"
+QUICK_REUSE_POLICY = "training_replay_fresh_epoch_holdouts@1"
 DEFAULT_HORIZONS = (1, 6, 24)
 # Cohorts are shared by every candidate in a generation, including candidates
 # that request the predictor's largest legal history window.  Plan against that
@@ -188,7 +190,7 @@ class PlannedCohort:
             PlannedOrigin.from_dict(item) if isinstance(item, Mapping) else item
             for item in raw
         )
-        if not origins or not all(isinstance(item, PlannedOrigin) for item in origins):
+        if (not origins and role != "screening") or not all(isinstance(item, PlannedOrigin) for item in origins):
             raise ValueError("cohort requires planned origins")
         occurrence_keys = {
             (item.origin_id, item.reuse_index) for item in origins
@@ -487,7 +489,7 @@ class CohortCapacityReport:
             "reused_origin_occurrences",
         ):
             _strict_integer(getattr(self, name), name)
-        if self.cohort_reuse_policy not in {COHORT_REUSE_POLICY, ISOLATED_REUSE_POLICY}:
+        if self.cohort_reuse_policy not in {COHORT_REUSE_POLICY, ISOLATED_REUSE_POLICY, TRAINING_REUSE_POLICY, QUICK_REUSE_POLICY}:
             raise ValueError(
                 f"cohort_reuse_policy must be {COHORT_REUSE_POLICY!r}"
             )
@@ -564,6 +566,16 @@ class CohortCapacityReport:
                 ),
             }
         )
+        if self.cohort_reuse_policy in {TRAINING_REUSE_POLICY, QUICK_REUSE_POLICY}:
+            payload.update(
+                planned_origin_occurrences=self.required_unique_origins + self.reused_origin_occurrences,
+                effective_source_count=self.required_unique_origins,
+                reuse_fraction=self.reused_origin_occurrences / max(1, self.required_unique_origins + self.reused_origin_occurrences),
+                cycle_count=self.planned_generations,
+                independent_evaluation_included=False,
+                evidence_class="training_search_only",
+            )
+            payload["fresh_epoch_holdout"] = self.cohort_reuse_policy == QUICK_REUSE_POLICY
         return payload
 
 
@@ -714,7 +726,10 @@ def plan_run_adaptation_cohort(
 ) -> RunAdaptationCohort:
     if not isinstance(schedule, OptimizationSchedule):
         raise TypeError("schedule must be OptimizationSchedule")
-    if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION:
+    if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
+        from .training_cohorts import plan_adaptation
+        return plan_adaptation(dataset, schedule=schedule, seed=seed)
+    if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION or schedule.quick:
         from .isolated_cohorts import plan_adaptation
         return plan_adaptation(dataset, schedule=schedule, seed=seed)
     _strict_integer(seed, "seed")
@@ -761,7 +776,10 @@ def plan_generation_selection_cohorts(
 ) -> GenerationCohorts:
     if not isinstance(schedule, OptimizationSchedule):
         raise TypeError("schedule must be OptimizationSchedule")
-    if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION:
+    if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
+        from .training_cohorts import plan_selection
+        return plan_selection(dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed)
+    if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION or schedule.quick:
         from .isolated_cohorts import plan_selection
         return plan_selection(dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed)
     if not isinstance(adaptation, RunAdaptationCohort):
@@ -825,7 +843,10 @@ def estimate_epoch_capacity(
         adapter = DATASET_ADAPTERS.get(dataset.dataset_id)
         scoring_cells_per_origin = (len(adapter.targets) * len(adapter.horizons_hours)
                                     if adapter else DEFAULT_SCORING_CELLS_PER_ORIGIN)
-    if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION:
+    if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
+        from .training_cohorts import estimate_capacity
+        return estimate_capacity(dataset, schedule=schedule, planned_generations=planned_generations, seed=seed, scoring_cells_per_origin=scoring_cells_per_origin)
+    if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION or schedule.quick:
         from .isolated_cohorts import estimate_capacity
         return estimate_capacity(dataset, schedule=schedule, planned_generations=planned_generations, seed=seed, scoring_cells_per_origin=scoring_cells_per_origin)
     _strict_integer(planned_generations, "planned_generations", minimum=1)

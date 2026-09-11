@@ -6,6 +6,8 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
+from ..core.errors import preferred_execution_failure
+
 
 @dataclass(frozen=True, slots=True, order=True)
 class CandidateEvaluationTask:
@@ -36,7 +38,7 @@ def run_candidate_evaluations(
 
     Work is submitted only up to ``max_concurrency``. The first worker error
     or a closed run admission stops queue refill, but work already admitted is
-    allowed to settle before the lowest-slot error is re-raised. A concurrency
+    allowed to settle before the fatal or lowest-slot error is re-raised. A concurrency
     value of one deliberately stays on the caller thread so legacy manifests
     preserve their historical execution boundary.
     """
@@ -99,7 +101,10 @@ def run_candidate_evaluations(
 
     if failures:
         failures.sort(key=lambda item: item[0])
-        raise failures[0][1]
+        failure = failures[0][1]
+        for _slot, error in failures[1:]:
+            failure = preferred_execution_failure(failure, error)
+        raise failure
 
 
 __all__ = ["CandidateEvaluationTask", "run_candidate_evaluations"]

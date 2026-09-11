@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from ..evolution.schedule import ADAPTIVE_PROTOCOLS
+
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Mapping
 from threading import Lock
 from typing import Any
 from .ports import GenerationRuntime
+
+from ..core.errors import preferred_execution_failure
 
 from ..core.models import CandidateRole, RunStatus
 from ..core.trajectory import TrajectoryStatus
@@ -99,7 +103,7 @@ def execute_next_adaptive_work_unit(services: GenerationRuntime, run_id: str) ->
         return True
     if (
         state.task_manifest.metadata.get("optimization_protocol")
-        == OPTIMIZATION_PROTOCOL
+        in ADAPTIVE_PROTOCOLS
         and state.task_manifest.metadata.get("cohort_capacity_enforced") is True
     ):
         generation_candidates = tuple(
@@ -221,7 +225,10 @@ def execute_next_adaptive_work_unit(services: GenerationRuntime, run_id: str) ->
                 except Exception as exc:  # noqa: BLE001
                     failures.append(exc)
             if failures:
-                raise failures[0]
+                failure = failures[0]
+                for error in failures[1:]:
+                    failure = preferred_execution_failure(failure, error)
+                raise failure
             changed = any(results)
     else:
         for _priority, candidate_id in ranked_lanes:

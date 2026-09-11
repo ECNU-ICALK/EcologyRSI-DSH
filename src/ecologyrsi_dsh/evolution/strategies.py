@@ -741,6 +741,37 @@ class FakeDSHAdapter:
                 self._session_counts.pop(key, None)
 
 
+def _deterministic_fallback_directions(
+    allowed_targets: Mapping[str, Sequence[str]], count: int
+) -> list[dict[str, Any]]:
+    """Materialize bounded directions when research recovery has no model list."""
+
+    options = [
+        (axis, target)
+        for axis in ("scientific_parameter", "registered_predictor", "instruction_profile")
+        for target in allowed_targets.get(axis, ())
+    ]
+    if not options:
+        raise ValueError("native fallback has no registered mutation targets")
+    directions: list[dict[str, Any]] = []
+    for index in range(count):
+        axis, target = options[index % len(options)]
+        directions.append({
+            "direction_id": f"host-fallback-{index + 1}",
+            "title": "保留当前搜索空间并生成有界变体",
+            "hypothesis": f"对已登记目标 {target} 生成第 {index + 1} 个可验证的有界变体。",
+            "target_weakness": "研究响应超出大小契约，暂不引入未验证的新方向。",
+            "capability_focus": "registered_host_capabilities",
+            "mutation_axis": axis,
+            "mutation_target": target,
+            "mutation_direction": "select" if axis != "scientific_parameter" else "increase",
+            "evidence_refs": [],
+            "expected_tradeoff": "保持当前预测器和评测边界不变，等待下一轮真实样本反馈。",
+            "success_criterion": "候选可编译、样本覆盖完整且不降低既有门禁证据。",
+        })
+    return directions
+
+
 class StrategyRouterDSHAdapter:
     """Route a task to bounded parameter proposal strategies.
 
@@ -2680,8 +2711,23 @@ class StrategyRouterDSHAdapter:
         assigned_direction = None
         if _model_search_cycle_enabled(task):
             allowed_mutation_targets = _registered_mutation_targets(task, parent)
+            raw_directions = research_plan.get("candidate_directions")
+            if (
+                raw_directions is None
+                and isinstance(research_plan.get("fallback_diagnostics"), Mapping)
+                and research_plan["fallback_diagnostics"].get("policy")
+                == "durable_evidence_host_fallback@1"
+            ):
+                # A bounded host fallback intentionally contains only durable
+                # evidence identifiers.  Synthesize one safe direction per
+                # slot so the native proposer still receives its required
+                # assignment context and can generate a fresh mutation.
+                raw_directions = _deterministic_fallback_directions(
+                    allowed_mutation_targets,
+                    int(batch["batch_size"]),
+                )
             directions = normalize_candidate_directions(
-                research_plan.get("candidate_directions"),
+                raw_directions,
                 exact_items=int(batch["batch_size"]),
                 allowed_mutation_targets=allowed_mutation_targets,
             )

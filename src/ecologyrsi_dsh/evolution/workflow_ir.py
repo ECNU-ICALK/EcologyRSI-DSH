@@ -35,14 +35,19 @@ from .genome import (
 )
 
 
-COMPILER_VERSION = "ecology-plugin-behavior-compiler@2"
+COMPILER_VERSION = "ecology-plugin-behavior-compiler@3"
 DEFAULT_COMPILER_SEMANTIC_DIGEST = _domain_digest(
-    "ecologyrsi-dsh/plugin-compiler-semantics/2",
+    "ecologyrsi-dsh/plugin-compiler-semantics/3",
     {
         "compiler_version": COMPILER_VERSION,
         "algorithm_behavior_projection": "algorithm_behavior_projection@1",
         "workflow_ir": "compiled-dsh-workflow@1",
         "defaults": "registry-resolved-before-digest@1",
+        # A declarative feature recipe is a behavior, so the reads it
+        # authorizes are projected into the feature training spec and folded
+        # into compiled_behavior_digest. Named here so a behavior compiled
+        # before recipes existed can never collide with one compiled after.
+        "feature_recipe": "ecologyrsi-dsh.feature-recipe/1",
     },
 )
 SECURITY_SEMANTIC_DIGEST = _domain_digest(
@@ -75,6 +80,7 @@ _EVALUATOR_VERSIONS = {
         "greenhouse-multihorizon-time-forward/4"
     ),
     "greenhouse_multihorizon_time_forward@3": "greenhouse-baseline-aligned-multihorizon-time-forward/1",
+    "greenhouse_recipe_multihorizon_forward@1": "greenhouse-recipe-multihorizon-forward/1",
     "greenhouse_multihorizon_time_forward@2": (
         "greenhouse-multihorizon-time-forward/5"
     ),
@@ -462,6 +468,77 @@ class CompiledEcologyBehaviorSpec:
         }
 
 
+def _compile_feature_recipe(
+    raw_recipe: Any,
+    *,
+    predictor_id: str,
+    predictor: Mapping[str, Any],
+    feature_policy: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Re-validate a genome's recipe against the policy that governs it.
+
+    The genome validator already enforced the primitive whitelist and every
+    static bound. This is the second, *binding-aware* check: the whitelist is
+    global, but the ceilings a run actually operates under come from the feature
+    policy the genome bound itself to, and the compiler is where the pairing of
+    predictor, policy and recipe is first known. Both directions are refused
+    rather than repaired — a recipe on a predictor with no recipe axis, and a
+    recipe-driven predictor with nothing to compile.
+    """
+
+    required_policy = predictor.get("feature_policy_id")
+    if raw_recipe is None:
+        if required_policy is not None:
+            raise ValueError(
+                f"predictor {predictor_id} requires a scientific_program."
+                "feature_recipe governed by "
+                f"{required_policy}"
+            )
+        return None
+    if required_policy is None:
+        raise ValueError(
+            f"predictor {predictor_id} does not accept a feature_recipe"
+        )
+    if feature_policy["id"] != required_policy:
+        raise ValueError(
+            f"predictor {predictor_id} requires feature policy "
+            f"{required_policy} but the genome bound {feature_policy['id']}"
+        )
+    # Deferred: evaluators/ reaches back into knowledge/, which imports this
+    # module, so a module-level import would close a cycle.
+    from ..evaluators.feature_recipe import (
+        recipe_training_summary,
+        validate_feature_recipe,
+    )
+
+    frozen = validate_feature_recipe(raw_recipe)
+    ceilings = feature_policy["effective_parameters"]
+    summary = recipe_training_summary(frozen)
+    if frozen.term_count > ceilings["max_terms"]:
+        raise ValueError(
+            f"feature_recipe declares {frozen.term_count} terms but "
+            f"{feature_policy['id']} allows {ceilings['max_terms']}"
+        )
+    deepest = max(
+        (cell["max_history_hours"] for cell in summary["per_horizon"].values()),
+        default=0,
+    )
+    if deepest > ceilings["max_lag_hours"]:
+        raise ValueError(
+            f"feature_recipe reads {deepest}h of history but "
+            f"{feature_policy['id']} allows {ceilings['max_lag_hours']}"
+        )
+    windows = [
+        int(term["w"]) for term in frozen.features if "w" in term
+    ]
+    if windows and max(windows) > ceilings["max_rolling_window"]:
+        raise ValueError(
+            f"feature_recipe uses a {max(windows)}h window but "
+            f"{feature_policy['id']} allows {ceilings['max_rolling_window']}"
+        )
+    return summary
+
+
 def compile_plugin_behavior(
     genome: EcologyEvolutionPluginGenome,
     task: TaskManifest,
@@ -522,14 +599,15 @@ def compile_plugin_behavior(
         ),
     )
     behavior_projection = algorithm_behavior_projection(algorithm_ir)
+    feature_policy = _compile_policy_ref(
+        registry,
+        "feature_policies",
+        scientific["feature_policy_ref"],
+        "feature policy",
+    )
     feature_training = {
         "schema_version": "ecologyrsi-dsh.compiled-feature-training/1",
-        "feature_policy": _compile_policy_ref(
-            registry,
-            "feature_policies",
-            scientific["feature_policy_ref"],
-            "feature policy",
-        ),
+        "feature_policy": feature_policy,
         "fit_policy": _compile_policy_ref(
             registry,
             "fit_policies",
@@ -544,6 +622,17 @@ def compile_plugin_behavior(
         ),
         "allowed_partitions": list(EVOLUTION_ALLOWED_PARTITIONS),
     }
+    recipe_summary = _compile_feature_recipe(
+        scientific.get("feature_recipe"),
+        predictor_id=predictor_id,
+        predictor=predictor,
+        feature_policy=feature_policy,
+    )
+    # Absent rather than null when the predictor has no recipe axis, so a
+    # behavior compiled for one of the six historical predictors projects the
+    # same four keys it always has.
+    if recipe_summary is not None:
+        feature_training["feature_recipe"] = recipe_summary
     agent = genome_data["agent_program"]
     execution = agent["candidate_execution_program"]
     candidate_workflow = compile_dsh_workflow_spec(

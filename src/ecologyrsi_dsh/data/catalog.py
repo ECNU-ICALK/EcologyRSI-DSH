@@ -4,29 +4,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import sysconfig
 
 from ..core.errors import FrozenRuntimeBindingDriftError
-from .contracts import _PREPARABLE_DATASET_IDS, _TOY_DATASET_ID, DatasetDescriptor
+from .definitions import default_catalog_path as _default_catalog_path
+from .contracts import _TOY_DATASET_ID, DatasetDescriptor
 from .greenhouse import CanonicalEpisode, CanonicalSeries, FeatureSpec
 from .toy import ToyCropSoilWater
-
-
-def _default_catalog_path() -> Path:
-    project_root = Path(__file__).resolve().parents[3]
-    candidates = (
-        project_root / "datasets" / "autonomous_greenhouse.json",
-        Path.cwd() / "datasets" / "autonomous_greenhouse.json",
-        Path(sysconfig.get_path("data"))
-        / "share"
-        / "ecologyrsi-dsh"
-        / "datasets"
-        / "autonomous_greenhouse.json",
-    )
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate.resolve()
-    return candidates[0].resolve()
 
 
 def _assert_snapshot_digest(
@@ -47,14 +30,9 @@ def _default_data_root() -> Path:
     configured = os.environ.get("ECOLOGYRSI_DATA_ROOT")
     if configured:
         return Path(configured).expanduser().resolve()
-    user_root = (Path.home() / ".ecologyrsi-dsh" / "data" / "greenhouse").resolve()
-    if any((user_root / dataset_id).is_dir() for dataset_id in _PREPARABLE_DATASET_IDS):
-        return user_root
-    project_root = Path(__file__).resolve().parents[3]
-    legacy_root = (project_root.parent / "EcologyRSI" / "data" / "greenhouse").resolve()
-    if legacy_root.is_dir():
-        return legacy_root
-    return user_root
+    # Downloads and every normal service start share one durable location.
+    # Do not change roots based on which old checkout happens to exist.
+    return (Path.home() / ".ecologyrsi-dsh" / "data" / "greenhouse").resolve()
 
 
 def _toy_descriptor() -> DatasetDescriptor:

@@ -315,7 +315,7 @@ def build_four_stage_data_protocol(
     }
     partition_timestamp_bounds = {
         name: (
-            timestamps[partition.start],
+            timestamps[partition.start] if partition.start < len(timestamps) else timestamps[-1] + 1,
             (
                 timestamps[partition.end]
                 if partition.end < len(timestamps)
@@ -381,7 +381,7 @@ def build_split_manifest(
     training_feedback_embargo_hours: int = 1,
     embargo_hours: int = 24,
     external_episode_patterns: tuple[str, ...] = ("reference",),
-    split_policy_version: str = "time-forward-embargo/1",
+    split_policy_version: str = "time-forward-calendar/2",
 ) -> SplitManifest:
     """Build deterministic fit/feedback/development/gate row ranges.
 
@@ -409,6 +409,18 @@ def build_split_manifest(
             raise ValueError(f"{name} must be a non-negative integer")
 
     normalized_patterns = tuple(item.casefold() for item in external_episode_patterns if item)
+    optimization = tuple(item for item in items if not any(
+        pattern in item.episode_id.casefold() for pattern in normalized_patterns)) or items
+    if any(not item.timestamps for item in items):
+        raise ValueError("cannot split an empty episode")
+    # One calendar boundary for all teams; gaps do not shift a team's test
+    # dates into dates already used to train another team.
+    time_start = min(item.timestamps[0] for item in optimization)
+    time_end = max(item.timestamps[-1] for item in optimization) + 1
+    duration = time_end - time_start
+    train_time = time_start + int(duration * train_fraction)
+    fit_time = time_start + int(duration * train_fraction * (1 - training_feedback_fraction))
+    development_time = time_start + int(duration * (train_fraction + development_fraction))
     records: list[EpisodeSplit] = []
     seen: set[str] = set()
     for episode in sorted(items, key=lambda item: item.episode_id):
@@ -422,24 +434,21 @@ def build_split_manifest(
             raise ValueError(f"episode timestamps must increase strictly: {episode.episode_id}")
 
         row_count = len(timestamps)
-        train_end = int(row_count * train_fraction)
-        development_end = int(row_count * (train_fraction + development_fraction))
-        training_fit_end = int(train_end * (1 - training_feedback_fraction))
-        if train_end >= 2:
-            training_fit_end = min(max(training_fit_end, 1), train_end - 1)
-        else:
-            training_fit_end = max(0, min(training_fit_end, train_end))
+        train_end = bisect_left(timestamps, train_time)
+        development_end = bisect_left(timestamps, development_time)
+        training_fit_end = bisect_left(timestamps, fit_time)
+        training_fit_end = max(0, min(training_fit_end, train_end))
         feedback_start = bisect_left(
             timestamps,
-            timestamps[training_fit_end] + training_feedback_embargo_hours,
+            fit_time + training_feedback_embargo_hours,
         )
         development_start = bisect_left(
             timestamps,
-            timestamps[train_end] + embargo_hours,
+            train_time + embargo_hours,
         )
         gate_start = bisect_left(
             timestamps,
-            timestamps[development_end] + embargo_hours,
+            development_time + embargo_hours,
         )
         role = (
             "external_holdout"

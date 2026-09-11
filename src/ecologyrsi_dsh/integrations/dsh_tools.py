@@ -685,13 +685,16 @@ class DshToolService:
                     continue
 
     def record_child_failure(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        from ..core.runtime_failure import validate_runtime_failure
         expected_fields = {"run_id", "stage", "idempotency_key", "error_code"}
-        if not isinstance(request, Mapping) or set(request) != expected_fields:
+        if not isinstance(request, Mapping) or set(request) not in (expected_fields, expected_fields | {"runtime_failure"}):
             raise ValueError("child failure request has an invalid shape")
         for name in ("run_id", "stage", "idempotency_key", "error_code"):
             if not isinstance(request[name], str) or not request[name].strip():
                 raise ValueError(f"child failure {name} must be non-empty text")
         error_code = str(request["error_code"]).strip()
+        details = ({"runtime_failure": validate_runtime_failure(request["runtime_failure"], error_code=error_code)}
+                   if "runtime_failure" in request else {})
         if len(error_code) > 80 or not error_code.replace("_", "").isalnum():
             raise ValueError("child failure error_code must be normalized text")
         run_id = str(request["run_id"])
@@ -743,7 +746,7 @@ class DshToolService:
                         "DshChildExecutionFailed",
                         {
                             "schema_version": (
-                                "ecologyrsi-dsh.child-execution-failed/1"
+                                "ecologyrsi-dsh.child-execution-failed/2" if details else "ecologyrsi-dsh.child-execution-failed/1"
                             ),
                             "identity": {
                                 "child_reservation_id": reservation_id,
@@ -751,6 +754,7 @@ class DshToolService:
                                 "idempotency_key": request["idempotency_key"],
                             },
                             "error_code": error_code,
+                            **details,
                         },
                         event_id=event_id,
                         expected_run_seq=self.ledger.latest_run_seq(run_id),

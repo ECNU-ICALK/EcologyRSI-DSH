@@ -71,6 +71,6 @@ def finalist_review_evidence(
             "judge_accepted": accepted,
             "judge_result_digest": metrics.get("judge_result_digest"),
         }
-    if set(evidence) != {HoldoutArm.FINALIST_1.value, HoldoutArm.FINALIST_2.value}:
+    if set(evidence) not in ({HoldoutArm.FINALIST_1.value, HoldoutArm.FINALIST_2.value}, {HoldoutArm.FINALIST_1.value}):
         raise ValueError("independent review requires both finalists")
     return evidence

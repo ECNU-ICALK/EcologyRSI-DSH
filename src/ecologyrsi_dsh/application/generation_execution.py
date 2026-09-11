@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..evolution.schedule import ADAPTIVE_PROTOCOLS
+
 from ..evaluators.agent_stability import REPLICA_COUNT, replica_summary, stability_evidence, capacity_with_inference_replicas
 
 from collections.abc import Mapping, Sequence
@@ -207,7 +209,7 @@ def _two_stage_screening_enabled(state: Any, candidates: Any) -> bool:
     metadata = state.task_manifest.metadata
     return bool(
         len(tuple(candidates)) > _FORMAL_FINALIST_COUNT
-        and metadata.get("optimization_protocol") == OPTIMIZATION_PROTOCOL
+        and metadata.get("optimization_protocol") in ADAPTIVE_PROTOCOLS
         and metadata.get("cohort_capacity_enforced") is True
         and supports_two_stage_screening(metadata.get("sample_agent_protocol"))
         and metadata.get("sample_budget_class") == "selection_eligible"
@@ -225,7 +227,7 @@ def _freeze_adaptive_generation_inputs(
     state = services.director.state(run_id)
     metadata = state.task_manifest.metadata
     if (
-        metadata.get("optimization_protocol") != OPTIMIZATION_PROTOCOL
+        metadata.get("optimization_protocol") not in ADAPTIVE_PROTOCOLS
         or metadata.get("cohort_capacity_enforced") is not True
     ):
         return
@@ -331,7 +333,7 @@ def _freeze_adaptive_generation_inputs(
 
 
 def _phase_task_manifest(task: Any, generation: int, phase: str) -> Any:
-    if task.metadata.get("optimization_protocol") == OPTIMIZATION_PROTOCOL:
+    if task.metadata.get("optimization_protocol") in ADAPTIVE_PROTOCOLS:
         return replace(
             task,
             metadata={
@@ -436,6 +438,8 @@ def _screen_candidate(services: GenerationRuntime, run_id: str, candidate_id: st
         )
         return
 
+    from ..evaluators.execution_validity import require_valid_execution
+    require_valid_execution(bundle.evaluation.metrics, screening_cohort.origin_count, phase="screening")
     summary = bundle.evaluation.metrics.get("sample_execution")
     attempted_origins = (
         int(summary.get("attempted_origin_samples", 0))
@@ -487,6 +491,15 @@ def _prepare_formal_finalists(
     state = services.director.state(run_id)
     generation = int(candidates[0].generation)
     frozen = _formal_selection_event(state, generation)
+    schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata.get("optimization_schedule") or OptimizationSchedule.default().to_dict())
+    if frozen is None and schedule.quick:
+        # Preregister the first proposal before seeing any evaluation labels.
+        # Other proposals are never scored or ranked in the quick protocol.
+        selected = min(candidates, key=lambda item: item.slot_index)
+        frozen = _director_mutation(services, "freeze_formal_selection_cohort", run_id,
+            generation=generation, selected_candidate_ids=(selected.candidate_id,),
+            screening_digest=screening_cohort_digest(()))
+        state = services.director.state(run_id)
     if frozen is None:
         tasks = tuple(
             CandidateEvaluationTask(
@@ -2863,7 +2876,10 @@ def _execute_adaptive_holdout_arm(
         **callbacks.evaluation_kwargs(),
     )
     metrics = dict(bundle.evaluation.metrics)
-    if task.metadata.get("sample_agent_mode") == "dsh_native_agent":
+    from ..evaluators.execution_validity import require_valid_execution
+    require_valid_execution(metrics, cohort.origin_count, phase="holdout")
+    schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata["optimization_schedule"])
+    if task.metadata.get("sample_agent_mode") == "dsh_native_agent" and not schedule.quick:
         replicas = [replica_summary(scope, bundle.evaluation)]
         for replica_index in range(1, REPLICA_COUNT):
             replica_scope = replace(scope, inference_replica=replica_index)
@@ -2875,11 +2891,12 @@ def _execute_adaptive_holdout_arm(
                 task, candidate, proposal, scope=replica_scope, cohort=cohort,
                 algorithm_spec=spec, **replica_callbacks.evaluation_kwargs(),
             )
+            require_valid_execution(replica_bundle.evaluation.metrics, cohort.origin_count, phase="holdout_replica")
             replicas.append(replica_summary(replica_scope, replica_bundle.evaluation))
         metrics["agent_inference_stability"] = stability_evidence(replicas)
     summary = metrics.get("sample_execution")
     if not isinstance(summary, Mapping) or int(summary.get("attempted_origin_samples", 0)) < cohort.origin_count:
-        raise RuntimeError("holdout did not complete the frozen 169-origin cohort")
+        raise RuntimeError(f"holdout did not complete the frozen {cohort.origin_count}-origin cohort")
     evaluation = existing or HoldoutEvaluation(
         evaluation_id=f"holdout-evaluation:{generation}:{arm.value}",
         scope=scope,
@@ -3788,7 +3805,7 @@ def _build_adaptive_analysis(
             if positive_delta_search and selected
             else "本代无候选通过初筛，仅保留探索证据；全局 incumbent 不变。"
             if exploration_only
-            else f"候选 {selected} 在冻结 169-origin 三臂留出比较中胜出。"
+            else f"候选 {selected} 在本轮冻结的三臂训练比较中胜出。"
             if selected
             else "两个 finalist 均未通过留出集门禁，保留 incumbent。"
         ),
@@ -3979,15 +3996,15 @@ def _finalize_adaptive_generation(services: GenerationRuntime, run_id: str, batc
             "candidate_id": finalist_ids[0],
             "candidate_revision_id": finalist_revision_ids[0],
         },
-        HoldoutArm.FINALIST_2.value: {
-            "candidate_id": finalist_ids[1],
-            "candidate_revision_id": finalist_revision_ids[1],
-        },
         HoldoutArm.INCUMBENT.value: {
             "candidate_id": incumbent_id,
             "candidate_revision_id": incumbent_revision_id,
         },
     }
+    if not schedule.quick:
+        bindings[HoldoutArm.FINALIST_2.value] = {
+            "candidate_id": finalist_ids[1], "candidate_revision_id": finalist_revision_ids[1],
+        }
     holdout = _director_mutation(
         services,
         "freeze_generation_holdout",
@@ -3997,7 +4014,7 @@ def _finalize_adaptive_generation(services: GenerationRuntime, run_id: str, batc
         bindings,
     )
     state = services.director.state(run_id)
-    for arm in HoldoutArm:
+    for arm in map(HoldoutArm, holdout.arm_bindings):
         _execute_adaptive_holdout_arm(
             services,
             run_id,
@@ -4009,7 +4026,7 @@ def _finalize_adaptive_generation(services: GenerationRuntime, run_id: str, batc
     state = services.director.state(run_id)
     evaluations = tuple(
         state.holdout_evaluation_for(generation, arm)
-        for arm in HoldoutArm
+        for arm in map(HoldoutArm, holdout.arm_bindings)
     )
     if any(item is None for item in evaluations):
         return None
@@ -4018,6 +4035,7 @@ def _finalize_adaptive_generation(services: GenerationRuntime, run_id: str, batc
         reviews = _ensure_finalist_reviews(services, run_id, evaluations)
         state = services.director.state(run_id)
         comparison = build_generation_comparison(
+            quick_experiment=schedule.quick,
             finalist_reviews=reviews,
             run_id=run_id,
             generation=generation,

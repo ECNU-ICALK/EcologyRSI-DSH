@@ -7,7 +7,18 @@ from .models import digest
 from .redaction import REMOTE_REASON_CODES
 
 AGENT_PREDICTION_SCHEMA = "ecology-sample-predictions@2"
-MAX_PREDICTION_CALLS = 6
+MAX_PREDICTION_CALLS = 6  # Maximum receipt size; admission sets the execution budget.
+PREDICTION_TOOL_CALL_BUDGET = 2
+
+
+def successful_agent_provenance_passes(sample):
+    """Qualify published successes independently of missing scientific pairs."""
+    if not isinstance(sample, Mapping):
+        return False
+    value = sample.get("successful_agent_provenance_pass")
+    if value is None:
+        value = sample.get("strict_agent_chain_pass")
+    return value is True
 
 
 def validate_predictions(value, sample_ids: Sequence[str], *, wave_digest: str):

@@ -14,6 +14,7 @@ class GatewayRetryPolicy:
     circuit_code: str
     suggested_action: str
     public_reason: str
+    retry_limit: int = 6
 
 
 GATEWAY_RETRY_SCHEMA_VERSION = "ecologyrsi-dsh.gateway-retry-scheduled/2"
@@ -31,6 +32,7 @@ GATEWAY_RETRY_POLICIES: Mapping[str, GatewayRetryPolicy] = MappingProxyType(
             "dsh_runtime_retry_circuit_open",
             "check_dsh_runtime_then_resume",
             "DSH 智能体运行时暂时不可用，已安排有界延迟重试。",
+            retry_limit=12,
         ),
         "research_timeout": GatewayRetryPolicy(
             "research_timeout_retry_circuit_open",

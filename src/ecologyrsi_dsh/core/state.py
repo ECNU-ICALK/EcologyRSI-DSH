@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..evolution.schedule import ADAPTIVE_PROTOCOLS
+
 from .dsh_usage import validate_session_metrics as _validate_dsh_session_metrics
 from .dsh_usage import validate_session_usage, check_usage_binding
 
@@ -633,13 +635,12 @@ def validate_generation_comparison_binding(
     embedded = {
         item.scope.holdout_arm: item for item in comparison.holdout_evaluations
     }
-    if set(embedded) != set(HoldoutArm) or set(persisted_evaluations) != set(
-        HoldoutArm
-    ):
+    arms = set(map(HoldoutArm, holdout.arm_bindings))
+    if set(embedded) != arms or set(persisted_evaluations) != arms:
         raise ValueError("generation comparison requires all three holdout arms")
     if any(
         embedded[arm].to_dict() != persisted_evaluations[arm].to_dict()
-        for arm in HoldoutArm
+        for arm in arms
     ):
         raise ValueError(
             "generation comparison evaluations differ from durable holdout evidence"
@@ -672,6 +673,7 @@ def validate_generation_comparison_binding(
         and "selection_policy" not in comparison.gate_results
     )
     expected = build_generation_comparison(
+        quick_experiment=OptimizationSchedule.from_dict(task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict())).quick,
         finalist_reviews=reviews,
         run_id=run_id,
         generation=comparison.generation,
@@ -859,6 +861,10 @@ _GATEWAY_RETRY_ERROR_CODE_POLICIES = {
                 "dsh_native_runtime_not_ready",
                 "dsh_native_runtime_transport_error",
                 "dsh_native_runtime_unavailable",
+                "structured_child_model_error",
+                "structured_child_tool_protocol_error",
+                "structured_role_operational_timeout",
+                "provider_route_cooling_down",
             }
         ),
         "dsh_native_runtime_unavailable",
@@ -1904,7 +1910,7 @@ class RunState:
         if batch is None:
             if (
                 self.task_manifest.metadata.get("optimization_protocol")
-                == OPTIMIZATION_PROTOCOL
+                in ADAPTIVE_PROTOCOLS
             ):
                 from ..evolution.genome import (
                     EcologyEvolutionPluginGenome,
@@ -2507,7 +2513,7 @@ class RunStateReducer:
                     self.task.metadata["optimization_schedule"]
                 )
                 if (
-                    self.task.metadata.get("optimization_protocol") != OPTIMIZATION_PROTOCOL
+                    self.task.metadata.get("optimization_protocol") not in ADAPTIVE_PROTOCOLS
                     or adaptation.dataset_id != self.task.visible_datasets[0]
                     or adaptation.episode_id != str(self.task.metadata.get("episode_id"))
                     or adaptation.seed != self.task.seed
@@ -2560,7 +2566,7 @@ class RunStateReducer:
                     or planned.screening.shared_candidate_count != 4
                     or planned.holdout.origin_count
                     != schedule.selection_holdout_origin_count
-                    or planned.holdout.shared_arm_count != 3
+                    or planned.holdout.shared_arm_count != schedule.finalist_count + 1
                     or set(planned.screening.origin_occurrence_keys)
                     & set(self.run_adaptation_cohort.origin_occurrence_keys)
                     or set(planned.holdout.origin_occurrence_keys)
@@ -2624,7 +2630,7 @@ class RunStateReducer:
                     raise ValueError("incumbent control cannot enter candidate screening")
                 if (
                     self.task.metadata.get("optimization_protocol")
-                    == OPTIMIZATION_PROTOCOL
+                    in ADAPTIVE_PROTOCOLS
                     and not any(
                         revision.candidate_id == candidate_id
                         and revision.parent_revision_id is None
@@ -2634,7 +2640,7 @@ class RunStateReducer:
                     raise ValueError(
                         "adaptive candidate screening requires frozen initial revision R0"
                     )
-                if self.task.metadata.get("optimization_protocol") == OPTIMIZATION_PROTOCOL:
+                if self.task.metadata.get("optimization_protocol") in ADAPTIVE_PROTOCOLS:
                     planned = self.generation_selection_cohorts.get(generation)
                     if planned is None:
                         raise ValueError(
@@ -2740,14 +2746,19 @@ class RunStateReducer:
                     raise ValueError("formal selection payload is invalid")
                 generation = payload["generation"]
                 selected = payload["selected_candidate_ids"]
+                schedule = OptimizationSchedule.from_dict(self.task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
+                if schedule.quick:
+                    first = min((c for c in self.candidates.values() if c.generation == generation and c.role is CandidateRole.SEARCH), key=lambda c: c.slot_index)
+                    if selected != [first.candidate_id]:
+                        raise ValueError("quick trajectory must preregister the first proposal")
                 if (
                     isinstance(generation, bool)
                     or not isinstance(generation, int)
                     or generation < 0
                     or not isinstance(selected, list)
-                    or len(selected) != 2
+                    or len(selected) != schedule.finalist_count
                     or any(not isinstance(item, str) or not item.strip() for item in selected)
-                    or len(set(selected)) != 2
+                    or len(set(selected)) != schedule.finalist_count
                 ):
                     raise ValueError("formal selected candidate count is invalid")
                 for candidate_id in selected:
@@ -2758,7 +2769,7 @@ class RunStateReducer:
                         or candidate.role is not CandidateRole.SEARCH
                     ):
                         raise ValueError("formal selected candidate is outside generation")
-                    if (generation, candidate_id) not in self.candidate_screening_events:
+                    if not schedule.quick and (generation, candidate_id) not in self.candidate_screening_events:
                         raise ValueError("formal selection is missing screening evidence")
                 screening_digest = payload["screening_digest"]
                 if (
@@ -3019,9 +3030,10 @@ class RunStateReducer:
                     raise ValueError("screened-out candidate formal selection is missing")
                 if candidate.candidate_id in formal.payload["selected_candidate_ids"]:
                     raise ValueError("selected candidate cannot be screened out")
-                if (generation, candidate.candidate_id) not in self.candidate_screening_events:
+                quick = OptimizationSchedule.from_dict(self.task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict())).quick
+                if not quick and (generation, candidate.candidate_id) not in self.candidate_screening_events:
                     raise ValueError("screened-out candidate is missing screening evidence")
-                if payload["reason"] != "not_selected_by_screening_top_k":
+                if payload["reason"] != ("outside_preregistered_quick_trajectory" if quick else "not_selected_by_screening_top_k"):
                     raise ValueError("screened-out candidate reason is invalid")
                 key = (generation, candidate.candidate_id)
                 existing = self.screened_out_events.get(key)
@@ -3610,12 +3622,14 @@ class RunStateReducer:
                     prior[launch.seq] = launch
                 check_usage_binding(payload, (prior[seq] for seq in sorted(prior)))
             elif event.kind == "DshChildExecutionFailed":
+                from .runtime_failure import validate_runtime_failure
                 identity = payload.get("identity")
+                failure_v2 = payload.get("schema_version") == "ecologyrsi-dsh.child-execution-failed/2"
                 if (
                     set(payload)
-                    != {"schema_version", "identity", "error_code"}
+                    != ({"schema_version", "identity", "error_code"} | ({"runtime_failure"} if failure_v2 else set()))
                     or payload.get("schema_version")
-                    != "ecologyrsi-dsh.child-execution-failed/1"
+                    not in {"ecologyrsi-dsh.child-execution-failed/1", "ecologyrsi-dsh.child-execution-failed/2"}
                     or not isinstance(identity, Mapping)
                     or set(identity)
                     != {"child_reservation_id", "stage", "idempotency_key"}
@@ -3628,6 +3642,8 @@ class RunStateReducer:
                     or not payload.get("error_code")
                 ):
                     raise ValueError("DshChildExecutionFailed payload is invalid")
+                if failure_v2:
+                    validate_runtime_failure(payload["runtime_failure"], error_code=payload["error_code"])
             elif event.kind == "GatewayRetryScheduled":
                 # A gateway cooldown is an operational heartbeat only.  It must
                 # survive replay so a browser refresh can distinguish a live run
@@ -4477,12 +4493,13 @@ class RunStateReducer:
                     if item.generation == holdout.generation
                     and item.status is TrajectoryStatus.COMPLETED
                 ]
-                if len(completed) != 2:
+                schedule = OptimizationSchedule.from_dict(self.task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
+                if len(completed) != schedule.finalist_count or len(holdout.arm_bindings) != schedule.finalist_count + 1:
                     raise ValueError("holdout requires two completed trajectories")
                 formal = self.formal_selection_events.get(holdout.generation)
                 finalist_candidates = {
                     holdout.arm_bindings[arm.value]["candidate_id"]
-                    for arm in (HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2)
+                    for arm in map(HoldoutArm, holdout.arm_bindings) if arm is not HoldoutArm.INCUMBENT
                 }
                 if formal is None or finalist_candidates != set(
                     formal.payload["selected_candidate_ids"]
@@ -4495,7 +4512,9 @@ class RunStateReducer:
                 completed_by_candidate = {
                     item.candidate_id: item for item in completed
                 }
-                for arm in (HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2):
+                for arm in map(HoldoutArm, holdout.arm_bindings):
+                    if arm is HoldoutArm.INCUMBENT:
+                        continue
                     binding = holdout.arm_bindings[arm.value]
                     trajectory = completed_by_candidate.get(
                         binding["candidate_id"]
@@ -4604,7 +4623,7 @@ class RunStateReducer:
                     raise ValueError("generation comparison holdout is missing")
                 persisted = {
                     arm: self.holdout_evaluations.get((comparison.generation, arm))
-                    for arm in HoldoutArm
+                    for arm in map(HoldoutArm, holdout.arm_bindings)
                 }
                 if any(item is None for item in persisted.values()):
                     raise ValueError("generation comparison requires all three holdout arms")

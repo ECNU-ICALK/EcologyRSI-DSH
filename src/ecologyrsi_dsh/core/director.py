@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..evolution.schedule import ADAPTIVE_PROTOCOLS
+
 from ..evolution.agent_policy import build_agent_policy, validate_agent_policy
 
 from ..evolution.diagnosis import diagnose_generation, hypothesis_for_proposal
@@ -71,7 +73,6 @@ from .retry_policy import (
     GATEWAY_CIRCUIT_CODES,
     GATEWAY_RETRY_CLASSES,
     GATEWAY_RETRY_EPOCH_SECONDS,
-    GATEWAY_RETRY_LIMIT,
     GATEWAY_RETRY_MAX_DELAY_SECONDS,
     GATEWAY_RETRY_SCHEMA_VERSION,
     retry_policy,
@@ -918,6 +919,9 @@ class EvolutionDirector:
                 and event.payload.get("retry_class") == normalized_retry_class
             ]
             active_events = [event for event in scoped_events if event.seq > reset_seq]
+            # Keep an existing durable chain's limit; new native recovery
+            # chains use a longer, still time-bounded outage window.
+            retry_limit = int(active_events[-1].payload["retry_limit"]) if active_events else policy.retry_limit
             if active_events and attempt_anchor_seq != active_events[-1].seq:
                 return GatewayRetryDecision("superseded", None)
             if not active_events and (
@@ -996,7 +1000,7 @@ class EvolutionDirector:
             proposed_retry_at = last_failure_at + timedelta(
                 seconds=persisted_retry_delay
             )
-            if consecutive_failures >= GATEWAY_RETRY_LIMIT:
+            if consecutive_failures >= retry_limit:
                 pause_trigger = "failure_limit"
             elif elapsed_seconds >= GATEWAY_RETRY_EPOCH_SECONDS:
                 pause_trigger = "epoch_elapsed"
@@ -1015,9 +1019,9 @@ class EvolutionDirector:
                     "breaker_epoch": breaker_epoch,
                     "consecutive_failures": min(
                         consecutive_failures,
-                        GATEWAY_RETRY_LIMIT,
+                        retry_limit,
                     ),
-                    "retry_limit": GATEWAY_RETRY_LIMIT,
+                    "retry_limit": retry_limit,
                     "first_failure_at": first_failure_text,
                     "last_failure_at": last_failure_text,
                     "last_error_code": normalized_error_code,
@@ -1044,7 +1048,7 @@ class EvolutionDirector:
                     "failure_id": normalized_failure_id,
                     "attempt_anchor_seq": attempt_anchor_seq,
                     "consecutive_failures": consecutive_failures,
-                    "retry_limit": GATEWAY_RETRY_LIMIT,
+                    "retry_limit": retry_limit,
                     "first_failure_at": first_failure_text,
                     "last_failure_at": last_failure_text,
                     "last_error_code": normalized_error_code,
@@ -1108,22 +1112,25 @@ class EvolutionDirector:
                 raise ValueError("error_code must be a compact host identifier")
             payload["error_code"] = code
         if failure_context is not None:
+            integer_fields = {
+                "generation", "batch_index", "batch_count",
+                "formal_origin_occurrences_completed",
+                "formal_origin_occurrences_upper_bound",
+            }
             allowed = {
-                "generation",
                 "stage",
                 "work_unit_kind",
                 "candidate_id",
                 "batch_id",
-                "batch_index",
-                "batch_count",
-            }
+                "failure_domain",
+            } | integer_fields
             context = dict(failure_context)
             if not context or not set(context) <= allowed:
                 raise ValueError("failure_context has an invalid shape")
             if not isinstance(context.get("generation"), int):
                 raise ValueError("failure_context generation must be an integer")
             for key, value in context.items():
-                if key in {"generation", "batch_index", "batch_count"}:
+                if key in integer_fields:
                     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                         raise ValueError(f"failure_context {key} must be non-negative")
                 elif not isinstance(value, str) or not value.strip() or len(value) > 160:
@@ -1184,7 +1191,7 @@ class EvolutionDirector:
             generation_batch is not None
             and generation_batch.generation > 0
             and state.task_manifest.metadata.get("optimization_protocol")
-            == OPTIMIZATION_PROTOCOL
+            in ADAPTIVE_PROTOCOLS
         ):
             selected_revision_id = state.effective_revision_for(
                 generation_batch.generation - 1
@@ -2284,13 +2291,13 @@ class EvolutionDirector:
             raise ValueError("incumbent control cannot enter candidate screening")
         if (
             state.task_manifest.metadata.get("optimization_protocol")
-            == OPTIMIZATION_PROTOCOL
+            in ADAPTIVE_PROTOCOLS
             and state.initial_revision_for(candidate_id) is None
         ):
             raise ValueError(
                 "adaptive candidate screening requires frozen initial revision R0"
             )
-        if state.task_manifest.metadata.get("optimization_protocol") == OPTIMIZATION_PROTOCOL:
+        if state.task_manifest.metadata.get("optimization_protocol") in ADAPTIVE_PROTOCOLS:
             generation_cohorts = state.generation_cohort_for(generation)
             if generation_cohorts is None:
                 raise ValueError(
@@ -2418,7 +2425,7 @@ class EvolutionDirector:
         )
         if (
             state.task_manifest.metadata.get("optimization_protocol")
-            != OPTIMIZATION_PROTOCOL
+            not in ADAPTIVE_PROTOCOLS
             or planned.dataset_id != state.task_manifest.visible_datasets[0]
             or planned.episode_id
             != str(state.task_manifest.metadata.get("episode_id"))
@@ -2484,7 +2491,7 @@ class EvolutionDirector:
             or planned.screening.shared_candidate_count != 4
             or planned.holdout.origin_count
             != schedule.selection_holdout_origin_count
-            or planned.holdout.shared_arm_count != 3
+            or planned.holdout.shared_arm_count != schedule.finalist_count + 1
             or set(planned.screening.origin_occurrence_keys)
             & set(adaptation.origin_occurrence_keys)
             or set(planned.holdout.origin_occurrence_keys)
@@ -2528,8 +2535,13 @@ class EvolutionDirector:
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
         selected = tuple(str(item) for item in selected_candidate_ids)
-        if len(selected) != 2 or len(selected) != len(set(selected)):
+        schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
+        if len(selected) != schedule.finalist_count or len(selected) != len(set(selected)):
             raise ValueError("formal selection cohort must contain exactly 2 candidates")
+        if schedule.quick:
+            first = min((c for c in state.candidates if c.generation == generation and c.role is CandidateRole.SEARCH), key=lambda c: c.slot_index)
+            if selected != (first.candidate_id,):
+                raise ValueError("quick trajectory must preregister the first proposal")
         for candidate_id in selected:
             candidate = state.candidate(candidate_id)
             if candidate.generation != generation:
@@ -2539,7 +2551,7 @@ class EvolutionDirector:
             for event in state.candidate_screening_events
             if event.payload["generation"] == generation
         ]
-        if any(
+        if not schedule.quick and any(
             state.screening_for(generation, candidate_id) is None
             for candidate_id in selected
         ):
@@ -3609,12 +3621,12 @@ class EvolutionDirector:
             if item.generation == generation
             and item.status is TrajectoryStatus.COMPLETED
         ]
-        if len(completed) != 2:
+        if len(completed) != schedule.finalist_count:
             raise ValueError("holdout requires two completed trajectories")
         formal = state.formal_selection_for(generation)
         finalist_bindings = {
             arm: holdout.arm_bindings[arm.value]
-            for arm in (HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2)
+            for arm in map(HoldoutArm, holdout.arm_bindings) if arm is not HoldoutArm.INCUMBENT
         }
         finalist_candidate_ids = {
             binding["candidate_id"]
@@ -3777,7 +3789,7 @@ class EvolutionDirector:
             raise ValueError("generation comparison holdout is missing")
         persisted = {
             arm: state.holdout_evaluation_for(comparison.generation, arm)
-            for arm in HoldoutArm
+            for arm in map(HoldoutArm, holdout.arm_bindings)
         }
         if any(item is None for item in persisted.values()):
             raise ValueError("generation comparison requires all three holdout arms")
@@ -3883,12 +3895,13 @@ class EvolutionDirector:
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
         candidate = state.candidate(candidate_id)
+        quick = OptimizationSchedule.from_dict(state.task_manifest.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict())).quick
         payload = {
             "schema_version": SCREENED_OUT_SCHEMA_V1,
             "candidate_id": candidate_id,
             "generation": generation,
             "formal_selection_event_id": formal_selection_event_id,
-            "reason": "not_selected_by_screening_top_k",
+            "reason": "outside_preregistered_quick_trajectory" if quick else "not_selected_by_screening_top_k",
         }
         event_id = f"{run_id}:generation:{generation}:screened-out:{candidate_id}"
         if candidate.status is CandidateStatus.SCREENED_OUT:
@@ -3908,7 +3921,7 @@ class EvolutionDirector:
             raise ValueError("screened-out candidate formal selection is missing")
         if candidate_id in formal.payload["selected_candidate_ids"]:
             raise ValueError("selected candidate cannot be screened out")
-        if state.screening_for(generation, candidate_id) is None:
+        if not quick and state.screening_for(generation, candidate_id) is None:
             raise ValueError("screened-out candidate is missing screening evidence")
         self.ledger.append(
             run_id,
