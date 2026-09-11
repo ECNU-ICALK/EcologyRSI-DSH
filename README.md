@@ -6,9 +6,7 @@ EcologyRSI-DSH 是一个基于 DeepSeek Harness 的 **AI for Ecology** 框架，
 
 这里的 RSI 指 Recursive Self-Improvement（循环自进化）：根据上一轮证据继续提出和检验方案。目前可执行的改进受已登记模型、参数与工具边界约束；新算法或新生态任务需要先适配和登记。搜索版本与严格认证版本分别记录，分数上升只有在相应比较资格和门槛通过后才允许更新。一次运行也可以正常结束且没有合格改进。
 
-> 当前版本：`0.7.10` 完整网页运行验证版 · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
-
-本版统一了研究、逐起点预测和独立评审的语义。Agent 自主决定工具与参数并提交最终数值；Critic 请求修改时返回 Agent 重试。正式留出认证采用两次独立推理，不把事件重放或重复推理计为新的统计样本。基础设计见 [Agent 策略说明](docs/refactor/AGENT-POLICY-0.7.0.md)，本次完整实跑与恢复验证见 [0.7.10 网页运行记录](docs/refactor/WEB-EVOLUTION-0.7.10.md)。
+> 当前工作树：基于 `0.7.10` 的快速协议优化版（长期实跑验收中） · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
 
 候选训练产物现在包含 Agent 策略、冻结经验、默认模型和可选工具配方。导出命令：
 
@@ -19,7 +17,7 @@ python -m ecologyrsi_dsh export-policy RUN_ID CANDIDATE_ID --db run.sqlite3 --ou
 通过 `ecologyrsi_dsh.integrations.agent_policy_bundle.load_policy_bundle` 和 `create_policy_adapter` 加载，提供匹配的运行合同、已授权 DSH 绑定及相同训练段的新因果输入；凭据不进入策略包。
 
 
-本机本轮验收入口为 `http://127.0.0.1:8851/`（后端 8879）。已完成一轮 1702 个预测起点，全部决策和反思已封存；没有候选达到晋升标准。0.7.10 修复独立副本恢复、轮末证据汇总和进度展示，交付包位于 `dist/0.7.10/`。
+当前主实例入口为 `http://127.0.0.1:8848/plugins/ecology/evolution/`，后端 8777。快速协议改造与验收见 [本次实施记录](docs/refactor/QUICK-OPTIMIZATION-IMPLEMENTATION-20260909.md)。`dist/0.7.10/` 属于此前的交付快照，不包含本次修改；此前完成的长运行也不能代替新协议验收。
 
 ## 先看这里
 
@@ -91,18 +89,21 @@ EcologyRSI-DSH 把模型放在“研究助理”的位置：模型负责提出�
 
 ## 默认一轮如何执行
 
-当前外层仍是“每轮 4 个候选、筛选后保留 Top 2”的选择逻辑；变化只发生在每个入围候选内部。默认执行合同如下：
+默认采用快速实验协议 `quick_adaptive_epoch@1`，先运行 5 个 epoch。每轮只训练一条主线，100 个训练时点分为 10 个 batch；每个时点仍由 Agent 自主分析、选择工具并提交预测。四个研究提案中预先指定首个进入训练，不用评测标签挑选主线。
 
 | 阶段 | 默认工作量 | 作用 |
 |---|---:|---|
-| 同窗初筛 | `4 × 64` 次完整预测 | 四个候选方案使用同一批 64 个预测起点，选出前两名 |
-| 入围方案的多批次优化 | 最多 `700` 次完整预测 | 两个入围方案共享 200 个固定预测起点；各自先做一个初始批次，再做三个新旧版本配对批次 |
-| 每轮结束的留出比较 | `3 × 169` 次完整预测 | 两个入围方案的最终版本与上一轮版本使用同一批冻结留出样本重新比较；这是搜索选择证据 |
-| 单轮合计 | 最多 `1,463` 次完整预测 | 默认 3 个目标 × 3 个预测时距，共 `13,167` 个评分单元 |
+| 主线训练 | 100 次完整预测 | 每批 10 个时点有效完成后反思，探索修订供后续使用 |
+| 轮末候选 | 50 次完整预测 | 冻结最后合法修订，使用本轮新评测时点 |
+| 轮初冠军对照 | 50 次完整预测 | 使用相同 50 个时点，单次推理 |
+| 单轮合计 | 200 次完整预测 | 默认每次包含 3 个目标 × 3 个时距，共 1,800 个评分单元 |
+| 5 轮合计 | 1,000 次完整预测 | 研究、反思、条件 critic、工具与恢复另计，不等于 LLM 请求数 |
 
-一次“完整预测”从一个时间起点出发，同时给出温度、相对湿度和 CO₂ 在 1、6、24 小时后的 9 个结果。同一批内的新旧版本共享预测起点；批次之间与筛选、轮末比较之间按目标成熟时间隔离。小批次至少跨越 24 小时，容量不足时拒绝创建，不循环补足数据。多轮共享同一组适应批次作为训练材料，每轮初筛和留出比较使用新的隔离样本。跨批原始分数不直接用于排名，轮末留出比较也不能代替独立 validation/final_test。
+跨轮固定回放 100 个训练起点，每轮使用新的 50 个比较起点。5 轮需要 350 个不同起点，对应 750 次 cohort 使用和 1,000 次版本执行；时间隔离额外需要原始时间跨度，独立认证区另计。两个数据集都通过默认 5 轮容量核验。快速模式按连续时点取样，批次和轮末 cohort 之间仍等待前一批全部目标成熟。训练回放与参与搜索的轮末比较均不是独立认证。
 
-默认同时处理 4 个候选方案、最多 64 个预测起点（可配置 1–128）。每个起点固定产生 9 个结果；两个入围方案可以并行处理，但共享同一运行的总并发额度，服务端还会限制短时间内向模型服务发起的请求数量。
+快速模式的修订只标记为待验证；轮末两臂完整、评分口径一致、实际增益超过 0.005 且各分项不退化，才更新工作版本。该模式不授予统计认证或稳定提升标记。正式对照模式显式启用原来的 4×64 预筛、Top 2 配对训练和三臂双副本评测，默认最多 936 次执行/轮，并保留跨日与推理稳定性门槛。最终认证须另行使用隔离数据。
+
+运行同时预测的起点上限默认 64，从 8 开始按有效执行结果调节。503/429 等服务故障进入有界恢复与路由冷却；执行不完整的批次或评测副本不能推进科学流程。每个 planner attempt 最多调用预测工具 2 次，planner/critic 分别限制 10/4 个 Agent 步骤；累计输出回执设中止阈值，不能当成精确计费硬上限。创建、运行摘要共同读取后端冻结执行计划。
 
 ### 这些词是什么意思
 
@@ -260,6 +261,24 @@ trap 'kill "$ECOLOGYRSI_SIDECAR_PID" 2>/dev/null || true' EXIT
 dsh --profile web --port 8848
 ```
 
+GLM 5.x、DeepSeek V4 通过自定义 OpenAI 地址接入时，需要声明实际的思考开关协议。
+否则服务端可能默认开启长思考，导致样本预测或预检在输出截断后停止。
+可为本项目生成独立配置（保留其他模型配置，文件权限为 `0600`，不修改全局设置）：
+
+```bash
+node scripts/configure_dsh_reasoning.mjs \
+  --dsh-package "$(npm root -g)/@deepseek-ai/dsh/package.json" \
+  --source "${DSH_HOME:-$HOME/.dsh}/settings.yaml" \
+  --output .runtime/ecology-inference \
+  --route pjlab/glm-5.2 --route pjlab/deepseek-v4-flash-0731
+dsh --profile web --patch "$PWD/.runtime/ecology-inference/settings.patch.yml" --port 8848
+```
+
+将示例路由换成已配置的同系列模型；输出目录须为新目录。`--patch` 必须位于 `--port`
+等网页参数之前。宿主依据模型明确声明的能力选择：样本预测和样本审查关闭额外深思考，
+轮末评审优先使用 low，研究和提案保留默认或 high。子 Agent 显式继承该策略；工具选择、
+逐样本预测、结构化输出验证和完整评测要求保持有效。
+
 打开 <http://127.0.0.1:8848/>，点击侧栏中的“生态模型进化”。浏览器只访问 DSH
 的 `8848` 端口；`8777` 是仅供 DSH 宿主插件调用的本机 sidecar，不是需要单独打开的
 前端端口。按 `Ctrl-C` 停止 DSH 后，上述 `trap` 会同时停止本次启动的 sidecar。
@@ -369,7 +388,7 @@ PYTHONPATH=src python -m ecologyrsi_dsh data fetch agc_tomato_2019
 
 启动检索不是唯一检索时机。Researcher、Candidate Proposer、Sample Planner、Sample Critic、Generation Judge 和 Coordinator 在各自阶段加载必需 Skill 后，都可以在遇到证据缺口时调用零到三次同一个 `web_search`。模型只提交 1–4 条短查询和阶段内 `retrieval_key`，不能选择 provider：包装器先调用 DSH 内部 `ctx.web.search`；若 provider 不可用、出错，或结果少于 2 个不同 HTTPS 来源、少于 2 个有标题/摘要的证据来源、与查询没有词项重合，Python sidecar 才自动调用 OpenAlex 元数据回退。主结果与回退结果按 URL 去重、最多保留 8 个来源，并以 `DshRetrievalExecuted` 事件持久化；相同阶段检索在恢复时先重放，不重复联网。动态结果可作为 Agent 预测分析的参考，不能自行进入冻结 `evidence_ref` 或改写宿主评分、门禁和晋级结果。
 
-插件不暴露 provider 专用工具，也不开放 `web_fetch`。显式取消会终止当前检索而不发起回退；检索与预测工具调用发生在 Skill 之后、最终结构化提交之前；Sample Planner 每个起点的每次分析尝试可执行 0–6 次预测工具调用、0–3 次检索，随后提交自己的数值预测。
+插件不暴露 provider 专用工具，也不开放 `web_fetch`。显式取消会终止当前检索而不发起回退；检索与预测工具调用发生在 Skill 之后、最终结构化提交之前；Sample Planner 每个起点的每次分析尝试可执行 0–2 次预测工具调用、0–3 次检索，随后提交自己的数值预测。
 
 这里的“实现方案”指把模型建议转换成 EcologyRSI 插件自己的受限模型配置，并调用宿主已登记的科学工具；不会修改 DSH 基本框架，也不会执行模型生成的 Python、Shell、依赖安装或任意网络代码。新增算法必须先由开发者实现、测试并登记，之后才能被模型选择。
 
@@ -461,11 +480,11 @@ export ECOLOGYRSI_DSH_MODELS_JSON='[
 
 创建运行时使用 `strategy_model_id: "newapi-glm52-policy"` 和 `review_model_id: "newapi-glm52-judge"`。两者可以使用同一 New API 账号，但必须保持不同的连接标识和角色；服务端会分别检查执行配置并把无凭据的配置摘要冻结到运行清单。网关会自动请求 `{gateway_url}/chat/completions`，不要把该路径重复写入 `gateway_url`。
 
-运行就绪先读取 `execution_available` 和 `roles_ready`；这属于配置与能力检查。基线对齐方案还要求创建前的真实工具/结构化输出预检，通过后保存与两角色模型身份绑定的回执。预检与正式研究均产生真实模型用量；预检不覆盖全部研究语义或逐样本行为。服务端在模型调用中使用 Bearer 凭据，失败记录经过脱敏，不暴露凭据或网关地址。
+运行就绪先读取 `execution_available` 和 `roles_ready`；这属于配置与能力检查。新建原生运行还要求创建前研究、轮次评审、sample.plan、sample.critic 四个角色的真实工具/结构化输出预检，通过后保存与策略及评审模型身份绑定的回执。预检与正式研究均产生真实模型用量；预检不覆盖全部研究语义或逐样本行为。服务端在模型调用中使用 Bearer 凭据，失败记录经过脱敏，不暴露凭据或网关地址。
 
 ## 模型自主调研与受限能力编译边界
 
-模型自主工作流默认启用。创建前完成两个智能体角色的真实模型预检，随后冻结数据、模型路由、预算和研究执行规则。正式运行中，研究模型先提出检索计划，再依据本轮冻结资料与既有反馈，为每个候选槽位给出一个可执行的研究方向。方向可以切换已登记预测器、调整当前预测器的有效参数或修改允许的指令模板；候选模型提交对应的单次有界变异，宿主完成校验、编译和持久化。同代候选共用冻结研究结果，后续研究以实际保留候选为父版本。搜索、研究依据、候选变异及反馈都保留可追溯关系。
+模型自主工作流默认启用。创建前完成四个执行角色的真实模型预检，协议瞬态异常允许一次有界真实重试，随后冻结数据、模型路由、预算和研究执行规则。正式运行中，研究模型先提出检索计划，再依据本轮冻结资料与既有反馈，为每个候选槽位给出一个可执行的研究方向。方向可以切换已登记预测器、调整当前预测器的有效参数或修改允许的指令模板；候选模型提交对应的单次有界变异，宿主完成校验、编译和持久化。同代候选共用冻结研究结果，后续研究以实际保留候选为父版本。搜索、研究依据、候选变异及反馈都保留可追溯关系。
 
 新原生运行冻结 `research-execution-policy/1`：研究综合采用紧凑上下文和精简报告，单次响应输出上限为 16,384 tokens；输出预算耗尽时不会在相同预算下重复同一请求。该上限不是阶段总用量或费用上限，输入、缓存、工具调用和其他阶段仍单独计量。历史无此字段的运行继续沿用原研究契约，不自动升级。在线研究可使用 DSH 联网检索并保存来源；宿主知识检索另有 OpenAlex 元数据和有界摘要支持，离线时使用内置知识目录。
 
@@ -479,7 +498,7 @@ export ECOLOGYRSI_DSH_MODELS_JSON='[
 
 真实自主运行只使用 `dsh-strict-origin-bundle@4`。一个“智能体样本”表示一个预测起点：远程 Planner 在 DSH 子会话中读取截止起点的因果数值上下文，可直接预测，也可多次调用登记模型、调整参数、融合或修正结果，最终提交温度、相对湿度、CO₂ 在 1、6、24 小时的 9 个数值；不确定或失败时才进入远程 Critic 修复/拒绝路径，随后由 Host 逐单元评分。严格 checkpoint 只在整个向量和当前策略要求的角色动作完整后原子落盘，恢复时只复用能验证该冻结执行策略的 origin。候选级聚合反思可以读取评分后的结果，但无权改写已经持久化的预测。
 
-严格运行只有在冻结统计门槛满足，且已评测 origin 具有完整 Planner 最终预测、所引用工具的实际回执以及条件触发时的 Critic 证据，才允许晋升。finalist 的冠军与挑战者只在同一个 batch cohort 内配对比较；这次比较决定 lane champion，但不同 batch 的原始分数不能直接比较。每个 revision 的改动数受 `max_local_edits_per_batch` 限制，数值步长和所有结构变更仍受宿主信赖域及能力注册表约束。轮末必须把两条 lane 的耐久冠军与 incumbent 放回同一 holdout，未显著改善时继续保留 incumbent，不用跨窗口原始分数制造“快速进化”。
+正式对照模式只有在冻结统计门槛满足，且已评测 origin 具有完整 Planner 最终预测、所引用工具的实际回执以及条件触发时的 Critic 证据，才允许晋升。finalist 的冠军与挑战者只在同一个 batch cohort 内配对比较；这次比较决定 lane champion，但不同 batch 的原始分数不能直接比较。每个 revision 的改动数受 `max_local_edits_per_batch` 限制，数值步长和所有结构变更仍受宿主信赖域及能力注册表约束。轮末必须把两条 lane 的耐久冠军与 incumbent 放回同一 holdout，未显著改善时继续保留 incumbent，不用跨窗口原始分数制造“快速进化”。
 
 DSH-native 运行不接收 `token_limit`。上下文压缩由 DSH Session 管理，阶段输出长度必须符合运行冻结的研究或逐样本执行约束；用量展示不等于可强制执行的总费用上限。
 
@@ -604,27 +623,27 @@ sidecar 主前缀是 `/api`；浏览器通过 DSH 同源代理使用 `/api/ecolo
   "evaluator_id": "greenhouse_multihorizon_time_forward@3",
   "search_guard_policy": "practical_delta_cell_noninferiority_paired_blocks@1",
   "require_model_contract_preflight": true,
-  "optimization_protocol": "top2_adaptive_epoch@1",
+  "optimization_protocol": "quick_adaptive_epoch@1",
   "optimization_schedule": {
-    "schema_version": "ecologyrsi-dsh.top2-adaptive-epoch-schedule/3",
-    "screening_origin_count": 64,
-    "finalist_count": 2,
-    "formal_origin_count_per_finalist": 200,
-    "local_batch_origin_count": 50,
+    "schema_version": "ecologyrsi-dsh.quick-adaptive-epoch-schedule/1",
+    "screening_origin_count": 0,
+    "finalist_count": 1,
+    "formal_origin_count_per_finalist": 100,
+    "local_batch_origin_count": 10,
     "max_local_edits_per_batch": 2,
-    "selection_holdout_origin_count": 169,
-    "local_evaluation_mode": "paired_champion_challenger"
+    "selection_holdout_origin_count": 50,
+    "local_evaluation_mode": "prequential"
   },
-  "strategy_model_id": "newapi-glm52-policy",
-  "review_model_id": "newapi-glm52-judge",
-  "rounds": 1,
+  "strategy_model_id": "provider/strategy-model",
+  "review_model_id": "provider/review-model",
+  "rounds": 5,
   "candidate_concurrency": 4,
   "sample_agent_batch_size": 9,
   "sample_concurrency": 64,
   "budget": {
-    "max_generations": 1,
+    "max_generations": 5,
     "candidates_per_generation": 4,
-    "max_candidates": 4
+    "max_candidates": 20
   },
   "model_workflow": "research_compile_evolve@1",
   "autonomous_mode": true,
@@ -634,21 +653,15 @@ sidecar 主前缀是 `/api`；浏览器通过 DSH 同源代理使用 `/api/ecolo
 }
 ```
 
-网页新建运行和 API 未指定 schedule 时使用上述 v3 时间隔离配对合同。历史 v1 `prequential` 与 v2 配对合同继续按原事件重放；它们的 500/50 默认值、数据复用规则和证据范围不适用于新默认运行。
+网页新建运行和 API 未指定 schedule 时使用上述快速协议。正式对照须显式选择；模型 ID 应替换为 DSH 模型目录中的真实 provider/model 路由。旧账本保留当时的协议与预检证据，不升级历史结论。
 
 自主运行使用 `auto_advance: true` 进入连续模式：服务端完成一轮后自动排入下一轮，直到达到轮数/候选预算、暂停、取消或失败；页面只轮询真实阶段事件，不需要反复点击“下一轮”。服务默认使用 4 个有界 worker 推进不同运行；同一运行始终只能持有一个世代租约，每执行一代就回到队尾。`ECOLOGYRSI_AUTO_PROGRESS_WORKERS` 可显式配置为 1–8。不同运行和同一运行内的候选可以并行；同一 provider 的 DSH stage 统一经过全局 FIFO 准入，物理在飞上限为 128，失败冷却对该 provider 的全部运行生效。服务重启后会从 SQLite 恢复未归档的连续运行，并在每轮开始前重新校验冻结的数据、预测器、策略、评测器和远程模型绑定；绑定发生漂移时以 `frozen_runtime_binding_drift` 停止运行并提示新建。
 
-默认界面先运行 1 轮、每轮 4 个候选，总预算 4 个候选。增加轮数前需重新检查当前 episode 的隔离数据容量；最大候选数须与轮数乘以 4 一致。每个提案都记录 `proposal_source`，投影分别统计远程成功、宿主种子和显式宿主回退，不把“未调用 API”显示成“调用完成”。
-
-新建运行不再接受含义含混的 `samples_per_update`；工作量由 `optimization_schedule` 以 prediction origins 表示。外层对 4 个候选各筛选 64 origins，再冻结 Top 2。每个 finalist lane 默认使用同一组 200 个适应起点，分成 4 个 50-origin batch：batch 0 只评测并冻结初始冠军；batch 1–3 从当前 selected champion 生成有界挑战者，让两臂在同一 cohort 上分别执行。通过门禁的挑战者成为新冠军，未改善的挑战者被拒，下一次仍从原冠军生成；最后一个配对批次之后不会再创建无法验证的 child。轮末两条 lane 的耐久冠军与上一冠军在同一组 169-origin holdout 上重新评测。每臂 169 次完整预测产生 `169 × 9 = 1,521` 个评分单元；这些评分单元不是独立模型请求。
-
-默认适应轨迹执行上限为 `2 × [50 + 2 × (4 - 1) × 50] = 700` candidate-origin occurrences；单轮预算为 `4 × 64 + 700 + 3 × 169 = 1,463` 次完整预测，即 `1,463 × 9 = 13,167` 个评分单元。若未生成有效挑战者或提前停止，实际工作量可低于该上限。一个 origin 的原生 Planner 可能包含多次模型 turn，因此完整预测次数也不等于 HTTP 请求总数。
-
-v3 规划仅按时间戳选择数据。适应批次作为共享训练材料跨轮使用，两个 finalist 和同批配对臂共享这些起点；每轮初筛和轮末留出另取新的隔离 cohort。默认 1 轮实际选取 `200 + 64 + 169 = 433` 个不同源起点，但跨批目标成熟隔离和小批次跨日采样还需要额外时间跨度，不能只比较 433 与数据行数来判断能否执行。容量不足或配对证据的实际日块不足时，创建会失败并说明原因；不会循环补足缺少的样本，也不会将适应材料重复使用解释为新的独立证据。候选并发默认 4，逐样本并发默认 64、可配置 1–128；两个 finalist 共享 run 级并发，同一 provider 物理在飞上限为 128。
+默认界面为 5 轮、每轮 4 个研究提案，总预算 20 个。快速模式只执行预先指定的单条训练主线。增加轮数前服务端重新核验新评测 cohort 容量。`samples_per_update` 已移除；所有工作量由冻结 `optimization_schedule` 与 `execution_plan` 表达，具体公式见前文。
 
 每个 origin 调用一次 Planner，由 Planner 在 DSH 子会话内分析数值上下文，可直接预测或调用登记工具，并提交自己的最终数值；只有不确定或失败时才调用 Critic。Host 将 9 条评分记录原子持久化，候选完成后再执行聚合反思。岭回归可以完整扫描 `training_fit` 拟合参数，但只能作为 Planner 主动调用的注册工具，不能替代智能体决策阶段。
 
-单个 origin 耗尽重试预算不会终止整个候选，但评分后处理保证失败行相对冻结强基线的 reward 不大于 0，不能通过失败或丢样本提高分数。同一 batch 内的配对分数用于 lane champion 选择，不同 batch 分数不直接比较；被拒挑战者只作为下一次受限提案的证据，不会成为父版本。轮末 F1/F2/incumbent 使用同一 holdout 的 centered max-T 选择门禁，并同时要求 0.005 实用差异和一致的评分合同。跨代反思按完整 `behavior_digest` 防止失败行为的精确重放；相同科学参数但不同 agent 程序仍可继续探索。`execution_diagnostics` 分别给出物理分区行数、selected/deferred 评分单元和 origins、eligible/used/skipped 目标、累计候选工作量、拟合 pass、提案来源和轮次耗时。正式 `EvaluationRecorded` 到达前，页面只把可验证的 checkpoint 聚合标为部分进度。
+可恢复服务故障补做冻结工作；critic 中断后复用已接受 planner 及工具凭证。不可恢复的无效样本使当前批次或评测臂不可评估，不再进入后续批次、反思择优或额外副本。失败罚分仅作为诊断，不能证明预测改善。正式对照采用同 cohort 的配对与统计门禁，快速模式采用前述探索选择规则。不同 batch 的原始分数不直接排名。
 
 创建合同以 `dataset_id`、策略模型、独立评审模型和轮数为输入。网页提交 `prediction_selection_policy: model_during_run@1`，不提交 `prediction_model_id`、`evaluator_id` 或种子模板；该策略会拒绝同时预选这些字段。服务端冻结统一评测规则和可选预测器目录，具体候选方案由运行中的研究模型决定。网页还提交目录绑定的 `episode_id`；API 省略时，服务端确定性选择首个可优化 episode。`domain_pack` / `research_domain`、分区、模型摘要和能力边界由服务端推导并冻结。新运行不会静默覆盖这些冻结字段来恢复旧实验。
 

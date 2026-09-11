@@ -14,7 +14,10 @@
       "doi": "10.4121/uuid:e4987a7b-04dd-4c89-9b18-883aad30ba9a",
       "landing_page": "https://data.4tu.nl/articles/dataset/Autonomous_Greenhouse_Challenge_First_Edition_2018_/12717758",
       "license": "CC0-1.0",
-      "modalities": ["time_series", "tabular"],
+      "modalities": [
+        "time_series",
+        "tabular"
+      ],
       "runnable": true,
       "required_globs": [
         "*/Greenhouse_climate.csv",
@@ -37,7 +40,8 @@
       "notes_zh": [
         "包含六个温室隔间或团队、约四个月的历史记录。",
         "数据仅适用于离线回放和评测，不是交互式控制环境。"
-      ]
+      ],
+      "adapter_definition": "agc_cucumber_2018.json"
     },
     {
       "dataset_id": "agc_tomato_2019",
@@ -52,7 +56,10 @@
       "doi": "10.4121/uuid:88d22c60-21b3-4ea8-90db-20249a5be2a7",
       "landing_page": "https://data.4tu.nl/articles/dataset/Autonomous_Greenhouse_Challenge_Second_Edition_2019_/12764777",
       "license": "CC0-1.0",
-      "modalities": ["time_series", "tabular"],
+      "modalities": [
+        "time_series",
+        "tabular"
+      ],
       "runnable": true,
       "required_globs": [
         "*/GreenhouseClimate.csv",
@@ -76,7 +83,8 @@
       "notes_zh": [
         "包含六个温室隔间或团队、约六个月的樱桃番茄历史记录。",
         "固定使用 4TU 数据文章的版本 2。"
-      ]
+      ],
+      "adapter_definition": "agc_tomato_2019.json"
     },
     {
       "dataset_id": "agc_lettuce_online_rgbd_2021",
@@ -91,9 +99,16 @@
       "doi": "10.4121/15023088.v1",
       "landing_page": "https://data.4tu.nl/articles/dataset/3rd_Autonomous_Greenhouse_Challenge_Online_Challenge_Lettuce_Images/15023088",
       "license": "CC-BY-4.0",
-      "modalities": ["rgb", "depth", "tabular"],
+      "modalities": [
+        "rgb",
+        "depth",
+        "tabular"
+      ],
       "runnable": false,
-      "required_globs": ["**/*.png", "**/*.json"],
+      "required_globs": [
+        "**/*.png",
+        "**/*.json"
+      ],
       "source_files": [
         {
           "name": "OnlineChallenge.zip",
@@ -121,9 +136,17 @@
       "doi": "10.4121/21960932.v1",
       "landing_page": "https://data.4tu.nl/articles/dataset/3rd_Autonomous_Greenhouse_Challenge_Time-series_data_on_realized_climate_with_annotated_crop_lettuce-images/21960932",
       "license": "CC-BY-4.0",
-      "modalities": ["time_series", "rgb", "depth", "tabular"],
+      "modalities": [
+        "time_series",
+        "rgb",
+        "depth",
+        "tabular"
+      ],
       "runnable": false,
-      "required_globs": ["**/*.csv", "**/*.png"],
+      "required_globs": [
+        "**/*.csv",
+        "**/*.png"
+      ],
       "source_files": [
         {
           "name": "1st Experiment.zip",

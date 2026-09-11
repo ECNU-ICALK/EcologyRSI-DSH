@@ -1,0 +1,749 @@
+{
+  "schema_version": "ecologyrsi-dsh.dataset-definition/1",
+  "dataset_id": "agc_tomato_2019",
+  "domain_id": "greenhouse_tomato_2019",
+  "source_document": {
+    "filename": "ReadMe.pdf",
+    "sha256": "e884cc347088bac498b730eaf442ccb9593c7aa84d4f85090b1fe2927646509c",
+    "doi": "10.4121/uuid:88d22c60-21b3-4ea8-90db-20249a5be2a7"
+  },
+  "features": [
+    {
+      "name": "air_temperature",
+      "display_name_zh": "室内气温",
+      "role": "environment",
+      "unit": "degC",
+      "required": true,
+      "aliases": [
+        "Tair"
+      ]
+    },
+    {
+      "name": "relative_humidity",
+      "display_name_zh": "室内相对湿度",
+      "role": "environment",
+      "unit": "percent",
+      "required": true,
+      "aliases": [
+        "RHair",
+        "Rhair"
+      ]
+    },
+    {
+      "name": "co2_concentration",
+      "display_name_zh": "室内 CO2 浓度",
+      "role": "environment",
+      "unit": "ppm",
+      "required": true,
+      "aliases": [
+        "CO2air"
+      ]
+    },
+    {
+      "name": "humidity_deficit",
+      "display_name_zh": "湿度亏缺",
+      "role": "environment",
+      "unit": "g_m3",
+      "required": false,
+      "aliases": [
+        "HumDef"
+      ]
+    },
+    {
+      "name": "supplemental_light",
+      "display_name_zh": "补光比例",
+      "role": "environment",
+      "unit": "percent",
+      "required": false,
+      "aliases": [
+        "AssimLight"
+      ]
+    },
+    {
+      "name": "heating_pipe_temperature",
+      "display_name_zh": "加热管温度",
+      "role": "environment",
+      "unit": "degC",
+      "required": false,
+      "aliases": [
+        "PipeLow"
+      ]
+    },
+    {
+      "name": "ventilation_leeward",
+      "display_name_zh": "背风侧通风开度",
+      "role": "environment",
+      "unit": "percent",
+      "required": false,
+      "aliases": [
+        "VentLee"
+      ]
+    },
+    {
+      "name": "ventilation_windward",
+      "display_name_zh": "迎风侧通风开度",
+      "role": "environment",
+      "unit": "percent",
+      "required": false,
+      "aliases": [
+        "Ventwind"
+      ]
+    },
+    {
+      "name": "outside_temperature",
+      "display_name_zh": "室外气温",
+      "role": "outside_weather",
+      "unit": "degC",
+      "required": false,
+      "aliases": [
+        "Tout"
+      ]
+    },
+    {
+      "name": "outside_relative_humidity",
+      "display_name_zh": "室外相对湿度",
+      "role": "outside_weather",
+      "unit": "percent",
+      "required": false,
+      "aliases": [
+        "Rhout"
+      ]
+    },
+    {
+      "name": "outside_radiation",
+      "display_name_zh": "室外辐射",
+      "role": "outside_weather",
+      "unit": "W_m2",
+      "required": false,
+      "aliases": [
+        "Iglob"
+      ]
+    },
+    {
+      "name": "outside_wind_speed",
+      "display_name_zh": "室外风速",
+      "role": "outside_weather",
+      "unit": "m_s",
+      "required": false,
+      "aliases": [
+        "Windsp"
+      ]
+    },
+    {
+      "name": "root_zone_water_content",
+      "display_name_zh": "根区含水量",
+      "role": "root_zone",
+      "unit": "percent",
+      "required": false,
+      "aliases": [
+        "WC_slab1",
+        "WC_slab2"
+      ]
+    },
+    {
+      "name": "root_zone_ec",
+      "display_name_zh": "根区电导率",
+      "role": "root_zone",
+      "unit": "dS_m",
+      "required": false,
+      "aliases": [
+        "EC_slab1",
+        "EC_slab2"
+      ]
+    },
+    {
+      "name": "cumulative_irrigation",
+      "display_name_zh": "累计灌溉量",
+      "role": "resource",
+      "unit": "L_m2",
+      "required": false,
+      "aliases": [
+        "Cum_irr"
+      ]
+    },
+    {
+      "name": "marketable_yield",
+      "display_name_zh": "一级果产量",
+      "role": "outcome",
+      "unit": "kg_m2_harvest",
+      "required": false,
+      "aliases": [
+        "ProdA"
+      ]
+    },
+    {
+      "name": "class_b_yield",
+      "display_name_zh": "二级果产量",
+      "role": "outcome",
+      "unit": "kg_m2_harvest",
+      "required": false,
+      "aliases": [
+        "ProdB"
+      ]
+    },
+    {
+      "name": "harvested_trusses",
+      "display_name_zh": "已采收果穗数",
+      "role": "crop",
+      "unit": "trusses_stem",
+      "required": false,
+      "aliases": [
+        "avg_nr_harvested_trusses"
+      ]
+    },
+    {
+      "name": "truss_development_time",
+      "display_name_zh": "果穗发育时间",
+      "role": "crop",
+      "unit": "days",
+      "required": false,
+      "aliases": [
+        "Truss development time"
+      ]
+    },
+    {
+      "name": "stem_elongation",
+      "display_name_zh": "茎伸长量",
+      "role": "crop",
+      "unit": "cm_week",
+      "required": false,
+      "aliases": [
+        "Stem_elong"
+      ]
+    },
+    {
+      "name": "stem_thickness",
+      "display_name_zh": "茎粗",
+      "role": "crop",
+      "unit": "mm",
+      "required": false,
+      "aliases": [
+        "Stem_thick"
+      ]
+    },
+    {
+      "name": "cumulative_trusses",
+      "display_name_zh": "累计果穗数",
+      "role": "crop",
+      "unit": "trusses_stem",
+      "required": false,
+      "aliases": [
+        "Cum_trusses"
+      ]
+    },
+    {
+      "name": "stem_density",
+      "display_name_zh": "茎密度",
+      "role": "crop",
+      "unit": "stems_m2",
+      "required": false,
+      "aliases": [
+        "stem_dens"
+      ]
+    },
+    {
+      "name": "plant_density",
+      "display_name_zh": "种植密度",
+      "role": "crop",
+      "unit": "plants_m2",
+      "required": false,
+      "aliases": [
+        "plant_dens"
+      ]
+    },
+    {
+      "name": "fruit_flavour",
+      "display_name_zh": "果实风味评分",
+      "role": "outcome",
+      "unit": "score_0_100",
+      "required": false,
+      "aliases": [
+        "Flavour"
+      ]
+    },
+    {
+      "name": "fruit_tss",
+      "display_name_zh": "可溶性固形物",
+      "role": "outcome",
+      "unit": "degBrix",
+      "required": false,
+      "aliases": [
+        "TSS"
+      ]
+    },
+    {
+      "name": "fruit_acid",
+      "display_name_zh": "果实酸度",
+      "role": "outcome",
+      "unit": "mmol_H3O_100g",
+      "required": false,
+      "aliases": [
+        "Acid"
+      ]
+    },
+    {
+      "name": "fruit_juice",
+      "display_name_zh": "果汁比例",
+      "role": "outcome",
+      "unit": "percent",
+      "required": false,
+      "aliases": [
+        "%Juice"
+      ]
+    },
+    {
+      "name": "fruit_bite",
+      "display_name_zh": "果实咬合力",
+      "role": "outcome",
+      "unit": "N",
+      "required": false,
+      "aliases": [
+        "Bite"
+      ]
+    },
+    {
+      "name": "fruit_weight",
+      "display_name_zh": "单果重",
+      "role": "outcome",
+      "unit": "g",
+      "required": false,
+      "aliases": [
+        "Weight"
+      ]
+    },
+    {
+      "name": "fruit_dry_matter",
+      "display_name_zh": "果实干物质比例",
+      "role": "outcome",
+      "unit": "percent",
+      "required": false,
+      "aliases": [
+        "DMC_fruit"
+      ]
+    },
+    {
+      "name": "heating_energy_use",
+      "display_name_zh": "供热能耗",
+      "role": "outcome",
+      "unit": "MJ_m2_day",
+      "required": false,
+      "aliases": [
+        "Heat_cons"
+      ]
+    },
+    {
+      "name": "electricity_peak_use",
+      "display_name_zh": "峰时用电",
+      "role": "resource",
+      "unit": "kWh_m2_day",
+      "required": false,
+      "aliases": [
+        "ElecHigh"
+      ]
+    },
+    {
+      "name": "electricity_offpeak_use",
+      "display_name_zh": "谷时用电",
+      "role": "resource",
+      "unit": "kWh_m2_day",
+      "required": false,
+      "aliases": [
+        "ElecLow"
+      ]
+    },
+    {
+      "name": "electricity_use",
+      "display_name_zh": "总用电",
+      "role": "outcome",
+      "unit": "kWh_m2_day",
+      "required": false,
+      "aliases": []
+    },
+    {
+      "name": "co2_use",
+      "display_name_zh": "CO2 用量",
+      "role": "outcome",
+      "unit": "kg_m2_day",
+      "required": false,
+      "aliases": [
+        "CO2_cons"
+      ]
+    },
+    {
+      "name": "irrigation_water",
+      "display_name_zh": "灌溉水量",
+      "role": "resource",
+      "unit": "L_m2_day",
+      "required": false,
+      "aliases": [
+        "Irr"
+      ]
+    },
+    {
+      "name": "drain_water",
+      "display_name_zh": "排水量",
+      "role": "root_zone",
+      "unit": "L_m2_day",
+      "required": false,
+      "aliases": [
+        "Drain"
+      ]
+    },
+    {
+      "name": "water_use",
+      "display_name_zh": "净用水量",
+      "role": "outcome",
+      "unit": "L_m2_day",
+      "required": false,
+      "aliases": []
+    },
+    {
+      "name": "irrigation_ph",
+      "display_name_zh": "灌溉液 pH",
+      "role": "root_zone",
+      "unit": "pH",
+      "required": false,
+      "aliases": [
+        "irr_PH"
+      ]
+    },
+    {
+      "name": "irrigation_ec",
+      "display_name_zh": "灌溉液电导率",
+      "role": "root_zone",
+      "unit": "dS_m",
+      "required": false,
+      "aliases": [
+        "irr_EC"
+      ]
+    },
+    {
+      "name": "irrigation_nitrate",
+      "display_name_zh": "灌溉液硝酸盐",
+      "role": "root_zone",
+      "unit": "mmol_L",
+      "required": false,
+      "aliases": [
+        "irr_NO3"
+      ]
+    },
+    {
+      "name": "irrigation_potassium",
+      "display_name_zh": "灌溉液钾",
+      "role": "root_zone",
+      "unit": "mmol_L",
+      "required": false,
+      "aliases": [
+        "irr_K"
+      ]
+    },
+    {
+      "name": "drain_ph",
+      "display_name_zh": "排液 pH",
+      "role": "root_zone",
+      "unit": "pH",
+      "required": false,
+      "aliases": [
+        "drain_PH"
+      ]
+    },
+    {
+      "name": "drain_ec",
+      "display_name_zh": "排液电导率",
+      "role": "root_zone",
+      "unit": "dS_m",
+      "required": false,
+      "aliases": [
+        "drain_EC"
+      ]
+    },
+    {
+      "name": "drain_nitrate",
+      "display_name_zh": "排液硝酸盐",
+      "role": "root_zone",
+      "unit": "mmol_L",
+      "required": false,
+      "aliases": [
+        "drain_NO3"
+      ]
+    },
+    {
+      "name": "drain_potassium",
+      "display_name_zh": "排液钾",
+      "role": "root_zone",
+      "unit": "mmol_L",
+      "required": false,
+      "aliases": [
+        "drain_K"
+      ]
+    },
+    {
+      "name": "co2_setpoint",
+      "display_name_zh": "CO2 设定值",
+      "role": "action",
+      "unit": "ppm",
+      "required": false,
+      "aliases": [
+        "co2_sp",
+        "co2_vip"
+      ]
+    },
+    {
+      "name": "heating_setpoint",
+      "display_name_zh": "加热设定值",
+      "role": "action",
+      "unit": "degC",
+      "required": false,
+      "aliases": [
+        "t_heat_sp",
+        "t_heat_vip"
+      ]
+    },
+    {
+      "name": "ventilation_temperature_setpoint",
+      "display_name_zh": "通风温度设定值",
+      "role": "action",
+      "unit": "degC",
+      "required": false,
+      "aliases": [
+        "t_vent_sp"
+      ]
+    },
+    {
+      "name": "humidity_deficit_setpoint",
+      "display_name_zh": "湿差设定值",
+      "role": "action",
+      "unit": "g_m3",
+      "required": false,
+      "aliases": [
+        "dx_sp",
+        "dx_vip"
+      ]
+    },
+    {
+      "name": "lighting_setpoint",
+      "display_name_zh": "照明设定值",
+      "role": "action",
+      "unit": "percent",
+      "required": false,
+      "aliases": [
+        "assim_sp",
+        "assim_vip"
+      ]
+    },
+    {
+      "name": "irrigation_interval",
+      "display_name_zh": "灌溉间隔",
+      "role": "action",
+      "unit": "minutes",
+      "required": false,
+      "aliases": [
+        "water_sup_intervals_sp_min",
+        "water_sup_intervals_vip_min"
+      ]
+    }
+  ],
+  "tables": [
+    {
+      "filename": "GreenhouseClimate.csv",
+      "features": [
+        "air_temperature",
+        "relative_humidity",
+        "co2_concentration",
+        "humidity_deficit",
+        "supplemental_light",
+        "heating_pipe_temperature",
+        "ventilation_leeward",
+        "ventilation_windward",
+        "cumulative_irrigation",
+        "co2_setpoint",
+        "heating_setpoint",
+        "ventilation_temperature_setpoint",
+        "humidity_deficit_setpoint",
+        "lighting_setpoint",
+        "irrigation_interval"
+      ],
+      "timestamp_aliases": [
+        "%time",
+        "time"
+      ],
+      "source_interval": "5_minutes",
+      "availability_delay_hours": 0
+    },
+    {
+      "filename": "Weather/Weather.csv",
+      "features": [
+        "outside_temperature",
+        "outside_relative_humidity",
+        "outside_radiation",
+        "outside_wind_speed"
+      ],
+      "timestamp_aliases": [
+        "%time",
+        "time"
+      ],
+      "source_interval": "5_minutes",
+      "availability_delay_hours": 0,
+      "scope": "dataset"
+    },
+    {
+      "filename": "GrodanSens.csv",
+      "features": [
+        "root_zone_water_content",
+        "root_zone_ec"
+      ],
+      "timestamp_aliases": [
+        "%time",
+        "time"
+      ],
+      "source_interval": "5_minutes",
+      "availability_delay_hours": 0
+    },
+    {
+      "filename": "CropParameters.csv",
+      "features": [
+        "stem_elongation",
+        "stem_thickness",
+        "cumulative_trusses",
+        "stem_density",
+        "plant_density"
+      ],
+      "timestamp_aliases": [
+        "%time",
+        "time"
+      ],
+      "source_interval": "weekly",
+      "availability_delay_hours": 24
+    },
+    {
+      "filename": "Production.csv",
+      "features": [
+        "marketable_yield",
+        "class_b_yield",
+        "harvested_trusses",
+        "truss_development_time"
+      ],
+      "timestamp_aliases": [
+        "%time",
+        "time"
+      ],
+      "source_interval": "harvest_event",
+      "availability_delay_hours": 24
+    },
+    {
+      "filename": "TomQuality.csv",
+      "features": [
+        "fruit_flavour",
+        "fruit_tss",
+        "fruit_acid",
+        "fruit_juice",
+        "fruit_bite",
+        "fruit_weight",
+        "fruit_dry_matter"
+      ],
+      "timestamp_aliases": [
+        "%time",
+        "time"
+      ],
+      "source_interval": "biweekly",
+      "availability_delay_hours": 24
+    },
+    {
+      "filename": "Resources.csv",
+      "features": [
+        "heating_energy_use",
+        "electricity_peak_use",
+        "electricity_offpeak_use",
+        "co2_use",
+        "irrigation_water",
+        "drain_water"
+      ],
+      "timestamp_aliases": [
+        "%time",
+        "time"
+      ],
+      "source_interval": "daily",
+      "availability_delay_hours": 24
+    },
+    {
+      "filename": "LabAnalysis.csv",
+      "features": [
+        "irrigation_ph",
+        "irrigation_ec",
+        "irrigation_nitrate",
+        "irrigation_potassium",
+        "drain_ph",
+        "drain_ec",
+        "drain_nitrate",
+        "drain_potassium"
+      ],
+      "timestamp_aliases": [
+        "%time",
+        "time"
+      ],
+      "source_interval": "biweekly",
+      "availability_delay_hours": 24
+    }
+  ],
+  "derive_tomato_resources": true,
+  "prediction_task": {
+    "adapter_id": "agc_tomato_2019@1",
+    "dataset_id": "agc_tomato_2019",
+    "domain_id": "greenhouse_tomato_2019",
+    "label": "2019 番茄 · 环境预测",
+    "climate_filename": "GreenhouseClimate.csv",
+    "targets": [
+      {
+        "name": "air_temperature",
+        "label": "室内气温",
+        "unit": "degC",
+        "minimum": -10.0,
+        "maximum": 60.0,
+        "weight": 0.3333333333333333
+      },
+      {
+        "name": "relative_humidity",
+        "label": "室内相对湿度",
+        "unit": "percent",
+        "minimum": 0.0,
+        "maximum": 100.0,
+        "weight": 0.3333333333333333
+      },
+      {
+        "name": "co2_concentration",
+        "label": "室内 CO₂ 浓度",
+        "unit": "ppm",
+        "minimum": 0.0,
+        "maximum": 5000.0,
+        "weight": 0.3333333333333333
+      }
+    ],
+    "label_semantics": [
+      "番茄一级果产量为单次采收量（kg/m²），不能与黄瓜累计产量混用。",
+      "供热能耗单位为 MJ/m²/日；稀疏产量和品质标签不插值，也不计入本任务评分。"
+    ],
+    "horizons_hours": [
+      1,
+      6,
+      24
+    ],
+    "evaluator_id": "greenhouse_multihorizon_time_forward@4",
+    "domain_pack_id": "greenhouse_environment@1",
+    "minimum_coverage": 0.8,
+    "selection_minimum_coverage": 0.9,
+    "minimum_skill": 1e-09,
+    "no_regression_tolerance": 1e-12,
+    "maximum_constraint_violations": 0,
+    "selection_minimum_score_delta": 0.005,
+    "primary_metric": "weighted_symmetric_rmse_skill@1",
+    "diagnostic_metrics": [
+      "mae",
+      "rmse",
+      "bias",
+      "normalized_rmse",
+      "skill_score",
+      "sample_execution_coverage",
+      "constraint_violations"
+    ]
+  }
+}
