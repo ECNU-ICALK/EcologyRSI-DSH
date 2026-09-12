@@ -4,7 +4,10 @@ import threading
 import time
 import unittest
 
-from ecologyrsi_dsh.execution.sample_admission import RunSampleAdmission
+from ecologyrsi_dsh.execution.sample_admission import (
+    ADMISSION_GROWTH_HEALTHY_ADMISSIONS,
+    RunSampleAdmission,
+)
 from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
 
 
@@ -144,6 +147,10 @@ class RunSampleAdmissionTests(unittest.TestCase):
         self.assertEqual(snapshot["active"], expected_active)
         self.assertEqual(snapshot["waiting"], expected_waiting)
         self.assertEqual(maximum_active, expected_active)
+        # The cold-start ceiling is what these callers exercise. Once `release`
+        # fires, the queued waiters drain as healthy admissions and legitimately
+        # raise the adaptive limit, so the peak has to be read before that.
+        cold_start_peak = maximum_active
 
         release.set()
         for thread in threads:
@@ -153,7 +160,7 @@ class RunSampleAdmissionTests(unittest.TestCase):
         self.assertEqual(final_snapshot["limit"], limit)
         self.assertEqual(final_snapshot["active"], 0)
         self.assertEqual(final_snapshot["waiting"], 0)
-        return admission, maximum_active, errors
+        return admission, cold_start_peak, errors
 
     def test_exact_limit_eight_across_three_worker_groups(self) -> None:
         admission, maximum_active, errors = self._exercise_limit(
@@ -184,7 +191,7 @@ class RunSampleAdmissionTests(unittest.TestCase):
         self.assertEqual(maximum_active, 8)
         self.assertEqual(errors, [])
 
-    def test_configured_sixty_four_warms_up_after_eight_successes(self) -> None:
+    def test_configured_sixty_four_warms_up_one_step_per_healthy_window(self) -> None:
         admission = RunSampleAdmission()
 
         with admission.admit("run:adaptive", 64):
@@ -192,13 +199,21 @@ class RunSampleAdmissionTests(unittest.TestCase):
 
         self.assertEqual(snapshot["limit"], 64)
         self.assertEqual(snapshot["adaptive_limit"], 8)
+        # One healthy admission is not a window: growth still waits for the
+        # second, so a single lucky origin cannot widen concurrency.
+        self.assertEqual(
+            admission.snapshot("run:adaptive")["adaptive_limit"],
+            8,
+        )
 
         for _ in range(7):
             with admission.admit("run:adaptive", 64):
                 pass
+        # Eight healthy admissions, one step per ADMISSION_GROWTH_HEALTHY_ADMISSIONS.
+        self.assertEqual(ADMISSION_GROWTH_HEALTHY_ADMISSIONS, 2)
         self.assertEqual(
             admission.snapshot("run:adaptive")["adaptive_limit"],
-            9,
+            12,
         )
 
     def test_replayed_successes_cannot_exponentially_jump_to_configured_limit(
@@ -206,14 +221,34 @@ class RunSampleAdmissionTests(unittest.TestCase):
     ) -> None:
         admission = RunSampleAdmission()
 
-        for _ in range(204):
+        for _ in range(40):
             with admission.admit("run:replayed", 64):
                 pass
 
+        # Strictly additive: 8 + 40 // 2, never a multiplicative jump toward 64.
         self.assertEqual(
             admission.snapshot("run:replayed")["adaptive_limit"],
-            22,
+            28,
         )
+
+    def test_a_healthy_epoch_can_actually_reach_the_configured_ceiling(
+        self,
+    ) -> None:
+        # The growth law used to require `adaptive_limit` consecutive successes,
+        # so reaching 64 from 8 cost sum(8..63) = 1988 healthy origins and a
+        # halving to 1 cost sum(1..63) = 2016 -- more than any epoch executes,
+        # which pinned run:e4332050-18c1-4562-8f03-3c4c8ee3a8bf at adaptive_limit
+        # 1 against a frozen limit of 64. Recovery has to fit inside one epoch.
+        admission = RunSampleAdmission()
+
+        for _ in range(200):
+            with admission.admit("run:recovered", 64):
+                pass
+
+        snapshot = admission.snapshot("run:recovered")
+        self.assertEqual(snapshot["adaptive_limit"], 64)
+        self.assertEqual(snapshot["limit"], 64)
+        self.assertEqual(snapshot["congestion_events"], 0)
 
     def test_retryable_provider_failure_reduces_adaptive_limit_once(self) -> None:
         admission = RunSampleAdmission()

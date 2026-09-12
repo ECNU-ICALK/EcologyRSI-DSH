@@ -44,6 +44,27 @@ _FORBIDDEN_KEYS = frozenset(
 )
 
 
+class UnknownEvidenceRefsError(ValueError):
+    """A model cited identifiers that are not in the frozen evidence snapshot.
+
+    The offending strings are the model's own output, so carrying them lets the
+    one-shot Host repair name them instead of restating the generic rule. In
+    run:e4332050-18c1-4562-8f03-3c4c8ee3a8bf both reflection attempts cited an
+    ``instruction_profile`` target as an ``evidence_ref``: that target is listed
+    in ``allowed_mutation_targets`` but is not an evidence identifier, and the
+    rejection named neither the bad ref nor the allowed set, so the repair had
+    nothing new to work from and the run failed on the second attempt.
+    """
+
+    def __init__(self, message: str, *, rejected_refs: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.rejected_refs: tuple[str, ...] = tuple(
+            dict.fromkeys(
+                str(reference) for reference in rejected_refs if str(reference).strip()
+            )
+        )
+
+
 def _text(value: Any, name: str, *, maximum: int) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be non-empty text")
@@ -812,7 +833,10 @@ def validate_research_synthesis(
             maximum=160,
         )
         if evidence_ref not in allowed_evidence_refs:
-            raise ValueError("research synthesis cited evidence outside the frozen snapshot")
+            raise UnknownEvidenceRefsError(
+                "research synthesis cited evidence outside the frozen snapshot",
+                rejected_refs=(evidence_ref,),
+            )
         evidence.append(
             {
                 "evidence_ref": evidence_ref,
@@ -834,8 +858,16 @@ def validate_research_synthesis(
         allowed_mutation_targets=allowed_mutation_targets,
     )
     for direction in directions:
-        if any(reference not in allowed_evidence_refs for reference in direction.evidence_refs):
-            raise ValueError("candidate direction cited evidence outside the frozen snapshot")
+        unknown = tuple(
+            reference
+            for reference in direction.evidence_refs
+            if reference not in allowed_evidence_refs
+        )
+        if unknown:
+            raise UnknownEvidenceRefsError(
+                "candidate direction cited evidence outside the frozen snapshot",
+                rejected_refs=unknown,
+            )
     return {
         "schema_version": RESEARCH_SYNTHESIS_SCHEMA_VERSION,
         "summary": summary,

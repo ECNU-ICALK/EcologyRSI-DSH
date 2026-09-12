@@ -351,7 +351,16 @@ def _evidence_matches_evaluation(
     return bool(
         tuple(evidence["horizons"]) == horizons
         and evidence["weights"] == weights
-        and evidence.get("dataset_task") == _contract_value(evaluation, "dataset_task")
+        # `_validated_evidence` thaws its side, while a live HoldoutEvaluation
+        # deep-freezes `metrics`, so the same contract arrives here as lists on
+        # one side and tuples/mappingproxies on the other. Comparing them raw
+        # never matched for any dataset whose contract holds an array -- which
+        # is every registered dataset -- so `_complete_scoring_blocks` returned
+        # None for both arms of run:e4332050-18c1-4562-8f03-3c4c8ee3a8bf and
+        # marked complete 50-origin evidence `paired_scoring_evidence_incomplete`.
+        # Normalize both sides; the digest checks above still bind the identity.
+        and evidence.get("dataset_task")
+        == thaw_json(_contract_value(evaluation, "dataset_task"))
     )
 
 

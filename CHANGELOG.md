@@ -1,5 +1,18 @@
 # Changelog
 
+## 未发布
+
+- 修复晋升比较把冻结的 `dataset_task` 与解冻后的同一契约直接对比的问题。`HoldoutEvaluation`/`BatchEvaluation` 把 `metrics` 深冻为 mappingproxy 与元组，而 `_validated_evidence` 把自己一侧解冻为 dict 与 list；由于每个已注册数据集的契约都含数组，两侧永不相等，`_complete_scoring_blocks` 恒为 `None`。守护搜索下这会把完整证据判成 `paired_scoring_evidence_incomplete`，堵死全部严格认证路径——`run:e4332050-18c1-4562-8f03-3c4c8ee3a8bf` 两臂各 50 origins 的完整证据即因此被判无效。`execution_qualification` 早已按解冻后比较，只有 `promotion` 是例外。新增回归测试在冻结轨迹评估上携带真实数据集契约（此前没有任何用例这样做，故整套测试都看不见该缺陷）。
+- 修复自适应样本准入的增长律无法真正恢复的问题。原规则要求连续 `adaptive_limit` 次健康准入才 +1，从 8 爬到配置的 64 需要 Σ(8..63)=1988 次、从一次减半后的 1 出发需要 Σ(1..63)=2016 次，任何一个 epoch 都花不起；`run:e4332050` 因此在 `limit=64` 下整代维持 `adaptive_limit=1`，实际串行执行。改为固定窗口 `ADMISSION_GROWTH_HEALTHY_ADMISSIONS=2`，增长仍严格线性（不会跳到上限），但上限在单个 epoch 内可达。
+- 反思与研究综合的 `evidence_ref` 契约改为可执行：`host_boundary`/`synthesis_contract` 现在直接给出 `allowed_evidence_refs`，并显式声明 `allowed_mutation_targets` 不是证据标识；Host 拒绝时在 `host_validation_feedback` 中回显被拒的 `rejected_evidence_refs`（模型自身输出，有界截断）并给出对应的 `required_action`。此前提示里唯一可见的标识列表就是变更目标，`run:e4332050` 的两次反思都把 `instruction_profile` 目标当作 `evidence_ref`，而拒绝信息既不点名错误标识也不给出可用集合，唯一一次修复机会因此空转、整轮失败。
+- 宿主异常暂停在服务端记录完整 traceback（`logging.exception`）；对外暂停原因仍只含类名或原生错误码，不变。
+- 世代失败原因不再硬编码「两个 finalist」：finalist 数量由调度决定，`quick_adaptive_epoch@1` 只跑一个。
+- 修复插件读取 DSH 事件日志的方式：`@deepseek-ai/dsh-session 0.1.5-rc.2` 只通过 `snapshotEvents()` 公开有序日志，不再提供 `events` 属性。原读取路径在真实宿主上一律得到 `undefined`，而数组形态的测试替身掩盖了这一漂移；新增 `session_events.test.mjs` 按真实形态固定该合同，缺失证据返回 `undefined` 而非空日志。
+- 样本 Planner 与修复的单次输出额度由 8192 提升至 16384。实测 `run:010d5ca2` 中一个 sample.plan 子会话在恰好 8192 输出 token 处以 max-tokens 结束、未能到达 `structured_output`，而十一个成功兄弟只用 4087..6347。九格预测响应须在同一预算内容纳工具参数、推理与决策对象。
+- 样本 Critic 的单次输出额度由 4096 提升至 8192。实测 `run:472dc541` 中一个 sample.critic 子会话在恰好 4096 输出 token 处因 length 停止、只留下一个未完成的推理块，而成功兄弟提交时用 1277 与 3080。当路由的模型元数据不声明推理档位时运行时无法请求 `off`，评审推理必须与决策对象共享该预算。
+- 累计输出中止阈值同步为单次额度的两倍（Planner 32768、Critic 16384），并新增跨语言一致性测试：冻结常量、网页展示的执行计划与插件的 `SAMPLE_STAGE_LIMITS` 三处数字必须相等，仅靠注释约定不再可能单边漂移。
+- 修复六个角色预设的 `@deepseek-ai/dsh-persona` 配置键（`prefix`，而非 `text`）。
+
 ## 0.7.10 — 2026-09-08
 
 - 独立推理副本按执行 scope 隔离检查点、写入权限、用量和结算；恢复时保留原 Agent 工具及参数证据，完成结果原样复用。

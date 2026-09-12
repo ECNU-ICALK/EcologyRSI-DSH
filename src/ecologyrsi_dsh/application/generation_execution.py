@@ -3807,7 +3807,13 @@ def _build_adaptive_analysis(
             if exploration_only
             else f"候选 {selected} 在本轮冻结的三臂训练比较中胜出。"
             if selected
-            else "两个 finalist 均未通过留出集门禁，保留 incumbent。"
+            # The finalist count is scheduled, not fixed: `quick_adaptive_epoch@1`
+            # runs a single finalist, so a hardcoded "两个 finalist" misreported
+            # every failed quick generation. Report what this epoch actually ran.
+            else (
+                f"本轮 {len(eligible_finalist_ids)} 个 finalist "
+                "均未通过留出集门禁，保留 incumbent。"
+            )
         ),
         insufficient_evidence=False,
         replan_required=force_replan,

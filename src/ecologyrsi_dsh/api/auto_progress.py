@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
 
+import logging
 import math
 import os
 import sqlite3
@@ -305,6 +306,18 @@ def _host_fault_pause(
             fault_detail = native_code
             if isinstance(native_status, int):
                 fault_detail += f"/HTTP{native_status}"
+    # The public reason stays bounded and message-free, which means a paused run
+    # carries only a class name or a native code -- enough to see that the Host
+    # faulted, never enough to say where. Diagnosing run:e4332050's pause needed
+    # the DSH transcript because nothing was written on this side. The traceback
+    # belongs in the server log, which is not attacker-visible.
+    logging.getLogger(__name__).exception(
+        "Auto progress paused on host fault for %s at stage %s (%s)",
+        getattr(getattr(state, "run", None), "run_id", "unknown"),
+        safe_stage,
+        fault_detail,
+        exc_info=exc,
+    )
     return _DeferredPause(
         reason=(
             "自动推进检测到宿主异常，已暂停并保留当前检查点；"

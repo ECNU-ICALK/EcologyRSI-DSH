@@ -6,7 +6,8 @@ from unittest.mock import Mock
 
 from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.application.formal_trajectory import _durable_batch_metrics
-from ecologyrsi_dsh.core.models import TaskManifest, digest
+from ecologyrsi_dsh.core.models import TaskManifest, digest, thaw_json
+from ecologyrsi_dsh.data.adapters import CUCUMBER_2018
 from ecologyrsi_dsh.core.search_policy import (
     PAIRED_EXECUTION_QUALIFICATION, SEARCH_GUARD_POLICY,
     local_challenger_policy, paired_execution_qualification_required,
@@ -15,6 +16,7 @@ from ecologyrsi_dsh.core.state import validate_generation_comparison_binding
 from ecologyrsi_dsh.core.trajectory import (
     BatchEvaluation, EvaluationPhase, EvaluationScope, FormalBatchArm,
     FormalBatchComparison, GenerationHoldout, HoldoutArm, HoldoutEvaluation,
+    _deep_freeze_json,
 )
 from ecologyrsi_dsh.evaluators.generation_comparison import build_generation_comparison
 from ecologyrsi_dsh.evaluators.objectives import (
@@ -25,7 +27,8 @@ from ecologyrsi_dsh.evolution.champion_challenger import (
     validate_formal_batch_comparison,
 )
 from ecologyrsi_dsh.evolution.promotion import (
-    _resampled_objective, _validated_evidence, build_promotion_block_evidence,
+    _resampled_objective, _validated_evidence, assess_promotion_improvement,
+    build_promotion_block_evidence,
 )
 from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
 from ecologyrsi_dsh.evolution.execution_qualification import paired_scoring_evidence_complete
@@ -136,6 +139,19 @@ def complete_chain(evaluation):
     return replace(evaluation, metrics=metrics)
 
 
+def with_dataset_task(item, adapter=CUCUMBER_2018):
+    """Carry the frozen dataset contract every real run binds to its metrics."""
+    contract = adapter.contract()
+    metrics = item.to_dict()["metrics"]
+    metrics["dataset_task"] = contract
+    evidence = metrics["promotion_block_evidence"]
+    evidence["dataset_task"] = contract
+    evidence["evidence_digest"] = digest(
+        {key: value for key, value in evidence.items() if key != "evidence_digest"}
+    )
+    return replace(item, metrics=metrics)
+
+
 class PairedExecutionQualificationTests(unittest.TestCase):
     def test_local_availability_only_gain_is_retained_without_changing_score(self):
         champion = evaluation(FormalBatchArm.CHAMPION, failed=True)
@@ -208,6 +224,40 @@ class PairedExecutionQualificationTests(unittest.TestCase):
         comparison = holdout_comparison(marked=True, failed_incumbent=False)
         self.assertEqual(comparison.selected_candidate_id, "candidate:finalist_1")
         self.assertTrue(comparison.gate_results["arms"]["finalist_1"]["certification_eligible"])
+
+    def test_frozen_dataset_contract_still_matches_its_own_block_evidence(self):
+        # Every registered dataset contract holds arrays, and `HoldoutEvaluation`
+        # deep-freezes `metrics` into mappingproxies and real tuples while
+        # `_validated_evidence` thaws its side into dicts and lists. Comparing
+        # the two raw can never match, so complete 50-origin evidence was
+        # reported `paired_scoring_evidence_incomplete` for both arms of
+        # run:e4332050-18c1-4562-8f03-3c4c8ee3a8bf. The whole suite missed it
+        # because no other fixture carries a `dataset_task` on a frozen
+        # trajectory evaluation.
+        contract = CUCUMBER_2018.contract()
+        self.assertNotEqual(
+            _deep_freeze_json(contract, "dataset_task"),
+            contract,
+            "fixture no longer exercises the frozen/thawed boundary",
+        )
+
+        incumbent, finalist = (
+            with_dataset_task(evaluation(arm, skill=skill))
+            for arm, skill in (
+                (HoldoutArm.INCUMBENT, 0.1),
+                (HoldoutArm.FINALIST_1, 0.2),
+            )
+        )
+        for item in (incumbent, finalist):
+            self.assertEqual(thaw_json(item.metrics["dataset_task"]), contract)
+            self.assertIsNotNone(_validated_evidence(item))
+            self.assertTrue(paired_scoring_evidence_complete(item, item))
+        self.assertTrue(paired_scoring_evidence_complete(incumbent, finalist))
+
+        report = assess_promotion_improvement(finalist, incumbent)
+        self.assertTrue(report["comparable"])
+        self.assertNotEqual(report["reason_code"], "incompatible_block_configuration")
+        self.assertGreater(report["score_delta"], 0)
 
     def test_holdout_complete_chain_with_failed_scoring_still_cannot_qualify(self):
         base = holdout_comparison(marked=False)

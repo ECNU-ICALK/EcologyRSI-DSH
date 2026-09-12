@@ -230,6 +230,44 @@ class _RepairCycleRuntime(_CycleRuntime):
         return super().run_stage(request)
 
 
+class _MutationTargetAsEvidenceRuntime(_CycleRuntime):
+    """Replay the real failure: cite an allowed mutation target as evidence.
+
+    Both reflection attempts of run:e4332050-18c1-4562-8f03-3c4c8ee3a8bf did
+    this. `allowed_mutation_targets` was the only identifier list the prompt
+    carried, and the rejection named neither the bad ref nor the allowed set,
+    so the one repair attempt had nothing new to work from.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.invalid_returned = False
+
+    def run_stage(self, request: dict) -> dict:
+        if request["stage"] == "generation.reflect" and not self.invalid_returned:
+            self.invalid_returned = True
+            self.requests.append(request)
+            context = request["request"]["context"]
+            target = context["host_boundary"]["allowed_mutation_targets"][
+                "instruction_profile"
+            ][0]
+            structured = {
+                "schema_version": "ecologyrsi-dsh.generation-reflection/1",
+                "summary": "First response cites a mutation target as evidence.",
+                "lessons": ["Keep each next direction executable."],
+                "recommended_search_queries": [
+                    "greenhouse ridge forecast calibration"
+                ],
+                "candidate_directions": [
+                    _direction(index + 2, [str(target)])
+                    for index in range(context["direction_count"])
+                ],
+                "stop_recommendation": "continue",
+            }
+            return {"structured": structured, "result_digest": digest(structured)}
+        return super().run_stage(request)
+
+
 class _ExactAssignmentReflectionRuntime(_CycleRuntime):
     def __init__(self) -> None:
         super().__init__()
@@ -1469,6 +1507,68 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
             "host_validation_feedback"
         ]
         self.assertIn("mutation_target", feedback["validation_detail"])
+
+    def test_reflection_sees_the_allowed_refs_and_the_ones_it_got_wrong(
+        self,
+    ) -> None:
+        runtime = _MutationTargetAsEvidenceRuntime()
+        adapter = StrategyRouterDSHAdapter(
+            gateway=object(),
+            native_runtime_provider=lambda: runtime,
+        )
+        director = EvolutionDirector(self.ledger, adapter)
+        run_id = "run:generation-reflection-evidence-refs"
+        director.create_run(self.task, run_id=run_id)
+        director.start_run(run_id)
+        batch = start_generation_batch(director, run_id)
+        analysis = GenerationAnalysis(
+            run_id=run_id,
+            generation=0,
+            candidate_count=0,
+            eligible_count=0,
+            outcome="no_eligible_candidate",
+            common_failures=("scientific_gate_failed",),
+            next_generation_focus="repair long-horizon CO2 skill",
+            selection_reason="No candidate passed the frozen gates.",
+            insufficient_evidence=True,
+        )
+        self.ledger.append(
+            run_id, "GenerationAnalyzed", {"analysis": analysis.to_dict()}
+        )
+
+        reflection = _ensure_generation_reflection(
+            director, director.state(run_id), batch, analysis
+        )
+        self.assertIsNotNone(reflection)
+
+        requests = [
+            item for item in runtime.requests if item["stage"] == "generation.reflect"
+        ]
+        self.assertEqual(len(requests), 2)
+        boundary = requests[0]["request"]["context"]["host_boundary"]
+        # The rule alone is unactionable: the set it validates against has to be
+        # readable, and it must not be confusable with the mutation coordinates.
+        allowed = boundary["allowed_evidence_refs"]
+        self.assertTrue(allowed)
+        self.assertEqual(allowed, sorted(allowed))
+        self.assertTrue(boundary["mutation_targets_are_not_evidence_refs"])
+        rejected_target = str(
+            boundary["allowed_mutation_targets"]["instruction_profile"][0]
+        )
+        self.assertNotIn(rejected_target, allowed)
+
+        feedback = requests[1]["request"]["context"]["host_validation_feedback"]
+        self.assertEqual(feedback["rejected_evidence_refs"], [rejected_target])
+        self.assertIn("allowed_evidence_refs", feedback["required_action"])
+        self.assertEqual(
+            requests[1]["request"]["context"]["host_boundary"][
+                "allowed_evidence_refs"
+            ],
+            allowed,
+        )
+        self.assertTrue(
+            set(reflection.candidate_directions[0].evidence_refs) <= set(allowed)
+        )
 
     def test_model_queries_drive_bounded_openalex_retrieval(self) -> None:
         online_director = EvolutionDirector(self.ledger, self.adapter)

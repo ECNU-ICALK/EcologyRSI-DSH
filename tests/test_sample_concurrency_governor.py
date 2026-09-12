@@ -52,9 +52,11 @@ class SampleConcurrencyGovernorTests(unittest.TestCase):
             with admission.admit("run:unhealthy", 64) as outcome:
                 outcome.healthy = False
         self.assertEqual(admission.snapshot("run:unhealthy")["adaptive_limit"], 8)
-        for _ in range(8):
+        for _ in range(2):
             with admission.admit("run:unhealthy", 64):
                 pass
+        # Only healthy admissions count, and one growth window is
+        # ADMISSION_GROWTH_HEALTHY_ADMISSIONS of them.
         self.assertEqual(admission.snapshot("run:unhealthy")["adaptive_limit"], 9)
 
     def test_candidate_concurrency_does_not_divide_origin_workers(self) -> None:

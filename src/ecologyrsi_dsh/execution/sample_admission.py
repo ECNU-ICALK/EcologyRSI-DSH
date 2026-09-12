@@ -18,6 +18,16 @@ DEFAULT_SAMPLE_CONCURRENCY = 64
 MAX_SAMPLE_CONCURRENCY = 128
 INITIAL_SAMPLE_CONCURRENCY = 8
 HISTORICAL_SAMPLE_CONCURRENCY_FALLBACK = 4
+# Healthy admissions required before the adaptive limit grows by one. This used
+# to be the adaptive limit itself, which made recovery unreachable rather than
+# merely cautious: climbing from 8 to a configured 64 needed sum(8..63) = 1988
+# consecutive healthy origins, and one halving to 1 needed sum(1..63) = 2016.
+# A 200-origin epoch cannot spend that, so run:e4332050-18c1-4562-8f03-3c4c8ee3a8bf
+# sat at adaptive_limit 1 -- effectively serial -- against a frozen limit of 64
+# for a whole epoch after its congestion halvings. A small constant keeps growth
+# strictly additive (one step per window, never a jump to the ceiling) while
+# making the ceiling reachable inside a single epoch.
+ADMISSION_GROWTH_HEALTHY_ADMISSIONS = 2
 
 
 def validate_sample_concurrency(value: object) -> int:
@@ -161,7 +171,7 @@ class RunSampleAdmission:
                     if (
                         state.adaptive_limit < state.limit
                         and state.successful_since_adjustment
-                        >= state.adaptive_limit
+                        >= ADMISSION_GROWTH_HEALTHY_ADMISSIONS
                     ):
                         state.adaptive_limit = min(
                             state.limit,

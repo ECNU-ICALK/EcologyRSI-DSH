@@ -294,12 +294,20 @@ class AutoProgressHTTPTests(unittest.TestCase):
                     "execute_generation",
                     side_effect=error_type(secret),
                 ) as execute_generation:
-                    keep_running = self.server.auto_progress._run_one_generation(
-                        run_id
-                    )
+                    with self.assertLogs(
+                        "ecologyrsi_dsh.api.auto_progress", level="ERROR"
+                    ) as logs:
+                        keep_running = self.server.auto_progress._run_one_generation(
+                            run_id
+                        )
 
                 self.assertFalse(keep_running)
                 execute_generation.assert_called_once()
+                # The public pause reason is deliberately message-free, which
+                # left a paused run with no way to say where the Host faulted.
+                # The traceback belongs in the server log instead of nowhere.
+                self.assertIn(secret, "\n".join(logs.output))
+                self.assertIn(run_id, "\n".join(logs.output))
                 state = self.server.director.state(run_id)
                 self.assertEqual(state.run.status.value, "paused")
                 self.assertEqual(state.run.generation, before.run.generation)
@@ -361,7 +369,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 0.0,
             ),
         ):
-            keep_running = self.server.auto_progress._run_one_generation(run_id)
+            with self.assertLogs("ecologyrsi_dsh.api.auto_progress", level="ERROR"):
+                keep_running = self.server.auto_progress._run_one_generation(run_id)
 
         self.assertTrue(keep_running)
         execute_generation.assert_called_once()
@@ -435,7 +444,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 return_value=True,
             ) as execute_work_unit,
         ):
-            keep_running = self.server.auto_progress._run_one_generation(run_id)
+            with self.assertLogs("ecologyrsi_dsh.api.auto_progress", level="ERROR"):
+                keep_running = self.server.auto_progress._run_one_generation(run_id)
 
         self.assertFalse(keep_running)
         execute_work_unit.assert_called_once()

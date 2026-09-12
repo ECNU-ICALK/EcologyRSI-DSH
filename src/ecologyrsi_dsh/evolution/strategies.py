@@ -47,6 +47,7 @@ from ..knowledge.autonomous_cycle import (
     normalize_candidate_directions,
     normalize_search_queries,
     reject_executable_fields,
+    UnknownEvidenceRefsError,
     validate_research_synthesis,
 )
 from ..knowledge.mapping import knowledge_focus_parameter
@@ -294,7 +295,7 @@ def _host_validation_feedback(
     """Build bounded, non-secret feedback for one fresh model correction."""
 
     detail = public_error_summary(str(exc), limit=500)
-    return {
+    feedback: dict[str, Any] = {
         "schema_version": "ecologyrsi-dsh.host-validation-feedback/1",
         "rejection_code": "semantic_contract_validation_failed",
         "validation_detail": detail or public_exception_summary(exc),
@@ -305,6 +306,22 @@ def _host_validation_feedback(
             "validation failure; do not repeat the rejected output."
         ),
     }
+    # A rejected identifier is the model's own output and already sits in this
+    # transcript, so echoing a bounded copy adds no exposure while turning an
+    # unactionable rule restatement into a named correction. The free-text
+    # summary above cannot carry them: `public_error_summary` redacts long
+    # alphanumeric runs, which is exactly the shape of an evidence digest.
+    rejected_refs = tuple(getattr(exc, "rejected_refs", ()) or ())[:8]
+    if rejected_refs:
+        feedback["rejected_evidence_refs"] = [
+            str(reference)[:160] for reference in rejected_refs
+        ]
+        feedback["required_action"] = (
+            "Return a fresh complete object. Every evidence_ref must be copied "
+            "exactly from allowed_evidence_refs; drop or replace each entry in "
+            "rejected_evidence_refs and do not repeat the rejected output."
+        )
+    return feedback
 
 
 def _native_evolution_reflection_from_experience(
@@ -1359,6 +1376,14 @@ class StrategyRouterDSHAdapter:
                 "candidate_directions_must_be_distinct": True,
                 **deepcopy(mutation_catalog),
                 "cite_only_frozen_evidence": True,
+                # The Host rejects any evidence_ref outside this set, so the set
+                # itself has to be in the prompt: reflection used to see only the
+                # rule plus `allowed_mutation_targets`, and both attempts of
+                # run:e4332050-18c1-4562-8f03-3c4c8ee3a8bf cited a mutation
+                # target as an evidence_ref -- the one identifier list they could
+                # actually see. Everything here is already frozen knowledge.
+                "allowed_evidence_refs": sorted(allowed_evidence_refs),
+                "mutation_targets_are_not_evidence_refs": True,
                 "registered_capabilities_only": True,
                 "model_generated_code_execution": False,
                 "selection_and_stopping_are_host_controlled": True,
@@ -1425,14 +1450,17 @@ class StrategyRouterDSHAdapter:
                     minimum_items=2,
                     allowed_mutation_targets=allowed_mutation_targets,
                 )
-                for index, direction in enumerate(directions):
-                    if any(
-                        reference not in allowed_evidence_refs
+                for direction in directions:
+                    unknown = tuple(
+                        reference
                         for reference in direction.evidence_refs
-                    ):
-                        raise ValueError(
+                        if reference not in allowed_evidence_refs
+                    )
+                    if unknown:
+                        raise UnknownEvidenceRefsError(
                             "generation reflection cited evidence outside the "
-                            "frozen snapshot"
+                            "frozen snapshot",
+                            rejected_refs=unknown,
                         )
                 return GenerationReflection(
                     run_id=run.run_id,
@@ -1555,6 +1583,11 @@ class StrategyRouterDSHAdapter:
                             ),
                             "diagnostic_insufficient_evidence_is_advisory": True,
                             "cite_only_frozen_evidence": True,
+                            # Same reason as the reflection boundary: the Host
+                            # validates every evidence_ref against this set, so
+                            # the model has to be able to read it.
+                            "allowed_evidence_refs": sorted(allowed_evidence_refs),
+                            "mutation_targets_are_not_evidence_refs": True,
                             "registered_capabilities_only": True,
                             "model_generated_code_execution": False,
                             "predictor_semantics": _predictor_semantics(parent),
