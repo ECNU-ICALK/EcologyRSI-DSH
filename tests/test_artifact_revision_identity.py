@@ -5,7 +5,7 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-import test_genome_replay as native_fixture
+from tests import test_genome_replay as native_fixture
 from ecologyrsi_dsh.core.artifact_identity import (
     ARTIFACT_EVENT_V2, EVALUATION_EVENT_V2, FORMAL_STAGE_V2,
     build_artifact_revision_binding, validate_artifact_revision_binding,

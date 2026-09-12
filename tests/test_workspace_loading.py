@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from urllib.parse import quote
 
-import test_http as http_helpers
+from tests import test_http as http_helpers
 from ecologyrsi_dsh.application.config import bind_toy_dataset
 from ecologyrsi_dsh.application.read_cache import ReadSectionCache
 from ecologyrsi_dsh.core.models import TaskManifest

@@ -12,7 +12,7 @@ from ecologyrsi_dsh.core.models import Evaluation, RunStatus, TaskManifest
 from ecologyrsi_dsh.core.state import validate_generation_comparison_binding
 from ecologyrsi_dsh.core.trajectory import GenerationHoldout, HoldoutArm
 from ecologyrsi_dsh.evaluators.generation_comparison import build_generation_comparison
-from test_paired_execution_qualification import GUARD_METADATA, evaluation
+from tests.test_paired_execution_qualification import GUARD_METADATA, evaluation
 
 
 MODEL = "provider/reviewer"
