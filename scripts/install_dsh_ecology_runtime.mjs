@@ -13,7 +13,7 @@ export const PRESET_IDS = Object.freeze([
   "ecology-coordinator-v5",
   "ecology-researcher-v12",
   "ecology-candidate-proposer-v4",
-  "ecology-sample-planner-v8",
+  "ecology-sample-planner-v9",
   "ecology-sample-critic-v5",
   "ecology-generation-judge-v8",
 ]);

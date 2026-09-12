@@ -497,6 +497,13 @@ export class ProviderStageGate {
     this.closedRuns.delete(runId);
   }
 
+  // Only for a run the Host has already driven to a terminal status: nothing can
+  // request admission for it again, so keeping its closed-run marker only grows
+  // the set for the life of the Node host.
+  forgetRun(runId) {
+    this.closedRuns.delete(runId);
+  }
+
   assertRunOpen(runId) {
     if (this.closedRuns.has(runId)) throw admissionClosedError();
   }

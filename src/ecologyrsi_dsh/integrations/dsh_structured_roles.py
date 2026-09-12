@@ -6,9 +6,19 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..core.errors import DshNativeRuntimeUnavailableError
-from ..core.model_execution_policy import research_execution_policy
+from ..core.model_execution_policy import (
+    SAMPLE_OPERATION_MAX_MAX_TOKENS,
+    research_execution_policy,
+)
 from ..core.models import canonical_json, digest
 from .dsh_native_runtime import DshNativeAgentRuntimeClient
+
+# Keep these exact ceilings in sync with the plugin's
+# lib/runtime/research-execution-policy.js. Only a stage whose single response
+# must carry tool arguments and a multi-cell decision object is bounded above
+# the default; the synthesis stage reads its exact value from its frozen policy.
+_DEFAULT_STAGE_MAX_OUTPUT_TOKENS = 8192
+_STAGE_MAX_OUTPUT_TOKENS = {"sample.plan": SAMPLE_OPERATION_MAX_MAX_TOKENS}
 
 
 class DshStructuredRoleRuntime:
@@ -46,7 +56,11 @@ class DshStructuredRoleRuntime:
         max_tokens: int | None = None,
     ) -> dict[str, Any]:
         policy = research_execution_policy(context) if stage == "generation.research-synthesis" else None
-        maximum = policy["synthesis_max_output_tokens"] if policy is not None else 8192
+        maximum = (
+            policy["synthesis_max_output_tokens"]
+            if policy is not None
+            else _STAGE_MAX_OUTPUT_TOKENS.get(stage, _DEFAULT_STAGE_MAX_OUTPUT_TOKENS)
+        )
         if max_tokens is not None and (
             isinstance(max_tokens, bool)
             or not isinstance(max_tokens, int)

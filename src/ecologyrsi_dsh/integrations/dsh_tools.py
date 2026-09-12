@@ -91,13 +91,7 @@ _STRUCTURED_STAGE_SKILLS: dict[str, frozenset[str]] = {
     "candidate.propose": frozenset({"bounded-plugin-experiment"}),
     "candidate.local_edit": frozenset({"bounded-plugin-experiment"}),
     "generation.judge": frozenset({"candidate-scientific-review"}),
-    "sample.plan": frozenset(
-        {
-            "origin-vector-forecasting-balanced",
-            "origin-vector-forecasting-anomaly-aware",
-            "origin-vector-forecasting-horizon-aware",
-        }
-    ),
+    "sample.plan": frozenset({"origin-vector-forecasting"}),
     "sample.critic": frozenset({"origin-vector-review"}),
     "sample.reflect": frozenset({"origin-vector-review"}),
 }

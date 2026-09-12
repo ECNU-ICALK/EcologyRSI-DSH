@@ -705,7 +705,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     "ecology-coordinator-v5",
                     "ecology-researcher-v12",
                     "ecology-candidate-proposer-v4",
-                    "ecology-sample-planner-v8",
+                    "ecology-sample-planner-v9",
                     "ecology-sample-critic-v5",
                     "ecology-generation-judge-v8",
                 )
@@ -919,9 +919,9 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                 "sample_operation_max_tokens"
             ],
             {
-                "sample.planner": 8192,
-                "sample.repair": 8192,
-                "sample.critic": 4096,
+                "sample.planner": 16384,
+                "sample.repair": 16384,
+                "sample.critic": 8192,
             },
         )
         explicit_configuration = explicit_created["projection"]["configuration"]

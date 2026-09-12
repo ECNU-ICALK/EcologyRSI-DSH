@@ -24,7 +24,7 @@ _ROLES = (
     ("strategy_model_id", "resolved_policy_route_config_digest", "researcher", "ecology-researcher-v12", "generation.search-plan", "ecology-research-search-plan@1"),
     ("review_model_id", "resolved_review_route_config_digest", "generation-judge", "ecology-generation-judge-v8", "generation.reflect", "ecology-generation-reflection@1"),
     ("review_model_id", "resolved_review_route_config_digest", "sample-critic", "ecology-sample-critic-v5", "sample.critic", "ecology-sample-review@2"),
-    ("strategy_model_id", "resolved_policy_route_config_digest", "sample-planner", "ecology-sample-planner-v8", "sample.plan", "ecology-sample-predictions@2"),
+    ("strategy_model_id", "resolved_policy_route_config_digest", "sample-planner", "ecology-sample-planner-v9", "sample.plan", "ecology-sample-predictions@2"),
 )
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
 _ROUTE_PART = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,119}$")
@@ -35,6 +35,10 @@ class CanaryBounds:
     max_attempts: int = 4
     max_output_tokens: int = 2048
     max_reported_tokens: int = 30000
+    # Raising this to the validated maximum of 180000 was measured against
+    # pjlab/deepseek-v4-flash-0731 and changed nothing: its sample.critic probe
+    # exhausted 120000 and 180000 alike while reporting ~1.4k tokens, so the
+    # bound separates unusable transports from usable ones already.
     total_timeout_ms: int = 120000
     ttl_seconds: int = 3600
 

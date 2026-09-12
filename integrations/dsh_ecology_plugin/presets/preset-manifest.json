@@ -18,7 +18,7 @@
       "required_tools": ["skill", "web_search"]
     },
     {
-      "preset_id": "ecology-sample-planner-v8",
+      "preset_id": "ecology-sample-planner-v9",
       "tool_profile": "dynamic-retrieval-v1",
       "required_tools": ["ecology_execute_prediction_tool", "skill", "web_search"]
     },

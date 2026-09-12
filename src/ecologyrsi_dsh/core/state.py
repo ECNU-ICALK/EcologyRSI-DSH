@@ -120,8 +120,13 @@ _DSH_STAGE_SKILLS: dict[str, frozenset[str]] = {
     "generation.judge": frozenset(
         {"candidate-scientific-review", "batch-scientific-reflection"}
     ),
+    # Replay must keep accepting the three per-strategy Skill names that existed
+    # before the strategy moved out of the Skill file into the registry
+    # directive.  The write-side DSH tool contract accepts only the shared
+    # origin-vector-forecasting Skill for new sample results.
     "sample.plan": frozenset(
         {
+            "origin-vector-forecasting",
             "origin-vector-forecasting-balanced",
             "origin-vector-forecasting-anomaly-aware",
             "origin-vector-forecasting-horizon-aware",

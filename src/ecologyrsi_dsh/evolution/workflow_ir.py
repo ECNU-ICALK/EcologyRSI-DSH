@@ -264,6 +264,13 @@ def compile_dsh_workflow_spec(
                 )["catalog_digest"],
                 "instruction_version": instruction["version"],
                 "skill_name": skill_name,
+                # The evolvable half of the instruction. It travels with the
+                # compiled profile because the Skill file is shared by every
+                # template and therefore says nothing about strategy; the
+                # template digest above already binds this text to identity.
+                "instruction_directive": _text(
+                    instruction.get("directive"), "instruction directive"
+                ),
                 "instruction_parameters": instruction_parameters,
                 "response_schema_id": _text(
                     raw_profile["response_schema_id"], "response_schema_id"
@@ -736,6 +743,7 @@ def resolve_candidate_agent_profile(
         "instruction_template_digest": profile["instruction_template_digest"],
         "instruction_version": profile["instruction_version"],
         "skill_name": profile["skill_name"],
+        "instruction_directive": profile["instruction_directive"],
         "instruction_parameters": dict(profile["instruction_parameters"]),
         "enabled_tool_ids": list(profile["enabled_tool_ids"]),
         "workflow_digest": workflow["workflow_digest"],

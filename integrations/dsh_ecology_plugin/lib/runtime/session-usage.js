@@ -1,4 +1,5 @@
 import { dshSessionMetrics } from "./agents.js";
+import { sessionEventLog } from "./session-events.js";
 
 export function sessionActivity(events) {
   const kinds = {
@@ -38,7 +39,7 @@ export function observeSessionUsage(ctx, sidecar, identity, { intervalMs = 5000 
     const freshUsage = metrics.provider_usage.available === true;
     if (freshUsage) lastAvailable = metrics;
     else if (lastAvailable) metrics = lastAvailable;
-    const events = ctx?.sessions?.get?.(identity.session_id)?.events;
+    const events = sessionEventLog(ctx, identity.session_id);
     const complete = sessionUsageComplete(events, { settlement, freshUsage });
     const body = {
       schema_version: "ecologyrsi-dsh.session-usage/1", identity: { ...identity },

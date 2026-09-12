@@ -6,6 +6,7 @@ fixed before inference and participates in the runtime phenotype identity.
 from collections.abc import Mapping
 from copy import deepcopy
 import math
+from ..core.agent_prediction import PREDICTION_TOOL_CALL_BUDGET
 from ..core.models import digest
 
 POLICY_SCHEMA = 'ecologyrsi-dsh.agent-policy/1'
@@ -98,7 +99,8 @@ def build_agent_policy(*, genome_digest, profile, parameters, previous_analysis,
             'experience': {'scope': 'prior_generation_training_feedback_aggregates',
                 'source_analysis_digest': digest(previous_analysis) if previous_analysis else None,
                 'rows': experience},
-            'inference': {'prediction_owner': 'sample_agent', 'max_tool_calls_per_attempt': 6,
+            'inference': {'prediction_owner': 'sample_agent',
+                          'max_tool_calls_per_attempt': PREDICTION_TOOL_CALL_BUDGET,
                           'model_parameter_selection': 'agent_within_registered_bounds',
                           'critic_protocol': 'ecology-sample-review@2', 'holdout_replicates': 2}}
     return {**body, 'policy_digest': digest(body)}

@@ -229,7 +229,7 @@ function samplePlanContext() {
       candidate_agent_profile: {
         schema_version: "ecologyrsi-dsh.candidate-agent-profile/1",
         role: "sample-planner",
-        skill_name: "origin-vector-forecasting-balanced",
+        skill_name: "origin-vector-forecasting",
       },
     },
   };
@@ -679,6 +679,15 @@ test("candidate judging and batch reflection use distinct scientific Skills", ()
   );
   assert.match(reflection.instruction, /mutation_direction/i);
   assert.match(reflection.instruction, /next research synthesis Host preflight/i);
+  // Reflection is validated against host_boundary.allowed_evidence_refs exactly
+  // like synthesis, so it has to name that list and say that a mutation target
+  // is not one -- citing a target was how reflection failed in production.
+  for (const stage of [reflection, STAGES["generation.research-synthesis"]]) {
+    assert.match(stage.instruction, /allowed_evidence_refs/);
+    assert.match(stage.instruction, /never invent a source/i);
+  }
+  assert.match(reflection.instruction, /allowed_mutation_targets are mutation coordinates, not evidence/i);
+  assert.match(reflection.instruction, /rejected_evidence_refs/);
 });
 
 test("research synthesis and candidate proposal bind structured mutation direction", () => {
@@ -992,7 +1001,9 @@ test("native stage runner rejects invalid or missing sample planner max_tokens l
       },
     },
   });
-  for (const maxTokens of [511, 8193, 2048.5, "2048"]) {
+  // sample.plan carries the raised nine-cell ceiling, so 16385 is the first
+  // rejected integer here while 8193 is a valid planner budget.
+  for (const maxTokens of [511, 16385, 2048.5, "2048"]) {
     const binding = samplePlanBinding();
     binding.request.max_tokens = maxTokens;
     await assert.rejects(
@@ -1533,7 +1544,7 @@ test("sample planner retries a zero-turn child after provider backpressure", asy
     ],
     sessionEvents: (attempt) => attempt === 1
       ? [{ type: "session", data: { id: "allocated-before-provider-rejection" } }]
-      : skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
+      : skillFirstEvents("origin-vector-forecasting", { prediction: true }),
   });
 
   const result = await harness.runner.run(
@@ -1566,7 +1577,7 @@ test("sample planner honors provider retry_after after a consumed RATE_LIMIT tur
       { stopReason: "completed", structured },
     ],
     sessionEvents: (attempt) => attempt === 1
-      ? rc6ConsumedEvents("origin-vector-forecasting-balanced", {
+      ? rc6ConsumedEvents("origin-vector-forecasting", {
         prediction: true,
         terminalKind: "error",
         terminalError: {
@@ -1574,7 +1585,7 @@ test("sample planner honors provider retry_after after a consumed RATE_LIMIT tur
           message: "429 user_rpm_rate_limit_exceeded {\"retry_after\":17}",
         },
       })
-      : skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
+      : skillFirstEvents("origin-vector-forecasting", { prediction: true }),
   });
 
   const result = await harness.runner.run(
@@ -1600,11 +1611,11 @@ test("provider concurrency limit reduces physical capacity instead of RPM spacin
     stage: "sample.plan",
     results: [{ stopReason: "error" }, { stopReason: "completed", structured }],
     sessionEvents: (attempt) => attempt === 1
-      ? rc6ConsumedEvents("origin-vector-forecasting-balanced", {
+      ? rc6ConsumedEvents("origin-vector-forecasting", {
         prediction: true, terminalKind: "error",
         terminalError: { code: "RATE_LIMIT",
           message: '429: {"code":"cluster_concurrency_rate_limit_exceeded","details":{"limit_type":"concurrency"}}' },
-      }) : skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
+      }) : skillFirstEvents("origin-vector-forecasting", { prediction: true }),
   });
   const result = await harness.runner.run(directSampleBinding("sample.plan", samplePlanContext()));
   assert.deepEqual(result.structured, structured);
@@ -1627,7 +1638,7 @@ test("sample planner prefers structured 429 Retry-After metadata", async () => {
       { stopReason: "completed", structured },
     ],
     sessionEvents: (attempt) => attempt === 1
-      ? rc6ConsumedEvents("origin-vector-forecasting-balanced", {
+      ? rc6ConsumedEvents("origin-vector-forecasting", {
         prediction: true,
         terminalKind: "error",
         terminalError: {
@@ -1636,7 +1647,7 @@ test("sample planner prefers structured 429 Retry-After metadata", async () => {
           message: "redacted provider failure",
         },
       })
-      : skillFirstEvents("origin-vector-forecasting-balanced", { prediction: true }),
+      : skillFirstEvents("origin-vector-forecasting", { prediction: true }),
   });
 
   const result = await harness.runner.run(
@@ -1944,7 +1955,7 @@ test("sample missing-output retry does not broaden to lifecycle or durable-bound
 });
 
 test("sample planner uses a bounded native one-shot child and retries one missing capture", async () => {
-  const skillName = "origin-vector-forecasting-balanced";
+  const skillName = "origin-vector-forecasting";
   const structured = {
     schema_version: "ecology-sample-predictions@2",
     wave_digest: "f".repeat(64),
@@ -1990,7 +2001,7 @@ test("sample planner uses a bounded native one-shot child and retries one missin
     const plannerPrompt = JSON.parse(request.prompt[0].text);
     assert.match(
       plannerPrompt.instruction,
-      /first response must call skill exactly once with name origin-vector-forecasting-balanced/i,
+      /first response must call skill exactly once with name origin-vector-forecasting/i,
     );
     assert.match(
       plannerPrompt.instruction,
@@ -2018,7 +2029,7 @@ test("sample planner uses a bounded native one-shot child and retries one missin
 });
 
 test("sample planner waits for the child Session projection before persistence", async () => {
-  const skillName = "origin-vector-forecasting-balanced";
+  const skillName = "origin-vector-forecasting";
   const structured = {
     schema_version: "ecology-sample-predictions@2",
     wave_digest: "f".repeat(64),
@@ -2051,7 +2062,7 @@ test("sample planner waits for the child Session projection before persistence",
 });
 
 test("completed sample result after INVALID_ARGS retries as missing capture", async () => {
-  const skillName = "origin-vector-forecasting-balanced";
+  const skillName = "origin-vector-forecasting";
   const structured = {
     schema_version: "ecology-sample-predictions@2",
     wave_digest: "f".repeat(64),
@@ -2086,7 +2097,7 @@ test("completed sample result after INVALID_ARGS retries as missing capture", as
 });
 
 test("error result waits for a late completed INVALID_ARGS projection before retry", async () => {
-  const skillName = "origin-vector-forecasting-balanced";
+  const skillName = "origin-vector-forecasting";
   const structured = {
     schema_version: "ecology-sample-predictions@2",
     wave_digest: "f".repeat(64),
@@ -2178,7 +2189,7 @@ test("persistence preserves only the Sidecar safe public diagnostic", async () =
     maxAttempts: 1,
     results: [{ stopReason: "completed", structured }],
     sessionEvents: () => skillFirstEvents(
-      "origin-vector-forecasting-balanced",
+      "origin-vector-forecasting",
       { prediction: true },
     ),
     persistenceError: new SidecarError("sidecar_rejected", "sidecar_rejected", {
@@ -2209,7 +2220,7 @@ test("sample persistence retry reuses one child and one frozen sidecar envelope"
     maxAttempts: 2,
     results: [{ stopReason: "completed", structured }],
     sessionEvents: () => skillFirstEvents(
-      "origin-vector-forecasting-balanced",
+      "origin-vector-forecasting",
       { prediction: true },
     ),
     persistenceError: (attempt) => {
@@ -2308,7 +2319,7 @@ test("sample critic uses its shorter independent operational timeout", async () 
 });
 
 function correctedOutputEvents() {
-  const events = rc6ConsumedEvents('origin-vector-forecasting-balanced', {
+  const events = rc6ConsumedEvents('origin-vector-forecasting', {
     prediction: true,
     structuredResult: { isError: true, error: { name: 'ToolArgsError', code: 'INVALID_ARGS' } },
   });
@@ -2349,14 +2360,14 @@ test('output correction rejects ambiguous evidence, operational errors, extra ca
   ];
   for (const change of changes) {
     const events = correctedOutputEvents(); change(events);
-    assert.throws(() => skillInvocationEvidence(events, { stage: 'sample.plan', skillName: 'origin-vector-forecasting-balanced', allowsPredictionTools: true }));
+    assert.throws(() => skillInvocationEvidence(events, { stage: 'sample.plan', skillName: 'origin-vector-forecasting', allowsPredictionTools: true }));
   }
 });
 
 
 test("SERVER 503 is recoverable and its bounded contract reaches failure accounting", async () => {
   const harness = directSampleHarness({stage: "sample.plan", maxAttempts: 1,
-    results: [{stopReason: "error"}], sessionEvents: () => rc6ConsumedEvents("origin-vector-forecasting-balanced", {
+    results: [{stopReason: "error"}], sessionEvents: () => rc6ConsumedEvents("origin-vector-forecasting", {
       prediction: true, terminalKind: "error", terminalError: {code: "SERVER", status: 503, providerRetryAfterMs: 12000, message: "private provider message"},
     })});
   await assert.rejects(harness.runner.run(directSampleBinding("sample.plan", samplePlanContext())), e => e.code === "structured_child_model_error");

@@ -4090,9 +4090,31 @@ assert.equal(Object.hasOwn(manifest.api, "model_verification"), false);
 assert.equal(manifest.security.capability_token_storage, "memory-only");
 assert.equal(manifest.security.token_scope, "service-process");
 assert.equal(manifest.security.formal_task_run_session_scope, false);
-assert.match(dshHostClient, /api\.llm\.models/);
-assert.match(dshHostClient, /\/api\/llm\.models/);
+// The Host generation model catalog is owned by the Session Remote namespace.
+// `llm.models` never existed on any DSH release: it failed soft via `.catch`, so
+// the directory was silently always empty. Pin the real route on both transports
+// and keep the dead one from coming back.
+//
+// The endpoint is canonically `<namespace>/<method>`: the Gateway claims only
+// two-segment endpoints and requires exactly one plain-object `args` payload
+// field, so the dotted spelling and a bare payload are both unroutable. The
+// typed client is read off `remote.session` (the Connection handle exposes no
+// `api`) and rejects any argument, because modelCatalog declares neither a
+// parameter nor a cancellation signal.
+assert.match(dshHostClient, /HOST_MODEL_DIRECTORY_ENDPOINT = "session\/modelCatalog"/);
+assert.match(dshHostClient, /ctx\.get\("remote\.session"\)/);
+assert.match(dshHostClient, /session\.modelCatalog\(\)/);
+assert.match(dshHostClient, /payload: \{ args: \{\} \}/);
+assert.doesNotMatch(dshHostClient, /api\.llm\.models|\/api\/llm\.models|llm\.models/);
+assert.doesNotMatch(dshHostClient, /session\.modelCatalog\(\{/);
+assert.doesNotMatch(dshHostClient, /connection\.api/);
 assert.match(dshHostClient, /flattenHostModelDirectory/);
+// Both transports carry the same {ok, value} result envelope; the same-origin
+// route nests it under `result` of a server-response. The parser must accept
+// exactly those two and unwrap the catalog from the envelope either way.
+assert.match(dshHostClient, /response\.type === "server-response" \? response\.result : response/);
+assert.match(dshHostClient, /envelope\.ok !== true/);
+assert.match(dshHostClient, /Array\.isArray\(catalog\.groups\) \? catalog : null/);
 assert.match(dshHostClient, /authentication_state: "dsh_authenticated"/);
 assert.doesNotMatch(dshHostClient, /models: \[\],/);
 for (const capability of ["evolution.catalog.read", "training.data.read", "evaluation.samples.read", "run.archive", "run.delete", "intervention.write"]) {

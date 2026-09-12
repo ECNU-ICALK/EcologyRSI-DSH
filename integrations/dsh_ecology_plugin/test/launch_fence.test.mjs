@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { RuntimeController } from "../lib/runtime/controller.js";
+import { roleSessionFingerprint } from "../lib/runtime/agents.js";
 import { ProviderStageGate } from "../lib/runtime/provider-stage-gate.js";
 import { RuntimeRunRegistry } from "../lib/runtime/run-registry.js";
 import { NativeStageRunner, jsonDigest } from "../lib/runtime/stage-runner.js";
@@ -10,13 +11,13 @@ const REALISTIC_PRESET_CATALOG = Object.freeze([
   "ecology-coordinator-v5",
   "ecology-researcher-v12",
   "ecology-candidate-proposer-v4",
-  "ecology-sample-planner-v8",
+  "ecology-sample-planner-v9",
   "ecology-sample-critic-v5",
   "ecology-generation-judge-v8",
 ].map((preset_id) => ({
   preset_id,
   tool_profile: "dynamic-retrieval-v1",
-  required_tools: preset_id === "ecology-sample-planner-v8"
+  required_tools: preset_id === "ecology-sample-planner-v9"
     ? ["ecology_execute_prediction_tool", "skill", "web_search"]
     : ["skill", "web_search"],
 })));
@@ -145,7 +146,7 @@ function stageBinding({ samplePlan = false, suffix = "race", revision = 7 } = {}
         candidate_agent_profile: {
           schema_version: "ecologyrsi-dsh.candidate-agent-profile/1",
           role: "sample-planner",
-          skill_name: "origin-vector-forecasting-balanced",
+          skill_name: "origin-vector-forecasting",
         },
       },
     }
@@ -413,9 +414,19 @@ test("real controller reconciles a durable paused restore with admission closed 
 test("global live readiness survives one run cleanup and closes after the final live run", async () => {
   const secondCreateEntered = deferred();
   const releaseSecondCreate = deferred();
+  // DSH 0.1.5 persists only its own closed meta shape, so the run a creation
+  // belongs to is now readable only through the session id fingerprint. Mirror
+  // the bindings RuntimeController mints for run-live-b and match on those.
+  const secondRunSessionIds = REALISTIC_PRESET_CATALOG.map(({ preset_id }) => (
+    `ecology-role-${roleSessionFingerprint({
+      run_id: "run-live-b",
+      role: preset_id.replace(/^ecology-/, "").replace(/-v\d+$/, ""),
+      preset_id,
+    })}-`
+  ));
   const controller = new RuntimeController(liveCapabilityContext({
     beforeCreate: async (options) => {
-      if (options.meta.ecologyRunId === "run-live-b") {
+      if (secondRunSessionIds.some((prefix) => options.sessionId.startsWith(prefix))) {
         secondCreateEntered.resolve();
         await releaseSecondCreate.promise;
       }

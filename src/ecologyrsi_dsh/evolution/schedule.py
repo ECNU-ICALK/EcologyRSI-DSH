@@ -158,10 +158,15 @@ class OptimizationSchedule:
             "fresh_epoch_holdout": self.quick,
             "qualification": "exploratory_only" if self.quick else "comparison_requires_certification_gates",
             "comparison_evidence": "complete_pair_practical_delta_cell_nonregression" if self.quick else "paired_time_blocks_and_inference_replicas",
-            "output_tokens_per_llm_call": {"planner": 8192, "critic": 4096},
+            # The per-call values are the frozen NATIVE_SAMPLE_OPERATION_MAX_TOKENS;
+            # the reported thresholds abort a runaway child at twice one full
+            # response, well above the 4087..6347 spent by observed successful
+            # planners and the 1277..3080 spent by observed critics. Keep them
+            # equal to the plugin's SAMPLE_STAGE_LIMITS.
+            "output_tokens_per_llm_call": {"planner": 16384, "critic": 8192},
             "sample_execution_limits": {"prediction_tool_calls_per_attempt": 2,
                 "planner_steps": 10, "critic_steps": 4,
-                "planner_reported_output_threshold": 24576, "critic_reported_output_threshold": 8192},
+                "planner_reported_output_threshold": 32768, "critic_reported_output_threshold": 16384},
         }
 
     @property

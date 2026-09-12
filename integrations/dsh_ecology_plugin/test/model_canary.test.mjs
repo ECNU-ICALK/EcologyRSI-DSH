@@ -7,7 +7,7 @@ import { STAGES } from "../lib/runtime/stage-runner.js";
 function request(stage = "generation.search-plan") {
   return { schema_version: CANARY_SCHEMA,
     identity: { provider_id: "provider", model_id: "model", stage, role: STAGES[stage]?.role || "sample-planner",
-      preset_id: ({"generation.reflect":"ecology-generation-judge-v8", "sample.plan":"ecology-sample-planner-v8", "sample.critic":"ecology-sample-critic-v5"})[stage] || "ecology-researcher-v12", output_schema_id: STAGES[stage]?.schema,
+      preset_id: ({"generation.reflect":"ecology-generation-judge-v8", "sample.plan":"ecology-sample-planner-v9", "sample.critic":"ecology-sample-critic-v5"})[stage] || "ecology-researcher-v12", output_schema_id: STAGES[stage]?.schema,
       preset_content_digest: "a".repeat(64), standing_tool_surface_digest: "b".repeat(64), route_config_digest: "c".repeat(64) },
     bounds: { max_attempts: 2, max_output_tokens: 1024, max_reported_tokens: 30000, total_timeout_ms: 1000, ttl_seconds: 3600 } };
 }
@@ -18,7 +18,7 @@ function fixture(mode = "ok") {
     subagents: { async start(provider, value) {
       launches.push(value); assert.equal(provider, "spawn");
       const prompt = JSON.parse(value.prompt[0].text), structured = prompt.expected_fixture;
-      const skillName = STAGES[prompt.stage].skillName || "origin-vector-forecasting-balanced";
+      const skillName = STAGES[prompt.stage].skillName || "origin-vector-forecasting";
       const sid = `child-${launches.length}`;
       const events = [{seq:1,type:"turn/start",data:{turn:1}}, {seq:2,type:"step/start",data:{turn:1,step:1}}];
       function call(seq,name,args,id) { events.push({seq,type:"tool/call",data:{turn:1,step:1,callId:id,name,arguments:JSON.stringify(args)}}); }

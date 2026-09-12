@@ -12,7 +12,11 @@ from .sample_contracts import _causal_wave_identity, _safe_mapping, _normalized_
 from .shared_sample_context import normalized_sample_planner_prompt_profile
 from .sample_execution import SampleExecutionPausedError, SampleExecutionCancelledError, SampleExecutionControlUnavailableError, classify_sample_failure
 from ..core.errors import dsh_native_runtime_error_in_chain, dsh_native_runtime_retryable
-from ..core.model_execution_policy import NATIVE_SAMPLE_OPERATION_MAX_TOKENS
+from ..core.model_execution_policy import (
+    NATIVE_SAMPLE_OPERATION_MAX_TOKENS,
+    SAMPLE_OPERATION_MAX_MAX_TOKENS,
+    SAMPLE_OPERATION_MIN_MAX_TOKENS,
+)
 from ..core.errors import dsh_native_runtime_evaluation_fatal
 from ..core.agent_prediction import PREDICTION_TOOL_CALL_BUDGET, validate_predictions, validate_agent_review
 from .origin_prompt import compact_origin_contexts
@@ -85,7 +89,9 @@ class _DshSampleDecisionClient:
         if (
             isinstance(max_tokens, bool)
             or not isinstance(max_tokens, int)
-            or not 512 <= max_tokens <= 8192
+            or not SAMPLE_OPERATION_MIN_MAX_TOKENS
+            <= max_tokens
+            <= SAMPLE_OPERATION_MAX_MAX_TOKENS
         ):
             raise SampleExecutionContractError(
                 "DSH sample stage requires a bounded max_tokens value"

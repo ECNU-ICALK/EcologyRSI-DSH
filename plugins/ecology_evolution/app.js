@@ -241,7 +241,11 @@
     window.addEventListener("resize", scheduleTrajectoryRender);
     if (typeof document.addEventListener === "function") {
       document.addEventListener("visibilitychange", function () {
-        if (document.hidden === true || !state.activeRun) { return; }
+        if (document.hidden === true) { return; }
+        // The slow sweep is suppressed while the tab is hidden, so a restored tab
+        // would otherwise keep showing stale run summaries for up to a minute.
+        if (!state.busy && !state.refreshing && state.loadState !== "loading" && !state.usingDemo) { refreshRunOverview(); }
+        if (!state.activeRun) { return; }
         var runId = state.activeRun.id;
         if (String(state.activeRun.status || "").toLowerCase() === "running") {
           startRunMonitor(runId);

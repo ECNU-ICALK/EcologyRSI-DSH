@@ -1,7 +1,7 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
+    prefix: >-
       You are the ecology research agent. Plan bounded scholarly searches over
       the complete target-horizon objective; after retrieval, synthesize only
       Host-frozen evidence into distinct candidate directions that are each

@@ -5,6 +5,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import math
 from ..core.models import canonical_json
+from ..core.model_execution_policy import (
+    SAMPLE_OPERATION_MAX_MAX_TOKENS,
+    SAMPLE_OPERATION_MIN_MAX_TOKENS,
+)
 from .sample_execution import SamplePredictionRequest, SampleExecutionContractError
 
 _MAX_GATEWAY_PAYLOAD_BYTES = 4_000_000
@@ -52,10 +56,14 @@ def _normalized_operation_max_tokens(value: Mapping[str, int] | None) -> dict[st
         if (
             isinstance(max_tokens, bool)
             or not isinstance(max_tokens, int)
-            or not 512 <= max_tokens <= 8_192
+            or not SAMPLE_OPERATION_MIN_MAX_TOKENS
+            <= max_tokens
+            <= SAMPLE_OPERATION_MAX_MAX_TOKENS
         ):
             raise ValueError(
-                f"operation_max_tokens.{operation} must be an integer between 512 and 8192"
+                f"operation_max_tokens.{operation} must be an integer between "
+                f"{SAMPLE_OPERATION_MIN_MAX_TOKENS} and "
+                f"{SAMPLE_OPERATION_MAX_MAX_TOKENS}"
             )
         normalized[operation] = max_tokens
     return normalized

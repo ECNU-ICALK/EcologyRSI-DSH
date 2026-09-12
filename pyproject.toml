@@ -82,8 +82,8 @@ where = ["src"]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4" = [
     "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4/*.yml",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v8" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v8/*.yml",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v9" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v9/*.yml",
 ]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v5" = [
     "integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v5/*.yml",
@@ -100,14 +100,8 @@ where = ["src"]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4/skills/bounded-plugin-experiment" = [
     "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4/skills/bounded-plugin-experiment/SKILL.md",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v8/skills/origin-vector-forecasting-balanced" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v8/skills/origin-vector-forecasting-balanced/SKILL.md",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v8/skills/origin-vector-forecasting-horizon-aware" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v8/skills/origin-vector-forecasting-horizon-aware/SKILL.md",
-]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v8/skills/origin-vector-forecasting-anomaly-aware" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v8/skills/origin-vector-forecasting-anomaly-aware/SKILL.md",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v9/skills/origin-vector-forecasting" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v9/skills/origin-vector-forecasting/SKILL.md",
 ]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v5/skills/origin-vector-review" = [
     "integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v5/skills/origin-vector-review/SKILL.md",

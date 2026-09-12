@@ -39,7 +39,7 @@ def _skill_evidence(stage: str) -> dict:
         "schema_version": "ecologyrsi-dsh.skill-invocation-evidence/1",
         "stage": stage,
         "skill_name": (
-            "origin-vector-forecasting-balanced"
+            "origin-vector-forecasting"
             if stage == "sample.plan"
             else "origin-vector-review"
         ),
@@ -626,7 +626,7 @@ class DshSampleExecutionTests(unittest.TestCase):
             ),
             1,
         )
-        self.assertEqual(native.requests[0]["request"]["max_tokens"], 8192)
+        self.assertEqual(native.requests[0]["request"]["max_tokens"], 16384)
 
 
 
@@ -866,7 +866,7 @@ class DshSampleExecutionTests(unittest.TestCase):
         self.assertNotIn("ground_truth", encoded)
         self.assertEqual(
             [item["request"]["max_tokens"] for item in runtime.requests],
-            [8192, 4096],
+            [16384, 8192],
         )
         critic_sample = runtime.requests[1]["request"]["context"]["samples"][0]
         self.assertNotIn("sample", critic_sample)

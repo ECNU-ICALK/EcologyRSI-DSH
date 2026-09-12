@@ -6,16 +6,7 @@ EcologyRSI-DSH 是一个基于 DeepSeek Harness 的 **AI for Ecology** 框架，
 
 这里的 RSI 指 Recursive Self-Improvement（循环自进化）：根据上一轮证据继续提出和检验方案。目前可执行的改进受已登记模型、参数与工具边界约束；新算法或新生态任务需要先适配和登记。搜索版本与严格认证版本分别记录，分数上升只有在相应比较资格和门槛通过后才允许更新。一次运行也可以正常结束且没有合格改进。
 
-> 当前工作树：基于 `0.7.10` 的快速协议优化版（长期实跑验收中） · Python 3.10+ · DSH `0.1.0-rc.6` · 本地服务端口 `8777/8848`
-
-候选训练产物现在包含 Agent 策略、冻结经验、默认模型和可选工具配方。导出命令：
-
-```bash
-python -m ecologyrsi_dsh export-policy RUN_ID CANDIDATE_ID --db run.sqlite3 --output agent-policy.json
-```
-
-通过 `ecologyrsi_dsh.integrations.agent_policy_bundle.load_policy_bundle` 和 `create_policy_adapter` 加载，提供匹配的运行合同、已授权 DSH 绑定及相同训练段的新因果输入；凭据不进入策略包。
-
+> 当前工作树：基于 `0.7.10` 的快速协议优化版（长期实跑验收中） · Python 3.10+ · DSH `0.1.5-rc.2` · 本地服务端口 `8777/8848`
 
 当前主实例入口为 `http://127.0.0.1:8848/plugins/ecology/evolution/`，后端 8777。快速协议改造与验收见 [本次实施记录](docs/refactor/QUICK-OPTIMIZATION-IMPLEMENTATION-20260909.md)。`dist/0.7.10/` 属于此前的交付快照，不包含本次修改；此前完成的长运行也不能代替新协议验收。
 
@@ -25,7 +16,12 @@ python -m ecologyrsi_dsh export-policy RUN_ID CANDIDATE_ID --db run.sqlite3 --ou
 - [快速启动](#快速启动)：启动服务或打开无后端演示。
 - [界面概览](#界面概览)：六个工作区和当前版本的界面证据。
 - [架构](#架构)：浏览器、服务端和数据账本如何配合。
-- [测试与发布](#测试与发布)：本地验证、真实数据验收和交付边界。
+- [真实数据](#真实数据)：接入哪两个数据集、如何做时间前向分区。
+- [HTTP API](#http-api)：全部端点、创建请求示例和逐样本语义。
+- [运行控制与人工干预](#运行控制与人工干预)：连续推进、预算、失败语义和人工意见的执行边界。
+- [DSH 插件与服务令牌](#dsh-插件与服务令牌)：装到 DSH Web Profile、令牌与同源代理。
+- [测试与发布](#测试与发布)：本地验证、真实数据验收和发布构建。
+- [科学与交付边界](#科学与交付边界)：结论能被解释到什么程度。
 
 ## 它是怎样工作的
 
@@ -177,6 +173,16 @@ README 后面的接口和日志会保留少量固定英文标识。它们对应�
 - 支持暂停后追加方向建议、参数覆盖、数值边界约束或指定父方案；恢复后只处理下一轮。可唯一解析的方向建议按固定步长应用，参数覆盖与约束由宿主校验，无法唯一解析的文字只记录为“未执行”，历史记录不被改写。
 - 支持运行创建、暂停、恢复、取消、逐轮推进、SQLite 重放、摘要、导出、校验和导入。
 
+### 导出可复用的 Agent 策略包
+
+候选训练产物包含 Agent 策略、冻结经验、默认模型和可选工具配方。导出命令：
+
+```bash
+python -m ecologyrsi_dsh export-policy RUN_ID CANDIDATE_ID --db run.sqlite3 --output agent-policy.json
+```
+
+通过 `ecologyrsi_dsh.integrations.agent_policy_bundle.load_policy_bundle` 和 `create_policy_adapter` 加载，提供匹配的运行合同、已授权 DSH 绑定及相同训练段的新因果输入；凭据不进入策略包。
+
 ## 架构
 
 正式工作台围绕一条进化主线运行，所有保留、晋级和结束决定都由宿主写入同一运行账本。模型提供建议和结构化方案，数值内核负责预测与评分，前端呈现宿主结论。
@@ -210,18 +216,18 @@ README 后面的接口和日志会保留少量固定英文标识。它们对应�
 
 ## 快速启动
 
-本项目当前固定使用 DSH `0.1.0-rc.6`。请先安装 Node.js（包含 `npm`）和
+本项目当前固定使用 DSH `0.1.5-rc.2`。请先安装 Node.js（包含 `npm`）和
 Python 3.10 或更高版本，再按以下顺序执行。
 
 ### 1. 安装 DSH
 
 ```bash
-npm install --global @deepseek-ai/dsh@0.1.0-rc.6
+npm install --global @deepseek-ai/dsh@0.1.5-rc.2
 dsh --help
 ```
 
 如果本机已经安装了这个版本，可以跳过本步骤。不要直接省略版本号安装最新预览版，
-因为 DSH 仍在快速迭代，本项目的宿主插件和 preset 已按 `0.1.0-rc.6` 的运行时接口冻结。
+因为 DSH 仍在快速迭代，本项目的宿主插件和 preset 已按 `0.1.5-rc.2` 的运行时接口冻结。
 
 ### 2. 安装 EcologyRSI-DSH
 
@@ -418,9 +424,15 @@ dsh --profile web --port 8848
 `8848` 端口，不需要单独启动前端端口；Python sidecar 默认仅监听
 `127.0.0.1:8777`。
 
+该协议由 DSH Web Profile 中的 Cordis 插件承载：角色 Agent Session、上下文压缩、模型路由和
+结构化子智能体都由 DSH 执行，逐 origin 的 `sample.plan` 只有在 Host 接受结构化结果后才计为
+远端完成；Python sidecar 只保留科学状态机、评测、幂等结果账本和治理边界。目录在运行时已绑定
+时返回 `harness_execution=dsh_native_agent_runtime` 与 `official_harness_agent_loop=true`；
+当前交付只验收这一条原生运行时路径。
+
 ## DSH OpenAI-compatible 模型目录
 
-推荐分别配置候选生成模型和独立评审模型。插件的两个角色下拉框共同读取后端 `dsh_models` 登记目录；具备安全后端路由、服务端凭据和对应角色的条目可以直接用于运行，角色不匹配、缺少凭据或被 URL 安全策略阻止的条目会禁用。目录通过 `configured_strategy_model_count`、`configured_review_model_count`、`executable_strategy_model_count`、`executable_review_model_count` 和 `roles_ready` 报告运行就绪状态。DSH Web Profile 打开插件时，会通过宿主 `llm.models` 目录把当前已登记的 provider/model 脱敏传入握手。后端 `dsh_models` 是执行配置与调用健康状态的权威目录；仅存在于宿主的模型仍会显示，但会以 `host_route_not_available_to_sidecar` 原因禁用，不能被当前后端选择或执行。密钥只放在服务端环境变量中：
+推荐分别配置候选生成模型和独立评审模型。插件的两个角色下拉框共同读取后端 `dsh_models` 登记目录；具备安全后端路由、服务端凭据和对应角色的条目可以直接用于运行，角色不匹配、缺少凭据或被 URL 安全策略阻止的条目会禁用。目录通过 `configured_strategy_model_count`、`configured_review_model_count`、`executable_strategy_model_count`、`executable_review_model_count` 和 `roles_ready` 报告运行就绪状态。DSH Web Profile 打开插件时，会通过宿主 Session Remote 的 `session/modelCatalog` 目录把当前已登记的 provider/model 脱敏传入握手。后端 `dsh_models` 是执行配置与调用健康状态的权威目录；仅存在于宿主的模型仍会显示，但会以 `host_route_not_available_to_sidecar` 原因禁用，不能被当前后端选择或执行。密钥只放在服务端环境变量中：
 
 未设置 `ECOLOGYRSI_DSH_MODELS_JSON` 时，Python 服务会自动读取当前用户的 `~/.dsh/settings.yaml` 和权限为 `0600` 的 `~/.dsh/.credentials.yaml`，把 DSH 的 provider/model 目录转换为同一份 `provider/model` ID。设置 `ECOLOGYRSI_DSH_DISCOVERY=0` 可关闭自动发现，设置 `ECOLOGYRSI_DSH_SETTINGS_FILE` 或 `ECOLOGYRSI_DSH_CREDENTIALS_FILE` 可指定文件位置。自动发现只接受 OpenAI-compatible provider；非回环 `http://` 地址会以 `insecure_http_blocked` 原因显示为不可用，交付配置必须使用 HTTPS。配置检查会校验路由、凭据、执行配置和角色；基线对齐方案另外执行创建前的真实工具/结构化输出预检。模型目录的请求策略默认单次等待上限为 900 秒、最多 4 次传输尝试，对瞬时网络错误和限流按既定策略退避；原生阶段还受冻结执行约束及错误分类限制，不能将这个次数解释为预算耗尽后仍必然重试。可用 `ECOLOGYRSI_DSH_MODEL_TIMEOUT`、`ECOLOGYRSI_DSH_MODEL_MAX_ATTEMPTS`、`ECOLOGYRSI_DSH_MODEL_RETRY_BASE_SECONDS` 和 `ECOLOGYRSI_DSH_MODEL_RETRY_MAX_SECONDS` 调整；瞬时失败只记录业务调用诊断，不撤销已持久化的验证状态。
 
@@ -504,26 +516,10 @@ DSH-native 运行不接收 `token_limit`。上下文压缩由 DSH Session 管理
 
 覆盖率止损只在固定 cohort 的总体或任一目标/时距“最大可达覆盖率”低于冻结门槛时触发，即使所有尚可恢复和未执行样本全部成功也无法通过才会停止后续远程微批。未执行样本仍生成 `attempts=0` 的明确失败记录，并沿用现有最坏回退参与评分；该止损不缩小分母、不提高分数，也不改变总体和逐任务 80% 门槛。
 
-需要在不创建完整多轮进化运行的情况下验收真实样本链路时，可执行下面的显式工程检查。脚本从 `--db` 指定的账本中只读选择最近一条同时冻结 planner 与 critic 的 `RunCreated` 绑定；可用 `--reference-run-id` 固定某次运行，`--planner`、`--critic` 和对应 digest 仅用于断言账本中的冻结值。它完整拟合 `training_fit`，再从 3 个目标 × 3 个时距各取一个不依赖标签的时间分位点。planner 只选择工具，岭回归仅在被选择后由宿主执行，critic 再接受或指定修复工具；总体和每个预测任务都必须达到 80% 覆盖率。输出明确标记为不可用于科学评分、候选晋级或训练资产。脚本先验证 wheel、sdist、完整交付包、内外部校验和与当前逐文件源码完全同源，再把这些 SHA-256 写入 `release_binding`；网络验收结束后会重新执行并逐字段比较同一绑定，期间任何源码或产物变化都会使验收失败。因此必须先构建并校验当前发布物。验收脚本不会放行非回环明文 HTTP provider，正式交付必须使用 HTTPS。
-
-```bash
-make release
-RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
-"$RELEASE_PYTHON" -B scripts/real_api_agent_tool_acceptance.py \
-  --db /tmp/ecologyrsi-dsh-dsh-adapter.sqlite3 \
-  --samples-per-task 1 \
-  --minimum-coverage 0.8 \
-  --dist-dir dist \
-  --output dist/ecologyrsi_dsh-0.7.10-real-api-agent-tool-acceptance.json
-```
-
-验收无论通过或失败都会原子写入 JSON 报告；省略 `--output` 时默认写到系统临时目录下的
-`ecologyrsi-dsh-real-api-agent-tool-acceptance-latest.json`。输出可以放在 `dist/` 的独立 JSON
-或项目目录之外，但不能覆盖源码清单成员、输入账本、wheel、sdist、完整交付包或
-`SHA256SUMS`；冲突路径只向标准输出返回脱敏失败，不写文件。失败报告只保留模型 ID、请求角色、
-耗时、错误分类、重试次数和覆盖率等脱敏诊断，不保存提示词、响应正文、密钥或网关地址；命令
-返回非零表示本次真实链路证据不足，并不自动表示 API 凭据失效。验收 JSON 在发布构建之后
-生成并保持外置，避免报告递归绑定包含自身的归档；交付记录应另行保存该报告本身的 SHA-256。
+需要在不创建完整多轮进化运行的情况下验收真实样本链路时，可执行受控工程检查
+`scripts/real_api_agent_tool_acceptance.py`；它的账本选择、覆盖率门槛、发布物同源绑定和脱敏报告
+规则见下文 [真实 API 逐样本链路验收](#真实-api-逐样本链路验收)。该检查的输出明确标记为不可用于
+科学评分、候选晋级或训练资产。
 
 因此，自主调研和实现计划是可审计的建议输入，不等于模型已经证明了科学有效性，也不等于正式发布或设备控制授权。候选仍必须经过训练、时间前向评测、独立评审和宿主保留规则；训练资产仍标记为需要治理审核。
 
@@ -655,15 +651,25 @@ sidecar 主前缀是 `/api`；浏览器通过 DSH 同源代理使用 `/api/ecolo
 
 网页新建运行和 API 未指定 schedule 时使用上述快速协议。正式对照须显式选择；模型 ID 应替换为 DSH 模型目录中的真实 provider/model 路由。旧账本保留当时的协议与预检证据，不升级历史结论。
 
+## 运行控制与人工干预
+
+### 创建合同
+
+创建合同以 `dataset_id`、策略模型、独立评审模型和轮数为输入。网页提交 `prediction_selection_policy: model_during_run@1`，不提交 `prediction_model_id`、`evaluator_id` 或种子模板；该策略会拒绝同时预选这些字段。服务端冻结统一评测规则和可选预测器目录，具体候选方案由运行中的研究模型决定。网页还提交目录绑定的 `episode_id`；API 省略时，服务端确定性选择首个可优化 episode。`domain_pack` / `research_domain`、分区、模型摘要和能力边界由服务端推导并冻结。新运行不会静默覆盖这些冻结字段来恢复旧实验。
+
+默认预算（5 轮 × 每轮 4 个研究提案、总计 20 个候选）以及“只训练一条主线”的口径见 [默认一轮如何执行](#默认一轮如何执行)。增加轮数前服务端重新核验新评测 cohort 容量。`samples_per_update` 已移除；所有工作量由冻结的 `optimization_schedule` 与 `execution_plan` 表达。
+
+### 连续推进与并发
+
 自主运行使用 `auto_advance: true` 进入连续模式：服务端完成一轮后自动排入下一轮，直到达到轮数/候选预算、暂停、取消或失败；页面只轮询真实阶段事件，不需要反复点击“下一轮”。服务默认使用 4 个有界 worker 推进不同运行；同一运行始终只能持有一个世代租约，每执行一代就回到队尾。`ECOLOGYRSI_AUTO_PROGRESS_WORKERS` 可显式配置为 1–8。不同运行和同一运行内的候选可以并行；同一 provider 的 DSH stage 统一经过全局 FIFO 准入，物理在飞上限为 128，失败冷却对该 provider 的全部运行生效。服务重启后会从 SQLite 恢复未归档的连续运行，并在每轮开始前重新校验冻结的数据、预测器、策略、评测器和远程模型绑定；绑定发生漂移时以 `frozen_runtime_binding_drift` 停止运行并提示新建。
 
-默认界面为 5 轮、每轮 4 个研究提案，总预算 20 个。快速模式只执行预先指定的单条训练主线。增加轮数前服务端重新核验新评测 cohort 容量。`samples_per_update` 已移除；所有工作量由冻结 `optimization_schedule` 与 `execution_plan` 表达，具体公式见前文。
+### 逐 origin 执行与失败语义
 
 每个 origin 调用一次 Planner，由 Planner 在 DSH 子会话内分析数值上下文，可直接预测或调用登记工具，并提交自己的最终数值；只有不确定或失败时才调用 Critic。Host 将 9 条评分记录原子持久化，候选完成后再执行聚合反思。岭回归可以完整扫描 `training_fit` 拟合参数，但只能作为 Planner 主动调用的注册工具，不能替代智能体决策阶段。
 
 可恢复服务故障补做冻结工作；critic 中断后复用已接受 planner 及工具凭证。不可恢复的无效样本使当前批次或评测臂不可评估，不再进入后续批次、反思择优或额外副本。失败罚分仅作为诊断，不能证明预测改善。正式对照采用同 cohort 的配对与统计门禁，快速模式采用前述探索选择规则。不同 batch 的原始分数不直接排名。
 
-创建合同以 `dataset_id`、策略模型、独立评审模型和轮数为输入。网页提交 `prediction_selection_policy: model_during_run@1`，不提交 `prediction_model_id`、`evaluator_id` 或种子模板；该策略会拒绝同时预选这些字段。服务端冻结统一评测规则和可选预测器目录，具体候选方案由运行中的研究模型决定。网页还提交目录绑定的 `episode_id`；API 省略时，服务端确定性选择首个可优化 episode。`domain_pack` / `research_domain`、分区、模型摘要和能力边界由服务端推导并冻结。新运行不会静默覆盖这些冻结字段来恢复旧实验。
+### 人工意见
 
 提交人工意见前必须暂停运行。支持 `guidance`、`parameter_override`、`constraint` 和 `parent_selection`。`guidance` 只有在唯一识别一个允许参数和一个增减方向时才按固定步长应用；`constraint` 只接受唯一的 `<=`/`>=` 数值边界，并在参数覆盖之后由宿主强制执行。歧义、冲突、否定或越出宿主范围的输入会被消费但明确标记为“仅记录（未执行）”。这些操作都不会改写固定评测器、数据分区或门禁规则。
 
@@ -679,14 +685,26 @@ sidecar 主前缀是 `/api`；浏览器通过 DSH 同源代理使用 `/api/ecolo
 
 ## 测试与发布
 
+### 本地验证
+
 ```bash
-make test
+make test                                                          # 全量 unittest 套件
+make test-integration                                              # DSH 原生插件与 provider 集成用例（Node）
 find plugins/ecology_evolution -name '*.js' -exec node --check {} \;
-node plugins/ecology_evolution/test/smoke.mjs
-make verify
+node plugins/ecology_evolution/test/smoke.mjs                      # 无浏览器前端 smoke
+make verify                                                        # 交付清单与源码一致性
 ```
 
 发布前以本机重新执行上述命令的结果为准；README 不固化会随测试增删变化的断言数量。
+
+| 命令 | 作用 |
+|---|---|
+| `make test` | 从仓库根目录 `unittest discover` 全部 `tests/`，最完整也最慢 |
+| `make test-fast` | 只跑合同与热路径回归（API/投影/core/DSH 工具/对账/GC），用于改动中的快速反馈 |
+| `make test-integration` | `node --test` 跑 `integrations/dsh_ecology_plugin/test/`，覆盖原生运行时桥、阶段执行与代理安全 |
+| `make compile` | 对 `src`、`scripts`、`tests` 做 `compileall` 语法体检 |
+| `make verify` | `verify_delivery.sh --source-only`，校验交付清单、preset 清单与打包数据文件 |
+| `make verify-artifacts` | `verify_delivery.sh --artifacts-only`，只重新校验已存在的 `dist/` 产物 |
 
 `make test` 默认优先使用 `uv` 发现的本机 Python 3.10+，未安装 `uv`
 时才回退到项目 `.venv` 或 `python3`；也可以通过 `PYTHON=/path/to/python`
@@ -700,18 +718,20 @@ make verify
 ECOLOGYRSI_TEST_REAL_DATA=1 make test
 ```
 
-需要验证真实的逐样本智能体工具链时，运行受控验收脚本。脚本从指定账本选择最近一条
-同时冻结 planner 与 critic 的 `RunCreated` 绑定；`--planner` / `--critic` 只用于可选断言。脚本不做
-API 健康预检，直接按 900 秒请求窗口和 4 次传输重试执行。岭回归使用完整
-`training_fit` 拟合，但只有按 `target × horizon` 固定时间分位抽取的小 cohort
-进入远程路由；报告固定标记为不可晋级、不可生成训练资产、不可作为科学得分。
+### 真实 API 逐样本链路验收
 
-当前原生执行协议由 DSH Web Profile 中的 Cordis 插件承载。角色 Agent Session、
-上下文压缩、模型路由和结构化子智能体由 DSH 执行；逐 origin `sample.plan`
-通过直接一次性子 Agent 执行，并在 Host 接受结构化结果后才计为远端完成；
-Python sidecar 只保留科学状态机、评测、幂等结果账本和治理边界。目录在运行时
-已绑定时返回 `harness_execution=dsh_native_agent_runtime` 与
-`official_harness_agent_loop=true`；当前交付只验收这一原生运行时路径。
+需要在不创建完整多轮进化运行的情况下验收真实样本链路时，运行这个受控工程检查。它只读地从
+`--db` 指定的账本选择最近一条同时冻结 planner 与 critic 的 `RunCreated` 绑定；可用
+`--reference-run-id` 固定某次运行，`--planner`、`--critic` 和对应 digest 仅用于断言账本中的冻结值。
+脚本不做 API 健康预检，直接按 900 秒请求窗口和 4 次传输重试执行。它完整拟合 `training_fit`，
+再从 3 个目标 × 3 个时距各取一个不依赖标签的时间分位点进入远程路由：planner 只选择工具，
+岭回归仅在被选择后由宿主执行，critic 再接受或指定修复工具；总体和每个预测任务都必须达到
+80% 覆盖率。
+
+脚本先验证 wheel、sdist、完整交付包、内外部校验和与当前逐文件源码完全同源，再把这些
+SHA-256 写入 `release_binding`；网络验收结束后会重新执行并逐字段比较同一绑定，期间任何源码
+或产物变化都会使验收失败——因此必须先构建并校验当前发布物。验收脚本不会放行非回环明文
+HTTP provider，正式交付必须使用 HTTPS。
 
 ```bash
 make release
@@ -719,9 +739,22 @@ RELEASE_PYTHON="$(uv python find --no-project --system '>=3.10')"
 "$RELEASE_PYTHON" -B scripts/real_api_agent_tool_acceptance.py \
   --db /tmp/ecologyrsi-dsh-dsh-adapter.sqlite3 \
   --samples-per-task 1 \
+  --minimum-coverage 0.8 \
   --dist-dir dist \
   --output dist/ecologyrsi_dsh-0.7.10-real-api-agent-tool-acceptance.json
 ```
+
+验收无论通过或失败都会原子写入 JSON 报告；省略 `--output` 时默认写到系统临时目录下的
+`ecologyrsi-dsh-real-api-agent-tool-acceptance-latest.json`。输出可以放在 `dist/` 的独立 JSON
+或项目目录之外，但不能覆盖源码清单成员、输入账本、wheel、sdist、完整交付包或
+`SHA256SUMS`；冲突路径只向标准输出返回脱敏失败，不写文件。失败报告只保留模型 ID、请求角色、
+耗时、错误分类、重试次数和覆盖率等脱敏诊断，不保存提示词、响应正文、密钥或网关地址；命令
+返回非零表示本次真实链路证据不足，并不自动表示 API 凭据失效。验收 JSON 在发布构建之后
+生成并保持外置，避免报告递归绑定包含自身的归档；交付记录应另行保存该报告本身的 SHA-256。
+
+报告固定标记为不可晋级、不可生成训练资产、不可作为科学得分。
+
+### 发布构建
 
 构建 wheel、sdist 和完整交付包需要 `uv` 及干净的 Git 工作区；文档和实验汇总更新后须重新构建，使校验和绑定最终源码：
 

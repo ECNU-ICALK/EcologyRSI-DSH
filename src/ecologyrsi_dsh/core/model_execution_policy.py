@@ -3,13 +3,35 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
 
+# The ceiling every sample operation budget is validated against. A nine-cell
+# planner response carries prediction-tool arguments, reasoning and the bounded
+# decision object in one output budget, so it is bounded above the single-answer
+# stages, exactly as research synthesis already is.
+SAMPLE_OPERATION_MIN_MAX_TOKENS = 512
+SAMPLE_OPERATION_MAX_MAX_TOKENS = 16384
+
 # Shared by run creation and the native adapter. Multi-tool, nine-cell Agent
 # inference needs the same output room in both paths; never keep API-local
 # defaults that silently override the adapter's tested execution contract.
+#
+# 8192 was measured as too tight: in run:010d5ca2-84a2-4955-9eeb-ee4d82446d49
+# one sample.plan child ended at turn/end max-tokens on exactly 8192 output
+# tokens without reaching structured_output, failing the whole run, while its
+# eleven successful siblings spent 4087..6347. The planner and the repair that
+# replays its prompt share the raised budget.
+#
+# The critic's own 4096 was measured as too tight the same way: in
+# run:472dc541-8b45-4150-8328-6addf8ae5e48 a sample.critic child on
+# newapi/glm-5.2 stopped at length on exactly 4096 output tokens holding one
+# unfinished reasoning block and no structured_output, while its siblings
+# submitted at 1277 and 3080. On routes whose model metadata advertises no
+# reasoning tier the runtime cannot request "off", so review reasoning shares
+# this budget with the decision object it must still emit; 8192 leaves the
+# largest observed submission its measured room instead of 1016 tokens.
 NATIVE_SAMPLE_OPERATION_MAX_TOKENS = MappingProxyType({
-    "sample.planner": 8192,
-    "sample.repair": 8192,
-    "sample.critic": 4096,
+    "sample.planner": 16384,
+    "sample.repair": 16384,
+    "sample.critic": 8192,
 })
 
 RESEARCH_EXECUTION_POLICY_KEY = "research_execution_policy"

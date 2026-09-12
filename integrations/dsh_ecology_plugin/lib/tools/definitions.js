@@ -20,7 +20,7 @@ export const TOOL_DEFINITIONS = Object.freeze({
   },
   ecology_execute_prediction_tool: {
     name: "ecology_execute_prediction_tool",
-    description: "Call an available prediction capability for this origin. Choose tool_id and allowed parameters; use a unique call_id. Results are evidence for your final prediction. Maximum six calls.",
+    description: "Call an available prediction capability for this origin. Choose tool_id and allowed parameters; use a unique call_id. Results are evidence for your final prediction. At most two calls per sample wave; a third call is refused and wastes a turn.",
     parameters: objectInput({
       tool_id: text(160),
       wave_digest: text(64),

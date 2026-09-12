@@ -37,10 +37,23 @@ window.__ModuleLoader__.load({
       return `${provider}/${model}`;
     }
 
+    // Two transports deliver the same ModelCatalog behind the same {ok, value}
+    // result envelope: the typed Remote client resolves to that envelope itself,
+    // while the same-origin client-request route nests it under `result` of a
+    // server-response. Accept either and nothing else.
+    function hostModelCatalogOf(response) {
+      if (!response || typeof response !== "object") return null;
+      const envelope = response.type === "server-response" ? response.result : response;
+      if (!envelope || typeof envelope !== "object" || envelope.ok !== true) return null;
+      const catalog = envelope.value;
+      if (!catalog || typeof catalog !== "object") return null;
+      return Array.isArray(catalog.groups) ? catalog : null;
+    }
+
     function flattenHostModelDirectory(response) {
-      const result = response && response.result;
-      if (!result || result.ok !== true || !result.value) return [];
-      const groups = Array.isArray(result.value.groups) ? result.value.groups : [];
+      const catalog = hostModelCatalogOf(response);
+      if (!catalog) return [];
+      const groups = Array.isArray(catalog.groups) ? catalog.groups : [];
       const seen = new Set();
       const models = [];
       for (const group of groups) {
@@ -74,39 +87,54 @@ window.__ModuleLoader__.load({
       return models.slice(0, 100);
     }
 
+    // The Host generation model catalog is owned by the Session Remote namespace
+    // (SessionController.modelCatalog); its ModelCatalog shape is what
+    // flattenHostModelDirectory reads. There is no llm/models route.
+    //
+    // A Remote endpoint is canonically `<namespace>/<method>`: the Gateway claims
+    // and routes only two-segment endpoints, and requires the wire payload to be
+    // exactly one plain-object `args` field. A dotted spelling is never claimed.
+    const HOST_MODEL_DIRECTORY_ENDPOINT = "session/modelCatalog";
+
     function requestHostModelDirectoryOverHttp() {
       const rpcId = globalThis.crypto && typeof globalThis.crypto.randomUUID === "function"
         ? globalThis.crypto.randomUUID()
         : `ecologyrsi-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      return fetch("/api/llm.models", {
+      return fetch(`/api/${HOST_MODEL_DIRECTORY_ENDPOINT}`, {
         method: "POST",
         headers: { "content-type": "application/json", "accept": "application/json" },
         body: JSON.stringify({
           type: "client-request",
           rpcId,
-          method: "llm.models",
-          payload: {},
+          method: HOST_MODEL_DIRECTORY_ENDPOINT,
+          payload: { args: {} },
         }),
       }).then((response) => response.ok ? response.json() : null).then(flattenHostModelDirectory).catch(() => []);
     }
 
+    // `remote.session` is read without an inject requirement so the workbench
+    // entry still mounts on a Host that never installed the Session Remote
+    // namespace; that deployment degrades to the same-origin route instead.
     function readHostModelDirectory(ctx) {
       try {
-        const connection = ctx.get("connection");
-        if (!connection || !connection.api || !connection.api.llm) {
-          console.warn("[ecologyrsi] DSH connection API unavailable; using same-origin model directory");
+        const session = ctx.get("remote.session");
+        if (!session || typeof session.modelCatalog !== "function") {
+          console.warn("[ecologyrsi] DSH Session Remote unavailable; using same-origin model directory");
           return requestHostModelDirectoryOverHttp();
         }
-        return connection.api.llm.models({}).then((response) => {
+        // modelCatalog declares no parameters and no cancellation, so the typed
+        // client rejects any argument outright; it also reports a failed call as
+        // an {ok: false} result rather than by throwing.
+        return session.modelCatalog().then((response) => {
           const models = flattenHostModelDirectory(response);
-          if (!models.length) console.warn("[ecologyrsi] DSH connection model directory empty; using same-origin fallback");
+          if (!models.length) console.warn("[ecologyrsi] DSH Session Remote model directory empty; using same-origin fallback");
           return models.length ? models : requestHostModelDirectoryOverHttp();
         }).catch((error) => {
-          console.warn("[ecologyrsi] DSH connection model directory failed; using same-origin fallback", error && error.message);
+          console.warn("[ecologyrsi] DSH Session Remote model directory failed; using same-origin fallback", error && error.message);
           return requestHostModelDirectoryOverHttp();
         });
       } catch (_error) {
-        console.warn("[ecologyrsi] DSH connection lookup threw; using same-origin fallback");
+        console.warn("[ecologyrsi] DSH Session Remote lookup threw; using same-origin fallback");
         return requestHostModelDirectoryOverHttp();
       }
     }
@@ -352,7 +380,7 @@ window.__ModuleLoader__.load({
       );
     }
 
-    const inject = ["slots", "connection"];
+    const inject = ["slots"];
     function apply(ctx) {
       hostPluginContext = ctx;
       ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({

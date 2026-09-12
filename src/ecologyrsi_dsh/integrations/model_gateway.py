@@ -27,6 +27,10 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from ..core.errors import walk_exception_graph
 from ..core.models import ExpertUncertaintyType, digest
+from ..core.model_execution_policy import (
+    SAMPLE_OPERATION_MAX_MAX_TOKENS,
+    SAMPLE_OPERATION_MIN_MAX_TOKENS,
+)
 from ..core.redaction import (
     REMOTE_REASON_CODES,
     public_error_summary,
@@ -235,8 +239,11 @@ _DEFAULT_RETRY_MAX_SECONDS = 600.0
 _MAX_SERVER_RETRY_AFTER_SECONDS = 3600.0
 _MAX_INLINE_SERVER_RETRY_AFTER_SECONDS = 15.0
 _SAMPLE_DECISION_MAX_BATCH = 128
-_MIN_SAMPLE_OPERATION_MAX_TOKENS = 512
-_MAX_SAMPLE_OPERATION_MAX_TOKENS = 8_192
+_MIN_SAMPLE_OPERATION_MAX_TOKENS = SAMPLE_OPERATION_MIN_MAX_TOKENS
+_MAX_SAMPLE_OPERATION_MAX_TOKENS = SAMPLE_OPERATION_MAX_MAX_TOKENS
+# A caller that names no budget keeps the remote gateway's measured default;
+# only the frozen native manifest spends the raised ceiling deliberately.
+_DEFAULT_SAMPLE_OPERATION_MAX_TOKENS = 8_192
 _RESEARCH_PLAN_INITIAL_MAX_TOKENS = 16_384
 _RESEARCH_PLAN_MAX_TOKENS = 32_768
 _COMPACT_JSON_RETRY_INSTRUCTION = (
@@ -1252,7 +1259,11 @@ class ModelGateway:
                 <= max_tokens
                 <= _MAX_SAMPLE_OPERATION_MAX_TOKENS
             ):
-                raise ValueError("sample max_tokens must be an integer between 512 and 8192")
+                raise ValueError(
+                    "sample max_tokens must be an integer between "
+                    f"{_MIN_SAMPLE_OPERATION_MAX_TOKENS} and "
+                    f"{_MAX_SAMPLE_OPERATION_MAX_TOKENS}"
+                )
 
         if not isinstance(role, str) or role.strip() not in _SAMPLE_AGENT_ROLE_TO_MODEL_ROLE:
             allowed = ", ".join(sorted(_SAMPLE_AGENT_ROLE_TO_MODEL_ROLE))
@@ -1540,7 +1551,7 @@ class ModelGateway:
         if normalized_role not in _SAMPLE_AGENT_ROLE_TO_MODEL_ROLE:
             raise ValueError("unsupported sample decision role")
         resolved_max_tokens = (
-            _MAX_SAMPLE_OPERATION_MAX_TOKENS
+            _DEFAULT_SAMPLE_OPERATION_MAX_TOKENS
             if max_tokens is None
             else max_tokens
         )
@@ -1552,7 +1563,9 @@ class ModelGateway:
             <= _MAX_SAMPLE_OPERATION_MAX_TOKENS
         ):
             raise ValueError(
-                "sample max_tokens must be an integer between 512 and 8192"
+                "sample max_tokens must be an integer between "
+                f"{_MIN_SAMPLE_OPERATION_MAX_TOKENS} and "
+                f"{_MAX_SAMPLE_OPERATION_MAX_TOKENS}"
             )
         compact_critic = (
             normalized_role == "critic"

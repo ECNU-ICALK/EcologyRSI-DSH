@@ -10,7 +10,7 @@
 
 每批完整执行后反思，修订仅应用于下一批并标记为待验证。轮末固定最后一个合法修订，与轮初冠军共同评测；完整执行、总体实用增益和分项约束共同决定是否更新工作版本。快速实验不授予统计认证，独立评测使用隔离的时间分区。
 
-一个样本指一个预测起点。Agent 读取截止该起点的因果信息，自行决定直接预测或调用登记模型工具，最终提交温度、湿度、CO₂ 在 1/6/24 小时的九个预测值。预测工具每次 Planner 尝试最多调用 2 次；工具结果是证据，最终数值由 Agent 提交。Planner 最多 10 步、Critic 最多 4 步；单次输出额度分别为 8192/4096 tokens。累计输出回执另有阶段中止阈值，不能解释为精确费用硬上限。
+一个样本指一个预测起点。Agent 读取截止该起点的因果信息，自行决定直接预测或调用登记模型工具，最终提交温度、湿度、CO₂ 在 1/6/24 小时的九个预测值。预测工具每次 Planner 尝试最多调用 2 次；工具结果是证据，最终数值由 Agent 提交。Planner 最多 10 步、Critic 最多 4 步；单次输出额度分别为 16384/8192 tokens。累计输出回执另有阶段中止阈值（Planner 32768、Critic 16384），不能解释为精确费用硬上限。
 
 服务 503、429、连接和超时进入有界恢复与路由冷却，已接受的 Planner 和工具结果可以供 Critic 恢复复用。不可恢复的协议、输出预算等故障关闭本次执行准入。执行不完整时不进入后续批次、反思择优或额外评测副本，不以失败罚分证明科学改善。
 
@@ -37,6 +37,32 @@ PYTHONPATH=src .venv/bin/python -m ecologyrsi_dsh serve \
 ```
 
 未连接原生模型运行时时，真实执行显示不可用。静态演示须显式使用 `?demo=1`，不会在服务失败时自动伪造结果。
+
+## DSH 宿主接入
+
+页面加载后向父窗口发送握手，目标 origin 取 `parent_origin` 查询参数，缺省为自身 origin：
+
+```json
+{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.7.10","context_protocol":"ecology-evolution.host-context/1","supported_api_bases":["/api/ecology-evolution"]}
+```
+
+宿主用 `postMessage` 回 `dsh.context`。只接受来自父窗口且 origin 为自身或已登记 `parent_origin` 的消息；字段可平铺，也可嵌在 `context` 对象中。最小合同只要求同源代理地址和短期能力令牌，身份、能力范围和模型目录可选：
+
+```json
+{
+  "type": "dsh.context",
+  "api_base": "/api/ecology-evolution",
+  "capability_token": "短期能力令牌",
+  "identity": {"subject_id": "researcher-17", "display_name": "研究员甲"},
+  "capabilities": ["evolution.catalog.read", "evolution.run.create", "evolution.run.advance", "evolution.projection.read", "run.control", "intervention.write"],
+  "models": [
+    {"model_id": "dsh-policy@1", "label": "DSH 策略模型 API", "roles": ["propose"]},
+    {"model_id": "dsh-judge@1", "label": "DSH 独立评审模型 API", "roles": ["judge"]}
+  ]
+}
+```
+
+能力令牌只保存在页面内存闭包中，请求时作为 Bearer 发送，不显示、不导出、不写入本地存储。宿主能力集合只控制页面入口；服务端仍是角色与权限的唯一权威，宿主模型也只能预选后端已登记的同名模型。
 
 ## 主要接口
 

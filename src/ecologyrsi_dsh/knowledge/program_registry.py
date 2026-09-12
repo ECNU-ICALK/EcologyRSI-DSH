@@ -28,6 +28,17 @@ from ..evaluators.greenhouse_prediction import (
 
 REGISTRY_SCHEMA_VERSION = "ecologyrsi-dsh.program-registry/1"
 
+# One Skill file for every sample-side instruction template. It carries only the
+# invariant protocol (call budget, evidence citation, the single structured
+# output, the label prohibition); the per-template strategy lives in the
+# registry's `directive` and is delivered through the candidate agent profile.
+SAMPLE_FORECASTING_SKILL = "origin-vector-forecasting"
+# Roles whose directive actually reaches the model. Registering a directive for a
+# role that has no delivery path would be an interface that cannot change
+# anything, so the validator requires one exactly here and nowhere else.
+_DIRECTIVE_ROLES = frozenset({"sample-planner", "sample-repair"})
+_MAX_DIRECTIVE_LENGTH = 600
+
 
 def _parameter(
     *, minimum: int | float, maximum: int | float, default: int | float, integer: bool = False
@@ -239,11 +250,21 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
             },
         },
     },
+    # The Skill file holds only the invariant protocol; the evolvable strategy is
+    # this `directive` text, delivered at run time through the candidate agent
+    # profile. Growing this category is therefore a registry edit, not a new
+    # shipped preset, which is what makes per-generation instruction search
+    # possible at all. The model selects a template id and never authors the
+    # text: the directive is part of the entry digest and of run provenance.
     "instruction_templates": {
         "sample-planner-balanced@1": {
-            "version": "sample-planner-balanced-instruction/2",
+            "version": "sample-planner-balanced-instruction/3",
             "role": "sample-planner",
-            "skill_name": "origin-vector-forecasting-balanced",
+            "skill_name": SAMPLE_FORECASTING_SKILL,
+            "directive": (
+                "Balance available observations and model evidence across all "
+                "target-horizon cells."
+            ),
             "parameters": {
                 "confidence_threshold": _parameter(
                     minimum=0.0, maximum=1.0, default=0.7
@@ -251,9 +272,14 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
             },
         },
         "sample-planner-anomaly-aware@1": {
-            "version": "sample-planner-anomaly-aware-instruction/2",
+            "version": "sample-planner-anomaly-aware-instruction/3",
             "role": "sample-planner",
-            "skill_name": "origin-vector-forecasting-anomaly-aware",
+            "skill_name": SAMPLE_FORECASTING_SKILL,
+            "directive": (
+                "Check missing values and unusual current observations; consider "
+                "an alternative model or a conservative adjustment when the "
+                "evidence supports it."
+            ),
             "parameters": {
                 "confidence_threshold": _parameter(
                     minimum=0.0, maximum=1.0, default=0.75
@@ -261,9 +287,14 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
             },
         },
         "sample-planner-horizon-aware@1": {
-            "version": "sample-planner-horizon-aware-instruction/2",
+            "version": "sample-planner-horizon-aware-instruction/3",
             "role": "sample-planner",
-            "skill_name": "origin-vector-forecasting-horizon-aware",
+            "skill_name": SAMPLE_FORECASTING_SKILL,
+            "directive": (
+                "Distinguish short and long horizons. You may choose different "
+                "prediction methods or combine model evidence by target and "
+                "horizon."
+            ),
             "parameters": {
                 "confidence_threshold": _parameter(
                     minimum=0.0, maximum=1.0, default=0.65
@@ -271,9 +302,13 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
             },
         },
         "sample-repair@1": {
-            "version": "sample-repair-instruction/1",
+            "version": "sample-repair-instruction/2",
             "role": "sample-repair",
-            "skill_name": "origin-vector-forecasting-anomaly-aware",
+            "skill_name": SAMPLE_FORECASTING_SKILL,
+            "directive": (
+                "Re-derive only the cells the Host reported as missing or "
+                "invalid; keep every already-accepted cell unchanged."
+            ),
             "parameters": {},
         },
         "researcher@1": {
@@ -319,6 +354,46 @@ def _program_ref(
         "id": program_id,
         "catalog_digest": _program_digest(category, program_id, programs[category][program_id]),
     }
+
+
+def _validate_instruction_templates(
+    programs: Mapping[str, Mapping[str, Mapping[str, Any]]],
+) -> None:
+    """Keep the evolvable directive well-formed and the Skill surface single.
+
+    Instruction search only works if adding a strategy is a registry edit. That
+    holds exactly while every sample-side template shares one Skill file and
+    differs only in `directive`, so both halves are enforced here rather than
+    left to review.
+    """
+
+    raw_templates = programs.get("instruction_templates")
+    if not isinstance(raw_templates, Mapping) or not raw_templates:
+        raise ValueError("program registry requires instruction templates")
+    for template_id, raw_template in raw_templates.items():
+        if not isinstance(raw_template, Mapping):
+            raise TypeError(f"instruction template {template_id} must be an object")
+        role = raw_template.get("role")
+        directive = raw_template.get("directive")
+        if role not in _DIRECTIVE_ROLES:
+            if directive is not None:
+                raise ValueError(
+                    f"instruction template {template_id} registers a directive for a "
+                    "role that has no delivery path"
+                )
+            continue
+        if not isinstance(directive, str) or not directive.strip():
+            raise ValueError(
+                f"instruction template {template_id} requires a strategy directive"
+            )
+        if len(directive) > _MAX_DIRECTIVE_LENGTH:
+            raise ValueError(
+                f"instruction template {template_id} directive exceeds its bound"
+            )
+        if raw_template.get("skill_name") != SAMPLE_FORECASTING_SKILL:
+            raise ValueError(
+                f"instruction template {template_id} must use the shared sample Skill"
+            )
 
 
 def _validate_workflow_templates(
@@ -414,7 +489,7 @@ def _agent_program(programs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             "role_profiles": [
                 {
                     "role": "sample-planner",
-                    "preset_id": "ecology-sample-planner-v8",
+                    "preset_id": "ecology-sample-planner-v9",
                     "instruction_template_ref": _program_ref(
                         programs,
                         "instruction_templates",
@@ -497,6 +572,7 @@ class ProgramRegistrySnapshot:
         seed_templates: tuple[SeedGenomeTemplate, ...] | None = None,
     ) -> "ProgramRegistrySnapshot":
         _validate_workflow_templates(programs)
+        _validate_instruction_templates(programs)
         frozen = deep_freeze_json(programs)
         if not isinstance(frozen, FrozenJsonObject):
             raise TypeError("program registry must be an object")

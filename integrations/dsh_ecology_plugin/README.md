@@ -6,8 +6,9 @@
 - 在 DSH 覆盖层中加载工作台，不离开 DSH；
 - 由 DSH 在 `/plugins/ecology/evolution/` 托管静态资源；
 - 由 DSH 将 `/api/ecology-evolution/*` 同源代理到本机 Python 服务；
-- 打开工作台时通过 DSH `llm.models` 读取当前已登记且可用的模型目录，只把
-  provider、模型 ID、显示名和职责元数据传给 iframe，不读取或转发密钥。
+- 打开工作台时通过 DSH Session Remote 的 `session/modelCatalog` 读取当前已登记
+  且可用的模型目录（宿主未安装该 Remote 命名空间时回退到同源 `/api/session/modelCatalog`
+  路由），只把 provider、模型 ID、显示名和职责元数据传给 iframe，不读取或转发密钥。
 
 浏览器只需访问 DSH 端口。Python 服务仍在回环地址运行，但不再作为用户入口。
 当前交付只启动两个进程：DSH Web Profile 监听 `8848`，EcologyRSI Python

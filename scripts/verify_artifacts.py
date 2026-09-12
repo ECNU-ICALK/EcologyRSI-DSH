@@ -44,7 +44,7 @@ CURRENT_DSH_PRESET_IDS = frozenset(
         "ecology-coordinator-v5",
         "ecology-researcher-v12",
         "ecology-candidate-proposer-v4",
-        "ecology-sample-planner-v8",
+        "ecology-sample-planner-v9",
         "ecology-sample-critic-v5",
         "ecology-generation-judge-v8",
     }
@@ -614,8 +614,10 @@ def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
         peer_meta = package.get("peerDependenciesMeta", {})
         for name, required_version in peers.items():
             if name.startswith("@deepseek-ai/dsh-"):
-                if required_version != "0.1.0-rc.6":
-                    raise RuntimeError("npm plugin DSH peer dependency is not exact rc.6")
+                if required_version != "0.1.5-rc.2":
+                    raise RuntimeError(
+                        "npm plugin DSH peer dependency is not exact 0.1.5-rc.2"
+                    )
                 if peer_meta.get(name, {}).get("optional") is not True:
                     raise RuntimeError("npm plugin DSH peer must be host-provided and optional")
         exports = package.get("exports", {})

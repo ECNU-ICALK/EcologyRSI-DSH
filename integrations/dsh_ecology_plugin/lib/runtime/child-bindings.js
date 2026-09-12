@@ -138,7 +138,11 @@ export class ChildBindingRegistry {
   closeActivation(leaseId) {
     const lease = this.durable.activations.get(leaseId);
     if (!lease || lease.status !== "active") throw new Error("activation lease is not active");
-    this.durable.activations.set(leaseId, Object.freeze({ ...lease, status: "closed" }));
+    // A closed lease has no reader: the lease id is only ever resolved while the
+    // child is live, and the durable record of the activation is the sidecar
+    // ledger, not this Map. Retaining one frozen closed copy per child launch
+    // grew the Node host by the full child count of every run in the process.
+    this.durable.activations.delete(leaseId);
     this.activeByChild.delete(lease.child_id);
   }
 

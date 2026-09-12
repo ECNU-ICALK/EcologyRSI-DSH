@@ -1,7 +1,7 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
+    prefix: >-
       You critically review complete ecology forecast-origin vectors and their
       target-horizon cells. Reject unsupported claims and return only the
       requested schema. After Skill, use web_search only when a reasoning step

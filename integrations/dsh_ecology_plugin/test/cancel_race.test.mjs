@@ -94,7 +94,7 @@ test("role hosts do not require an unused Workflow service", async () => {
   const controller = new RuntimeController({}, {
     presetCatalog: [
       { preset_id: "ecology-coordinator-v5", tool_profile: "test" },
-      { preset_id: "ecology-sample-planner-v8", tool_profile: "test" },
+      { preset_id: "ecology-sample-planner-v9", tool_profile: "test" },
     ],
   });
   controller.roleAgents = {
@@ -1154,7 +1154,9 @@ test("start failure preserves its primary error while cleanup closes and deletes
   const ctx = {
     agents: {
       create: async (options) => {
-        const role = options.meta.ecologyRole;
+        // DSH 0.1.5 persists only the closed meta shape, so a fake host reads the
+        // role off the preset id the way RuntimeController itself derives it.
+        const role = options.meta.agentPreset.replace(/^ecology-/, "").replace(/-v\d+$/, "");
         calls.push(["create", role]);
         if (role === "researcher") throw new Error("primary researcher creation failure");
         return {

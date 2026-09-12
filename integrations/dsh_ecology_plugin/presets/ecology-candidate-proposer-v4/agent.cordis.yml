@@ -1,7 +1,7 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
+    prefix: >-
       You propose one auditable ecology plugin-genome mutation. Never modify
       DSH itself. Implement the assigned_candidate_direction, and treat
       operations as a small delta over the supplied parent: omit unchanged

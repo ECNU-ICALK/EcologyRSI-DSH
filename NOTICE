@@ -10,7 +10,7 @@ only dataset catalogue metadata and adapters; Autonomous Greenhouse Challenge
 raw data are not redistributed. The generated crop-soil-water data remain
 engineering fixtures, not scientific observations or validated model output.
 
-The Ecology Evolution plugin integrates with DeepSeek Harness 0.1.0-rc.6 role
+The Ecology Evolution plugin integrates with DeepSeek Harness 0.1.5-rc.2 role
 presets, Agent sessions, structured subagents, context compaction, and
 provider-usage projections. DSH, DeepSeek, and other names may be trademarks
 of their respective owners; this project does not claim endorsement by them.

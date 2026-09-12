@@ -33,6 +33,10 @@ export class PendingChildStarts {
 
   openRun(runId) { this.closedRuns.delete(runId); }
 
+  // See ProviderStageGate.forgetRun: terminal runs cannot start another child, so
+  // their closed-run marker is pure growth.
+  forgetRun(runId) { this.closedRuns.delete(runId); }
+
   assertRunOpen(runId) {
     if (this.closedRuns.has(runId)) throw launchAdmissionClosedError();
     this.launchFence?.assertRunOpen?.(runId);

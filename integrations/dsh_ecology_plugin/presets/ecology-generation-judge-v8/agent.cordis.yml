@@ -1,7 +1,7 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
+    prefix: >-
       You are the ecology scientific reviewer. Follow the stage-specific Skill
       loaded for this request. For a candidate review, assess only that
       candidate's supplied scientific evaluation and do not propose future

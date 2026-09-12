@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { RoleAgentManager, roleRequestOptions, tokenSemantics } from "../lib/runtime/agents.js";
+import {
+  RoleAgentManager,
+  roleRequestOptions,
+  roleSessionFingerprint,
+  tokenSemantics,
+} from "../lib/runtime/agents.js";
 import { withThinkingCapabilities } from "../../../scripts/configure_dsh_reasoning.mjs";
 import { installRoleReasoning } from "../lib/tools/agent-plugin.js";
 
@@ -86,6 +91,17 @@ function outcome(promise) {
   );
 }
 
+// DSH 0.1.5 drops plugin-authored session meta, so the run/role provenance rides
+// in the session id fingerprint. A fake host recovers the role the same way a
+// resume does: by matching the id against the bindings it could have come from.
+function roleFromSessionId(sessionId, bindings) {
+  const match = bindings.find(
+    (binding) => sessionId.startsWith(`ecology-role-${roleSessionFingerprint(binding)}-`),
+  );
+  if (!match) throw new Error(`unrecognized role session id: ${sessionId}`);
+  return match.role;
+}
+
 test("role-host creation is single-flight, resumable and has no token hard cap", async () => {
   const calls = [];
   const agent = { id: "unpredictable", session: { append: async (...event) => calls.push(["append", ...event]), flush: async () => calls.push(["flush"]) } };
@@ -126,10 +142,28 @@ test("run quiescence waits pending creations and disposes every published host",
   const releaseProposer = deferred();
   const creationEntered = [deferred(), deferred()];
   const disposals = [];
+  const common = {
+    run_id: "run-pending-cleanup",
+    model: "provider/model",
+    cwd: "/tmp",
+  };
+  const researcherBinding = {
+    ...common,
+    role: "researcher",
+    preset_id: "ecology-researcher-v12",
+  };
+  const proposerBinding = {
+    ...common,
+    role: "candidate-proposer",
+    preset_id: "ecology-candidate-proposer-v4",
+  };
   const ctx = {
     agents: {
       create: async (options) => {
-        const role = options.meta.ecologyRole;
+        const role = roleFromSessionId(options.sessionId, [
+          researcherBinding,
+          proposerBinding,
+        ]);
         if (role === "researcher") {
           creationEntered[0].resolve();
           return await releaseResearcher.promise;
@@ -145,21 +179,8 @@ test("run quiescence waits pending creations and disposes every published host",
     },
   };
   const manager = new RoleAgentManager(ctx);
-  const common = {
-    run_id: "run-pending-cleanup",
-    model: "provider/model",
-    cwd: "/tmp",
-  };
-  const researcher = manager.createRoleAgent({
-    ...common,
-    role: "researcher",
-    preset_id: "ecology-researcher-v12",
-  });
-  const proposer = manager.createRoleAgent({
-    ...common,
-    role: "candidate-proposer",
-    preset_id: "ecology-candidate-proposer-v4",
-  });
+  const researcher = manager.createRoleAgent(researcherBinding);
+  const proposer = manager.createRoleAgent(proposerBinding);
   await Promise.all(creationEntered.map((item) => item.promise));
 
   let cleanupSettled = false;

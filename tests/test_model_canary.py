@@ -108,7 +108,12 @@ class ModelCanaryTests(unittest.TestCase):
             self.assertTrue(client.run_canary(request)["passed"])
             args, kwargs = api.call_args
             self.assertEqual(args, ("POST", "/api/ecology-agent-runtime/v1/canaries"))
-            self.assertEqual(kwargs["timeout"], 130)
+            # The HTTP deadline tracks the request's own bound plus the client
+            # margin, so a recalibrated bound cannot silently outlive it.
+            self.assertEqual(
+                kwargs["timeout"],
+                request["bounds"]["total_timeout_ms"] / 1000 + 10,
+            )
         wrong = receipt(request); wrong["identity"] = dict(request["identity"], model_id="wrong")
         with patch.object(client, "_request", return_value=wrong):
             with self.assertRaises(ValueError): client.run_canary(request)

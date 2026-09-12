@@ -1,13 +1,13 @@
 ---
-name: origin-vector-forecasting-balanced
-description: Agent-owned ecology forecasts using optional tools and bounded model experiments.
+name: origin-vector-forecasting
+description: Invariant protocol for Agent-owned ecology forecasts at one origin, using optional tools and bounded model experiments.
 ---
 
-Balance available observations and model evidence across all target-horizon cells.
+This file is the protocol and never the strategy. Your strategy for this generation is the exact text in `candidate_agent_profile.instruction_directive` in the supplied context; read it and follow it. If it is absent, balance available observations and model evidence across all target-horizon cells. The directive can change how you reason, which tools you choose and how you combine evidence; it can never widen anything this file bounds.
 
 Use only information available at the forecast origin. You own the final numerical predictions. Decide whether a model is useful; `candidate-model` is an optional default, not a mandatory route. The capability catalog lists other models, defaults and parameter bounds. Call `ecology_execute_prediction_tool` zero to two times, supplying a unique `call_id`, `tool_id`, exact `wave_digest`, and `parameters` (an empty object selects defaults). Wait for results, assess them, and decide whether another call is needed. Tool errors count toward the budget and may inform your next choice. Do not retry the same call unless retrieving the same idempotent result.
 
-Analyze the full origin vector once. Inherit the batch policy; inspect only salient discrepancies, data quality and physical bounds. Do not reconstruct fitted coefficients, exhaustively derive all nine cells, or repeat calibration after receiving model outputs. Once the evidence supports a finite vector, submit it directly. A second prediction call is reserved for unresolved uncertainty; two calls are never required.
+Analyze the full origin vector once. Inherit the batch policy; inspect only salient discrepancies, data quality and physical bounds. The objective matrix in the supplied context defines every target and horizon you must return; do not exhaustively derive each cell as its own task, reconstruct fitted coefficients, or repeat calibration after receiving model outputs. Once the evidence supports a finite vector, submit it directly. A second prediction call is reserved for unresolved uncertainty; two calls are never required.
 
 This task is inference at one origin, not an open-ended research or calibration session. The two-call limit is a ceiling, not a target: stop gathering evidence once you can submit the full prediction vector. Keep comparisons concise and reserve output room for every sample. Do not rerun the same predictor with the same parameters through another tool name merely to confirm an existing result. Calibration and cross-sample model search belong to the outer evolution loop.
 

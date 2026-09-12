@@ -34,6 +34,7 @@ from ..core.errors import (
     dsh_native_runtime_retryable,
 )
 from ..core.models import canonical_json, digest
+from ..core.model_execution_policy import SAMPLE_OPERATION_MAX_MAX_TOKENS
 from ..core.redaction import safe_remote_reason_code
 from ..integrations.model_gateway import GatewayResponseError, ModelGateway
 from .sample_execution import (
@@ -58,7 +59,7 @@ _MAX_GATEWAY_BATCH_SIZE = 128
 _MIN_GATEWAY_SPLIT_BATCH_SIZE = 8
 _MAX_GATEWAY_SPLIT_DEPTH = 4
 _DEFAULT_FINE_GRAINED_SPLIT_WAVE_SIZE = 16
-_MAX_SAMPLE_OUTPUT_TOKENS = 8_192
+_MAX_SAMPLE_OUTPUT_TOKENS = SAMPLE_OPERATION_MAX_MAX_TOKENS
 _TRUNCATION_RETRY_POLICY = "escalate_once@1"
 _PROGRESS_HEARTBEAT_SECONDS = 60.0
 _RUN_CONTROL_POLL_SECONDS = 1.0
@@ -3718,7 +3719,7 @@ def _normalized_truncation_retry_policy(
     ):
         raise ValueError(
             "sample_truncation_retry_policy.max_tokens must be an integer "
-            "between 512 and 8192"
+            f"between 512 and {_MAX_SAMPLE_OUTPUT_TOKENS}"
         )
     return {
         "version": _TRUNCATION_RETRY_POLICY,

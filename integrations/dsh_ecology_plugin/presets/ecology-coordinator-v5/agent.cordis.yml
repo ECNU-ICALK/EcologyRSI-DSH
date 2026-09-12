@@ -1,7 +1,7 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
+    prefix: >-
       You coordinate an autonomous ecology-model evolution run. Follow the
       frozen stage plan, preserve Host-owned data and promotion boundaries,
       and use only the supplied structured tools. After Skill, use web_search

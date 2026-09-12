@@ -31,6 +31,13 @@ export function apply(ctx, rawConfig = {}) {
     if (!rawConfig.controller && config.sidecarToolToken) {
       const runner = controller.configureStageRunner(config);
       ctx.provide("ecologyAgentTools", runner.bridge);
+      // A controller this plugin created owns live role-host Sessions, provider
+      // admission state and usage timers. Tie them to the plugin's own lifetime
+      // so a reload disposes them instead of stranding them in the Node host.
+      ctx.effect(
+        () => () => { void controller.dispose(); },
+        "ecologyrsi: native runtime controller",
+      );
     }
     ctx.effect(
       () => registerRuntimeRoutes(ctx, controller, config),

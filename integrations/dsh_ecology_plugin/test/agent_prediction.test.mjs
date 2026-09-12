@@ -11,13 +11,13 @@ function chain(count, { errorAt = -1, lateTool = false } = {}) {
     events.push({seq: events.length + 1, type: 'tool/call', data: {name, callId, arguments: args}});
     events.push({seq: events.length + 1, type: 'tool/result', data: {message: {content: [{type: 'tool-result', toolCallId: callId, isError: error}]}}});
   }
-  pair('skill', {name: 'origin-vector-forecasting-balanced'});
+  pair('skill', {name: 'origin-vector-forecasting'});
   for (let i = 0; i < count; i++) pair('ecology_execute_prediction_tool', {}, i === errorAt);
   pair('structured_output');
   if (lateTool) pair('ecology_execute_prediction_tool');
   return events;
 }
-const options = { stage: 'sample.plan', skillName: 'origin-vector-forecasting-balanced', allowsPredictionTools: true };
+const options = { stage: 'sample.plan', skillName: 'origin-vector-forecasting', allowsPredictionTools: true };
 
 test('sample Agent can finalize directly or after multiple tool results', () => {
   for (const count of [0, 2, 6]) {

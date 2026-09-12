@@ -286,7 +286,7 @@ export class RuntimeController {
     }
     const activated = this.registry.transition(binding.run_id, binding, "running");
     if (!this.#openLaunchFenceFor(binding.run_id, lifecycle, generation)) {
-      throw this.#hostsIncompleteError();
+      return Promise.reject(this.#hostsIncompleteError());
     }
     return Promise.resolve(this.#response(activated));
   }
@@ -596,11 +596,13 @@ export class RuntimeController {
       () => {
         if (rememberFailure) lifecycle.failed[token.action] = null;
         lifecycle.controls.delete(token);
+        this.#pruneRun(token.binding.run_id);
       },
       () => {
         if (rememberFailure) lifecycle.failed[token.action] = token.binding;
         try { onRejected?.(); } catch {}
         lifecycle.controls.delete(token);
+        this.#pruneRun(token.binding.run_id);
       },
     );
     return promise;
@@ -651,5 +653,38 @@ export class RuntimeController {
     tracked.catch(() => {});
     this.controlDrains.set(runId, tracked);
     return tracked;
+  }
+
+  // The run registry keeps every record so `status` stays answerable, but the
+  // per-run control lifecycle and the launch-fence markers only mean anything
+  // while a transition can still occur. Drop them once the run is fully
+  // cancelled and its control queue has drained; `#lifecycle` recreates a
+  // neutral entry if a late idempotent replay still arrives.
+  //
+  // `cancelling` is deliberately excluded even though it is a terminal *start*
+  // status: a failed cancel is still exact-retryable from there, and that retry
+  // is recognised through `lifecycle.failed.cancel`.
+  #pruneRun(runId) {
+    const lifecycle = this.runLifecycles.get(runId);
+    if (!lifecycle) return;
+    if (this.registry.get(runId)?.status !== "cancelled") return;
+    if (lifecycle.controls.size > 0) return;
+    if (lifecycle.start !== null && !lifecycle.start.finalized) return;
+    this.runLifecycles.delete(runId);
+    this.stageRunner?.forgetRun?.(runId);
+  }
+
+  async dispose() {
+    const runIds = new Set(this.registry.values().map((run) => run.run_id));
+    await Promise.allSettled([...this.controlDrains.values()]);
+    await Promise.allSettled(
+      [...runIds].map((runId) => this.roleAgents.quiesceRun(runId, { dispose: true })),
+    );
+    await Promise.allSettled([
+      Promise.resolve().then(() => this.stageRunner?.dispose?.()),
+      Promise.resolve().then(() => this.roleAgents.dispose()),
+    ]);
+    this.controlDrains.clear();
+    this.runLifecycles.clear();
   }
 }

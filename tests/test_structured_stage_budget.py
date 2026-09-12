@@ -1,9 +1,15 @@
+from pathlib import Path
+import re
 from types import SimpleNamespace
 import unittest
 
 from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError, dsh_native_runtime_retryable
-from ecologyrsi_dsh.core.model_execution_policy import RESEARCH_EXECUTION_POLICY
+from ecologyrsi_dsh.core.model_execution_policy import (
+    NATIVE_SAMPLE_OPERATION_MAX_TOKENS,
+    RESEARCH_EXECUTION_POLICY,
+)
 from ecologyrsi_dsh.core.models import digest
+from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
 from ecologyrsi_dsh.integrations.dsh_structured_roles import DshStructuredRoleRuntime
 from ecologyrsi_dsh.api.auto_progress import _progress_failure_irrecoverable, _progress_failure_retryable
 
@@ -35,7 +41,7 @@ class StructuredStageBudgetTests(unittest.TestCase):
         for stage, context, tokens in [
             ("generation.research-synthesis", {}, 16384),
             ("generation.search-plan", policy, 16384),
-            ("sample.plan", policy, 16384),
+            ("sample.plan", policy, 16385),
             ("generation.research-synthesis", policy, None),
             ("generation.research-synthesis", policy, 8192),
             ("generation.research-synthesis", policy, 16385),
@@ -46,6 +52,42 @@ class StructuredStageBudgetTests(unittest.TestCase):
                 with self.assertRaises(ValueError): self.request(stage, context, tokens)
         _result, request = self.request("generation.research-synthesis", {}, 8192)
         self.assertEqual(request["max_tokens"], 8192)
+
+    def test_sample_plan_carries_its_own_frozen_ceiling_without_the_research_policy(self):
+        # A nine-cell planner response holds prediction-tool arguments and the
+        # decision object at once, so its stage ceiling is raised on its own
+        # contract, not by borrowing the research synthesis policy.
+        _result, request = self.request("sample.plan", {}, NATIVE_SAMPLE_OPERATION_MAX_TOKENS["sample.planner"])
+        self.assertEqual(request["max_tokens"], 16384)
+        with self.assertRaises(ValueError): self.request("sample.critic", {}, 16384)
+        # The critic's frozen budget must fit inside the default stage ceiling;
+        # nothing else declares one for it.
+        _result, critic = self.request("sample.critic", {}, NATIVE_SAMPLE_OPERATION_MAX_TOKENS["sample.critic"])
+        self.assertEqual(critic["max_tokens"], 8192)
+
+    def test_advertised_sample_budgets_stay_equal_across_python_and_the_plugin(self):
+        # Three files carry these numbers and each only says "keep them equal":
+        # the frozen manifest constant, the plan the workbench displays, and the
+        # plugin's runaway-child abort. A raise applied to one of them is a
+        # contract split the suite could not otherwise see.
+        plan = OptimizationSchedule.for_new_run().execution_plan(5, cells_per_origin=9)
+        per_call = plan["output_tokens_per_llm_call"]
+        limits = plan["sample_execution_limits"]
+        self.assertEqual(per_call["planner"], NATIVE_SAMPLE_OPERATION_MAX_TOKENS["sample.planner"])
+        self.assertEqual(per_call["critic"], NATIVE_SAMPLE_OPERATION_MAX_TOKENS["sample.critic"])
+        self.assertEqual(limits["planner_reported_output_threshold"], 2 * per_call["planner"])
+        self.assertEqual(limits["critic_reported_output_threshold"], 2 * per_call["critic"])
+        source = (Path(__file__).resolve().parents[1]
+                  / "integrations/dsh_ecology_plugin/lib/runtime/sample-stage-budget.js").read_text(encoding="utf-8")
+        for stage, steps, reported in (
+            ("sample.plan", limits["planner_steps"], limits["planner_reported_output_threshold"]),
+            ("sample.critic", limits["critic_steps"], limits["critic_reported_output_threshold"]),
+        ):
+            found = re.search(
+                rf'"{re.escape(stage)}":\s*\{{\s*maxSteps:\s*(\d+),\s*maxReportedOutputTokens:\s*(\d+)\s*\}}',
+                source)
+            self.assertIsNotNone(found, stage)
+            self.assertEqual((int(found[1]), int(found[2])), (steps, reported), stage)
 
     def test_fatal_cause_wins_over_wrapper_and_cancelled_sibling(self):
         from ecologyrsi_dsh.core.errors import dsh_native_runtime_error_in_chain, preferred_execution_failure

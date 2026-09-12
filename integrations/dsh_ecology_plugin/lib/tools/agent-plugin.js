@@ -7,8 +7,9 @@ export const inject = ["tools", "web", "ecologyAgentTools", "llm"];
 export function installRoleReasoning(ctx, role) {
   if (typeof ctx.on !== "function") return () => {};
   const policies = new Map();
-  // AgentOptions supports provider/model/maxTokens, not reasoningEffort.
-  // The preset's request waterfall is inherited by its role host AND children;
+  // DSH 0.1.5 added AgentOptions.reasoningEffort, but that only seeds the host's
+  // own default; it is not inherited. The preset's request waterfall is, by both
+  // its role host AND its spawned children, so per-role effort stays here — and
   // DSH records the resolved effort in each child's native request/header.
   return ctx.on("agent/request", async (_payload, next) => {
     const resolved = await next();

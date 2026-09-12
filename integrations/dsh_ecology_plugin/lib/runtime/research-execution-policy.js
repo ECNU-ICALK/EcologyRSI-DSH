@@ -19,9 +19,17 @@ export function researchExecutionPolicy(context) {
   return RESEARCH_EXECUTION_POLICY;
 }
 
+// Keep these exact ceilings in sync with integrations/dsh_structured_roles.py.
+// Only a stage whose single response must carry prediction-tool arguments and a
+// nine-cell decision object is bounded above the default; the synthesis stage
+// reads its exact value from its frozen policy.
+const DEFAULT_STAGE_MAX_OUTPUT_TOKENS = 8192;
+const STAGE_MAX_OUTPUT_TOKENS = Object.freeze({ "sample.plan": 16384 });
+
 export function validateStructuredStageBudget(stage, maxTokens, context, label) {
   const policy = stage === "generation.research-synthesis" ? researchExecutionPolicy(context) : null;
-  const maximum = policy?.synthesis_max_output_tokens ?? 8192;
+  const maximum = policy?.synthesis_max_output_tokens
+    ?? STAGE_MAX_OUTPUT_TOKENS[stage] ?? DEFAULT_STAGE_MAX_OUTPUT_TOKENS;
   if (maxTokens !== undefined && (!Number.isSafeInteger(maxTokens) || maxTokens < 512 || maxTokens > maximum)) {
     throw new Error(`${label} must be between 512 and ${maximum}`);
   }

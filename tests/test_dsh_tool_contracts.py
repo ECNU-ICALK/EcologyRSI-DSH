@@ -51,7 +51,7 @@ def _skill_evidence(stage: str) -> dict:
     skill_by_stage = {
         "generation.research": "autonomous-ecology-research",
         "generation.judge": "candidate-scientific-review",
-        "sample.plan": "origin-vector-forecasting-balanced",
+        "sample.plan": "origin-vector-forecasting",
         "sample.reflect": "origin-vector-review",
     }
     return {

@@ -83,8 +83,8 @@ integrations/dsh_ecology_plugin/presets/ecology-researcher-v12/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-researcher-v12/agent.cordis.yml
 integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4/agent.cordis.yml
-integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v8/preset.yml
-integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v8/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v9/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v9/agent.cordis.yml
 integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v5/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v5/agent.cordis.yml
 integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v8/preset.yml
@@ -110,7 +110,7 @@ current_presets = {
     "ecology-coordinator-v5",
     "ecology-researcher-v12",
     "ecology-candidate-proposer-v4",
-    "ecology-sample-planner-v8",
+    "ecology-sample-planner-v9",
     "ecology-sample-critic-v5",
     "ecology-generation-judge-v8",
 }

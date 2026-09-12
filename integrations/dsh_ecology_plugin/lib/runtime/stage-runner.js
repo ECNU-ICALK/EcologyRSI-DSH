@@ -34,6 +34,7 @@ import {
 import { PendingChildStarts } from "./pending-child-starts.js";
 import { RouteHealth } from "./route-health.js";
 import { checkSampleStageBudget, SAMPLE_STAGE_LIMITS } from "./sample-stage-budget.js";
+import { sessionEventLog } from "./session-events.js";
 
 const STAGES = Object.freeze({
   "generation.research": Object.freeze({
@@ -65,11 +66,11 @@ const STAGES = Object.freeze({
       "Use only the frozen evidence_catalog supplied by the Host.",
       "Treat synthesis_contract.predictor_semantics as implementation facts. Ridge coefficients are independent per target and horizon in all ridge variants. Residual scales are fixed genome controls, not automatically fitted; selecting a pipeline only installs its defaults. Never claim otherwise in prose.",
       "Reason against the complete forecast_objective target-horizon matrix; a focused direction must state its local weakness without treating one target as the whole task.",
-      "For evidence_ref use exactly a frozen knowledge_id, evidence_digest, or registered capability_id/capability_ids value; never invent a source.",
+      "For every evidence_ref copy one string verbatim from synthesis_contract.allowed_evidence_refs, which lists the frozen knowledge_id, evidence_digest, and registered capability_id/capability_ids values; never invent a source.",
       "Return exactly required_candidate_direction_count distinct, implementable directions.",
       "Each direction must select exactly one mutation_axis and one matching target from synthesis_contract.allowed_mutation_targets.",
       "Set mutation_direction to increase or decrease for scientific_parameter, and to select for registered_predictor or instruction_profile. Baseline values may be described for context; prose is audit-only and only the structured mutation coordinates are executable.",
-      "If host_validation_feedback is present, correct its validation_detail in a fresh complete response.",
+      "If host_validation_feedback is present, correct its validation_detail in a fresh complete response and drop or replace every string it lists in rejected_evidence_refs.",
     ].join(" "),
   }),
   "candidate.propose": Object.freeze({
@@ -128,7 +129,8 @@ const STAGES = Object.freeze({
       "Return exactly direction_count distinct next-step directions and bounded search queries.",
       "Each direction must select one mutation_axis and one exact target from host_boundary.allowed_mutation_targets.",
       "Set mutation_direction to increase or decrease for scientific_parameter and select for the other axes; only the structured mutation coordinates are executable; prose remains audit-only.",
-      "Cite only identifiers in the frozen knowledge_snapshot and correct host_validation_feedback when present.",
+      "For every evidence_ref copy one string verbatim from host_boundary.allowed_evidence_refs; entries of allowed_mutation_targets are mutation coordinates, not evidence, and citing one is rejected. Never invent a source.",
+      "When host_validation_feedback is present, drop or replace every string it lists in rejected_evidence_refs instead of resubmitting them.",
       "Every reflected direction is advisory and must pass the next research synthesis Host preflight before candidate use. Your stop recommendation is advisory; the Host owns selection and termination.",
     ].join(" "),
   }),
@@ -397,11 +399,9 @@ async function withinStructuredDeadline(deadline, operation) {
   }
 }
 
-const SAMPLE_PLANNER_SKILLS = new Set([
-  "origin-vector-forecasting-balanced",
-  "origin-vector-forecasting-anomaly-aware",
-  "origin-vector-forecasting-horizon-aware",
-]);
+// One Skill for every planner instruction template: the evolvable strategy is the
+// registry directive delivered in the candidate agent profile, not a separate file.
+const SAMPLE_PLANNER_SKILLS = new Set(["origin-vector-forecasting"]);
 
 function expectedSkillName(contract, request) {
   if (contract.skillName) return contract.skillName;
@@ -766,6 +766,14 @@ function exactInvalidStructuredArgsSeen(rawEvents) {
 const SESSION_PROJECTION_SYNC_GRACE_MS = 2_000;
 const SESSION_PROJECTION_SYNC_POLL_MS = 20;
 
+// Deliberately the receipt cap (core.agent_prediction.MAX_PREDICTION_CALLS), not
+// the execution budget (PREDICTION_TOOL_CALL_BUDGET = 2). The Python prediction
+// binding refuses the third distinct call itself, and that refusal is legitimate
+// visible evidence in the child's event log — an Agent that over-reaches has
+// still produced a valid, fully-refused attempt. Tightening this bound to the
+// execution budget would discard those runs instead of recording the refusal.
+const PREDICTION_TOOL_CALL_RECEIPT_CAP = 6;
+
 function waitForSessionProjection(milliseconds, signal) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -790,7 +798,7 @@ export async function synchronizedStructuredCaptureDisposition(
   sessionId,
   deadline,
 ) {
-  let events = ctx?.sessions?.get?.(sessionId)?.events;
+  let events = sessionEventLog(ctx, sessionId);
   const initialDisposition = structuredCaptureDisposition(events);
   // An allocated Session without a turn boundary is the exact zero-token
   // provider-rejection shape. Retrying it immediately cannot race a tool call.
@@ -812,7 +820,7 @@ export async function synchronizedStructuredCaptureDisposition(
   const expiresAt = Date.now() + graceMs;
   while (true) {
     deadline.throwIfExpired();
-    events = ctx?.sessions?.get?.(sessionId)?.events;
+    events = sessionEventLog(ctx, sessionId);
     if (Array.isArray(events) && consumedTerminalEnd(events)) {
       return structuredCaptureDisposition(events);
     }
@@ -842,6 +850,46 @@ function verifiedSkillInvocationEvidence(events, options) {
   }
 }
 
+// Evidence over a tool result the Host itself produces (structured_output) can
+// only be read after that handler has returned: inside the handler the result
+// does not exist yet. Callers verifying such evidence synchronize here first,
+// before the child's private disposal can retire the live projection.
+export async function synchronizedProjectedTerminalEvents(
+  ctx,
+  sessionId,
+  deadline,
+  satisfied = () => false,
+) {
+  const projected = () => sessionEventLog(ctx, sessionId);
+  const settled = (events) => Array.isArray(events)
+    && (satisfied(events) || Boolean(consumedTerminalEnd(events)));
+  let events = projected();
+  if (settled(events)) return events;
+  if (
+    !deadline
+    || typeof deadline.throwIfExpired !== "function"
+    || typeof deadline.remainingTimeoutMs !== "function"
+  ) {
+    return events;
+  }
+  const graceMs = Math.min(
+    SESSION_PROJECTION_SYNC_GRACE_MS,
+    Math.max(1, deadline.remainingTimeoutMs()),
+  );
+  const expiresAt = Date.now() + graceMs;
+  while (true) {
+    deadline.throwIfExpired();
+    events = projected();
+    if (settled(events)) return events;
+    const remainingGraceMs = expiresAt - Date.now();
+    if (remainingGraceMs <= 0) return events;
+    await waitForSessionProjection(
+      Math.min(SESSION_PROJECTION_SYNC_POLL_MS, remainingGraceMs),
+      deadline.signal,
+    );
+  }
+}
+
 export async function synchronizedSkillInvocationEvidence(ctx, sessionId, options, deadline) {
   const graceMs = Math.min(
     SESSION_PROJECTION_SYNC_GRACE_MS,
@@ -851,7 +899,7 @@ export async function synchronizedSkillInvocationEvidence(ctx, sessionId, option
   let lastError = null;
   while (true) {
     deadline.throwIfExpired();
-    const events = ctx?.sessions?.get?.(sessionId)?.events;
+    const events = sessionEventLog(ctx, sessionId);
     // Check the exact tool rejection before accepting ordering evidence: the
     // latter intentionally proves call order, not whether structured_output
     // accepted its arguments.
@@ -935,7 +983,10 @@ export function skillInvocationEvidence(
     }
   }
   const predictionCalls = calls.filter((item) => eventData(item.event).name === "ecology_execute_prediction_tool");
-  if ((!allowsPredictionTools && predictionCalls.length) || predictionCalls.length > 6) {
+  if (
+    (!allowsPredictionTools && predictionCalls.length)
+    || predictionCalls.length > PREDICTION_TOOL_CALL_RECEIPT_CAP
+  ) {
     throw new Error("prediction tool capability/call budget exceeded");
   }
   for (const call of predictionCalls) {
@@ -1025,10 +1076,13 @@ export class NativeStageRunner {
   async schema(file) {
     if (!this.schemaCache.has(file)) {
       const url = new URL(`../../schemas/${file}.schema.json`, import.meta.url);
-      this.schemaCache.set(
-        file,
-        readFile(url, "utf8").then(JSON.parse).then(dshCompatibleSchema),
-      );
+      const loaded = readFile(url, "utf8").then(JSON.parse).then(dshCompatibleSchema);
+      // Cache the parsed schema, never a rejection: a single transient read error
+      // would otherwise poison this stage for the life of the Node host.
+      loaded.catch(() => {
+        if (this.schemaCache.get(file) === loaded) this.schemaCache.delete(file);
+      });
+      this.schemaCache.set(file, loaded);
     }
     return structuredClone(await this.schemaCache.get(file));
   }
@@ -1171,7 +1225,7 @@ export class NativeStageRunner {
     request,
     identityDigests,
     roleHost,
-  lifecycle,
+    lifecycle,
     signal = null,
   }) {
     const dynamicRetrieval = (
@@ -1293,8 +1347,6 @@ export class NativeStageRunner {
       const persist = async (
         structured,
         sessionId,
-        capturedSessionMetrics = null,
-        capturedSessionEvents = null,
         persistenceDeadline = null,
       ) => {
         if (budgetError) throw budgetError;
@@ -1330,14 +1382,12 @@ export class NativeStageRunner {
             allowsPredictionTools: contract.allowsPredictionTools === true,
             allowDynamicRetrieval: dynamicRetrieval,
           };
-          const evidence = capturedSessionEvents
-            ? verifiedSkillInvocationEvidence(capturedSessionEvents, evidenceOptions)
-            : await synchronizedSkillInvocationEvidence(
-              this.ctx,
-              sessionId,
-              evidenceOptions,
-              persistenceDeadline,
-            );
+          const evidence = await synchronizedSkillInvocationEvidence(
+            this.ctx,
+            sessionId,
+            evidenceOptions,
+            persistenceDeadline,
+          );
           persistenceDeadline.throwIfExpired();
           persistedSkillEvidence = evidence;
           const resultDigest = jsonDigest(structured);
@@ -1356,7 +1406,7 @@ export class NativeStageRunner {
             output_schema_id: contract.schema,
             structured: structuredClone(structured),
             result_digest: resultDigest,
-            session_metrics: capturedSessionMetrics || dshSessionMetrics(this.ctx, sessionId),
+            session_metrics: dshSessionMetrics(this.ctx, sessionId),
             skill_invocation_evidence: evidence,
             admission_id: binding.admission_id,
           });
@@ -1405,8 +1455,6 @@ export class NativeStageRunner {
           persist: async ({ structured, session_id }, persistenceDeadline) => persist(
             structured,
             session_id,
-            null,
-            null,
             persistenceDeadline,
           ),
           deadline: lifecycle.deadline,
@@ -1468,6 +1516,26 @@ export class NativeStageRunner {
     await this.providerStageGate.drainRun?.(runId, deadline || { timeoutMs });
     await this.#drainLaunchLifecycles(runId);
     this.childBindings.revokeRun(runId);
+  }
+
+  // Called only once the Host has driven the run to a terminal status. Drops the
+  // per-run admission bookkeeping that closeLaunchFence deliberately keeps for
+  // live runs, so a long-lived Node host does not accumulate one closed-run
+  // marker per run it has ever executed.
+  forgetRun(runId) {
+    this.providerStageGate.forgetRun?.(runId);
+    this.pendingStarts.forgetRun?.(runId);
+    this.childBindings.revokeRun(runId);
+  }
+
+  async dispose() {
+    const runIds = new Set([
+      ...[...this.pendingStarts.pending].map((record) => record.binding?.runId),
+      ...[...this.providerStageGate.records].map((record) => record.runId),
+    ]);
+    runIds.delete(undefined);
+    await Promise.allSettled([...runIds].map((runId) => this.quiesceRun(runId)));
+    this.schemaCache.clear();
   }
 }
 

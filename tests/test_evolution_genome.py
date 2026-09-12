@@ -106,7 +106,7 @@ class EvolutionGenomeTests(unittest.TestCase):
                 },
                 lambda child: self.assertEqual(
                     resolve_candidate_agent_profile(child, registry)["skill_name"],
-                    "origin-vector-forecasting-anomaly-aware",
+                    "origin-vector-forecasting",
                 ),
             ),
         )

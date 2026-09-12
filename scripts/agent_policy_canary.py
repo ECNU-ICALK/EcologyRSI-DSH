@@ -65,7 +65,7 @@ adapter=DshSampleCollaborationAdapter(run_id=run_id,
  remote_critic_policy={'version':'always@1'},
  operation_max_tokens={'sample.planner':8192,'sample.repair':8192,'sample.critic':8192})
 plan=adapter.plan_batch({'run_id':run_id,'candidate_id':'candidate:agent-probe','algorithm_id':'greenhouse-exogenous-ridge','algorithm_version':'1',
- 'candidate_agent_profile':{'schema_version':'ecologyrsi-dsh.candidate-agent-profile/1','role':'sample-planner','skill_name':'origin-vector-forecasting-horizon-aware','instruction_parameters':{'confidence_threshold':.7}}})
+ 'candidate_agent_profile':{'schema_version':'ecologyrsi-dsh.candidate-agent-profile/1','role':'sample-planner','skill_name':'origin-vector-forecasting','instruction_parameters':{'confidence_threshold':.7}}})
 print('Running one real Agent origin with nine scoring cells',flush=True)
 started=time.monotonic()
 try:

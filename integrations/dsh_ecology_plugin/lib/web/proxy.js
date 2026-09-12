@@ -96,6 +96,20 @@ export function registerApiProxy(ctx, config) {
           resolveRequest();
         });
         req.once("aborted", () => upstream.destroy());
+        // content-length is advisory: a chunked upload declares none, so the cap
+        // has to be enforced against the bytes actually streamed upstream.
+        let requestBytes = 0;
+        req.on("data", (chunk) => {
+          requestBytes += chunk.length;
+          if (requestBytes > config.maxBodyBytes) {
+            req.unpipe(upstream);
+            if (!res.headersSent) errorResponse(res, 413, "请求过大");
+            else res.destroy();
+            upstream.destroy(new Error("request_too_large"));
+            req.destroy();
+            resolveRequest();
+          }
+        });
         req.pipe(upstream);
       });
     },

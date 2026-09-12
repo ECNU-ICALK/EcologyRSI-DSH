@@ -1226,17 +1226,24 @@
     var ttl = path === "/catalog" ? 60000 : /^\/datasets\/[^/]+(?:\?|$|\/samples\?)/.test(path) ? 15000 : 0;
     var cached = cachedReads.get(key);
     if (ttl && cached && cached.expires > Date.now()) { return Promise.resolve(clone(cached.value)); }
-    if (pendingReads.has(key)) { return pendingReads.get(key).then(clone); }
-    var operation = EcologyDSHHost.request(path, options).then(function (value) {
+    var shared = pendingReads.get(key);
+    if (shared) { shared.readers += 1; return shared.operation.then(clone); }
+    var entry = {operation: null, readers: 1};
+    entry.operation = EcologyDSHHost.request(path, options).then(function (value) {
       if (ttl) {
         cachedReads.delete(key);
         cachedReads.set(key, {value: value, expires: Date.now() + ttl});
         while (cachedReads.size > 16) { cachedReads.delete(cachedReads.keys().next().value); }
       }
       return value;
-    }).finally(function () { if (pendingReads.get(key) === operation) { pendingReads.delete(key); } });
-    pendingReads.set(key, operation);
-    return operation.then(clone);
+    }).finally(function () { if (pendingReads.get(key) === entry) { pendingReads.delete(key); } });
+    pendingReads.set(key, entry);
+    // Callers may mutate what they read, so only pay for a deep copy when someone
+    // else can still observe this value: the TTL cache keeps a reference, and a
+    // deduplicated reader gets its own copy.  A lone uncached read owns the result.
+    return entry.operation.then(function (value) {
+      return ttl || entry.readers > 1 ? clone(value) : value;
+    });
   }
 
   function agentPredictionDescription(info) {

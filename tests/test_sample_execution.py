@@ -2098,7 +2098,7 @@ class SampleExecutionTests(unittest.TestCase):
                 "candidate_agent_profile": {
                     "schema_version": "ecologyrsi-dsh.candidate-agent-profile/1",
                     "role": "sample-planner",
-                    "skill_name": "origin-vector-forecasting-balanced",
+                    "skill_name": "origin-vector-forecasting",
                 },
             }
         )
@@ -2126,7 +2126,7 @@ class SampleExecutionTests(unittest.TestCase):
         )
         self.assertEqual(
             call["context"]["candidate_agent_profile"]["skill_name"],
-            "origin-vector-forecasting-balanced",
+            "origin-vector-forecasting",
         )
         self.assertNotIn(
             "candidate_agent_profile",

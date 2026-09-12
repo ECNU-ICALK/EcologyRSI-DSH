@@ -1,4 +1,67 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+
+// DSH 0.1.5 narrowed the persisted session header to a closed shape: SessionStore
+// builds it from an explicit key allowlist (cwd, parentSession, isSeeded, origin,
+// delegationDepth, agentPreset), and CreateAgentOptions.meta now declares exactly
+// those keys. Plugin-authored meta is therefore dropped before persistence sees
+// it, and a plugin-defined session event is refused on read unless it carries
+// `ignorable: true`, which Session.append cannot set. So the role-host provenance
+// moves into the one field DSH stores verbatim and revalidates on every read: the
+// session id. A drifted preset digest, tool surface, or model route fingerprints
+// differently, so it cannot address the session it would have to resume.
+const ROLE_SESSION_PROVENANCE_VERSION = "ecologyrsi-dsh.role-session-provenance/1";
+const ROLE_SESSION_ID_PREFIX = "ecology-role-";
+const ROLE_SESSION_FINGERPRINT_LENGTH = 16;
+
+// Frozen order: the fingerprint is an identity, so its pre-image must not depend
+// on key insertion order, and a field appended here changes every session id.
+const ROLE_SESSION_PROVENANCE_FIELDS = Object.freeze([
+  "run_id",
+  "role",
+  "preset_id",
+  "preset_content_digest",
+  "standing_tool_surface_digest",
+  "route_config_digest",
+]);
+
+export function roleSessionFingerprint(binding) {
+  const preimage = JSON.stringify([
+    ROLE_SESSION_PROVENANCE_VERSION,
+    ...ROLE_SESSION_PROVENANCE_FIELDS.map((field) => String(binding?.[field] ?? "")),
+  ]);
+  return createHash("sha256").update(preimage, "utf8")
+    .digest("hex").slice(0, ROLE_SESSION_FINGERPRINT_LENGTH);
+}
+
+export function roleSessionId(binding) {
+  return `${ROLE_SESSION_ID_PREFIX}${roleSessionFingerprint(binding)}-${randomUUID()}`;
+}
+
+function assertRoleSessionProvenance(sessionId, binding) {
+  const expected = roleSessionFingerprint(binding);
+  if (sessionId.startsWith(`${ROLE_SESSION_ID_PREFIX}${expected}-`)) return;
+  const carried = sessionId.startsWith(ROLE_SESSION_ID_PREFIX)
+    ? sessionId.slice(
+      ROLE_SESSION_ID_PREFIX.length,
+      ROLE_SESSION_ID_PREFIX.length + ROLE_SESSION_FINGERPRINT_LENGTH,
+    )
+    : "";
+  // A pre-0.1.5 role host minted `ecology-role-<uuid>` and kept its provenance in
+  // header meta. Its log is also an older session format that this DSH refuses
+  // outright, so there is no resume path to offer: name the cut-over rather than
+  // report a digest mismatch the operator cannot act on.
+  if (!/^[0-9a-f]{16}$/.test(carried)) {
+    throw new Error(
+      "persisted DSH role-host predates "
+      + `${ROLE_SESSION_PROVENANCE_VERSION} and cannot be resumed: ${sessionId}`,
+    );
+  }
+  throw new Error(
+    `persisted DSH role-host provenance drifted: session id carries ${carried}, `
+    + `binding fingerprints to ${expected} `
+    + `over (${ROLE_SESSION_PROVENANCE_FIELDS.join(", ")})`,
+  );
+}
 
 function bindingKey(binding) {
   return `${binding.run_id}\u0000${binding.role}`;
@@ -14,11 +77,16 @@ function agentOptionsFor(modelRoute) {
   };
 }
 
+// Model metadata is a small, local-ish catalog read, not a generation call: a
+// route that cannot answer within this bound falls back to the declared default
+// effort rather than stalling role-host creation.
+const MODEL_INFO_TIMEOUT_MS = 10_000;
+
 async function roleRequestOptions(ctx, binding) {
   const options = agentOptionsFor(binding.model);
   if (!options.provider || typeof ctx.llm?.resolveModelInfo !== "function") return options;
   const info = await ctx.llm.resolveModelInfo(
-    options.provider, options.model, AbortSignal.timeout(10_000),
+    options.provider, options.model, AbortSignal.timeout(MODEL_INFO_TIMEOUT_MS),
   );
   const reasoning = info?.reasoning;
   const efforts = new Set(reasoning?.efforts?.map((effort) => effort.id) || []);
@@ -127,23 +195,22 @@ export class RoleAgentManager {
     if (!sessionId || !/^[a-z0-9][a-z0-9-]*$/.test(presetId)) {
       throw new Error("invalid persisted DSH role-host identity");
     }
-    const inspected = await this.ctx.sessionPersistence.inspect(sessionId);
-    const header = inspected?.header || inspected;
-    const meta = header?.meta;
-    if (!header || !meta || (header.id && header.id !== sessionId)) {
+    // DSH 0.1.5 removed SessionPersistence.inspect; the equivalent full logical
+    // read now lives on the app-layer SessionController. This guard only needs
+    // detached header metadata, so `stat` is both the surviving primitive and the
+    // cheaper one: it never reads the event log. Log integrity stays where it
+    // belongs, in ctx.agents.resume.
+    const stored = await this.ctx.sessionPersistence.stat(sessionId);
+    const header = stored?.header;
+    if (!header || header.id !== sessionId) {
       throw new Error("persisted DSH role-host header is invalid");
     }
-    const expectedMeta = {
-      agentPreset: presetId,
-      ecologyRunId: binding.run_id,
-      ecologyRole: binding.role,
-      ecologyPresetContentDigest: binding.preset_content_digest,
-      ecologyToolSurfaceDigest: binding.standing_tool_surface_digest,
-      ecologyRouteConfigDigest: binding.route_config_digest,
-    };
-    for (const [name, value] of Object.entries(expectedMeta)) {
-      if (meta[name] !== value) throw new Error(`persisted DSH role-host ${name} drifted`);
+    // agentPreset is the one provenance field DSH itself persists, so keep its
+    // own message; everything else is covered by the session-id fingerprint.
+    if (header.agentPreset !== presetId) {
+      throw new Error("persisted DSH role-host agentPreset drifted");
     }
+    assertRoleSessionProvenance(sessionId, binding);
     const standingKey = await this.ctx.agentPresets.standingKeyFor(presetId);
     if (!standingKey) throw new Error(`DSH preset is not mountable: ${presetId}`);
     const rawHandle = await this.ctx.agents.resume({
@@ -177,17 +244,14 @@ export class RoleAgentManager {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(presetId)) throw new Error("invalid DSH preset id");
     const standingKey = await this.ctx.agentPresets.standingKeyFor(presetId);
     if (!standingKey) throw new Error(`DSH preset is not mountable: ${presetId}`);
-    const sessionId = `ecology-role-${randomUUID()}`;
+    const sessionId = roleSessionId(binding);
     const options = {
       sessionId,
+      // Closed shape as of DSH 0.1.5; the run/role/digest provenance rides in
+      // sessionId because anything else here is dropped before persistence.
       meta: {
         cwd: binding.cwd,
         agentPreset: presetId,
-        ecologyRunId: binding.run_id,
-        ecologyRole: binding.role,
-        ecologyPresetContentDigest: binding.preset_content_digest,
-        ecologyToolSurfaceDigest: binding.standing_tool_surface_digest,
-        ecologyRouteConfigDigest: binding.route_config_digest,
       },
       agentOptions: agentOptionsFor(binding.model),
       setup: presetSetup(this.ctx, presetId),
@@ -270,13 +334,12 @@ export function dshSessionMetrics(ctx, sessionId) {
   const usage = semantics.provider_usage;
   // @deepseek-ai/dsh-token-meter exposes tokenUsage as the four cumulative
   // buckets directly.  It is not wrapped in a `totals` member.
-  const rawTotals = usage;
-  const totals = rawTotals && typeof rawTotals === "object"
+  const totals = usage && typeof usage === "object"
     ? {
-      uncached_input_tokens: nonnegativeInteger(rawTotals.uncachedInputTokens),
-      output_tokens: nonnegativeInteger(rawTotals.outputTokens),
-      cache_read_tokens: nonnegativeInteger(rawTotals.cacheReadTokens),
-      cache_write_tokens: nonnegativeInteger(rawTotals.cacheWriteTokens),
+      uncached_input_tokens: nonnegativeInteger(usage.uncachedInputTokens),
+      output_tokens: nonnegativeInteger(usage.outputTokens),
+      cache_read_tokens: nonnegativeInteger(usage.cacheReadTokens),
+      cache_write_tokens: nonnegativeInteger(usage.cacheWriteTokens),
     }
     : null;
   if (totals) {
