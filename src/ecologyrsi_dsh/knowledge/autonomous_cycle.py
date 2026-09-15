@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,18 +19,196 @@ RESEARCH_SYNTHESIS_SCHEMA_VERSION = "ecologyrsi-dsh.research-synthesis/1"
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _DIRECTION_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}")
+# The structural analogue of the scalar trust region. A recipe rewrite is not a
+# scalar move, so `TRUST_REGION_MAX_NORMALIZED_STEP` cannot bound it; without a
+# cap a single edit could replace the whole feature set and no score change
+# would be attributable to anything. Two is the smallest cap that still allows
+# the substitutions worth making -- swapping one primitive for another is a
+# remove plus an add -- while keeping a batch's result readable.
+MAX_RECIPE_TERM_EDITS_PER_MUTATION = 2
+# One axis catalog for both callers. The generation-level proposer and the
+# batch-local editor advertise different axis *sets* -- the local editor adds
+# the workflow and per-role axes and withholds `registered_predictor` -- but
+# they must never disagree about what an axis is called, which operation writes
+# it, or what it changes. Both project these maps down to the axes they actually
+# advertise, so a model is never shown an operation it may not use, and never an
+# axis without the operation name that would let it use it.
+MUTATION_OPERATION_BY_AXIS: dict[str, str] = {
+    "scientific_parameter": "set_bounded_parameter",
+    "registered_predictor": "select_registered_pipeline",
+    "instruction_profile": "select_instruction_template",
+    "instruction_parameter": "set_instruction_parameter",
+    "instruction_directive": "author_role_directive",
+    "instruction_tool_policy": "narrow_role_tool_policy",
+    "workflow_template": "select_registered_workflow_template",
+    "workflow_parameter": "set_bounded_workflow_parameter",
+    "feature_policy": "select_registered_feature_policy",
+    "feature_recipe": "author_feature_recipe",
+    "fit_policy": "select_registered_fit_policy",
+    "uncertainty_policy": "select_registered_uncertainty_policy",
+}
+MUTATION_DIRECTIONS_BY_AXIS: dict[str, tuple[str, ...]] = {
+    "scientific_parameter": ("increase", "decrease"),
+    "registered_predictor": ("select",),
+    "instruction_profile": ("select",),
+    "instruction_parameter": ("increase", "decrease"),
+    # Authoring is not a scalar move, so it has no increase/decrease. `author`
+    # writes a directive where none existed; `revise` rewrites the clauses of
+    # one the parent already had. Keeping them distinct lets a reflection say
+    # which of the two the evidence supports.
+    "instruction_directive": ("author", "revise"),
+    "instruction_tool_policy": ("narrow",),
+    "workflow_template": ("select",),
+    "workflow_parameter": ("increase", "decrease"),
+    "feature_policy": ("select",),
+    # Structural like `instruction_directive`, so it shares that axis's
+    # author/revise split rather than a scalar direction: `author` writes a
+    # recipe onto a candidate that had none, `revise` rewrites the terms of one
+    # the parent already carried. A term-count change is not a direction.
+    "feature_recipe": ("author", "revise"),
+    "fit_policy": ("select",),
+    "uncertainty_policy": ("select",),
+}
+MUTATION_AXIS_EFFECTS: dict[str, str] = {
+    "scientific_parameter": (
+        "Changes exactly one optional default-tool parameter within its "
+        "Host trust region and in the declared increase/decrease "
+        "direction; it cannot change the predictor, Planner "
+        "instruction, sample cohort, budget, evaluator, or gate. "
+        "Effects on final predictions are conditional on the Agent using that default; it may choose another tool, override call parameters or predict directly."
+    ),
+    "registered_predictor": (
+        "Switches the optional default predictor to its registered defaults. "
+        "The sample Agent still decides whether to use it and may tune tool-call parameters within catalog bounds. "
+        "Mutating the frozen default parameters requires a later accepted research or local edit."
+    ),
+    "instruction_profile": (
+        "Changes Agent reasoning, optional tool choice, parameter exploration, "
+        "evidence combination and final numerical predictions. Evaluate both "
+        "forecast quality and execution reliability. The Host-selected origin "
+        "cohort, sample budget, evaluator and statistical gates remain fixed."
+    ),
+    "instruction_parameter": (
+        "Tunes one bounded number inside the Planner's current instruction "
+        "template without changing which template it is. Today that number is "
+        "`confidence_threshold`, and it is the Planner's escalation threshold: a "
+        "decision whose reported confidence falls below it is sent to the remote "
+        "critic for an independent look. Raising it buys review on more cells and "
+        "costs one extra model call for each of them; lowering it spends less and "
+        "leaves more decisions unreviewed. The advertised bounds are the cost "
+        "window, not the arithmetic one -- Planner confidences observed in "
+        "production sit around 0.70-0.85, so a threshold near 0.9 would escalate "
+        "almost every cell. Selecting a different instruction template does not "
+        "move this number: every template carries the same default, so template "
+        "choice stays a pure strategy change."
+    ),
+    "instruction_tool_policy": (
+        "Removes tools from the role's inherited policy. Narrowing only: a "
+        "candidate can never grant itself a tool the Host did not enable."
+    ),
+    "instruction_directive": (
+        "Writes the Planner's strategy instead of selecting one of the "
+        "registered templates. The directive is authored as four clauses, and "
+        "they are not all of the same kind. `blend_rule` and `tool_plan` are "
+        "enforced by the Host: the blend rule narrows the prediction methods "
+        "the Host will accept, and a tool plan naming a tool this candidate "
+        "does not have is rejected before the run. `anchor` and `rationale` "
+        "reach the Planner as strategy and are only as strong as the Planner's "
+        "compliance. Authoring replaces the selected template's text entirely, "
+        "so it supersedes `instruction_profile` rather than combining with it; "
+        "the escalation threshold stays on `instruction_parameter`, and the "
+        "directive states whatever value is set there. This is the widest axis "
+        "available: it can express strategies no registered template does, and "
+        "for the same reason it carries no template's track record."
+    ),
+    "workflow_template": (
+        "Replaces the registered execution graph the candidate runs under. "
+        "Structural, so it needs batch evidence that the current graph is the "
+        "limitation."
+    ),
+    "workflow_parameter": (
+        "Sets this generation's requested per-sample retry depth "
+        "(`max_attempts`). The Host contributes a reliability floor derived "
+        "from the previous generation's transient failures, and the effective "
+        "depth is `max(requested, floor)` -- so raising it always takes effect, "
+        "while a request below the floor is overruled. That is why the "
+        "advertised minimum is the floor's own value rather than 1: every legal "
+        "value has to be observable in the evaluation record. Deeper retries buy "
+        "coverage against transient runtime failures and cost model calls."
+    ),
+    "feature_policy": (
+        "Selects a registered feature-construction policy for the predictor."
+    ),
+    "feature_recipe": (
+        "Rewrites which features the predictor is built from, inside the "
+        "`authored_causal_features@1` grammar: a list of whitelisted primitives "
+        "(target lags, rolling mean/std, slope, seasonal reference and delta, "
+        "diurnal encoding, exogenous columns), a ridge model with its alpha and "
+        "baseline anchor, and the per-horizon residual scales. This changes what "
+        "information the model can see rather than the scale of a coefficient it "
+        "already has, so it is the widest scientific axis available -- and for "
+        "that reason it is bounded on every side: the primitive whitelist is the "
+        "Host's, the term, lag and window ceilings come from the bound feature "
+        "policy, and one edit may change at most "
+        f"{MAX_RECIPE_TERM_EDITS_PER_MUTATION} terms so a score change stays "
+        "attributable. Only predictors that declare a feature policy accept one; "
+        "on any other predictor the axis is absent."
+    ),
+    "fit_policy": ("Selects a registered fitting policy for the predictor."),
+    "uncertainty_policy": (
+        "Selects a registered interval-calibration policy. Not connected to "
+        "point-forecast execution, so it cannot improve the score."
+    ),
+}
+
+
+def mutation_axis_contract(axes: Iterable[str]) -> dict[str, Any]:
+    """Project the axis catalog onto the axes a caller is really advertising."""
+
+    advertised = tuple(axes)
+    missing = [axis for axis in advertised if axis not in MUTATION_OPERATION_BY_AXIS]
+    if missing:
+        raise ValueError(
+            f"mutation axes have no registered operation: {sorted(missing)}"
+        )
+    return {
+        "operation_by_axis": {
+            axis: MUTATION_OPERATION_BY_AXIS[axis] for axis in advertised
+        },
+        "mutation_directions_by_axis": {
+            axis: list(MUTATION_DIRECTIONS_BY_AXIS[axis]) for axis in advertised
+        },
+        "mutation_axis_effects": {
+            axis: MUTATION_AXIS_EFFECTS[axis] for axis in advertised
+        },
+    }
+
+
+# The axes a generation-level candidate proposal may declare a direction on. A
+# strict subset of the catalog above, and the reason is delivery rather than
+# taste: `registered_predictor` and the three policy axes are proposed here but
+# withheld from the batch-local editor, while `instruction_tool_policy`,
+# `workflow_template`, `feature_policy`, `fit_policy` and `uncertainty_policy`
+# have no reachable edit at all today (one registered program, a pinned workflow
+# class, or no consumer). An axis stays out of this set until an accepted
+# direction on it could change something a score can see.
+#
+# `feature_recipe` is the exception to the "policy axes are select-only" shape:
+# selecting `authored_causal_features@1` was already possible and changed
+# nothing by itself, because the recipe it governs had no writer. The axis is
+# the writer. It is advertised only when the bound predictor declares a feature
+# policy, so a candidate on a scalar-tunable predictor never sees it.
 CANDIDATE_MUTATION_AXES = frozenset(
     {
         "scientific_parameter",
+        "feature_recipe",
         "registered_predictor",
         "instruction_profile",
+        "instruction_parameter",
+        "instruction_directive",
+        "workflow_parameter",
     }
 )
-_MUTATION_DIRECTIONS_BY_AXIS = {
-    "scientific_parameter": frozenset({"increase", "decrease"}),
-    "registered_predictor": frozenset({"select"}),
-    "instruction_profile": frozenset({"select"}),
-}
 _FORBIDDEN_KEYS = frozenset(
     {
         "code",
@@ -373,7 +551,7 @@ class CandidateDirection:
             "mutation_direction",
             maximum=40,
         )
-        if mutation_direction not in _MUTATION_DIRECTIONS_BY_AXIS[mutation_axis]:
+        if mutation_direction not in MUTATION_DIRECTIONS_BY_AXIS[mutation_axis]:
             raise ValueError("mutation_direction is incompatible with mutation_axis")
         object.__setattr__(self, "mutation_direction", mutation_direction)
         object.__setattr__(
@@ -896,8 +1074,12 @@ __all__ = [
     "GENERATION_REFLECTION_SCHEMA_VERSION",
     "GenerationReflection",
     "GenerationSearchPlan",
+    "MUTATION_AXIS_EFFECTS",
+    "MUTATION_DIRECTIONS_BY_AXIS",
+    "MUTATION_OPERATION_BY_AXIS",
     "RESEARCH_SYNTHESIS_SCHEMA_VERSION",
     "SEARCH_PLAN_SCHEMA_VERSION",
+    "mutation_axis_contract",
     "normalize_candidate_directions",
     "normalize_search_queries",
     "reject_executable_fields",

@@ -82,7 +82,31 @@
     water_stress: "水分胁迫指数", split: "数据分区"
   };
   var interventionLabels = {
-    guidance: "方向建议", parameter_override: "参数覆盖", constraint: "新增约束", parent_selection: "指定父方案"
+    guidance: "方向建议", parameter_override: "参数覆盖", constraint: "新增约束", parent_selection: "指定父方案", domain_knowledge: "专家知识"
+  };
+  // The twelve mutation axes the host advertises to the researcher. A candidate
+  // card that only names the raw operation ("set_bounded_workflow_parameter")
+  // asks the expert to know the contract vocabulary before they can judge the
+  // move; naming the axis in domain terms is what makes the panel reviewable.
+  var mutationAxisLabels = {
+    scientific_parameter: "科学参数", registered_predictor: "预测模型选择",
+    instruction_profile: "指令模板", instruction_parameter: "指令参数",
+    instruction_directive: "指令正文", instruction_tool_policy: "工具权限",
+    workflow_template: "执行流程模板", workflow_parameter: "执行流程参数",
+    feature_policy: "特征处理规则", feature_recipe: "特征配方",
+    fit_policy: "拟合策略", uncertainty_policy: "不确定性估计策略",
+    scientific_program: "科学程序", agent_program: "智能体执行程序"
+  };
+  var mutationOperationLabels = {
+    set_bounded_parameter: "设定有界科学参数", select_registered_pipeline: "选择已注册预测流水线",
+    select_instruction_template: "选择指令模板", set_instruction_parameter: "设定指令参数",
+    author_role_directive: "撰写角色指令正文", narrow_role_tool_policy: "收紧角色工具权限",
+    select_registered_workflow_template: "选择已注册执行流程", set_bounded_workflow_parameter: "设定有界执行流程参数",
+    select_registered_feature_policy: "选择已注册特征处理规则", author_feature_recipe: "撰写特征配方",
+    select_registered_fit_policy: "选择已注册拟合策略", select_registered_uncertainty_policy: "选择已注册不确定性策略"
+  };
+  var mutationDirectionLabels = {
+    increase: "调高", decrease: "调低", select: "改选", author: "新撰", revise: "改写"
   };
   var eventLabels = {
     "run.created": "进化运行已创建", "run.started": "进化运行已启动", "run.paused": "进化运行已暂停",
@@ -220,7 +244,7 @@
   function expertConsultationDraft(runId, consultationId) {
     var key = expertConsultationDraftKey(runId, consultationId);
     if (!state.expertConsultationDrafts[key]) {
-      state.expertConsultationDrafts[key] = { answer: "", selected_option: "", answered_by: defaultExpertIdentity() };
+      state.expertConsultationDrafts[key] = { answer: "", selected_option: "", answered_by: defaultExpertIdentity(), persistent: false };
     }
     return state.expertConsultationDrafts[key];
   }
@@ -966,7 +990,10 @@
       failure_reason: item.failure_reason || item.error || item.failure || null,
       failed_stage: item.failed_stage || item.failure_stage || null,
       metrics: item.metrics && typeof item.metrics === "object" ? item.metrics : {},
-      changes: item.changes && typeof item.changes === "object" ? item.changes : {}
+      changes: item.changes && typeof item.changes === "object" ? item.changes : {},
+      // Absent on a summary row and on any pre-genome run, so the renderer has
+      // to distinguish "not projected here" from "no change" itself.
+      mutation_explanation: item.mutation_explanation && typeof item.mutation_explanation === "object" ? item.mutation_explanation : null
     });
   }
   function normalizeExpertConsultation(value, index) {
@@ -989,7 +1016,8 @@
       answered_by: item.answered_by || nestedAnswer.answered_by || null,
       answered_at: item.answered_at || nestedAnswer.answered_at || nestedAnswer.created_at || null,
       effective_generation: Object.prototype.hasOwnProperty.call(item, "effective_generation") ? item.effective_generation : nestedAnswer.effective_generation,
-      applied_generation: Object.prototype.hasOwnProperty.call(item, "applied_generation") ? item.applied_generation : nestedAnswer.applied_generation
+      applied_generation: Object.prototype.hasOwnProperty.call(item, "applied_generation") ? item.applied_generation : nestedAnswer.applied_generation,
+      persistent: (Object.prototype.hasOwnProperty.call(item, "persistent") ? item.persistent : nestedAnswer.persistent) === true
     });
   }
   function processCandidates(run) {
@@ -1184,7 +1212,8 @@
     if (/forbidden|403|capability/i.test(text)) { return "当前 DSH 能力权限不允许执行该操作。"; }
     if (/validation partition/i.test(text)) { return "迭代搜索只能使用训练反馈分区，不能读取正式验证分区。"; }
     if (/training_fit/i.test(text)) { return "当前目录未开放训练拟合分区。"; }
-    if (/run must be paused|expected paused/i.test(text)) { return "提交人工意见前必须先暂停进化运行。"; }
+    if (/expected paused, running/i.test(text)) { return "只有运行中或已暂停的进化运行可以提交专家意见。"; }
+    if (/run must be paused|expected paused/i.test(text)) { return "该操作需要先暂停进化运行。"; }
     if (/run must be running/i.test(text)) { return "只有运行中的任务可以执行下一轮。"; }
     if (/unknown run/i.test(text)) { return "未找到指定的进化运行。"; }
     if (/idempotency/i.test(text)) { return "请求标识与已有操作冲突。"; }

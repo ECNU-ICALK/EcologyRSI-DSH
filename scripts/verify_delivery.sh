@@ -79,12 +79,12 @@ integrations/dsh_ecology_plugin/schemas/genome-mutation.schema.json
 integrations/dsh_ecology_plugin/schemas/local-edit.schema.json
 integrations/dsh_ecology_plugin/presets/ecology-coordinator-v5/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-coordinator-v5/agent.cordis.yml
-integrations/dsh_ecology_plugin/presets/ecology-researcher-v12/preset.yml
-integrations/dsh_ecology_plugin/presets/ecology-researcher-v12/agent.cordis.yml
-integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4/preset.yml
-integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4/agent.cordis.yml
-integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v9/preset.yml
-integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v9/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-researcher-v13/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-researcher-v13/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v5/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v5/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v11/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v11/agent.cordis.yml
 integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v5/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v5/agent.cordis.yml
 integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v8/preset.yml
@@ -108,9 +108,9 @@ import sys
 root = Path.cwd()
 current_presets = {
     "ecology-coordinator-v5",
-    "ecology-researcher-v12",
-    "ecology-candidate-proposer-v4",
-    "ecology-sample-planner-v9",
+    "ecology-researcher-v13",
+    "ecology-candidate-proposer-v5",
+    "ecology-sample-planner-v11",
     "ecology-sample-critic-v5",
     "ecology-generation-judge-v8",
 }

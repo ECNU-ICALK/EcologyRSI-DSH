@@ -55,6 +55,7 @@ from .models import (
     ExpertConsultation,
     ExpertConsultationAnswer,
     HumanIntervention,
+    InterventionKind,
     ModelArtifact,
     Promotion,
     PromotionDecision,
@@ -691,6 +692,7 @@ def validate_generation_comparison_binding(
         challenger_promotion_allowed=not exploration_only,
         positive_delta_search=uses_positive_delta_search_protocol(task),
         legacy_runtime_v2_shape=legacy_runtime_v2_shape,
+        legacy_incomplete_paired_scoring=legacy_incomplete_paired_scoring(comparison),
         require_paired_strict_chain=paired_execution_qualification_required(
             task.metadata, comparison.gate_results.get("paired_execution_qualification")
         ),
@@ -699,6 +701,31 @@ def validate_generation_comparison_binding(
         raise ValueError(
             "generation comparison differs from deterministic Host comparison"
         )
+
+
+def legacy_incomplete_paired_scoring(comparison: GenerationComparison) -> bool:
+    """Replay a record whose Host could not yet read complete paired evidence.
+
+    Before ``6458330`` fixed ``_evidence_matches_evaluation``, every arm's
+    complete 50-origin evidence was reported as
+    ``paired_scoring_evidence_incomplete``.  Recomputation now reads the same
+    durable evidence as complete, so those archived comparisons would stop
+    replaying.  The recorded verdict is the strictly conservative one -- it only
+    adds failures and clears eligibility -- so reproducing it is safe, and the
+    identity comparison against the rebuilt record still has to match exactly.
+    """
+
+    arms = comparison.gate_results.get("arms")
+    if not isinstance(arms, Mapping) or not arms:
+        return False
+    return all(
+        isinstance(gate, Mapping)
+        and (
+            gate.get("paired_scoring_evidence_complete") is False
+            or "paired_scoring_evidence_incomplete" in tuple(gate.get("failures") or ())
+        )
+        for gate in arms.values()
+    )
 
 
 def persisted_genome_from_proposal(proposal: Proposal):
@@ -2007,6 +2034,16 @@ class RunState:
     def available_expert_answers(
         self, generation: int
     ) -> tuple[ExpertConsultationAnswer, ...]:
+        """Answers a research iteration at `generation` may still read.
+
+        A one-off answer drops out once some iteration has consumed it. A
+        `persistent` one does not: durable domain knowledge -- "night
+        transpiration lags by roughly two hours here" -- is a standing fact
+        about the domain, and dropping it after a single generation meant the
+        model re-derived, and often re-contradicted, what the expert had
+        already settled. It is still excluded from the generation that already
+        applied it, so one iteration can never consume the same answer twice.
+        """
         return tuple(
             sorted(
                 (
@@ -2014,7 +2051,10 @@ class RunState:
                     for item in self.expert_consultation_answers
                     if item.effective_generation is not None
                     and item.effective_generation <= generation
-                    and item.applied_generation is None
+                    and (
+                        item.applied_generation is None
+                        or (item.persistent and item.applied_generation < generation)
+                    )
                 ),
                 key=lambda item: (item.created_at, item.answer_id),
             )
@@ -2211,2497 +2251,23 @@ class RunStateReducer:
         self.events += incoming
         for event in incoming:
             payload = event.payload
-            if event.kind == "RunSeedGenomeMaterialized":
-                if self.expected_seed_canonical is None:
-                    raise ValueError("historical run cannot materialize a DSH-native seed")
-                if self.materialized_seed_canonical is not None:
-                    raise ValueError("run has multiple seed materialization events")
-                if not isinstance(payload, Mapping) or set(payload) != {
-                    "schema_version",
-                    "materializer_version",
-                    "genome_canonical_json",
-                    "genome_digest",
-                }:
-                    raise ValueError("RunSeedGenomeMaterialized payload is invalid")
-                if payload["genome_canonical_json"] != self.expected_seed_canonical:
-                    raise ValueError("materialized seed differs from RunCreated expectation")
-                from ..evolution.genome import EcologyEvolutionPluginGenome
-
-                import json
-
-                seed = EcologyEvolutionPluginGenome.from_dict(
-                    json.loads(self.expected_seed_canonical)
-                )
-                if payload["genome_digest"] != seed.genome_digest:
-                    raise ValueError("materialized seed genome digest mismatch")
-                self.materialized_seed_canonical = self.expected_seed_canonical
-            elif event.kind == "DshRuntimeBound":
-                if set(payload) != {
-                    "schema_version",
-                    "execution_protocol",
-                    "capabilities_digest",
-                    "preset_ids",
-                    "first_call_verified",
-                }:
-                    raise ValueError("DshRuntimeBound payload is invalid")
-                if (
-                    payload["schema_version"] != "ecologyrsi-dsh.runtime-bound/1"
-                    or payload["execution_protocol"] != DSH_NATIVE_EVOLUTION_PROTOCOL
-                    or payload["first_call_verified"] is not False
-                    or not isinstance(payload["preset_ids"], list)
-                    or not isinstance(payload["capabilities_digest"], str)
-                    or len(payload["capabilities_digest"]) != 64
-                ):
-                    raise ValueError("DshRuntimeBound contract is invalid")
-            elif event.kind == AUDIT_EVENT:
-                if self.run.status is not RunStatus.CREATED or self.model_contract_preflight_recorded:
-                    raise ValueError("model preflight audit must be recorded once before start")
-                validate_preflight_audit(
-                    payload, self.task, self.run.run_id,
-                    recorded_at=event.created_at, created_at=self.created.created_at,
-                )
-                self.model_contract_preflight_recorded = True
-            elif event.kind == "RunStarted":
-                if (preflight_audit_required(self.task.metadata)
-                        and not self.model_contract_preflight_recorded):
-                    raise ValueError("run started without model contract preflight audit")
-                if self.active_gateway_circuit_pause is not None:
-                    raise ValueError(
-                        "gateway circuit requires an exact RunResumed origin"
-                    )
-                if self.expected_seed_canonical is not None and self.materialized_seed_canonical is None:
-                    raise ValueError("DSH-native run started before seed initialization")
-                if self.run.status not in _TERMINAL_RUN_STATUSES:
-                    self.run = replace(
-                        self.run, status=RunStatus.RUNNING, session_id=payload["session_id"]
-                    )
-            elif event.kind == "RunPaused":
-                if payload.get("code") in GATEWAY_CIRCUIT_CODES:
-                    _validate_gateway_circuit_pause_payload(payload)
-                    if (
-                        self.run.status is not RunStatus.RUNNING
-                        or int(payload["generation"]) != int(self.run.generation)
-                    ):
-                        raise ValueError(
-                            "gateway circuit pause requires a running current generation"
-                        )
-                    scope = self.gateway_retry_scope(payload)
-                    reset_seq = self.gateway_retry_reset_seq(
-                        scope,
-                        dsh_continuity_reset=(
-                            payload.get("continuity_reset_contract")
-                            == _DSH_CONTINUITY_RESET_CONTRACT
-                        ),
-                    )
-                    prior_retry = self.active_gateway_retry(scope, reset_seq=reset_seq)
-                    first_retry = self.gateway_retry_first_by_scope.get(scope)
-                    first_failure_event = (
-                        first_retry
-                        if first_retry is not None and first_retry.seq > reset_seq
-                        else event
-                    )
-                    _validate_gateway_circuit_pause_trigger_evidence(
-                        payload,
-                        first_failure_event=first_failure_event,
-                        pause_event=event,
-                    )
-                    if prior_retry is None:
-                        chain_valid = (
-                            payload["consecutive_failures"] == 1
-                            and payload["breaker_epoch"]
-                            == self.gateway_retry_expected_epoch(scope, reset_seq=reset_seq)
-                            and payload["first_failure_at"]
-                            == payload["last_failure_at"]
-                        )
-                    else:
-                        chain_valid = (
-                            payload["consecutive_failures"]
-                            == prior_retry.payload["consecutive_failures"] + 1
-                            and payload["breaker_epoch"]
-                            == prior_retry.payload["breaker_epoch"]
-                            and payload["retry_limit"]
-                            == prior_retry.payload["retry_limit"]
-                            and payload["first_failure_at"]
-                            == prior_retry.payload["first_failure_at"]
-                            and _aware_timestamp(payload["last_failure_at"])
-                            >= _aware_timestamp(prior_retry.payload["last_failure_at"])
-                        )
-                    if not chain_valid:
-                        raise ValueError(
-                            "gateway circuit pause does not match the retry chain"
-                        )
-                    self.gateway_retry_max_epoch[scope] = max(
-                        self.gateway_retry_max_epoch.get(scope, 0),
-                        int(payload["breaker_epoch"]),
-                    )
-                    self.active_gateway_circuit_pause = event
-                else:
-                    if self.active_gateway_circuit_pause is not None:
-                        raise ValueError(
-                            "gateway circuit requires an exact RunResumed origin"
-                        )
-                if self.run.status not in _TERMINAL_RUN_STATUSES:
-                    self.run = replace(self.run, status=RunStatus.PAUSED)
-            elif event.kind == "RunResumed":
-                if self.active_gateway_circuit_pause is not None:
-                    if payload.get("resume_origin") not in GATEWAY_CIRCUIT_CODES:
-                        raise ValueError(
-                            "gateway circuit requires an exact RunResumed origin"
-                        )
-                    _validate_gateway_circuit_resume_payload(payload)
-                    origin = self.active_gateway_circuit_pause
-                    if (
-                        self.run.status is not RunStatus.PAUSED
-                        or origin is None
-                        or payload["origin_pause_event_id"] != origin.event_id
-                        or payload["origin_breaker_epoch"]
-                        != origin.payload.get("breaker_epoch")
-                        or payload["retry_class"] != origin.payload.get("retry_class")
-                        or payload["generation"] != origin.payload.get("generation")
-                        or payload["stage"] != origin.payload.get("stage")
-                    ):
-                        raise ValueError(
-                            "gateway circuit resume does not match the active pause"
-                        )
-                elif payload.get("resume_origin") in GATEWAY_CIRCUIT_CODES:
-                    _validate_gateway_circuit_resume_payload(payload)
-                    raise ValueError(
-                        "gateway circuit resume does not match the active pause"
-                    )
-                self.active_gateway_circuit_pause = None
-                if self.run.status not in _TERMINAL_RUN_STATUSES:
-                    self.run = replace(self.run, status=RunStatus.RUNNING)
-                self.latest_run_resumed = event
-            elif event.kind == "RunCancelled":
-                if self.run.status not in _TERMINAL_RUN_STATUSES:
-                    self.run = replace(self.run, status=RunStatus.CANCELLED)
-            elif event.kind == "RunFailed":
-                if self.run.status not in _TERMINAL_RUN_STATUSES:
-                    self.run = replace(self.run, status=RunStatus.FAILED)
-            elif event.kind == "RunCompleted":
-                if self.run.status not in _TERMINAL_RUN_STATUSES:
-                    self.run = replace(self.run, status=RunStatus.COMPLETED)
-            elif event.kind == "GenerationAdvanced":
-                if self.run.status not in _TERMINAL_RUN_STATUSES:
-                    next_generation = payload.get("generation")
-                    if uses_global_incumbent_protocol(self.task) and (
-                        isinstance(next_generation, bool)
-                        or not isinstance(next_generation, int)
-                        or next_generation != self.run.generation + 1
-                        or self.run.generation not in self.generation_comparisons
-                        or self.run.generation not in self.effective_revision_bindings
-                        or self.run.generation not in self.champion_generations
-                    ):
-                        raise ValueError(
-                            "runtime-v2 generation advance requires the sequential "
-                            "global incumbent decision"
-                        )
-                    self.run = replace(self.run, generation=int(payload["generation"]))
-            elif event.kind == "ProposalSubmitted":
-                if is_dsh_native_protocol(self.task) and self.formal_stage_started:
-                    raise ValueError("formal stage results cannot feed a new proposal")
-                item = Proposal.from_dict(payload["proposal"])
-                if is_dsh_native_protocol(self.task):
-                    genome = persisted_genome_from_proposal(item)
-                    if genome is None:
-                        raise ValueError("DSH-native proposal is missing its genome")
-                    lineage = dict(genome.lineage)
-                    seed_control = (
-                        item.metadata.get("candidate_role")
-                        == CandidateRole.INCUMBENT_CONTROL.value
-                    )
-                    if seed_control:
-                        if self.materialized_seed_canonical is None:
-                            raise ValueError("seed incumbent cannot precede seed materialization")
-                        import json
-
-                        from ..evolution.genome import EcologyEvolutionPluginGenome
-
-                        seed = EcologyEvolutionPluginGenome.from_dict(
-                            json.loads(self.materialized_seed_canonical)
-                        )
-                        if (
-                            item.generation != 0
-                            or item.parent_candidate_id is not None
-                            or genome.genome_digest != seed.genome_digest
-                            or lineage["origin_kind"] != "seed_catalog"
-                            or lineage["generation"] is not None
-                            or lineage["slot_index"] is not None
-                        ):
-                            raise ValueError(
-                                "seed incumbent proposal does not match materialized seed"
-                            )
-                    elif (
-                        lineage["generation"] != item.generation
-                        or lineage["parent_candidate_id"] != item.parent_candidate_id
-                    ):
-                        raise ValueError("proposal scope does not match genome lineage")
-                    if item.generation == 0 and not seed_control:
-                        if self.materialized_seed_canonical is None:
-                            raise ValueError("proposal cannot precede seed materialization")
-                        import json
-
-                        from ..evolution.genome import EcologyEvolutionPluginGenome
-
-                        seed = EcologyEvolutionPluginGenome.from_dict(
-                            json.loads(self.materialized_seed_canonical)
-                        )
-                        if lineage["parent_genome_digest"] != seed.genome_digest:
-                            raise ValueError("first-generation proposal parent genome mismatch")
-                    elif not seed_control and item.parent_candidate_id is None:
-                        raise ValueError("later DSH-native proposal requires a parent candidate")
-                self.proposals[item.proposal_id] = item
-            elif event.kind == "CandidateSpawned":
-                item = Candidate.from_dict(payload["candidate"])
-                if item.run_id != self.run.run_id:
-                    raise ValueError("candidate ownership does not match run")
-                if item.candidate_id in self.candidates:
-                    raise ValueError("candidate_id has multiple spawn events")
-                if is_dsh_native_protocol(self.task):
-                    proposal = self.proposals.get(item.proposal_id)
-                    if proposal is None:
-                        raise ValueError("candidate is missing its DSH-native proposal")
-                    genome = persisted_genome_from_proposal(proposal)
-                    if genome is None:
-                        raise ValueError("candidate proposal is missing its genome")
-                    lineage = dict(genome.lineage)
-                    if item.role is CandidateRole.INCUMBENT_CONTROL:
-                        if self.materialized_seed_canonical is None:
-                            raise ValueError("incumbent control cannot precede seed")
-                        import json
-
-                        from ..evolution.genome import EcologyEvolutionPluginGenome
-
-                        seed = EcologyEvolutionPluginGenome.from_dict(
-                            json.loads(self.materialized_seed_canonical)
-                        )
-                        if (
-                            item.proposal_id
-                            != f"proposal:{self.run.run_id}:seed-incumbent-control"
-                            or item.candidate_id
-                            != f"candidate:{self.run.run_id}:seed-incumbent-control"
-                            or item.slot_index != 0
-                            or any(
-                                candidate.role is CandidateRole.INCUMBENT_CONTROL
-                                for candidate in self.candidates.values()
-                            )
-                            or
-                            proposal.metadata.get("candidate_role") != item.role.value
-                            or genome.genome_digest != seed.genome_digest
-                            or lineage["origin_kind"] != "seed_catalog"
-                            or lineage["generation"] is not None
-                            or lineage["slot_index"] is not None
-                        ):
-                            raise ValueError(
-                                "deterministic seed control does not match materialized seed"
-                            )
-                    elif (
-                        item.generation != lineage["generation"]
-                        or item.slot_index != lineage["slot_index"]
-                    ):
-                        raise ValueError("candidate coordinates do not match genome lineage")
-                    binding = validate_identity_binding(payload.get("identity_binding"))
-                    if binding["genome_digest"] != genome.genome_digest:
-                        raise ValueError("candidate identity binding genome mismatch")
-                    if binding["behavior_digest"] != genome.behavior_digest:
-                        raise ValueError("candidate identity binding behavior mismatch")
-                    self.candidate_identity_bindings[item.candidate_id] = {
-                        "candidate_id": item.candidate_id,
-                        "identity_binding": binding,
-                    }
-                self.candidates[item.candidate_id] = item
-            elif event.kind == "RunAdaptationCohortFrozen":
-                if set(payload) != {"adaptation"}:
-                    raise ValueError("RunAdaptationCohortFrozen payload is invalid")
-                adaptation = RunAdaptationCohort.from_dict(payload["adaptation"])
-                schedule = OptimizationSchedule.from_dict(
-                    self.task.metadata["optimization_schedule"]
-                )
-                if (
-                    self.task.metadata.get("optimization_protocol") not in ADAPTIVE_PROTOCOLS
-                    or adaptation.dataset_id != self.task.visible_datasets[0]
-                    or adaptation.episode_id != str(self.task.metadata.get("episode_id"))
-                    or adaptation.seed != self.task.seed
-                    or adaptation.origin_count
-                    != schedule.formal_origin_count_per_finalist
-                    or len(adaptation.batches) != schedule.batch_count
-                    or any(
-                        batch.origin_count != schedule.local_batch_origin_count
-                        for batch in adaptation.batches
-                    )
-                ):
-                    raise ValueError("run adaptation cohort differs from frozen task")
-                if (
-                    self.run_adaptation_cohort is not None
-                    and self.run_adaptation_cohort.to_dict() != adaptation.to_dict()
-                ):
-                    raise ValueError("conflicting run adaptation cohort")
-                self.run_adaptation_cohort = adaptation
-            elif event.kind == "GenerationCohortsFrozen":
-                if set(payload) != {"generation_cohorts"}:
-                    raise ValueError("GenerationCohortsFrozen payload is invalid")
-                planned = GenerationCohorts.from_dict(payload["generation_cohorts"])
-                schedule = OptimizationSchedule.from_dict(
-                    self.task.metadata["optimization_schedule"]
-                )
-                generation_candidates = [
-                    item for item in self.candidates.values()
-                    if item.generation == planned.generation
-                    and item.role is CandidateRole.SEARCH
-                ]
-                if self.run_adaptation_cohort is None:
-                    raise ValueError("generation cohorts require run adaptation cohort")
-                if len(generation_candidates) != 4:
-                    raise ValueError("generation cohorts require exactly four candidates")
-                if any(
-                    generation == planned.generation
-                    for generation, _candidate_id in self.candidate_screening_events
-                ):
-                    raise ValueError("generation cohorts must precede screening")
-                if (
-                    planned.dataset_id != self.run_adaptation_cohort.dataset_id
-                    or planned.episode_id != self.run_adaptation_cohort.episode_id
-                    or planned.seed != self.task.seed
-                    or planned.adaptation_digest
-                    != self.run_adaptation_cohort.adaptation_digest
-                    or planned.adaptation_batch_digests
-                    != self.run_adaptation_cohort.batch_digests
-                    or planned.screening.origin_count
-                    != schedule.screening_origin_count
-                    or planned.screening.shared_candidate_count != 4
-                    or planned.holdout.origin_count
-                    != schedule.selection_holdout_origin_count
-                    or planned.holdout.shared_arm_count != schedule.finalist_count + 1
-                    or set(planned.screening.origin_occurrence_keys)
-                    & set(self.run_adaptation_cohort.origin_occurrence_keys)
-                    or set(planned.holdout.origin_occurrence_keys)
-                    & set(self.run_adaptation_cohort.origin_occurrence_keys)
-                ):
-                    raise ValueError("generation cohorts differ from frozen task")
-                prior_origins = {
-                    origin_id
-                    for item in self.generation_selection_cohorts.values()
-                    for origin_id in (
-                        *item.screening.origin_occurrence_keys,
-                        *item.holdout.origin_occurrence_keys,
-                    )
-                }
-                if prior_origins & set(
-                    (
-                        *planned.screening.origin_occurrence_keys,
-                        *planned.holdout.origin_occurrence_keys,
-                    )
-                ):
-                    raise ValueError("generation selection origins cannot be reused")
-                existing = self.generation_selection_cohorts.get(planned.generation)
-                if existing is not None and existing.to_dict() != planned.to_dict():
-                    raise ValueError("conflicting generation cohorts")
-                self.generation_selection_cohorts.setdefault(planned.generation, planned)
-            elif event.kind == "CandidateScreeningRecorded":
-                schema_version = payload.get("schema_version")
-                expected_fields = {
-                    "schema_version",
-                    "generation",
-                    "candidate_id",
-                    "score",
-                    "passed",
-                    "constraint_violations",
-                    "origin_count",
-                    "prediction_cell_count",
-                    "cohort_digest",
-                }
-                if schema_version == SCREENING_SCHEMA_V2:
-                    expected_fields.add("record_digest")
-                elif schema_version != SCREENING_SCHEMA_V1:
-                    raise ValueError("unsupported candidate screening schema")
-                if set(payload) != expected_fields:
-                    raise ValueError("candidate screening payload is invalid")
-                generation = payload["generation"]
-                candidate_id = payload["candidate_id"]
-                if (
-                    isinstance(generation, bool)
-                    or not isinstance(generation, int)
-                    or generation < 0
-                    or not isinstance(candidate_id, str)
-                    or not candidate_id.strip()
-                ):
-                    raise ValueError("candidate screening identity is invalid")
-                candidate = self.candidates.get(candidate_id)
-                if candidate is None:
-                    raise ValueError("screening candidate is missing")
-                if candidate.generation != generation:
-                    raise ValueError("screening generation does not match candidate")
-                if candidate.role is not CandidateRole.SEARCH:
-                    raise ValueError("incumbent control cannot enter candidate screening")
-                if (
-                    self.task.metadata.get("optimization_protocol")
-                    in ADAPTIVE_PROTOCOLS
-                    and not any(
-                        revision.candidate_id == candidate_id
-                        and revision.parent_revision_id is None
-                        for revision in self.candidate_revisions.values()
-                    )
-                ):
-                    raise ValueError(
-                        "adaptive candidate screening requires frozen initial revision R0"
-                    )
-                if self.task.metadata.get("optimization_protocol") in ADAPTIVE_PROTOCOLS:
-                    planned = self.generation_selection_cohorts.get(generation)
-                    if planned is None:
-                        raise ValueError(
-                            "adaptive candidate screening requires frozen generation cohorts"
-                        )
-                    if payload.get("cohort_digest") != planned.screening.cohort_digest:
-                        raise ValueError(
-                            "candidate screening differs from frozen screening cohort"
-                        )
-                score = payload["score"]
-                constraint_violations = payload["constraint_violations"]
-                origin_count = payload["origin_count"]
-                prediction_cell_count = payload["prediction_cell_count"]
-                if (
-                    isinstance(score, bool)
-                    or not isinstance(score, (int, float))
-                    or not math.isfinite(float(score))
-                    or not isinstance(payload["passed"], bool)
-                    or isinstance(constraint_violations, bool)
-                    or not isinstance(constraint_violations, int)
-                    or constraint_violations < 0
-                    or isinstance(origin_count, bool)
-                    or not isinstance(origin_count, int)
-                    or origin_count < 1
-                    or isinstance(prediction_cell_count, bool)
-                    or not isinstance(prediction_cell_count, int)
-                    or prediction_cell_count < origin_count
-                ):
-                    raise ValueError("candidate screening evidence is invalid")
-                cohort_digest = payload["cohort_digest"]
-                strict_selection = bool(
-                    supports_two_stage_screening(
-                        self.task.metadata.get("sample_agent_protocol")
-                    )
-                    and self.task.metadata.get("sample_budget_class") == "selection_eligible"
-                    and self.task.metadata.get("two_stage_evaluation_enabled", True) is True
-                )
-                if (
-                    schema_version == SCREENING_SCHEMA_V2 or cohort_digest is not None
-                ) and (
-                    not isinstance(cohort_digest, str)
-                    or len(cohort_digest) != 64
-                    or any(character not in "0123456789abcdef" for character in cohort_digest)
-                ):
-                    raise ValueError("screening cohort_digest must be a SHA-256 digest")
-                if strict_selection:
-                    cells_per_origin = self.task.metadata.get("prediction_cells_per_origin")
-                    if (
-                        cohort_digest is None
-                        or isinstance(cells_per_origin, bool)
-                        or not isinstance(cells_per_origin, int)
-                        or cells_per_origin < 1
-                        or origin_count != 64
-                        or complete_origin_count(
-                            prediction_cell_count, cells_per_origin
-                        )
-                        != 64
-                    ):
-                        raise ValueError("strict-v4 screening evidence is incomplete")
-                if schema_version == SCREENING_SCHEMA_V2:
-                    record_digest = payload["record_digest"]
-                    if (
-                        not isinstance(record_digest, str)
-                        or len(record_digest) != 64
-                        or any(
-                            character not in "0123456789abcdef"
-                            for character in record_digest
-                        )
-                        or record_digest != screening_record_digest(payload)
-                    ):
-                        raise ValueError("candidate screening record_digest is invalid")
-                key = (generation, candidate_id)
-                existing = self.candidate_screening_events.get(key)
-                if existing is not None:
-                    if canonical_json(existing.payload) != canonical_json(payload):
-                        raise ValueError("conflicting screening record")
-                else:
-                    if candidate.status is not CandidateStatus.SPAWNED:
-                        raise ValueError("only a new candidate can be screened")
-                    self.candidate_screening_events[key] = event
-            elif event.kind == "FormalSelectionCohortFrozen":
-                if payload.get("schema_version") not in {
-                    FORMAL_SELECTION_SCHEMA_V1,
-                    FORMAL_SELECTION_SCHEMA_V2,
-                    FORMAL_SELECTION_SCHEMA_V3,
-                }:
-                    raise ValueError("formal selection payload is invalid")
-                expected_formal_fields = {
-                    "schema_version",
-                    "generation",
-                    "selected_candidate_ids",
-                    "screening_digest",
-                }
-                if payload.get("schema_version") == FORMAL_SELECTION_SCHEMA_V3:
-                    expected_formal_fields.update(
-                        {
-                            "screening_pass_count",
-                            "exploration_only",
-                            "consecutive_exploration_generations",
-                        }
-                    )
-                if set(payload) != expected_formal_fields:
-                    raise ValueError("formal selection payload is invalid")
-                generation = payload["generation"]
-                selected = payload["selected_candidate_ids"]
-                schedule = OptimizationSchedule.from_dict(self.task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
-                if schedule.quick:
-                    first = min((c for c in self.candidates.values() if c.generation == generation and c.role is CandidateRole.SEARCH), key=lambda c: c.slot_index)
-                    if selected != [first.candidate_id]:
-                        raise ValueError("quick trajectory must preregister the first proposal")
-                if (
-                    isinstance(generation, bool)
-                    or not isinstance(generation, int)
-                    or generation < 0
-                    or not isinstance(selected, list)
-                    or len(selected) != schedule.finalist_count
-                    or any(not isinstance(item, str) or not item.strip() for item in selected)
-                    or len(set(selected)) != schedule.finalist_count
-                ):
-                    raise ValueError("formal selected candidate count is invalid")
-                for candidate_id in selected:
-                    candidate = self.candidates.get(candidate_id)
-                    if (
-                        candidate is None
-                        or candidate.generation != generation
-                        or candidate.role is not CandidateRole.SEARCH
-                    ):
-                        raise ValueError("formal selected candidate is outside generation")
-                    if not schedule.quick and (generation, candidate_id) not in self.candidate_screening_events:
-                        raise ValueError("formal selection is missing screening evidence")
-                screening_digest = payload["screening_digest"]
-                if (
-                    not isinstance(screening_digest, str)
-                    or len(screening_digest) != 64
-                    or any(
-                        character not in "0123456789abcdef"
-                        for character in screening_digest
-                    )
-                ):
-                    raise ValueError("formal screening_digest must be a SHA-256 digest")
-                generation_records = [
-                    screening_event.payload
-                    for (item_generation, _candidate_id), screening_event in self.candidate_screening_events.items()
-                    if item_generation == generation
-                ]
-                if screening_digest != screening_cohort_digest(generation_records):
-                    raise ValueError("formal screening digest does not match screening cohort")
-                if payload.get("schema_version") == FORMAL_SELECTION_SCHEMA_V3:
-                    pass_count = sum(
-                        record.get("passed") is True for record in generation_records
-                    )
-                    exploration_only = pass_count == 0
-                    consecutive = payload["consecutive_exploration_generations"]
-                    expected_consecutive = 0
-                    if exploration_only:
-                        expected_consecutive = 1
-                        expected_generation = generation - 1
-                        while expected_generation >= 0:
-                            prior = self.formal_selection_events.get(expected_generation)
-                            if (
-                                prior is None
-                                or prior.payload.get("schema_version")
-                                != FORMAL_SELECTION_SCHEMA_V3
-                                or prior.payload.get("exploration_only") is not True
-                            ):
-                                break
-                            expected_consecutive += 1
-                            expected_generation -= 1
-                    supplied_pass_count = payload["screening_pass_count"]
-                    if (
-                        isinstance(consecutive, bool)
-                        or not isinstance(consecutive, int)
-                        or consecutive < 0
-                        or isinstance(supplied_pass_count, bool)
-                        or not isinstance(supplied_pass_count, int)
-                        or supplied_pass_count != pass_count
-                        or payload["exploration_only"] is not exploration_only
-                        or consecutive != expected_consecutive
-                    ):
-                        raise ValueError("formal exploration state is invalid")
-                existing = self.formal_selection_events.get(generation)
-                if existing is not None:
-                    if canonical_json(existing.payload) != canonical_json(payload):
-                        raise ValueError("conflicting formal selection")
-                else:
-                    self.formal_selection_events[generation] = event
-            elif event.kind == "ArtifactRecorded":
-                item = ModelArtifact.from_dict(payload["artifact"])
-                if is_dsh_native_protocol(self.task):
-                    expected_binding = self.candidate_identity_bindings.get(item.candidate_id)
-                    if expected_binding is None:
-                        raise ValueError("artifact candidate has no identity binding")
-                    if payload.get("schema_version") == ARTIFACT_EVENT_V2:
-                        if set(payload) != {"schema_version", "artifact", "proposal_identity_binding", "artifact_revision_binding"}:
-                            raise ValueError("artifact v2 envelope fields are invalid")
-                        validate_identity_binding(payload.get("proposal_identity_binding"), expected=expected_binding["identity_binding"])
-                        revision = self.candidate_revisions.get(item.candidate_revision_id)
-                        if revision is None:
-                            raise ValueError("artifact actual revision is missing")
-                        scope = resolve_artifact_scope(item, holdouts=self.generation_holdouts.values(),
-                                                       evaluations=(*self.formal_batch_evaluations.values(), *self.holdout_evaluations.values()))
-                        self.artifact_revision_bindings[item.artifact_id] = validate_artifact_revision_binding(
-                            payload.get("artifact_revision_binding"), artifact=item, revision=revision, scope=scope)
-                    else:
-                        if payload.get("schema_version") is not None or item.artifact_id in self.artifact_revision_bindings:
-                            raise ValueError("artifact envelope version is invalid")
-                        validate_identity_binding(payload.get("identity_binding"), expected=expected_binding["identity_binding"])
-                    if payload["artifact"].get("artifact_digest") != item.digest:
-                        raise ValueError("artifact digest mismatch")
-                existing = self.artifacts.get(item.artifact_id)
-                if existing is not None and existing.to_dict() != item.to_dict():
-                    raise ValueError("artifact_id belongs to multiple candidates")
-                self.artifacts[item.artifact_id] = item
-            elif event.kind == "EvaluationRecorded":
-                item = Evaluation.from_dict(payload["evaluation"])
-                if is_dsh_native_protocol(self.task):
-                    expected_binding = self.candidate_identity_bindings.get(item.candidate_id)
-                    if expected_binding is None:
-                        raise ValueError("evaluation candidate has no identity binding")
-                    artifact = next(
-                        (
-                            artifact
-                            for artifact in self.artifacts.values()
-                            if artifact.candidate_id == item.candidate_id
-                        ),
-                        None,
-                    )
-                    if artifact is None or item.artifact_digest != artifact.digest:
-                        raise ValueError("evaluation artifact binding mismatch")
-                    actual_binding = self.artifact_revision_bindings.get(artifact.artifact_id)
-                    if payload.get("schema_version") == EVALUATION_EVENT_V2:
-                        if set(payload) != {"schema_version", "evaluation", "proposal_identity_binding", "artifact_revision_binding", "artifact_digest", "evaluation_digest"}:
-                            raise ValueError("evaluation v2 envelope fields are invalid")
-                        validate_identity_binding(payload.get("proposal_identity_binding"), expected=expected_binding["identity_binding"])
-                        if actual_binding is None or canonical_json(payload.get("artifact_revision_binding")) != canonical_json(actual_binding):
-                            raise ValueError("evaluation artifact revision binding mismatch")
-                        validate_evaluation_artifact_binding(item, artifact, actual_binding)
-                    else:
-                        if payload.get("schema_version") is not None or actual_binding is not None:
-                            raise ValueError("evaluation envelope does not match artifact version")
-                        validate_identity_binding(payload.get("identity_binding"), expected=expected_binding["identity_binding"])
-                    if payload.get("artifact_digest") != artifact.digest:
-                        raise ValueError("evaluation event artifact digest mismatch")
-                    if payload.get("evaluation_digest") != digest(item.to_dict()):
-                        raise ValueError("evaluation event digest mismatch")
-                existing = self.evaluations.get(item.evaluation_id)
-                if existing is not None and existing.to_dict() != item.to_dict():
-                    raise ValueError("evaluation_id belongs to multiple candidates")
-                self.evaluations[item.evaluation_id] = item
-                candidate = self.candidates.get(item.candidate_id)
-                if candidate is not None:
-                    self.candidates[item.candidate_id] = replace(
-                        candidate,
-                        status=CandidateStatus.EVALUATED,
-                        evaluation_id=item.evaluation_id,
-                    )
-            elif event.kind == "EvaluationJudged":
-                item = Evaluation.from_dict(payload["evaluation"])
-                if is_dsh_native_protocol(self.task):
-                    expected_binding = self.candidate_identity_bindings.get(item.candidate_id)
-                    if expected_binding is None:
-                        raise ValueError("judgment candidate has no identity binding")
-                    validate_identity_binding(
-                        payload.get("identity_binding"),
-                        expected=expected_binding["identity_binding"],
-                    )
-                    artifact = next(
-                        (
-                            artifact
-                            for artifact in self.artifacts.values()
-                            if artifact.candidate_id == item.candidate_id
-                        ),
-                        None,
-                    )
-                    if artifact is None or item.artifact_digest != artifact.digest:
-                        raise ValueError("judgment artifact binding mismatch")
-                    actual_binding = self.artifact_revision_bindings.get(artifact.artifact_id)
-                    if actual_binding is not None:
-                        validate_evaluation_artifact_binding(item, artifact, actual_binding)
-                        scientific = self.evaluations.get(item.evaluation_id)
-                        immutable_fields = (
-                            "evaluation_id", "run_id", "candidate_id", "candidate_revision_id",
-                            "evaluation_scope", "score", "partition", "evaluator_digest",
-                            "artifact_digest", "created_at",
-                        )
-                        if scientific is None or any(
-                            getattr(scientific, name) != getattr(item, name)
-                            for name in immutable_fields
-                        ):
-                            raise ValueError("judgment cannot change scientific evaluation fields")
-                    if payload.get("artifact_digest") != artifact.digest:
-                        raise ValueError("judgment event artifact digest mismatch")
-                    if payload.get("evaluation_digest") != digest(item.to_dict()):
-                        raise ValueError("judgment event evaluation digest mismatch")
-                existing = self.evaluations.get(item.evaluation_id)
-                if existing is None:
-                    raise ValueError("judged evaluation is missing its scientific evaluation")
-                if existing.candidate_id != item.candidate_id:
-                    raise ValueError("judged evaluation belongs to another candidate")
-                self.evaluations[item.evaluation_id] = item
-            elif event.kind == "PromotionDecided":
-                item = Promotion.from_dict(payload["promotion"])
-                if is_dsh_native_protocol(self.task):
-                    expected_binding = self.candidate_identity_bindings.get(item.candidate_id)
-                    if expected_binding is None:
-                        raise ValueError("promotion candidate has no identity binding")
-                    validate_identity_binding(
-                        payload.get("identity_binding"),
-                        expected=expected_binding["identity_binding"],
-                    )
-                    evaluation = next(
-                        (
-                            evaluation
-                            for evaluation in self.evaluations.values()
-                            if evaluation.candidate_id == item.candidate_id
-                        ),
-                        None,
-                    )
-                    artifact = next(
-                        (
-                            artifact
-                            for artifact in self.artifacts.values()
-                            if artifact.candidate_id == item.candidate_id
-                        ),
-                        None,
-                    )
-                    if evaluation is None or artifact is None:
-                        raise ValueError("promotion is missing evaluation or artifact binding")
-                    if payload.get("evaluation_id") != evaluation.evaluation_id:
-                        raise ValueError("promotion evaluation binding mismatch")
-                    if payload.get("evaluation_digest") != digest(evaluation.to_dict()):
-                        raise ValueError("promotion evaluation digest mismatch")
-                    if payload.get("artifact_digest") != artifact.digest:
-                        raise ValueError("promotion artifact digest mismatch")
-                    candidate = self.candidates.get(item.candidate_id)
-                    if candidate is None:
-                        raise ValueError("promotion candidate is missing")
-                    validate_runtime_promotion_decision(
-                        self.task,
-                        candidate,
-                        item,
-                        self.generation_comparisons.get(candidate.generation),
-                        self.generation_analyses.get(candidate.generation),
-                    )
-                existing = self.promotions.get(item.promotion_id)
-                if existing is not None and existing.to_dict() != item.to_dict():
-                    raise ValueError("promotion_id belongs to multiple candidates")
-                self.promotions[item.promotion_id] = item
-                candidate = self.candidates.get(item.candidate_id)
-                if candidate is not None:
-                    status = (
-                        CandidateStatus.PROMOTED
-                        if item.decision is PromotionDecision.APPROVED
-                        else CandidateStatus.REJECTED
-                    )
-                    self.candidates[item.candidate_id] = replace(
-                        candidate, status=status, promotion_id=item.promotion_id
-                    )
-            elif event.kind == "CandidateScreenedOut":
-                legacy_fields = {
-                    "candidate_id",
-                    "generation",
-                    "formal_selection_event_id",
-                    "reason",
-                }
-                if set(payload) == legacy_fields:
-                    pass
-                elif (
-                    payload.get("schema_version") != SCREENED_OUT_SCHEMA_V1
-                    or set(payload) != legacy_fields | {"schema_version"}
-                ):
-                    raise ValueError("candidate screened-out payload is invalid")
-                candidate_id = payload["candidate_id"]
-                generation = payload["generation"]
-                candidate = self.candidates.get(candidate_id) if isinstance(candidate_id, str) else None
-                if (
-                    candidate is None
-                    or isinstance(generation, bool)
-                    or not isinstance(generation, int)
-                    or candidate.generation != generation
-                    or candidate.status
-                    not in {CandidateStatus.SPAWNED, CandidateStatus.SCREENED_OUT}
-                ):
-                    raise ValueError("screened-out candidate generation is invalid")
-                formal = self.formal_selection_events.get(generation)
-                if formal is None or payload["formal_selection_event_id"] != formal.event_id:
-                    raise ValueError("screened-out candidate formal selection is missing")
-                if candidate.candidate_id in formal.payload["selected_candidate_ids"]:
-                    raise ValueError("selected candidate cannot be screened out")
-                quick = OptimizationSchedule.from_dict(self.task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict())).quick
-                if not quick and (generation, candidate.candidate_id) not in self.candidate_screening_events:
-                    raise ValueError("screened-out candidate is missing screening evidence")
-                if payload["reason"] != ("outside_preregistered_quick_trajectory" if quick else "not_selected_by_screening_top_k"):
-                    raise ValueError("screened-out candidate reason is invalid")
-                key = (generation, candidate.candidate_id)
-                existing = self.screened_out_events.get(key)
-                if existing is not None:
-                    if canonical_json(existing.payload) != canonical_json(payload):
-                        raise ValueError("conflicting screened-out candidate")
-                else:
-                    self.screened_out_events[key] = event
-                self.candidates[candidate.candidate_id] = replace(
-                    candidate, status=CandidateStatus.SCREENED_OUT
-                )
-            elif event.kind in {
-                "CandidateFailed",
-                "CandidateMarkedDuplicate",
-            }:
-                candidate_id = str(payload["candidate_id"])
-                candidate = self.candidates.get(candidate_id)
-                if candidate is not None:
-                    status = {
-                        "CandidateFailed": CandidateStatus.FAILED,
-                        "CandidateMarkedDuplicate": CandidateStatus.DUPLICATE,
-                    }[event.kind]
-                    self.candidates[candidate_id] = replace(candidate, status=status)
-            elif event.kind == "GenerationSearchPlanned":
-                item = GenerationSearchPlan.from_dict(payload["search_plan"])
-                if item.run_id != self.run.run_id:
-                    raise ValueError("generation search plan belongs to another run")
-                previous = self.generation_analyses.get(item.generation - 1)
-                previous_reflection = self.generation_reflections.get(item.generation - 1)
-                if item.source_analysis_digest != (
-                    previous.analysis_digest if previous is not None else None
-                ):
-                    raise ValueError("generation search plan previous analysis mismatch")
-                if item.source_reflection_digest != (
-                    previous_reflection.reflection_digest
-                    if previous_reflection is not None
-                    else None
-                ):
-                    raise ValueError("generation search plan previous reflection mismatch")
-                if previous is not None and previous.replan_required:
-                    prior_plan = self.generation_search_plans.get(item.generation - 1)
-                    if prior_plan is not None and (
-                        item.search_queries == prior_plan.search_queries
-                        and item.focus_areas == prior_plan.focus_areas
-                    ):
-                        raise ValueError(
-                            "required search replan must change queries or focus areas"
-                        )
-                existing = self.generation_search_plans.get(item.generation)
-                if existing is not None and existing.to_dict() != item.to_dict():
-                    raise ValueError("generation has multiple search plans")
-                self.generation_search_plans[item.generation] = item
-            elif event.kind == "GenerationBatchStarted":
-                if self.expected_seed_canonical is not None and self.materialized_seed_canonical is None:
-                    raise ValueError("generation batch cannot precede seed materialization")
-                item = GenerationBatch.from_dict(payload["batch"])
-                if (
-                    item.run_id != self.run.run_id
-                    or item.generation != self.run.generation
-                    or item.task_manifest_digest != self.task.digest
-                ):
-                    raise ValueError("generation batch scope differs from the active run")
-                frozen_interventions = []
-                expected_pending_intervention_ids = tuple(
-                    intervention.intervention_id
-                    for intervention in self.interventions.values()
-                    if intervention.applied_proposal_id is None
-                )
-                if item.intervention_ids != expected_pending_intervention_ids:
-                    raise ValueError(
-                        "generation batch intervention set differs from pending guidance"
-                    )
-                for intervention_id in item.intervention_ids:
-                    intervention = self.interventions.get(intervention_id)
-                    if (
-                        intervention is None
-                        or intervention.run_id != self.run.run_id
-                        or intervention.applied_proposal_id is not None
-                    ):
-                        raise ValueError(
-                            "generation batch intervention set is not pending and frozen"
-                        )
-                    frozen_interventions.append(intervention)
-                if is_dsh_native_protocol(self.task):
-                    if item.parent_genome_canonical_json is None:
-                        raise ValueError("DSH-native batch is missing its parent genome")
-                    if item.generation == 0:
-                        if item.parent_candidate_id is not None:
-                            raise ValueError("first generation cannot bind a parent candidate")
-                        if item.parent_genome_canonical_json != self.materialized_seed_canonical:
-                            raise ValueError("first generation parent differs from materialized seed")
-                    else:
-                        if item.parent_candidate_id is None:
-                            raise ValueError("later generation batch requires a parent candidate")
-                        parent_candidate = self.candidates.get(item.parent_candidate_id)
-                        if parent_candidate is None:
-                            raise ValueError("generation parent candidate is missing")
-                        parent_overrides = [
-                            intervention
-                            for intervention in frozen_interventions
-                            if intervention.kind is InterventionKind.PARENT_SELECTION
-                        ]
-                        parent_override = (
-                            parent_overrides[-1] if parent_overrides else None
-                        )
-                        if (
-                            parent_override is not None
-                            and parent_override.target_candidate_id
-                            != item.parent_candidate_id
-                        ):
-                            raise ValueError(
-                                "generation parent differs from the frozen parent-selection "
-                                "intervention"
-                            )
-                        if (
-                            uses_global_incumbent_protocol(self.task)
-                            and parent_override is None
-                        ):
-                            prior_binding = self.effective_revision_bindings.get(
-                                item.generation - 1
-                            )
-                            prior_revision = (
-                                self.candidate_revisions.get(
-                                    str(prior_binding.get("selected_revision_id"))
-                                )
-                                if isinstance(prior_binding, Mapping)
-                                else None
-                            )
-                            if (
-                                prior_revision is None
-                                or prior_binding.get("selected_candidate_id")
-                                != item.parent_candidate_id
-                                or prior_revision.candidate_id
-                                != item.parent_candidate_id
-                                or prior_revision.genome_digest
-                                != item.parent_genome_digest
-                                or canonical_json(prior_revision.identity_dict()["genome"])
-                                != item.parent_genome_canonical_json
-                            ):
-                                raise ValueError(
-                                    "runtime generation parent differs from the prior "
-                                    "effective revision"
-                                )
-                        else:
-                            parent_proposal = self.proposals.get(parent_candidate.proposal_id)
-                            if parent_proposal is None:
-                                raise ValueError("generation parent proposal is missing")
-                            parent_genome = persisted_genome_from_proposal(parent_proposal)
-                            if (
-                                parent_genome is None
-                                or canonical_json(parent_genome.to_dict())
-                                != item.parent_genome_canonical_json
-                            ):
-                                raise ValueError("generation parent genome binding mismatch")
-                existing_batch = self.generation_batches.get(item.generation)
-                if existing_batch is not None and existing_batch.to_dict() != item.to_dict():
-                    raise ValueError("generation has multiple conflicting batches")
-                self.generation_batches.setdefault(item.generation, item)
-            elif event.kind == "GenerationAnalyzed":
-                item = GenerationAnalysis.from_dict(payload["analysis"])
-                if item.run_id != self.run.run_id:
-                    raise ValueError("generation analysis belongs to another run")
-                formal = self.formal_selection_events.get(item.generation)
-                formal_payload = getattr(formal, "payload", {})
-                if (
-                    isinstance(formal_payload, Mapping)
-                    and formal_payload.get("schema_version")
-                    == FORMAL_SELECTION_SCHEMA_V3
-                ):
-                    exploration_only = formal_payload.get("exploration_only") is True
-                    consecutive = int(
-                        formal_payload.get("consecutive_exploration_generations") or 0
-                    )
-                    if (
-                        item.consecutive_exploration_generations
-                        != (consecutive if exploration_only else 0)
-                        or item.replan_required
-                        is not (exploration_only and consecutive >= 2)
-                    ):
-                        raise ValueError(
-                            "generation analysis exploration replan state is invalid"
-                        )
-                existing = self.generation_analyses.get(item.generation)
-                if existing is not None and existing.to_dict() != item.to_dict():
-                    raise ValueError("generation has multiple analyses")
-                self.generation_analyses[item.generation] = item
-            elif event.kind == "GenerationReflected":
-                reflection_payload = payload["reflection"]
-                if "canonical_candidate_outcomes" in reflection_payload:
-                    item = GenerationReflection.from_dict(reflection_payload)
-                else:
-                    item = GenerationReflection.from_legacy_dict(reflection_payload)
-                if item.run_id != self.run.run_id:
-                    raise ValueError("generation reflection belongs to another run")
-                analysis = self.generation_analyses.get(item.generation)
-                if analysis is None or analysis.analysis_digest != item.analysis_digest:
-                    raise ValueError("generation reflection analysis mismatch")
-                existing = self.generation_reflections.get(item.generation)
-                if existing is not None and existing.to_dict() != item.to_dict():
-                    raise ValueError("generation has multiple reflections")
-                self.generation_reflections[item.generation] = item
-            elif event.kind == "GenerationKnowledgeRetrieved":
-                item = KnowledgeSnapshot.from_dict(payload["knowledge_snapshot"])
-                self.knowledge_snapshots[item.generation] = item
-            elif event.kind == "GenerationKnowledgeAssessed":
-                item = KnowledgeAssessment.from_dict(payload["knowledge_assessment"])
-                self.knowledge_assessments[item.generation] = item
-            elif event.kind == "GenerationResearchIterated":
-                item = ResearchIteration.from_dict(payload["research_iteration"])
-                if item.run_id != self.run.run_id:
-                    raise ValueError("research iteration belongs to another run")
-                if item.diagnostic_report is not None:
-                    knowledge = self.knowledge_snapshots.get(item.generation)
-                    if knowledge is None or knowledge.snapshot_digest != item.knowledge_snapshot_digest:
-                        raise ValueError("research diagnosis knowledge is not frozen")
-                    expected = diagnose_evidence(
-                        self.task, self.generation_analyses.get(item.generation - 1),
-                        self.generation_comparisons.get(item.generation - 1), knowledge,
-                    )
-                    if DiagnosticReport(**dict(item.diagnostic_report)) != expected:
-                        raise ValueError("research diagnosis does not match visible host evidence")
-                existing = self.research_iterations.get(item.generation)
-                if existing is not None and existing.to_dict() != item.to_dict():
-                    raise ValueError("generation has multiple research iterations")
-                self.research_iterations[item.generation] = item
-            elif event.kind == "AlgorithmAttemptRecorded":
-                item = AlgorithmAttempt.from_dict(payload["algorithm_attempt"])
-                if item.run_id != self.run.run_id:
-                    raise ValueError("algorithm attempt belongs to another run")
-                candidate = self.candidates.get(item.candidate_id)
-                if candidate is None:
-                    raise ValueError("algorithm attempt is missing its candidate")
-                if (
-                    candidate.proposal_id != item.proposal_id
-                    or candidate.generation != item.generation
-                ):
-                    raise ValueError("algorithm attempt scope does not match its candidate")
-                if is_dsh_native_protocol(self.task):
-                    expected_binding = self.candidate_identity_bindings.get(item.candidate_id)
-                    if expected_binding is None:
-                        raise ValueError("algorithm attempt candidate has no identity binding")
-                    validate_identity_binding(
-                        payload.get("identity_binding"),
-                        expected=expected_binding["identity_binding"],
-                    )
-                duplicate = next(
-                    (
-                        existing
-                        for existing in self.algorithm_attempts
-                        if existing.candidate_id == item.candidate_id
-                        and existing.phase == item.phase
-                        and existing.attempt == item.attempt
-                    ),
-                    None,
-                )
-                if duplicate is not None and duplicate.to_dict() != item.to_dict():
-                    raise ValueError("algorithm attempt identity was reused")
-                if duplicate is None:
-                    self.algorithm_attempts.append(item)
-            elif event.kind == "FormalStageFrozen":
-                required = {
-                    "stage",
-                    "candidate_id",
-                    "artifact_digest",
-                    "genome_digest",
-                    "analysis_plan_digest",
-                    "objective_family_digest",
-                    "partition_digest",
-                    "holdout_exposure_key",
-                    "token_digest",
-                }
-                revision_aware = payload.get("schema_version") == FORMAL_STAGE_V2
-                if revision_aware:
-                    required |= {"schema_version", "candidate_revision_id", "artifact_revision_binding"}
-                if not is_dsh_native_protocol(self.task) or set(payload) != required:
-                    raise ValueError("formal stage frozen payload is invalid")
-                stage = str(payload["stage"])
-                if stage not in {"validation", "final_test"}:
-                    raise ValueError("formal stage is invalid")
-                if stage in self.formal_stage_seals:
-                    raise ValueError("formal stage is already sealed")
-                candidate = self.candidates.get(str(payload["candidate_id"]))
-                if candidate is None:
-                    raise ValueError("formal stage candidate is missing")
-                artifact = next(
-                    (
-                        item
-                        for item in self.artifacts.values()
-                        if item.candidate_id == candidate.candidate_id
-                    ),
-                    None,
-                )
-                if artifact is None or artifact.digest != payload["artifact_digest"]:
-                    raise ValueError("formal stage artifact binding mismatch")
-                if revision_aware:
-                    revision = self.candidate_revisions.get(artifact.candidate_revision_id)
-                    if revision is None or payload["candidate_revision_id"] != revision.revision_id:
-                        raise ValueError("formal stage actual artifact revision is missing")
-                    scope = resolve_artifact_scope(artifact, holdouts=self.generation_holdouts.values(),
-                                                   evaluations=(*self.formal_batch_evaluations.values(), *self.holdout_evaluations.values()))
-                    binding = validate_artifact_revision_binding(payload["artifact_revision_binding"], artifact=artifact, revision=revision, scope=scope)
-                    if binding["genome_digest"] != payload["genome_digest"]:
-                        raise ValueError("formal stage actual genome binding mismatch")
-                else:
-                    if artifact.artifact_id in self.artifact_revision_bindings:
-                        raise ValueError("formal stage envelope cannot downgrade a v2 artifact")
-                    binding = self.candidate_identity_bindings.get(candidate.candidate_id)
-                    if binding is None or binding["identity_binding"]["genome_digest"] != payload["genome_digest"]:
-                        raise ValueError("formal stage genome binding mismatch")
-                if stage == "final_test" and self.run.validated_candidate_id != candidate.candidate_id:
-                    raise ValueError("final-test requires the validated candidate")
-                self.formal_stage_started = True
-            elif event.kind == "FormalStageCompleted":
-                if not self.formal_stage_started:
-                    raise ValueError("formal stage completion has no frozen stage")
-                stage = str(payload.get("stage") or "")
-                candidate_id = str(payload.get("candidate_id") or "")
-                outcome = str(payload.get("outcome") or "")
-                if stage not in {"validation", "final_test"} or outcome not in {
-                    "passed",
-                    "failed",
-                    "inconclusive",
-                }:
-                    raise ValueError("formal stage completion is invalid")
-                if candidate_id not in self.candidates:
-                    raise ValueError("formal stage completion candidate is missing")
-                if outcome == "passed":
-                    self.run = replace(
-                        self.run,
-                        **(
-                            {"validated_candidate_id": candidate_id}
-                            if stage == "validation"
-                            else {"final_test_candidate_id": candidate_id}
-                        ),
-                    )
-            elif event.kind == "FormalStageSealed":
-                stage = str(payload.get("stage") or "")
-                if stage not in {"validation", "final_test"}:
-                    raise ValueError("formal stage seal is invalid")
-                if stage in self.formal_stage_seals:
-                    raise ValueError("formal stage has multiple seals")
-                self.formal_stage_seals[stage] = dict(payload)
-            # Legacy generations used the same event name for an aggregate
-            # analysis payload.  Adaptive generations use the new three-field
-            # revision binding below; only the legacy shape is ignored here so the
-            # authoritative binding is still validated and replayed.
-            elif event.kind == "GenerationChampionSelected" and set(payload) != {
-                "generation",
-                "selected_candidate_id",
-                "selected_revision_id",
-            }:
-                continue
-            elif event.kind == "HumanInterventionRecorded":
-                item = HumanIntervention.from_dict(payload["intervention"])
-                existing = self.interventions.get(item.intervention_id)
-                if existing is not None and existing.to_dict() != item.to_dict():
-                    raise ValueError("intervention_id belongs to multiple interventions")
-                self.interventions[item.intervention_id] = item
-            elif event.kind == "HumanInterventionApplied":
-                intervention_id = str(payload["intervention_id"])
-                item = self.interventions.get(intervention_id)
-                if item is None:
-                    raise ValueError("applied intervention is missing its recorded event")
-                self.interventions[intervention_id] = replace(
-                    item, applied_proposal_id=str(payload["proposal_id"])
-                )
-            elif event.kind == "ExpertConsultationRequested":
-                item = ExpertConsultation.from_dict(payload["consultation"])
-                if item.run_id != self.run.run_id:
-                    raise ValueError("expert consultation belongs to another run")
-                existing = self.expert_consultations.get(item.consultation_id)
-                if existing is not None and existing.to_dict() != item.to_dict():
-                    raise ValueError("consultation_id belongs to multiple consultations")
-                self.expert_consultations[item.consultation_id] = item
-            elif event.kind == "ExpertConsultationAnswered":
-                item = ExpertConsultationAnswer.from_dict(payload["answer"])
-                if item.run_id != self.run.run_id:
-                    raise ValueError("expert consultation answer belongs to another run")
-                consultation = self.expert_consultations.get(item.consultation_id)
-                if consultation is None:
-                    raise ValueError("expert answer is missing its consultation request")
-                existing = self.expert_consultation_answers.get(item.consultation_id)
-                if existing is not None and existing.to_dict() != item.to_dict():
-                    raise ValueError("expert consultation already has a different answer")
-                self.expert_consultation_answers[item.consultation_id] = item
-            elif event.kind == "ExpertConsultationApplied":
-                consultation_id = str(payload.get("consultation_id") or "")
-                answer_id = str(payload.get("answer_id") or "")
-                generation = payload.get("generation")
-                iteration_digest = str(payload.get("research_iteration_digest") or "")
-                if (
-                    not consultation_id
-                    or not answer_id
-                    or isinstance(generation, bool)
-                    or not isinstance(generation, int)
-                    or generation < 0
-                    or not iteration_digest
-                ):
-                    raise ValueError("expert consultation application payload is invalid")
-                if consultation_id not in self.expert_consultations:
-                    raise ValueError("applied expert answer is missing its consultation")
-                answer = self.expert_consultation_answers.get(consultation_id)
-                if answer is None or answer.answer_id != answer_id:
-                    raise ValueError("applied expert answer is missing its answer event")
-                iteration = self.research_iterations.get(generation)
-                if (
-                    iteration is None
-                    or iteration.iteration_digest != iteration_digest
-                    or answer_id not in iteration.expert_answer_ids
-                ):
-                    raise ValueError("expert answer application does not match research iteration")
-                if (
-                    answer.effective_generation is None
-                    or answer.effective_generation > generation
-                ):
-                    raise ValueError("expert answer was applied before it became effective")
-                if answer.applied_generation not in (None, generation):
-                    raise ValueError("expert answer was applied to multiple generations")
-                self.expert_consultation_answers[consultation_id] = replace(
-                    answer, applied_generation=generation
-                )
-            elif event.kind == "EvolutionStageRecorded":
-                validate_evolution_stage_payload(payload)
-                if payload.get("status") == "completed":
-                    self.gateway_retry_stage_success_seq[
-                        (int(payload["generation"]), str(payload["stage"]))
-                    ] = event.seq
-            elif event.kind == "DshStructuredResultAccepted":
-                required_fields = {
-                    "schema_version",
-                    "identity",
-                    "output_schema_id",
-                    "result_digest",
-                    "structured",
-                    "skill_invocation_evidence",
-                }
-                if not required_fields.issubset(payload) or set(payload) - (
-                    required_fields | {"session_metrics", "required_tool_receipt"}
-                ):
-                    raise ValueError("DshStructuredResultAccepted payload is invalid")
-                if payload["schema_version"] != "ecologyrsi-dsh.structured-result-accepted/1":
-                    raise ValueError("unsupported DSH structured-result event version")
-                identity = payload["identity"]
-                structured = payload["structured"]
-                if not isinstance(identity, Mapping) or identity.get("run_id") != self.run.run_id:
-                    raise ValueError("DSH structured-result run identity mismatch")
-                if not isinstance(structured, Mapping) or digest(structured) != payload["result_digest"]:
-                    raise ValueError("DSH structured-result digest mismatch")
-                stage_contracts = {
-                    "generation.research": (
-                        "researcher",
-                        "ecology-research-result@1",
-                    ),
-                    "generation.search-plan": (
-                        "researcher",
-                        "ecology-research-search-plan@1",
-                    ),
-                    "generation.research-synthesis": (
-                        "researcher",
-                        "ecology-research-synthesis@1",
-                    ),
-                    "generation.reflect": (
-                        "generation-judge",
-                        "ecology-generation-reflection@1",
-                    ),
-                    "candidate.propose": (
-                        "candidate-proposer",
-                        "ecology-genome-mutation@1",
-                    ),
-                    "candidate.local_edit": (
-                        "candidate-proposer",
-                        "ecology-local-edit@1",
-                    ),
-                    "generation.judge": (
-                        "generation-judge",
-                        "ecology-generation-review@1",
-                    ),
-                    "sample.plan": (
-                        "sample-planner",
-                        "ecology-sample-predictions@2",
-                    ),
-                    "sample.critic": (
-                        "sample-critic",
-                        "ecology-sample-review@2",
-                    ),
-                    "sample.reflect": (
-                        "sample-critic",
-                        "ecology-sample-reflection@1",
-                    ),
-                }
-                contract = stage_contracts.get(identity.get("stage"))
-                if contract is None or (
-                    identity.get("role"), payload["output_schema_id"]
-                ) != contract:
-                    raise ValueError("DSH structured-result stage contract mismatch")
-                _validate_dsh_skill_evidence(
-                    payload["skill_invocation_evidence"],
-                    stage=str(identity.get("stage") or ""),
-                )
-                if "session_metrics" in payload:
-                    session_id = identity.get("session_id")
-                    if not isinstance(session_id, str) or not session_id:
-                        raise ValueError("DSH structured-result session identity is invalid")
-                    _validate_dsh_session_metrics(
-                        payload["session_metrics"], session_id=session_id
-                    )
-                tool_receipt = payload.get("required_tool_receipt")
-                if identity.get("stage") == "sample.plan":
-                    from types import SimpleNamespace
-                    from .agent_prediction import validate_prediction_receipt
-                    def lookup_prediction_event(event_id):
-                        record = self.dsh_prediction_tool_events.get(event_id)
-                        return None if record is None else SimpleNamespace(
-                            kind="DshPredictionToolExecuted", seq=record[0], payload=record[1]
-                        )
-                    validate_prediction_receipt(
-                        structured, tool_receipt, event_lookup=lookup_prediction_event,
-                        identity=identity, before_seq=event.seq,
-                    )
-                elif tool_receipt is not None:
-                    raise ValueError(
-                        "non-Planner structured result cannot claim a prediction-tool receipt"
-                    )
-                # A successfully admitted DSH result proves runtime continuity.
-                # It closes only the native-runtime retry epoch for the generation
-                # in which it was accepted; model/persistence retry classes remain
-                # independent.
-                self.gateway_retry_dsh_success_seq[int(self.run.generation)] = event.seq
-            elif event.kind == "DshRetrievalExecuted":
-                _validate_dsh_retrieval_event(payload, run_id=self.run.run_id)
-            elif event.kind == "DshPredictionToolExecuted":
-                from .agent_prediction import validate_tool_event
-                validate_tool_event(payload)
-                self.dsh_prediction_tool_events[event.event_id] = (event.seq, dict(payload))
-            elif event.kind == "DshChildLaunchReserved":
-                legacy_fields = {
-                    "schema_version",
-                    "request_id",
-                    "parent_session_id",
-                    "business_key_digest",
-                    "launch",
-                }
-                if set(payload) not in (
-                    legacy_fields,
-                    legacy_fields | {"request_contract_digest"},
-                ):
-                    raise ValueError("DshChildLaunchReserved payload is invalid")
-                launch = payload["launch"]
-                request_contract_digest = payload.get("request_contract_digest")
-                if (
-                    payload["schema_version"]
-                    != "ecologyrsi-dsh.child-launch-reserved/1"
-                    or not isinstance(launch, Mapping)
-                    or launch.get("run_id") != self.run.run_id
-                    or isinstance(launch.get("launch_attempt"), bool)
-                    or not isinstance(launch.get("launch_attempt"), int)
-                    or launch["launch_attempt"] < 1
-                    or (
-                        request_contract_digest is not None
-                        and (
-                            not isinstance(request_contract_digest, str)
-                            or len(request_contract_digest) != 64
-                            or any(
-                                character not in "0123456789abcdef"
-                                for character in request_contract_digest
-                            )
-                        )
-                    )
-                ):
-                    raise ValueError("DshChildLaunchReserved contract is invalid")
-            elif event.kind == "DshSessionUsageRecorded":
-                validate_session_usage(payload, run_id=event.run_id)
-                # These indexes contain only already validated earlier events,
-                # even when apply() received a whole history in one batch.
-                identity = payload["identity"]
-                reservation_id = identity["child_reservation_id"]
-                launch = self.dsh_usage_launches.get(reservation_id)
-                prior = {
-                    item.seq: item
-                    for item in (
-                        self.dsh_usage_by_reservation.get(reservation_id, [])
-                        + self.dsh_usage_by_session.get(identity["session_id"], [])
-                    )
-                }
-                if launch is not None:
-                    prior[launch.seq] = launch
-                check_usage_binding(payload, (prior[seq] for seq in sorted(prior)))
-            elif event.kind == "DshChildExecutionFailed":
-                from .runtime_failure import validate_runtime_failure
-                identity = payload.get("identity")
-                failure_v2 = payload.get("schema_version") == "ecologyrsi-dsh.child-execution-failed/2"
-                if (
-                    set(payload)
-                    != ({"schema_version", "identity", "error_code"} | ({"runtime_failure"} if failure_v2 else set()))
-                    or payload.get("schema_version")
-                    not in {"ecologyrsi-dsh.child-execution-failed/1", "ecologyrsi-dsh.child-execution-failed/2"}
-                    or not isinstance(identity, Mapping)
-                    or set(identity)
-                    != {"child_reservation_id", "stage", "idempotency_key"}
-                    or any(
-                        not isinstance(identity.get(name), str)
-                        or not identity.get(name)
-                        for name in identity
-                    )
-                    or not isinstance(payload.get("error_code"), str)
-                    or not payload.get("error_code")
-                ):
-                    raise ValueError("DshChildExecutionFailed payload is invalid")
-                if failure_v2:
-                    validate_runtime_failure(payload["runtime_failure"], error_code=payload["error_code"])
-            elif event.kind == "GatewayRetryScheduled":
-                # A gateway cooldown is an operational heartbeat only.  It must
-                # survive replay so a browser refresh can distinguish a live run
-                # waiting on a busy provider from a stalled/failed run.
-                if payload.get("schema_version") == GATEWAY_RETRY_SCHEMA_VERSION:
-                    _validate_gateway_retry_v2_payload(payload)
-                    if (
-                        self.run.status is not RunStatus.RUNNING
-                        or int(payload["run_incarnation"]) != int(self.created.seq)
-                        or int(payload["generation"]) != int(self.run.generation)
-                    ):
-                        raise ValueError(
-                            "GatewayRetryScheduled scope does not match the running run"
-                        )
-                    scope = self.gateway_retry_scope(payload)
-                    reset_seq = self.gateway_retry_reset_seq(
-                        scope,
-                        dsh_continuity_reset=(
-                            payload.get("continuity_reset_contract")
-                            == _DSH_CONTINUITY_RESET_CONTRACT
-                        ),
-                    )
-                    prior_retry = self.active_gateway_retry(scope, reset_seq=reset_seq)
-                    anchor = int(payload["attempt_anchor_seq"])
-                    anchor_event = self.events_by_seq.get(anchor)
-                    if (
-                        anchor_event is None
-                        or anchor >= event.seq
-                        or anchor < reset_seq
-                        or payload["failure_id"] in self.gateway_retry_failure_ids
-                    ):
-                        if payload["failure_id"] in self.gateway_retry_failure_ids:
-                            raise ValueError(
-                                "GatewayRetryScheduled failure_id is not unique"
-                            )
-                        raise ValueError("GatewayRetryScheduled retry chain is invalid")
-                    if prior_retry is None:
-                        chain_valid = (
-                            payload["consecutive_failures"] == 1
-                            and payload["breaker_epoch"]
-                            == self.gateway_retry_expected_epoch(scope, reset_seq=reset_seq)
-                            and payload["first_failure_at"]
-                            == payload["last_failure_at"]
-                        )
-                    else:
-                        chain_valid = (
-                            anchor == prior_retry.seq
-                            and payload["consecutive_failures"]
-                            == prior_retry.payload["consecutive_failures"] + 1
-                            and payload["breaker_epoch"]
-                            == prior_retry.payload["breaker_epoch"]
-                            and payload["retry_limit"]
-                            == prior_retry.payload["retry_limit"]
-                            and payload["first_failure_at"]
-                            == prior_retry.payload["first_failure_at"]
-                            and _aware_timestamp(payload["last_failure_at"])
-                            >= _aware_timestamp(prior_retry.payload["last_failure_at"])
-                        )
-                    if not chain_valid:
-                        raise ValueError("GatewayRetryScheduled retry chain is invalid")
-                    first_retry = self.gateway_retry_first_by_scope.get(scope)
-                    if first_retry is None or first_retry.seq <= reset_seq:
-                        self.gateway_retry_first_by_scope[scope] = event
-                    self.gateway_retry_last_by_scope[scope] = event
-                    self.gateway_retry_max_epoch[scope] = max(
-                        self.gateway_retry_max_epoch.get(scope, 0),
-                        int(payload["breaker_epoch"]),
-                    )
-                    self.gateway_retry_failure_ids.add(str(payload["failure_id"]))
-                if not isinstance(payload.get("generation"), int) or payload["generation"] < 0:
-                    raise ValueError("GatewayRetryScheduled generation must be non-negative")
-                if not isinstance(payload.get("retry_at"), str) or not payload["retry_at"].strip():
-                    raise ValueError("GatewayRetryScheduled retry_at must be text")
-            elif event.kind == "CandidateRevisionCreated":
-                if set(payload) != {"revision"}:
-                    raise ValueError("CandidateRevisionCreated payload is invalid")
-                revision = CandidateRevision.from_dict(payload["revision"])
-                candidate = self.candidates.get(revision.candidate_id)
-                if (
-                    revision.run_id != self.run.run_id
-                    or candidate is None
-                    or candidate.generation != revision.generation
-                ):
-                    raise ValueError("candidate revision ownership is invalid")
-                if (
-                    candidate.role is CandidateRole.INCUMBENT_CONTROL
-                    and is_dsh_native_protocol(self.task)
-                    and (
-                    candidate.candidate_id
-                    != f"candidate:{self.run.run_id}:seed-incumbent-control"
-                    or revision.revision_id
-                    != f"revision:{candidate.candidate_id}:r0"
-                    or revision.parent_revision_id is not None
-                    or revision.source_batch_index is not None
-                    )
-                ):
-                    raise ValueError(
-                        "incumbent control must use the deterministic seed control R0"
-                    )
-                existing = self.candidate_revisions.get(revision.revision_id)
-                if existing is not None and existing.to_dict() != revision.to_dict():
-                    raise ValueError("conflicting candidate revision")
-                if existing is None:
-                    if revision.parent_revision_id is None:
-                        if any(
-                            item.candidate_id == revision.candidate_id
-                            and item.parent_revision_id is None
-                            for item in self.candidate_revisions.values()
-                        ):
-                            raise ValueError("candidate already has an initial revision")
-                    else:
-                        parent = self.candidate_revisions.get(revision.parent_revision_id)
-                        if parent is None or parent.candidate_id != revision.candidate_id:
-                            raise ValueError("revision parent is missing or cross-candidate")
-                        schedule = OptimizationSchedule.from_dict(
-                            self.task.metadata["optimization_schedule"]
-                        )
-                        if (
-                            schedule.local_evaluation_mode
-                            == PAIRED_LOCAL_EVALUATION_MODE
-                        ):
-                            source_batch_index = revision.source_batch_index
-                            assert source_batch_index is not None
-                            trajectory = self.formal_trajectories.get(
-                                revision.candidate_id
-                            )
-                            if (
-                                trajectory is None
-                                or trajectory.status is not TrajectoryStatus.RUNNING
-                            ):
-                                raise ValueError(
-                                    "paired local edit child requires a running trajectory"
-                                )
-                            if source_batch_index >= trajectory.batch_count - 1:
-                                raise ValueError(
-                                    "paired final batch cannot create a local edit child"
-                                )
-                            comparison = self.formal_batch_comparisons.get(
-                                (revision.candidate_id, source_batch_index)
-                            )
-                            proposal = self.local_edit_proposals.get(
-                                (revision.candidate_id, source_batch_index)
-                            )
-                            if comparison is None or proposal is None:
-                                raise ValueError(
-                                    "paired local edit child requires comparison and proposal"
-                                )
-                            if (
-                                revision.parent_revision_id
-                                != comparison.champion_after_revision_id
-                            ):
-                                raise ValueError(
-                                    "paired local edit child must descend from selected champion"
-                                )
-                            if (
-                                proposal.get("decision")
-                                != LocalEditProposalDecision.MUTATE.value
-                            ):
-                                raise ValueError(
-                                    "paired local edit child requires a mutate proposal"
-                                )
-                            local_key = (
-                                revision.candidate_id,
-                                source_batch_index,
-                            )
-                            if (
-                                local_key in self.local_edit_outcomes
-                                or local_key in self.trajectory_revision_activations
-                            ):
-                                raise ValueError(
-                                    "paired local edit child must be created before local decision"
-                                )
-                            if any(
-                                item.candidate_id == revision.candidate_id
-                                and item.source_batch_index == source_batch_index
-                                for item in self.candidate_revisions.values()
-                            ):
-                                raise ValueError(
-                                    "paired local edit batch can create only one challenger"
-                                )
-                    self.candidate_revisions[revision.revision_id] = revision
-            elif event.kind == "FormalTrajectoryStarted":
-                if set(payload) != {"trajectory"}:
-                    raise ValueError("FormalTrajectoryStarted payload is invalid")
-                trajectory = FormalTrajectory.from_dict(payload["trajectory"])
-                if trajectory.status is not TrajectoryStatus.RUNNING:
-                    raise ValueError("started formal trajectory must be running")
-                formal = self.formal_selection_events.get(trajectory.generation)
-                if (
-                    formal is None
-                    or trajectory.candidate_id
-                    not in formal.payload["selected_candidate_ids"]
-                ):
-                    raise ValueError("formal trajectory requires frozen Top 2 selection")
-                revision = self.candidate_revisions.get(trajectory.initial_revision_id)
-                if revision is None or revision.candidate_id != trajectory.candidate_id:
-                    raise ValueError("formal trajectory initial revision is invalid")
-                schedule = OptimizationSchedule.from_dict(
-                    self.task.metadata["optimization_schedule"]
-                )
-                if trajectory.batch_count != schedule.batch_count:
-                    raise ValueError("formal trajectory batch_count differs from schedule")
-                existing = self.formal_trajectories.get(trajectory.candidate_id)
-                if existing is not None and existing.to_dict() != trajectory.to_dict():
-                    raise ValueError("conflicting formal trajectory")
-                self.formal_trajectories.setdefault(trajectory.candidate_id, trajectory)
-            elif event.kind == "FormalBatchStarted":
-                if set(payload) != {"batch"}:
-                    raise ValueError("FormalBatchStarted payload is invalid")
-                batch = FormalBatch.from_dict(payload["batch"])
-                trajectory = self.formal_trajectories.get(batch.candidate_id)
-                if (
-                    trajectory is None
-                    or trajectory.status is not TrajectoryStatus.RUNNING
-                    or trajectory.trajectory_id != batch.trajectory_id
-                    or trajectory.generation != batch.generation
-                    or trajectory.batch_count != batch.batch_count
-                ):
-                    raise ValueError("formal batch trajectory is invalid")
-                prior_batches = [
-                    item
-                    for (candidate_id, _index), item in self.formal_batches.items()
-                    if candidate_id == batch.candidate_id
-                ]
-                expected_index = len(prior_batches)
-                if batch.batch_index != expected_index:
-                    raise ValueError("formal batch must use the next batch index")
-                active_revision_id = (
-                    trajectory.initial_revision_id
-                    if batch.batch_index == 0
-                    else self.trajectory_revision_activations[
-                        (batch.candidate_id, batch.batch_index - 1)
-                    ].to_revision_id
-                )
-                if batch.revision_id != active_revision_id:
-                    raise ValueError("formal batch revision is not the active revision")
-                self.formal_batches[(batch.candidate_id, batch.batch_index)] = batch
-            elif event.kind == "FormalBatchEvaluated":
-                if set(payload) != {"evaluation"}:
-                    raise ValueError("FormalBatchEvaluated payload is invalid")
-                evaluation = BatchEvaluation.from_dict(payload["evaluation"])
-                candidate_id = evaluation.scope.candidate_id
-                batch_index = int(evaluation.scope.batch_index)
-                batch_key = (candidate_id, batch_index)
-                batch = self.formal_batches.get(batch_key)
-                schedule = OptimizationSchedule.from_dict(
-                    self.task.metadata["optimization_schedule"]
-                )
-                arm = evaluation.scope.formal_batch_arm
-                expected_revision_id = batch.revision_id if batch is not None else None
-                if schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
-                    if arm is None:
-                        raise ValueError("paired formal batch evaluation requires an arm")
-                    if batch_index == 0:
-                        if arm is not FormalBatchArm.CHAMPION:
-                            raise ValueError("paired batch 0 only accepts the champion arm")
-                    elif arm is FormalBatchArm.CHAMPION:
-                        prior_comparison = self.formal_batch_comparisons.get(
-                            (candidate_id, batch_index - 1)
-                        )
-                        if prior_comparison is None:
-                            raise ValueError(
-                                "paired champion evaluation requires prior comparison"
-                            )
-                        expected_revision_id = (
-                            prior_comparison.champion_after_revision_id
-                        )
-                elif arm is not None:
-                    raise ValueError("prequential formal evaluation cannot have an arm")
-                key = (candidate_id, batch_index, arm)
-                if (
-                    batch is None
-                    or evaluation.scope.run_id != batch.run_id
-                    or evaluation.scope.generation != batch.generation
-                    or evaluation.scope.candidate_revision_id
-                    != expected_revision_id
-                    or evaluation.scope.cohort_digest != batch.cohort_digest
-                    or evaluation.scope.origin_count != batch.origin_count
-                ):
-                    raise ValueError("formal batch evaluation scope does not match batch")
-                existing = self.formal_batch_evaluations.get(key)
-                if existing is not None and existing.to_dict() != evaluation.to_dict():
-                    raise ValueError("conflicting formal batch evaluation")
-                self.formal_batch_evaluations.setdefault(key, evaluation)
-            elif event.kind == "FormalBatchCompared":
-                if set(payload) != {"comparison"}:
-                    raise ValueError("FormalBatchCompared payload is invalid")
-                comparison = FormalBatchComparison.from_dict(payload["comparison"])
-                schedule = OptimizationSchedule.from_dict(
-                    self.task.metadata["optimization_schedule"]
-                )
-                if schedule.local_evaluation_mode != PAIRED_LOCAL_EVALUATION_MODE:
-                    raise ValueError("formal batch comparison requires paired schedule")
-                key = (comparison.candidate_id, comparison.batch_index)
-                batch = self.formal_batches.get(key)
-                trajectory = self.formal_trajectories.get(comparison.candidate_id)
-                evaluations_for_batch = tuple(
-                    item
-                    for (candidate_id, batch_index, _arm), item
-                    in self.formal_batch_evaluations.items()
-                    if candidate_id == comparison.candidate_id
-                    and batch_index == comparison.batch_index
-                )
-                champion_evaluation = next(
-                    (
-                        item
-                        for item in evaluations_for_batch
-                        if item.evaluation_id
-                        == comparison.champion_evaluation_id
-                    ),
-                    None,
-                )
-                challenger_evaluation = next(
-                    (
-                        item
-                        for item in evaluations_for_batch
-                        if item.evaluation_id
-                        == comparison.challenger_evaluation_id
-                    ),
-                    None,
-                )
-                prior_comparison = self.formal_batch_comparisons.get(
-                    (comparison.candidate_id, comparison.batch_index - 1)
-                )
-                expected_champion_id = (
-                    trajectory.initial_revision_id
-                    if comparison.batch_index == 0 and trajectory is not None
-                    else prior_comparison.champion_after_revision_id
-                    if prior_comparison is not None
-                    else None
-                )
-                if (
-                    batch is None
-                    or trajectory is None
-                    or comparison.run_id != batch.run_id
-                    or comparison.generation != batch.generation
-                    or comparison.cohort_digest != batch.cohort_digest
-                    or comparison.champion_before_revision_id
-                    != expected_champion_id
-                    or comparison.challenger_revision_id != batch.revision_id
-                    or champion_evaluation is None
-                    or challenger_evaluation is None
-                    or champion_evaluation.scope.candidate_revision_id
-                    != comparison.champion_before_revision_id
-                    or challenger_evaluation.scope.candidate_revision_id
-                    != comparison.challenger_revision_id
-                    or champion_evaluation.evaluation_digest
-                    != comparison.champion_evaluation_digest
-                    or challenger_evaluation.evaluation_digest
-                    != comparison.challenger_evaluation_digest
-                    or not math.isclose(
-                        champion_evaluation.score,
-                        comparison.champion_score,
-                        rel_tol=0.0,
-                        abs_tol=1e-12,
-                    )
-                    or not math.isclose(
-                        challenger_evaluation.score,
-                        comparison.challenger_score,
-                        rel_tol=0.0,
-                        abs_tol=1e-12,
-                    )
-                ):
-                    raise ValueError(
-                        "formal batch comparison evaluation digest, score, "
-                        "revision, or cohort is invalid"
-                    )
-                validate_formal_batch_comparison(
-                    comparison,
-                    champion_evaluation,
-                    challenger_evaluation,
-                    **local_challenger_policy(self.task.metadata),
-                )
-                existing = self.formal_batch_comparisons.get(key)
-                if existing is not None and existing.to_dict() != comparison.to_dict():
-                    raise ValueError("conflicting formal batch comparison")
-                self.formal_batch_comparisons.setdefault(key, comparison)
-            elif event.kind == "LocalEditProposalRecorded":
-                legacy_fields = {
-                    "proposal_id",
-                    "candidate_id",
-                    "batch_index",
-                    "evidence_scope_digest",
-                    "decision",
-                    "operations",
-                }
-                fields = {
-                    "proposal_id",
-                    "candidate_id",
-                    "batch_index",
-                    "evidence_scope_digest",
-                    "proposal",
-                }
-                if set(payload) not in (legacy_fields, fields, fields | {"safety_reason"}):
-                    raise ValueError("local edit proposal payload is invalid")
-                candidate_id = payload["candidate_id"]
-                batch_index = payload["batch_index"]
-                if (
-                    not isinstance(candidate_id, str)
-                    or not candidate_id
-                    or isinstance(batch_index, bool)
-                    or not isinstance(batch_index, int)
-                    or batch_index < 0
-                ):
-                    raise ValueError("local edit proposal scope is invalid")
-                key = (candidate_id, batch_index)
-                existing_event = self.local_edit_proposal_events.get(key)
-                if existing_event is not None:
-                    if canonical_json(existing_event.payload) == canonical_json(payload):
-                        continue
-                    raise ValueError("conflicting local edit proposal")
-                evaluation = self.replay_batch_evaluation_for(candidate_id, batch_index)
-                schedule = OptimizationSchedule.from_dict(
-                    self.task.metadata["optimization_schedule"]
-                )
-                if (
-                    schedule.local_evaluation_mode
-                    == PAIRED_LOCAL_EVALUATION_MODE
-                ):
-                    trajectory = self.formal_trajectories.get(candidate_id)
-                    if (
-                        trajectory is None
-                        or trajectory.status is not TrajectoryStatus.RUNNING
-                    ):
-                        raise ValueError(
-                            "paired local edit requires a running trajectory"
-                        )
-                    if batch_index >= trajectory.batch_count - 1:
-                        raise ValueError(
-                            "paired final batch cannot record a local edit proposal"
-                        )
-                if "proposal" in payload:
-                    from ..evolution.local_edits import LocalEditProposal
-
-                    proposal_value = LocalEditProposal.from_dict(payload["proposal"])
-                    decision = proposal_value.decision
-                    operations = list(proposal_value.operations)
-                else:
-                    decision = LocalEditProposalDecision(payload["decision"])
-                    operations = payload["operations"]
-                if (
-                    evaluation is None
-                    or (
-                        schedule.local_evaluation_mode
-                        == PAIRED_LOCAL_EVALUATION_MODE
-                        and key not in self.formal_batch_comparisons
-                    )
-                    or payload["evidence_scope_digest"] != evaluation.scope.scope_key
-                    or not isinstance(operations, list)
-                    or len(operations) > schedule.max_local_edits_per_batch
-                    or (decision is LocalEditProposalDecision.KEEP and operations)
-                    or (decision is LocalEditProposalDecision.MUTATE and not operations)
-                ):
-                    raise ValueError("local edit proposal evidence is invalid")
-                if "safety_reason" in payload and (
-                    decision is not LocalEditProposalDecision.KEEP
-                    or not isinstance(payload["safety_reason"], str)
-                    or not payload["safety_reason"].strip()
-                ):
-                    raise ValueError("local edit safety reason is invalid")
-                normalized = {
-                    "proposal_id": payload["proposal_id"],
-                    "candidate_id": candidate_id,
-                    "batch_index": batch_index,
-                    "evidence_scope_digest": payload["evidence_scope_digest"],
-                    "proposal": (
-                        proposal_value.to_dict()
-                        if "proposal" in payload
-                        else {
-                            "schema_version": "ecology-local-edit@1",
-                            "decision": decision.value,
-                            "operations": [dict(item) for item in operations],
-                            "evidence_refs": ["batch:score"],
-                            "expected_effect_cells": [],
-                            "risk_cells": [],
-                        }
-                    ),
-                    "decision": decision.value,
-                    "operations": [dict(item) for item in operations],
-                }
-                if "safety_reason" in payload:
-                    normalized["safety_reason"] = payload["safety_reason"]
-                existing = self.local_edit_proposals.get(key)
-                if existing is not None and canonical_json(existing) != canonical_json(normalized):
-                    raise ValueError("conflicting local edit proposal")
-                self.local_edit_proposals.setdefault(key, normalized)
-                self.local_edit_proposal_events.setdefault(key, event)
-            elif event.kind == "LocalEditDecided":
-                fields = {
-                    "proposal_id",
-                    "candidate_id",
-                    "batch_index",
-                    "outcome",
-                    "active_revision_id",
-                }
-                if set(payload) not in (fields, fields | {"reason"}):
-                    raise ValueError("local edit outcome payload is invalid")
-                key = (payload["candidate_id"], payload["batch_index"])
-                existing_event = self.local_edit_outcome_events.get(key)
-                if existing_event is not None:
-                    if canonical_json(existing_event.payload) == canonical_json(payload):
-                        continue
-                    raise ValueError("conflicting local edit outcome")
-                proposal = self.local_edit_proposals.get(key)
-                outcome = LocalEditOutcome(payload["outcome"])
-                revision = self.candidate_revisions.get(payload["active_revision_id"])
-                schedule = OptimizationSchedule.from_dict(
-                    self.task.metadata["optimization_schedule"]
-                )
-                if (
-                    schedule.local_evaluation_mode
-                    == PAIRED_LOCAL_EVALUATION_MODE
-                ):
-                    trajectory = self.formal_trajectories.get(payload["candidate_id"])
-                    if (
-                        trajectory is None
-                        or trajectory.status is not TrajectoryStatus.RUNNING
-                    ):
-                        raise ValueError(
-                            "paired local edit requires a running trajectory"
-                        )
-                    if payload["batch_index"] >= trajectory.batch_count - 1:
-                        raise ValueError(
-                            "paired final batch cannot record a local edit decision"
-                        )
-                    comparison = self.formal_batch_comparisons.get(key)
-                    if comparison is None:
-                        raise ValueError(
-                            "paired local edit decision requires a comparison"
-                        )
-                    proposal_decision = (
-                        proposal.get("decision") if proposal is not None else None
-                    )
-                    if not (
-                        (
-                            proposal_decision
-                            == LocalEditProposalDecision.KEEP.value
-                            and outcome is LocalEditOutcome.KEPT
-                        )
-                        or (
-                            proposal_decision
-                            == LocalEditProposalDecision.MUTATE.value
-                            and outcome
-                            in (LocalEditOutcome.APPLIED, LocalEditOutcome.REJECTED)
-                        )
-                    ):
-                        raise ValueError(
-                            "paired local edit outcome does not match proposal decision"
-                        )
-                    selected_revision_id = comparison.champion_after_revision_id
-                    children = [
-                        item
-                        for item in self.candidate_revisions.values()
-                        if item.candidate_id == payload["candidate_id"]
-                        and item.source_batch_index == payload["batch_index"]
-                    ]
-                    if outcome is LocalEditOutcome.APPLIED:
-                        if (
-                            proposal is None
-                            or proposal.get("decision")
-                            != LocalEditProposalDecision.MUTATE.value
-                            or revision is None
-                            or len(children) != 1
-                            or revision.revision_id != children[0].revision_id
-                            or revision.parent_revision_id != selected_revision_id
-                        ):
-                            raise ValueError(
-                                "paired applied edit must create one child from selected champion"
-                            )
-                    elif (
-                        outcome is LocalEditOutcome.ROLLED_BACK
-                        or revision is None
-                        or revision.revision_id != selected_revision_id
-                        or children
-                    ):
-                        raise ValueError(
-                            "paired retained edit must keep the selected champion "
-                            "without a child"
-                        )
-                if (
-                    proposal is None
-                    or proposal["proposal_id"] != payload["proposal_id"]
-                    or revision is None
-                    or revision.candidate_id != payload["candidate_id"]
-                    or (
-                        proposal["decision"] == LocalEditProposalDecision.KEEP.value
-                        and outcome is not LocalEditOutcome.KEPT
-                        and not (
-                            outcome is LocalEditOutcome.ROLLED_BACK
-                            and payload.get("reason") == proposal.get("safety_reason")
-                        )
-                    )
-                ):
-                    raise ValueError("local edit outcome is inconsistent")
-                if "reason" in payload and (
-                    not isinstance(payload["reason"], str)
-                    or not payload["reason"].strip()
-                ):
-                    raise ValueError("local edit outcome reason is invalid")
-                normalized = dict(payload)
-                existing = self.local_edit_outcomes.get(key)
-                if existing is not None and canonical_json(existing) != canonical_json(normalized):
-                    raise ValueError("conflicting local edit outcome")
-                self.local_edit_outcomes.setdefault(key, normalized)
-                self.local_edit_outcome_events.setdefault(key, event)
-            elif event.kind == "TrajectoryRevisionAdvanced":
-                if set(payload) != {"activation"}:
-                    raise ValueError("TrajectoryRevisionAdvanced payload is invalid")
-                activation = TrajectoryRevisionActivation.from_dict(payload["activation"])
-                key = (activation.candidate_id, activation.batch_index)
-                batch = self.formal_batches.get(key)
-                outcome = self.local_edit_outcomes.get(key)
-                destination = self.candidate_revisions.get(activation.to_revision_id)
-                schedule = OptimizationSchedule.from_dict(
-                    self.task.metadata["optimization_schedule"]
-                )
-                comparison = self.formal_batch_comparisons.get(key)
-                trajectory = self.formal_trajectories.get(activation.candidate_id)
-                if (
-                    schedule.local_evaluation_mode
-                    == PAIRED_LOCAL_EVALUATION_MODE
-                ):
-                    if (
-                        trajectory is None
-                        or trajectory.status is not TrajectoryStatus.RUNNING
-                    ):
-                        raise ValueError(
-                            "paired revision activation requires a running trajectory"
-                        )
-                    if activation.batch_index >= trajectory.batch_count - 1:
-                        raise ValueError(
-                            "paired final batch cannot activate a local edit revision"
-                        )
-                source_revision_id = (
-                    comparison.champion_after_revision_id
-                    if schedule.local_evaluation_mode
-                    == PAIRED_LOCAL_EVALUATION_MODE
-                    and comparison is not None
-                    else batch.revision_id
-                    if batch is not None
-                    else None
-                )
-                if (
-                    batch is None
-                    or outcome is None
-                    or (
-                        schedule.local_evaluation_mode
-                        == PAIRED_LOCAL_EVALUATION_MODE
-                        and comparison is None
-                    )
-                    or self.replay_batch_evaluation_for(
-                        activation.candidate_id,
-                        activation.batch_index,
-                    )
-                    is None
-                    or activation.run_id != batch.run_id
-                    or activation.generation != batch.generation
-                    or activation.from_revision_id != source_revision_id
-                    or destination is None
-                    or destination.candidate_id != activation.candidate_id
-                    or outcome["active_revision_id"] != activation.to_revision_id
-                ):
-                    raise ValueError("trajectory revision activation is invalid")
-                expected_reason = {
-                    LocalEditOutcome.KEPT.value: RevisionAdvanceReason.KEPT,
-                    LocalEditOutcome.APPLIED.value: RevisionAdvanceReason.LOCAL_EDIT_APPLIED,
-                    LocalEditOutcome.REJECTED.value: RevisionAdvanceReason.LOCAL_EDIT_REJECTED,
-                    LocalEditOutcome.ROLLED_BACK.value: (
-                        RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK
-                    ),
-                }[outcome["outcome"]]
-                if activation.reason is not expected_reason:
-                    raise ValueError("trajectory revision activation reason is inconsistent")
-                if (
-                    schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE
-                    and activation.reason
-                    is RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK
-                ):
-                    raise ValueError("paired trajectory cannot use prequential rollback")
-                if activation.reason is RevisionAdvanceReason.LOCAL_EDIT_APPLIED:
-                    if (
-                        destination.source_batch_index != activation.batch_index
-                        or destination.parent_revision_id != source_revision_id
-                    ):
-                        raise ValueError("new revision source batch is inconsistent")
-                elif activation.reason is RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK:
-                    source = self.candidate_revisions.get(batch.revision_id)
-                    if source is None or source.parent_revision_id != activation.to_revision_id:
-                        raise ValueError("safety rollback must activate the batch revision parent")
-                elif activation.to_revision_id != source_revision_id:
-                    raise ValueError("kept/rejected edit cannot change active revision")
-                existing = self.trajectory_revision_activations.get(key)
-                if existing is not None and existing.to_dict() != activation.to_dict():
-                    raise ValueError("conflicting trajectory revision activation")
-                self.trajectory_revision_activations.setdefault(key, activation)
-            elif event.kind == "FormalTrajectoryCompleted":
-                if set(payload) != {"candidate_id", "final_revision_id"}:
-                    raise ValueError("FormalTrajectoryCompleted payload is invalid")
-                candidate_id = payload["candidate_id"]
-                trajectory = self.formal_trajectories.get(candidate_id)
-                if trajectory is None or trajectory.status is not TrajectoryStatus.RUNNING:
-                    raise ValueError("formal trajectory is not running")
-                required = {
-                    (candidate_id, index) for index in range(trajectory.batch_count)
-                }
-                schedule = OptimizationSchedule.from_dict(
-                    self.task.metadata["optimization_schedule"]
-                )
-                if schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
-                    local_required = {
-                        (candidate_id, index)
-                        for index in range(trajectory.batch_count - 1)
-                    }
-                    candidate_batches = {
-                        key for key in self.formal_batches if key[0] == candidate_id
-                    }
-                    candidate_comparisons = {
-                        key
-                        for key in self.formal_batch_comparisons
-                        if key[0] == candidate_id
-                    }
-                    candidate_proposals = {
-                        key for key in self.local_edit_proposals if key[0] == candidate_id
-                    }
-                    candidate_outcomes = {
-                        key for key in self.local_edit_outcomes if key[0] == candidate_id
-                    }
-                    candidate_activations = {
-                        key
-                        for key in self.trajectory_revision_activations
-                        if key[0] == candidate_id
-                    }
-                    local_bindings_are_exact = True
-                    for key in local_required:
-                        comparison = self.formal_batch_comparisons.get(key)
-                        proposal = self.local_edit_proposals.get(key)
-                        outcome = self.local_edit_outcomes.get(key)
-                        activation = self.trajectory_revision_activations.get(key)
-                        children = [
-                            item
-                            for item in self.candidate_revisions.values()
-                            if item.candidate_id == candidate_id
-                            and item.source_batch_index == key[1]
-                        ]
-                        if (
-                            comparison is None
-                            or proposal is None
-                            or outcome is None
-                            or activation is None
-                        ):
-                            local_bindings_are_exact = False
-                            break
-                        selected_revision_id = (
-                            comparison.champion_after_revision_id
-                        )
-                        if outcome.get("outcome") == LocalEditOutcome.APPLIED.value:
-                            local_bindings_are_exact = (
-                                proposal.get("decision")
-                                == LocalEditProposalDecision.MUTATE.value
-                                and len(children) == 1
-                                and children[0].parent_revision_id
-                                == selected_revision_id
-                                and outcome.get("active_revision_id")
-                                == children[0].revision_id
-                                and activation.to_revision_id
-                                == children[0].revision_id
-                                and activation.reason
-                                is RevisionAdvanceReason.LOCAL_EDIT_APPLIED
-                            )
-                        else:
-                            expected = {
-                                LocalEditOutcome.KEPT.value: (
-                                    LocalEditProposalDecision.KEEP.value,
-                                    RevisionAdvanceReason.KEPT
-                                ),
-                                LocalEditOutcome.REJECTED.value: (
-                                    LocalEditProposalDecision.MUTATE.value,
-                                    RevisionAdvanceReason.LOCAL_EDIT_REJECTED,
-                                ),
-                            }.get(outcome.get("outcome"))
-                            local_bindings_are_exact = (
-                                not children
-                                and expected is not None
-                                and proposal.get("decision") == expected[0]
-                                and outcome.get("active_revision_id")
-                                == selected_revision_id
-                                and activation.to_revision_id
-                                == selected_revision_id
-                                and activation.reason is expected[1]
-                            )
-                        if not local_bindings_are_exact:
-                            break
-                    has_post_final_child = any(
-                        item.candidate_id == candidate_id
-                        and item.source_batch_index is not None
-                        and item.source_batch_index >= trajectory.batch_count - 1
-                        for item in self.candidate_revisions.values()
-                    )
-                    if not (
-                        required == candidate_batches
-                        and required == candidate_comparisons
-                        and local_required == candidate_proposals
-                        and local_required == candidate_outcomes
-                        and local_required == candidate_activations
-                        and local_bindings_are_exact
-                        and not has_post_final_child
-                    ):
-                        raise ValueError(
-                            "formal trajectory has incomplete paired batches or invalid "
-                            "child/outcome binding"
-                        )
-                    final_revision_id = self.formal_batch_comparisons[
-                        (candidate_id, trajectory.batch_count - 1)
-                    ].champion_after_revision_id
-                else:
-                    legacy_evaluation_keys = {
-                        (candidate_id, index, None)
-                        for index in range(trajectory.batch_count)
-                    }
-                    if not (
-                        required <= set(self.formal_batches)
-                        and legacy_evaluation_keys <= set(self.formal_batch_evaluations)
-                        and required <= set(self.local_edit_proposals)
-                        and required <= set(self.local_edit_outcomes)
-                        and required <= set(self.trajectory_revision_activations)
-                    ):
-                        raise ValueError("formal trajectory has incomplete batches")
-                    final_revision_id = self.trajectory_revision_activations[
-                        (candidate_id, trajectory.batch_count - 1)
-                    ].to_revision_id
-                if payload["final_revision_id"] != final_revision_id:
-                    raise ValueError("formal trajectory final revision is invalid")
-                self.formal_trajectories[candidate_id] = replace(
-                    trajectory,
-                    status=TrajectoryStatus.COMPLETED,
-                    final_revision_id=final_revision_id,
-                )
-            elif event.kind == "GenerationHoldoutFrozen":
-                if set(payload) != {"holdout"}:
-                    raise ValueError("GenerationHoldoutFrozen payload is invalid")
-                holdout = GenerationHoldout.from_dict(payload["holdout"])
-                if holdout.run_id != self.run.run_id:
-                    raise ValueError("generation holdout belongs to another run")
-                completed = [
-                    item
-                    for item in self.formal_trajectories.values()
-                    if item.generation == holdout.generation
-                    and item.status is TrajectoryStatus.COMPLETED
-                ]
-                schedule = OptimizationSchedule.from_dict(self.task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
-                if len(completed) != schedule.finalist_count or len(holdout.arm_bindings) != schedule.finalist_count + 1:
-                    raise ValueError("holdout requires two completed trajectories")
-                formal = self.formal_selection_events.get(holdout.generation)
-                finalist_candidates = {
-                    holdout.arm_bindings[arm.value]["candidate_id"]
-                    for arm in map(HoldoutArm, holdout.arm_bindings) if arm is not HoldoutArm.INCUMBENT
-                }
-                if formal is None or finalist_candidates != set(
-                    formal.payload["selected_candidate_ids"]
-                ):
-                    raise ValueError("holdout finalist arms do not match frozen Top 2")
-                for binding in holdout.arm_bindings.values():
-                    revision = self.candidate_revisions.get(binding["candidate_revision_id"])
-                    if revision is None or revision.candidate_id != binding["candidate_id"]:
-                        raise ValueError("holdout arm revision binding is invalid")
-                completed_by_candidate = {
-                    item.candidate_id: item for item in completed
-                }
-                for arm in map(HoldoutArm, holdout.arm_bindings):
-                    if arm is HoldoutArm.INCUMBENT:
-                        continue
-                    binding = holdout.arm_bindings[arm.value]
-                    trajectory = completed_by_candidate.get(
-                        binding["candidate_id"]
-                    )
-                    if (
-                        trajectory is None
-                        or binding["candidate_revision_id"]
-                        != trajectory.final_revision_id
-                    ):
-                        raise ValueError(
-                            "holdout finalist arm must bind trajectory final revision"
-                        )
-                validate_generation_zero_incumbent_binding(
-                    self.task,
-                    holdout.generation,
-                    holdout.arm_bindings,
-                    candidates=self.candidates,
-                    revisions=self.candidate_revisions,
-                    materialized_seed_canonical=self.materialized_seed_canonical,
-                    prior_effective_revision_id=(
-                        str(
-                            self.effective_revision_bindings[holdout.generation - 1][
-                                "selected_revision_id"
-                            ]
-                        )
-                        if holdout.generation > 0
-                        and holdout.generation - 1 in self.effective_revision_bindings
-                        else None
-                    ),
-                    prior_champion_selected=(
-                        holdout.generation == 0
-                        or holdout.generation - 1 in self.champion_generations
-                    ),
-                )
-                existing = self.generation_holdouts.get(holdout.generation)
-                if existing is not None and existing.to_dict() != holdout.to_dict():
-                    raise ValueError("conflicting generation holdout")
-                self.generation_holdouts.setdefault(holdout.generation, holdout)
-            elif event.kind == "HoldoutArmStarted":
-                expected_fields = {
-                    "schema_version",
-                    "generation",
-                    "holdout_arm",
-                    "candidate_id",
-                    "candidate_revision_id",
-                    "cohort_digest",
-                    "origin_count",
-                }
-                if (
-                    set(payload) != expected_fields
-                    or payload.get("schema_version")
-                    != "ecologyrsi-dsh.holdout-arm-started/1"
-                ):
-                    raise ValueError("HoldoutArmStarted payload is invalid")
-                try:
-                    arm = HoldoutArm(str(payload["holdout_arm"]))
-                except ValueError:
-                    raise ValueError("HoldoutArmStarted arm is invalid") from None
-                generation = payload["generation"]
-                holdout = (
-                    self.generation_holdouts.get(generation)
-                    if isinstance(generation, int) and not isinstance(generation, bool)
-                    else None
-                )
-                binding = holdout.arm_bindings[arm.value] if holdout is not None else None
-                if (
-                    holdout is None
-                    or binding is None
-                    or payload["candidate_id"] != binding["candidate_id"]
-                    or payload["candidate_revision_id"]
-                    != binding["candidate_revision_id"]
-                    or payload["cohort_digest"] != holdout.cohort_digest
-                    or payload["origin_count"] != holdout.origin_count
-                ):
-                    raise ValueError("HoldoutArmStarted scope is invalid")
-            elif event.kind == "HoldoutEvaluationRecorded":
-                if set(payload) != {"evaluation"}:
-                    raise ValueError("HoldoutEvaluationRecorded payload is invalid")
-                evaluation = HoldoutEvaluation.from_dict(payload["evaluation"])
-                arm = evaluation.scope.holdout_arm
-                assert arm is not None
-                holdout = self.generation_holdouts.get(evaluation.scope.generation)
-                binding = holdout.arm_bindings[arm.value] if holdout is not None else None
-                if (
-                    holdout is None
-                    or evaluation.scope.run_id != holdout.run_id
-                    or evaluation.scope.cohort_digest != holdout.cohort_digest
-                    or evaluation.scope.origin_count != holdout.origin_count
-                    or binding is None
-                    or evaluation.scope.candidate_id != binding["candidate_id"]
-                    or evaluation.scope.candidate_revision_id
-                    != binding["candidate_revision_id"]
-                ):
-                    raise ValueError("holdout evaluation scope is invalid")
-                key = (holdout.generation, arm)
-                existing = self.holdout_evaluations.get(key)
-                if existing is not None and existing.to_dict() != evaluation.to_dict():
-                    raise ValueError("conflicting holdout evaluation")
-                self.holdout_evaluations.setdefault(key, evaluation)
-            elif event.kind == "GenerationComparisonRecorded":
-                if set(payload) != {"comparison"}:
-                    raise ValueError("GenerationComparisonRecorded payload is invalid")
-                comparison = GenerationComparison.from_dict(payload["comparison"])
-                holdout = self.generation_holdouts.get(comparison.generation)
-                if holdout is None or holdout.cohort_digest != comparison.cohort_digest:
-                    raise ValueError("generation comparison holdout is missing")
-                persisted = {
-                    arm: self.holdout_evaluations.get((comparison.generation, arm))
-                    for arm in map(HoldoutArm, holdout.arm_bindings)
-                }
-                if any(item is None for item in persisted.values()):
-                    raise ValueError("generation comparison requires all three holdout arms")
-                validate_generation_comparison_binding(
-                    self.task,
-                    self.run.run_id,
-                    holdout,
-                    self.formal_selection_events.get(comparison.generation),
-                    comparison,
-                    persisted_evaluations={
-                        arm: item
-                        for arm, item in persisted.items()
-                        if item is not None
-                    },
-                    persisted_judgments={item.candidate_id: item for item in self.evaluations.values()},
-                )
-                existing = self.generation_comparisons.get(comparison.generation)
-                if existing is not None and existing.to_dict() != comparison.to_dict():
-                    raise ValueError("conflicting generation comparison")
-                self.generation_comparisons.setdefault(comparison.generation, comparison)
-            elif event.kind == "CandidateEffectiveRevisionFrozen":
-                fields = {
-                    "generation",
-                    "selected_candidate_id",
-                    "selected_revision_id",
-                    "comparison_digest",
-                }
-                if set(payload) != fields:
-                    raise ValueError("effective revision payload is invalid")
-                generation = payload["generation"]
-                comparison = self.generation_comparisons.get(generation)
-                if (
-                    comparison is None
-                    or payload["comparison_digest"] != comparison.comparison_digest
-                    or payload["selected_candidate_id"]
-                    != comparison.selected_candidate_id
-                    or payload["selected_revision_id"]
-                    != comparison.selected_revision_id
-                ):
-                    raise ValueError("effective revision differs from Host comparison")
-                existing = self.effective_revision_bindings.get(generation)
-                if existing is not None and canonical_json(existing) != canonical_json(payload):
-                    raise ValueError("conflicting effective revision")
-                self.effective_revision_bindings.setdefault(generation, dict(payload))
-            elif event.kind == "GenerationChampionSelected":
-                fields = {"generation", "selected_candidate_id", "selected_revision_id"}
-                if set(payload) != fields:
-                    raise ValueError("generation champion payload is invalid")
-                binding = self.effective_revision_bindings.get(payload["generation"])
-                if (
-                    binding is None
-                    or payload["selected_candidate_id"]
-                    != binding["selected_candidate_id"]
-                    or payload["selected_revision_id"]
-                    != binding["selected_revision_id"]
-                    or payload["generation"] in self.champion_generations
-                ):
-                    raise ValueError("generation champion requires effective revision")
-                self.champion_generations.add(payload["generation"])
-            elif event.kind == "ModelUsageRecorded":
-                validate_model_usage_payload(payload)
-            elif event.kind == "EvaluationProgressRecorded":
-                validate_evaluation_progress_payload(payload)
-            elif event.kind in {
-                "EvaluationSampleResultsStarted",
-                "EvaluationSampleResultsResumed",
-                "EvaluationSampleResultBatchRecorded",
-                "EvaluationSampleResultsRecorded",
-            }:
-                # Full result rows are a private paginated read model. They must
-                # never enter evaluations or later-generation strategy context.
-                continue
-            else:
+            # One call per event-kind group, in the order the single chain used
+            # to test them. `or` short-circuits, so the first group that claims
+            # the kind is the only one that runs, and an unclaimed kind still
+            # reaches the same error it always did.
+            if not (
+                self._apply_run_lifecycle(event, payload)
+                or self._apply_proposal_and_cohort(event, payload)
+                or self._apply_screening(event, payload)
+                or self._apply_evaluation_and_promotion(event, payload)
+                or self._apply_generation_research(event, payload)
+                or self._apply_formal_stage_and_intervention(event, payload)
+                or self._apply_dsh_runtime(event, payload)
+                or self._apply_revision_and_formal_batch(event, payload)
+                or self._apply_local_edit(event, payload)
+                or self._apply_trajectory_completion(event, payload)
+                or self._apply_holdout_and_comparison(event, payload)
+            ):
                 raise ValueError(f"unknown event kind: {event.kind}")
 
             if event.kind == "DshChildLaunchReserved":
@@ -4717,6 +2283,2610 @@ class RunStateReducer:
                     self.dsh_usage_by_reservation.setdefault(reservation_id, []).append(event)
                 if isinstance(session_id, str):
                     self.dsh_usage_by_session.setdefault(session_id, []).append(event)
+
+    def _apply_run_lifecycle(self, event: Event, payload: Any) -> bool:
+        """Seed materialization, runtime binding, and run status transitions.
+
+        Returns True when this group recognizes ``event.kind``, False to let
+        the next group try. Cut verbatim out of the single chain ``apply``
+        used to carry inline; the branches and their order are unchanged.
+        """
+        if event.kind == "RunSeedGenomeMaterialized":
+            if self.expected_seed_canonical is None:
+                raise ValueError("historical run cannot materialize a DSH-native seed")
+            if self.materialized_seed_canonical is not None:
+                raise ValueError("run has multiple seed materialization events")
+            if not isinstance(payload, Mapping) or set(payload) != {
+                "schema_version",
+                "materializer_version",
+                "genome_canonical_json",
+                "genome_digest",
+            }:
+                raise ValueError("RunSeedGenomeMaterialized payload is invalid")
+            if payload["genome_canonical_json"] != self.expected_seed_canonical:
+                raise ValueError("materialized seed differs from RunCreated expectation")
+            from ..evolution.genome import EcologyEvolutionPluginGenome
+
+            import json
+
+            seed = EcologyEvolutionPluginGenome.from_dict(
+                json.loads(self.expected_seed_canonical)
+            )
+            if payload["genome_digest"] != seed.genome_digest:
+                raise ValueError("materialized seed genome digest mismatch")
+            self.materialized_seed_canonical = self.expected_seed_canonical
+        elif event.kind == "DshRuntimeBound":
+            if set(payload) != {
+                "schema_version",
+                "execution_protocol",
+                "capabilities_digest",
+                "preset_ids",
+                "first_call_verified",
+            }:
+                raise ValueError("DshRuntimeBound payload is invalid")
+            if (
+                payload["schema_version"] != "ecologyrsi-dsh.runtime-bound/1"
+                or payload["execution_protocol"] != DSH_NATIVE_EVOLUTION_PROTOCOL
+                or payload["first_call_verified"] is not False
+                or not isinstance(payload["preset_ids"], list)
+                or not isinstance(payload["capabilities_digest"], str)
+                or len(payload["capabilities_digest"]) != 64
+            ):
+                raise ValueError("DshRuntimeBound contract is invalid")
+        elif event.kind == AUDIT_EVENT:
+            if self.run.status is not RunStatus.CREATED or self.model_contract_preflight_recorded:
+                raise ValueError("model preflight audit must be recorded once before start")
+            validate_preflight_audit(
+                payload, self.task, self.run.run_id,
+                recorded_at=event.created_at, created_at=self.created.created_at,
+            )
+            self.model_contract_preflight_recorded = True
+        elif event.kind == "RunStarted":
+            if (preflight_audit_required(self.task.metadata)
+                    and not self.model_contract_preflight_recorded):
+                raise ValueError("run started without model contract preflight audit")
+            if self.active_gateway_circuit_pause is not None:
+                raise ValueError(
+                    "gateway circuit requires an exact RunResumed origin"
+                )
+            if self.expected_seed_canonical is not None and self.materialized_seed_canonical is None:
+                raise ValueError("DSH-native run started before seed initialization")
+            if self.run.status not in _TERMINAL_RUN_STATUSES:
+                self.run = replace(
+                    self.run, status=RunStatus.RUNNING, session_id=payload["session_id"]
+                )
+        elif event.kind == "RunPaused":
+            if payload.get("code") in GATEWAY_CIRCUIT_CODES:
+                _validate_gateway_circuit_pause_payload(payload)
+                if (
+                    self.run.status is not RunStatus.RUNNING
+                    or int(payload["generation"]) != int(self.run.generation)
+                ):
+                    raise ValueError(
+                        "gateway circuit pause requires a running current generation"
+                    )
+                scope = self.gateway_retry_scope(payload)
+                reset_seq = self.gateway_retry_reset_seq(
+                    scope,
+                    dsh_continuity_reset=(
+                        payload.get("continuity_reset_contract")
+                        == _DSH_CONTINUITY_RESET_CONTRACT
+                    ),
+                )
+                prior_retry = self.active_gateway_retry(scope, reset_seq=reset_seq)
+                first_retry = self.gateway_retry_first_by_scope.get(scope)
+                first_failure_event = (
+                    first_retry
+                    if first_retry is not None and first_retry.seq > reset_seq
+                    else event
+                )
+                _validate_gateway_circuit_pause_trigger_evidence(
+                    payload,
+                    first_failure_event=first_failure_event,
+                    pause_event=event,
+                )
+                if prior_retry is None:
+                    chain_valid = (
+                        payload["consecutive_failures"] == 1
+                        and payload["breaker_epoch"]
+                        == self.gateway_retry_expected_epoch(scope, reset_seq=reset_seq)
+                        and payload["first_failure_at"]
+                        == payload["last_failure_at"]
+                    )
+                else:
+                    chain_valid = (
+                        payload["consecutive_failures"]
+                        == prior_retry.payload["consecutive_failures"] + 1
+                        and payload["breaker_epoch"]
+                        == prior_retry.payload["breaker_epoch"]
+                        and payload["retry_limit"]
+                        == prior_retry.payload["retry_limit"]
+                        and payload["first_failure_at"]
+                        == prior_retry.payload["first_failure_at"]
+                        and _aware_timestamp(payload["last_failure_at"])
+                        >= _aware_timestamp(prior_retry.payload["last_failure_at"])
+                    )
+                if not chain_valid:
+                    raise ValueError(
+                        "gateway circuit pause does not match the retry chain"
+                    )
+                self.gateway_retry_max_epoch[scope] = max(
+                    self.gateway_retry_max_epoch.get(scope, 0),
+                    int(payload["breaker_epoch"]),
+                )
+                self.active_gateway_circuit_pause = event
+            else:
+                if self.active_gateway_circuit_pause is not None:
+                    raise ValueError(
+                        "gateway circuit requires an exact RunResumed origin"
+                    )
+            if self.run.status not in _TERMINAL_RUN_STATUSES:
+                self.run = replace(self.run, status=RunStatus.PAUSED)
+        elif event.kind == "RunResumed":
+            if self.active_gateway_circuit_pause is not None:
+                if payload.get("resume_origin") not in GATEWAY_CIRCUIT_CODES:
+                    raise ValueError(
+                        "gateway circuit requires an exact RunResumed origin"
+                    )
+                _validate_gateway_circuit_resume_payload(payload)
+                origin = self.active_gateway_circuit_pause
+                if (
+                    self.run.status is not RunStatus.PAUSED
+                    or origin is None
+                    or payload["origin_pause_event_id"] != origin.event_id
+                    or payload["origin_breaker_epoch"]
+                    != origin.payload.get("breaker_epoch")
+                    or payload["retry_class"] != origin.payload.get("retry_class")
+                    or payload["generation"] != origin.payload.get("generation")
+                    or payload["stage"] != origin.payload.get("stage")
+                ):
+                    raise ValueError(
+                        "gateway circuit resume does not match the active pause"
+                    )
+            elif payload.get("resume_origin") in GATEWAY_CIRCUIT_CODES:
+                _validate_gateway_circuit_resume_payload(payload)
+                raise ValueError(
+                    "gateway circuit resume does not match the active pause"
+                )
+            self.active_gateway_circuit_pause = None
+            if self.run.status not in _TERMINAL_RUN_STATUSES:
+                self.run = replace(self.run, status=RunStatus.RUNNING)
+            self.latest_run_resumed = event
+        elif event.kind == "RunCancelled":
+            if self.run.status not in _TERMINAL_RUN_STATUSES:
+                self.run = replace(self.run, status=RunStatus.CANCELLED)
+        elif event.kind == "RunFailed":
+            if self.run.status not in _TERMINAL_RUN_STATUSES:
+                self.run = replace(self.run, status=RunStatus.FAILED)
+        elif event.kind == "RunCompleted":
+            if self.run.status not in _TERMINAL_RUN_STATUSES:
+                self.run = replace(self.run, status=RunStatus.COMPLETED)
+        elif event.kind == "GenerationAdvanced":
+            if self.run.status not in _TERMINAL_RUN_STATUSES:
+                next_generation = payload.get("generation")
+                if uses_global_incumbent_protocol(self.task) and (
+                    isinstance(next_generation, bool)
+                    or not isinstance(next_generation, int)
+                    or next_generation != self.run.generation + 1
+                    or self.run.generation not in self.generation_comparisons
+                    or self.run.generation not in self.effective_revision_bindings
+                    or self.run.generation not in self.champion_generations
+                ):
+                    raise ValueError(
+                        "runtime-v2 generation advance requires the sequential "
+                        "global incumbent decision"
+                    )
+                self.run = replace(self.run, generation=int(payload["generation"]))
+        else:
+            return False
+        return True
+    def _apply_proposal_and_cohort(self, event: Event, payload: Any) -> bool:
+        """Proposal submission, candidate spawning, and frozen cohort planning.
+
+        Returns True when this group recognizes ``event.kind``, False to let
+        the next group try. Cut verbatim out of the single chain ``apply``
+        used to carry inline; the branches and their order are unchanged.
+        """
+        if event.kind == "ProposalSubmitted":
+            if is_dsh_native_protocol(self.task) and self.formal_stage_started:
+                raise ValueError("formal stage results cannot feed a new proposal")
+            item = Proposal.from_dict(payload["proposal"])
+            if is_dsh_native_protocol(self.task):
+                genome = persisted_genome_from_proposal(item)
+                if genome is None:
+                    raise ValueError("DSH-native proposal is missing its genome")
+                lineage = dict(genome.lineage)
+                seed_control = (
+                    item.metadata.get("candidate_role")
+                    == CandidateRole.INCUMBENT_CONTROL.value
+                )
+                if seed_control:
+                    if self.materialized_seed_canonical is None:
+                        raise ValueError("seed incumbent cannot precede seed materialization")
+                    import json
+
+                    from ..evolution.genome import EcologyEvolutionPluginGenome
+
+                    seed = EcologyEvolutionPluginGenome.from_dict(
+                        json.loads(self.materialized_seed_canonical)
+                    )
+                    if (
+                        item.generation != 0
+                        or item.parent_candidate_id is not None
+                        or genome.genome_digest != seed.genome_digest
+                        or lineage["origin_kind"] != "seed_catalog"
+                        or lineage["generation"] is not None
+                        or lineage["slot_index"] is not None
+                    ):
+                        raise ValueError(
+                            "seed incumbent proposal does not match materialized seed"
+                        )
+                elif (
+                    lineage["generation"] != item.generation
+                    or lineage["parent_candidate_id"] != item.parent_candidate_id
+                ):
+                    raise ValueError("proposal scope does not match genome lineage")
+                if item.generation == 0 and not seed_control:
+                    if self.materialized_seed_canonical is None:
+                        raise ValueError("proposal cannot precede seed materialization")
+                    import json
+
+                    from ..evolution.genome import EcologyEvolutionPluginGenome
+
+                    seed = EcologyEvolutionPluginGenome.from_dict(
+                        json.loads(self.materialized_seed_canonical)
+                    )
+                    if lineage["parent_genome_digest"] != seed.genome_digest:
+                        raise ValueError("first-generation proposal parent genome mismatch")
+                elif not seed_control and item.parent_candidate_id is None:
+                    raise ValueError("later DSH-native proposal requires a parent candidate")
+            self.proposals[item.proposal_id] = item
+        elif event.kind == "CandidateSpawned":
+            item = Candidate.from_dict(payload["candidate"])
+            if item.run_id != self.run.run_id:
+                raise ValueError("candidate ownership does not match run")
+            if item.candidate_id in self.candidates:
+                raise ValueError("candidate_id has multiple spawn events")
+            if is_dsh_native_protocol(self.task):
+                proposal = self.proposals.get(item.proposal_id)
+                if proposal is None:
+                    raise ValueError("candidate is missing its DSH-native proposal")
+                genome = persisted_genome_from_proposal(proposal)
+                if genome is None:
+                    raise ValueError("candidate proposal is missing its genome")
+                lineage = dict(genome.lineage)
+                if item.role is CandidateRole.INCUMBENT_CONTROL:
+                    if self.materialized_seed_canonical is None:
+                        raise ValueError("incumbent control cannot precede seed")
+                    import json
+
+                    from ..evolution.genome import EcologyEvolutionPluginGenome
+
+                    seed = EcologyEvolutionPluginGenome.from_dict(
+                        json.loads(self.materialized_seed_canonical)
+                    )
+                    if (
+                        item.proposal_id
+                        != f"proposal:{self.run.run_id}:seed-incumbent-control"
+                        or item.candidate_id
+                        != f"candidate:{self.run.run_id}:seed-incumbent-control"
+                        or item.slot_index != 0
+                        or any(
+                            candidate.role is CandidateRole.INCUMBENT_CONTROL
+                            for candidate in self.candidates.values()
+                        )
+                        or
+                        proposal.metadata.get("candidate_role") != item.role.value
+                        or genome.genome_digest != seed.genome_digest
+                        or lineage["origin_kind"] != "seed_catalog"
+                        or lineage["generation"] is not None
+                        or lineage["slot_index"] is not None
+                    ):
+                        raise ValueError(
+                            "deterministic seed control does not match materialized seed"
+                        )
+                elif (
+                    item.generation != lineage["generation"]
+                    or item.slot_index != lineage["slot_index"]
+                ):
+                    raise ValueError("candidate coordinates do not match genome lineage")
+                binding = validate_identity_binding(payload.get("identity_binding"))
+                if binding["genome_digest"] != genome.genome_digest:
+                    raise ValueError("candidate identity binding genome mismatch")
+                if binding["behavior_digest"] != genome.behavior_digest:
+                    raise ValueError("candidate identity binding behavior mismatch")
+                self.candidate_identity_bindings[item.candidate_id] = {
+                    "candidate_id": item.candidate_id,
+                    "identity_binding": binding,
+                }
+            self.candidates[item.candidate_id] = item
+        elif event.kind == "RunAdaptationCohortFrozen":
+            if set(payload) != {"adaptation"}:
+                raise ValueError("RunAdaptationCohortFrozen payload is invalid")
+            adaptation = RunAdaptationCohort.from_dict(payload["adaptation"])
+            schedule = OptimizationSchedule.from_dict(
+                self.task.metadata["optimization_schedule"]
+            )
+            if (
+                self.task.metadata.get("optimization_protocol") not in ADAPTIVE_PROTOCOLS
+                or adaptation.dataset_id != self.task.visible_datasets[0]
+                or adaptation.episode_id != str(self.task.metadata.get("episode_id"))
+                or adaptation.seed != self.task.seed
+                or adaptation.origin_count
+                != schedule.formal_origin_count_per_finalist
+                or len(adaptation.batches) != schedule.batch_count
+                or any(
+                    batch.origin_count != schedule.local_batch_origin_count
+                    for batch in adaptation.batches
+                )
+            ):
+                raise ValueError("run adaptation cohort differs from frozen task")
+            if (
+                self.run_adaptation_cohort is not None
+                and self.run_adaptation_cohort.to_dict() != adaptation.to_dict()
+            ):
+                raise ValueError("conflicting run adaptation cohort")
+            self.run_adaptation_cohort = adaptation
+        elif event.kind == "GenerationCohortsFrozen":
+            if set(payload) != {"generation_cohorts"}:
+                raise ValueError("GenerationCohortsFrozen payload is invalid")
+            planned = GenerationCohorts.from_dict(payload["generation_cohorts"])
+            schedule = OptimizationSchedule.from_dict(
+                self.task.metadata["optimization_schedule"]
+            )
+            generation_candidates = [
+                item for item in self.candidates.values()
+                if item.generation == planned.generation
+                and item.role is CandidateRole.SEARCH
+            ]
+            if self.run_adaptation_cohort is None:
+                raise ValueError("generation cohorts require run adaptation cohort")
+            if len(generation_candidates) != 4:
+                raise ValueError("generation cohorts require exactly four candidates")
+            if any(
+                generation == planned.generation
+                for generation, _candidate_id in self.candidate_screening_events
+            ):
+                raise ValueError("generation cohorts must precede screening")
+            if (
+                planned.dataset_id != self.run_adaptation_cohort.dataset_id
+                or planned.episode_id != self.run_adaptation_cohort.episode_id
+                or planned.seed != self.task.seed
+                or planned.adaptation_digest
+                != self.run_adaptation_cohort.adaptation_digest
+                or planned.adaptation_batch_digests
+                != self.run_adaptation_cohort.batch_digests
+                or planned.screening.origin_count
+                != schedule.screening_origin_count
+                or planned.screening.shared_candidate_count != 4
+                or planned.holdout.origin_count
+                != schedule.selection_holdout_origin_count
+                or planned.holdout.shared_arm_count != schedule.finalist_count + 1
+                or set(planned.screening.origin_occurrence_keys)
+                & set(self.run_adaptation_cohort.origin_occurrence_keys)
+                or set(planned.holdout.origin_occurrence_keys)
+                & set(self.run_adaptation_cohort.origin_occurrence_keys)
+            ):
+                raise ValueError("generation cohorts differ from frozen task")
+            prior_origins = {
+                origin_id
+                for item in self.generation_selection_cohorts.values()
+                for origin_id in (
+                    *item.screening.origin_occurrence_keys,
+                    *item.holdout.origin_occurrence_keys,
+                )
+            }
+            if prior_origins & set(
+                (
+                    *planned.screening.origin_occurrence_keys,
+                    *planned.holdout.origin_occurrence_keys,
+                )
+            ):
+                raise ValueError("generation selection origins cannot be reused")
+            existing = self.generation_selection_cohorts.get(planned.generation)
+            if existing is not None and existing.to_dict() != planned.to_dict():
+                raise ValueError("conflicting generation cohorts")
+            self.generation_selection_cohorts.setdefault(planned.generation, planned)
+        else:
+            return False
+        return True
+    def _apply_screening(self, event: Event, payload: Any) -> bool:
+        """Screening records and the frozen formal-selection cohort.
+
+        Returns True when this group recognizes ``event.kind``, False to let
+        the next group try. Cut verbatim out of the single chain ``apply``
+        used to carry inline; the branches and their order are unchanged.
+        """
+        if event.kind == "CandidateScreeningRecorded":
+            schema_version = payload.get("schema_version")
+            expected_fields = {
+                "schema_version",
+                "generation",
+                "candidate_id",
+                "score",
+                "passed",
+                "constraint_violations",
+                "origin_count",
+                "prediction_cell_count",
+                "cohort_digest",
+            }
+            if schema_version == SCREENING_SCHEMA_V2:
+                expected_fields.add("record_digest")
+            elif schema_version != SCREENING_SCHEMA_V1:
+                raise ValueError("unsupported candidate screening schema")
+            if set(payload) != expected_fields:
+                raise ValueError("candidate screening payload is invalid")
+            generation = payload["generation"]
+            candidate_id = payload["candidate_id"]
+            if (
+                isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or generation < 0
+                or not isinstance(candidate_id, str)
+                or not candidate_id.strip()
+            ):
+                raise ValueError("candidate screening identity is invalid")
+            candidate = self.candidates.get(candidate_id)
+            if candidate is None:
+                raise ValueError("screening candidate is missing")
+            if candidate.generation != generation:
+                raise ValueError("screening generation does not match candidate")
+            if candidate.role is not CandidateRole.SEARCH:
+                raise ValueError("incumbent control cannot enter candidate screening")
+            if (
+                self.task.metadata.get("optimization_protocol")
+                in ADAPTIVE_PROTOCOLS
+                and not any(
+                    revision.candidate_id == candidate_id
+                    and revision.parent_revision_id is None
+                    for revision in self.candidate_revisions.values()
+                )
+            ):
+                raise ValueError(
+                    "adaptive candidate screening requires frozen initial revision R0"
+                )
+            if self.task.metadata.get("optimization_protocol") in ADAPTIVE_PROTOCOLS:
+                planned = self.generation_selection_cohorts.get(generation)
+                if planned is None:
+                    raise ValueError(
+                        "adaptive candidate screening requires frozen generation cohorts"
+                    )
+                if payload.get("cohort_digest") != planned.screening.cohort_digest:
+                    raise ValueError(
+                        "candidate screening differs from frozen screening cohort"
+                    )
+            score = payload["score"]
+            constraint_violations = payload["constraint_violations"]
+            origin_count = payload["origin_count"]
+            prediction_cell_count = payload["prediction_cell_count"]
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, (int, float))
+                or not math.isfinite(float(score))
+                or not isinstance(payload["passed"], bool)
+                or isinstance(constraint_violations, bool)
+                or not isinstance(constraint_violations, int)
+                or constraint_violations < 0
+                or isinstance(origin_count, bool)
+                or not isinstance(origin_count, int)
+                or origin_count < 1
+                or isinstance(prediction_cell_count, bool)
+                or not isinstance(prediction_cell_count, int)
+                or prediction_cell_count < origin_count
+            ):
+                raise ValueError("candidate screening evidence is invalid")
+            cohort_digest = payload["cohort_digest"]
+            strict_selection = bool(
+                supports_two_stage_screening(
+                    self.task.metadata.get("sample_agent_protocol")
+                )
+                and self.task.metadata.get("sample_budget_class") == "selection_eligible"
+                and self.task.metadata.get("two_stage_evaluation_enabled", True) is True
+            )
+            if (
+                schema_version == SCREENING_SCHEMA_V2 or cohort_digest is not None
+            ) and (
+                not isinstance(cohort_digest, str)
+                or len(cohort_digest) != 64
+                or any(character not in "0123456789abcdef" for character in cohort_digest)
+            ):
+                raise ValueError("screening cohort_digest must be a SHA-256 digest")
+            if strict_selection:
+                cells_per_origin = self.task.metadata.get("prediction_cells_per_origin")
+                if (
+                    cohort_digest is None
+                    or isinstance(cells_per_origin, bool)
+                    or not isinstance(cells_per_origin, int)
+                    or cells_per_origin < 1
+                    or origin_count != 64
+                    or complete_origin_count(
+                        prediction_cell_count, cells_per_origin
+                    )
+                    != 64
+                ):
+                    raise ValueError("strict-v4 screening evidence is incomplete")
+            if schema_version == SCREENING_SCHEMA_V2:
+                record_digest = payload["record_digest"]
+                if (
+                    not isinstance(record_digest, str)
+                    or len(record_digest) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in record_digest
+                    )
+                    or record_digest != screening_record_digest(payload)
+                ):
+                    raise ValueError("candidate screening record_digest is invalid")
+            key = (generation, candidate_id)
+            existing = self.candidate_screening_events.get(key)
+            if existing is not None:
+                if canonical_json(existing.payload) != canonical_json(payload):
+                    raise ValueError("conflicting screening record")
+            else:
+                if candidate.status is not CandidateStatus.SPAWNED:
+                    raise ValueError("only a new candidate can be screened")
+                self.candidate_screening_events[key] = event
+        elif event.kind == "FormalSelectionCohortFrozen":
+            if payload.get("schema_version") not in {
+                FORMAL_SELECTION_SCHEMA_V1,
+                FORMAL_SELECTION_SCHEMA_V2,
+                FORMAL_SELECTION_SCHEMA_V3,
+            }:
+                raise ValueError("formal selection payload is invalid")
+            expected_formal_fields = {
+                "schema_version",
+                "generation",
+                "selected_candidate_ids",
+                "screening_digest",
+            }
+            if payload.get("schema_version") == FORMAL_SELECTION_SCHEMA_V3:
+                expected_formal_fields.update(
+                    {
+                        "screening_pass_count",
+                        "exploration_only",
+                        "consecutive_exploration_generations",
+                    }
+                )
+            if set(payload) != expected_formal_fields:
+                raise ValueError("formal selection payload is invalid")
+            generation = payload["generation"]
+            selected = payload["selected_candidate_ids"]
+            schedule = OptimizationSchedule.from_dict(self.task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
+            if schedule.quick:
+                first = min((c for c in self.candidates.values() if c.generation == generation and c.role is CandidateRole.SEARCH), key=lambda c: c.slot_index)
+                if selected != [first.candidate_id]:
+                    raise ValueError("quick trajectory must preregister the first proposal")
+            if (
+                isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or generation < 0
+                or not isinstance(selected, list)
+                or len(selected) != schedule.finalist_count
+                or any(not isinstance(item, str) or not item.strip() for item in selected)
+                or len(set(selected)) != schedule.finalist_count
+            ):
+                raise ValueError("formal selected candidate count is invalid")
+            for candidate_id in selected:
+                candidate = self.candidates.get(candidate_id)
+                if (
+                    candidate is None
+                    or candidate.generation != generation
+                    or candidate.role is not CandidateRole.SEARCH
+                ):
+                    raise ValueError("formal selected candidate is outside generation")
+                if not schedule.quick and (generation, candidate_id) not in self.candidate_screening_events:
+                    raise ValueError("formal selection is missing screening evidence")
+            screening_digest = payload["screening_digest"]
+            if (
+                not isinstance(screening_digest, str)
+                or len(screening_digest) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in screening_digest
+                )
+            ):
+                raise ValueError("formal screening_digest must be a SHA-256 digest")
+            generation_records = [
+                screening_event.payload
+                for (item_generation, _candidate_id), screening_event in self.candidate_screening_events.items()
+                if item_generation == generation
+            ]
+            if screening_digest != screening_cohort_digest(generation_records):
+                raise ValueError("formal screening digest does not match screening cohort")
+            if payload.get("schema_version") == FORMAL_SELECTION_SCHEMA_V3:
+                pass_count = sum(
+                    record.get("passed") is True for record in generation_records
+                )
+                exploration_only = pass_count == 0
+                consecutive = payload["consecutive_exploration_generations"]
+                expected_consecutive = 0
+                if exploration_only:
+                    expected_consecutive = 1
+                    expected_generation = generation - 1
+                    while expected_generation >= 0:
+                        prior = self.formal_selection_events.get(expected_generation)
+                        if (
+                            prior is None
+                            or prior.payload.get("schema_version")
+                            != FORMAL_SELECTION_SCHEMA_V3
+                            or prior.payload.get("exploration_only") is not True
+                        ):
+                            break
+                        expected_consecutive += 1
+                        expected_generation -= 1
+                supplied_pass_count = payload["screening_pass_count"]
+                if (
+                    isinstance(consecutive, bool)
+                    or not isinstance(consecutive, int)
+                    or consecutive < 0
+                    or isinstance(supplied_pass_count, bool)
+                    or not isinstance(supplied_pass_count, int)
+                    or supplied_pass_count != pass_count
+                    or payload["exploration_only"] is not exploration_only
+                    or consecutive != expected_consecutive
+                ):
+                    raise ValueError("formal exploration state is invalid")
+            existing = self.formal_selection_events.get(generation)
+            if existing is not None:
+                if canonical_json(existing.payload) != canonical_json(payload):
+                    raise ValueError("conflicting formal selection")
+            else:
+                self.formal_selection_events[generation] = event
+        else:
+            return False
+        return True
+    def _apply_evaluation_and_promotion(self, event: Event, payload: Any) -> bool:
+        """Artifacts, evaluations, judgements, promotions, and candidate exits.
+
+        Returns True when this group recognizes ``event.kind``, False to let
+        the next group try. Cut verbatim out of the single chain ``apply``
+        used to carry inline; the branches and their order are unchanged.
+        """
+        if event.kind == "ArtifactRecorded":
+            item = ModelArtifact.from_dict(payload["artifact"])
+            if is_dsh_native_protocol(self.task):
+                expected_binding = self.candidate_identity_bindings.get(item.candidate_id)
+                if expected_binding is None:
+                    raise ValueError("artifact candidate has no identity binding")
+                if payload.get("schema_version") == ARTIFACT_EVENT_V2:
+                    if set(payload) != {"schema_version", "artifact", "proposal_identity_binding", "artifact_revision_binding"}:
+                        raise ValueError("artifact v2 envelope fields are invalid")
+                    validate_identity_binding(payload.get("proposal_identity_binding"), expected=expected_binding["identity_binding"])
+                    revision = self.candidate_revisions.get(item.candidate_revision_id)
+                    if revision is None:
+                        raise ValueError("artifact actual revision is missing")
+                    scope = resolve_artifact_scope(item, holdouts=self.generation_holdouts.values(),
+                                                   evaluations=(*self.formal_batch_evaluations.values(), *self.holdout_evaluations.values()))
+                    self.artifact_revision_bindings[item.artifact_id] = validate_artifact_revision_binding(
+                        payload.get("artifact_revision_binding"), artifact=item, revision=revision, scope=scope)
+                else:
+                    if payload.get("schema_version") is not None or item.artifact_id in self.artifact_revision_bindings:
+                        raise ValueError("artifact envelope version is invalid")
+                    validate_identity_binding(payload.get("identity_binding"), expected=expected_binding["identity_binding"])
+                if payload["artifact"].get("artifact_digest") != item.digest:
+                    raise ValueError("artifact digest mismatch")
+            existing = self.artifacts.get(item.artifact_id)
+            if existing is not None and existing.to_dict() != item.to_dict():
+                raise ValueError("artifact_id belongs to multiple candidates")
+            self.artifacts[item.artifact_id] = item
+        elif event.kind == "EvaluationRecorded":
+            item = Evaluation.from_dict(payload["evaluation"])
+            if is_dsh_native_protocol(self.task):
+                expected_binding = self.candidate_identity_bindings.get(item.candidate_id)
+                if expected_binding is None:
+                    raise ValueError("evaluation candidate has no identity binding")
+                artifact = next(
+                    (
+                        artifact
+                        for artifact in self.artifacts.values()
+                        if artifact.candidate_id == item.candidate_id
+                    ),
+                    None,
+                )
+                if artifact is None or item.artifact_digest != artifact.digest:
+                    raise ValueError("evaluation artifact binding mismatch")
+                actual_binding = self.artifact_revision_bindings.get(artifact.artifact_id)
+                if payload.get("schema_version") == EVALUATION_EVENT_V2:
+                    if set(payload) != {"schema_version", "evaluation", "proposal_identity_binding", "artifact_revision_binding", "artifact_digest", "evaluation_digest"}:
+                        raise ValueError("evaluation v2 envelope fields are invalid")
+                    validate_identity_binding(payload.get("proposal_identity_binding"), expected=expected_binding["identity_binding"])
+                    if actual_binding is None or canonical_json(payload.get("artifact_revision_binding")) != canonical_json(actual_binding):
+                        raise ValueError("evaluation artifact revision binding mismatch")
+                    validate_evaluation_artifact_binding(item, artifact, actual_binding)
+                else:
+                    if payload.get("schema_version") is not None or actual_binding is not None:
+                        raise ValueError("evaluation envelope does not match artifact version")
+                    validate_identity_binding(payload.get("identity_binding"), expected=expected_binding["identity_binding"])
+                if payload.get("artifact_digest") != artifact.digest:
+                    raise ValueError("evaluation event artifact digest mismatch")
+                if payload.get("evaluation_digest") != digest(item.to_dict()):
+                    raise ValueError("evaluation event digest mismatch")
+            existing = self.evaluations.get(item.evaluation_id)
+            if existing is not None and existing.to_dict() != item.to_dict():
+                raise ValueError("evaluation_id belongs to multiple candidates")
+            self.evaluations[item.evaluation_id] = item
+            candidate = self.candidates.get(item.candidate_id)
+            if candidate is not None:
+                self.candidates[item.candidate_id] = replace(
+                    candidate,
+                    status=CandidateStatus.EVALUATED,
+                    evaluation_id=item.evaluation_id,
+                )
+        elif event.kind == "EvaluationJudged":
+            item = Evaluation.from_dict(payload["evaluation"])
+            if is_dsh_native_protocol(self.task):
+                expected_binding = self.candidate_identity_bindings.get(item.candidate_id)
+                if expected_binding is None:
+                    raise ValueError("judgment candidate has no identity binding")
+                validate_identity_binding(
+                    payload.get("identity_binding"),
+                    expected=expected_binding["identity_binding"],
+                )
+                artifact = next(
+                    (
+                        artifact
+                        for artifact in self.artifacts.values()
+                        if artifact.candidate_id == item.candidate_id
+                    ),
+                    None,
+                )
+                if artifact is None or item.artifact_digest != artifact.digest:
+                    raise ValueError("judgment artifact binding mismatch")
+                actual_binding = self.artifact_revision_bindings.get(artifact.artifact_id)
+                if actual_binding is not None:
+                    validate_evaluation_artifact_binding(item, artifact, actual_binding)
+                    scientific = self.evaluations.get(item.evaluation_id)
+                    immutable_fields = (
+                        "evaluation_id", "run_id", "candidate_id", "candidate_revision_id",
+                        "evaluation_scope", "score", "partition", "evaluator_digest",
+                        "artifact_digest", "created_at",
+                    )
+                    if scientific is None or any(
+                        getattr(scientific, name) != getattr(item, name)
+                        for name in immutable_fields
+                    ):
+                        raise ValueError("judgment cannot change scientific evaluation fields")
+                if payload.get("artifact_digest") != artifact.digest:
+                    raise ValueError("judgment event artifact digest mismatch")
+                if payload.get("evaluation_digest") != digest(item.to_dict()):
+                    raise ValueError("judgment event evaluation digest mismatch")
+            existing = self.evaluations.get(item.evaluation_id)
+            if existing is None:
+                raise ValueError("judged evaluation is missing its scientific evaluation")
+            if existing.candidate_id != item.candidate_id:
+                raise ValueError("judged evaluation belongs to another candidate")
+            self.evaluations[item.evaluation_id] = item
+        elif event.kind == "PromotionDecided":
+            item = Promotion.from_dict(payload["promotion"])
+            if is_dsh_native_protocol(self.task):
+                expected_binding = self.candidate_identity_bindings.get(item.candidate_id)
+                if expected_binding is None:
+                    raise ValueError("promotion candidate has no identity binding")
+                validate_identity_binding(
+                    payload.get("identity_binding"),
+                    expected=expected_binding["identity_binding"],
+                )
+                evaluation = next(
+                    (
+                        evaluation
+                        for evaluation in self.evaluations.values()
+                        if evaluation.candidate_id == item.candidate_id
+                    ),
+                    None,
+                )
+                artifact = next(
+                    (
+                        artifact
+                        for artifact in self.artifacts.values()
+                        if artifact.candidate_id == item.candidate_id
+                    ),
+                    None,
+                )
+                if evaluation is None or artifact is None:
+                    raise ValueError("promotion is missing evaluation or artifact binding")
+                if payload.get("evaluation_id") != evaluation.evaluation_id:
+                    raise ValueError("promotion evaluation binding mismatch")
+                if payload.get("evaluation_digest") != digest(evaluation.to_dict()):
+                    raise ValueError("promotion evaluation digest mismatch")
+                if payload.get("artifact_digest") != artifact.digest:
+                    raise ValueError("promotion artifact digest mismatch")
+                candidate = self.candidates.get(item.candidate_id)
+                if candidate is None:
+                    raise ValueError("promotion candidate is missing")
+                validate_runtime_promotion_decision(
+                    self.task,
+                    candidate,
+                    item,
+                    self.generation_comparisons.get(candidate.generation),
+                    self.generation_analyses.get(candidate.generation),
+                )
+            existing = self.promotions.get(item.promotion_id)
+            if existing is not None and existing.to_dict() != item.to_dict():
+                raise ValueError("promotion_id belongs to multiple candidates")
+            self.promotions[item.promotion_id] = item
+            candidate = self.candidates.get(item.candidate_id)
+            if candidate is not None:
+                status = (
+                    CandidateStatus.PROMOTED
+                    if item.decision is PromotionDecision.APPROVED
+                    else CandidateStatus.REJECTED
+                )
+                self.candidates[item.candidate_id] = replace(
+                    candidate, status=status, promotion_id=item.promotion_id
+                )
+        elif event.kind == "CandidateScreenedOut":
+            legacy_fields = {
+                "candidate_id",
+                "generation",
+                "formal_selection_event_id",
+                "reason",
+            }
+            if set(payload) == legacy_fields:
+                pass
+            elif (
+                payload.get("schema_version") != SCREENED_OUT_SCHEMA_V1
+                or set(payload) != legacy_fields | {"schema_version"}
+            ):
+                raise ValueError("candidate screened-out payload is invalid")
+            candidate_id = payload["candidate_id"]
+            generation = payload["generation"]
+            candidate = self.candidates.get(candidate_id) if isinstance(candidate_id, str) else None
+            if (
+                candidate is None
+                or isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or candidate.generation != generation
+                or candidate.status
+                not in {CandidateStatus.SPAWNED, CandidateStatus.SCREENED_OUT}
+            ):
+                raise ValueError("screened-out candidate generation is invalid")
+            formal = self.formal_selection_events.get(generation)
+            if formal is None or payload["formal_selection_event_id"] != formal.event_id:
+                raise ValueError("screened-out candidate formal selection is missing")
+            if candidate.candidate_id in formal.payload["selected_candidate_ids"]:
+                raise ValueError("selected candidate cannot be screened out")
+            quick = OptimizationSchedule.from_dict(self.task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict())).quick
+            if not quick and (generation, candidate.candidate_id) not in self.candidate_screening_events:
+                raise ValueError("screened-out candidate is missing screening evidence")
+            if payload["reason"] != ("outside_preregistered_quick_trajectory" if quick else "not_selected_by_screening_top_k"):
+                raise ValueError("screened-out candidate reason is invalid")
+            key = (generation, candidate.candidate_id)
+            existing = self.screened_out_events.get(key)
+            if existing is not None:
+                if canonical_json(existing.payload) != canonical_json(payload):
+                    raise ValueError("conflicting screened-out candidate")
+            else:
+                self.screened_out_events[key] = event
+            self.candidates[candidate.candidate_id] = replace(
+                candidate, status=CandidateStatus.SCREENED_OUT
+            )
+        elif event.kind in {
+            "CandidateFailed",
+            "CandidateMarkedDuplicate",
+        }:
+            candidate_id = str(payload["candidate_id"])
+            candidate = self.candidates.get(candidate_id)
+            if candidate is not None:
+                status = {
+                    "CandidateFailed": CandidateStatus.FAILED,
+                    "CandidateMarkedDuplicate": CandidateStatus.DUPLICATE,
+                }[event.kind]
+                self.candidates[candidate_id] = replace(candidate, status=status)
+        else:
+            return False
+        return True
+    def _apply_generation_research(self, event: Event, payload: Any) -> bool:
+        """Search plans, batches, analyses, reflections, and knowledge retrieval.
+
+        Returns True when this group recognizes ``event.kind``, False to let
+        the next group try. Cut verbatim out of the single chain ``apply``
+        used to carry inline; the branches and their order are unchanged.
+        """
+        if event.kind == "GenerationSearchPlanned":
+            item = GenerationSearchPlan.from_dict(payload["search_plan"])
+            if item.run_id != self.run.run_id:
+                raise ValueError("generation search plan belongs to another run")
+            previous = self.generation_analyses.get(item.generation - 1)
+            previous_reflection = self.generation_reflections.get(item.generation - 1)
+            if item.source_analysis_digest != (
+                previous.analysis_digest if previous is not None else None
+            ):
+                raise ValueError("generation search plan previous analysis mismatch")
+            if item.source_reflection_digest != (
+                previous_reflection.reflection_digest
+                if previous_reflection is not None
+                else None
+            ):
+                raise ValueError("generation search plan previous reflection mismatch")
+            if previous is not None and previous.replan_required:
+                prior_plan = self.generation_search_plans.get(item.generation - 1)
+                if prior_plan is not None and (
+                    item.search_queries == prior_plan.search_queries
+                    and item.focus_areas == prior_plan.focus_areas
+                ):
+                    raise ValueError(
+                        "required search replan must change queries or focus areas"
+                    )
+            existing = self.generation_search_plans.get(item.generation)
+            if existing is not None and existing.to_dict() != item.to_dict():
+                raise ValueError("generation has multiple search plans")
+            self.generation_search_plans[item.generation] = item
+        elif event.kind == "GenerationBatchStarted":
+            if self.expected_seed_canonical is not None and self.materialized_seed_canonical is None:
+                raise ValueError("generation batch cannot precede seed materialization")
+            item = GenerationBatch.from_dict(payload["batch"])
+            if (
+                item.run_id != self.run.run_id
+                or item.generation != self.run.generation
+                or item.task_manifest_digest != self.task.digest
+            ):
+                raise ValueError("generation batch scope differs from the active run")
+            frozen_interventions = []
+            expected_pending_intervention_ids = tuple(
+                intervention.intervention_id
+                for intervention in self.interventions.values()
+                if intervention.applied_proposal_id is None
+            )
+            if item.intervention_ids != expected_pending_intervention_ids:
+                raise ValueError(
+                    "generation batch intervention set differs from pending guidance"
+                )
+            for intervention_id in item.intervention_ids:
+                intervention = self.interventions.get(intervention_id)
+                if (
+                    intervention is None
+                    or intervention.run_id != self.run.run_id
+                    or intervention.applied_proposal_id is not None
+                ):
+                    raise ValueError(
+                        "generation batch intervention set is not pending and frozen"
+                    )
+                frozen_interventions.append(intervention)
+            if is_dsh_native_protocol(self.task):
+                if item.parent_genome_canonical_json is None:
+                    raise ValueError("DSH-native batch is missing its parent genome")
+                if item.generation == 0:
+                    if item.parent_candidate_id is not None:
+                        raise ValueError("first generation cannot bind a parent candidate")
+                    if item.parent_genome_canonical_json != self.materialized_seed_canonical:
+                        raise ValueError("first generation parent differs from materialized seed")
+                else:
+                    if item.parent_candidate_id is None:
+                        raise ValueError("later generation batch requires a parent candidate")
+                    parent_candidate = self.candidates.get(item.parent_candidate_id)
+                    if parent_candidate is None:
+                        raise ValueError("generation parent candidate is missing")
+                    parent_overrides = [
+                        intervention
+                        for intervention in frozen_interventions
+                        if intervention.kind is InterventionKind.PARENT_SELECTION
+                    ]
+                    parent_override = (
+                        parent_overrides[-1] if parent_overrides else None
+                    )
+                    if (
+                        parent_override is not None
+                        and parent_override.target_candidate_id
+                        != item.parent_candidate_id
+                    ):
+                        raise ValueError(
+                            "generation parent differs from the frozen parent-selection "
+                            "intervention"
+                        )
+                    if (
+                        uses_global_incumbent_protocol(self.task)
+                        and parent_override is None
+                    ):
+                        prior_binding = self.effective_revision_bindings.get(
+                            item.generation - 1
+                        )
+                        prior_revision = (
+                            self.candidate_revisions.get(
+                                str(prior_binding.get("selected_revision_id"))
+                            )
+                            if isinstance(prior_binding, Mapping)
+                            else None
+                        )
+                        if (
+                            prior_revision is None
+                            or prior_binding.get("selected_candidate_id")
+                            != item.parent_candidate_id
+                            or prior_revision.candidate_id
+                            != item.parent_candidate_id
+                            or prior_revision.genome_digest
+                            != item.parent_genome_digest
+                            or canonical_json(prior_revision.identity_dict()["genome"])
+                            != item.parent_genome_canonical_json
+                        ):
+                            raise ValueError(
+                                "runtime generation parent differs from the prior "
+                                "effective revision"
+                            )
+                    else:
+                        parent_proposal = self.proposals.get(parent_candidate.proposal_id)
+                        if parent_proposal is None:
+                            raise ValueError("generation parent proposal is missing")
+                        parent_genome = persisted_genome_from_proposal(parent_proposal)
+                        if (
+                            parent_genome is None
+                            or canonical_json(parent_genome.to_dict())
+                            != item.parent_genome_canonical_json
+                        ):
+                            raise ValueError("generation parent genome binding mismatch")
+            existing_batch = self.generation_batches.get(item.generation)
+            if existing_batch is not None and existing_batch.to_dict() != item.to_dict():
+                raise ValueError("generation has multiple conflicting batches")
+            self.generation_batches.setdefault(item.generation, item)
+        elif event.kind == "GenerationAnalyzed":
+            item = GenerationAnalysis.from_dict(payload["analysis"])
+            if item.run_id != self.run.run_id:
+                raise ValueError("generation analysis belongs to another run")
+            formal = self.formal_selection_events.get(item.generation)
+            formal_payload = getattr(formal, "payload", {})
+            if (
+                isinstance(formal_payload, Mapping)
+                and formal_payload.get("schema_version")
+                == FORMAL_SELECTION_SCHEMA_V3
+            ):
+                exploration_only = formal_payload.get("exploration_only") is True
+                consecutive = int(
+                    formal_payload.get("consecutive_exploration_generations") or 0
+                )
+                if (
+                    item.consecutive_exploration_generations
+                    != (consecutive if exploration_only else 0)
+                    or item.replan_required
+                    is not (exploration_only and consecutive >= 2)
+                ):
+                    raise ValueError(
+                        "generation analysis exploration replan state is invalid"
+                    )
+            existing = self.generation_analyses.get(item.generation)
+            if existing is not None and existing.to_dict() != item.to_dict():
+                raise ValueError("generation has multiple analyses")
+            self.generation_analyses[item.generation] = item
+        elif event.kind == "GenerationReflected":
+            reflection_payload = payload["reflection"]
+            if "canonical_candidate_outcomes" in reflection_payload:
+                item = GenerationReflection.from_dict(reflection_payload)
+            else:
+                item = GenerationReflection.from_legacy_dict(reflection_payload)
+            if item.run_id != self.run.run_id:
+                raise ValueError("generation reflection belongs to another run")
+            analysis = self.generation_analyses.get(item.generation)
+            if analysis is None or analysis.analysis_digest != item.analysis_digest:
+                raise ValueError("generation reflection analysis mismatch")
+            existing = self.generation_reflections.get(item.generation)
+            if existing is not None and existing.to_dict() != item.to_dict():
+                raise ValueError("generation has multiple reflections")
+            self.generation_reflections[item.generation] = item
+        elif event.kind == "GenerationKnowledgeRetrieved":
+            item = KnowledgeSnapshot.from_dict(payload["knowledge_snapshot"])
+            self.knowledge_snapshots[item.generation] = item
+        elif event.kind == "GenerationKnowledgeAssessed":
+            item = KnowledgeAssessment.from_dict(payload["knowledge_assessment"])
+            self.knowledge_assessments[item.generation] = item
+        elif event.kind == "GenerationResearchIterated":
+            item = ResearchIteration.from_dict(payload["research_iteration"])
+            if item.run_id != self.run.run_id:
+                raise ValueError("research iteration belongs to another run")
+            if item.diagnostic_report is not None:
+                knowledge = self.knowledge_snapshots.get(item.generation)
+                if knowledge is None or knowledge.snapshot_digest != item.knowledge_snapshot_digest:
+                    raise ValueError("research diagnosis knowledge is not frozen")
+                expected = diagnose_evidence(
+                    self.task, self.generation_analyses.get(item.generation - 1),
+                    self.generation_comparisons.get(item.generation - 1), knowledge,
+                )
+                if DiagnosticReport(**dict(item.diagnostic_report)) != expected:
+                    raise ValueError("research diagnosis does not match visible host evidence")
+            existing = self.research_iterations.get(item.generation)
+            if existing is not None and existing.to_dict() != item.to_dict():
+                raise ValueError("generation has multiple research iterations")
+            self.research_iterations[item.generation] = item
+        elif event.kind == "AlgorithmAttemptRecorded":
+            item = AlgorithmAttempt.from_dict(payload["algorithm_attempt"])
+            if item.run_id != self.run.run_id:
+                raise ValueError("algorithm attempt belongs to another run")
+            candidate = self.candidates.get(item.candidate_id)
+            if candidate is None:
+                raise ValueError("algorithm attempt is missing its candidate")
+            if (
+                candidate.proposal_id != item.proposal_id
+                or candidate.generation != item.generation
+            ):
+                raise ValueError("algorithm attempt scope does not match its candidate")
+            if is_dsh_native_protocol(self.task):
+                expected_binding = self.candidate_identity_bindings.get(item.candidate_id)
+                if expected_binding is None:
+                    raise ValueError("algorithm attempt candidate has no identity binding")
+                validate_identity_binding(
+                    payload.get("identity_binding"),
+                    expected=expected_binding["identity_binding"],
+                )
+            duplicate = next(
+                (
+                    existing
+                    for existing in self.algorithm_attempts
+                    if existing.candidate_id == item.candidate_id
+                    and existing.phase == item.phase
+                    and existing.attempt == item.attempt
+                ),
+                None,
+            )
+            if duplicate is not None and duplicate.to_dict() != item.to_dict():
+                raise ValueError("algorithm attempt identity was reused")
+            if duplicate is None:
+                self.algorithm_attempts.append(item)
+        else:
+            return False
+        return True
+    def _apply_formal_stage_and_intervention(self, event: Event, payload: Any) -> bool:
+        """Formal stage freezes, interventions, and expert consultations.
+
+        Returns True when this group recognizes ``event.kind``, False to let
+        the next group try. Cut verbatim out of the single chain ``apply``
+        used to carry inline; the branches and their order are unchanged.
+        """
+        if event.kind == "FormalStageFrozen":
+            required = {
+                "stage",
+                "candidate_id",
+                "artifact_digest",
+                "genome_digest",
+                "analysis_plan_digest",
+                "objective_family_digest",
+                "partition_digest",
+                "holdout_exposure_key",
+                "token_digest",
+            }
+            revision_aware = payload.get("schema_version") == FORMAL_STAGE_V2
+            if revision_aware:
+                required |= {"schema_version", "candidate_revision_id", "artifact_revision_binding"}
+            if not is_dsh_native_protocol(self.task) or set(payload) != required:
+                raise ValueError("formal stage frozen payload is invalid")
+            stage = str(payload["stage"])
+            if stage not in {"validation", "final_test"}:
+                raise ValueError("formal stage is invalid")
+            if stage in self.formal_stage_seals:
+                raise ValueError("formal stage is already sealed")
+            candidate = self.candidates.get(str(payload["candidate_id"]))
+            if candidate is None:
+                raise ValueError("formal stage candidate is missing")
+            artifact = next(
+                (
+                    item
+                    for item in self.artifacts.values()
+                    if item.candidate_id == candidate.candidate_id
+                ),
+                None,
+            )
+            if artifact is None or artifact.digest != payload["artifact_digest"]:
+                raise ValueError("formal stage artifact binding mismatch")
+            if revision_aware:
+                revision = self.candidate_revisions.get(artifact.candidate_revision_id)
+                if revision is None or payload["candidate_revision_id"] != revision.revision_id:
+                    raise ValueError("formal stage actual artifact revision is missing")
+                scope = resolve_artifact_scope(artifact, holdouts=self.generation_holdouts.values(),
+                                               evaluations=(*self.formal_batch_evaluations.values(), *self.holdout_evaluations.values()))
+                binding = validate_artifact_revision_binding(payload["artifact_revision_binding"], artifact=artifact, revision=revision, scope=scope)
+                if binding["genome_digest"] != payload["genome_digest"]:
+                    raise ValueError("formal stage actual genome binding mismatch")
+            else:
+                if artifact.artifact_id in self.artifact_revision_bindings:
+                    raise ValueError("formal stage envelope cannot downgrade a v2 artifact")
+                binding = self.candidate_identity_bindings.get(candidate.candidate_id)
+                if binding is None or binding["identity_binding"]["genome_digest"] != payload["genome_digest"]:
+                    raise ValueError("formal stage genome binding mismatch")
+            if stage == "final_test" and self.run.validated_candidate_id != candidate.candidate_id:
+                raise ValueError("final-test requires the validated candidate")
+            self.formal_stage_started = True
+        elif event.kind == "FormalStageCompleted":
+            if not self.formal_stage_started:
+                raise ValueError("formal stage completion has no frozen stage")
+            stage = str(payload.get("stage") or "")
+            candidate_id = str(payload.get("candidate_id") or "")
+            outcome = str(payload.get("outcome") or "")
+            if stage not in {"validation", "final_test"} or outcome not in {
+                "passed",
+                "failed",
+                "inconclusive",
+            }:
+                raise ValueError("formal stage completion is invalid")
+            if candidate_id not in self.candidates:
+                raise ValueError("formal stage completion candidate is missing")
+            if outcome == "passed":
+                self.run = replace(
+                    self.run,
+                    **(
+                        {"validated_candidate_id": candidate_id}
+                        if stage == "validation"
+                        else {"final_test_candidate_id": candidate_id}
+                    ),
+                )
+        elif event.kind == "FormalStageSealed":
+            stage = str(payload.get("stage") or "")
+            if stage not in {"validation", "final_test"}:
+                raise ValueError("formal stage seal is invalid")
+            if stage in self.formal_stage_seals:
+                raise ValueError("formal stage has multiple seals")
+            self.formal_stage_seals[stage] = dict(payload)
+        # Legacy generations used the same event name for an aggregate
+        # analysis payload.  Adaptive generations use the new three-field
+        # revision binding below; only the legacy shape is ignored here so the
+        # authoritative binding is still validated and replayed.
+        elif event.kind == "GenerationChampionSelected" and set(payload) != {
+            "generation",
+            "selected_candidate_id",
+            "selected_revision_id",
+        }:
+            return True  # handled; the DSH usage index below does not apply
+        elif event.kind == "HumanInterventionRecorded":
+            item = HumanIntervention.from_dict(payload["intervention"])
+            existing = self.interventions.get(item.intervention_id)
+            if existing is not None and existing.to_dict() != item.to_dict():
+                raise ValueError("intervention_id belongs to multiple interventions")
+            self.interventions[item.intervention_id] = item
+        elif event.kind == "HumanInterventionApplied":
+            intervention_id = str(payload["intervention_id"])
+            item = self.interventions.get(intervention_id)
+            if item is None:
+                raise ValueError("applied intervention is missing its recorded event")
+            self.interventions[intervention_id] = replace(
+                item, applied_proposal_id=str(payload["proposal_id"])
+            )
+        elif event.kind == "ExpertConsultationRequested":
+            item = ExpertConsultation.from_dict(payload["consultation"])
+            if item.run_id != self.run.run_id:
+                raise ValueError("expert consultation belongs to another run")
+            existing = self.expert_consultations.get(item.consultation_id)
+            if existing is not None and existing.to_dict() != item.to_dict():
+                raise ValueError("consultation_id belongs to multiple consultations")
+            self.expert_consultations[item.consultation_id] = item
+        elif event.kind == "ExpertConsultationAnswered":
+            item = ExpertConsultationAnswer.from_dict(payload["answer"])
+            if item.run_id != self.run.run_id:
+                raise ValueError("expert consultation answer belongs to another run")
+            consultation = self.expert_consultations.get(item.consultation_id)
+            if consultation is None:
+                raise ValueError("expert answer is missing its consultation request")
+            existing = self.expert_consultation_answers.get(item.consultation_id)
+            if existing is not None and existing.to_dict() != item.to_dict():
+                raise ValueError("expert consultation already has a different answer")
+            self.expert_consultation_answers[item.consultation_id] = item
+        elif event.kind == "ExpertConsultationApplied":
+            consultation_id = str(payload.get("consultation_id") or "")
+            answer_id = str(payload.get("answer_id") or "")
+            generation = payload.get("generation")
+            iteration_digest = str(payload.get("research_iteration_digest") or "")
+            if (
+                not consultation_id
+                or not answer_id
+                or isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or generation < 0
+                or not iteration_digest
+            ):
+                raise ValueError("expert consultation application payload is invalid")
+            if consultation_id not in self.expert_consultations:
+                raise ValueError("applied expert answer is missing its consultation")
+            answer = self.expert_consultation_answers.get(consultation_id)
+            if answer is None or answer.answer_id != answer_id:
+                raise ValueError("applied expert answer is missing its answer event")
+            iteration = self.research_iterations.get(generation)
+            if (
+                iteration is None
+                or iteration.iteration_digest != iteration_digest
+                or answer_id not in iteration.expert_answer_ids
+            ):
+                raise ValueError("expert answer application does not match research iteration")
+            if (
+                answer.effective_generation is None
+                or answer.effective_generation > generation
+            ):
+                raise ValueError("expert answer was applied before it became effective")
+            if answer.applied_generation not in (None, generation) and not (
+                answer.persistent and generation > answer.applied_generation
+            ):
+                raise ValueError("expert answer was applied to multiple generations")
+            self.expert_consultation_answers[consultation_id] = replace(
+                answer, applied_generation=generation
+            )
+        elif event.kind == "EvolutionStageRecorded":
+            validate_evolution_stage_payload(payload)
+            if payload.get("status") == "completed":
+                self.gateway_retry_stage_success_seq[
+                    (int(payload["generation"]), str(payload["stage"]))
+                ] = event.seq
+        else:
+            return False
+        return True
+    def _apply_dsh_runtime(self, event: Event, payload: Any) -> bool:
+        """Structured results, tool executions, child launches, and gateway retries.
+
+        Returns True when this group recognizes ``event.kind``, False to let
+        the next group try. Cut verbatim out of the single chain ``apply``
+        used to carry inline; the branches and their order are unchanged.
+        """
+        if event.kind == "DshStructuredResultAccepted":
+            required_fields = {
+                "schema_version",
+                "identity",
+                "output_schema_id",
+                "result_digest",
+                "structured",
+                "skill_invocation_evidence",
+            }
+            if not required_fields.issubset(payload) or set(payload) - (
+                required_fields | {"session_metrics", "required_tool_receipt"}
+            ):
+                raise ValueError("DshStructuredResultAccepted payload is invalid")
+            if payload["schema_version"] != "ecologyrsi-dsh.structured-result-accepted/1":
+                raise ValueError("unsupported DSH structured-result event version")
+            identity = payload["identity"]
+            structured = payload["structured"]
+            if not isinstance(identity, Mapping) or identity.get("run_id") != self.run.run_id:
+                raise ValueError("DSH structured-result run identity mismatch")
+            if not isinstance(structured, Mapping) or digest(structured) != payload["result_digest"]:
+                raise ValueError("DSH structured-result digest mismatch")
+            stage_contracts = {
+                "generation.research": (
+                    "researcher",
+                    "ecology-research-result@1",
+                ),
+                "generation.search-plan": (
+                    "researcher",
+                    "ecology-research-search-plan@1",
+                ),
+                "generation.research-synthesis": (
+                    "researcher",
+                    "ecology-research-synthesis@1",
+                ),
+                "generation.reflect": (
+                    "generation-judge",
+                    "ecology-generation-reflection@1",
+                ),
+                "candidate.propose": (
+                    "candidate-proposer",
+                    "ecology-genome-mutation@1",
+                ),
+                "candidate.local_edit": (
+                    "candidate-proposer",
+                    "ecology-local-edit@1",
+                ),
+                "generation.judge": (
+                    "generation-judge",
+                    "ecology-generation-review@1",
+                ),
+                "sample.plan": (
+                    "sample-planner",
+                    "ecology-sample-predictions@2",
+                ),
+                "sample.critic": (
+                    "sample-critic",
+                    "ecology-sample-review@2",
+                ),
+                "sample.reflect": (
+                    "sample-critic",
+                    "ecology-sample-reflection@1",
+                ),
+            }
+            contract = stage_contracts.get(identity.get("stage"))
+            if contract is None or (
+                identity.get("role"), payload["output_schema_id"]
+            ) != contract:
+                raise ValueError("DSH structured-result stage contract mismatch")
+            _validate_dsh_skill_evidence(
+                payload["skill_invocation_evidence"],
+                stage=str(identity.get("stage") or ""),
+            )
+            if "session_metrics" in payload:
+                session_id = identity.get("session_id")
+                if not isinstance(session_id, str) or not session_id:
+                    raise ValueError("DSH structured-result session identity is invalid")
+                _validate_dsh_session_metrics(
+                    payload["session_metrics"], session_id=session_id
+                )
+            tool_receipt = payload.get("required_tool_receipt")
+            if identity.get("stage") == "sample.plan":
+                from types import SimpleNamespace
+                from .agent_prediction import validate_prediction_receipt
+                def lookup_prediction_event(event_id):
+                    record = self.dsh_prediction_tool_events.get(event_id)
+                    return None if record is None else SimpleNamespace(
+                        kind="DshPredictionToolExecuted", seq=record[0], payload=record[1]
+                    )
+                validate_prediction_receipt(
+                    structured, tool_receipt, event_lookup=lookup_prediction_event,
+                    identity=identity, before_seq=event.seq,
+                )
+            elif tool_receipt is not None:
+                raise ValueError(
+                    "non-Planner structured result cannot claim a prediction-tool receipt"
+                )
+            # A successfully admitted DSH result proves runtime continuity.
+            # It closes only the native-runtime retry epoch for the generation
+            # in which it was accepted; model/persistence retry classes remain
+            # independent.
+            self.gateway_retry_dsh_success_seq[int(self.run.generation)] = event.seq
+        elif event.kind == "DshRetrievalExecuted":
+            _validate_dsh_retrieval_event(payload, run_id=self.run.run_id)
+        elif event.kind == "DshPredictionToolExecuted":
+            from .agent_prediction import validate_tool_event
+            validate_tool_event(payload)
+            self.dsh_prediction_tool_events[event.event_id] = (event.seq, dict(payload))
+        elif event.kind == "DshChildLaunchReserved":
+            legacy_fields = {
+                "schema_version",
+                "request_id",
+                "parent_session_id",
+                "business_key_digest",
+                "launch",
+            }
+            if set(payload) not in (
+                legacy_fields,
+                legacy_fields | {"request_contract_digest"},
+            ):
+                raise ValueError("DshChildLaunchReserved payload is invalid")
+            launch = payload["launch"]
+            request_contract_digest = payload.get("request_contract_digest")
+            if (
+                payload["schema_version"]
+                != "ecologyrsi-dsh.child-launch-reserved/1"
+                or not isinstance(launch, Mapping)
+                or launch.get("run_id") != self.run.run_id
+                or isinstance(launch.get("launch_attempt"), bool)
+                or not isinstance(launch.get("launch_attempt"), int)
+                or launch["launch_attempt"] < 1
+                or (
+                    request_contract_digest is not None
+                    and (
+                        not isinstance(request_contract_digest, str)
+                        or len(request_contract_digest) != 64
+                        or any(
+                            character not in "0123456789abcdef"
+                            for character in request_contract_digest
+                        )
+                    )
+                )
+            ):
+                raise ValueError("DshChildLaunchReserved contract is invalid")
+        elif event.kind == "DshSessionUsageRecorded":
+            validate_session_usage(payload, run_id=event.run_id)
+            # These indexes contain only already validated earlier events,
+            # even when apply() received a whole history in one batch.
+            identity = payload["identity"]
+            reservation_id = identity["child_reservation_id"]
+            launch = self.dsh_usage_launches.get(reservation_id)
+            prior = {
+                item.seq: item
+                for item in (
+                    self.dsh_usage_by_reservation.get(reservation_id, [])
+                    + self.dsh_usage_by_session.get(identity["session_id"], [])
+                )
+            }
+            if launch is not None:
+                prior[launch.seq] = launch
+            check_usage_binding(payload, (prior[seq] for seq in sorted(prior)))
+        elif event.kind == "DshChildExecutionFailed":
+            from .runtime_failure import validate_runtime_failure
+            identity = payload.get("identity")
+            failure_v2 = payload.get("schema_version") == "ecologyrsi-dsh.child-execution-failed/2"
+            if (
+                set(payload)
+                != ({"schema_version", "identity", "error_code"} | ({"runtime_failure"} if failure_v2 else set()))
+                or payload.get("schema_version")
+                not in {"ecologyrsi-dsh.child-execution-failed/1", "ecologyrsi-dsh.child-execution-failed/2"}
+                or not isinstance(identity, Mapping)
+                or set(identity)
+                != {"child_reservation_id", "stage", "idempotency_key"}
+                or any(
+                    not isinstance(identity.get(name), str)
+                    or not identity.get(name)
+                    for name in identity
+                )
+                or not isinstance(payload.get("error_code"), str)
+                or not payload.get("error_code")
+            ):
+                raise ValueError("DshChildExecutionFailed payload is invalid")
+            if failure_v2:
+                validate_runtime_failure(payload["runtime_failure"], error_code=payload["error_code"])
+        elif event.kind == "GatewayRetryScheduled":
+            # A gateway cooldown is an operational heartbeat only.  It must
+            # survive replay so a browser refresh can distinguish a live run
+            # waiting on a busy provider from a stalled/failed run.
+            if payload.get("schema_version") == GATEWAY_RETRY_SCHEMA_VERSION:
+                _validate_gateway_retry_v2_payload(payload)
+                if (
+                    self.run.status is not RunStatus.RUNNING
+                    or int(payload["run_incarnation"]) != int(self.created.seq)
+                    or int(payload["generation"]) != int(self.run.generation)
+                ):
+                    raise ValueError(
+                        "GatewayRetryScheduled scope does not match the running run"
+                    )
+                scope = self.gateway_retry_scope(payload)
+                reset_seq = self.gateway_retry_reset_seq(
+                    scope,
+                    dsh_continuity_reset=(
+                        payload.get("continuity_reset_contract")
+                        == _DSH_CONTINUITY_RESET_CONTRACT
+                    ),
+                )
+                prior_retry = self.active_gateway_retry(scope, reset_seq=reset_seq)
+                anchor = int(payload["attempt_anchor_seq"])
+                anchor_event = self.events_by_seq.get(anchor)
+                if (
+                    anchor_event is None
+                    or anchor >= event.seq
+                    or anchor < reset_seq
+                    or payload["failure_id"] in self.gateway_retry_failure_ids
+                ):
+                    if payload["failure_id"] in self.gateway_retry_failure_ids:
+                        raise ValueError(
+                            "GatewayRetryScheduled failure_id is not unique"
+                        )
+                    raise ValueError("GatewayRetryScheduled retry chain is invalid")
+                if prior_retry is None:
+                    chain_valid = (
+                        payload["consecutive_failures"] == 1
+                        and payload["breaker_epoch"]
+                        == self.gateway_retry_expected_epoch(scope, reset_seq=reset_seq)
+                        and payload["first_failure_at"]
+                        == payload["last_failure_at"]
+                    )
+                else:
+                    chain_valid = (
+                        anchor == prior_retry.seq
+                        and payload["consecutive_failures"]
+                        == prior_retry.payload["consecutive_failures"] + 1
+                        and payload["breaker_epoch"]
+                        == prior_retry.payload["breaker_epoch"]
+                        and payload["retry_limit"]
+                        == prior_retry.payload["retry_limit"]
+                        and payload["first_failure_at"]
+                        == prior_retry.payload["first_failure_at"]
+                        and _aware_timestamp(payload["last_failure_at"])
+                        >= _aware_timestamp(prior_retry.payload["last_failure_at"])
+                    )
+                if not chain_valid:
+                    raise ValueError("GatewayRetryScheduled retry chain is invalid")
+                first_retry = self.gateway_retry_first_by_scope.get(scope)
+                if first_retry is None or first_retry.seq <= reset_seq:
+                    self.gateway_retry_first_by_scope[scope] = event
+                self.gateway_retry_last_by_scope[scope] = event
+                self.gateway_retry_max_epoch[scope] = max(
+                    self.gateway_retry_max_epoch.get(scope, 0),
+                    int(payload["breaker_epoch"]),
+                )
+                self.gateway_retry_failure_ids.add(str(payload["failure_id"]))
+            if not isinstance(payload.get("generation"), int) or payload["generation"] < 0:
+                raise ValueError("GatewayRetryScheduled generation must be non-negative")
+            if not isinstance(payload.get("retry_at"), str) or not payload["retry_at"].strip():
+                raise ValueError("GatewayRetryScheduled retry_at must be text")
+        else:
+            return False
+        return True
+    def _apply_revision_and_formal_batch(self, event: Event, payload: Any) -> bool:
+        """Candidate revisions and the formal trajectory's per-batch events.
+
+        Returns True when this group recognizes ``event.kind``, False to let
+        the next group try. Cut verbatim out of the single chain ``apply``
+        used to carry inline; the branches and their order are unchanged.
+        """
+        if event.kind == "CandidateRevisionCreated":
+            if set(payload) != {"revision"}:
+                raise ValueError("CandidateRevisionCreated payload is invalid")
+            revision = CandidateRevision.from_dict(payload["revision"])
+            candidate = self.candidates.get(revision.candidate_id)
+            if (
+                revision.run_id != self.run.run_id
+                or candidate is None
+                or candidate.generation != revision.generation
+            ):
+                raise ValueError("candidate revision ownership is invalid")
+            if (
+                candidate.role is CandidateRole.INCUMBENT_CONTROL
+                and is_dsh_native_protocol(self.task)
+                and (
+                candidate.candidate_id
+                != f"candidate:{self.run.run_id}:seed-incumbent-control"
+                or revision.revision_id
+                != f"revision:{candidate.candidate_id}:r0"
+                or revision.parent_revision_id is not None
+                or revision.source_batch_index is not None
+                )
+            ):
+                raise ValueError(
+                    "incumbent control must use the deterministic seed control R0"
+                )
+            existing = self.candidate_revisions.get(revision.revision_id)
+            if existing is not None and existing.to_dict() != revision.to_dict():
+                raise ValueError("conflicting candidate revision")
+            if existing is None:
+                if revision.parent_revision_id is None:
+                    if any(
+                        item.candidate_id == revision.candidate_id
+                        and item.parent_revision_id is None
+                        for item in self.candidate_revisions.values()
+                    ):
+                        raise ValueError("candidate already has an initial revision")
+                else:
+                    parent = self.candidate_revisions.get(revision.parent_revision_id)
+                    if parent is None or parent.candidate_id != revision.candidate_id:
+                        raise ValueError("revision parent is missing or cross-candidate")
+                    schedule = OptimizationSchedule.from_dict(
+                        self.task.metadata["optimization_schedule"]
+                    )
+                    if (
+                        schedule.local_evaluation_mode
+                        == PAIRED_LOCAL_EVALUATION_MODE
+                    ):
+                        source_batch_index = revision.source_batch_index
+                        assert source_batch_index is not None
+                        trajectory = self.formal_trajectories.get(
+                            revision.candidate_id
+                        )
+                        if (
+                            trajectory is None
+                            or trajectory.status is not TrajectoryStatus.RUNNING
+                        ):
+                            raise ValueError(
+                                "paired local edit child requires a running trajectory"
+                            )
+                        if source_batch_index >= trajectory.batch_count - 1:
+                            raise ValueError(
+                                "paired final batch cannot create a local edit child"
+                            )
+                        comparison = self.formal_batch_comparisons.get(
+                            (revision.candidate_id, source_batch_index)
+                        )
+                        proposal = self.local_edit_proposals.get(
+                            (revision.candidate_id, source_batch_index)
+                        )
+                        if comparison is None or proposal is None:
+                            raise ValueError(
+                                "paired local edit child requires comparison and proposal"
+                            )
+                        if (
+                            revision.parent_revision_id
+                            != comparison.champion_after_revision_id
+                        ):
+                            raise ValueError(
+                                "paired local edit child must descend from selected champion"
+                            )
+                        if (
+                            proposal.get("decision")
+                            != LocalEditProposalDecision.MUTATE.value
+                        ):
+                            raise ValueError(
+                                "paired local edit child requires a mutate proposal"
+                            )
+                        local_key = (
+                            revision.candidate_id,
+                            source_batch_index,
+                        )
+                        if (
+                            local_key in self.local_edit_outcomes
+                            or local_key in self.trajectory_revision_activations
+                        ):
+                            raise ValueError(
+                                "paired local edit child must be created before local decision"
+                            )
+                        if any(
+                            item.candidate_id == revision.candidate_id
+                            and item.source_batch_index == source_batch_index
+                            for item in self.candidate_revisions.values()
+                        ):
+                            raise ValueError(
+                                "paired local edit batch can create only one challenger"
+                            )
+                self.candidate_revisions[revision.revision_id] = revision
+        elif event.kind == "FormalTrajectoryStarted":
+            if set(payload) != {"trajectory"}:
+                raise ValueError("FormalTrajectoryStarted payload is invalid")
+            trajectory = FormalTrajectory.from_dict(payload["trajectory"])
+            if trajectory.status is not TrajectoryStatus.RUNNING:
+                raise ValueError("started formal trajectory must be running")
+            formal = self.formal_selection_events.get(trajectory.generation)
+            if (
+                formal is None
+                or trajectory.candidate_id
+                not in formal.payload["selected_candidate_ids"]
+            ):
+                raise ValueError("formal trajectory requires frozen Top 2 selection")
+            revision = self.candidate_revisions.get(trajectory.initial_revision_id)
+            if revision is None or revision.candidate_id != trajectory.candidate_id:
+                raise ValueError("formal trajectory initial revision is invalid")
+            schedule = OptimizationSchedule.from_dict(
+                self.task.metadata["optimization_schedule"]
+            )
+            if trajectory.batch_count != schedule.batch_count:
+                raise ValueError("formal trajectory batch_count differs from schedule")
+            existing = self.formal_trajectories.get(trajectory.candidate_id)
+            if existing is not None and existing.to_dict() != trajectory.to_dict():
+                raise ValueError("conflicting formal trajectory")
+            self.formal_trajectories.setdefault(trajectory.candidate_id, trajectory)
+        elif event.kind == "FormalBatchStarted":
+            if set(payload) != {"batch"}:
+                raise ValueError("FormalBatchStarted payload is invalid")
+            batch = FormalBatch.from_dict(payload["batch"])
+            trajectory = self.formal_trajectories.get(batch.candidate_id)
+            if (
+                trajectory is None
+                or trajectory.status is not TrajectoryStatus.RUNNING
+                or trajectory.trajectory_id != batch.trajectory_id
+                or trajectory.generation != batch.generation
+                or trajectory.batch_count != batch.batch_count
+            ):
+                raise ValueError("formal batch trajectory is invalid")
+            prior_batches = [
+                item
+                for (candidate_id, _index), item in self.formal_batches.items()
+                if candidate_id == batch.candidate_id
+            ]
+            expected_index = len(prior_batches)
+            if batch.batch_index != expected_index:
+                raise ValueError("formal batch must use the next batch index")
+            active_revision_id = (
+                trajectory.initial_revision_id
+                if batch.batch_index == 0
+                else self.trajectory_revision_activations[
+                    (batch.candidate_id, batch.batch_index - 1)
+                ].to_revision_id
+            )
+            if batch.revision_id != active_revision_id:
+                raise ValueError("formal batch revision is not the active revision")
+            self.formal_batches[(batch.candidate_id, batch.batch_index)] = batch
+        elif event.kind == "FormalBatchEvaluated":
+            if set(payload) != {"evaluation"}:
+                raise ValueError("FormalBatchEvaluated payload is invalid")
+            evaluation = BatchEvaluation.from_dict(payload["evaluation"])
+            candidate_id = evaluation.scope.candidate_id
+            batch_index = int(evaluation.scope.batch_index)
+            batch_key = (candidate_id, batch_index)
+            batch = self.formal_batches.get(batch_key)
+            schedule = OptimizationSchedule.from_dict(
+                self.task.metadata["optimization_schedule"]
+            )
+            arm = evaluation.scope.formal_batch_arm
+            expected_revision_id = batch.revision_id if batch is not None else None
+            if schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
+                if arm is None:
+                    raise ValueError("paired formal batch evaluation requires an arm")
+                if batch_index == 0:
+                    if arm is not FormalBatchArm.CHAMPION:
+                        raise ValueError("paired batch 0 only accepts the champion arm")
+                elif arm is FormalBatchArm.CHAMPION:
+                    prior_comparison = self.formal_batch_comparisons.get(
+                        (candidate_id, batch_index - 1)
+                    )
+                    if prior_comparison is None:
+                        raise ValueError(
+                            "paired champion evaluation requires prior comparison"
+                        )
+                    expected_revision_id = (
+                        prior_comparison.champion_after_revision_id
+                    )
+            elif arm is not None:
+                raise ValueError("prequential formal evaluation cannot have an arm")
+            key = (candidate_id, batch_index, arm)
+            if (
+                batch is None
+                or evaluation.scope.run_id != batch.run_id
+                or evaluation.scope.generation != batch.generation
+                or evaluation.scope.candidate_revision_id
+                != expected_revision_id
+                or evaluation.scope.cohort_digest != batch.cohort_digest
+                or evaluation.scope.origin_count != batch.origin_count
+            ):
+                raise ValueError("formal batch evaluation scope does not match batch")
+            existing = self.formal_batch_evaluations.get(key)
+            if existing is not None and existing.to_dict() != evaluation.to_dict():
+                raise ValueError("conflicting formal batch evaluation")
+            self.formal_batch_evaluations.setdefault(key, evaluation)
+        elif event.kind == "FormalBatchCompared":
+            if set(payload) != {"comparison"}:
+                raise ValueError("FormalBatchCompared payload is invalid")
+            comparison = FormalBatchComparison.from_dict(payload["comparison"])
+            schedule = OptimizationSchedule.from_dict(
+                self.task.metadata["optimization_schedule"]
+            )
+            if schedule.local_evaluation_mode != PAIRED_LOCAL_EVALUATION_MODE:
+                raise ValueError("formal batch comparison requires paired schedule")
+            key = (comparison.candidate_id, comparison.batch_index)
+            batch = self.formal_batches.get(key)
+            trajectory = self.formal_trajectories.get(comparison.candidate_id)
+            evaluations_for_batch = tuple(
+                item
+                for (candidate_id, batch_index, _arm), item
+                in self.formal_batch_evaluations.items()
+                if candidate_id == comparison.candidate_id
+                and batch_index == comparison.batch_index
+            )
+            champion_evaluation = next(
+                (
+                    item
+                    for item in evaluations_for_batch
+                    if item.evaluation_id
+                    == comparison.champion_evaluation_id
+                ),
+                None,
+            )
+            challenger_evaluation = next(
+                (
+                    item
+                    for item in evaluations_for_batch
+                    if item.evaluation_id
+                    == comparison.challenger_evaluation_id
+                ),
+                None,
+            )
+            prior_comparison = self.formal_batch_comparisons.get(
+                (comparison.candidate_id, comparison.batch_index - 1)
+            )
+            expected_champion_id = (
+                trajectory.initial_revision_id
+                if comparison.batch_index == 0 and trajectory is not None
+                else prior_comparison.champion_after_revision_id
+                if prior_comparison is not None
+                else None
+            )
+            if (
+                batch is None
+                or trajectory is None
+                or comparison.run_id != batch.run_id
+                or comparison.generation != batch.generation
+                or comparison.cohort_digest != batch.cohort_digest
+                or comparison.champion_before_revision_id
+                != expected_champion_id
+                or comparison.challenger_revision_id != batch.revision_id
+                or champion_evaluation is None
+                or challenger_evaluation is None
+                or champion_evaluation.scope.candidate_revision_id
+                != comparison.champion_before_revision_id
+                or challenger_evaluation.scope.candidate_revision_id
+                != comparison.challenger_revision_id
+                or champion_evaluation.evaluation_digest
+                != comparison.champion_evaluation_digest
+                or challenger_evaluation.evaluation_digest
+                != comparison.challenger_evaluation_digest
+                or not math.isclose(
+                    champion_evaluation.score,
+                    comparison.champion_score,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+                or not math.isclose(
+                    challenger_evaluation.score,
+                    comparison.challenger_score,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            ):
+                raise ValueError(
+                    "formal batch comparison evaluation digest, score, "
+                    "revision, or cohort is invalid"
+                )
+            validate_formal_batch_comparison(
+                comparison,
+                champion_evaluation,
+                challenger_evaluation,
+                **local_challenger_policy(self.task.metadata),
+            )
+            existing = self.formal_batch_comparisons.get(key)
+            if existing is not None and existing.to_dict() != comparison.to_dict():
+                raise ValueError("conflicting formal batch comparison")
+            self.formal_batch_comparisons.setdefault(key, comparison)
+        else:
+            return False
+        return True
+    def _apply_local_edit(self, event: Event, payload: Any) -> bool:
+        """Local-edit proposals and the decision that applies or rejects them.
+
+        Returns True when this group recognizes ``event.kind``, False to let
+        the next group try. Cut verbatim out of the single chain ``apply``
+        used to carry inline; the branches and their order are unchanged.
+        """
+        if event.kind == "LocalEditProposalRecorded":
+            legacy_fields = {
+                "proposal_id",
+                "candidate_id",
+                "batch_index",
+                "evidence_scope_digest",
+                "decision",
+                "operations",
+            }
+            fields = {
+                "proposal_id",
+                "candidate_id",
+                "batch_index",
+                "evidence_scope_digest",
+                "proposal",
+            }
+            if set(payload) not in (legacy_fields, fields, fields | {"safety_reason"}):
+                raise ValueError("local edit proposal payload is invalid")
+            candidate_id = payload["candidate_id"]
+            batch_index = payload["batch_index"]
+            if (
+                not isinstance(candidate_id, str)
+                or not candidate_id
+                or isinstance(batch_index, bool)
+                or not isinstance(batch_index, int)
+                or batch_index < 0
+            ):
+                raise ValueError("local edit proposal scope is invalid")
+            key = (candidate_id, batch_index)
+            existing_event = self.local_edit_proposal_events.get(key)
+            if existing_event is not None:
+                if canonical_json(existing_event.payload) == canonical_json(payload):
+                    return True  # handled; the DSH usage index below does not apply
+                raise ValueError("conflicting local edit proposal")
+            evaluation = self.replay_batch_evaluation_for(candidate_id, batch_index)
+            schedule = OptimizationSchedule.from_dict(
+                self.task.metadata["optimization_schedule"]
+            )
+            if (
+                schedule.local_evaluation_mode
+                == PAIRED_LOCAL_EVALUATION_MODE
+            ):
+                trajectory = self.formal_trajectories.get(candidate_id)
+                if (
+                    trajectory is None
+                    or trajectory.status is not TrajectoryStatus.RUNNING
+                ):
+                    raise ValueError(
+                        "paired local edit requires a running trajectory"
+                    )
+                if batch_index >= trajectory.batch_count - 1:
+                    raise ValueError(
+                        "paired final batch cannot record a local edit proposal"
+                    )
+            if "proposal" in payload:
+                from ..evolution.local_edits import LocalEditProposal
+
+                proposal_value = LocalEditProposal.from_dict(payload["proposal"])
+                decision = proposal_value.decision
+                operations = list(proposal_value.operations)
+            else:
+                decision = LocalEditProposalDecision(payload["decision"])
+                operations = payload["operations"]
+            if (
+                evaluation is None
+                or (
+                    schedule.local_evaluation_mode
+                    == PAIRED_LOCAL_EVALUATION_MODE
+                    and key not in self.formal_batch_comparisons
+                )
+                or payload["evidence_scope_digest"] != evaluation.scope.scope_key
+                or not isinstance(operations, list)
+                or len(operations) > schedule.max_local_edits_per_batch
+                or (decision is LocalEditProposalDecision.KEEP and operations)
+                or (decision is LocalEditProposalDecision.MUTATE and not operations)
+            ):
+                raise ValueError("local edit proposal evidence is invalid")
+            if "safety_reason" in payload and (
+                decision is not LocalEditProposalDecision.KEEP
+                or not isinstance(payload["safety_reason"], str)
+                or not payload["safety_reason"].strip()
+            ):
+                raise ValueError("local edit safety reason is invalid")
+            normalized = {
+                "proposal_id": payload["proposal_id"],
+                "candidate_id": candidate_id,
+                "batch_index": batch_index,
+                "evidence_scope_digest": payload["evidence_scope_digest"],
+                "proposal": (
+                    proposal_value.to_dict()
+                    if "proposal" in payload
+                    else {
+                        "schema_version": "ecology-local-edit@1",
+                        "decision": decision.value,
+                        "operations": [dict(item) for item in operations],
+                        "evidence_refs": ["batch:score"],
+                        "expected_effect_cells": [],
+                        "risk_cells": [],
+                    }
+                ),
+                "decision": decision.value,
+                "operations": [dict(item) for item in operations],
+            }
+            if "safety_reason" in payload:
+                normalized["safety_reason"] = payload["safety_reason"]
+            existing = self.local_edit_proposals.get(key)
+            if existing is not None and canonical_json(existing) != canonical_json(normalized):
+                raise ValueError("conflicting local edit proposal")
+            self.local_edit_proposals.setdefault(key, normalized)
+            self.local_edit_proposal_events.setdefault(key, event)
+        elif event.kind == "LocalEditDecided":
+            fields = {
+                "proposal_id",
+                "candidate_id",
+                "batch_index",
+                "outcome",
+                "active_revision_id",
+            }
+            if set(payload) not in (fields, fields | {"reason"}):
+                raise ValueError("local edit outcome payload is invalid")
+            key = (payload["candidate_id"], payload["batch_index"])
+            existing_event = self.local_edit_outcome_events.get(key)
+            if existing_event is not None:
+                if canonical_json(existing_event.payload) == canonical_json(payload):
+                    return True  # handled; the DSH usage index below does not apply
+                raise ValueError("conflicting local edit outcome")
+            proposal = self.local_edit_proposals.get(key)
+            outcome = LocalEditOutcome(payload["outcome"])
+            revision = self.candidate_revisions.get(payload["active_revision_id"])
+            schedule = OptimizationSchedule.from_dict(
+                self.task.metadata["optimization_schedule"]
+            )
+            if (
+                schedule.local_evaluation_mode
+                == PAIRED_LOCAL_EVALUATION_MODE
+            ):
+                trajectory = self.formal_trajectories.get(payload["candidate_id"])
+                if (
+                    trajectory is None
+                    or trajectory.status is not TrajectoryStatus.RUNNING
+                ):
+                    raise ValueError(
+                        "paired local edit requires a running trajectory"
+                    )
+                if payload["batch_index"] >= trajectory.batch_count - 1:
+                    raise ValueError(
+                        "paired final batch cannot record a local edit decision"
+                    )
+                comparison = self.formal_batch_comparisons.get(key)
+                if comparison is None:
+                    raise ValueError(
+                        "paired local edit decision requires a comparison"
+                    )
+                proposal_decision = (
+                    proposal.get("decision") if proposal is not None else None
+                )
+                if not (
+                    (
+                        proposal_decision
+                        == LocalEditProposalDecision.KEEP.value
+                        and outcome is LocalEditOutcome.KEPT
+                    )
+                    or (
+                        proposal_decision
+                        == LocalEditProposalDecision.MUTATE.value
+                        and outcome
+                        in (LocalEditOutcome.APPLIED, LocalEditOutcome.REJECTED)
+                    )
+                ):
+                    raise ValueError(
+                        "paired local edit outcome does not match proposal decision"
+                    )
+                selected_revision_id = comparison.champion_after_revision_id
+                children = [
+                    item
+                    for item in self.candidate_revisions.values()
+                    if item.candidate_id == payload["candidate_id"]
+                    and item.source_batch_index == payload["batch_index"]
+                ]
+                if outcome is LocalEditOutcome.APPLIED:
+                    if (
+                        proposal is None
+                        or proposal.get("decision")
+                        != LocalEditProposalDecision.MUTATE.value
+                        or revision is None
+                        or len(children) != 1
+                        or revision.revision_id != children[0].revision_id
+                        or revision.parent_revision_id != selected_revision_id
+                    ):
+                        raise ValueError(
+                            "paired applied edit must create one child from selected champion"
+                        )
+                elif (
+                    outcome is LocalEditOutcome.ROLLED_BACK
+                    or revision is None
+                    or revision.revision_id != selected_revision_id
+                    or children
+                ):
+                    raise ValueError(
+                        "paired retained edit must keep the selected champion "
+                        "without a child"
+                    )
+            if (
+                proposal is None
+                or proposal["proposal_id"] != payload["proposal_id"]
+                or revision is None
+                or revision.candidate_id != payload["candidate_id"]
+                or (
+                    proposal["decision"] == LocalEditProposalDecision.KEEP.value
+                    and outcome is not LocalEditOutcome.KEPT
+                    and not (
+                        outcome is LocalEditOutcome.ROLLED_BACK
+                        and payload.get("reason") == proposal.get("safety_reason")
+                    )
+                )
+            ):
+                raise ValueError("local edit outcome is inconsistent")
+            if "reason" in payload and (
+                not isinstance(payload["reason"], str)
+                or not payload["reason"].strip()
+            ):
+                raise ValueError("local edit outcome reason is invalid")
+            normalized = dict(payload)
+            existing = self.local_edit_outcomes.get(key)
+            if existing is not None and canonical_json(existing) != canonical_json(normalized):
+                raise ValueError("conflicting local edit outcome")
+            self.local_edit_outcomes.setdefault(key, normalized)
+            self.local_edit_outcome_events.setdefault(key, event)
+        else:
+            return False
+        return True
+    def _apply_trajectory_completion(self, event: Event, payload: Any) -> bool:
+        """Revision advancement and formal trajectory completion.
+
+        Returns True when this group recognizes ``event.kind``, False to let
+        the next group try. Cut verbatim out of the single chain ``apply``
+        used to carry inline; the branches and their order are unchanged.
+        """
+        if event.kind == "TrajectoryRevisionAdvanced":
+            if set(payload) != {"activation"}:
+                raise ValueError("TrajectoryRevisionAdvanced payload is invalid")
+            activation = TrajectoryRevisionActivation.from_dict(payload["activation"])
+            key = (activation.candidate_id, activation.batch_index)
+            batch = self.formal_batches.get(key)
+            outcome = self.local_edit_outcomes.get(key)
+            destination = self.candidate_revisions.get(activation.to_revision_id)
+            schedule = OptimizationSchedule.from_dict(
+                self.task.metadata["optimization_schedule"]
+            )
+            comparison = self.formal_batch_comparisons.get(key)
+            trajectory = self.formal_trajectories.get(activation.candidate_id)
+            if (
+                schedule.local_evaluation_mode
+                == PAIRED_LOCAL_EVALUATION_MODE
+            ):
+                if (
+                    trajectory is None
+                    or trajectory.status is not TrajectoryStatus.RUNNING
+                ):
+                    raise ValueError(
+                        "paired revision activation requires a running trajectory"
+                    )
+                if activation.batch_index >= trajectory.batch_count - 1:
+                    raise ValueError(
+                        "paired final batch cannot activate a local edit revision"
+                    )
+            source_revision_id = (
+                comparison.champion_after_revision_id
+                if schedule.local_evaluation_mode
+                == PAIRED_LOCAL_EVALUATION_MODE
+                and comparison is not None
+                else batch.revision_id
+                if batch is not None
+                else None
+            )
+            if (
+                batch is None
+                or outcome is None
+                or (
+                    schedule.local_evaluation_mode
+                    == PAIRED_LOCAL_EVALUATION_MODE
+                    and comparison is None
+                )
+                or self.replay_batch_evaluation_for(
+                    activation.candidate_id,
+                    activation.batch_index,
+                )
+                is None
+                or activation.run_id != batch.run_id
+                or activation.generation != batch.generation
+                or activation.from_revision_id != source_revision_id
+                or destination is None
+                or destination.candidate_id != activation.candidate_id
+                or outcome["active_revision_id"] != activation.to_revision_id
+            ):
+                raise ValueError("trajectory revision activation is invalid")
+            expected_reason = {
+                LocalEditOutcome.KEPT.value: RevisionAdvanceReason.KEPT,
+                LocalEditOutcome.APPLIED.value: RevisionAdvanceReason.LOCAL_EDIT_APPLIED,
+                LocalEditOutcome.REJECTED.value: RevisionAdvanceReason.LOCAL_EDIT_REJECTED,
+                LocalEditOutcome.ROLLED_BACK.value: (
+                    RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK
+                ),
+            }[outcome["outcome"]]
+            if activation.reason is not expected_reason:
+                raise ValueError("trajectory revision activation reason is inconsistent")
+            if (
+                schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE
+                and activation.reason
+                is RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK
+            ):
+                raise ValueError("paired trajectory cannot use prequential rollback")
+            if activation.reason is RevisionAdvanceReason.LOCAL_EDIT_APPLIED:
+                if (
+                    destination.source_batch_index != activation.batch_index
+                    or destination.parent_revision_id != source_revision_id
+                ):
+                    raise ValueError("new revision source batch is inconsistent")
+            elif activation.reason is RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK:
+                source = self.candidate_revisions.get(batch.revision_id)
+                if source is None or source.parent_revision_id != activation.to_revision_id:
+                    raise ValueError("safety rollback must activate the batch revision parent")
+            elif activation.to_revision_id != source_revision_id:
+                raise ValueError("kept/rejected edit cannot change active revision")
+            existing = self.trajectory_revision_activations.get(key)
+            if existing is not None and existing.to_dict() != activation.to_dict():
+                raise ValueError("conflicting trajectory revision activation")
+            self.trajectory_revision_activations.setdefault(key, activation)
+        elif event.kind == "FormalTrajectoryCompleted":
+            if set(payload) != {"candidate_id", "final_revision_id"}:
+                raise ValueError("FormalTrajectoryCompleted payload is invalid")
+            candidate_id = payload["candidate_id"]
+            trajectory = self.formal_trajectories.get(candidate_id)
+            if trajectory is None or trajectory.status is not TrajectoryStatus.RUNNING:
+                raise ValueError("formal trajectory is not running")
+            required = {
+                (candidate_id, index) for index in range(trajectory.batch_count)
+            }
+            schedule = OptimizationSchedule.from_dict(
+                self.task.metadata["optimization_schedule"]
+            )
+            if schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
+                local_required = {
+                    (candidate_id, index)
+                    for index in range(trajectory.batch_count - 1)
+                }
+                candidate_batches = {
+                    key for key in self.formal_batches if key[0] == candidate_id
+                }
+                candidate_comparisons = {
+                    key
+                    for key in self.formal_batch_comparisons
+                    if key[0] == candidate_id
+                }
+                candidate_proposals = {
+                    key for key in self.local_edit_proposals if key[0] == candidate_id
+                }
+                candidate_outcomes = {
+                    key for key in self.local_edit_outcomes if key[0] == candidate_id
+                }
+                candidate_activations = {
+                    key
+                    for key in self.trajectory_revision_activations
+                    if key[0] == candidate_id
+                }
+                local_bindings_are_exact = True
+                for key in local_required:
+                    comparison = self.formal_batch_comparisons.get(key)
+                    proposal = self.local_edit_proposals.get(key)
+                    outcome = self.local_edit_outcomes.get(key)
+                    activation = self.trajectory_revision_activations.get(key)
+                    children = [
+                        item
+                        for item in self.candidate_revisions.values()
+                        if item.candidate_id == candidate_id
+                        and item.source_batch_index == key[1]
+                    ]
+                    if (
+                        comparison is None
+                        or proposal is None
+                        or outcome is None
+                        or activation is None
+                    ):
+                        local_bindings_are_exact = False
+                        break
+                    selected_revision_id = (
+                        comparison.champion_after_revision_id
+                    )
+                    if outcome.get("outcome") == LocalEditOutcome.APPLIED.value:
+                        local_bindings_are_exact = (
+                            proposal.get("decision")
+                            == LocalEditProposalDecision.MUTATE.value
+                            and len(children) == 1
+                            and children[0].parent_revision_id
+                            == selected_revision_id
+                            and outcome.get("active_revision_id")
+                            == children[0].revision_id
+                            and activation.to_revision_id
+                            == children[0].revision_id
+                            and activation.reason
+                            is RevisionAdvanceReason.LOCAL_EDIT_APPLIED
+                        )
+                    else:
+                        expected = {
+                            LocalEditOutcome.KEPT.value: (
+                                LocalEditProposalDecision.KEEP.value,
+                                RevisionAdvanceReason.KEPT
+                            ),
+                            LocalEditOutcome.REJECTED.value: (
+                                LocalEditProposalDecision.MUTATE.value,
+                                RevisionAdvanceReason.LOCAL_EDIT_REJECTED,
+                            ),
+                        }.get(outcome.get("outcome"))
+                        local_bindings_are_exact = (
+                            not children
+                            and expected is not None
+                            and proposal.get("decision") == expected[0]
+                            and outcome.get("active_revision_id")
+                            == selected_revision_id
+                            and activation.to_revision_id
+                            == selected_revision_id
+                            and activation.reason is expected[1]
+                        )
+                    if not local_bindings_are_exact:
+                        break
+                has_post_final_child = any(
+                    item.candidate_id == candidate_id
+                    and item.source_batch_index is not None
+                    and item.source_batch_index >= trajectory.batch_count - 1
+                    for item in self.candidate_revisions.values()
+                )
+                if not (
+                    required == candidate_batches
+                    and required == candidate_comparisons
+                    and local_required == candidate_proposals
+                    and local_required == candidate_outcomes
+                    and local_required == candidate_activations
+                    and local_bindings_are_exact
+                    and not has_post_final_child
+                ):
+                    raise ValueError(
+                        "formal trajectory has incomplete paired batches or invalid "
+                        "child/outcome binding"
+                    )
+                final_revision_id = self.formal_batch_comparisons[
+                    (candidate_id, trajectory.batch_count - 1)
+                ].champion_after_revision_id
+            else:
+                legacy_evaluation_keys = {
+                    (candidate_id, index, None)
+                    for index in range(trajectory.batch_count)
+                }
+                if not (
+                    required <= set(self.formal_batches)
+                    and legacy_evaluation_keys <= set(self.formal_batch_evaluations)
+                    and required <= set(self.local_edit_proposals)
+                    and required <= set(self.local_edit_outcomes)
+                    and required <= set(self.trajectory_revision_activations)
+                ):
+                    raise ValueError("formal trajectory has incomplete batches")
+                final_revision_id = self.trajectory_revision_activations[
+                    (candidate_id, trajectory.batch_count - 1)
+                ].to_revision_id
+            if payload["final_revision_id"] != final_revision_id:
+                raise ValueError("formal trajectory final revision is invalid")
+            self.formal_trajectories[candidate_id] = replace(
+                trajectory,
+                status=TrajectoryStatus.COMPLETED,
+                final_revision_id=final_revision_id,
+            )
+        else:
+            return False
+        return True
+    def _apply_holdout_and_comparison(self, event: Event, payload: Any) -> bool:
+        """Holdout freezing, arms, generation comparison, and the champion binding.
+
+        Returns True when this group recognizes ``event.kind``, False to let
+        the next group try. Cut verbatim out of the single chain ``apply``
+        used to carry inline; the branches and their order are unchanged.
+        """
+        if event.kind == "GenerationHoldoutFrozen":
+            if set(payload) != {"holdout"}:
+                raise ValueError("GenerationHoldoutFrozen payload is invalid")
+            holdout = GenerationHoldout.from_dict(payload["holdout"])
+            if holdout.run_id != self.run.run_id:
+                raise ValueError("generation holdout belongs to another run")
+            completed = [
+                item
+                for item in self.formal_trajectories.values()
+                if item.generation == holdout.generation
+                and item.status is TrajectoryStatus.COMPLETED
+            ]
+            schedule = OptimizationSchedule.from_dict(self.task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
+            if len(completed) != schedule.finalist_count or len(holdout.arm_bindings) != schedule.finalist_count + 1:
+                raise ValueError("holdout requires two completed trajectories")
+            formal = self.formal_selection_events.get(holdout.generation)
+            finalist_candidates = {
+                holdout.arm_bindings[arm.value]["candidate_id"]
+                for arm in map(HoldoutArm, holdout.arm_bindings) if arm is not HoldoutArm.INCUMBENT
+            }
+            if formal is None or finalist_candidates != set(
+                formal.payload["selected_candidate_ids"]
+            ):
+                raise ValueError("holdout finalist arms do not match frozen Top 2")
+            for binding in holdout.arm_bindings.values():
+                revision = self.candidate_revisions.get(binding["candidate_revision_id"])
+                if revision is None or revision.candidate_id != binding["candidate_id"]:
+                    raise ValueError("holdout arm revision binding is invalid")
+            completed_by_candidate = {
+                item.candidate_id: item for item in completed
+            }
+            for arm in map(HoldoutArm, holdout.arm_bindings):
+                if arm is HoldoutArm.INCUMBENT:
+                    continue
+                binding = holdout.arm_bindings[arm.value]
+                trajectory = completed_by_candidate.get(
+                    binding["candidate_id"]
+                )
+                if (
+                    trajectory is None
+                    or binding["candidate_revision_id"]
+                    != trajectory.final_revision_id
+                ):
+                    raise ValueError(
+                        "holdout finalist arm must bind trajectory final revision"
+                    )
+            validate_generation_zero_incumbent_binding(
+                self.task,
+                holdout.generation,
+                holdout.arm_bindings,
+                candidates=self.candidates,
+                revisions=self.candidate_revisions,
+                materialized_seed_canonical=self.materialized_seed_canonical,
+                prior_effective_revision_id=(
+                    str(
+                        self.effective_revision_bindings[holdout.generation - 1][
+                            "selected_revision_id"
+                        ]
+                    )
+                    if holdout.generation > 0
+                    and holdout.generation - 1 in self.effective_revision_bindings
+                    else None
+                ),
+                prior_champion_selected=(
+                    holdout.generation == 0
+                    or holdout.generation - 1 in self.champion_generations
+                ),
+            )
+            existing = self.generation_holdouts.get(holdout.generation)
+            if existing is not None and existing.to_dict() != holdout.to_dict():
+                raise ValueError("conflicting generation holdout")
+            self.generation_holdouts.setdefault(holdout.generation, holdout)
+        elif event.kind == "HoldoutArmStarted":
+            expected_fields = {
+                "schema_version",
+                "generation",
+                "holdout_arm",
+                "candidate_id",
+                "candidate_revision_id",
+                "cohort_digest",
+                "origin_count",
+            }
+            if (
+                set(payload) != expected_fields
+                or payload.get("schema_version")
+                != "ecologyrsi-dsh.holdout-arm-started/1"
+            ):
+                raise ValueError("HoldoutArmStarted payload is invalid")
+            try:
+                arm = HoldoutArm(str(payload["holdout_arm"]))
+            except ValueError:
+                raise ValueError("HoldoutArmStarted arm is invalid") from None
+            generation = payload["generation"]
+            holdout = (
+                self.generation_holdouts.get(generation)
+                if isinstance(generation, int) and not isinstance(generation, bool)
+                else None
+            )
+            binding = holdout.arm_bindings[arm.value] if holdout is not None else None
+            if (
+                holdout is None
+                or binding is None
+                or payload["candidate_id"] != binding["candidate_id"]
+                or payload["candidate_revision_id"]
+                != binding["candidate_revision_id"]
+                or payload["cohort_digest"] != holdout.cohort_digest
+                or payload["origin_count"] != holdout.origin_count
+            ):
+                raise ValueError("HoldoutArmStarted scope is invalid")
+        elif event.kind == "HoldoutEvaluationRecorded":
+            if set(payload) != {"evaluation"}:
+                raise ValueError("HoldoutEvaluationRecorded payload is invalid")
+            evaluation = HoldoutEvaluation.from_dict(payload["evaluation"])
+            arm = evaluation.scope.holdout_arm
+            assert arm is not None
+            holdout = self.generation_holdouts.get(evaluation.scope.generation)
+            binding = holdout.arm_bindings[arm.value] if holdout is not None else None
+            if (
+                holdout is None
+                or evaluation.scope.run_id != holdout.run_id
+                or evaluation.scope.cohort_digest != holdout.cohort_digest
+                or evaluation.scope.origin_count != holdout.origin_count
+                or binding is None
+                or evaluation.scope.candidate_id != binding["candidate_id"]
+                or evaluation.scope.candidate_revision_id
+                != binding["candidate_revision_id"]
+            ):
+                raise ValueError("holdout evaluation scope is invalid")
+            key = (holdout.generation, arm)
+            existing = self.holdout_evaluations.get(key)
+            if existing is not None and existing.to_dict() != evaluation.to_dict():
+                raise ValueError("conflicting holdout evaluation")
+            self.holdout_evaluations.setdefault(key, evaluation)
+        elif event.kind == "GenerationComparisonRecorded":
+            if set(payload) != {"comparison"}:
+                raise ValueError("GenerationComparisonRecorded payload is invalid")
+            comparison = GenerationComparison.from_dict(payload["comparison"])
+            holdout = self.generation_holdouts.get(comparison.generation)
+            if holdout is None or holdout.cohort_digest != comparison.cohort_digest:
+                raise ValueError("generation comparison holdout is missing")
+            persisted = {
+                arm: self.holdout_evaluations.get((comparison.generation, arm))
+                for arm in map(HoldoutArm, holdout.arm_bindings)
+            }
+            if any(item is None for item in persisted.values()):
+                raise ValueError("generation comparison requires all three holdout arms")
+            validate_generation_comparison_binding(
+                self.task,
+                self.run.run_id,
+                holdout,
+                self.formal_selection_events.get(comparison.generation),
+                comparison,
+                persisted_evaluations={
+                    arm: item
+                    for arm, item in persisted.items()
+                    if item is not None
+                },
+                persisted_judgments={item.candidate_id: item for item in self.evaluations.values()},
+            )
+            existing = self.generation_comparisons.get(comparison.generation)
+            if existing is not None and existing.to_dict() != comparison.to_dict():
+                raise ValueError("conflicting generation comparison")
+            self.generation_comparisons.setdefault(comparison.generation, comparison)
+        elif event.kind == "CandidateEffectiveRevisionFrozen":
+            fields = {
+                "generation",
+                "selected_candidate_id",
+                "selected_revision_id",
+                "comparison_digest",
+            }
+            if set(payload) != fields:
+                raise ValueError("effective revision payload is invalid")
+            generation = payload["generation"]
+            comparison = self.generation_comparisons.get(generation)
+            if (
+                comparison is None
+                or payload["comparison_digest"] != comparison.comparison_digest
+                or payload["selected_candidate_id"]
+                != comparison.selected_candidate_id
+                or payload["selected_revision_id"]
+                != comparison.selected_revision_id
+            ):
+                raise ValueError("effective revision differs from Host comparison")
+            existing = self.effective_revision_bindings.get(generation)
+            if existing is not None and canonical_json(existing) != canonical_json(payload):
+                raise ValueError("conflicting effective revision")
+            self.effective_revision_bindings.setdefault(generation, dict(payload))
+        elif event.kind == "GenerationChampionSelected":
+            fields = {"generation", "selected_candidate_id", "selected_revision_id"}
+            if set(payload) != fields:
+                raise ValueError("generation champion payload is invalid")
+            binding = self.effective_revision_bindings.get(payload["generation"])
+            if (
+                binding is None
+                or payload["selected_candidate_id"]
+                != binding["selected_candidate_id"]
+                or payload["selected_revision_id"]
+                != binding["selected_revision_id"]
+                or payload["generation"] in self.champion_generations
+            ):
+                raise ValueError("generation champion requires effective revision")
+            self.champion_generations.add(payload["generation"])
+        elif event.kind == "ModelUsageRecorded":
+            validate_model_usage_payload(payload)
+        elif event.kind == "EvaluationProgressRecorded":
+            validate_evaluation_progress_payload(payload)
+        elif event.kind in {
+            "EvaluationSampleResultsStarted",
+            "EvaluationSampleResultsResumed",
+            "EvaluationSampleResultBatchRecorded",
+            "EvaluationSampleResultsRecorded",
+        }:
+            # Full result rows are a private paginated read model. They must
+            # never enter evaluations or later-generation strategy context.
+            return True  # handled; the DSH usage index below does not apply
+        else:
+            return False
+        return True
+
 
     def snapshot(self) -> RunState:
 

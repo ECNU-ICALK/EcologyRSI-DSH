@@ -9,15 +9,15 @@ import { NativeStageRunner, jsonDigest } from "../lib/runtime/stage-runner.js";
 
 const REALISTIC_PRESET_CATALOG = Object.freeze([
   "ecology-coordinator-v5",
-  "ecology-researcher-v12",
-  "ecology-candidate-proposer-v4",
-  "ecology-sample-planner-v9",
+  "ecology-researcher-v13",
+  "ecology-candidate-proposer-v5",
+  "ecology-sample-planner-v11",
   "ecology-sample-critic-v5",
   "ecology-generation-judge-v8",
 ].map((preset_id) => ({
   preset_id,
   tool_profile: "dynamic-retrieval-v1",
-  required_tools: preset_id === "ecology-sample-planner-v9"
+  required_tools: preset_id === "ecology-sample-planner-v11"
     ? ["ecology_execute_prediction_tool", "skill", "web_search"]
     : ["skill", "web_search"],
 })));
@@ -45,7 +45,7 @@ async function startReadyControllerRun(controller, startBinding) {
   const roleAgents = controller.roleAgents;
   controller.stageRunner = null;
   controller.presetCatalog = [
-    { preset_id: "ecology-researcher-v12", tool_profile: "test" },
+    { preset_id: "ecology-researcher-v13", tool_profile: "test" },
   ];
   controller.roleAgents = {
     createRoleAgent: async () => ({ dispose: async () => {} }),

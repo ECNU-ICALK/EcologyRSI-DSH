@@ -10,6 +10,7 @@ import test from "node:test";
 import { sessionEventLog } from "../lib/runtime/session-events.js";
 import { checkSampleStageBudget } from "../lib/runtime/sample-stage-budget.js";
 import { sessionUsageComplete } from "../lib/runtime/session-usage.js";
+import { ChildBindingRegistry } from "../lib/runtime/child-bindings.js";
 
 const EVENTS = [
   { seq: 1, type: "turn/start", data: { turn: 1 } },
@@ -77,4 +78,38 @@ test("usage completeness reads the same log the Host actually publishes", () => 
     sessionUsageComplete(fromSnapshot, { settlement: { kind: "completed" }, freshUsage: true }),
     sessionUsageComplete(events, { settlement: { kind: "completed" }, freshUsage: true }),
   );
+});
+
+test("a child claims its reservation from the snapshot-shaped Session it really has", () => {
+  // Production evidence: every `ecology_execute_prediction_tool` call returned
+  // "Error: missing reservation" because the claim resolved the child's own
+  // `subagent/descriptor` through `.events`, which the installed Session does
+  // not expose. Structured persistence claims by the reserved label instead, so
+  // planners still submitted -- they just submitted with no tool evidence, and
+  // the whole prediction-tool axis measured zero.
+  const registry = new ChildBindingRegistry();
+  const reserved = registry.reserve("parent-1", {
+    reservation_id: "reservation-1",
+    run_id: "run-1",
+    stage: "sample.plan",
+    role: "sample-planner",
+    item_digest: "a".repeat(64),
+    idempotency_key: "idem-1",
+    launch_attempt: 1,
+  }, { role: "sample-planner", allowed_tools: ["ecology_execute_prediction_tool"] });
+  const events = [
+    { seq: 1, type: "turn/start", data: { turn: 1 } },
+    { seq: 2, type: "subagent/descriptor", data: { label: reserved.label } },
+  ];
+  const child = {
+    id: "child-1",
+    session: { header: { parentSession: "parent-1" }, ...snapshotSession(events) },
+  };
+  assert.equal(registry.claim(child).role, "sample-planner");
+  const binding = registry.bindingFor(child, {
+    role: "sample-planner",
+    toolName: "ecology_execute_prediction_tool",
+  });
+  assert.equal(binding.session_id, "child-1");
+  assert.equal(binding.child_reservation_id, "reservation-1");
 });

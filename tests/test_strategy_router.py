@@ -7,7 +7,8 @@ from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import digest
-from ecologyrsi_dsh.evolution.strategies import FakeDSHAdapter, StrategyRouterDSHAdapter
+from ecologyrsi_dsh.evaluators.registry import EvaluatorRegistry
+from ecologyrsi_dsh.evolution.strategies import FakeDSHAdapter, StrategyRouterDSHAdapter, _parent_context
 from ecologyrsi_dsh.evolution.batches import start_generation_batch
 from ecologyrsi_dsh.evolution.context import safe_aggregate_feedback
 from ecologyrsi_dsh.integrations.dsh_native_runtime import (
@@ -569,6 +570,40 @@ class StrategyRouterTests(unittest.TestCase):
         self.assertGreater(
             proposal.changes["co2_concentration_24h_residual_scale"], 0.0
         )
+
+    def test_recipe_ridge_has_an_empty_but_registered_parameter_boundary(self) -> None:
+        # _task_parameter_space had no branch for this predictor and raised
+        # "unsupported prediction_model_id", so building the runtime component
+        # catalog threw the moment the recipe predictor became selectable.
+        adapter = StrategyRouterDSHAdapter(max_proposals=2)
+        task = _task(
+            metadata={
+                "strategy_id": "parameter_sweep@1",
+                "domain": "greenhouse",
+                "prediction_model_id": "greenhouse-recipe-ridge@1",
+            },
+            domain_pack="greenhouse-climate@1",
+        )
+
+        self.assertEqual(adapter.parameter_schemas_for_task(task), {})
+        self.assertEqual(adapter.parameter_semantics_for_task(task), {})
+        proposal = adapter.propose(_run(generation=0), task, adapter.open_session(_run(generation=0), task))
+        self.assertEqual(proposal.changes, {})
+        # Empty is the honest boundary, not an oversight: the evaluator refuses
+        # scalar overrides for this predictor outright, so advertising a knob
+        # here would advertise one nothing downstream would accept.
+        with self.assertRaisesRegex(ValueError, "parameter_overrides is not supported"):
+            EvaluatorRegistry.validate_parameter_overrides(task, {"ridge_alpha": 0.1})
+        EvaluatorRegistry.validate_parameter_overrides(task, {})
+        # A recipe candidate proposes an empty scalar map, and the next
+        # generation has to recognise it as its own registered contract.
+        parent = _parent_context({
+            'candidate_id': 'cand', 'proposal_id': 'prop', 'status': 'promoted',
+            'proposal_parameters': proposal.changes,
+            'evaluation': {'score': .3, 'passed': True},
+        }, adapter.parameter_schemas_for_task(task))
+        self.assertEqual(parent["parameter_space"], "greenhouse_recipe_ridge")
+        self.assertTrue(parent["parameter_space_compatible"])
 
     def test_generation_one_predictor_switch_keeps_metrics_but_resets_parameters(
         self,

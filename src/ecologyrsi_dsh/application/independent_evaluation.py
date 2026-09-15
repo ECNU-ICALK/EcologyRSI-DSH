@@ -11,6 +11,7 @@ from ..core.immutable import thaw_json
 from ..core.trajectory import EvaluationPhase, EvaluationScope
 from ..data.adapters import dataset_adapter
 from ..evaluators.epoch_cohorts import PlannedCohort, _eligible_origins
+from ..evaluators.greenhouse_prediction import origin_history_alignment_hours
 
 
 class IndependentEvaluationService:
@@ -152,7 +153,11 @@ class IndependentEvaluationService:
         if artifact.digest != token.artifact_digest:
             raise ValueError("independent evaluation artifact changed after freezing")
         series = self.server.datasets.formal_view(task.dataset, token, ScientificExposureRegistry(self.server.ledger))
-        origins, _gaps = _eligible_origins(series)
+        # Same alignment the run froze: an independent partition planned at a
+        # different depth would score the frozen policy on origins its own
+        # feedback cohort never had to serve.
+        origins, _gaps = _eligible_origins(
+            series, history_steps=origin_history_alignment_hours(task.metadata))
         if not origins:
             raise ValueError("独立评测分区没有满足历史窗口和预测时距的样本")
         adapter = dataset_adapter(task.dataset)

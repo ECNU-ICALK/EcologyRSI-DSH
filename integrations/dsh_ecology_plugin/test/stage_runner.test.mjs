@@ -1052,6 +1052,12 @@ test("new synthesis alone receives the frozen 16k budget and concise schema", as
   await harness.runner.run(binding);
   assert.equal(harness.starts.length, 1);
   assert.deepEqual(harness.starts[0].request.agentOptions, { maxTokens: 16384 });
+  // The child cannot be asked for a lower reasoning tier on every route, so
+  // the budget it must not overrun is stated in the prompt itself.
+  const prompt = JSON.parse(harness.starts[0].request.prompt[0].text);
+  assert.match(prompt.instruction, /single output budget of 16384 tokens/);
+  assert.match(prompt.instruction, /Submit structured_output before expanding your reasoning/);
+  assert.match(prompt.instruction, /output_budget_exhausted_before_structured_output/);
   assert.equal(harness.reservationRequests[0].item_digest, jsonDigest(binding.request.context));
   const schema = harness.starts[0].request.outputSchema;
   assert.match(schema.properties.summary.description, /1200 characters/);

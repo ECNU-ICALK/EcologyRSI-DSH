@@ -677,6 +677,126 @@
       return "<div class=\"change-row candidate-change\"><span title=\"" + escapeHTML(key) + "\">" + escapeHTML(parameterLabels[key] || "参数：" + key) + "</span>" + (hasDiff ? "<strong class=\"candidate-change-before\">" + escapeHTML(formatNumber(before)) + "</strong><span class=\"candidate-change-arrow\" aria-hidden=\"true\">→</span><strong class=\"candidate-change-after\">" + escapeHTML(formatNumber(after)) + "</strong>" : "<strong class=\"candidate-change-after\">" + escapeHTML(changeDisplay(change)) + "</strong>") + "</div>";
     }).join("");
   }
+  var mutationFieldLabels = {
+    op: "操作", name: "参数名", value: "取值", role: "执行角色",
+    instruction_template_id: "指令模板", instruction_parameters: "指令参数",
+    instruction_template_ref: "指令模板引用", pipeline_id: "预测流水线",
+    workflow_template_id: "执行流程模板", feature_policy_id: "特征处理规则",
+    fit_policy_id: "拟合策略", uncertainty_policy_id: "不确定性策略",
+    feature_recipe: "特征配方", directive: "指令正文", enabled_tool_ids: "启用的工具",
+    base_tool_policy_id: "基础工具策略", preset_id: "预设", response_schema_id: "结果结构",
+    catalog_digest: "目录校验值", id: "标识", confidence_threshold: "置信度阈值",
+    max_attempts: "最大尝试次数"
+  };
+  function mutationFieldLabel(key) {
+    if (mutationFieldLabels[key]) { return mutationFieldLabels[key]; }
+    if (parameterLabels[key]) { return parameterLabels[key]; }
+    // A per-target residual knob is named `<target>_<horizon>_residual_scale`,
+    // which no flat catalog can enumerate; decomposing it keeps the card
+    // readable as the genome grows more of them.
+    var residual = String(key).match(/^(.+)_([0-9]+)h_residual_scale$/);
+    if (residual) {
+      return (targetLabels[residual[1]] || residual[1]) + "（" + residual[2] + " 小时）残差修正系数";
+    }
+    return artifactFieldLabel(key);
+  }
+  function mutationAxisText(axis) {
+    if (!axis) { return "未标注轴向"; }
+    return mutationAxisLabels[axis] || String(axis);
+  }
+  function mutationPathLabel(row) {
+    // The leaf name is the useful part -- `ridge_alpha`, `confidence_threshold`
+    // -- but a genome repeats leaf names across roles, so the full path stays
+    // on the title attribute rather than being dropped.
+    return mutationFieldLabel(String(row && row.name || ""));
+  }
+  function mutationValueText(value, kind, side) {
+    if (kind === "added" && side === "previous") { return "（原本没有）"; }
+    if (kind === "removed" && side === "new") { return "（已移除）"; }
+    return artifactValueText(value);
+  }
+  function renderMutationDiff(explanation) {
+    var rows = Array.isArray(explanation.diff) ? explanation.diff : [];
+    if (!rows.length) {
+      return explanation.parent_genome_available
+        ? "<span class=\"empty-state\">本候选与父方案的程序完全一致。</span>"
+        : "<span class=\"empty-state\">未能读取父方案程序，无法逐项对比；请参考下方的变更操作。</span>";
+    }
+    var body = rows.map(function (row) {
+      var kind = String(row.change_kind || "changed");
+      return "<div class=\"change-row candidate-change mutation-diff-row is-" + escapeHTML(kind) + "\">" +
+        "<span title=\"" + escapeHTML(String(row.path || "")) + "\"><b>" + escapeHTML(mutationPathLabel(row)) + "</b><small>" + escapeHTML(mutationAxisText(row.axis)) + "</small></span>" +
+        "<strong class=\"candidate-change-before\">" + escapeHTML(mutationValueText(row.previous_value, kind, "previous")) + "</strong>" +
+        "<span class=\"candidate-change-arrow\" aria-hidden=\"true\">→</span>" +
+        "<strong class=\"candidate-change-after\">" + escapeHTML(mutationValueText(row.new_value, kind, "new")) + "</strong>" +
+        "</div>";
+    }).join("");
+    var truncated = Number(explanation.diff_count || rows.length) > rows.length
+      ? "<small class=\"mutation-note\">已显示前 " + escapeHTML(formatNumber(rows.length)) + " 项，共 " + escapeHTML(formatNumber(explanation.diff_count)) + " 项变更。</small>"
+      : "";
+    return body + truncated;
+  }
+  function renderMutationOperations(explanation) {
+    var operations = Array.isArray(explanation.operations) ? explanation.operations : [];
+    if (!operations.length) { return "<span class=\"empty-state\">未记录结构化变更操作。</span>"; }
+    return operations.map(function (operation) {
+      var detail = operation && operation.detail && typeof operation.detail === "object" ? operation.detail : {};
+      var fields = Object.keys(detail).sort().map(function (key) {
+        return "<span>" + escapeHTML(mutationFieldLabel(key)) + "<strong>" + escapeHTML(artifactValueText(detail[key])) + "</strong></span>";
+      }).join("");
+      var op = String(operation.op || "");
+      return "<article class=\"mutation-operation\"><div class=\"mutation-operation-header\">" +
+        "<strong title=\"" + escapeHTML(op) + "\">" + escapeHTML(mutationOperationLabels[op] || op || "未命名操作") + "</strong>" +
+        "<span class=\"pill pill-blue\">" + escapeHTML(mutationAxisText(operation.axis)) + "</span></div>" +
+        (fields ? "<div class=\"mutation-operation-detail\">" + fields + "</div>" : "") +
+        "</article>";
+    }).join("");
+  }
+  function renderMutationDirection(direction) {
+    if (!direction || typeof direction !== "object") {
+      return "<span class=\"empty-state\">本候选没有记录模型自述的改动理由（早期运行或非自主协议）。</span>";
+    }
+    var rows = [
+      ["改动目标", direction.mutation_target ? (parameterLabels[direction.mutation_target] || direction.mutation_target) : null],
+      ["改动轴向", direction.mutation_axis ? mutationAxisText(direction.mutation_axis) : null],
+      ["改动方向", direction.mutation_direction ? (mutationDirectionLabels[direction.mutation_direction] || direction.mutation_direction) : null],
+      ["针对的弱点", direction.target_weakness],
+      ["预期代价", direction.expected_tradeoff],
+      ["判定成功的标准", direction.success_criterion]
+    ].filter(function (pair) { return pair[1]; }).map(function (pair) {
+      return "<div class=\"detail-value\"><span>" + escapeHTML(pair[0]) + "</span><strong title=\"" + escapeHTML(String(pair[1])) + "\">" + escapeHTML(compactTechnicalText(pair[1])) + "</strong></div>";
+    }).join("");
+    var refs = Array.isArray(direction.evidence_refs) ? direction.evidence_refs : [];
+    return (direction.title ? "<h4 class=\"mutation-direction-title\">" + escapeHTML(String(direction.title)) + "</h4>" : "") +
+      (direction.hypothesis ? "<p class=\"mutation-hypothesis\">" + escapeHTML(compactTechnicalText(direction.hypothesis)) + "</p>" : "") +
+      (rows ? "<div class=\"detail-grid\">" + rows + "</div>" : "") +
+      (refs.length ? "<small class=\"mutation-note\">引用证据 " + escapeHTML(formatNumber(refs.length)) + " 条：" + escapeHTML(refs.map(shortId).join("、")) + "</small>" : "");
+  }
+  function renderMutationAllowedTargets(allowed) {
+    if (!allowed || typeof allowed !== "object") {
+      return "<span class=\"empty-state\">未能重建本轮可选改动范围。</span>";
+    }
+    var axes = Object.keys(allowed).sort();
+    if (!axes.length) { return "<span class=\"empty-state\">本轮没有可用的改动目标。</span>"; }
+    return axes.map(function (axis) {
+      var targets = Array.isArray(allowed[axis]) ? allowed[axis] : [];
+      return "<div class=\"change-row mutation-allowed-row\"><span>" + escapeHTML(mutationAxisText(axis)) + "</span><strong title=\"" + escapeHTML(targets.join("、")) + "\">" + escapeHTML(targets.length ? targets.map(mutationFieldLabel).join("、") : "本轮不可用") + "</strong></div>";
+    }).join("");
+  }
+  function renderMutationExplanation(candidate) {
+    var explanation = candidate && candidate.mutation_explanation && typeof candidate.mutation_explanation === "object" ? candidate.mutation_explanation : null;
+    if (!explanation || explanation.available !== true) {
+      return "<section class=\"detail-section candidate-section candidate-mutation-section\"><div class=\"candidate-section-heading\"><h3>改了什么 · 为什么</h3><span>来自模型自述与父子程序对比</span></div><span class=\"empty-state\">该候选来自没有结构化基因组的历史运行，无法重建父子对比。</span></section>";
+    }
+    var counts = "变更 " + formatNumber(explanation.diff_count || 0) + " 项 · 操作 " + formatNumber(explanation.operation_count || 0) + " 个";
+    return "<section class=\"detail-section candidate-section candidate-mutation-section\">" +
+      "<div class=\"candidate-section-heading\"><h3>改了什么 · 为什么</h3><span>" + escapeHTML(counts) + "</span></div>" +
+      "<div class=\"mutation-block\"><h4>模型自述的改动理由</h4>" + renderMutationDirection(explanation.direction) + "</div>" +
+      "<div class=\"mutation-block\"><h4>父方案 → 当前候选的逐项变化</h4><div class=\"change-list candidate-change-list\">" + renderMutationDiff(explanation) + "</div></div>" +
+      "<div class=\"mutation-block\"><h4>宿主已校验的变更操作</h4><div class=\"mutation-operations\">" + renderMutationOperations(explanation) + "</div></div>" +
+      "<details class=\"mutation-block mutation-allowed\"><summary>查看本轮允许改动的范围 <span>判断模型是否选对了着力点</span></summary><div class=\"change-list\">" + renderMutationAllowedTargets(explanation.allowed_mutation_targets) + "</div></details>" +
+      "</section>";
+  }
   function renderCandidateTargets(targets) {
     if (!targets.length) { return "<span class=\"empty-state\">当前评测器未提供分目标结果。</span>"; }
     return targets.map(function (target) {
@@ -911,7 +1031,8 @@
     var rationale = compactTechnicalText(candidate.rationale || "未提供");
     var details = [
       "<section class=\"detail-section candidate-section candidate-gate-section\"><h3>评测门禁</h3>" + renderCandidateGates(candidate, run) + "</section>",
-      "<section class=\"detail-section candidate-section candidate-changes-section\"><div class=\"candidate-section-heading\"><h3>本轮修改</h3><span>从父方案到当前候选</span></div><div class=\"change-list candidate-change-list\">" + renderCandidateChanges(candidate.changes) + "</div></section>",
+      "<section class=\"detail-section candidate-section candidate-changes-section\"><div class=\"candidate-section-heading\"><h3>候选当前参数</h3><span>本候选生效的科学参数取值；父子对比见下一节</span></div><div class=\"change-list candidate-change-list\">" + renderCandidateChanges(candidate.changes) + "</div></section>",
+      renderMutationExplanation(candidate),
       renderCandidateExecutionEvidence(candidate, run),
       "<section class=\"detail-section candidate-section\"><div class=\"candidate-section-heading\"><h3>分目标表现</h3><span>每个目标单独计算，避免单位混淆</span></div><div class=\"target-results\">" + renderCandidateTargets(targets) + "</div></section>",
       "<details class=\"detail-section candidate-evidence\"><summary>查看预测效果预览 <span>" + escapeHTML(predictionRows.length ? formatNumber(predictionRows.length) + " 条记录" : "暂无记录") + "</span></summary>" + predictionTable + "</details>",

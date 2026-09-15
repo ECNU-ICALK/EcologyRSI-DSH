@@ -184,7 +184,7 @@
       var payload = payloadOf(event);
       var intervention = payload.intervention && typeof payload.intervention === "object" ? payload.intervention : payload;
       var explicit = intervention.application_status || intervention.enforced === true && "enforced" || intervention.applied === true && "applied";
-      return explicit ? "人工意见" + interventionApplicationText(explicit) : "人工意见执行状态已更新";
+      return explicit ? "人工意见" + interventionApplicationText(explicit, intervention) : "人工意见执行状态已更新";
     }
     return eventLabels[event.type] || "系统事件";
   }
@@ -1958,10 +1958,19 @@
 
   function adaptiveTrajectoryOperationText(operation) {
     var item = operation && typeof operation === "object" ? operation : {};
-    var name = item.name || item.op || item.program_id || "局部修改";
-    var target = item.target == null ? "" : " · " + executionSafeValue(item.target);
+    // The projection now names the axis and the subject for every registered
+    // operation, not just the scalar ones. A non-scalar edit used to fall all
+    // the way through to the bare string "局部修改", which read as if the run
+    // had made an anonymous change.
+    var axis = item.axis ? mutationAxisLabels[item.axis] || item.axis : "";
+    var operationLabel = item.op ? mutationOperationLabels[item.op] || item.op : "";
+    var subject = item.name || item.target || item.program_id || item.predictor_id
+      || item.instruction_template_id || item.workflow_template_id || "";
     var value = item.value == null ? "" : " = " + executionSafeValue(item.value);
-    return compactTechnicalText(name + target + value);
+    var role = item.role ? "（" + executionSafeValue(item.role) + "）" : "";
+    var head = [axis, operationLabel].filter(Boolean).join(" · ") || "局部修改";
+    var body = subject ? " " + executionSafeValue(subject) + role : role;
+    return compactTechnicalText(head + body + value);
   }
   function adaptiveTrajectoryUsesPairedMode(run, lane) {
     var configuration = run && run.configuration && typeof run.configuration === "object" ? run.configuration : {};

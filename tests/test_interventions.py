@@ -71,6 +71,48 @@ class HumanInterventionTests(unittest.TestCase):
         self.assertTrue(receipt["enforced"])
         self.assertEqual(state.pending_interventions, ())
 
+    def test_an_expert_can_write_a_note_without_stopping_the_run(self) -> None:
+        # Requiring PAUSED turned every expert note into an interrupt. The
+        # semantics stay "effective next generation": a note written while the
+        # run is going still cannot change a proposal already produced.
+        self.assertEqual(self.director.state(self.run_id).run.status.value, "running")
+        self.director.record_intervention(
+            HumanIntervention(
+                intervention_id="running-note",
+                run_id=self.run_id,
+                kind=InterventionKind.DOMAIN_KNOWLEDGE,
+                message="土壤水分在雨后两日内仍偏高，阈值判断应考虑滞后",
+                created_by="领域专家",
+            )
+        )
+
+        state = self.director.state(self.run_id)
+        self.assertEqual(
+            [item.intervention_id for item in state.pending_interventions],
+            ["running-note"],
+        )
+
+        proposal = self.director.request_proposal(self.run_id)
+        self.assertEqual(
+            self.director.state(self.run_id)
+            .interventions[0]
+            .applied_proposal_id,
+            proposal.proposal_id,
+        )
+
+    def test_a_terminal_run_still_refuses_new_interventions(self) -> None:
+        self.director.cancel_run(self.run_id)
+        with self.assertRaises(RuntimeError):
+            self.director.record_intervention(
+                HumanIntervention(
+                    intervention_id="too-late",
+                    run_id=self.run_id,
+                    kind=InterventionKind.GUIDANCE,
+                    message="缩短时间窗口",
+                    created_by="研究者",
+                )
+            )
+
     def test_training_artifact_is_digest_bound_to_evaluation(self) -> None:
         candidate = self.director.propose_and_spawn(self.run_id)
         artifact = ModelArtifact(
@@ -258,17 +300,32 @@ class HumanInterventionTests(unittest.TestCase):
             "enforced",
         )
 
-    def test_intervention_is_rejected_while_running(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "expected paused"):
-            self.director.record_intervention(
-                HumanIntervention(
-                    intervention_id="human-running",
-                    run_id=self.run_id,
-                    kind="guidance",
-                    message="不应在运行中写入",
-                    created_by="研究者",
-                )
+    def test_a_note_written_mid_generation_is_not_in_the_frozen_batch(self) -> None:
+        # This replaces the old "rejected while running" rule. Accepting the
+        # note is now the point; what still must hold is that it cannot enter a
+        # generation whose intervention set the Host has already frozen.
+        from ecologyrsi_dsh.evolution.batches import start_generation_batch
+
+        batch = start_generation_batch(self.director, self.run_id)
+        self.director.record_intervention(
+            HumanIntervention(
+                intervention_id="written-after-freeze",
+                run_id=self.run_id,
+                kind=InterventionKind.GUIDANCE,
+                message="缩短时间窗口",
+                created_by="研究者",
             )
+        )
+
+        self.assertNotIn("written-after-freeze", batch.intervention_ids)
+        self.director.request_proposal(
+            self.run_id, generation_batch=batch, slot_index=0
+        )
+        state = self.director.state(self.run_id)
+        self.assertEqual(
+            [item.intervention_id for item in state.pending_interventions],
+            ["written-after-freeze"],
+        )
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import unittest
 
 from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.core.trajectory import LocalEditOutcome
+from ecologyrsi_dsh.evaluators.authored_directive import AUTHORED_DIRECTIVE_POLICY_ID
 from ecologyrsi_dsh.evolution.genome import (
     FrozenRunInitialization,
     materialize_seed_genome,
@@ -230,6 +231,91 @@ class LocalEditTests(unittest.TestCase):
         )
         self.assertEqual(
             result.child.lineage["parent_genome_digest"], parent.genome_digest
+        )
+
+    def test_an_authored_directive_edit_is_applied_and_bounded_by_the_grammar(
+        self,
+    ) -> None:
+        # The authoring axis reaches the local editor through the same target
+        # gate as every other axis: the target is the *policy* that bounds the
+        # text, because "may this candidate author under this grammar" and "is
+        # this text legal" are two questions owned by two layers.
+        parent = _parent()
+        context_data = _context(parent).to_dict()
+        context_data["allowed_mutation_targets"]["instruction_directive"] = [
+            AUTHORED_DIRECTIVE_POLICY_ID
+        ]
+        context = LocalEditContext(**context_data)
+
+        def _proposal(**changes: object) -> LocalEditProposal:
+            directive = {
+                "anchor": "candidate_model",
+                "blend_rule": "mean",
+                "tool_plan": [
+                    {
+                        "tool_id": "ecology_execute_prediction_tool",
+                        "purpose": "discrepancy_check",
+                    }
+                ],
+                "rationale": "The model beat persistence on CO2; lead with it.",
+            }
+            directive.update(changes)
+            return LocalEditProposal(
+                decision="mutate",
+                operations=(
+                    {
+                        "op": "author_role_directive",
+                        "role": "sample-planner",
+                        "authored_directive": directive,
+                    },
+                ),
+                evidence_refs=("metric:overall",),
+                expected_effect_cells=("air_temperature@1h", "co2_concentration@24h"),
+                risk_cells=(),
+            )
+
+        result = apply_local_edit_bundle(
+            parent, _proposal(), context, current_program_registry()
+        )
+
+        self.assertIs(result.outcome, LocalEditOutcome.APPLIED)
+        assert result.child is not None
+        profile = next(
+            item
+            for item in result.child.agent_program["candidate_execution_program"][
+                "role_profiles"
+            ]
+            if item["role"] == "sample-planner"
+        )
+        self.assertEqual(profile["authored_directive"]["blend_rule"], "mean")
+        self.assertNotEqual(result.child.behavior_digest, parent.behavior_digest)
+
+        # An out-of-grammar clause is advisory, not fatal: the active revision
+        # survives and the trajectory records a rejection.
+        rejected = apply_or_reject_local_edit_bundle(
+            parent,
+            _proposal(blend_rule="kalman"),
+            context,
+            current_program_registry(),
+        )
+        self.assertIs(rejected.outcome, LocalEditOutcome.REJECTED)
+        self.assertIn("blend_rule", rejected.rejection_reason or "")
+
+        # Authoring can move any cell, so the effect-domain check treats the
+        # whole grid as reachable -- a narrower claim stays a legal subset,
+        # unlike the per-cell `residual_scale` case just below.
+        narrow = LocalEditProposal(
+            decision="mutate",
+            operations=_proposal().operations,
+            evidence_refs=("metric:overall",),
+            expected_effect_cells=("air_temperature@1h",),
+            risk_cells=(),
+        )
+        self.assertIs(
+            apply_local_edit_bundle(
+                parent, narrow, context, current_program_registry()
+            ).outcome,
+            LocalEditOutcome.APPLIED,
         )
 
     def test_dynamic_maximum_duplicate_and_unregistered_targets_are_rejected(self) -> None:

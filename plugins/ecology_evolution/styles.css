@@ -1065,6 +1065,37 @@ tbody tr:hover { background: #f8faf9; }
 #workspace-candidates .candidate-decision { padding: 10px; border: 1px solid #c8ddd7; border-radius: 6px; background: var(--candidate-accent-soft); }
 #workspace-candidates .candidate-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 #workspace-candidates .candidate-section-heading span { color: var(--subtle); font-size: 12px; }
+
+/* The mutation panel: what changed relative to the parent, and why. A diff row
+   carries four cells (field, previous, arrow, new), so it overrides the
+   two-column `.candidate-change` grid rather than inheriting it. */
+#workspace-candidates .candidate-mutation-section { display: grid; gap: 12px; }
+#workspace-candidates .mutation-block { display: grid; gap: 7px; min-width: 0; }
+#workspace-candidates .mutation-block h4 { margin: 0; color: var(--muted); font-size: 12px; font-weight: 700; }
+#workspace-candidates .mutation-diff-row {
+  grid-template-columns: minmax(100px, 0.78fr) minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: baseline;
+}
+#workspace-candidates .mutation-diff-row > span { display: grid; gap: 2px; }
+#workspace-candidates .mutation-diff-row > span small { color: var(--subtle); font-size: 11px; }
+#workspace-candidates .mutation-diff-row.is-added { border-left-color: #6aa88f; }
+#workspace-candidates .mutation-diff-row.is-removed { border-left-color: #c98f86; }
+#workspace-candidates .candidate-change-before { color: var(--subtle); }
+#workspace-candidates .candidate-change-arrow { color: var(--subtle); }
+#workspace-candidates .candidate-change-after { font-weight: 750; }
+#workspace-candidates .mutation-operations { display: grid; gap: 7px; }
+#workspace-candidates .mutation-operation { padding: 8px 9px; border: 1px solid #e1e9e7; border-radius: 5px; background: #fff; }
+#workspace-candidates .mutation-operation-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#workspace-candidates .mutation-operation-header strong { color: #2c4145; font-size: 12px; }
+#workspace-candidates .mutation-operation-detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 6px; margin-top: 6px; }
+#workspace-candidates .mutation-operation-detail span { display: grid; gap: 2px; color: var(--subtle); font-size: 11px; }
+#workspace-candidates .mutation-operation-detail span strong { color: #2c4145; font-size: 12px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+#workspace-candidates .mutation-direction-title { margin: 0; color: #2c4145; font-size: 13px; }
+#workspace-candidates .mutation-hypothesis { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+#workspace-candidates .mutation-note { display: block; margin-top: 5px; color: var(--subtle); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+#workspace-candidates .mutation-allowed summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 700; }
+#workspace-candidates .mutation-allowed summary span { margin-left: 6px; color: var(--subtle); font-weight: 500; }
+#workspace-candidates .mutation-allowed[open] summary { margin-bottom: 6px; }
 #workspace-candidates .candidate-decision-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
 #workspace-candidates .candidate-decision-grid .detail-value { min-width: 0; padding: 8px 9px; border: 1px solid #dfe8e5; border-radius: 5px; background: #fff; }
 #workspace-candidates .candidate-decision-grid .detail-value:first-child { border-color: #c8ddd7; background: #f7fcfa; }
@@ -1124,6 +1155,9 @@ tbody tr:hover { background: #f8faf9; }
 .consultation-answer-form .form-actions span { flex: 0 1 auto; width: 100%; overflow: visible; color: var(--subtle); font-size: 12px; line-height: 1.4; white-space: normal; }
 .consultation-audit-note { margin: 0; padding: 9px 10px; border: 1px solid var(--line); background: var(--surface-muted); color: var(--muted); font-size: 12px; line-height: 1.55; }
 .consultation-item-answered { grid-template-columns: minmax(0, 1fr); }
+.consultation-item-persistent { border-left: 3px solid var(--primary); }
+.consultation-persistent { display: flex; align-items: flex-start; gap: 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.consultation-persistent input { flex: 0 0 auto; margin-top: 2px; }
 .collaboration-section-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin: 16px 0 8px; }
 .collaboration-section-heading span { color: var(--primary); font-size: 12px; font-weight: 700; text-transform: uppercase; }
 .collaboration-section-heading h2 { margin: 2px 0 0; font-size: 16px; }
@@ -1491,6 +1525,10 @@ tbody tr:hover { background: #f8faf9; }
   #workspace-candidates .candidate-target-header { grid-column: 1; }
   #workspace-candidates .change-row,
   #workspace-candidates .candidate-change { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  /* Narrow screens stack the diff, so the arrow is the only thing separating
+     the previous value from the new one; keep it on its own line. */
+  #workspace-candidates .mutation-diff-row { grid-template-columns: minmax(0, 1fr); }
+  #workspace-candidates .mutation-operation-detail { grid-template-columns: minmax(0, 1fr); }
   #workspace-candidates .detail-table-wrap { margin-inline: 0; }
 }
 

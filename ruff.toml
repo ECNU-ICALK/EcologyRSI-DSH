@@ -1,0 +1,63 @@
+# Static analysis for a codebase that had none.
+#
+# The selection rule here is deliberately narrow: a lint is enabled only if
+# every one of its current findings is a defect worth fixing today. A gate that
+# reports 800 findings on a clean tree is a gate nobody runs, and the one real
+# NameError it was hiding stays hidden. `make lint` is therefore green, and
+# anything it reports is actionable.
+#
+# Not enabled, and why -- this is a backlog, not a verdict:
+#   E501      2171 findings. The house style wraps at 88 in new code but the
+#             existing tree does not, and reflowing it would rewrite nearly
+#             every file, destroying `git blame` on an event-sourced core whose
+#             reviews depend on it. The formatter section below fixes the width
+#             for anything newly formatted.
+#   S         256 findings, nearly all S101 (assert) in tests and S311
+#             (non-crypto random) in the seeded, deliberately-reproducible
+#             mutation sampler. Needs per-directory triage first.
+#   B023      26 findings (loop variable captured in a closure). Each one needs
+#             reading to tell a latent bug from a closure that is called inside
+#             the same iteration; not a mechanical fix.
+#   BLE001    25 blind `except Exception`. Several are deliberate fail-closed
+#             boundaries at the Host edge, which is exactly where a broad catch
+#             belongs; narrowing them is a design change.
+#   F401      82 unused imports, and NOT mechanically fixable here. Running
+#             `--fix` broke the package outright: this tree re-exports through
+#             ordinary modules, not just `__init__.py` -- `data/registry.py`
+#             does `from .catalog import _default_catalog_path`, and
+#             `catalog.py` only imports that name in order to republish it.
+#             Ruff cannot see the downstream importer, so it deleted the line
+#             and 103 test modules stopped loading. Each one needs a
+#             cross-module check; a per-file-ignores list cannot express it.
+#   RUF100    stale `# noqa` directives. Cannot be enabled alongside a narrow
+#             select: ruff reports every suppression whose rule is merely not
+#             selected here, which is most of them. Revisit if the select grows.
+target-version = "py310"
+line-length = 88
+src = ["src"]
+extend-exclude = ["integrations", "plugins", "build", "dist"]
+
+[lint]
+select = [
+    # Real errors, not style. F821 caught an `InterventionKind` that was used in
+    # `core/state.py` but never imported: a NameError on the human-parent-override
+    # replay path that the suite could not see, because the branch it lives in is
+    # DSH-native-only and every test that froze an intervention took the other one.
+    "F821",   # undefined-name
+    "F811",   # redefinition of an unused name
+    "F632",   # `is` against a literal
+    "E9",     # syntax and IO errors
+    "PLE",    # pylint errors
+    "B002", "B003", "B004", "B005", "B006", "B012", "B017", "B018",
+    "B021", "B025", "B029", "B032",
+    "TRY203", # useless try/except
+]
+ignore = []
+
+[lint.per-file-ignores]
+
+[format]
+# Not run over the tree. Declared so that anyone who formats a file they are
+# already editing produces the same result as anyone else.
+quote-style = "double"
+indent-style = "space"

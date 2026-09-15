@@ -12,7 +12,9 @@ from ecologyrsi_dsh.core.search_policy import (
     PAIRED_EXECUTION_QUALIFICATION, SEARCH_GUARD_POLICY,
     local_challenger_policy, paired_execution_qualification_required,
 )
-from ecologyrsi_dsh.core.state import validate_generation_comparison_binding
+from ecologyrsi_dsh.core.state import (
+    legacy_incomplete_paired_scoring, validate_generation_comparison_binding,
+)
 from ecologyrsi_dsh.core.trajectory import (
     BatchEvaluation, EvaluationPhase, EvaluationScope, FormalBatchArm,
     FormalBatchComparison, GenerationHoldout, HoldoutArm, HoldoutEvaluation,
@@ -258,6 +260,44 @@ class PairedExecutionQualificationTests(unittest.TestCase):
         self.assertTrue(report["comparable"])
         self.assertNotEqual(report["reason_code"], "incompatible_block_configuration")
         self.assertGreater(report["score_delta"], 0)
+
+    def test_archived_incomplete_paired_evidence_still_replays(self):
+        # Fixing that read changed what recomputation says about evidence a Host
+        # already recorded as incomplete, which would stop
+        # run:e4332050-18c1-4562-8f03-3c4c8ee3a8bf from replaying at all. The
+        # recorded verdict is the conservative one, so the Host reproduces it
+        # instead of rejecting the run -- and everything else still has to match.
+        items = tuple(
+            with_dataset_task(evaluation(arm, skill=.1 if arm is HoldoutArm.INCUMBENT else .2))
+            for arm in HoldoutArm
+        )
+        inputs = dict(
+            run_id=items[0].scope.run_id, generation=0,
+            cohort_digest=items[0].scope.cohort_digest, holdout_evaluations=items,
+            incumbent_candidate_id="candidate:incumbent", require_paired_strict_chain=True,
+        )
+        current = build_generation_comparison(**inputs)
+        archived = build_generation_comparison(**inputs, legacy_incomplete_paired_scoring=True)
+        self.assertNotEqual(current.identity_dict(), archived.identity_dict())
+        self.assertFalse(legacy_incomplete_paired_scoring(current))
+        self.assertTrue(legacy_incomplete_paired_scoring(archived))
+        for arm, gate in current.gate_results["arms"].items():
+            with self.subTest(arm=arm):
+                self.assertTrue(gate["paired_scoring_evidence_complete"])
+                self.assertNotIn("paired_scoring_evidence_incomplete", gate["certification_failures"])
+        for arm, gate in archived.gate_results["arms"].items():
+            with self.subTest(arm=arm):
+                self.assertFalse(gate["paired_scoring_evidence_complete"])
+                self.assertIn("paired_scoring_evidence_incomplete", gate["certification_failures"])
+                self.assertFalse(gate["certification_eligible"])
+        # Forcing the verdict can only withhold a promotion, never grant one.
+        self.assertEqual(current.selected_candidate_id, "candidate:finalist_1")
+        self.assertEqual(archived.selected_candidate_id, "candidate:incumbent")
+        replayed = build_generation_comparison(
+            **inputs,
+            legacy_incomplete_paired_scoring=legacy_incomplete_paired_scoring(archived),
+        )
+        self.assertEqual(replayed.identity_dict(), archived.identity_dict())
 
     def test_holdout_complete_chain_with_failed_scoring_still_cannot_qualify(self):
         base = holdout_comparison(marked=False)

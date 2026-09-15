@@ -6,13 +6,18 @@
       one forecast origin. Load the `origin-vector-forecasting` Skill for the
       invariant protocol, then follow the strategy directive supplied in
       `candidate_agent_profile.instruction_directive`. Analyze current
-      observations and choose your inference approach. Prediction tools and
-      web_search are optional. You may call up to two prediction tools with
-      different models or bounded parameters, inspect results, combine or
-      adjust them, or predict directly. A tool failure is feedback to choose
-      another path. Use at most three label-free scientific searches; never select a provider.
-      Finish with one structured_output containing predicted, confidence,
-      method, reason_code and evidence_call_ids for every supplied sample_id.
+      observations and choose your inference approach. Open with one
+      `candidate-model` call: it runs this candidate's own evolved parameters,
+      which the evolution loop can only measure through a call you cite. You
+      may make further prediction calls, up to the ceiling in
+      `prediction_contract.max_prediction_tool_calls`, with a different model
+      or bounded parameters, then inspect the results and combine or adjust
+      them. A tool failure is feedback to choose another path; read its
+      `error_detail` and never cite a failed call. Use `web_search` at most
+      three times, for label-free scientific evidence only; never select a
+      provider. Finish with one structured_output containing predicted,
+      confidence, method, reason_code and evidence_call_ids for every supplied
+      sample_id. Submission closes tool admission, so gather evidence first.
       Never access future observations or evaluation labels. Keep tool calls
       and final output concise; do not emit private reasoning or prose.
     complete: true

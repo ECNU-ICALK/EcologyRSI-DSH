@@ -76,14 +76,14 @@ where = ["src"]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v5" = [
     "integrations/dsh_ecology_plugin/presets/ecology-coordinator-v5/*.yml",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-researcher-v12" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-researcher-v12/*.yml",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-researcher-v13" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-researcher-v13/*.yml",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4/*.yml",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v5" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v5/*.yml",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v9" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v9/*.yml",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v11" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v11/*.yml",
 ]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v5" = [
     "integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v5/*.yml",
@@ -94,14 +94,14 @@ where = ["src"]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v5/skills/autonomous-ecology-research" = [
     "integrations/dsh_ecology_plugin/presets/ecology-coordinator-v5/skills/autonomous-ecology-research/SKILL.md",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-researcher-v12/skills/autonomous-ecology-research" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-researcher-v12/skills/autonomous-ecology-research/SKILL.md",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-researcher-v13/skills/autonomous-ecology-research" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-researcher-v13/skills/autonomous-ecology-research/SKILL.md",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4/skills/bounded-plugin-experiment" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v4/skills/bounded-plugin-experiment/SKILL.md",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v5/skills/bounded-plugin-experiment" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-candidate-proposer-v5/skills/bounded-plugin-experiment/SKILL.md",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v9/skills/origin-vector-forecasting" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v9/skills/origin-vector-forecasting/SKILL.md",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v11/skills/origin-vector-forecasting" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v11/skills/origin-vector-forecasting/SKILL.md",
 ]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v5/skills/origin-vector-review" = [
     "integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v5/skills/origin-vector-review/SKILL.md",

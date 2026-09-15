@@ -241,11 +241,21 @@ def build_generation_comparison(
     challenger_promotion_allowed: bool = True,
     positive_delta_search: bool = False,
     legacy_runtime_v2_shape: bool = False,
+    legacy_incomplete_paired_scoring: bool = False,
     require_paired_strict_chain: bool = False,
     finalist_reviews: Mapping[str, Mapping[str, Any]] | None = None,
     quick_experiment: bool = False,
 ) -> GenerationComparison:
-    """Build one immutable three-arm comparison without model-authored ranking."""
+    """Build one immutable three-arm comparison without model-authored ranking.
+
+    ``legacy_incomplete_paired_scoring`` reports every arm's paired scoring
+    evidence as incomplete instead of measuring it.  It exists only to replay
+    comparisons that a Host recorded before ``6458330`` fixed
+    ``_evidence_matches_evaluation``, which used to read complete evidence as
+    incomplete.  Forcing the verdict can only add failures and clear
+    eligibility, so a record that matches this build is at least as
+    conservative as one today's Host would produce.
+    """
 
     if not isinstance(require_paired_strict_chain, bool):
         raise TypeError("require_paired_strict_chain must be a bool")
@@ -270,6 +280,14 @@ def build_generation_comparison(
     by_arm = {item.scope.holdout_arm: item for item in evaluations}
     finalist_evaluations = [by_arm[arm] for arm in HoldoutArm if arm in arms and arm is not HoldoutArm.INCUMBENT]
     incumbent = by_arm[HoldoutArm.INCUMBENT]
+
+    def paired_evidence_complete(challenger: Any) -> bool:
+        """Measure one arm against the incumbent, or replay a legacy verdict."""
+
+        return not legacy_incomplete_paired_scoring and paired_scoring_evidence_complete(
+            incumbent, challenger
+        )
+
     if len({item.evaluator_digest for item in evaluations}) != 1:
         raise ValueError("holdout evaluations must share one evaluator digest")
     profile = fitness_profile or FitnessProfile()
@@ -310,7 +328,7 @@ def build_generation_comparison(
             _strict_chain_pass(item) and _strict_chain_pass(incumbent)
         )
         scoring_evidence_complete = (
-            paired_scoring_evidence_complete(incumbent, item)
+            paired_evidence_complete(item)
             if require_paired_strict_chain else True
         )
         review = finalist_reviews[item.scope.holdout_arm.value] if finalist_reviews is not None else None
@@ -356,7 +374,7 @@ def build_generation_comparison(
                 search_failures.append("below_practical_score_delta")
             if not cell_gate["no_regression"]:
                 search_failures.append("cell_regression")
-            if not paired_scoring_evidence_complete(incumbent, item):
+            if not paired_evidence_complete(item):
                 search_failures.append("paired_scoring_evidence_incomplete")
         search_eligible = bool(
             not search_failures
@@ -496,7 +514,7 @@ def build_generation_comparison(
         minimum_coverage=profile.selection_minimum_coverage,
     )
     incumbent_scoring_complete = (
-        paired_scoring_evidence_complete(incumbent, incumbent)
+        paired_evidence_complete(incumbent)
         if require_paired_strict_chain else True
     )
     if require_paired_strict_chain and (not _strict_chain_pass(incumbent) or not incumbent_scoring_complete):

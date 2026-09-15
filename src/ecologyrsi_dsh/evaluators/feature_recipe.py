@@ -678,13 +678,20 @@ def compile_feature_plan(
     target: str,
     horizon_hours: int,
     allowed_roles: frozenset[str] = frozenset(),
-    max_history_hours: int | None = None,
+    origin_history_alignment: int | None = None,
 ) -> FeaturePlan:
     """Compile one cell's read plan, refusing any non-causal offset.
 
-    ``max_history_hours`` is the run's frozen cohort alignment. A recipe that
-    reaches further back than the cohort guarantees would be scored on fewer
-    origins than its rivals, so it is rejected rather than silently narrowed.
+    ``origin_history_alignment`` is the run's frozen cohort alignment. A recipe
+    that reaches further back than the cohort guarantees would be scored on
+    fewer origins than its rivals, so it is rejected rather than silently
+    narrowed. Mind the units, because they are what made this check off by one:
+    an alignment counts *observations including the origin* -- the cohort
+    planner and ``_base_samples`` both read lags ``range(alignment)`` -- while
+    ``plan.max_history_hours`` counts hours *reached back* from the origin. An
+    alignment of N therefore serves a reach of N-1, and a recipe reaching
+    exactly -N compiled fine and then failed at the one origin the planner put
+    at the partition head.
 
     ``series`` may be omitted to compile the *structure* alone — every offset,
     arity and causality check still runs, only the two checks that need real
@@ -743,12 +750,14 @@ def compile_feature_plan(
         recipe_digest=frozen.digest,
         _terms=tuple(terms),
     )
-    if max_history_hours is not None and plan.max_history_hours > max_history_hours:
-        raise ValueError(
-            f"feature_recipe needs {plan.max_history_hours}h of history for "
-            f"{target}@{horizon_hours}h but the cohort only guarantees "
-            f"{max_history_hours}h"
-        )
+    if origin_history_alignment is not None:
+        servable = origin_history_alignment - 1
+        if plan.max_history_hours > servable:
+            raise ValueError(
+                f"feature_recipe needs {plan.max_history_hours}h of history for "
+                f"{target}@{horizon_hours}h but the cohort only guarantees "
+                f"{servable}h"
+            )
     return plan
 
 
@@ -844,6 +853,68 @@ def recipe_grammar() -> dict[str, Any]:
     }
 
 
+# Which grammar bound each op parameter spends history against. ``period``
+# reaches back one full cycle, so it counts even though the primitive that
+# encodes phase never reads that far.
+_HISTORY_BEARING_PARAMETERS = frozenset({"target_lag.k", "rolling_mean.w", "rolling_std.w",
+                                         "target_slope.w", "exogenous.lag",
+                                         "exogenous_rolling_mean.w", "seasonal_reference.period",
+                                         "seasonal_delta.period", "diurnal_sin_cos.period"})
+
+
+def servable_recipe_grammar(origin_history_alignment: int | None = None) -> dict[str, Any]:
+    """The whitelist clamped to the history a run's frozen cohort can serve.
+
+    ``recipe_grammar`` stays the zero-argument constant the program registry
+    hashes into ``catalog_digest``. The sample Agent is a different consumer
+    with a different constraint: a 168-hour lag is in the whitelist, but no
+    cohort alignment ever guarantees 168 hours, so advertising it invited
+    recipes that compiled against the ceiling and then raised 'tool requires
+    complete causal history' at every origin near the partition head. Clamp
+    what is advertised to what is servable, and name the value that clamped it
+    so the Agent can tell a narrow run from a narrow grammar.
+
+    The clamp is the *reach* ``origin_history_alignment - 1``, not the alignment
+    itself: the alignment counts the origin as one of its observations (see
+    ``compile_feature_plan``), so publishing it unconverted advertised exactly
+    one lag the host would refuse.
+    """
+
+    grammar = recipe_grammar()
+    if origin_history_alignment is None:
+        return grammar
+    max_history_hours = origin_history_alignment - 1
+    grammar["max_lag_hours"] = min(grammar["max_lag_hours"], max_history_hours)
+    grammar["max_rolling_window"] = min(grammar["max_rolling_window"], max_history_hours)
+    grammar["servable_history_hours"] = max_history_hours
+    op_parameters: dict[str, Any] = {}
+    unavailable: set[str] = set()
+    for key, bounds in grammar["op_parameters"].items():
+        if key in _HISTORY_BEARING_PARAMETERS:
+            bounds = dict(bounds)
+            if "maximum" in bounds:
+                bounds["maximum"] = min(bounds["maximum"], max_history_hours)
+            if "choices" in bounds:
+                bounds["choices"] = [c for c in bounds["choices"] if c <= max_history_hours]
+            if not bounds.get("choices", [None]) or bounds.get(
+                "maximum", max_history_hours
+            ) < bounds.get("minimum", 0):
+                # No admissible value left at this depth: withhold the whole
+                # primitive rather than publish an empty range the Agent would
+                # have to discover by spending a call on it.
+                unavailable.add(key.split(".", 1)[0])
+                continue
+        op_parameters[key] = bounds
+    grammar["op_parameters"] = {
+        key: bounds for key, bounds in op_parameters.items()
+        if key.split(".", 1)[0] not in unavailable
+    }
+    grammar["allowed_ops"] = {
+        op: spec for op, spec in grammar["allowed_ops"].items() if op not in unavailable
+    }
+    return grammar
+
+
 __all__ = [
     "FEATURE_RECIPE_SCHEMA_VERSION",
     "FeaturePlan",
@@ -858,5 +929,6 @@ __all__ = [
     "recipe_digest",
     "recipe_grammar",
     "recipe_training_summary",
+    "servable_recipe_grammar",
     "validate_feature_recipe",
 ]

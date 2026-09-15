@@ -164,7 +164,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
             "root_services": {"required": ["agents"], "missing": [], "declared": True},
             "presets": [
                 {
-                    "preset_id": "ecology-researcher-v12",
+                    "preset_id": "ecology-researcher-v13",
                     "declared": True,
                     "standing_key": "standing:researcher",
                     "preset_mountable": True,
@@ -192,7 +192,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
     def test_capabilities_and_mutations_are_strict_and_bearer_authenticated(self) -> None:
         self.server.responses.extend([(200, self._capabilities()), (200, self._accepted())])  # type: ignore[attr-defined]
         capability = self.client.capabilities()
-        self.client.require_capabilities(capability, ["ecology-researcher-v12"])
+        self.client.require_capabilities(capability, ["ecology-researcher-v13"])
         response = self.client.create_run(
             {
                 "run_id": "run-1",
@@ -211,9 +211,9 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
     def test_python_resume_handshake_accepts_real_node_restored_paused_hosts(self) -> None:
         preset_ids = (
             "ecology-coordinator-v5",
-            "ecology-researcher-v12",
-            "ecology-candidate-proposer-v4",
-            "ecology-sample-planner-v9",
+            "ecology-researcher-v13",
+            "ecology-candidate-proposer-v5",
+            "ecology-sample-planner-v11",
             "ecology-sample-critic-v5",
             "ecology-generation-judge-v8",
         )
@@ -338,7 +338,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
             )
         with self.assertRaises(DshNativeRuntimeUnavailableError):
             self.client.require_capabilities(
-                self._capabilities(ready=False), ["ecology-researcher-v12"]
+                self._capabilities(ready=False), ["ecology-researcher-v13"]
             )
 
     def test_remote_errors_and_transport_failures_never_disclose_token(self) -> None:
@@ -406,9 +406,9 @@ class _FakeNativeRuntime:
         presets = []
         for preset_id in (
             "ecology-coordinator-v5",
-            "ecology-researcher-v12",
-            "ecology-candidate-proposer-v4",
-            "ecology-sample-planner-v9",
+            "ecology-researcher-v13",
+            "ecology-candidate-proposer-v5",
+            "ecology-sample-planner-v11",
             "ecology-sample-critic-v5",
             "ecology-generation-judge-v8",
         ):

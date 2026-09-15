@@ -20,11 +20,13 @@ from ecologyrsi_dsh.evolution.strategies import (
     _candidate_direction_execution_view,
     _mutation_contract_catalog,
     _parameter_preflight_values,
+    _registered_mutation_targets,
     _validate_candidate_direction_realizability,
 )
 from ecologyrsi_dsh.evolution.genome import EcologyEvolutionPluginGenome
 from ecologyrsi_dsh.knowledge.autonomous_cycle import (
     AUTONOMOUS_RESEARCH_PROTOCOL,
+    CANDIDATE_MUTATION_AXES,
     CandidateDirection,
     GenerationReflection,
     GenerationSearchPlan,
@@ -535,7 +537,24 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                 "scientific_parameter": ["increase", "decrease"],
                 "registered_predictor": ["select"],
                 "instruction_profile": ["select"],
+                # Retry depth and critic-escalation threshold. Both are
+                # generation-scoped properties of how a candidate runs, both now
+                # reach the runtime, and both are exact-matched here so opening a
+                # further axis has to be a deliberate edit to this contract
+                # rather than a silent widening of what a Researcher is offered.
+                "instruction_parameter": ["increase", "decrease"],
+                "workflow_parameter": ["increase", "decrease"],
+                # Authoring the sample planner's strategy text itself, rather
+                # than selecting one of the registered templates. `revise`
+                # exists separately from `author` because the operator rejects
+                # an authored value identical to the one already on the profile,
+                # so the two directions are not interchangeable.
+                "instruction_directive": ["author", "revise"],
             },
+        )
+        self.assertEqual(
+            set(synthesis_contract["operation_by_axis"]),
+            set(synthesis_contract["mutation_directions_by_axis"]),
         )
         self.assertIn(
             "samples_per_update and prediction cells per origin",
@@ -1164,10 +1183,103 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                 avoid_behaviors=[{"behavior_digest": behavior_digest}],
             )
 
+    def _scalar_axis_direction(self, axis: str, target: str, mutation_direction: str) -> dict:
+        direction = _direction(0, [])
+        direction.update(
+            {
+                "direction_id": f"{axis}-probe",
+                "title": f"Probe the registered {axis} contract",
+                "hypothesis": f"Moving {target} may change how this generation runs.",
+                "capability_focus": "registered_host_capabilities",
+                "mutation_axis": axis,
+                "mutation_target": target,
+                "mutation_direction": mutation_direction,
+            }
+        )
+        return direction
 
+    def test_direction_preflight_proves_the_two_registry_bounded_axes(self) -> None:
+        """A generation-level direction on retry depth or escalation is realizable.
 
+        Both axes reach the runtime now, so the Researcher is allowed to propose
+        one -- and before the preflight learned about them, an accepted direction
+        here raised `KeyError` from the expected-operation map and failed the whole
+        generation rather than one proposal.
+        """
 
+        state = self.director.state(self.run_id)
+        for axis, target, operation in (
+            ("workflow_parameter", "max_attempts", "set_bounded_workflow_parameter"),
+            (
+                "instruction_parameter",
+                "confidence_threshold",
+                "set_instruction_parameter",
+            ),
+        ):
+            with self.subTest(axis=axis):
+                preflight = _validate_candidate_direction_realizability(
+                    [self._scalar_axis_direction(axis, target, "increase")],
+                    run=state.run,
+                    task=state.task_manifest,
+                    parent=state.materialized_seed_genome(),
+                    avoid_behaviors=[],
+                )
+                check = preflight["checks"][0]
+                self.assertEqual(check["status"], "single_operation_feasible")
+                self.assertEqual(check["operation"], operation)
 
+    def test_direction_preflight_rejects_a_scalar_move_the_contract_forbids(
+        self,
+    ) -> None:
+        """A direction with no legal witness is refused, not silently reinterpreted.
+
+        The seed sits at the floor of both registered contracts -- `max_attempts`
+        at 3 and `confidence_threshold` at 0.5 -- so `decrease` has nowhere to go.
+        Refusing it here is what keeps an accepted direction a claim the Host has
+        already proved implementable.
+        """
+
+        state = self.director.state(self.run_id)
+        for axis, target in (
+            ("workflow_parameter", "max_attempts"),
+            ("instruction_parameter", "confidence_threshold"),
+        ):
+            with self.subTest(axis=axis):
+                with self.assertRaisesRegex(ValueError, "is not realizable"):
+                    _validate_candidate_direction_realizability(
+                        [self._scalar_axis_direction(axis, target, "decrease")],
+                        run=state.run,
+                        task=state.task_manifest,
+                        parent=state.materialized_seed_genome(),
+                        avoid_behaviors=[],
+                    )
+
+    def test_the_researcher_is_offered_exactly_the_wired_scalar_knobs(self) -> None:
+        """The advertised targets are the ones with a Host consumer, and no more.
+
+        `candidate-sample-execution@1` also declares `max_concurrent` and
+        `wave_size`, which nothing reads; advertising either would let a proposal
+        spend its one operation on a change no score could attribute.
+        """
+
+        state = self.director.state(self.run_id)
+        targets = _registered_mutation_targets(
+            state.task_manifest, state.materialized_seed_genome()
+        )
+        self.assertEqual(targets["workflow_parameter"], ("max_attempts",))
+        self.assertEqual(
+            targets["instruction_parameter"], ("confidence_threshold",)
+        )
+        # `feature_recipe` is the one axis whose availability depends on the
+        # bound predictor rather than on the catalog: this run's predictor is
+        # scalar-tunable and declares no feature policy, so there is no recipe
+        # to author and the axis is withheld for the same reason the unread
+        # workflow knobs are. A recipe predictor gets it -- pinned in
+        # tests/test_workflow_ir.py.
+        self.assertNotIn("feature_recipe", targets)
+        self.assertEqual(
+            set(targets), set(CANDIDATE_MUTATION_AXES) - {"feature_recipe"}
+        )
 
     def test_direction_preflight_allows_non_assignment_parameter_mentions(self) -> None:
         state = self.director.state(self.run_id)

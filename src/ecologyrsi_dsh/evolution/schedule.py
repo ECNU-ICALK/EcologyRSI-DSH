@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
+from ..core.agent_prediction import PREDICTION_TOOL_CALL_BUDGET
 from .parameters import PARAMETER_RULES
 
 
@@ -163,8 +164,10 @@ class OptimizationSchedule:
             # response, well above the 4087..6347 spent by observed successful
             # planners and the 1277..3080 spent by observed critics. Keep them
             # equal to the plugin's SAMPLE_STAGE_LIMITS.
+            # prediction_tool_calls_per_attempt reports the current default only;
+            # a run's actual ceiling is the one frozen into its Agent policy.
             "output_tokens_per_llm_call": {"planner": 16384, "critic": 8192},
-            "sample_execution_limits": {"prediction_tool_calls_per_attempt": 2,
+            "sample_execution_limits": {"prediction_tool_calls_per_attempt": PREDICTION_TOOL_CALL_BUDGET,
                 "planner_steps": 10, "critic_steps": 4,
                 "planner_reported_output_threshold": 32768, "critic_reported_output_threshold": 16384},
         }

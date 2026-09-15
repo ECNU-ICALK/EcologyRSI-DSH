@@ -25,11 +25,22 @@
     return "recorded";
   }
   function interventionApplicationText(status, item) {
-    if (status === "recorded") { return item && item.applied_proposal_id ? "仅记录（未执行）" : "等待下一轮"; }
+    if (status === "recorded") {
+      if (item && item.model_context_delivered === true) { return "模型已读取（未强制执行）"; }
+      return item && item.applied_proposal_id ? "仅记录（未执行）" : "等待下一轮";
+    }
     return { applied: "已应用", enforced: "已强制执行" }[status] || "仅记录（未执行）";
   }
   function interventionApplicationClass(status) {
     return status === "enforced" ? "pill-green" : status === "applied" ? "pill-blue" : "pill-amber";
+  }
+  function interventionParseText(parsed) {
+    if (!parsed || typeof parsed !== "object") { return ""; }
+    var details = [];
+    if (parsed.parameter) { details.push(parameterLabels[parsed.parameter] || parsed.parameter); }
+    if (parsed.direction) { details.push({ increase: "增加", decrease: "减少", up: "增加", down: "减少" }[String(parsed.direction).toLowerCase()] || parsed.direction); }
+    if (parsed.operator && parsed.bound != null) { details.push(parsed.operator + formatNumber(parsed.bound)); }
+    return details.length ? "宿主解析结果（未执行）：" + details.join(" ") : "";
   }
   function interventionExecutionText(item) {
     var details = [];
@@ -38,6 +49,9 @@
     if (item.operator && item.bound != null) { details.push("约束：" + item.operator + formatNumber(item.bound)); }
     if (item.previous_value != null || item.result_value != null) { details.push("执行值：" + formatNumber(item.previous_value) + " → " + formatNumber(item.result_value)); }
     if (item.step != null) { details.push("调整步长：" + formatNumber(item.step)); }
+    if (item.model_context_delivered === true) { details.push("模型已在提案上下文读取该意见原文"); }
+    var parsed = interventionParseText(item.host_did_not_enforce);
+    if (parsed) { details.push(parsed); }
     if (item.reason) { details.push("执行说明：" + compactTechnicalText(item.reason)); }
     return details.join(" · ");
   }
@@ -106,6 +120,7 @@
     draft.answer = elements.answer ? elements.answer.value : draft.answer;
     draft.selected_option = elements.selected_option ? elements.selected_option.value : draft.selected_option;
     draft.answered_by = elements.answered_by ? elements.answered_by.value : draft.answered_by;
+    draft.persistent = elements.persistent ? elements.persistent.checked === true : draft.persistent === true;
     return draft;
   }
   function pendingConsultationAnswerHTML(item, run, ended) {
@@ -125,6 +140,7 @@
       optionField +
       "<label><span>专家答复</span><textarea name=\"answer\" rows=\"3\" maxlength=\"4000\" placeholder=\"给出判断、依据或建议的后续检查\" required" + disabledAttribute + ">" + escapeHTML(draft.answer) + "</textarea></label>" +
       "<label><span>答复人</span><input name=\"answered_by\" type=\"text\" maxlength=\"120\" value=\"" + escapeHTML(draft.answered_by) + "\" placeholder=\"姓名或工作编号\" required" + disabledAttribute + "></label>" +
+      "<label class=\"consultation-persistent\"><input name=\"persistent\" type=\"checkbox\"" + (draft.persistent === true ? " checked" : "") + disabledAttribute + "><span>作为长期领域知识保留（后续每轮都进入模型上下文，而非只用于下一轮）</span></label>" +
       "<div class=\"form-actions\"><button class=\"button button-primary button-small\" type=\"submit\"" + disabledAttribute + ">" + (submitting ? "正在提交答复" : ended ? "补录专家答复" : "提交专家答复") + "</button><span>" + escapeHTML(hint) + "</span></div></form>";
   }
   function renderPendingConsultation(item, run, ended) {
@@ -142,12 +158,23 @@
   }
   function renderAnsweredConsultation(item, run, ended) {
     var applied = item.applied_generation != null;
-    var lifecycle = applied ? "已在第 " + consultationValueText(item.applied_generation) + " 轮应用" : ended ? "本运行未应用" : "等待后续轮次应用";
-    var lifecycleClass = applied ? "pill-green" : ended ? "pill-neutral" : "pill-blue";
+    var persistent = item.persistent === true;
+    // A persistent answer is never "used up": `applied_generation` records the
+    // most recent round that read it, not the one that consumed it.
+    var lifecycle = persistent
+      ? (applied ? "长期知识 · 最近第 " + consultationValueText(item.applied_generation) + " 轮读取" : ended ? "长期知识 · 本运行未读取" : "长期知识 · 等待下一轮读取")
+      : applied ? "已在第 " + consultationValueText(item.applied_generation) + " 轮应用" : ended ? "本运行未应用" : "等待后续轮次应用";
+    var lifecycleClass = persistent ? "pill-blue" : applied ? "pill-green" : ended ? "pill-neutral" : "pill-blue";
     var effective = item.effective_generation != null ? "计划生效：第 " + consultationValueText(item.effective_generation) + " 轮" : "计划生效：未安排";
     var selected = selectedConsultationOptionText(item);
-    var answerMeta = [item.answered_by ? "答复人：" + item.answered_by : "答复人未记录", item.answered_at ? "答复时间：" + formatDate(item.answered_at) : "答复时间未记录", effective, "实际应用：" + (applied ? "第 " + item.applied_generation + " 轮" : "尚未应用")];
-    return "<article class=\"consultation-item consultation-item-answered\"><div class=\"consultation-main\"><div class=\"consultation-question-line\"><h3>" + escapeHTML(consultationValueText(item.question, "未提供问题内容")) + "</h3><div class=\"consultation-status\"><span class=\"pill " + lifecycleClass + "\">" + escapeHTML(lifecycle) + "</span>" + (item.non_blocking === false ? "<span class=\"pill pill-red\">治理问题</span>" : "<span class=\"pill pill-green\">非阻塞</span>") + "</div></div>" +
+    var answerMeta = [
+      item.answered_by ? "答复人：" + item.answered_by : "答复人未记录",
+      item.answered_at ? "答复时间：" + formatDate(item.answered_at) : "答复时间未记录",
+      effective,
+      persistent ? "保留方式：长期领域知识（每轮持续进入模型上下文）" : "保留方式：一次性（被某一轮读取后移出上下文）",
+      (persistent ? "最近读取：" : "实际应用：") + (applied ? "第 " + item.applied_generation + " 轮" : persistent ? "尚未读取" : "尚未应用")
+    ];
+    return "<article class=\"consultation-item consultation-item-answered" + (persistent ? " consultation-item-persistent" : "") + "\"><div class=\"consultation-main\"><div class=\"consultation-question-line\"><h3>" + escapeHTML(consultationValueText(item.question, "未提供问题内容")) + "</h3><div class=\"consultation-status\"><span class=\"pill " + lifecycleClass + "\">" + escapeHTML(lifecycle) + "</span>" + (item.non_blocking === false ? "<span class=\"pill pill-red\">治理问题</span>" : "<span class=\"pill pill-green\">非阻塞</span>") + "</div></div>" +
       consultationContextHTML(item) +
       "<p class=\"consultation-answer\"><strong>专家答复：</strong> " + escapeHTML(consultationValueText(item.answer, "未记录答复内容")) + (selected ? "<br><strong>所选参考项：</strong> " + escapeHTML(selected) : "") + "</p>" +
       "<div class=\"consultation-meta\">" + consultationMetaHTML(item) + answerMeta.map(function (part) { return "<span>" + escapeHTML(part) + "</span>"; }).join("") + "</div></div></article>";
@@ -171,13 +198,17 @@
   function renderCollaboration() {
     var run = state.activeRun;
     var paused = run && run.status === "paused";
+    // Writing a note no longer requires stopping the evolution: the Host freezes
+    // each generation's intervention set when the batch starts, so anything
+    // submitted while running lands in the next generation.
+    var acceptsIntervention = run && (run.status === "running" || paused);
     var ended = expertConsultationRunIsTerminal(run);
     var pill = $("#intervention-state-pill");
-    pill.className = "pill " + (paused ? "pill-green" : ended || !run ? "pill-neutral" : "pill-blue");
-    pill.textContent = paused ? "可提交意见与答复" : ended ? "运行已结束 · 可补录答复" : run ? "可异步答复" : "尚未创建运行";
-    $("#submit-intervention").disabled = state.busy || !paused || !hasCapability("intervention.write");
+    pill.className = "pill " + (acceptsIntervention ? "pill-green" : ended || !run ? "pill-neutral" : "pill-blue");
+    pill.textContent = acceptsIntervention ? "可提交意见与答复" : ended ? "运行已结束 · 可补录答复" : run ? "可异步答复" : "尚未创建运行";
+    $("#submit-intervention").disabled = state.busy || !acceptsIntervention || !hasCapability("intervention.write");
     $("#submit-intervention").textContent = state.pendingAction === "intervention" ? "正在提交专家意见" : "提交专家意见";
-    $("#intervention-hint").textContent = !run ? "请先创建进化运行。" : ended ? "运行已结束，不能再提交主动意见；未答咨询仍可补录专家答复并归档。" : !hasCapability("intervention.write") ? "当前 DSH 会话未授予提交专家意见与答复的能力。" : paused ? "提交后请恢复运行，意见将在下一轮处理。" : "主动意见需暂停后提交；模型咨询可在运行中异步答复。";
+    $("#intervention-hint").textContent = !run ? "请先创建进化运行。" : ended ? "运行已结束，不能再提交主动意见；未答咨询仍可补录专家答复并归档。" : !hasCapability("intervention.write") ? "当前 DSH 会话未授予提交专家意见与答复的能力。" : paused ? "提交后请恢复运行，意见将在下一轮处理。" : acceptsIntervention ? "运行中即可提交；意见会在下一轮进入模型上下文，不影响本轮已生成的提案。" : "当前运行状态不接受主动意见；模型咨询可在运行中异步答复。";
     renderExpertConsultations(run, ended);
     var candidates = run && Array.isArray(run.intervention_candidates) ? run.intervention_candidates : run ? run.candidates.filter(function (candidate) {
       return ["retained", "rejected", "promoted", "accepted"].indexOf(String(candidate.status || "").toLowerCase()) >= 0 && candidate.promotion;

@@ -8,17 +8,17 @@
       "required_tools": ["skill", "web_search"]
     },
     {
-      "preset_id": "ecology-researcher-v12",
+      "preset_id": "ecology-researcher-v13",
       "tool_profile": "dynamic-retrieval-v1",
       "required_tools": ["skill", "web_search"]
     },
     {
-      "preset_id": "ecology-candidate-proposer-v4",
+      "preset_id": "ecology-candidate-proposer-v5",
       "tool_profile": "dynamic-retrieval-v1",
       "required_tools": ["skill", "web_search"]
     },
     {
-      "preset_id": "ecology-sample-planner-v9",
+      "preset_id": "ecology-sample-planner-v11",
       "tool_profile": "dynamic-retrieval-v1",
       "required_tools": ["ecology_execute_prediction_tool", "skill", "web_search"]
     },

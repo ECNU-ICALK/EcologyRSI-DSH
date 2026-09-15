@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from ecologyrsi_dsh.core.director import EvolutionDirector
+from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.model_execution_policy import RESEARCH_EXECUTION_POLICY
 from ecologyrsi_dsh.core.models import Run, digest
@@ -133,6 +134,63 @@ class ResearchContextTests(unittest.TestCase):
                 if enabled:
                     self.assertEqual(result["dsh_research_summary"], "x" * 1362)
                     self.assertEqual(result["report_size_advisories"], [{"field": "summary", "actual": 1362, "recommended_maximum": 1200}])
+
+    def _budget_policy_adapter(self, invoke):
+        """Run one policy-enabled synthesis against a scripted native runtime."""
+
+        task = replace(self.task, metadata={**self.task.metadata,
+            "research_execution_policy": dict(RESEARCH_EXECUTION_POLICY)})
+        parent = materialize_seed_genome(current_program_registry().seed_template("greenhouse-baseline-aligned-default@1"),
+                                        _initialization(task_manifest_digest=task.digest))
+        adapter = StrategyRouterDSHAdapter(gateway=object())
+        with patch.object(adapter, "_native_runtime", return_value=SimpleNamespace(run=invoke)):
+            return adapter.research_plan("offline", run=self.run, task=task, parent_genome=parent.to_dict(),
+                knowledge_snapshot=self.knowledge, generation_search_plan=self.search.to_dict(), candidate_count=4)
+
+    @staticmethod
+    def _exhausted(code="structured_child_output_budget_exhausted"):
+        return DshNativeRuntimeUnavailableError("DSH 原生智能体运行时拒绝了请求。",
+            error_code=code, status_code=422, failure_domain="execution_contract")
+
+    def test_budget_exhaustion_is_repaired_once_by_naming_the_overrun_budget(self):
+        calls = []
+        def invoke(**request):
+            calls.append(request)
+            if len(calls) == 1:
+                raise self._exhausted()
+            return minimal_aligned_synthesis()
+        result = self._budget_policy_adapter(invoke)
+        self.assertEqual(len(result["candidate_direction_preflight"]["checks"]), 4)
+        self.assertEqual([call["stage_attempt"] for call in calls], [1, 2])
+        self.assertEqual(len({call["idempotency_key"] for call in calls}), 2)
+        self.assertIsNone(calls[0]["context"]["host_validation_feedback"])
+        feedback = calls[1]["context"]["host_validation_feedback"]
+        self.assertEqual(feedback["rejection_code"], "output_budget_exhausted_before_structured_output")
+        self.assertEqual(feedback["output_token_budget"], 16384)
+        self.assertIn("16384", feedback["validation_detail"])
+        # The repair is bounded by the same fence as a semantic rejection: it
+        # may change the request once, never replay it.
+        self.assertEqual(calls[1]["max_tokens"], 16384)
+
+    def test_a_second_budget_exhaustion_stays_terminal_without_a_third_request(self):
+        calls = []
+        def invoke(**request):
+            calls.append(request)
+            raise self._exhausted()
+        with self.assertRaises(DshNativeRuntimeUnavailableError) as raised:
+            self._budget_policy_adapter(invoke)
+        self.assertEqual(raised.exception.error_code, "structured_child_output_budget_exhausted")
+        self.assertEqual(len(calls), 2)
+
+    def test_other_native_failures_keep_failing_on_the_first_request(self):
+        calls = []
+        def invoke(**request):
+            calls.append(request)
+            raise self._exhausted("structured_result_missing")
+        with self.assertRaises(DshNativeRuntimeUnavailableError) as raised:
+            self._budget_policy_adapter(invoke)
+        self.assertEqual(raised.exception.error_code, "structured_result_missing")
+        self.assertEqual(len(calls), 1)
 
     def test_concise_limits_apply_after_unchanged_historical_scientific_schema(self):
         output = minimal_aligned_synthesis()

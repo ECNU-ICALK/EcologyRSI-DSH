@@ -2121,6 +2121,95 @@ class ExecutionProjectionTests(unittest.TestCase):
             self.assertNotIn(v2_only_field, row)
         self.assertNotIn("sample_execution_records", str(row))
 
+    def test_trajectory_operations_keep_non_scalar_subjects_and_name_the_axis(
+        self,
+    ) -> None:
+        # The row used to keep a fixed op/name/value/target/program_id
+        # whitelist, which is the shape of a scalar parameter move and of
+        # nothing else. An instruction or workflow edit therefore reached the
+        # process UI as a bare `{"op": ...}` and rendered untargeted.
+        evaluation = SimpleNamespace(
+            score=-0.2,
+            passed=True,
+            created_at="2026-08-28T00:00:02+00:00",
+            metrics={"sample_execution_coverage": 1.0},
+        )
+        batch = SimpleNamespace(
+            generation=0,
+            candidate_id="candidate:axes",
+            batch_index=0,
+            batch_count=4,
+            origin_count=50,
+            revision_id="revision:axes:0",
+            cohort_digest="a" * 64,
+            created_at="2026-08-28T00:00:00+00:00",
+        )
+        state = SimpleNamespace(
+            task_manifest=SimpleNamespace(metadata={}),
+            local_edit_proposals=(
+                {
+                    "candidate_id": "candidate:axes",
+                    "batch_index": 0,
+                    "decision": "mutate",
+                    "operations": [
+                        {
+                            "op": "select_instruction_template",
+                            "role": "sample-planner",
+                            "instruction_template_id": (
+                                "sample-planner-anomaly-aware@1"
+                            ),
+                        },
+                        {
+                            "op": "set_bounded_workflow_parameter",
+                            "name": "max_attempts",
+                            "value": 3,
+                        },
+                    ],
+                },
+            ),
+            local_edit_outcomes=(),
+            trajectory_revision_activations=(),
+            formal_batches=(batch,),
+            formal_trajectories=(
+                SimpleNamespace(
+                    generation=0,
+                    candidate_id="candidate:axes",
+                    status=SimpleNamespace(value="running"),
+                    initial_revision_id="revision:axes:0",
+                    final_revision_id=None,
+                    batch_count=4,
+                ),
+            ),
+            batch_evaluation_for=lambda candidate_id, batch_index: evaluation,
+        )
+
+        operations = _adaptive_trajectory_projection(state)[0]["batches"][0][
+            "operations"
+        ]
+
+        self.assertEqual(
+            operations[0],
+            {
+                "op": "select_instruction_template",
+                "role": "sample-planner",
+                "instruction_template_id": "sample-planner-anomaly-aware@1",
+                "axis": "instruction_profile",
+                # Joined in from the operator's own target resolver, so the UI
+                # never has to know the per-operation field names.
+                "target": "sample-planner-anomaly-aware@1",
+            },
+        )
+        self.assertEqual(
+            operations[1],
+            {
+                "op": "set_bounded_workflow_parameter",
+                "name": "max_attempts",
+                "value": 3,
+                "axis": "workflow_parameter",
+                "target": "max_attempts",
+            },
+        )
+
     def test_paired_trajectory_projects_durable_comparison_and_next_challenger(self) -> None:
         champion = SimpleNamespace(
             score=-0.6,
@@ -3408,7 +3497,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     payload={
                         "execution_protocol": "dsh_native_plugin_evolution@1",
                         "capabilities_digest": "a" * 64,
-                        "preset_ids": ["ecology-sample-planner-v9"],
+                        "preset_ids": ["ecology-sample-planner-v11"],
                     },
                 ),
                 SimpleNamespace(

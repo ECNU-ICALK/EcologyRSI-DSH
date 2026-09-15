@@ -102,6 +102,7 @@ from .greenhouse_prediction import (
     RecipeRidgeConfig,
     RidgeConfig,
     TargetwiseExogenousRidgeConfig,
+    origin_history_alignment_hours,
     predict_fitted_exogenous_ridge,
 )
 from .metrics import (
@@ -676,18 +677,16 @@ def _resolve_origin_history_alignment(
     easier one. Manifests without the key keep the historical 12-hour
     alignment, so old runs stay replayable; a run that wants recipes must
     freeze the wider alignment explicitly rather than have it widened for it.
+
+    Because it is the depth the cohort *guarantees*, it is also the depth the
+    optional numerical tools may advertise: see
+    ``AgentModelTools.catalog``, which withholds the recipe tool rather than
+    offer a seed this alignment could not serve at every origin. Parsing lives
+    in ``origin_history_alignment_hours`` so the value-blind cohort planner
+    reads the manifest exactly the way this evaluator does; only the
+    predictor-compatibility check below is specific to a bound candidate.
     """
-    raw = task.metadata.get("origin_history_alignment_hours")
-    alignment = MAX_EXOGENOUS_RIDGE_HISTORY_STEPS if raw is None else raw
-    if (
-        isinstance(alignment, bool)
-        or not isinstance(alignment, int)
-        or not 1 <= alignment <= COHORT_HISTORY_HOURS
-    ):
-        raise ValueError(
-            "origin_history_alignment_hours must be an integer between 1 and "
-            f"{COHORT_HISTORY_HOURS}"
-        )
+    alignment = origin_history_alignment_hours(task.metadata)
     if config.history_steps > alignment:
         raise ValueError(
             "predictor requires "
@@ -1313,6 +1312,82 @@ def _finite_registry_number(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _candidate_sample_max_attempts(proposal: Proposal | None) -> int | None:
+    """Read one candidate's own requested retry depth, or ``None`` for silence.
+
+    The value comes from the compiled ``candidate_agent_profile`` carried on the
+    proposal, so rescoring an archived candidate reproduces the depth it ran at
+    instead of whatever the current registry defaults to. Profiles archived
+    before ``workflow_parameters`` existed simply have no opinion, and the host
+    floor stands alone -- which is exactly the behaviour they were scored with.
+    The value's range is enforced twice over: by the registry contract when the
+    mutation was applied, and by ``SampleExecutionPolicy`` when it is used.
+    """
+
+    if proposal is None:
+        return None
+    profile = proposal.metadata.get("candidate_agent_profile")
+    if not isinstance(profile, Mapping):
+        return None
+    parameters = profile.get("workflow_parameters")
+    if not isinstance(parameters, Mapping):
+        return None
+    value = parameters.get("max_attempts")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("candidate workflow max_attempts must be an integer")
+    return value
+
+
+def _candidate_remote_critic_policy(
+    task: TaskManifest, proposal: Proposal | None
+) -> Mapping[str, Any] | None:
+    """Overlay one candidate's escalation threshold on the run's critic policy.
+
+    The run-level policy is frozen on the TaskManifest, which is per run and not
+    per candidate, so the candidate's own threshold has to be applied here -- at
+    the point where the adapter is constructed and the proposal is still in
+    scope. What the candidate owns is exactly one number: how eagerly its planner
+    hands a low-confidence decision to the remote critic. Everything else about
+    the policy stays the host's.
+
+    Three cases return the run policy untouched, and each is a boundary rather
+    than a convenience:
+
+    * ``None`` means "always escalate" downstream
+      (``dsh_sample_adapter._require_remote_critic``). Synthesising a policy here
+      would let a candidate switch independent review off, which is a scoring
+      guarantee and not an evolvable knob.
+    * ``always@1`` carries no threshold at all -- ``_normalized_remote_critic_policy``
+      rejects the key -- so there is nothing to overlay.
+    * a profile with no ``confidence_threshold`` (archived before this parameter
+      had a consumer) keeps the threshold it was scored with.
+    """
+
+    policy = task.metadata.get("sample_remote_critic_policy")
+    if not isinstance(policy, Mapping) or "min_planner_confidence" not in policy:
+        return policy
+    if proposal is None:
+        return policy
+    profile = proposal.metadata.get("candidate_agent_profile")
+    if not isinstance(profile, Mapping):
+        return policy
+    parameters = profile.get("instruction_parameters")
+    if not isinstance(parameters, Mapping):
+        return policy
+    threshold = parameters.get("confidence_threshold")
+    if threshold is None:
+        return policy
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+        raise ValueError("candidate confidence_threshold must be a number")
+    # Left unclamped on purpose: the registry contract bounds it when the
+    # mutation is applied, and `_normalized_remote_critic_policy` bounds it again
+    # here. Silently clamping would hide a contract breach behind a legal-looking
+    # run.
+    return {**dict(policy), "min_planner_confidence": float(threshold)}
+
+
 @dataclass(frozen=True, slots=True)
 class EvaluationBundle:
     artifact: ModelArtifact
@@ -1373,8 +1448,15 @@ class EvaluatorRegistry:
         agent_model_tools: AgentModelTools | None = None,
         run_id: str | None = None,
         candidate_id: str | None = None,
+        proposal: Proposal | None = None,
     ) -> CollaborativeSampleExecutor:
-        """Resolve the frozen sample runtime for the current task."""
+        """Resolve the frozen sample runtime for the current task.
+
+        ``proposal`` carries the compiled candidate agent profile. It is optional
+        because the injected and host-feedback runtimes never consult it, but the
+        model-backed adapters below do: the candidate's escalation threshold is
+        per candidate while the TaskManifest is per run.
+        """
 
         if self._sample_executor_injected:
             return self.sample_executor
@@ -1476,7 +1558,7 @@ class EvaluatorRegistry:
                     else None
                 ),
                 run_control_callback=on_sample_control,
-                remote_critic_policy=task.metadata.get("sample_remote_critic_policy"),
+                remote_critic_policy=_candidate_remote_critic_policy(task, proposal),
                 sample_reflection_policy=task.metadata.get(
                     "sample_reflection_policy"
                 ),
@@ -1554,7 +1636,7 @@ class EvaluatorRegistry:
             model_usage_callback=model_usage_callback,
             run_control_callback=on_sample_control,
             operation_max_tokens=task.metadata.get("sample_operation_max_tokens"),
-            remote_critic_policy=task.metadata.get("sample_remote_critic_policy"),
+            remote_critic_policy=_candidate_remote_critic_policy(task, proposal),
             sample_planner_prompt_profile=task.metadata.get(
                 "sample_planner_prompt_profile"
             ),
@@ -2355,16 +2437,32 @@ class EvaluatorRegistry:
     def _sample_execution_policy(
         task: TaskManifest,
         execution_plan: DerivedExecutionPlan,
+        proposal: Proposal | None = None,
     ) -> SampleExecutionPolicy:
         base = SampleExecutionPolicy.from_mapping(
             task.metadata.get("sample_execution_policy")
         )
         adapter = dataset_adapter(task.dataset) if task.dataset != TOY_DATASET_ID else None
         coverage_floor = adapter.minimum_coverage if adapter else base.minimum_coverage
+        # Two different things are being combined here, and keeping them named
+        # apart is the whole point. The derived plan's depth is a *reliability
+        # floor*: it exists so a generation that just saw transient failures
+        # retries harder, and the host owns it. The candidate's value is *this
+        # generation's requested retry depth* -- the one workflow parameter the
+        # genome can move that anything reads. The floor may raise the request
+        # but never lowers it, so `max()` is the synthesis, written explicitly
+        # rather than left to a chain of `max()` calls where a candidate's
+        # intent could be swallowed without a trace.
+        transient_floor = max(base.max_attempts, execution_plan.sample_max_attempts)
+        requested_attempts = _candidate_sample_max_attempts(proposal)
         # Prior-generation evidence may increase resilience, but it may never
         # weaken the immutable coverage thresholds chosen by the host.
         return SampleExecutionPolicy(
-            max_attempts=max(base.max_attempts, execution_plan.sample_max_attempts),
+            max_attempts=(
+                transient_floor
+                if requested_attempts is None
+                else max(requested_attempts, transient_floor)
+            ),
             plan_max_attempts=max(
                 base.plan_max_attempts, execution_plan.plan_max_attempts
             ),
@@ -2494,7 +2592,7 @@ class EvaluatorRegistry:
         evaluation_data = original.to_dict()
         evaluation_metrics = dict(evaluation_data["metrics"])
         evaluation_partition_rows = len(toy.splits["validation"])
-        sample_policy = self._sample_execution_policy(task, execution_plan)
+        sample_policy = self._sample_execution_policy(task, execution_plan, proposal)
         raw_prediction_rows = [
             {**row, "partition": "validation"}
             for row in evaluation_metrics.get("prediction_preview", [])
@@ -2543,6 +2641,7 @@ class EvaluatorRegistry:
             task,
             run_id=candidate.run_id,
             candidate_id=candidate.candidate_id,
+            proposal=proposal,
             progress_callback=on_evaluation_progress,
             model_usage_callback=on_model_usage,
             on_sample_control=on_sample_control,
@@ -3010,7 +3109,7 @@ class EvaluatorRegistry:
         if not separator:
             algorithm_name = GREENHOUSE_ROLLING_PREDICTOR_ID
             algorithm_revision = "unversioned"
-        sample_policy = self._sample_execution_policy(task, execution_plan)
+        sample_policy = self._sample_execution_policy(task, execution_plan, proposal)
 
         def rolling_forecast_bundle_tool(
             requests: Sequence[SamplePredictionRequest],
@@ -3038,6 +3137,7 @@ class EvaluatorRegistry:
             task,
             run_id=candidate.run_id,
             candidate_id=candidate.candidate_id,
+            proposal=proposal,
             progress_callback=on_evaluation_progress,
             model_usage_callback=on_model_usage,
             on_sample_control=on_sample_control,
@@ -3733,6 +3833,9 @@ class EvaluatorRegistry:
             control=on_sample_control,
             cache_dir=Path.home() / ".cache" / "ecologyrsi-dsh" / "agent-fits-v2",
             default_fit=prediction, default_config=parameters,
+            # The same depth the cohort was aligned to, so what the tool
+            # advertises is what the frozen origin set can serve.
+            origin_history_alignment=history_alignment,
         ) if task.metadata.get("sample_agent_mode") == "dsh_native_agent" else None
         if frozen_artifact is not None and agent_model_tools is not None:
             policy = rebind_agent_policy(proposal.metadata.get("agent_policy"),
@@ -3764,7 +3867,7 @@ class EvaluatorRegistry:
         if not separator:
             algorithm_name = predictor_model_id
             algorithm_revision = "unversioned"
-        sample_policy = self._sample_execution_policy(task, execution_plan)
+        sample_policy = self._sample_execution_policy(task, execution_plan, proposal)
         generated_feedback_rows = [
             {
                 **row,
@@ -3911,6 +4014,7 @@ class EvaluatorRegistry:
             agent_model_tools=agent_model_tools,
             run_id=candidate.run_id,
             candidate_id=candidate.candidate_id,
+            proposal=proposal,
             progress_callback=on_evaluation_progress,
             model_usage_callback=on_model_usage,
             on_sample_control=on_sample_control,
@@ -4754,6 +4858,11 @@ class EvaluatorRegistry:
                 "models": models,
                 **({"agent_policy": delivery_policy, "optional_tool_catalog": agent_model_tools.catalog(),
                     "training_data_digest": agent_model_tools.training_digest,
+                    # The alignment the catalog above was narrowed to. A
+                    # redeployed policy has to advertise the same servable
+                    # depth, or its tool contract check fails against a
+                    # grammar it never saw.
+                    "origin_history_alignment_hours": history_alignment,
                     "runtime_contract": {key: task.metadata.get(key) for key in ("strategy_model_id", "review_model_id", "preset_content_digest", "standing_tool_surface_digest", "resolved_policy_route_config_digest", "resolved_review_route_config_digest")}}
                    if agent_model_tools is not None else {}),
                 **({"baseline_profile": prediction["baseline_profile"]}

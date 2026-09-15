@@ -5,7 +5,11 @@ from types import SimpleNamespace
 from threading import Lock
 import unittest
 
-from ecologyrsi_dsh.core.agent_prediction import validate_predictions, validate_prediction_receipt
+from ecologyrsi_dsh.core.agent_prediction import (
+    PREDICTION_TOOL_CALL_BUDGET,
+    validate_predictions,
+    validate_prediction_receipt,
+)
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.evaluators.dsh_sample_adapter import DshSampleCollaborationAdapter
@@ -342,10 +346,12 @@ class AgentOwnedPredictionTests(unittest.TestCase):
     def test_two_receipts_share_equivalent_computation_and_preserve_call_budget(self):
         calls = []
         def policy(c, call):
-            for i in range(2):
-                self.assertEqual(call('candidate-model', str(i))['remaining_calls'], 1-i)
+            budget = PREDICTION_TOOL_CALL_BUDGET
+            for i in range(budget):
+                self.assertEqual(call('candidate-model', str(i))['remaining_calls'], budget - 1 - i)
+            # Repeating a call_id is idempotent: no re-execution, and no refund.
             self.assertEqual(call('candidate-model', '0')['remaining_calls'], 0)
-            with self.assertRaisesRegex(ValueError, 'budget'): call('candidate-model', '7')
+            with self.assertRaisesRegex(ValueError, 'budget'): call('candidate-model', 'over')
             with self.assertRaisesRegex(ValueError, 'reused'): call('candidate-model', '0', {'x': 1})
             return result(c, method='model', refs=('0',))
         def tool(reqs):
@@ -354,7 +360,10 @@ class AgentOwnedPredictionTests(unittest.TestCase):
         adapter, plan, _, ledger = self.setup_agent(policy, tool=tool)
         self.assertIsNone(self.predict(adapter, plan).error)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(len(ledger.events_by_kind('run-agent', 'DshPredictionToolExecuted')), 2)
+        self.assertEqual(
+            len(ledger.events_by_kind('run-agent', 'DshPredictionToolExecuted')),
+            PREDICTION_TOOL_CALL_BUDGET,
+        )
 
     def test_validation_rejects_nonfinite_duplicate_missing_and_bad_blend(self):
         context = {'wave_digest': 'a'*64, 'samples': [{'sample_id': 'one'}]}
@@ -363,3 +372,37 @@ class AgentOwnedPredictionTests(unittest.TestCase):
         for change in ({'decisions': []}, {'wave_digest': 'b'*64}):
             with self.assertRaises(ValueError): validate_predictions({**result(context), **change}, ['one'], wave_digest='a'*64)
         with self.assertRaises(ValueError): validate_predictions(result(context, method='blend', refs=('one',)), ['one'], wave_digest='a'*64)
+
+    def test_a_directive_blend_rule_narrows_the_methods_the_host_accepts(self):
+        # The authored-directive axis is only real if `blend_rule` is enforced
+        # rather than advertised. `direct` stays legal under every rule, so a
+        # planner whose tools all failed is never left without a legal answer.
+        context = {'wave_digest': 'a'*64, 'samples': [{'sample_id': 'one'}]}
+        methods = ('direct', 'model')
+        for method, refs in (('direct', ()), ('model', ('one',))):
+            with self.subTest(method=method):
+                self.assertEqual(
+                    validate_predictions(
+                        result(context, method=method, refs=refs),
+                        ['one'],
+                        wave_digest='a'*64,
+                        allowed_methods=methods,
+                    )[0]['method'],
+                    method,
+                )
+        with self.assertRaisesRegex(ValueError, "outside the candidate's directive"):
+            validate_predictions(
+                result(context, method='adjusted', refs=('one',)),
+                ['one'],
+                wave_digest='a'*64,
+                allowed_methods=methods,
+            )
+        # An empty or unrecognized set is a Host wiring fault, not an Agent
+        # error: it would silently forbid everything the planner could say.
+        for bad in ((), ('teleport',)):
+            with self.subTest(allowed=bad), self.assertRaisesRegex(
+                ValueError, 'allowed prediction methods are invalid'
+            ):
+                validate_predictions(
+                    result(context), ['one'], wave_digest='a'*64, allowed_methods=bad
+                )

@@ -4,8 +4,7 @@
 // accepted so an array-shaped Session stays readable. A Session that is not live
 // in this store yields undefined, which every caller already treats as absent
 // evidence rather than as a passing check.
-export function sessionEventLog(ctx, sessionId) {
-  const session = ctx?.sessions?.get?.(sessionId);
+export function sessionEvents(session) {
   if (session === undefined || session === null) return undefined;
   if (Array.isArray(session.events)) return session.events;
   if (typeof session.snapshotEvents !== "function") return undefined;
@@ -16,4 +15,8 @@ export function sessionEventLog(ctx, sessionId) {
     // A snapshot raced against session teardown is absent evidence, not proof.
     return undefined;
   }
+}
+
+export function sessionEventLog(ctx, sessionId) {
+  return sessionEvents(ctx?.sessions?.get?.(sessionId));
 }

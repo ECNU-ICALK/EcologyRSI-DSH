@@ -71,6 +71,7 @@ const STAGES = Object.freeze({
       "Each direction must select exactly one mutation_axis and one matching target from synthesis_contract.allowed_mutation_targets.",
       "Set mutation_direction to increase or decrease for scientific_parameter, and to select for registered_predictor or instruction_profile. Baseline values may be described for context; prose is audit-only and only the structured mutation coordinates are executable.",
       "If host_validation_feedback is present, correct its validation_detail in a fresh complete response and drop or replace every string it lists in rejected_evidence_refs.",
+      "If host_validation_feedback.rejection_code is output_budget_exhausted_before_structured_output, the previous turn spent its whole output budget reasoning and submitted nothing: call structured_output immediately with the shortest object that satisfies the schema.",
     ].join(" "),
   }),
   "candidate.propose": Object.freeze({
@@ -767,11 +768,12 @@ const SESSION_PROJECTION_SYNC_GRACE_MS = 2_000;
 const SESSION_PROJECTION_SYNC_POLL_MS = 20;
 
 // Deliberately the receipt cap (core.agent_prediction.MAX_PREDICTION_CALLS), not
-// the execution budget (PREDICTION_TOOL_CALL_BUDGET = 2). The Python prediction
-// binding refuses the third distinct call itself, and that refusal is legitimate
-// visible evidence in the child's event log — an Agent that over-reaches has
-// still produced a valid, fully-refused attempt. Tightening this bound to the
-// execution budget would discard those runs instead of recording the refusal.
+// the execution budget, which each run freezes into its own Agent policy. The
+// Python prediction binding refuses the call past that budget itself, and that
+// refusal is legitimate visible evidence in the child's event log — an Agent that
+// over-reaches has still produced a valid, fully-refused attempt. Tightening this
+// bound to the execution budget would discard those runs instead of recording the
+// refusal.
 const PREDICTION_TOOL_CALL_RECEIPT_CAP = 6;
 
 function waitForSessionProjection(milliseconds, signal) {
@@ -1327,6 +1329,14 @@ export class NativeStageRunner {
           "Do not emit prose before or after it.",
         ]),
         "If structured_output returns INVALID_ARGS, correct the arguments once using the error feedback. Do not call other tools, repeat an accepted output, or make more than two output attempts.",
+        // Reasoning and tool arguments share one per-call cap. A model that
+        // cannot be asked for a lower reasoning tier will otherwise spend the
+        // whole cap thinking and end the turn with no structured_output call
+        // at all, which is a terminal stage failure rather than a bad answer.
+        ...(typeof request.max_tokens === "number" ? [
+          `This turn has a single output budget of ${request.max_tokens} tokens shared by reasoning and tool arguments.`,
+          "Submit structured_output before expanding your reasoning; exhausting the budget without that call fails the stage and discards all the work.",
+        ] : []),
       ];
       const prompt = canonical({
         instruction: [

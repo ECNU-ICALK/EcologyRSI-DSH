@@ -6,7 +6,11 @@ fixed before inference and participates in the runtime phenotype identity.
 from collections.abc import Mapping
 from copy import deepcopy
 import math
-from ..core.agent_prediction import PREDICTION_TOOL_CALL_BUDGET
+from ..core.agent_prediction import (
+    MAX_PREDICTION_CALLS,
+    PREDICTION_METHODS,
+    PREDICTION_TOOL_CALL_BUDGET,
+)
 from ..core.models import digest
 
 POLICY_SCHEMA = 'ecologyrsi-dsh.agent-policy/1'
@@ -78,7 +82,11 @@ def prior_candidate_tool_experience(state, candidate, metrics):
     return result[-64:]
 
 
-def build_agent_policy(*, genome_digest, profile, parameters, previous_analysis, generation):
+def build_agent_policy(*, genome_digest, profile, parameters, previous_analysis, generation,
+                       prediction_tool_call_budget=None):
+    budget = PREDICTION_TOOL_CALL_BUDGET if prediction_tool_call_budget is None else prediction_tool_call_budget
+    if type(budget) is not int or not 1 <= budget <= MAX_PREDICTION_CALLS:
+        raise ValueError('prediction tool call budget must be a positive int within the receipt cap')
     experience = []
     if isinstance(previous_analysis, Mapping):
         source_generation = previous_analysis.get('generation')
@@ -100,7 +108,7 @@ def build_agent_policy(*, genome_digest, profile, parameters, previous_analysis,
                 'source_analysis_digest': digest(previous_analysis) if previous_analysis else None,
                 'rows': experience},
             'inference': {'prediction_owner': 'sample_agent',
-                          'max_tool_calls_per_attempt': PREDICTION_TOOL_CALL_BUDGET,
+                          'max_tool_calls_per_attempt': budget,
                           'model_parameter_selection': 'agent_within_registered_bounds',
                           'critic_protocol': 'ecology-sample-review@2', 'holdout_replicates': 2}}
     return {**body, 'policy_digest': digest(body)}
@@ -115,12 +123,56 @@ def validate_agent_policy(value):
     return value
 
 
+def frozen_prediction_tool_call_budget(policy):
+    """The execution budget this run froze, not the current default.
+
+    Both the enforcing binding and the contract shown to the Agent must read the
+    same per-run value; a mismatch would either promise calls the binding
+    refuses, or hide calls it would allow.
+    """
+    if isinstance(policy, Mapping):
+        inference = policy.get('inference')
+        if isinstance(inference, Mapping):
+            budget = inference.get('max_tool_calls_per_attempt')
+            if type(budget) is int and 1 <= budget <= MAX_PREDICTION_CALLS:
+                return budget
+    return PREDICTION_TOOL_CALL_BUDGET
+
+
+def allowed_prediction_methods(profile):
+    """The methods this candidate's directive admits, or all of them.
+
+    Read defensively from the archived profile for the same reason the budget
+    above is: the contract shown to the Agent and the check applied to its
+    answer must come from one value, and a candidate that authored no directive
+    must be validated exactly as it was before authoring existed.
+    """
+    if isinstance(profile, Mapping):
+        methods = profile.get('allowed_prediction_methods')
+        if isinstance(methods, (list, tuple)) and methods:
+            permitted = frozenset(str(item) for item in methods)
+            if permitted <= PREDICTION_METHODS:
+                return tuple(sorted(permitted))
+    return tuple(sorted(PREDICTION_METHODS))
+
+
 def rebind_agent_policy(policy, *, genome_digest, profile, parameters):
-    """Local edits change policy source while preserving frozen prior experience."""
-    base = build_agent_policy(genome_digest=genome_digest, profile=profile, parameters=parameters,
-                              previous_analysis=None, generation=0)
+    """Local edits change policy source while preserving frozen prior experience.
+
+    The execution budget is frozen per run, so it is carried over from the
+    supplied policy rather than re-read from the current default: an archived
+    artifact has to rebind to the budget it was scored under, or raising
+    PREDICTION_TOOL_CALL_BUDGET would make every archived run fail the frozen
+    Agent policy check in evaluators/registry.py.
+    """
+    frozen_budget = None
     if policy is not None:
         validate_agent_policy(policy)
+        frozen_budget = frozen_prediction_tool_call_budget(policy)
+    base = build_agent_policy(genome_digest=genome_digest, profile=profile, parameters=parameters,
+                              previous_analysis=None, generation=0,
+                              prediction_tool_call_budget=frozen_budget)
+    if policy is not None:
         base["experience"] = deepcopy(dict(policy["experience"]))
     base["policy_digest"] = digest({key: value for key, value in base.items() if key != "policy_digest"})
     return base

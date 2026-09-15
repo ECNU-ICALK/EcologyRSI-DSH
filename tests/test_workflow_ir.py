@@ -4,19 +4,27 @@ import json
 import unittest
 
 from ecologyrsi_dsh.core.models import TaskManifest
+from ecologyrsi_dsh.evaluators.authored_directive import AUTHORED_DIRECTIVE_POLICY_ID
 from ecologyrsi_dsh.evaluators.feature_recipe import MAX_RECIPE_TERMS
 from ecologyrsi_dsh.evolution.genome import (
     FrozenRunInitialization,
     GenomeMutationContextV1,
     apply_genome_mutation,
+    deep_thaw_json,
     materialize_seed_genome,
 )
+from ecologyrsi_dsh.evolution.strategies import _registered_mutation_targets
 from ecologyrsi_dsh.evolution.workflow_ir import (
     CompilationInstanceContext,
+    _compile_authored_directive,
     _compile_feature_recipe,
     bind_phenotype_instance,
     compile_dsh_workflow_spec,
     compile_plugin_behavior,
+)
+from ecologyrsi_dsh.knowledge.autonomous_cycle import (
+    CANDIDATE_MUTATION_AXES,
+    MAX_RECIPE_TERM_EDITS_PER_MUTATION,
 )
 from ecologyrsi_dsh.knowledge.program_registry import (
     ProgramRegistrySnapshot,
@@ -146,6 +154,51 @@ def _child(task: TaskManifest, *, slot_index: int, slot_seed: int):
                     "name": "ridge_alpha",
                     "value": 0.2,
                 }
+            ],
+        },
+        context,
+        current_program_registry(),
+    )
+
+
+def _recipe_seed():
+    """A seed genome on the predictor that actually carries a recipe."""
+
+    return _seed(_recipe_task(), template_id="greenhouse-recipe-default@1")
+
+
+def _recipe_of(genome) -> dict[str, object]:
+    """The genome's recipe as plain mutable JSON, ready to edit."""
+
+    return deep_thaw_json(genome.scientific_program["feature_recipe"])
+
+
+def _recipe_features(genome) -> list[dict[str, object]]:
+    return list(_recipe_of(genome)["features"])
+
+
+def _author_recipe(parent, recipe: dict[str, object]):
+    """Run one `author_feature_recipe` operation against `parent`."""
+
+    context = GenomeMutationContextV1(
+        run_id="run:workflow-compiler",
+        generation=0,
+        slot_index=0,
+        slot_seed=17,
+        parent_candidate_id=None,
+        parent_genome_digest=parent.genome_digest,
+        generation_batch_digest="e" * 64,
+        research_iteration_digest="f" * 64,
+        knowledge_snapshot_digest="0" * 64,
+        mutation_budget_digest="1" * 64,
+        mutation_operator_id="bounded-single-parent-mutation@1",
+    )
+    return apply_genome_mutation(
+        parent,
+        {
+            "schema_version": "ecologyrsi-dsh.genome-mutation/1",
+            "operations": [
+                {"op": "author_feature_recipe", "feature_recipe": recipe}
             ],
         },
         context,
@@ -290,6 +343,182 @@ class WorkflowIRTests(unittest.TestCase):
                     registry, "authored_causal_features@1"
                 ),
             )
+
+    def test_authoring_a_recipe_term_changes_executable_behavior(self) -> None:
+        # The axis exists because selecting `authored_causal_features@1` changed
+        # nothing on its own -- the policy governs a recipe no operator could
+        # write. This is the writer, so the test that matters is that the edit
+        # reaches the digest the scoreboard compares.
+        parent = _recipe_seed()
+        features = _recipe_features(parent)
+        child = _author_recipe(
+            parent,
+            {**_recipe_of(parent), "features": [*features, {"op": "target_lag", "k": 7}]},
+        )
+
+        self.assertEqual(len(_recipe_features(child)), len(features) + 1)
+        self.assertNotEqual(child.behavior_digest, parent.behavior_digest)
+        # And it survives compilation: the recipe the genome carries is the one
+        # the feature policy's ceilings are re-checked against, and the compiled
+        # spec's term_count is what the trainer will actually build.
+        behavior = compile_plugin_behavior(
+            child, _recipe_task(), None, current_program_registry()
+        )
+        self.assertEqual(
+            behavior.feature_training_spec["feature_recipe"]["term_count"],
+            len(features) + 1,
+        )
+
+    def test_a_recipe_edit_may_substitute_one_term(self) -> None:
+        # A substitution is a removal plus an addition, which is two of the
+        # two allowed edits -- the cap's whole point is that this still fits.
+        parent = _recipe_seed()
+        features = _recipe_features(parent)
+        child = _author_recipe(
+            parent,
+            {
+                **_recipe_of(parent),
+                "features": [*features[:-1], {"op": "target_lag", "k": 9}],
+            },
+        )
+
+        self.assertEqual(len(_recipe_features(child)), len(features))
+        self.assertNotEqual(child.behavior_digest, parent.behavior_digest)
+
+    def test_a_recipe_edit_beyond_the_structural_trust_region_is_refused(self) -> None:
+        # Isolated from the term ceiling on purpose: this recipe ends up
+        # *shorter* than the parent, so the only rule it can trip is the
+        # per-mutation edit cap. `TRUST_REGION_MAX_NORMALIZED_STEP` is
+        # log-space and scalar-only, so without this cap a single operation
+        # could replace the entire feature set and no score delta would be
+        # attributable to anything.
+        parent = _recipe_seed()
+        features = _recipe_features(parent)
+        rewritten = [*features[:-2], {"op": "target_lag", "k": 11}]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            rf"changes 3 terms but {MAX_RECIPE_TERM_EDITS_PER_MUTATION} is the",
+        ):
+            _author_recipe(parent, {**_recipe_of(parent), "features": rewritten})
+
+    def test_a_recipe_that_changes_nothing_is_refused(self) -> None:
+        # The bundle-level "did not change executable behavior" check would also
+        # catch this, but only after the operation was spent. Refusing at the
+        # operator keeps the message specific to what the editor did wrong.
+        parent = _recipe_seed()
+
+        with self.assertRaisesRegex(ValueError, "does not change the recipe"):
+            _author_recipe(parent, _recipe_of(parent))
+
+    def test_a_model_only_recipe_edit_bypasses_the_term_cap(self) -> None:
+        # The cap counts feature terms, and tuning the ridge penalty inside the
+        # recipe touches none of them. That edit still obeys the model block's
+        # own bounds -- it is just not a structural move.
+        parent = _recipe_seed()
+        recipe = _recipe_of(parent)
+        child = _author_recipe(
+            parent, {**recipe, "model": {**recipe["model"], "alpha": 0.35}}
+        )
+
+        self.assertEqual(_recipe_of(child)["model"]["alpha"], 0.35)
+        self.assertEqual(_recipe_features(child), _recipe_features(parent))
+
+    def test_the_recipe_operator_is_refused_on_a_scalar_predictor(self) -> None:
+        # The compiler refuses this too, but a genome that carried a recipe its
+        # predictor cannot read would already have a behavior_digest nothing can
+        # execute. The operator is the earlier of the two gates.
+        parent = _seed()
+
+        with self.assertRaisesRegex(ValueError, "does not accept a feature_recipe"):
+            _author_recipe(
+                parent,
+                {
+                    "features": [{"op": "target_lag", "k": 0}],
+                    "model": {
+                        "kind": "ridge",
+                        "alpha": 0.1,
+                        "anchor": "fit_selected_baseline",
+                    },
+                    "per_horizon": {"1": {"residual_scale": 0.2}},
+                },
+            )
+
+    def test_the_recipe_axis_is_advertised_only_where_it_is_writable(self) -> None:
+        # Offering the axis on a predictor with no feature policy would spend a
+        # researcher's one operation on an edit the operator is about to refuse.
+        recipe_targets = _registered_mutation_targets(_recipe_task(), _recipe_seed())
+        scalar_targets = _registered_mutation_targets(_task(), _seed())
+
+        self.assertEqual(
+            recipe_targets["feature_recipe"], ("authored_causal_features@1",)
+        )
+        self.assertNotIn("feature_recipe", scalar_targets)
+        self.assertIn("feature_recipe", CANDIDATE_MUTATION_AXES)
+
+    def test_the_directive_policy_binding_is_the_run_s_real_ceiling(self) -> None:
+        # The grammar's `MAX_DIRECTIVE_TOOL_PLAN_STEPS` is the global whitelist;
+        # the ceiling a given run actually enforces comes from the policy that
+        # profile bound itself to, which is why the compiler re-checks a value
+        # the genome validator already accepted.
+        registry = current_program_registry()
+        compiled: dict[str, object] = {"role": "sample-planner", "instruction_directive": "x"}
+        ref = {
+            "id": AUTHORED_DIRECTIVE_POLICY_ID,
+            "catalog_digest": registry.program_ref(
+                "directive_policies", AUTHORED_DIRECTIVE_POLICY_ID
+            )["catalog_digest"],
+            "overrides": {"max_tool_plan_steps": 1},
+        }
+        directive = {
+            "anchor": "persistence",
+            "blend_rule": "mean",
+            "tool_plan": [
+                {"tool_id": "planner_tool", "purpose": "candidate_model_baseline"},
+                {"tool_id": "other_tool", "purpose": "discrepancy_check"},
+            ],
+            "rationale": "Two probes, one of which this binding will not allow.",
+        }
+
+        with self.assertRaisesRegex(ValueError, "plans 2 steps"):
+            _compile_authored_directive(
+                dict(compiled),
+                directive,
+                ref,
+                registry=registry,
+                enabled_tools=["other_tool", "planner_tool"],
+                instruction_parameters={"confidence_threshold": 0.5},
+            )
+
+        # A tool the role does not hold is refused here even though the grammar
+        # accepts its shape: the tool policy is the authority on the grant.
+        with self.assertRaisesRegex(ValueError, "plans unavailable tools"):
+            _compile_authored_directive(
+                dict(compiled),
+                directive,
+                {**ref, "overrides": {}},
+                registry=registry,
+                enabled_tools=["planner_tool"],
+                instruction_parameters={"confidence_threshold": 0.5},
+            )
+
+        profile = dict(compiled)
+        _compile_authored_directive(
+            profile,
+            directive,
+            {**ref, "overrides": {}},
+            registry=registry,
+            enabled_tools=["other_tool", "planner_tool"],
+            instruction_parameters={"confidence_threshold": 0.65},
+        )
+        # The rendered text replaces the template's sentence in the same slot,
+        # and it states the threshold the host will actually enforce -- one
+        # number, so prose and policy cannot drift.
+        self.assertIn("0.65", str(profile["instruction_directive"]))
+        self.assertEqual(
+            profile["allowed_prediction_methods"], ["direct", "model", "blend"]
+        )
+        self.assertEqual(profile["directive_policy"]["id"], AUTHORED_DIRECTIVE_POLICY_ID)
 
     def test_rolling_residual_rejects_multihorizon_evaluator(self) -> None:
         task = _task()

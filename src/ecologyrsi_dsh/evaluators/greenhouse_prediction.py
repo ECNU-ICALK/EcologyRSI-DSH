@@ -53,6 +53,44 @@ MAX_EXOGENOUS_RIDGE_HISTORY_STEPS = 12
 # history, so a recipe that reaches further back than a scalar candidate is
 # still scored on a byte-identical origin set instead of an easier one.
 COHORT_HISTORY_HOURS = 48
+# The alignment a run has to freeze before the recipe tool is offered to its
+# Agents at all: the registered seed recipe reaches 24 hours back (``target_lag``
+# k=24 and the 24-hour seasonal terms), and an alignment counts the origin as one
+# of its observations, so serving that reach takes 25. It is a servability
+# threshold, not a floor on every run: raising the floor globally would move the
+# origin set -- and so the score -- of scalar-predictor runs that never see the
+# recipe tool. Instead ``AgentModelTools.catalog`` withholds the tool below this
+# depth, because advertising it there planned origins that could never be served
+# (the seed compiled fine against the 48-hour ceiling and then failed per origin
+# inside the first day of the feedback partition).
+SEED_RECIPE_HISTORY_HOURS = 25
+
+
+def origin_history_alignment_hours(metadata: Mapping[str, Any] | None) -> int:
+    """The alignment a task manifest froze, or the historical default.
+
+    One reader for two very different consumers that must not drift: the
+    value-blind cohort *planner* (``epoch_cohorts._eligible_origins``, which
+    bakes the depth into every ``origin_id``) and the evaluator that intersects
+    the planned cohort down to what that depth can serve. They agreed only by
+    coincidence while both were hardcoded to 12; a manifest freezing a deeper
+    alignment for one but not the other would plan origins no candidate could
+    serve, which ``execution_validity`` escalates into a non-retryable run
+    failure. Manifests without the key keep 12, so archived runs replay.
+    """
+
+    raw = None if metadata is None else metadata.get("origin_history_alignment_hours")
+    alignment = MAX_EXOGENOUS_RIDGE_HISTORY_STEPS if raw is None else raw
+    if (
+        isinstance(alignment, bool)
+        or not isinstance(alignment, int)
+        or not 1 <= alignment <= COHORT_HISTORY_HOURS
+    ):
+        raise ValueError(
+            "origin_history_alignment_hours must be an integer between 1 and "
+            f"{COHORT_HISTORY_HOURS}"
+        )
+    return alignment
 
 
 @dataclass(frozen=True, slots=True)
@@ -717,7 +755,7 @@ def fit_predict_exogenous_ridge(
                     target=target,
                     horizon_hours=horizon,
                     allowed_roles=_ALLOWED_EXOGENOUS_ROLES,
-                    max_history_hours=COHORT_HISTORY_HOURS,
+                    origin_history_alignment=COHORT_HISTORY_HOURS,
                 )
     baseline_profile = (
         fit_baseline_profile(
@@ -1851,6 +1889,7 @@ __all__ = [
     "HorizonTargetwiseExogenousRidgeConfig",
     "TargetwiseExogenousRidgeConfig",
     "fit_predict_exogenous_ridge",
+    "origin_history_alignment_hours",
     "predict_fitted_exogenous_ridge",
     "validate_exogenous_ridge_parameters",
     "validate_horizon_targetwise_exogenous_ridge_parameters",

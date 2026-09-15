@@ -3884,6 +3884,42 @@ def _adaptive_progress_projection(
     }
 
 
+_TRAJECTORY_OPERATION_LIMIT = 8
+_TRAJECTORY_OPERATION_FIELD_LIMIT = 10
+
+
+def _trajectory_operation_projection(operation: Mapping[str, Any]) -> dict[str, Any]:
+    """One local-edit operation, with the fields that operation actually uses.
+
+    The old projection kept a fixed five-key whitelist -- op/name/value/
+    target/program_id -- which is exactly the shape of a scalar parameter
+    move. Every other registered operation names its subject somewhere else
+    (`role` and `instruction_template_id`, `predictor_id`,
+    `workflow_template_id`), so an instruction or workflow edit reached the
+    process UI as a bare `{"op": ...}` and rendered as the untargeted string
+    "局部修改". Keeping whatever keys the operation carries is both more
+    truthful and one less list to update when an axis is opened.
+    """
+
+    projected = {
+        str(key): sanitize_public_value(operation[key], text_limit=300)
+        for key in sorted(operation)[:_TRAJECTORY_OPERATION_FIELD_LIMIT]
+    }
+    # The axis is what makes the row readable without knowing the operator
+    # vocabulary, and it is also what tells an expert whether the run is
+    # exploring one axis over and over.
+    try:
+        from ..evolution.local_edits import _operation_target
+
+        axis, target, _slot = _operation_target(operation)
+    except Exception:  # noqa: BLE001 - an unregistered op still deserves a row
+        return projected
+    projected["axis"] = axis
+    if target and "target" not in projected:
+        projected["target"] = sanitize_public_value(target, text_limit=300)
+    return projected
+
+
 def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
     """Expose bounded, truthful formal-batch evidence for the process UI.
 
@@ -3959,16 +3995,12 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
             operations: list[dict[str, Any]] = []
             proposal_detail = proposal.get("proposal", proposal) if proposal else {}
             if isinstance(proposal_detail, Mapping) and isinstance(proposal_detail.get("operations"), (list, tuple)):
-                for operation in proposal_detail["operations"][:5]:
+                for operation in proposal_detail["operations"][
+                    :_TRAJECTORY_OPERATION_LIMIT
+                ]:
                     if not isinstance(operation, Mapping):
                         continue
-                    operations.append(
-                        {
-                            name: sanitize_public_value(operation.get(name))
-                            for name in ("op", "name", "value", "target", "program_id")
-                            if name in operation
-                        }
-                    )
+                    operations.append(_trajectory_operation_projection(operation))
             coverage = _finite_number(
                 sample.get("coverage", metrics.get("sample_execution_coverage"))
             )
@@ -4997,6 +5029,278 @@ def _model_usage_summary(state: Any) -> dict[str, Any]:
     return summary
 
 
+_MUTATION_EXPLANATION_OPERATION_LIMIT = 8
+_MUTATION_EXPLANATION_DIFF_LIMIT = 40
+_MUTATION_EXPLANATION_ALLOWED_AXES_LIMIT = 12
+_MUTATION_EXPLANATION_TARGETS_PER_AXIS_LIMIT = 24
+
+
+def _mutation_axis_by_operation() -> dict[str, str]:
+    """Invert the axis→operation catalog so an op can name its own axis.
+
+    Built lazily and cached because `knowledge/` imports back into `api/` at
+    module scope in some paths; a deferred call keeps this module importable
+    either way.
+    """
+
+    from ..knowledge.autonomous_cycle import MUTATION_OPERATION_BY_AXIS
+
+    return {
+        operation: axis for axis, operation in MUTATION_OPERATION_BY_AXIS.items()
+    }
+
+
+_MUTATION_DIFF_IDENTITY_KEYS = ("role", "id", "name", "template_id")
+
+
+def _mutation_diff_identity(value: Any) -> str | None:
+    """The stable key a list of mappings is addressed by, if it has one.
+
+    `role_profiles` is a list in the genome but a keyed collection in meaning:
+    the sample-planner entry stays the sample-planner entry however the list is
+    ordered. Recursing into it by identity turns an instruction mutation from
+    two pretty-printed role blobs into the one field that actually moved.
+    """
+
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    for key in _MUTATION_DIFF_IDENTITY_KEYS:
+        identities = [
+            item[key]
+            for item in value
+            if isinstance(item, Mapping) and isinstance(item.get(key), str)
+        ]
+        if len(identities) == len(value) and len(set(identities)) == len(identities):
+            return key
+    return None
+
+
+def _mutation_diff_paths(value: Any, prefix: tuple[str, ...] = ()) -> dict[tuple[str, ...], Any]:
+    """Flatten one genome program into leaf paths so it can be diffed.
+
+    A list is a leaf unless its items carry a stable identity. A
+    `feature_recipe`'s term sequence and a role's `enabled_tool_ids` only mean
+    anything as a whole, and a positional path like `features.3.lag` would
+    report a reordering as four unrelated edits; a keyed list has no such
+    problem, because the key travels with the item.
+    """
+
+    if isinstance(value, Mapping):
+        flattened: dict[tuple[str, ...], Any] = {}
+        for key in value:
+            flattened.update(_mutation_diff_paths(value[key], prefix + (str(key),)))
+        return flattened
+    identity = _mutation_diff_identity(value)
+    if identity is not None:
+        keyed: dict[tuple[str, ...], Any] = {}
+        for item in value:
+            keyed.update(_mutation_diff_paths(item, prefix + (str(item[identity]),)))
+        return keyed
+    return {prefix: value}
+
+
+def _mutation_program_diff(
+    parent_program: Any,
+    child_program: Any,
+    *,
+    axis: str,
+) -> list[dict[str, Any]]:
+    """Every leaf the mutation actually moved, as previous → new."""
+
+    parent_paths = _mutation_diff_paths(parent_program)
+    child_paths = _mutation_diff_paths(child_program)
+    rows: list[dict[str, Any]] = []
+    for path in sorted(set(parent_paths) | set(child_paths)):
+        previous = parent_paths.get(path)
+        current = child_paths.get(path)
+        if path in parent_paths and path in child_paths and previous == current:
+            continue
+        rows.append(
+            {
+                "axis": axis,
+                "path": ".".join(path),
+                "name": path[-1] if path else axis,
+                "previous_value": sanitize_public_value(previous, text_limit=300),
+                "new_value": sanitize_public_value(current, text_limit=300),
+                "change_kind": (
+                    "added"
+                    if path not in parent_paths
+                    else "removed"
+                    if path not in child_paths
+                    else "changed"
+                ),
+            }
+        )
+    return rows
+
+
+def _mutation_explanation_projection(state: Any, candidate: Any, proposal: Any) -> dict[str, Any]:
+    """What this candidate changed relative to its parent, and why.
+
+    The candidate card used to show `changes` alone -- the child's own flat
+    `parameter_overrides`, with no parent value beside it and nothing at all
+    for a mutation that moved an instruction, a workflow parameter or a feature
+    recipe rather than a scalar. An expert asked to confirm a direction could
+    therefore see *that* a number was 0.4 but not what it had been, which axis
+    the model was working on, what it hoped the move would buy, or what else it
+    was allowed to touch that generation. All three are already in the ledger;
+    only the projection was missing.
+    """
+
+    metadata = proposal.metadata if isinstance(proposal.metadata, Mapping) else {}
+    explanation: dict[str, Any] = {
+        "available": False,
+        "reason": "historical_legacy_projection",
+        "operations": [],
+        "diff": [],
+    }
+    try:
+        child = state.persisted_genome_for(candidate.candidate_id)
+    except (KeyError, TypeError, ValueError):
+        return explanation
+    parent_candidate_id = proposal.parent_candidate_id
+    try:
+        parent = (
+            state.persisted_genome_for(parent_candidate_id)
+            if parent_candidate_id
+            else state.parent_genome_for_generation(candidate.generation)
+        )
+    except Exception:  # noqa: BLE001 - a missing parent degrades the panel, not the read
+        # `parent_genome_for_generation` raises on several shapes of incomplete
+        # history (RuntimeError for an unmaterialized seed, ValueError for an
+        # adaptive generation with no frozen parent). None of them should cost
+        # the expert the operation list and the direction, which do not need a
+        # parent at all.
+        parent = None
+
+    diff: list[dict[str, Any]] = []
+    if parent is not None:
+        parent_value = parent.to_dict()
+        child_value = child.to_dict()
+        for axis, key in (
+            ("scientific_program", "scientific_program"),
+            ("agent_program", "agent_program"),
+        ):
+            diff.extend(
+                _mutation_program_diff(
+                    parent_value.get(key),
+                    child_value.get(key),
+                    axis=axis,
+                )
+            )
+
+    # The host-validated operation list: the authoritative "what", already
+    # normalized by `apply_genome_mutation`. Unlike `changes` it names the
+    # operation, so a non-parameter mutation is no longer invisible.
+    operations: list[dict[str, Any]] = []
+    raw_operations = metadata.get("mutation_operations")
+    if isinstance(raw_operations, (list, tuple)):
+        axis_by_operation = _mutation_axis_by_operation()
+        for operation in raw_operations[:_MUTATION_EXPLANATION_OPERATION_LIMIT]:
+            if not isinstance(operation, Mapping):
+                continue
+            op = str(operation.get("op") or "")
+            operations.append(
+                {
+                    "op": op,
+                    "axis": axis_by_operation.get(op),
+                    "detail": {
+                        str(key): sanitize_public_value(
+                            operation[key],
+                            text_limit=300,
+                        )
+                        for key in sorted(operation)
+                        if key != "op"
+                    },
+                }
+            )
+
+    # The model's own reasoning for the move. `Proposal.rationale` on the
+    # native path is a fixed protocol sentence, so the direction is the only
+    # place an expert can read an actual hypothesis.
+    direction = metadata.get("candidate_direction")
+    direction_projection = (
+        {
+            name: sanitize_public_value(direction.get(name), text_limit=1600)
+            for name in (
+                "direction_id",
+                "title",
+                "hypothesis",
+                "target_weakness",
+                "capability_focus",
+                "mutation_axis",
+                "mutation_target",
+                "mutation_direction",
+                "expected_tradeoff",
+                "success_criterion",
+            )
+            if direction.get(name) is not None
+        }
+        if isinstance(direction, Mapping)
+        else None
+    )
+    if isinstance(direction, Mapping) and direction_projection is not None:
+        refs = direction.get("evidence_refs")
+        if isinstance(refs, (list, tuple)):
+            direction_projection["evidence_refs"] = [
+                sanitize_public_value(ref, text_limit=160) for ref in refs[:16]
+            ]
+
+    # What the generation was *allowed* to change. Recomputed from the parent
+    # genome because the set is never persisted -- only its digest reaches the
+    # ledger, via `lineage.mutation_budget_digest`. Showing it is what turns
+    # "it changed alpha" into "it changed alpha out of these five options",
+    # which is the difference between a receipt and something an expert can
+    # actually second-guess.
+    allowed: dict[str, list[str]] | None = None
+    task_manifest = getattr(state, "task_manifest", None)
+    if parent is not None and task_manifest is not None:
+        try:
+            from ..evolution.strategies import _registered_mutation_targets
+
+            targets = _registered_mutation_targets(task_manifest, parent)
+        except Exception:  # noqa: BLE001 - an advisory panel must never fail a read
+            targets = None
+        if targets:
+            allowed = {
+                axis: [
+                    str(target)
+                    for target in tuple(values)[
+                        :_MUTATION_EXPLANATION_TARGETS_PER_AXIS_LIMIT
+                    ]
+                ]
+                for axis, values in sorted(targets.items())[
+                    :_MUTATION_EXPLANATION_ALLOWED_AXES_LIMIT
+                ]
+            }
+
+    lineage = child.to_dict()["lineage"]
+    explanation = {
+        "available": True,
+        "parent_candidate_id": parent_candidate_id,
+        "parent_source": (
+            "persisted_candidate_genome"
+            if parent_candidate_id
+            else "generation_parent_genome"
+        ),
+        "parent_genome_available": parent is not None,
+        "origin_kind": lineage.get("origin_kind"),
+        "mutation_operator_id": lineage.get("mutation_operator_id"),
+        "mutation_digest": lineage.get("mutation_digest"),
+        "operations": operations,
+        "operation_count": (
+            len(raw_operations)
+            if isinstance(raw_operations, (list, tuple))
+            else len(operations)
+        ),
+        "diff": diff[:_MUTATION_EXPLANATION_DIFF_LIMIT],
+        "diff_count": len(diff),
+        "direction": direction_projection,
+        "allowed_mutation_targets": allowed,
+    }
+    return explanation
+
+
 def _candidate_projection(state: Any, candidate: Any, *, summary_only: bool = False) -> dict[str, Any]:
     proposal = state.proposal(candidate.proposal_id)
     evaluation = state.evaluation_for(candidate.candidate_id)
@@ -5260,6 +5564,9 @@ def _candidate_projection(state: Any, candidate: Any, *, summary_only: bool = Fa
             # The model plan is an advisory, JSON-only trace.  It is intentionally
             # projected separately from executable parameter changes.
             result["model_plan"] = _safe_plan_value(dict(proposal.metadata))
+        result["mutation_explanation"] = _mutation_explanation_projection(
+            state, candidate, proposal
+        )
     if evaluation is not None:
         result.update(
             {
@@ -5549,6 +5856,11 @@ _INTERVENTION_RECEIPT_DETAIL_FIELDS = (
     "operator",
     "bound",
     "target_candidate_id",
+    # Written by `advisory_only_receipts`: the Host did not move a parameter,
+    # but the expert's sentence did reach the proposer's context. Without these
+    # two the web UI could only show "仅记录", which reads as "ignored".
+    "model_context_delivered",
+    "host_did_not_enforce",
 )
 
 
@@ -5629,6 +5941,11 @@ def _intervention_projection(state: Any, item: HumanIntervention) -> dict[str, A
             "applied": "已应用",
             "enforced": "已强制执行",
         }[receipt["application_status"]]
+        if (
+            receipt["application_status"] == "recorded"
+            and receipt.get("model_context_delivered") is True
+        ):
+            status_text = "模型已读取（未强制执行）"
     return {
         **item.to_dict(),
         "id": item.intervention_id,
@@ -5709,6 +6026,7 @@ def _expert_consultation_projection(state: Any, item: Any) -> dict[str, Any]:
             if answer is not None
             else None
         ),
+        "persistent": answer is not None and answer.persistent is True,
     }
 
 

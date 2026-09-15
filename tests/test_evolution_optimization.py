@@ -11,6 +11,7 @@ from ecologyrsi_dsh.core.search_policy import SEARCH_GUARD_POLICY, local_challen
 from ecologyrsi_dsh.core.trajectory import FormalBatchArm, LocalEditOutcome
 from ecologyrsi_dsh.evaluators.fitness import FitnessProfile
 from ecologyrsi_dsh.evaluators.generation_comparison import _gate, _cell_gate
+from ecologyrsi_dsh.evaluators.sample_execution import _public_steps
 from ecologyrsi_dsh.evolution.champion_challenger import assess_local_challenger
 from ecologyrsi_dsh.evolution.local_edits import LocalEditContext, LocalEditProposal, apply_or_reject_local_edit_bundle
 from ecologyrsi_dsh.integrations.prediction_binding import DshPredictionToolBinding
@@ -104,8 +105,11 @@ class EvolutionOptimizationTests(unittest.TestCase):
             computations.append((tool, parameters))
             return {'s': {'predicted': 20., 'metadata': {}}}
         def binding(wave='w'):
+            # An explicit per-run budget, not the current default: what this test
+            # pins is that calls recovered by restore() still consume it.
             return DshPredictionToolBinding(run_id='r', stage_attempt=1, idempotency_key='k', wave_digest=wave,
-                sample_ids=['s'], catalog=[{'tool_id': 'ridge', 'version': '1', 'parameters': {'alpha': {'default': .1}}}], executor=execute)
+                sample_ids=['s'], catalog=[{'tool_id': 'ridge', 'version': '1', 'parameters': {'alpha': {'default': .1}}}], executor=execute,
+                budget=2)
         def call(current, call_id, parameters=None):
             return current.execute({'tool_id': 'ridge', 'call_id': call_id, 'wave_digest': current.wave_digest,
                 'parameters': parameters or {}}, session_id='agent', persist=lambda p: ledger.append('r', 'DshPredictionToolExecuted', p))
@@ -131,6 +135,44 @@ class EvolutionOptimizationTests(unittest.TestCase):
         call(binding('new-attempt'), 'four', {'alpha': .2})
         call(binding('other-origin'), 'five')
         self.assertEqual(len(computations), 3)
+
+    def test_rich_tool_metadata_cannot_make_the_host_reject_its_own_prediction(self):
+        # public_trace used to republish the tool's own metadata['parameters'],
+        # and a recipe tool reports a nested feature_recipe there. The per-cell
+        # evidence contract accepts only bounded finite numbers, so every origin
+        # whose planner called that tool was retried as invalid_output and one
+        # that called it on all three attempts was scored at a physical bound.
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        def execute(tool, parameters):
+            del parameters
+            if tool == 'broken':
+                raise ValueError('tool requires complete causal history')
+            return {'s': {'predicted': 20., 'metadata': {'parameters': {
+                'feature_recipe': {'terms': [{'op': 'target_lag', 'k': 24}]},
+                'ridge_alpha': .5, 'history_steps': 12, 'exogenous': ('par', 'rh'),
+            }}}}
+        binding = DshPredictionToolBinding(run_id='r', stage_attempt=1, idempotency_key='k', wave_digest='w',
+            sample_ids=['s'], executor=execute, origin_timestamp=1040895,
+            catalog=[{'tool_id': tool, 'version': '1', 'parameters': {}} for tool in ('recipe', 'broken')])
+        def call(tool, call_id):
+            return binding.execute({'tool_id': tool, 'call_id': call_id, 'wave_digest': 'w', 'parameters': {}},
+                session_id='agent', persist=lambda p: ledger.append('r', 'DshPredictionToolExecuted', p))
+        call('recipe', 'one')
+        failed = call('broken', 'two')
+        trace = binding.public_trace('s', evidence_call_ids=('one',))
+        # The very contract that used to reject the Host's accepted prediction.
+        self.assertEqual(_public_steps(trace, kind='tool', id_field='tool_id'), trace)
+        recipe, broken = (next(item for item in trace if item['tool_id'] == name)
+                          for name in ('recipe', 'broken'))
+        self.assertEqual(recipe['parameters'], {'history_steps': 12, 'ridge_alpha': .5})
+        self.assertEqual(recipe['tool_predicted'], 20.)
+        # A failed capability has to say why, or the planner spends the rest of
+        # its budget on a call that can never succeed.
+        for reason in (failed['error_detail'], broken['error_detail']):
+            self.assertEqual(reason, 'tool requires complete causal history')
+        self.assertEqual([event.payload['origin_timestamp'] for event in ledger.events('r')],
+                         [1040895, 1040895])
 
     def test_usage_only_updates_preserve_workspace_revision_and_terminal_session(self):
         def event(seq, kind, settlement=None):

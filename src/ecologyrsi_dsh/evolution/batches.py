@@ -48,6 +48,7 @@ from .analysis import (
     sample_update_windows_enabled,
 )
 from .genome import EcologyEvolutionPluginGenome, deep_thaw_json
+from .interventions import expert_directive_context
 from .schedule import (
     OPTIMIZATION_PROTOCOL,
     QUICK_OPTIMIZATION_PROTOCOL,
@@ -77,6 +78,23 @@ class ResearchResponseContractError(ValueError):
             validation_detail if validation_detail is not None else message,
             limit=500,
         )
+
+
+def _pending_expert_directives(state: Any) -> dict[str, Any] | None:
+    """The bounded advisory view of pending human directives, or nothing.
+
+    Returns `None` rather than an empty block so every caller can make the key
+    conditional: a run where no expert wrote anything must keep the exact stage
+    context digest it had before this channel existed.
+    """
+
+    directives = expert_directive_context(
+        [
+            item.to_dict()
+            for item in state.pending_interventions[:_EXPERT_PENDING_CONTEXT_LIMIT]
+        ]
+    )
+    return directives if directives["directives"] else None
 
 
 def _expert_collaboration_context(
@@ -123,12 +141,32 @@ def _expert_collaboration_context(
                 "answer": answer.answer,
                 "selected_option": answer.selected_option,
                 "effective_generation": answer.effective_generation,
+                # Only marked when true, so an ordinary one-off answer keeps the
+                # exact row shape it had before durable knowledge existed. The
+                # flag tells the planner this is a standing fact about the
+                # domain rather than a one-generation instruction, which is the
+                # difference between "use option B this round" and "night
+                # transpiration lags by two hours here".
+                **({"persistent": True} if answer.persistent else {}),
             }
         )
+    directives = _pending_expert_directives(state)
     context = {
         "mode": "asynchronous_non_blocking",
         "pending_consultations": pending_rows,
         "available_answers": answer_rows,
+        # The research call decides *where to look next*, which is exactly what
+        # an expert's own reasoning should be able to steer. Until this was
+        # added, a pending guidance/constraint/knowledge note only ever reached
+        # the far narrower `candidate.propose` stage, so the planner kept
+        # proposing directions the expert had already argued against. Omitted
+        # entirely -- not set to null -- when nobody wrote anything, so a run
+        # without interventions keeps its exact prior context digest.
+        **(
+            {"expert_directives": directives}
+            if directives is not None
+            else {}
+        ),
         "policy": {
             "answers_are_advisory_only": True,
             "answers_cannot_expand_data_or_tool_permissions": True,
@@ -392,6 +430,7 @@ def _ensure_generation_search_plan(
             run_state_revision=state.events[-1].seq,
             stage_attempt=attempt,
             ledger_expected_revision=director.ledger.latest_seq(),
+            expert_directives=_pending_expert_directives(state),
         )
         if not isinstance(search_plan, GenerationSearchPlan):
             raise TypeError("generation search planner must return GenerationSearchPlan")

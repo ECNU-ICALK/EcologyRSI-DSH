@@ -8,7 +8,19 @@ from .redaction import REMOTE_REASON_CODES
 
 AGENT_PREDICTION_SCHEMA = "ecology-sample-predictions@2"
 MAX_PREDICTION_CALLS = 6  # Maximum receipt size; admission sets the execution budget.
-PREDICTION_TOOL_CALL_BUDGET = 2
+# The execution budget a NEW run freezes into its Agent policy. It is not read
+# directly at execution time: every run carries its own value in
+# agent_policy["inference"]["max_tool_calls_per_attempt"], and
+# rebind_agent_policy preserves it, so raising this default cannot invalidate an
+# archived artifact. Two left a planner that wants to `blend` -- which needs two
+# successful results (see below) -- no slack to probe any predictor, because a
+# failed call still consumes budget; observed runs spent all of it and then cited
+# evidence they never received.
+PREDICTION_TOOL_CALL_BUDGET = 4
+# Every method the schema knows. A candidate that authored a directive narrows
+# this set for itself through `blend_rule`; the default is the full set, so a
+# genome that authored nothing is validated exactly as before.
+PREDICTION_METHODS = frozenset({"direct", "model", "blend", "adjusted"})
 
 
 def successful_agent_provenance_passes(sample):
@@ -21,7 +33,13 @@ def successful_agent_provenance_passes(sample):
     return value is True
 
 
-def validate_predictions(value, sample_ids: Sequence[str], *, wave_digest: str):
+def validate_predictions(value, sample_ids: Sequence[str], *, wave_digest: str, allowed_methods=None):
+    if allowed_methods is None:
+        permitted = PREDICTION_METHODS
+    else:
+        permitted = frozenset(allowed_methods)
+        if not permitted or not permitted <= PREDICTION_METHODS:
+            raise ValueError("allowed prediction methods are invalid")
     if not isinstance(value, Mapping) or set(value) != {"schema_version", "wave_digest", "decisions"}:
         raise ValueError("agent prediction result fields are invalid")
     if value["schema_version"] != AGENT_PREDICTION_SCHEMA or value["wave_digest"] != wave_digest:
@@ -45,8 +63,14 @@ def validate_predictions(value, sample_ids: Sequence[str], *, wave_digest: str):
                 raise ValueError(f"agent {name} must be finite")
         if not 0 <= row["confidence"] <= 1:
             raise ValueError("agent confidence must be in [0, 1]")
-        if row["method"] not in {"direct", "model", "blend", "adjusted"}:
+        if row["method"] not in PREDICTION_METHODS:
             raise ValueError("unknown agent prediction method")
+        if row["method"] not in permitted:
+            # The candidate's own authored blend_rule, enforced rather than
+            # merely stated in the prompt. A directive that says "do not blend"
+            # is a constraint the host can score, which is what separates this
+            # clause from the strategy clauses beside it.
+            raise ValueError("agent prediction method is outside the candidate's directive")
         if row["reason_code"] not in REMOTE_REASON_CODES:
             raise ValueError("agent reason code is invalid")
         refs = row["evidence_call_ids"]
@@ -96,12 +120,23 @@ def validate_prediction_receipt(structured, receipt, *, event_lookup, identity, 
 
 
 def validate_tool_event(p):
-    if not isinstance(p, Mapping) or set(p) != {
+    # `origin_timestamp` is optional: it names the forecast origin a wave served,
+    # which the payload never carried, so reading the ledger could not tell which
+    # origin a tool call belonged to without joining through sample_ids. Archived
+    # events predate it and stay valid; it is outside `arguments`, so neither
+    # `request_digest` nor the reuse comparison in the binding is affected.
+    if not isinstance(p, Mapping) or set(p) - {"origin_timestamp"} != {
         "schema_version", "stage", "stage_attempt", "idempotency_key", "tool_id", "wave_digest",
         "sample_ids", "prediction_count", "request_digest", "output_digest", "execution_owner",
         "call_id", "arguments", "result"
     } or p["schema_version"] != "ecologyrsi-dsh.dsh-prediction-tool-executed/2":
         raise ValueError("prediction tool event schema is invalid")
+    if "origin_timestamp" in p and (
+        isinstance(p["origin_timestamp"], bool)
+        or not isinstance(p["origin_timestamp"], (str, int, float))
+        or (isinstance(p["origin_timestamp"], str) and not 0 < len(p["origin_timestamp"]) <= 64)
+    ):
+        raise ValueError("prediction tool event origin is invalid")
     if p["stage"] != "sample.plan" or p["execution_owner"] != "dsh_agent_tool_call":
         raise ValueError("prediction tool event owner is invalid")
     result = p["result"]

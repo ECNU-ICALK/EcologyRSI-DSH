@@ -454,8 +454,13 @@ class DshStructuredRoleTests(unittest.TestCase):
                 {
                     "op": "set_instruction_parameter",
                     "role": "sample-planner",
+                    # The contract's upper bound: `confidence_threshold` is the
+                    # planner's live critic-escalation threshold, so its bounds
+                    # are the cost window [0.5, 0.75] rather than [0, 1]. Any
+                    # value inside it serves this test, which is about pairing a
+                    # historical parameter set with a new agent behaviour.
                     "name": "confidence_threshold",
-                    "value": 0.8,
+                    "value": 0.75,
                 },
             ],
         }

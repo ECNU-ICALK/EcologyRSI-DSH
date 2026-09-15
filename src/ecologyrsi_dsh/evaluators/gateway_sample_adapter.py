@@ -8,7 +8,7 @@ decisions are microbatched; only sparse failed samples enter the repair role.
 from __future__ import annotations
 
 from .sample_contracts import (
-    _ALWAYS_CRITIC_POLICY, _CAUSAL_PROVENANCE_SCHEMA_VERSION, _FORBIDDEN_OUTCOME_KEYS, _FORBIDDEN_OUTCOME_TOKENS, _MAX_GATEWAY_PAYLOAD_BYTES, _SAMPLE_OPERATION_MAX_TOKENS, _UNCERTAIN_OR_FAILURE_CRITIC_POLICY, _causal_wave_identity, _normalized_operation_max_tokens, _normalized_remote_critic_policy, _normalized_timestamp, _safe_mapping, _safe_value,
+    _ALWAYS_CRITIC_POLICY, _causal_wave_identity, _normalized_operation_max_tokens, _normalized_remote_critic_policy, _safe_mapping,
 )
 
 import math

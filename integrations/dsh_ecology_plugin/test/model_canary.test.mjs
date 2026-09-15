@@ -7,7 +7,7 @@ import { STAGES } from "../lib/runtime/stage-runner.js";
 function request(stage = "generation.search-plan") {
   return { schema_version: CANARY_SCHEMA,
     identity: { provider_id: "provider", model_id: "model", stage, role: STAGES[stage]?.role || "sample-planner",
-      preset_id: ({"generation.reflect":"ecology-generation-judge-v8", "sample.plan":"ecology-sample-planner-v9", "sample.critic":"ecology-sample-critic-v5"})[stage] || "ecology-researcher-v12", output_schema_id: STAGES[stage]?.schema,
+      preset_id: ({"generation.reflect":"ecology-generation-judge-v8", "sample.plan":"ecology-sample-planner-v11", "sample.critic":"ecology-sample-critic-v5"})[stage] || "ecology-researcher-v13", output_schema_id: STAGES[stage]?.schema,
       preset_content_digest: "a".repeat(64), standing_tool_surface_digest: "b".repeat(64), route_config_digest: "c".repeat(64) },
     bounds: { max_attempts: 2, max_output_tokens: 1024, max_reported_tokens: 30000, total_timeout_ms: 1000, ttl_seconds: 3600 } };
 }

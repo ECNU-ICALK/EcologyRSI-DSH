@@ -8,9 +8,11 @@ import unittest
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.core.trajectory import EvaluationScope, EvaluationPhase, HoldoutArm, HoldoutEvaluation
-from ecologyrsi_dsh.evolution.agent_policy import build_agent_policy, summarize_agent_tools, prior_candidate_tool_experience
+from ecologyrsi_dsh.core.agent_prediction import MAX_PREDICTION_CALLS, PREDICTION_TOOL_CALL_BUDGET
+from ecologyrsi_dsh.evolution.agent_policy import build_agent_policy, rebind_agent_policy, summarize_agent_tools, prior_candidate_tool_experience
 from ecologyrsi_dsh.evaluators.agent_stability import replica_summary, stability_evidence, paired_stability_gate
 from ecologyrsi_dsh.evaluators.agent_model_tools import AgentModelTools
+from ecologyrsi_dsh.evaluators.greenhouse_prediction import SEED_RECIPE_HISTORY_HOURS
 from ecologyrsi_dsh.evaluators.sample_execution import SampleExecutionPausedError, _validated_result
 from tests import test_agent_model_tools as model_fixtures
 from tests import test_agent_owned_prediction as agent_fixtures
@@ -59,6 +61,55 @@ class AgentPolicyRefactorTests(unittest.TestCase):
         self.assertEqual(learned['experience']['rows'], evidence)
         with self.assertRaisesRegex(ValueError, 'precede'):
             build_agent_policy(**args, previous_analysis={'generation': 2})
+
+    def test_rebinding_an_archived_policy_keeps_its_own_execution_budget(self):
+        # registry.py rebuilds the Agent policy with the CURRENT code and refuses
+        # the artifact when it differs, so re-reading PREDICTION_TOOL_CALL_BUDGET
+        # here would make every run frozen under an older budget unscorable.
+        args = dict(genome_digest='a'*64, profile={}, parameters={})
+        archived = build_agent_policy(**args, previous_analysis=None, generation=0,
+                                      prediction_tool_call_budget=2)
+        self.assertEqual(archived['inference']['max_tool_calls_per_attempt'], 2)
+        rebound = rebind_agent_policy(archived, **args)
+        self.assertEqual(rebound['inference']['max_tool_calls_per_attempt'], 2)
+        self.assertEqual(rebound['policy_digest'], archived['policy_digest'])
+        # A fresh run takes the current default, and that is a different identity.
+        fresh = build_agent_policy(**args, previous_analysis=None, generation=0)
+        self.assertEqual(fresh['inference']['max_tool_calls_per_attempt'],
+                         PREDICTION_TOOL_CALL_BUDGET)
+        self.assertNotEqual(fresh['policy_digest'], archived['policy_digest'])
+        self.assertEqual(rebind_agent_policy(None, **args)['inference'][
+            'max_tool_calls_per_attempt'], PREDICTION_TOOL_CALL_BUDGET)
+        for invalid in (0, MAX_PREDICTION_CALLS + 1, 2.0, True):
+            with self.assertRaisesRegex(ValueError, 'budget'):
+                build_agent_policy(**args, previous_analysis=None, generation=0,
+                                   prediction_tool_call_budget=invalid)
+
+    def test_the_contract_shown_to_the_agent_matches_the_enforced_budget(self):
+        # The prose the planner reads and the ceiling the binding enforces are
+        # one frozen value, so the contract cannot promise a call the binding
+        # refuses, nor hide one it would allow.
+        fixture = agent_fixtures.AgentOwnedPredictionTests()
+        self.addCleanup(fixture.doCleanups)
+        archived = build_agent_policy(genome_digest='a'*64, profile={}, parameters={},
+                                      previous_analysis=None, generation=0,
+                                      prediction_tool_call_budget=2)
+        def policy(c, call):
+            contract = c['context']['prediction_contract']
+            self.assertEqual(contract['max_prediction_tool_calls'], 2)
+            self.assertIn('2 is the hard call limit', contract['analysis_stopping_rule'])
+            self.assertEqual(call('candidate-model', 'a')['remaining_calls'], 1)
+            self.assertEqual(call('persistence', 'b')['remaining_calls'], 0)
+            with self.assertRaisesRegex(ValueError, 'budget'):
+                call('candidate-model', 'c')
+            return result(c, method='blend', refs=('a', 'b'))
+        adapter, _, _, ledger = fixture.setup_agent(policy)
+        plan = adapter.plan_batch({'run_id': 'run-agent', 'candidate_id': 'candidate-1',
+            'algorithm_id': 'registered-predictor', 'algorithm_version': '1',
+            'agent_policy': archived})
+        outcome = fixture.predict(adapter, plan)
+        self.assertIsNone(outcome.error)
+        self.assertEqual(len(ledger.events_by_kind('run-agent', 'DshPredictionToolExecuted')), 2)
 
     def test_formal_experience_survives_final_holdout_without_using_holdout_labels(self):
         tool = {'tool_id': 'ridge', 'evidence_kind': 'raw_tool_output', 'source_phase': 'formal_batch', 'mae': 3.}
@@ -140,11 +191,20 @@ class AgentPolicyRefactorTests(unittest.TestCase):
         series = periodic_series()
         config = ExogenousRidgeConfig(6,.1,.5)
         fit = fit_predict_exogenous_ridge(series, targets=('air_temperature',), horizons=(1,), config=config)
-        bank = AgentModelTools(series, targets=('air_temperature',), horizons=(1,))
+        # A deployed candidate advertises its own evolved parameters as the
+        # default model, so the exported catalog must be built that way too.
+        # The cohort alignment is part of that contract: the catalog only
+        # advertises numerical tools this depth can serve at every origin, so
+        # the bundle has to carry it or the redeployed bank would rebuild a
+        # different catalog and reject its own export.
+        bank = AgentModelTools(series, targets=('air_temperature',), horizons=(1,),
+                               default_fit=fit, default_config=config,
+                               origin_history_alignment=SEED_RECIPE_HISTORY_HOURS)
         policy = build_agent_policy(genome_digest='a'*64, profile={}, parameters=config.to_dict(), previous_analysis=None, generation=0)
         contract = {'strategy_model_id':'dsh/strategy', 'review_model_id':'dsh/review'}
         artifact = SimpleNamespace(learned_parameters={'models':fit['models'], 'agent_policy':policy,
-            'runtime_contract':contract, 'training_data_digest':bank.training_digest, 'optional_tool_catalog':bank.catalog()},
+            'runtime_contract':contract, 'training_data_digest':bank.training_digest, 'optional_tool_catalog':bank.catalog(),
+            'origin_history_alignment_hours': SEED_RECIPE_HISTORY_HOURS},
             model_id='greenhouse-exogenous-ridge@1', parameters=config.to_dict(), digest='c'*64)
         bundle = export_policy_bundle(artifact)
         with TemporaryDirectory() as tmp:

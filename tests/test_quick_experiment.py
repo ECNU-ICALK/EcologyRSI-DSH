@@ -1,6 +1,7 @@
 """Quick epochs retain causal evidence while removing repeated candidate work."""
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 from dataclasses import replace
 from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
 from ecologyrsi_dsh.evaluators.epoch_cohorts import plan_run_adaptation_cohort, plan_generation_selection_cohorts
@@ -95,3 +96,87 @@ class QuickTrajectoryTests(unittest.TestCase):
         })
         self.assertEqual(len(holdout.arm_bindings), 2)
         self.assertEqual(self.director.state(self.run_id).generation_holdout_for(0), holdout)
+        # The final batch must not author a revision that this trajectory never
+        # scored, so completion can only promote the last measured revision.
+        self.assertFalse([
+            revision.revision_id
+            for revision in state.candidate_revisions
+            if revision.candidate_id == candidate_id
+            and revision.source_batch_index is not None
+            and revision.source_batch_index >= self.schedule.batch_count - 1
+        ])
+        self.assertEqual(
+            trajectory.final_revision_id,
+            state.formal_batch_for(candidate_id, self.schedule.batch_count - 1).revision_id,
+        )
+
+    def test_prequential_score_regression_rolls_back_through_the_real_ledger(self):
+        """A real ledger accepts the regression rollback and keeps a measured revision."""
+        candidate_id = self.finalist.candidate_id
+        scores = {0: 0.50, 1: 0.50, 2: 0.10}
+        evaluate = self.evaluator.evaluate_scientific
+
+        def scored_batch(*args, **kwargs):
+            result = evaluate(*args, **kwargs)
+            score = scores[int(kwargs["scope"].batch_index)]
+            result.evaluation.score = score
+            result.evaluation.metrics["objective_score"] = score
+            for target in result.evaluation.metrics["targets"]:
+                target["skill_score"] = score
+            return result
+
+        def distinct_edit(*_args, **_kwargs):
+            from ecologyrsi_dsh.evolution.local_edits import LocalEditProposal
+
+            distinct_edit.calls += 1
+            return LocalEditProposal(
+                decision="mutate",
+                operations=(
+                    {
+                        "op": "set_bounded_parameter",
+                        "name": "ridge_alpha",
+                        "value": 0.1 * distinct_edit.calls,
+                    },
+                ),
+                evidence_refs=("batch:score",),
+                expected_effect_cells=("air_temperature@1h",),
+                risk_cells=(),
+            )
+
+        distinct_edit.calls = 0
+        patches = self._execution_patches(self._mutate_proposal())
+        with patches[0], patches[1], patches[2], patches[3], patch.object(
+            formal_trajectory, "_local_edit_proposal", side_effect=distinct_edit
+        ), patch.object(
+            self.evaluator, "evaluate_scientific", side_effect=scored_batch
+        ):
+            for _ in range(self.schedule.batch_count):
+                self.assertTrue(formal_trajectory.execute_next_formal_batch(self.endpoint.server, self.run_id, candidate_id))
+                self.assertTrue(formal_trajectory.execute_next_local_edit(self.endpoint.server, self.run_id, candidate_id))
+
+        # Batch 2 fell far outside the lane's own realized volatility, so the
+        # edit authored on batch 1 is undone instead of being built upon.
+        self.assertEqual(distinct_edit.calls, 2)
+        state = self.director.state(self.run_id)
+        final_batch = self.schedule.batch_count - 1
+        parent_revision_id = state.formal_batch_for(candidate_id, final_batch - 1).revision_id
+        outcome = next(
+            item
+            for item in state.local_edit_outcomes
+            if item["candidate_id"] == candidate_id
+            and item["batch_index"] == final_batch
+        )
+        self.assertEqual(outcome["outcome"], "rolled_back")
+        self.assertEqual(outcome["reason"], "score_regression_guardrail_failed")
+        self.assertEqual(
+            state.local_edit_proposal_for(candidate_id, final_batch)["safety_reason"],
+            "score_regression_guardrail_failed",
+        )
+        activation = state.revision_activation_for(candidate_id, final_batch)
+        self.assertEqual(activation.reason.value, "prequential_safety_rollback")
+        self.assertEqual(activation.to_revision_id, parent_revision_id)
+        trajectory = state.trajectory_for(candidate_id)
+        self.assertEqual(trajectory.status, TrajectoryStatus.COMPLETED)
+        # The promoted revision is the one batch 1 actually measured.
+        self.assertEqual(trajectory.final_revision_id, parent_revision_id)
+        self.assertIsNotNone(state.batch_evaluation_for(candidate_id, final_batch - 1))

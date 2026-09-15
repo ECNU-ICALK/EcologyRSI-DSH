@@ -13,6 +13,7 @@ import tempfile
 
 from . import greenhouse_prediction as ridge
 from .feature_recipe import recipe_grammar
+from .feature_recipe import servable_recipe_grammar
 from ..core.models import digest
 from .sample_execution import SampleExecutionCancelledError, SampleExecutionPausedError
 
@@ -45,9 +46,17 @@ def _defaults(config_type, horizons=(1, 6, 24)):
 class AgentModelTools:
     CACHE_CAPACITY = 8
 
-    def __init__(self, series, *, targets, horizons, control=None, cache_dir=None, default_fit=None, default_config=None):
+    def __init__(self, series, *, targets, horizons, control=None, cache_dir=None, default_fit=None, default_config=None,
+                 origin_history_alignment=None):
         self.series, self.targets, self.horizons = series, tuple(targets), tuple(horizons)
         self.control = control
+        # The run's frozen cohort alignment: the one depth this bank both
+        # advertises and can serve. Counted the way the cohort planner counts it
+        # -- observations including the origin -- so it is one more than the
+        # deepest lag a recipe may read. ``None`` keeps the historical behaviour
+        # for callers that hold no run (the exported policy bundle carries the
+        # value so a redeployed policy advertises the contract it was fitted at).
+        self.origin_history_alignment = origin_history_alignment
         fit_range = series.partitions['training_fit']
         self.training_digest = digest({'timestamps': series.timestamps[fit_range.start:fit_range.end],
             'values': {name: values[fit_range.start:fit_range.end] for name, values in series.values.items()},
@@ -58,34 +67,87 @@ class AgentModelTools:
         self._index = {t: i for i, t in enumerate(series.timestamps)}
         self._filled = None
         self._plans = {}
-        if default_fit is not None and default_config is not None and all(m['status'] != 'baseline_only' for m in default_fit['models']):
-            tool_id = next(name for name, cls in _CONFIGS.items() if type(default_config) is cls)
-            key, _ = self._fit_identity(tool_id, default_config)
+        # The candidate's evolved parameters are its *default model*: the tool
+        # entry they belong to advertises them, and an empty ``parameters``
+        # object selects them.  Advertising the package defaults instead made an
+        # empty call silently discard the whole genome, so no evolved
+        # ``scientific_parameter`` value could ever reach a prediction.
+        self._default_config = default_config
+        self._default_tool_id = next(
+            (name for name, cls in _CONFIGS.items() if type(default_config) is cls), None
+        ) if default_config is not None else None
+        if (default_fit is not None and self._default_tool_id is not None
+                and all(m['status'] != 'baseline_only' for m in default_fit['models'])):
+            key, _ = self._fit_identity(self._default_tool_id, default_config)
             self._fits[key] = {k: default_fit[k] for k in ('models', 'baseline_profile') if k in default_fit}
+
+    def _tool_defaults(self, tool_id):
+        """Return this tool's default parameters for the current candidate.
+
+        The candidate default is also the fit the batch backend already
+        computed, so selecting it costs no additional fit.
+        """
+        if tool_id == self._default_tool_id and self._default_config is not None:
+            return self._default_config.to_dict()
+        return _defaults(_CONFIGS[tool_id], self.horizons)
+
+    def _servable(self, recipe):
+        """Whether every cell of this recipe fits the run's guaranteed history.
+
+        The compile ceiling used to be the 48-hour package constant while the
+        cohort only guaranteed the run's alignment, so the seed recipe -- which
+        reaches 24 hours back -- was advertised to Agents in 12-hour runs,
+        accepted, and then raised 'tool requires complete causal history' at
+        every origin inside the first day of the feedback partition. Deciding it
+        once here means the Agent never spends a call on a capability this run
+        cannot serve, and a run that wants recipes freezes the deeper alignment
+        on purpose.
+        """
+        if self.origin_history_alignment is None:
+            return True
+        for target in self.targets:
+            for horizon in self.horizons:
+                try:
+                    ridge.compile_feature_plan(
+                        recipe, series=self.series, target=target, horizon_hours=horizon,
+                        allowed_roles=ridge._ALLOWED_EXOGENOUS_ROLES,
+                        origin_history_alignment=self.origin_history_alignment,
+                    )
+                except ValueError:
+                    return False
+        return True
 
     def catalog(self):
         entries = []
         for name, config in _CONFIGS.items():
+            candidate_default = name == self._default_tool_id
+            purpose_suffix = (
+                '; these defaults are this candidate\'s own evolved model'
+                if candidate_default else ''
+            )
             if config is ridge.RecipeRidgeConfig:
                 # The recipe tool advertises the primitive whitelist itself, so
                 # the Agent reads the same bounds the host enforces instead of
                 # guessing from a scalar range that does not apply.
+                default = self._tool_defaults(name)['feature_recipe']
+                if not self._servable(default):
+                    continue
                 entries.append({
                     'tool_id': name, 'version': '1',
-                    'purpose': 'Ridge over a declarative feature recipe; the host compiles and bounds every primitive',
+                    'purpose': 'Ridge over a declarative feature recipe; the host compiles and bounds every primitive' + purpose_suffix,
                     'parameters': {'feature_recipe': {
-                        'default': _defaults(config, self.horizons)['feature_recipe'],
-                        'type': 'object', 'grammar': recipe_grammar(),
+                        'default': default,
+                        'type': 'object', 'grammar': servable_recipe_grammar(self.origin_history_alignment),
                     }},
                 })
                 continue
             entries.append({
                 'tool_id': name, 'version': '1',
-                'purpose': 'Optional ridge fitted only on training_fit; parameters are selected by the Agent',
+                'purpose': 'Optional ridge fitted only on training_fit; parameters are selected by the Agent' + purpose_suffix,
                 'parameters': {key: {'default': value, 'minimum': 1 if key == 'history_steps' else .0001 if key == 'ridge_alpha' else 0,
                                      'maximum': 12 if key == 'history_steps' else 1,
                                      'type': 'integer' if key == 'history_steps' else 'number'}
-                               for key, value in _defaults(config, self.horizons).items()},
+                               for key, value in self._tool_defaults(name).items()},
             })
         return entries
 
@@ -152,7 +214,11 @@ class AgentModelTools:
         """Compile (and memoize) the recipe read plan for one cell.
 
         The plan is the single source of the required offsets, so this path and
-        the batch fit path cannot drift into reading different history.
+        the batch fit path cannot drift into reading different history. It is
+        compiled against the run's own alignment, not the 48-hour package
+        ceiling: compiling against the ceiling accepted recipes the frozen
+        cohort could not serve, which then failed one origin at a time instead
+        of once, legibly, at the call the Agent made.
         """
         if not isinstance(config, ridge.RecipeRidgeConfig):
             return None
@@ -161,7 +227,8 @@ class AgentModelTools:
             self._plans[key] = ridge.compile_feature_plan(
                 config.recipe, series=self.series, target=target,
                 horizon_hours=horizon_hours, allowed_roles=ridge._ALLOWED_EXOGENOUS_ROLES,
-                max_history_hours=ridge.COHORT_HISTORY_HOURS,
+                origin_history_alignment=(ridge.COHORT_HISTORY_HOURS if self.origin_history_alignment is None
+                                          else self.origin_history_alignment),
             )
         return self._plans[key]
 
@@ -201,7 +268,7 @@ class AgentModelTools:
 
     def execute(self, requests, tool_id, parameters):
         self._check_control()
-        config = _CONFIGS[tool_id].from_mapping({**_defaults(_CONFIGS[tool_id], self.horizons), **parameters})
+        config = _CONFIGS[tool_id].from_mapping({**self._tool_defaults(tool_id), **parameters})
         key, fit_config = self._fit_identity(tool_id, config)
         with self._lock:
             if key not in self._fits:

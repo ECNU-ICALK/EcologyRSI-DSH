@@ -18,14 +18,17 @@ from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
+from ..core.errors import DshNativeRuntimeUnavailableError
 from ..core.model_execution_policy import research_execution_policy
 from ..core.models import Proposal, Run, TaskManifest, canonical_json, digest
 from ..core.protocols import is_strict_origin_protocol
 from ..core.redaction import public_error_summary, public_exception_summary
+from ..evaluators.authored_directive import AUTHORED_DIRECTIVE_POLICY_ID
 from ..evaluators.greenhouse_prediction import (
     BASELINE_ALIGNED_RIDGE_MODEL_ID,
     EXOGENOUS_RIDGE_MODEL_ID,
     HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
+    RECIPE_RIDGE_MODEL_ID,
     TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
 )
 from ..integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
@@ -39,11 +42,21 @@ from ..knowledge.algorithms import (
 )
 from ..knowledge.autonomous_cycle import (
     AUTONOMOUS_RESEARCH_PROTOCOL,
+    CANDIDATE_MUTATION_AXES,
     CandidateDirection,
     GENERATION_REFLECTION_SCHEMA_VERSION,
+    # The axis catalog lives in `autonomous_cycle` because that module validates
+    # a proposed direction against it and cannot import from here -- this file
+    # already imports from there. Re-exported below so both callers can keep
+    # reading it off `strategies`, which is where the local-edit side and its
+    # tests have always looked for it.
+    MUTATION_AXIS_EFFECTS,
+    MUTATION_DIRECTIONS_BY_AXIS,
+    MUTATION_OPERATION_BY_AXIS,
     SEARCH_PLAN_SCHEMA_VERSION,
     GenerationReflection,
     GenerationSearchPlan,
+    mutation_axis_contract,
     normalize_candidate_directions,
     normalize_search_queries,
     reject_executable_fields,
@@ -72,12 +85,14 @@ from .genome import (
     parameter_trust_region_neighborhood,
 )
 from .agent_policy import build_agent_policy
+from .interventions import apply_bounded_interventions, expert_directive_context
 from .parameter_activity import (
     parameter_activity_contract,
 )
 from .research_context import compact_research_context, research_report_size_diagnostics
 from .workflow_ir import (
     DEFAULT_COMPILER_SEMANTIC_DIGEST,
+    EXECUTABLE_WORKFLOW_PARAMETERS,
     compile_plugin_behavior,
     resolve_candidate_agent_profile,
 )
@@ -98,6 +113,12 @@ _HISTORICAL_PARAMETER_GUARDRAIL_SELECTION_POLICY = (
 _NATIVE_AVOID_BEHAVIOR_LIMIT = 8
 _NATIVE_MAX_PROPOSAL_ATTEMPTS = 4
 _NATIVE_MAX_SEMANTIC_CONTRACT_ATTEMPTS = 2
+# A `max-tokens` terminal is not a repairable output; it is a turn that never
+# produced one. The Host owns the only correction that can change the outcome,
+# so it is carried through the same bounded repair loop as a semantic rejection.
+_OUTPUT_BUDGET_ERROR_CODE = "structured_child_output_budget_exhausted"
+_OUTPUT_BUDGET_REJECTION_CODE = "output_budget_exhausted_before_structured_output"
+_DEFAULT_SYNTHESIS_MAX_OUTPUT_TOKENS = 8192
 _FORECAST_CONTEXT_MAX_TARGETS = 32
 _FORECAST_CONTEXT_MAX_HORIZONS = 32
 _FORECAST_CONTEXT_MAX_CELLS = 256
@@ -322,6 +343,35 @@ def _host_validation_feedback(
             "rejected_evidence_refs and do not repeat the rejected output."
         )
     return feedback
+
+
+def _output_budget_feedback(*, attempt: int, max_output_tokens: int) -> dict[str, Any]:
+    """Turn one budget-exhausted turn into a correctable Host rejection.
+
+    A `max-tokens` terminal means the child spent its whole single-call output
+    budget reasoning and never called `structured_output`, so there is no
+    rejected output to digest and nothing the model can learn from the failure
+    alone.  Naming the exact budget and the ordering it violated changes the
+    request, which is what `retry_identical_exhausted_request: False` requires:
+    the frozen policy forbids replaying the same request, not repairing it.
+    """
+
+    return {
+        "schema_version": "ecologyrsi-dsh.host-validation-feedback/1",
+        "rejection_code": _OUTPUT_BUDGET_REJECTION_CODE,
+        "validation_detail": (
+            f"The previous attempt spent its entire {max_output_tokens}-token "
+            "single-response output budget on reasoning and ended without "
+            "calling structured_output, so it produced no result."
+        ),
+        "rejected_attempt": attempt,
+        "output_token_budget": max_output_tokens,
+        "required_action": (
+            "Call structured_output first with one complete object, then stop. "
+            "Keep every field at its concise target and do not draft or "
+            "restate the analysis in prose before that call."
+        ),
+    }
 
 
 def _native_evolution_reflection_from_experience(
@@ -763,9 +813,15 @@ def _deterministic_fallback_directions(
 ) -> list[dict[str, Any]]:
     """Materialize bounded directions when research recovery has no model list."""
 
+    # Ordered by the shared axis catalog rather than a literal tuple, so opening
+    # an axis for candidate proposals also makes it reachable from the recovery
+    # path instead of quietly leaving the fallback one generation behind. The
+    # catalog's order puts the three long-standing axes first, so a small `count`
+    # still yields exactly the directions it yielded before.
     options = [
         (axis, target)
-        for axis in ("scientific_parameter", "registered_predictor", "instruction_profile")
+        for axis in MUTATION_OPERATION_BY_AXIS
+        if axis in CANDIDATE_MUTATION_AXES
         for target in allowed_targets.get(axis, ())
     ]
     if not options:
@@ -781,12 +837,162 @@ def _deterministic_fallback_directions(
             "capability_focus": "registered_host_capabilities",
             "mutation_axis": axis,
             "mutation_target": target,
-            "mutation_direction": "select" if axis != "scientific_parameter" else "increase",
+            # The catalog lists each axis's legal directions; the first one is the
+            # conservative reading for every axis it covers -- `select` where the
+            # axis picks a registered program, `increase` where it moves a scalar.
+            "mutation_direction": MUTATION_DIRECTIONS_BY_AXIS[axis][0],
             "evidence_refs": [],
             "expected_tradeoff": "保持当前预测器和评测边界不变，等待下一轮真实样本反馈。",
             "success_criterion": "候选可编译、样本覆盖完整且不降低既有门禁证据。",
         })
     return directions
+
+
+def _registered_scalar_axis_targets(
+    genome: EcologyEvolutionPluginGenome, axis: str
+) -> tuple[str, ...]:
+    """The legal targets on one registry-bounded scalar axis.
+
+    Shared by the generation-level proposer and the batch-local editor so the two
+    can never advertise a different set of knobs for the same axis. Both filters
+    below are deliberate:
+
+    * ``workflow_parameter`` is narrowed to the parameters a Host component
+      actually reads. The template also declares ``max_concurrent`` and
+      ``wave_size``, which nothing consumes; advertising them spends a
+      proposal's single operation on an edit no measurement can attribute.
+    * ``instruction_parameter`` is read off the sample-planner profile, which is
+      the role both mutation paths pin. ``sample-repair@1`` declares no
+      parameters, so this is the whole reachable set rather than a restriction.
+    """
+
+    execution = genome.agent_program["candidate_execution_program"]
+    registry = current_program_registry()
+    if axis == "workflow_parameter":
+        template = registry.program(
+            "workflow_templates", str(execution["workflow_template_ref"]["id"])
+        )
+        return tuple(
+            sorted(
+                name
+                for name in template["parameters"]
+                if name in EXECUTABLE_WORKFLOW_PARAMETERS
+            )
+        )
+    if axis == "instruction_parameter":
+        profile = next(
+            (
+                item
+                for item in execution["role_profiles"]
+                if item["role"] == "sample-planner"
+            ),
+            None,
+        )
+        if profile is None:
+            return ()
+        template = registry.program(
+            "instruction_templates", str(profile["instruction_template_ref"]["id"])
+        )
+        return tuple(sorted(template["parameters"]))
+    raise ValueError(f"unsupported registered scalar mutation axis: {axis}")
+
+
+def _registered_scalar_axis_contract(
+    parent: EcologyEvolutionPluginGenome, axis: str, target: str
+) -> tuple[Mapping[str, Any] | None, Any]:
+    """The registered contract and the parent's effective value for one axis.
+
+    Covers the two scalar axes whose bounds live in the program registry rather
+    than in the frozen parameter boundary. The effective value falls back to the
+    registered default when the genome carries no override, and that fallback is
+    load-bearing rather than defensive: ``select_instruction_template`` clears a
+    role profile's ``instruction_parameters`` outright, so right after a template
+    switch the default *is* the value the run would use.
+
+    Returns ``(None, None)`` when the axis or the target is not something this
+    parent can express, which every caller reads as "no legal move here".
+    """
+
+    execution = parent.to_dict()["agent_program"]["candidate_execution_program"]
+    registry = current_program_registry()
+    if axis == "workflow_parameter":
+        template = registry.program(
+            "workflow_templates", str(execution["workflow_template_ref"]["id"])
+        )
+        overrides = execution["workflow_overrides"]
+    elif axis == "instruction_parameter":
+        profile = next(
+            (
+                item
+                for item in execution["role_profiles"]
+                if item["role"] == "sample-planner"
+            ),
+            None,
+        )
+        if profile is None:
+            return None, None
+        template = registry.program(
+            "instruction_templates", str(profile["instruction_template_ref"]["id"])
+        )
+        overrides = profile["instruction_parameters"]
+    else:
+        return None, None
+    contract = template["parameters"].get(target)
+    if not isinstance(contract, Mapping):
+        return None, None
+    return contract, overrides.get(target, contract["default"])
+
+
+def _scalar_axis_preflight_schema(contract: Mapping[str, Any]) -> dict[str, Any]:
+    """Translate a registry parameter contract into a trust-region schema.
+
+    The registry declares integrality as ``integer: bool``; the witness generator
+    reads ``type == "integer"``. Doing the translation once means the registered
+    axes get exactly the witnesses the scientific axis gets, including the
+    integer enumeration that makes a bounded ``max_attempts`` step checkable.
+    """
+
+    return {
+        "minimum": contract["minimum"],
+        "maximum": contract["maximum"],
+        "type": "integer" if contract.get("integer") else "number",
+    }
+
+
+def _assigned_direction_baseline(
+    parent: EcologyEvolutionPluginGenome, axis: str, target: str
+) -> Any:
+    """The value an ``increase``/``decrease`` direction has to move away from.
+
+    ``scientific_parameter`` deliberately does not get the registered-default
+    fallback the other scalar axes get: its overrides are fully materialized by
+    the seed genome, so a missing one means something is wrong with the parent
+    rather than that a default applies.
+    """
+
+    if axis == "scientific_parameter":
+        return parent.to_dict()["scientific_program"]["parameter_overrides"].get(
+            target
+        )
+    return _registered_scalar_axis_contract(parent, axis, target)[1]
+
+
+def _has_authored_directive(
+    parent: EcologyEvolutionPluginGenome, role: str
+) -> bool:
+    """Whether the parent already carries an authored directive for ``role``.
+
+    The field is optional and omitted when absent, so its presence is exactly
+    the question ``author`` versus ``revise`` asks.
+    """
+
+    profiles = parent.to_dict()["agent_program"]["candidate_execution_program"][
+        "role_profiles"
+    ]
+    return any(
+        profile.get("role") == role and "authored_directive" in profile
+        for profile in profiles
+    )
 
 
 class StrategyRouterDSHAdapter:
@@ -928,6 +1134,16 @@ class StrategyRouterDSHAdapter:
             "maximum": 1.0,
         },
     }
+    # Every tunable of the recipe predictor lives inside its declarative
+    # feature_recipe, and evaluators.registry.validate_parameter_overrides
+    # refuses scalar overrides for it outright. So this boundary is empty on
+    # purpose: it advertises no knob the runtime cannot read, which is also
+    # what keeps _genome_parameter_boundary from offering a recipe genome a
+    # scientific_parameter target that no evaluator would accept. The single
+    # empty sweep row keeps the schedule arithmetic at _schedule_index well
+    # defined -- without it a recipe run divided by zero before proposing.
+    _GREENHOUSE_RECIPE_RIDGE_SCHEMAS: ClassVar[dict[str, dict[str, Any]]] = {}
+    _GREENHOUSE_RECIPE_RIDGE_SWEEP: ClassVar[tuple[dict[str, Any], ...]] = ({},)
     _TOY_SWEEP = (
         {"alpha": 0.20, "window": 3, "water_threshold": 0.35},
         {"alpha": 0.35, "window": 5, "water_threshold": 0.40},
@@ -1189,6 +1405,7 @@ class StrategyRouterDSHAdapter:
         run_state_revision: int,
         stage_attempt: int,
         ledger_expected_revision: int,
+        expert_directives: Mapping[str, Any] | None = None,
     ) -> GenerationSearchPlan:
         """Ask the strategy model what to retrieve before the Host goes online."""
 
@@ -1222,6 +1439,15 @@ class StrategyRouterDSHAdapter:
                 name="search-plan current research plan",
             ),
             "host_query_hints": list(normalize_search_queries(host_query_hints)),
+            # What an expert says about the domain is a retrieval hint in its own
+            # right: it should be able to steer *what literature this generation
+            # reads*, not only the parameter move at the end. Conditional key so
+            # a run without interventions keeps its prior context digest.
+            **(
+                {"expert_directives": deepcopy(dict(expert_directives))}
+                if isinstance(expert_directives, Mapping) and expert_directives
+                else {}
+            ),
             "retrieval_contract": {
                 "provider": "OpenAlex metadata and built-in verified catalog",
                 "maximum_queries": 6,
@@ -1613,6 +1839,11 @@ class StrategyRouterDSHAdapter:
                         policy=execution_policy,
                     )
                 feedback: dict[str, Any] | None = None
+                synthesis_max_output_tokens = (
+                    execution_policy["synthesis_max_output_tokens"]
+                    if execution_policy is not None
+                    else _DEFAULT_SYNTHESIS_MAX_OUTPUT_TOKENS
+                )
                 for contract_attempt in range(
                     1,
                     _NATIVE_MAX_SEMANTIC_CONTRACT_ATTEMPTS + 1,
@@ -1625,25 +1856,41 @@ class StrategyRouterDSHAdapter:
                         stage_attempt,
                         contract_attempt,
                     )
-                    structured = self._native_runtime().run(
-                        run_id=run.run_id,
-                        stage=stage,
-                        role="researcher",
-                        context=stage_context,
-                        output_schema_id=output_schema_id,
-                        run_state_revision=run_state_revision,
-                        stage_attempt=dsh_stage_attempt,
-                        ledger_expected_revision=ledger_expected_revision,
-                        idempotency_key=(
-                            f"{run.run_id}:generation:{run.generation}:{stage}:"
-                            f"attempt:{dsh_stage_attempt}"
-                        ),
-                        identity_digests=self._native_stage_identity(
-                            parent, task, run, stage, stage_context
-                        ),
-                        max_tokens=(execution_policy["synthesis_max_output_tokens"]
-                                    if execution_policy is not None else 8192),
-                    )
+                    try:
+                        structured = self._native_runtime().run(
+                            run_id=run.run_id,
+                            stage=stage,
+                            role="researcher",
+                            context=stage_context,
+                            output_schema_id=output_schema_id,
+                            run_state_revision=run_state_revision,
+                            stage_attempt=dsh_stage_attempt,
+                            ledger_expected_revision=ledger_expected_revision,
+                            idempotency_key=(
+                                f"{run.run_id}:generation:{run.generation}:{stage}:"
+                                f"attempt:{dsh_stage_attempt}"
+                            ),
+                            identity_digests=self._native_stage_identity(
+                                parent, task, run, stage, stage_context
+                            ),
+                            max_tokens=synthesis_max_output_tokens,
+                        )
+                    except DshNativeRuntimeUnavailableError as exc:
+                        # The child burned the whole budget reasoning and never
+                        # submitted. That is terminal for the runtime but not
+                        # for the Host: one attempt remains, and telling the
+                        # model what it overran is new request content.
+                        if (
+                            exc.error_code != _OUTPUT_BUDGET_ERROR_CODE
+                            or contract_attempt
+                            >= _NATIVE_MAX_SEMANTIC_CONTRACT_ATTEMPTS
+                        ):
+                            raise
+                        feedback = _output_budget_feedback(
+                            attempt=contract_attempt,
+                            max_output_tokens=synthesis_max_output_tokens,
+                        )
+                        continue
                     try:
                         reject_executable_fields(structured)
                         normalized = validate_research_synthesis(
@@ -1991,6 +2238,7 @@ class StrategyRouterDSHAdapter:
                 session_id,
                 parent_candidate_id=parent_candidate_id,
                 batch_context=batch_context,
+                interventions=interventions,
             )
         expected_session = f"strategy-dsh:{run.run_id}"
         if session_id != expected_session:
@@ -2226,6 +2474,7 @@ class StrategyRouterDSHAdapter:
                 "accepted",
                 "guidance",
                 "constraints",
+                "domain_knowledge",
                 "parameter_override",
                 "host_applies_interventions",
             }
@@ -2709,6 +2958,7 @@ class StrategyRouterDSHAdapter:
         *,
         parent_candidate_id: str | None,
         batch_context: Mapping[str, Any] | None,
+        interventions: Mapping[str, Any] | None = None,
     ) -> Proposal:
         if session_id != f"dsh-native:{run.run_id}":
             raise RuntimeError("DSH-native strategy session is not open")
@@ -2937,6 +3187,13 @@ class StrategyRouterDSHAdapter:
             ),
             "has_research_plan": bool(research_plan),
         }
+        # Human directives reach the native proposer as advice, never as an
+        # executable edit. The mutation contract above is the only thing that
+        # can widen, and it is built from the registry, not from this text.
+        # Before this existed the native dispatch dropped `interventions`
+        # outright: a paused run, an expert sentence, a "已应用" receipt in the
+        # web UI, and a proposer that never saw a word of it.
+        expert_directives = _native_expert_directives(interventions)
         host_rejections: list[dict[str, Any]] = []
         child: EcologyEvolutionPluginGenome | None = None
         base_stage_attempt = max(1, int(batch.get("stage_attempt", 1)))
@@ -2970,6 +3227,14 @@ class StrategyRouterDSHAdapter:
                     "proposal_attempt": proposal_attempt,
                     "maximum_proposal_attempts": _NATIVE_MAX_PROPOSAL_ATTEMPTS,
                 },
+                # Omitted entirely when no expert wrote anything, so a run
+                # without interventions keeps its exact prior context digest
+                # and stays byte-replayable against archived stage identities.
+                **(
+                    {"expert_directives": deepcopy(expert_directives)}
+                    if expert_directives is not None
+                    else {}
+                ),
             }
             mutation = self._native_runtime().run(
                 run_id=run.run_id,
@@ -3045,39 +3310,79 @@ class StrategyRouterDSHAdapter:
                 continue
             if assigned_direction is not None:
                 accepted_operation = mutation["operations"][0]
-                expected_by_axis = {
+                # Only the *identifying* fields per axis; the operation name comes
+                # from the shared catalog so this check cannot drift from the one
+                # the proposer was shown. An axis opened in
+                # `CANDIDATE_MUTATION_AXES` without an entry here would otherwise
+                # raise `KeyError` mid-batch and fail the whole run, so a missing
+                # entry is rejected as one bad proposal instead.
+                expected_fields_by_axis = {
                     "scientific_parameter": {
-                        "op": "set_bounded_parameter",
                         "name": assigned_direction.mutation_target,
                     },
                     "registered_predictor": {
-                        "op": "select_registered_pipeline",
                         "predictor_id": assigned_direction.mutation_target,
                     },
                     "instruction_profile": {
-                        "op": "select_instruction_template",
                         "role": "sample-planner",
                         "instruction_template_id": (
                             assigned_direction.mutation_target
                         ),
                     },
+                    "instruction_parameter": {
+                        "role": "sample-planner",
+                        "name": assigned_direction.mutation_target,
+                    },
+                    "workflow_parameter": {
+                        "name": assigned_direction.mutation_target,
+                    },
+                    # The target is the grammar, which the operation does not
+                    # carry -- the operation carries the authored clauses. So
+                    # the only identifying field is the role; whether the text
+                    # is legal under that grammar is settled by the validator,
+                    # and whether it is `author` or `revise` by the check just
+                    # below, which needs the parent to answer.
+                    "instruction_directive": {"role": "sample-planner"},
                 }
-                expected_operation = expected_by_axis[
-                    assigned_direction.mutation_axis
-                ]
+                if assigned_direction.mutation_axis not in expected_fields_by_axis:
+                    host_rejections.append(
+                        {
+                            "reason": "assigned_direction_unverifiable",
+                            "rejection_code": "mutation_axis_has_no_direction_check",
+                            "validation_detail": (
+                                "the Host cannot verify that an operation "
+                                "implements a direction on axis "
+                                f"{assigned_direction.mutation_axis}"
+                            )[:500],
+                            "rejected_operations": deepcopy(
+                                mutation["operations"]
+                            ),
+                        }
+                    )
+                    continue
+                expected_operation = {
+                    "op": MUTATION_OPERATION_BY_AXIS[
+                        assigned_direction.mutation_axis
+                    ],
+                    **expected_fields_by_axis[assigned_direction.mutation_axis],
+                }
                 direction_mismatch = any(
                     accepted_operation.get(name) != value
                     for name, value in expected_operation.items()
                 )
-                if (
-                    not direction_mismatch
-                    and assigned_direction.mutation_axis
-                    == "scientific_parameter"
+                if not direction_mismatch and "increase" in (
+                    MUTATION_DIRECTIONS_BY_AXIS[assigned_direction.mutation_axis]
                 ):
-                    parameter_name = assigned_direction.mutation_target
-                    previous_value = parent.to_dict()["scientific_program"][
-                        "parameter_overrides"
-                    ].get(parameter_name)
+                    # Every scalar axis has to be checked for more than "it named
+                    # the right knob": a direction is a claim about which way the
+                    # number moves, and an accepted operation that moves it the
+                    # other way implements a different experiment than the one
+                    # this candidate was assigned.
+                    previous_value = _assigned_direction_baseline(
+                        parent,
+                        assigned_direction.mutation_axis,
+                        assigned_direction.mutation_target,
+                    )
                     proposed_value = accepted_operation.get("value")
                     mutation_direction = assigned_direction.mutation_direction
                     direction_mismatch = (
@@ -3090,6 +3395,23 @@ class StrategyRouterDSHAdapter:
                         or mutation_direction == "decrease"
                         and float(proposed_value) >= float(previous_value)
                         or mutation_direction not in {"increase", "decrease"}
+                    )
+                if (
+                    not direction_mismatch
+                    and assigned_direction.mutation_axis == "instruction_directive"
+                ):
+                    # `author` and `revise` are claims about the parent, not
+                    # about a number: writing the first directive and rewriting
+                    # an existing one are different experiments, and only the
+                    # parent can say which one this is.
+                    had_directive = _has_authored_directive(parent, "sample-planner")
+                    direction_mismatch = (
+                        assigned_direction.mutation_direction == "author"
+                        and had_directive
+                        or assigned_direction.mutation_direction == "revise"
+                        and not had_directive
+                        or assigned_direction.mutation_direction
+                        not in {"author", "revise"}
                     )
                 if direction_mismatch:
                     host_rejections.append(
@@ -3475,6 +3797,14 @@ def _parent_context(
             "greenhouse_horizon_targetwise_ridge",
             StrategyRouterDSHAdapter._GREENHOUSE_HORIZON_TARGETWISE_RIDGE_SCHEMAS,
         ),
+        # Last, and the only entry with no parameters: a recipe candidate
+        # proposes an empty scalar map, so without this row the second
+        # generation of a recipe run refused its own parent as an unregistered
+        # contract. Matching is by key set, so an empty map is unambiguous.
+        (
+            "greenhouse_recipe_ridge",
+            StrategyRouterDSHAdapter._GREENHOUSE_RECIPE_RIDGE_SCHEMAS,
+        ),
     )
     matched_space = next(
         (
@@ -3665,6 +3995,9 @@ def _registered_mutation_targets(
             predictor_ids.append(predictor_id)
 
     current_profile = resolve_candidate_agent_profile(genome, registry)
+    recipe_policy_id = registry.program(
+        "predictors", current_predictor
+    ).get("feature_policy_id")
     instruction_ids: list[str] = []
     for instruction_id in registry.program_ids("instruction_templates"):
         instruction = registry.program("instruction_templates", instruction_id)
@@ -3678,8 +4011,35 @@ def _registered_mutation_targets(
         "scientific_parameter": tuple(sorted(
             set(parameter_schemas)
         )),
+        # Present only when the bound predictor declares a feature policy. On a
+        # scalar-tunable predictor there is nothing to author, and advertising
+        # the axis would invite an edit the compiler is about to refuse.
+        **(
+            {"feature_recipe": (recipe_policy_id,)}
+            if recipe_policy_id is not None
+            else {}
+        ),
         "registered_predictor": tuple(sorted(set(predictor_ids))),
         "instruction_profile": tuple(sorted(instruction_ids)),
+        # The two axes whose bounds come from the program registry rather than
+        # the frozen parameter boundary. They are advertised here, and not only
+        # to the batch-local editor, because a generation-level proposal is where
+        # a real change of retry depth or escalation rate belongs: both are
+        # properties of how the candidate runs for a whole generation, and both
+        # now reach the runtime, so a direction on either is something a score
+        # can be attributed to.
+        "workflow_parameter": _registered_scalar_axis_targets(
+            genome, "workflow_parameter"
+        ),
+        "instruction_parameter": _registered_scalar_axis_targets(
+            genome, "instruction_parameter"
+        ),
+        # Always available, and deliberately a single target: the target names
+        # the grammar an authored directive is written under, not the text. A
+        # candidate that already authored one revises it; one that has not
+        # writes its first. Unlike `instruction_profile`, this axis does not
+        # run out of unused options.
+        "instruction_directive": (AUTHORED_DIRECTIVE_POLICY_ID,),
     }
 
 
@@ -3721,21 +4081,14 @@ def _mutation_contract_catalog(
     )
     diagnostic_only = sample_budget_class == "diagnostic_smoke"
     selection_eligible = sample_budget_class == "selection_eligible"
+    axis_contract = mutation_axis_contract(targets)
     return {
         "scientific_parameter_activity": parameter_activity_contract(genome),
         "allowed_mutation_targets": {
             axis: list(values) for axis, values in targets.items()
         },
-        "operation_by_axis": {
-            "scientific_parameter": "set_bounded_parameter",
-            "registered_predictor": "select_registered_pipeline",
-            "instruction_profile": "select_instruction_template",
-        },
-        "mutation_directions_by_axis": {
-            "scientific_parameter": ["increase", "decrease"],
-            "registered_predictor": ["select"],
-            "instruction_profile": ["select"],
-        },
+        "operation_by_axis": axis_contract["operation_by_axis"],
+        "mutation_directions_by_axis": axis_contract["mutation_directions_by_axis"],
         **({"prediction_selection": {
             "owner": "sample_agent", "default_tool_owner": "research_model", "current_usage": prediction_usage(
                 str(genome.scientific_program["predictor_ref"]["id"]), genome.scientific_program["parameter_overrides"]),
@@ -3747,26 +4100,7 @@ def _mutation_contract_catalog(
                 for item in task.metadata.get("runtime_component_catalog", {}).get("prediction_models", [])
             ],
         }} if task.metadata.get("prediction_selection_policy") == RUNTIME_PREDICTION_POLICY else {}),
-        "mutation_axis_effects": {
-            "scientific_parameter": (
-                "Changes exactly one optional default-tool parameter within its "
-                "Host trust region and in the declared increase/decrease "
-                "direction; it cannot change the predictor, Planner "
-                "instruction, sample cohort, budget, evaluator, or gate. "
-                "Effects on final predictions are conditional on the Agent using that default; it may choose another tool, override call parameters or predict directly."
-            ),
-            "registered_predictor": (
-                "Switches the optional default predictor to its registered defaults. "
-                "The sample Agent still decides whether to use it and may tune tool-call parameters within catalog bounds. "
-                "Mutating the frozen default parameters requires a later accepted research or local edit."
-            ),
-            "instruction_profile": (
-                "Changes Agent reasoning, optional tool choice, parameter exploration, "
-                "evidence combination and final numerical predictions. Evaluate both "
-                "forecast quality and execution reliability. The Host-selected origin "
-                "cohort, sample budget, evaluator and statistical gates remain fixed."
-            ),
-        },
+        "mutation_axis_effects": axis_contract["mutation_axis_effects"],
         "evaluation_evidence_contract": {
             "schema_version": "ecologyrsi-dsh.evaluation-evidence-contract/1",
             "sample_budget_class": sample_budget_class,
@@ -3812,6 +4146,53 @@ def _mutation_contract_catalog(
             }
             for instruction_id in targets["instruction_profile"]
         ],
+        # The clause whitelist an authored directive has to satisfy. Published
+        # alongside the template list because the two are alternatives for the
+        # same slot: a proposer choosing between selecting and authoring needs
+        # to see both, and one that authors without the grammar can only guess
+        # at the enumerations its text will be rejected against.
+        "directive_grammar": _directive_authoring_contract(genome),
+    }
+
+
+def _directive_authoring_contract(
+    genome: EcologyEvolutionPluginGenome,
+) -> dict[str, Any]:
+    """The authoring grammar, narrowed to what this candidate may actually write.
+
+    The registered grammar is the global whitelist; the tools a given candidate
+    may plan come from its own profile, which may have been narrowed below the
+    base policy. Publishing the intersection means a proposal that follows the
+    contract cannot be rejected by the compiler for naming a withheld tool.
+    """
+
+    registry = current_program_registry()
+    policy = registry.program("directive_policies", AUTHORED_DIRECTIVE_POLICY_ID)
+    profile = next(
+        (
+            item
+            for item in genome.agent_program["candidate_execution_program"][
+                "role_profiles"
+            ]
+            if item.get("role") == "sample-planner"
+        ),
+        None,
+    )
+    enabled_tools = list((profile or {}).get("enabled_tool_ids") or ())
+    return {
+        **deepcopy(dict(policy["grammar"])),
+        "policy_id": AUTHORED_DIRECTIVE_POLICY_ID,
+        "policy_digest": registry.program_ref(
+            "directive_policies", AUTHORED_DIRECTIVE_POLICY_ID
+        )["catalog_digest"],
+        "effective_parameters": {
+            name: contract["default"]
+            for name, contract in policy["parameters"].items()
+        },
+        "tool_plan.allowed_tool_ids": enabled_tools,
+        "current_directive_present": _has_authored_directive(
+            genome, "sample-planner"
+        ),
     }
 
 
@@ -3925,6 +4306,77 @@ def _parameter_preflight_values(
     return tuple(result)
 
 
+def _directive_preflight_operations(
+    parent: EcologyEvolutionPluginGenome, mutation_direction: str
+) -> tuple[dict[str, Any], ...]:
+    """Witness directives proving the authoring axis is realizable.
+
+    The counterpart to ``_parameter_preflight_values`` for an axis with no
+    numbers in it. These are Host-built placeholders whose only job is to show
+    a legal one-operation implementation exists; the proposer writes its own
+    clauses, and the validator -- not this function -- decides whether they are
+    legal. Every witness differs from the parent's directive, because a
+    mutation equal to its parent is refused.
+    """
+
+    from ..evaluators.authored_directive import (
+        ALLOWED_DIRECTIVE_ANCHORS,
+        BLEND_RULE_METHODS,
+    )
+
+    if mutation_direction not in {"author", "revise"}:
+        return ()
+    had_directive = _has_authored_directive(parent, "sample-planner")
+    # `author` writes the first directive and `revise` rewrites an existing
+    # one, so a direction that disagrees with the parent has no
+    # implementation at all -- which is what the preflight exists to catch.
+    if (mutation_direction == "author") == had_directive:
+        return ()
+    profile = next(
+        (
+            item
+            for item in parent.to_dict()["agent_program"][
+                "candidate_execution_program"
+            ]["role_profiles"]
+            if item.get("role") == "sample-planner"
+        ),
+        None,
+    )
+    if profile is None:
+        return ()
+    tool_ids = list(profile.get("enabled_tool_ids") or ())
+    if not tool_ids:
+        return ()
+    current = profile.get("authored_directive") or {}
+    witnesses: list[dict[str, Any]] = []
+    for anchor in sorted(ALLOWED_DIRECTIVE_ANCHORS):
+        for blend_rule in sorted(BLEND_RULE_METHODS):
+            directive = {
+                "anchor": anchor,
+                "blend_rule": blend_rule,
+                "tool_plan": [
+                    {"tool_id": tool_ids[0], "purpose": "candidate_model_baseline"}
+                ],
+                "rationale": (
+                    "Host preflight witness: establish the candidate's own model "
+                    "baseline before departing from it."
+                ),
+            }
+            if (
+                current.get("anchor") == anchor
+                and current.get("blend_rule") == blend_rule
+            ):
+                continue
+            witnesses.append(
+                {
+                    "op": "author_role_directive",
+                    "role": "sample-planner",
+                    "authored_directive": directive,
+                }
+            )
+    return tuple(witnesses)
+
+
 def _validate_candidate_direction_realizability(
     raw_directions: Sequence[Mapping[str, Any]],
     *,
@@ -3983,13 +4435,76 @@ def _validate_candidate_direction_realizability(
                     "predictor_id": direction.mutation_target,
                 },
             )
-        else:
+        elif direction.mutation_axis == "instruction_profile":
             operations = (
                 {
                     "op": "select_instruction_template",
                     "role": "sample-planner",
                     "instruction_template_id": direction.mutation_target,
                 },
+            )
+        elif direction.mutation_axis in {
+            "instruction_parameter",
+            "workflow_parameter",
+        }:
+            # Spelled out per axis rather than left to a catch-all `else`: the
+            # witnesses have to come from the *registered* contract for this axis,
+            # and an axis that fell through to someone else's operation would fail
+            # preflight with a message naming the wrong knob.
+            contract, current_value = _registered_scalar_axis_contract(
+                parent, direction.mutation_axis, direction.mutation_target
+            )
+            if contract is None:
+                raise ValueError(
+                    f"candidate_directions[{index}] names no registered "
+                    f"{direction.mutation_axis} target"
+                )
+            operations = tuple(
+                {
+                    "op": MUTATION_OPERATION_BY_AXIS[direction.mutation_axis],
+                    **(
+                        {"role": "sample-planner"}
+                        if direction.mutation_axis == "instruction_parameter"
+                        else {}
+                    ),
+                    "name": direction.mutation_target,
+                    "value": value,
+                }
+                for value in _parameter_preflight_values(
+                    _scalar_axis_preflight_schema(contract),
+                    current_value,
+                    str(direction.mutation_direction),
+                )
+            )
+        elif direction.mutation_axis == "instruction_directive":
+            # Not a scalar move, so there are no numeric witnesses: the
+            # witnesses are whole directives, and the preflight proves the axis
+            # is reachable at all by building ones that differ from the parent.
+            operations = _directive_preflight_operations(
+                parent, str(direction.mutation_direction)
+            )
+            if not operations:
+                had = _has_authored_directive(parent, "sample-planner")
+                reason = (
+                    "this candidate already authored a directive, so it can "
+                    "only be revised"
+                    if direction.mutation_direction == "author" and had
+                    else "this candidate has no directive to revise"
+                    if direction.mutation_direction == "revise" and not had
+                    else "the sample-planner has no enabled tool a directive "
+                    "could plan"
+                )
+                raise ValueError(
+                    f"candidate_directions[{index}] cannot be realized: {reason}"
+                )
+        else:
+            # `CandidateDirection.from_dict` already rejects axes outside
+            # `CANDIDATE_MUTATION_AXES`, so reaching here means that set grew
+            # without a preflight implementation. Say that, instead of proving an
+            # unrelated operation legal.
+            raise ValueError(
+                f"candidate_directions[{index}] axis "
+                f"{direction.mutation_axis} has no preflight implementation"
             )
 
         preflight_context = GenomeMutationContextV1(
@@ -4175,6 +4690,12 @@ def _task_parameter_space(
             "greenhouse_horizon_targetwise_ridge",
             StrategyRouterDSHAdapter._GREENHOUSE_HORIZON_TARGETWISE_RIDGE_SCHEMAS,
             StrategyRouterDSHAdapter._GREENHOUSE_HORIZON_TARGETWISE_RIDGE_SWEEP,
+        )
+    if predictor_id == RECIPE_RIDGE_MODEL_ID:
+        return (
+            "greenhouse_recipe_ridge",
+            StrategyRouterDSHAdapter._GREENHOUSE_RECIPE_RIDGE_SCHEMAS,
+            StrategyRouterDSHAdapter._GREENHOUSE_RECIPE_RIDGE_SWEEP,
         )
     if predictor_id == "greenhouse-rolling-residual@1":
         return (
@@ -4384,4 +4905,54 @@ def _project_single_parameter_change(
     }
 
 
-from .interventions import apply_bounded_interventions
+def _native_expert_directives(
+    interventions: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Translate the adapter intervention mapping into advisory directive rows.
+
+    The director hands adapters a flattened mapping (``guidance`` is one joined
+    string, ``constraints`` a list) because the legacy path fed those straight
+    into a gateway payload. The native proposer instead wants the same bounded
+    advisory shape the research stage uses, so rebuild directive rows here and
+    reuse the one policy block. Returns None when no expert text is present, so
+    that an uninterrupted run's stage context is bit-identical to before.
+    """
+
+    if not isinstance(interventions, Mapping):
+        return None
+    controls: list[dict[str, Any]] = []
+    guidance = interventions.get("guidance")
+    if isinstance(guidance, str) and guidance.strip():
+        controls.append(
+            {
+                "intervention_id": "pending-guidance",
+                "kind": "guidance",
+                "message": guidance,
+            }
+        )
+    raw_constraints = interventions.get("constraints")
+    if isinstance(raw_constraints, (list, tuple)):
+        for offset, item in enumerate(raw_constraints, start=1):
+            if isinstance(item, str) and item.strip():
+                controls.append(
+                    {
+                        "intervention_id": f"pending-constraint-{offset}",
+                        "kind": "constraint",
+                        "message": item,
+                    }
+                )
+    raw_knowledge = interventions.get("domain_knowledge")
+    if isinstance(raw_knowledge, (list, tuple)):
+        for offset, item in enumerate(raw_knowledge, start=1):
+            if isinstance(item, str) and item.strip():
+                controls.append(
+                    {
+                        "intervention_id": f"pending-domain-knowledge-{offset}",
+                        "kind": "domain_knowledge",
+                        "message": item,
+                    }
+                )
+    if not controls:
+        return None
+    context = expert_directive_context(controls)
+    return context if context["directives"] else None

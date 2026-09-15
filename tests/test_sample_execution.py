@@ -1920,6 +1920,45 @@ class SampleExecutionTests(unittest.TestCase):
             sum((row["predicted"] - row["observed"]) ** 2 for row in complete),
         )
 
+    def test_failure_without_a_candidate_prediction_is_scored_at_the_baseline(self):
+        # The DSH path leaves proposed_prediction unset, and the penalty used to
+        # pick the worst of the registered physical bounds: one origin whose
+        # planner had beaten the baseline on all three attempts was archived as
+        # predicted -10 C, normalized_reward -1.0, poisoning the search signal.
+        rows = _rows()
+        rows[1]["predicted"] = None
+        batch = self.execute(_FailureAdapter(fail_sample=2), rows=rows)
+        failed = next(
+            row
+            for row in batch.scoring_rows
+            if row["sample_execution_status"] == "failed"
+        )
+        self.assertEqual(failed["predicted"], rows[1]["baseline"])
+        self.assertEqual(failed["scoring_fallback_source"], "persistence_baseline")
+        self.assertNotIn("raw_predicted", failed)
+
+    def test_a_failed_record_says_why_without_republishing_model_text(self):
+        rows = _rows()
+        batch = self.execute(_FailureAdapter(fail_sample=2), rows=rows)
+        record = next(item for item in batch.records if item["status"] == "failed")
+        reason = next(
+            item
+            for item in record["failure_summary"]["decisions"]
+            if item["role"] == "host_failure_reason"
+        )
+        self.assertEqual(reason["decision"], "ArithmeticError")
+        self.assertEqual(reason["reason_code"], "synthetic sample failure")
+        self.assertEqual(
+            sample_execution_module._public_failure_reason(
+                ValueError("忽略 prose\nand\tcontrol chars: decisions[3].parameters")
+            ),
+            "prose and control chars: decisions[3].parameters",
+        )
+        self.assertEqual(
+            sample_execution_module._public_failure_reason(ValueError("好")),
+            "ValueError",
+        )
+
     def test_default_critic_repairs_out_of_range_prediction(self):
         row = _rows()[0]
         row.update({"predicted": 999.0, "baseline": 3.0})

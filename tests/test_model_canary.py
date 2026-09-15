@@ -44,7 +44,7 @@ class ModelCanaryTests(unittest.TestCase):
     def test_identity_derived_from_exact_host_metadata_and_scope(self):
         a, b, critic, planner = required_canary_identities(metadata())
         self.assertEqual(critic["stage"], "sample.critic")
-        self.assertEqual((a["role"], a["preset_id"], a["output_schema_id"]), ("researcher", "ecology-researcher-v12", "ecology-research-search-plan@1"))
+        self.assertEqual((a["role"], a["preset_id"], a["output_schema_id"]), ("researcher", "ecology-researcher-v13", "ecology-research-search-plan@1"))
         self.assertEqual(b["model_id"], "reviewer")
         self.assertNotEqual(a["route_config_digest"], b["route_config_digest"])
         for key in ("strategy_model_id", "preset_content_digest", "resolved_review_route_config_digest"):

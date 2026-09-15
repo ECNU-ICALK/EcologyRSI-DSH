@@ -8,8 +8,10 @@ from ecologyrsi_dsh.core.models import digest
 active_binding = ContextVar('test_agent_prediction_binding')
 
 @contextmanager
-def agent_binding(**arguments):
-    binding = DshPredictionToolBinding(**arguments)
+def agent_binding(*, prediction_tool_call_budget=None, **arguments):
+    # Stands in for DshToolService.bind_prediction_tool, so it translates the
+    # per-run execution budget the same way the real binder does.
+    binding = DshPredictionToolBinding(budget=prediction_tool_call_budget, **arguments)
     token = active_binding.set(binding)
     try:
         yield binding

@@ -308,9 +308,9 @@
             <div class="collaboration-layout">
               <form id="intervention-form" class="panel intervention-form">
                 <div class="panel-heading"><div><span>专家主动意见</span><h2>记录下一轮方向</h2></div><strong>追加记录，不改写历史</strong></div>
-                <label><span>干预类型</span><select id="intervention-kind" name="kind"><option value="guidance">方向建议</option><option value="parameter_override">参数覆盖</option><option value="constraint">新增约束</option><option value="parent_selection">指定父方案</option></select></label>
+                <label><span>干预类型</span><select id="intervention-kind" name="kind"><option value="guidance">方向建议</option><option value="parameter_override">参数覆盖</option><option value="constraint">新增约束</option><option value="parent_selection">指定父方案</option><option value="domain_knowledge">专家知识</option></select></label>
                 <label id="target-candidate-field" hidden><span>下一轮父方案</span><select id="target-candidate-id" name="target_candidate_id" disabled><option value="">请选择候选方案</option></select><small>仅“指定父方案”使用；其他意见统一作用于下一轮提案。</small></label>
-                <label><span>意见说明</span><textarea id="intervention-message" name="message" rows="4" maxlength="1000" placeholder="说明继续、收缩或更换方向的原因和预期效果" required></textarea></label>
+                <label><span>意见说明</span><textarea id="intervention-message" name="message" rows="4" maxlength="1000" placeholder="说明继续、收缩或更换方向的原因和预期效果" required></textarea><small id="intervention-message-help">“专家知识”不会被宿主强制执行：原文会随下一轮提案上下文交给模型，由模型在既有边界内自行决定如何采纳。</small></label>
                 <label id="parameter-overrides-field" hidden><span>参数覆盖值</span><textarea id="parameter-overrides" name="parameter_overrides" rows="3" placeholder="参数名=数值" aria-describedby="parameter-overrides-help"></textarea><small id="parameter-overrides-help">每行填写一个“参数名=数值”；可用参数和范围以当前运行实际采用的预测器为准，由服务端校验。</small></label>
                 <label><span>记录人</span><input id="created-by" name="created_by" type="text" maxlength="120" placeholder="姓名或工作编号" required></label>
                 <div class="form-actions"><button id="submit-intervention" class="button button-primary" type="submit" disabled>提交专家意见</button><span id="intervention-hint">运行暂停后才能提交主动意见。</span></div>

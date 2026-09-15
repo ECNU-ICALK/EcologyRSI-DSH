@@ -9,11 +9,15 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
+// Must stay in the manifest's order and membership; tests/test_preset_roster_consistency.py
+// pins this list, `presets/preset-manifest.json`, the installed directories, and the
+// delivery manifests against one another. A superseded id left behind here would keep
+// its directory installed and ship two rosters in one artifact.
 export const PRESET_IDS = Object.freeze([
   "ecology-coordinator-v5",
-  "ecology-researcher-v12",
-  "ecology-candidate-proposer-v4",
-  "ecology-sample-planner-v9",
+  "ecology-researcher-v13",
+  "ecology-candidate-proposer-v5",
+  "ecology-sample-planner-v11",
   "ecology-sample-critic-v5",
   "ecology-generation-judge-v8",
 ]);

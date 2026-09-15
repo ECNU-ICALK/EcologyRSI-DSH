@@ -8,6 +8,8 @@ from typing import Any, Mapping, Sequence
 from ..core.models import canonical_json, digest
 from ..core.redaction import redact_sensitive_text
 from ..core.trajectory import LocalEditOutcome, LocalEditProposalDecision
+from ..evaluators.authored_directive import AUTHORED_DIRECTIVE_POLICY_ID
+from ..evaluators.greenhouse_prediction import RECIPE_FEATURE_POLICY_ID
 from .genome import (
     LOCAL_EDIT_MUTATION_OPERATOR_ID,
     EcologyEvolutionPluginGenome,
@@ -198,6 +200,12 @@ def _operation_target(operation: Mapping[str, Any]) -> tuple[str, str, str]:
             "select_registered_uncertainty_policy": "uncertainty_policy",
         }[op]
         return category, str(operation.get("program_id") or ""), category
+    if op == "author_feature_recipe":
+        # Targeted by the policy whose grammar and ceilings bound the recipe,
+        # not by the terms, for the same reason `author_role_directive` is
+        # targeted by its directive policy: the allowed-target check asks
+        # whether this candidate may author under this grammar at all.
+        return "feature_recipe", RECIPE_FEATURE_POLICY_ID, "feature-recipe"
     if op == "select_instruction_template":
         role = str(operation.get("role") or "")
         target = str(operation.get("instruction_template_id") or "")
@@ -218,6 +226,17 @@ def _operation_target(operation: Mapping[str, Any]) -> tuple[str, str, str]:
     if op == "narrow_role_tool_policy":
         role = str(operation.get("role") or "")
         return "instruction_tool_policy", role, f"tool-policy:{role}"
+    if op == "author_role_directive":
+        role = str(operation.get("role") or "")
+        # Targeted by the grammar that bounds the text, not by the text: the
+        # allowed-target check asks "may this candidate author under this
+        # policy", and the clause-level check belongs to the validator that
+        # knows the grammar.
+        return (
+            "instruction_directive",
+            AUTHORED_DIRECTIVE_POLICY_ID,
+            f"instruction-directive:{role}",
+        )
     raise ValueError(f"local edit operation {op or '<missing>'} is not registered")
 
 

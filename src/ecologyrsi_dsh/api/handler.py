@@ -14,12 +14,14 @@ from ..execution.ownership import RuntimeOwnerLease as _SidecarOwnerLease
 from ..application.runtime_bindings import dsh_revision_snapshot as _dsh_revision_snapshot, ValidatedCandidateIdentityCache as _ValidatedCandidateIdentityCache
 
 import fcntl
+import json
 import os
 import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -59,6 +61,10 @@ from ..core.state import (
 )
 from ..data.registry import DatasetRegistry
 from ..evaluators.epoch_cohorts import estimate_epoch_capacity
+from ..evaluators.greenhouse_prediction import (
+    COHORT_HISTORY_HOURS,
+    MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
+)
 from ..evaluators.registry import (
     GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
     GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID,
@@ -151,6 +157,39 @@ def _dsh_sidecar_error(exc: BaseException) -> dict[str, str]:
     return payload
 
 
+def _record_sidecar_rejection(
+    directory: Path, envelope: Any, exc: BaseException, *, stage: str | None = None
+) -> None:
+    """Keep the redacted rejection reason where only the operator can read it.
+
+    The DSH process deliberately receives ``internal server error`` for every
+    unapproved code, which also left the operator with no way to tell a
+    contract violation from a Host defect.  ``public_error_payload`` has
+    already applied the credential-redacting policy, so persisting that same
+    text next to the ledger adds no disclosure while making a rejected
+    structured result diagnosable.  Never raises: diagnostics must not turn a
+    bounded rejection into a request failure.
+    """
+
+    try:
+        identity = envelope.get("identity") if isinstance(envelope, Mapping) else None
+        identity = identity if isinstance(identity, Mapping) else {}
+        detail = str(public_error_payload(exc).get("error") or "")[:300]
+        line = json.dumps({
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "stage": stage or str(identity.get("stage") or ""),
+            "run_id": str(identity.get("run_id") or ""),
+            "candidate_id": str(identity.get("candidate_id") or ""),
+            "exception": type(exc).__name__,
+            "detail": detail,
+        }, ensure_ascii=False)
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / "sidecar-rejections.log").open("a", encoding="utf-8") as sink:
+            sink.write(f"{line}\n")
+    except (OSError, TypeError, ValueError):
+        return
+
+
 _DEFAULT_SAMPLE_OPERATION_MAX_TOKENS = {
     # Production evidence showed that reasoning-capable planners frequently
     # exhausted 3072 tokens before emitting the bounded decision object.  A
@@ -178,9 +217,9 @@ _STRICT_SAMPLE_REMOTE_CRITIC_POLICY = {
 _STRICT_SAMPLE_REFLECTION_POLICY = "candidate_aggregate_post_score@1"
 _DSH_NATIVE_PRESET_IDS = (
     "ecology-coordinator-v5",
-    "ecology-researcher-v12",
-    "ecology-candidate-proposer-v4",
-    "ecology-sample-planner-v9",
+    "ecology-researcher-v13",
+    "ecology-candidate-proposer-v5",
+    "ecology-sample-planner-v11",
     "ecology-sample-critic-v5",
     "ecology-generation-judge-v8",
 )
@@ -971,8 +1010,10 @@ class EvolutionRequestHandler(
         if raw_path == "/api/ecology-agent-sidecar/v1/structured-results":
             if not self._authorize_dsh_tool():
                 return
+            envelope: Any = None
             try:
-                result = self.server.dsh_tools.accept_structured(self._body())
+                envelope = self._body()
+                result = self.server.dsh_tools.accept_structured(envelope)
                 self._send(HTTPStatus.OK, result)
             except DshStructuredResultPersistenceError as exc:
                 # The DSH child already has one immutable structured result.
@@ -983,8 +1024,10 @@ class EvolutionRequestHandler(
                     _dsh_sidecar_error(exc),
                 )
             except PermissionError as exc:
+                self._record_structured_rejection(envelope, exc)
                 self._send(HTTPStatus.FORBIDDEN, _dsh_sidecar_error(exc))
             except (RuntimeError, TypeError, ValueError) as exc:
+                self._record_structured_rejection(envelope, exc)
                 self._send(HTTPStatus.CONFLICT, _dsh_sidecar_error(exc))
             return
         if raw_path == "/api/ecology-agent-sidecar/v1/retrievals/replay":
@@ -1021,12 +1064,16 @@ class EvolutionRequestHandler(
                     FileNotFoundError("unknown DSH role tool"), status=HTTPStatus.NOT_FOUND
                 ))
                 return
+            tool_envelope: Any = None
             try:
-                result = self.server.dsh_tools.execute(tool_name, self._body())
+                tool_envelope = self._body()
+                result = self.server.dsh_tools.execute(tool_name, tool_envelope)
                 self._send(HTTPStatus.OK, result)
             except PermissionError as exc:
+                self._record_structured_rejection(tool_envelope, exc, stage=f"tool:{tool_name}")
                 self._send(HTTPStatus.FORBIDDEN, _dsh_sidecar_error(exc))
             except (RuntimeError, TypeError, ValueError) as exc:
+                self._record_structured_rejection(tool_envelope, exc, stage=f"tool:{tool_name}")
                 self._send(HTTPStatus.CONFLICT, _dsh_sidecar_error(exc))
             return
         if not self._authorize_api():
@@ -1319,6 +1366,16 @@ class EvolutionRequestHandler(
 
     def _model_preflight_directory(self) -> Path:
         return Path(self.server.ledger.path).expanduser().resolve().parent / "model-preflight"
+
+    def _record_structured_rejection(
+        self, envelope: Any, exc: BaseException, *, stage: str | None = None
+    ) -> None:
+        """Write the operator-only diagnostic for a rejected structured result."""
+        try:
+            directory = Path(self.server.ledger.path).expanduser().resolve().parent
+        except (AttributeError, OSError, TypeError, ValueError):
+            return
+        _record_sidecar_rejection(directory, envelope, exc, stage=stage)
 
     @staticmethod
     def _request_binding(body: Mapping[str, Any], name: str) -> Any:
@@ -2880,6 +2937,19 @@ class EvolutionRequestHandler(
         minimum_selection_samples_per_update = (
             minimum_selection_origin_samples_per_update * prediction_cells_per_origin
         )
+        # The one depth this run guarantees: the planner bakes it into every
+        # ``origin_id`` and the evaluator intersects the cohort down to it, so
+        # both have to read this single value. DSH-native greenhouse runs freeze
+        # the full cohort ceiling, which is what makes declarative feature
+        # recipes reachable at all -- the recipe predictor needs all 48 and the
+        # seed recipe tool 25, and below that depth both are refused rather
+        # than offered and then failed per origin. Every other mode keeps the
+        # historical 12 so its origin set, and therefore its score, is unmoved.
+        origin_history_alignment = (
+            COHORT_HISTORY_HOURS
+            if native_protocol and not toy_domain
+            else MAX_EXOGENOUS_RIDGE_HISTORY_STEPS
+        )
         cohort_capacity_report = None
         if schedule is not None:
             if not toy_domain:
@@ -2901,6 +2971,7 @@ class EvolutionRequestHandler(
                     planned_generations=manifest.max_generations,
                     seed=manifest.seed,
                     scoring_cells_per_origin=prediction_cells_per_origin,
+                    history_steps=origin_history_alignment,
                 )
                 if not cohort_capacity_report.sufficient:
                     raise ValueError(
@@ -2922,6 +2993,7 @@ class EvolutionRequestHandler(
                         planned_generations=manifest.max_generations,
                         seed=manifest.seed,
                         profile=selection_fitness_profile,
+                        history_steps=origin_history_alignment,
                     )
             else:
                 cohort_capacity_report = estimate_epoch_capacity(
@@ -2930,6 +3002,7 @@ class EvolutionRequestHandler(
                     planned_generations=manifest.max_generations,
                     seed=manifest.seed,
                     scoring_cells_per_origin=prediction_cells_per_origin,
+                    history_steps=origin_history_alignment,
                 )
         sample_budget_class = None
         # DSH-native sample execution needs the same frozen scheduling values
@@ -3093,6 +3166,9 @@ class EvolutionRequestHandler(
                     minimum_selection_origin_samples_per_update
                 ),
                 "prediction_cells_per_origin": prediction_cells_per_origin,
+                # Frozen with the run, not read from a package constant, so a
+                # later default change cannot re-plan an existing cohort.
+                "origin_history_alignment_hours": origin_history_alignment,
                 "sample_budget_class": sample_budget_class,
                 # These limits are part of the task manifest rather than a
                 # process-wide gateway default, so later configuration changes
@@ -3791,10 +3867,13 @@ class EvolutionRequestHandler(
                     # the ledger before deciding who owns the native drain.
                     try:
                         reconciled_state = director.state(run_id)
-                    except Exception:
+                    except Exception:  # noqa: TRY203 - the bare re-raise is the decision
                         # The durable outcome is unknown.  Keep the admission
                         # fence and ownership marker fail-closed; startup recovery
                         # can prove the lifecycle before allowing a resume.
+                        # Deliberately not folded into the caller: the reason this
+                        # path does *not* reconcile has to stay next to the code
+                        # that skips reconciliation.
                         raise
                     reconciled_status = reconciled_state.run.status.value
                     if reconciled_status == target_status:
@@ -4050,8 +4129,12 @@ class EvolutionRequestHandler(
             return
         state = self.server.director.state(run_id)
         _assert_http_scope(state)
-        if state.run.status.value != "paused":
-            raise RuntimeError("提交人工意见前必须先暂停运行")
+        # Pausing used to be mandatory, which turned every expert note into an
+        # interrupt. `start_generation_batch` freezes the generation's
+        # `intervention_ids`, so a note written while RUNNING joins the *next*
+        # generation and cannot retroactively alter a proposal already produced.
+        if state.run.status.value not in {"paused", "running"}:
+            raise RuntimeError("只有运行中或已暂停的任务可以提交人工意见")
         allowed_fields = {
             "kind",
             "message",
@@ -4150,6 +4233,7 @@ class EvolutionRequestHandler(
             "answer",
             "selected_option",
             "answered_by",
+            "persistent",
             "idempotency_key",
         }
         unknown = set(body) - allowed_fields
@@ -4176,6 +4260,12 @@ class EvolutionRequestHandler(
             selected_option = selected_option.strip()
             if not selected_option or len(selected_option) > 500:
                 raise ValueError("所选选项必须为 1 至 500 个字符")
+        # Durable domain knowledge stays in the model's context for the rest of
+        # the run instead of being consumed by one research iteration. Absent
+        # means false, so an existing client keeps the old one-off semantics.
+        persistent = body.get("persistent", False)
+        if not isinstance(persistent, bool):
+            raise TypeError("persistent 必须是布尔值")
 
         command_body = {**body, "consultation_id": consultation_id}
         cache_key = self._command_key(run_id, body)
@@ -4204,6 +4294,7 @@ class EvolutionRequestHandler(
                     and recorded.get("answer") == answer_text
                     and recorded.get("answered_by") == answered_by
                     and recorded.get("selected_option") == selected_option
+                    and bool(recorded.get("persistent")) is persistent
                 ):
                     payload = _state_payload(self.server.director.state(run_id))
                     self._complete_command(cache_key, payload)
@@ -4248,6 +4339,7 @@ class EvolutionRequestHandler(
                     and existing_answer.answer == answer_text
                     and existing_answer.answered_by == answered_by
                     and existing_answer.selected_option == selected_option
+                    and existing_answer.persistent is persistent
                 ):
                     break
                 raise RuntimeError("该专家咨询已有答复")
@@ -4268,6 +4360,7 @@ class EvolutionRequestHandler(
                 answered_by=answered_by,
                 selected_option=selected_option,
                 effective_generation=effective_generation,
+                persistent=persistent,
                 created_at=created_at,
             )
             try:

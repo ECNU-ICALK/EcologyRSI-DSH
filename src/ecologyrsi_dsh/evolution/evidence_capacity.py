@@ -5,7 +5,8 @@ from typing import Any
 from ..core.models import digest
 from ..core.search_policy import LOCAL_PAIRED_BLOCK_MINIMUM, SEARCH_GUARD_POLICY
 from ..evaluators.epoch_cohorts import (
-    PlannedCohort, plan_generation_selection_cohorts, plan_run_adaptation_cohort,
+    DEFAULT_HISTORY_STEPS, PlannedCohort, plan_generation_selection_cohorts,
+    plan_run_adaptation_cohort,
 )
 from ..evaluators.fitness import FitnessProfile, _legal_starts
 from .promotion import PROMOTION_BLOCK_HOURS
@@ -30,6 +31,7 @@ def guarded_cohort_evidence_capacity(
     planned_generations: int,
     seed: int,
     profile: FitnessProfile | None = None,
+    history_steps: int = DEFAULT_HISTORY_STEPS,
 ) -> dict[str, Any]:
     """Count actual frozen origin-day identities without looking at labels.
 
@@ -41,7 +43,8 @@ def guarded_cohort_evidence_capacity(
     if isinstance(planned_generations, bool) or not isinstance(planned_generations, int) or planned_generations < 1:
         raise ValueError("planned_generations must be a positive integer")
     profile = profile or FitnessProfile()
-    adaptation = plan_run_adaptation_cohort(dataset, schedule=schedule, seed=seed)
+    adaptation = plan_run_adaptation_cohort(dataset, schedule=schedule, seed=seed,
+                                           history_steps=history_steps)
     formal = [
         {"batch_index": batch.batch_index,
          **_cohort_evidence(batch.cohort, minimum=(1 if schedule.quick else 2 if schedule.exploratory_local_comparison
@@ -52,6 +55,7 @@ def guarded_cohort_evidence_capacity(
     for generation in range(planned_generations):
         selection = plan_generation_selection_cohorts(
             dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed,
+            history_steps=history_steps,
         )
         evidence = _cohort_evidence(selection.holdout, minimum=2 if schedule.quick else profile.selection_minimum_paired_blocks)
         days = tuple(sorted({o.origin_timestamp // PROMOTION_BLOCK_HOURS for o in selection.holdout.origins}))

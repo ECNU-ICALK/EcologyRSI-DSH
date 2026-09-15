@@ -21,10 +21,10 @@ REQUEST_SCHEMA = "ecologyrsi-dsh.model-contract-canary/1"
 RECEIPT_SCHEMA = "ecologyrsi-dsh.model-contract-canary-receipt/1"
 SCOPE = "tool_and_schema_transport_only"
 _ROLES = (
-    ("strategy_model_id", "resolved_policy_route_config_digest", "researcher", "ecology-researcher-v12", "generation.search-plan", "ecology-research-search-plan@1"),
+    ("strategy_model_id", "resolved_policy_route_config_digest", "researcher", "ecology-researcher-v13", "generation.search-plan", "ecology-research-search-plan@1"),
     ("review_model_id", "resolved_review_route_config_digest", "generation-judge", "ecology-generation-judge-v8", "generation.reflect", "ecology-generation-reflection@1"),
     ("review_model_id", "resolved_review_route_config_digest", "sample-critic", "ecology-sample-critic-v5", "sample.critic", "ecology-sample-review@2"),
-    ("strategy_model_id", "resolved_policy_route_config_digest", "sample-planner", "ecology-sample-planner-v9", "sample.plan", "ecology-sample-predictions@2"),
+    ("strategy_model_id", "resolved_policy_route_config_digest", "sample-planner", "ecology-sample-planner-v11", "sample.plan", "ecology-sample-predictions@2"),
 )
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
 _ROUTE_PART = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,119}$")

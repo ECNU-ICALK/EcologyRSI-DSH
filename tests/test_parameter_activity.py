@@ -22,7 +22,10 @@ from ecologyrsi_dsh.evolution.strategies import (
     _genome_parameter_boundary, _mutation_contract_catalog, _predictor_semantics,
     _registered_mutation_targets, _validate_candidate_direction_realizability,
 )
-from ecologyrsi_dsh.knowledge.program_registry import current_program_registry
+from ecologyrsi_dsh.knowledge.program_registry import (
+    SAMPLE_FORECASTING_SKILL,
+    current_program_registry,
+)
 from tests.test_baseline_aligned_ridge import periodic_series
 from tests.test_candidate_direction_contract import _direction_payload
 from tests.test_evolution_genome import _initialization, _mutation_context
@@ -77,6 +80,44 @@ class ParameterActivityTests(unittest.TestCase):
         self.assertEqual(activity["zero_effect_default_tool_parameters"], ["history_steps", "ridge_alpha"])
         self.assertFalse(activity["agent_policy_parameters_pruned"])
         self.assertIn("final numerical predictions", _mutation_contract_catalog(self.task, self.parent)["mutation_axis_effects"]["instruction_profile"])
+
+    def test_the_instruction_axis_offers_strategies_that_route_through_a_tool(self):
+        """The only axis that always reaches the score must be able to open the others.
+
+        `scientific_parameter` and `registered_predictor` change a default the
+        Agent has to opt into. When every registered directive can be satisfied
+        by answering from context, a lane that stops calling tools has no legal
+        edit that could restore the measurement. These templates are that exit.
+        """
+        registry = current_program_registry()
+        templates = registry.to_dict()["programs"]["instruction_templates"]
+        planner = {name: entry for name, entry in templates.items()
+                   if entry.get("role") == "sample-planner"}
+        tool_routed = {
+            "sample-planner-model-anchored@1",
+            "sample-planner-residual-blend@1",
+            "sample-planner-horizon-split-model@1",
+            "sample-planner-tool-comparison@1",
+        }
+        self.assertLessEqual(tool_routed, set(planner))
+        for name in tool_routed:
+            directive = planner[name]["directive"]
+            self.assertIn("candidate-model", directive)
+            self.assertIn("cite", directive.lower())
+            self.assertEqual(planner[name]["skill_name"], SAMPLE_FORECASTING_SKILL)
+            self.assertIn("confidence_threshold", planner[name]["parameters"])
+
+        # Every one of them is reachable from a seed genome in a single edit.
+        offered = _registered_mutation_targets(self.task, self.parent)["instruction_profile"]
+        self.assertLessEqual(tool_routed, set(offered))
+        selected = next(
+            profile["instruction_template_ref"]["id"]
+            for profile in self.parent.to_dict()["agent_program"][
+                "candidate_execution_program"
+            ]["role_profiles"]
+            if profile["role"] == "sample-planner"
+        )
+        self.assertEqual(set(offered), set(planner) - {selected})
 
     def test_local_edit_can_change_agent_visible_default_parameters(self):
         context = _context(self.parent)

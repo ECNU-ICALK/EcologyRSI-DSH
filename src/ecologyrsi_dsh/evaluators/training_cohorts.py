@@ -7,24 +7,28 @@ are separate datasets and are never consulted by this planner.
 from dataclasses import replace
 
 from . import isolated_cohorts
-from .epoch_cohorts import TRAINING_REUSE_POLICY, _strict_integer
+from .epoch_cohorts import DEFAULT_HISTORY_STEPS, TRAINING_REUSE_POLICY, _strict_integer
 
 PLANNER_SCHEMA = "ecologyrsi-dsh.epoch-cohort-planner/3"
 
 
-def plan_adaptation(dataset, *, schedule, seed):
-    return replace(isolated_cohorts.plan_adaptation(dataset, schedule=schedule, seed=seed),
+def plan_adaptation(dataset, *, schedule, seed, history_steps=DEFAULT_HISTORY_STEPS):
+    return replace(isolated_cohorts.plan_adaptation(dataset, schedule=schedule, seed=seed,
+                                                   history_steps=history_steps),
                    planner_schema=PLANNER_SCHEMA)
 
 
-def plan_selection(dataset, *, schedule, generation, adaptation, seed):
+def plan_selection(dataset, *, schedule, generation, adaptation, seed,
+                   history_steps=DEFAULT_HISTORY_STEPS):
     _strict_integer(generation, "generation")
-    expected = plan_adaptation(dataset, schedule=schedule, seed=seed)
+    expected = plan_adaptation(dataset, schedule=schedule, seed=seed, history_steps=history_steps)
     if adaptation.adaptation_digest != expected.adaptation_digest:
         raise ValueError("adaptation does not match the fixed training plan")
-    original = isolated_cohorts.plan_adaptation(dataset, schedule=schedule, seed=seed)
+    original = isolated_cohorts.plan_adaptation(dataset, schedule=schedule, seed=seed,
+                                               history_steps=history_steps)
     first = isolated_cohorts.plan_selection(dataset, schedule=schedule, generation=0,
-                                           adaptation=original, seed=seed)
+                                           adaptation=original, seed=seed,
+                                           history_steps=history_steps)
     def occurrence(cohort):
         return replace(cohort, origins=tuple(replace(o, reuse_index=generation) for o in cohort.origins))
     return replace(first, generation=generation, adaptation_digest=adaptation.adaptation_digest,
@@ -33,10 +37,12 @@ def plan_selection(dataset, *, schedule, generation, adaptation, seed):
                    planner_schema=PLANNER_SCHEMA)
 
 
-def estimate_capacity(dataset, *, schedule, planned_generations, seed, scoring_cells_per_origin):
+def estimate_capacity(dataset, *, schedule, planned_generations, seed, scoring_cells_per_origin,
+                      history_steps=DEFAULT_HISTORY_STEPS):
     _strict_integer(planned_generations, "planned_generations", minimum=1)
     first = isolated_cohorts.estimate_capacity(dataset, schedule=schedule, planned_generations=1,
-                                              seed=seed, scoring_cells_per_origin=scoring_cells_per_origin)
+                                              seed=seed, scoring_cells_per_origin=scoring_cells_per_origin,
+                                              history_steps=history_steps)
     # Candidate/replica executions cost time, not additional independent rows.
     return replace(first, planned_generations=planned_generations,
                    max_feasible_generations=planned_generations if first.sufficient else 0,

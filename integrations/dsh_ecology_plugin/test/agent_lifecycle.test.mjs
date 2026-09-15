@@ -150,12 +150,12 @@ test("run quiescence waits pending creations and disposes every published host",
   const researcherBinding = {
     ...common,
     role: "researcher",
-    preset_id: "ecology-researcher-v12",
+    preset_id: "ecology-researcher-v13",
   };
   const proposerBinding = {
     ...common,
     role: "candidate-proposer",
-    preset_id: "ecology-candidate-proposer-v4",
+    preset_id: "ecology-candidate-proposer-v5",
   };
   const ctx = {
     agents: {
@@ -249,7 +249,7 @@ test("role creation preserves its setup error when private disposal also fails",
   const result = await outcome(manager.createRoleAgent({
     run_id: "run-primary-role-error",
     role: "researcher",
-    preset_id: "ecology-researcher-v12",
+    preset_id: "ecology-researcher-v13",
     model: "provider/model",
     cwd: "/tmp",
   }));

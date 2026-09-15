@@ -166,7 +166,13 @@ class WorkspaceHTTPTests(unittest.TestCase):
         run, candidate_id = self.seed()
         state = self.server.director.state(run)
         complete = _candidate_projection(state, state.candidate(candidate_id))
-        hidden = {'metrics', 'inference_trace', 'algorithm_execution', 'model_plan', 'genome'}
+        # `mutation_explanation` belongs with the other detail-only keys: it
+        # reads the parent genome out of history and recomputes the round's
+        # allowed mutation targets, which is exactly the work a summary must
+        # not do. The renderer already treats its absence as "not projected
+        # here" rather than "no change".
+        hidden = {'metrics', 'inference_trace', 'algorithm_execution', 'model_plan',
+                  'genome', 'mutation_explanation'}
         with ExitStack() as stack:
             for name in ('_algorithm_execution_projection', '_public_inference_trace',
                          '_public_evaluation_metrics', '_safe_plan_value'):

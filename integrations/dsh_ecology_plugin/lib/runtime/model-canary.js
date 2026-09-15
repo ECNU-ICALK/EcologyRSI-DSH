@@ -17,10 +17,10 @@ import {
 export const CANARY_SCHEMA = "ecologyrsi-dsh.model-contract-canary/1";
 export const CANARY_RECEIPT_SCHEMA = "ecologyrsi-dsh.model-contract-canary-receipt/1";
 const PRESETS = Object.freeze({
-  "generation.search-plan": "ecology-researcher-v12",
+  "generation.search-plan": "ecology-researcher-v13",
   "generation.reflect": "ecology-generation-judge-v8",
   "sample.critic": "ecology-sample-critic-v5",
-  "sample.plan": "ecology-sample-planner-v9",
+  "sample.plan": "ecology-sample-planner-v11",
 });
 const DIGEST_FIELDS = ["preset_content_digest", "standing_tool_surface_digest", "route_config_digest"];
 const IDENTITY_KEYS = ["provider_id", "model_id", "stage", "role", "preset_id", "output_schema_id", ...DIGEST_FIELDS];

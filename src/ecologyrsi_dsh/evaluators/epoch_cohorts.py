@@ -473,6 +473,7 @@ class CohortCapacityReport:
     reused_origin_occurrences: int = 0
     schema_version: str = CAPACITY_REPORT_SCHEMA
     planner_schema: str = COHORT_PLANNER_SCHEMA
+    origin_history_alignment_hours: int = DEFAULT_HISTORY_STEPS
 
     def __post_init__(self) -> None:
         for name in (
@@ -489,6 +490,11 @@ class CohortCapacityReport:
             "reused_origin_occurrences",
         ):
             _strict_integer(getattr(self, name), name)
+        _strict_integer(
+            self.origin_history_alignment_hours,
+            "origin_history_alignment_hours",
+            minimum=1,
+        )
         if self.cohort_reuse_policy not in {COHORT_REUSE_POLICY, ISOLATED_REUSE_POLICY, TRAINING_REUSE_POLICY, QUICK_REUSE_POLICY}:
             raise ValueError(
                 f"cohort_reuse_policy must be {COHORT_REUSE_POLICY!r}"
@@ -503,7 +509,7 @@ class CohortCapacityReport:
         )
 
     def identity_dict(self) -> dict[str, Any]:
-        return {
+        identity = {
             "schema_version": self.schema_version,
             "planner_schema": self.planner_schema,
             "dataset_id": self.dataset_id,
@@ -528,6 +534,18 @@ class CohortCapacityReport:
             "cohort_reuse_policy": self.cohort_reuse_policy,
             "reused_origin_occurrences": self.reused_origin_occurrences,
         }
+        if self.origin_history_alignment_hours != DEFAULT_HISTORY_STEPS:
+            # Omitted at the historical depth so every archived report -- and so
+            # every frozen ``planner_digest`` a paused run has to match on resume
+            # -- stays byte-identical. Present as soon as a run freezes a deeper
+            # alignment, because the eligible count is only a proxy for it: two
+            # depths can leave the same number of origins, and then a digest
+            # built from the count alone would let a cohort planned at one depth
+            # pass the drift check of a run frozen at the other.
+            identity["origin_history_alignment_hours"] = (
+                self.origin_history_alignment_hours
+            )
+        return identity
 
     @property
     def planner_digest(self) -> str:
@@ -723,17 +741,18 @@ def plan_run_adaptation_cohort(
     *,
     schedule: OptimizationSchedule,
     seed: int,
+    history_steps: int = DEFAULT_HISTORY_STEPS,
 ) -> RunAdaptationCohort:
     if not isinstance(schedule, OptimizationSchedule):
         raise TypeError("schedule must be OptimizationSchedule")
     if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
         from .training_cohorts import plan_adaptation
-        return plan_adaptation(dataset, schedule=schedule, seed=seed)
+        return plan_adaptation(dataset, schedule=schedule, seed=seed, history_steps=history_steps)
     if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION or schedule.quick:
         from .isolated_cohorts import plan_adaptation
-        return plan_adaptation(dataset, schedule=schedule, seed=seed)
+        return plan_adaptation(dataset, schedule=schedule, seed=seed, history_steps=history_steps)
     _strict_integer(seed, "seed")
-    eligible, _gaps = _eligible_origins(dataset)
+    eligible, _gaps = _eligible_origins(dataset, history_steps=history_steps)
     required = schedule.formal_origin_count_per_finalist
     selected = _cycled_origins(eligible, start=0, count=required)
     cohort = PlannedCohort(
@@ -773,20 +792,24 @@ def plan_generation_selection_cohorts(
     generation: int,
     adaptation: RunAdaptationCohort,
     seed: int,
+    history_steps: int = DEFAULT_HISTORY_STEPS,
 ) -> GenerationCohorts:
     if not isinstance(schedule, OptimizationSchedule):
         raise TypeError("schedule must be OptimizationSchedule")
     if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
         from .training_cohorts import plan_selection
-        return plan_selection(dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed)
+        return plan_selection(dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed, history_steps=history_steps)
     if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION or schedule.quick:
         from .isolated_cohorts import plan_selection
-        return plan_selection(dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed)
+        return plan_selection(dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed, history_steps=history_steps)
     if not isinstance(adaptation, RunAdaptationCohort):
         raise TypeError("adaptation must be RunAdaptationCohort")
     _strict_integer(generation, "generation")
     _strict_integer(seed, "seed")
-    eligible, _gaps = _eligible_origins(dataset)
+    # The identity check below re-derives the adaptation cohort, and every
+    # ``origin_id`` carries its own history depth, so passing a different
+    # ``history_steps`` than the run froze rejects the run's own cohort.
+    eligible, _gaps = _eligible_origins(dataset, history_steps=history_steps)
     if not eligible:
         raise _capacity_error(required=1, available=0, schedule=schedule)
     expected_adaptation = _cycled_origins(
@@ -836,6 +859,7 @@ def estimate_epoch_capacity(
     planned_generations: int,
     seed: int,
     scoring_cells_per_origin: int | None = None,
+    history_steps: int = DEFAULT_HISTORY_STEPS,
 ) -> CohortCapacityReport:
     if not isinstance(schedule, OptimizationSchedule):
         raise TypeError("schedule must be OptimizationSchedule")
@@ -845,17 +869,17 @@ def estimate_epoch_capacity(
                                     if adapter else DEFAULT_SCORING_CELLS_PER_ORIGIN)
     if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
         from .training_cohorts import estimate_capacity
-        return estimate_capacity(dataset, schedule=schedule, planned_generations=planned_generations, seed=seed, scoring_cells_per_origin=scoring_cells_per_origin)
+        return estimate_capacity(dataset, schedule=schedule, planned_generations=planned_generations, seed=seed, scoring_cells_per_origin=scoring_cells_per_origin, history_steps=history_steps)
     if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION or schedule.quick:
         from .isolated_cohorts import estimate_capacity
-        return estimate_capacity(dataset, schedule=schedule, planned_generations=planned_generations, seed=seed, scoring_cells_per_origin=scoring_cells_per_origin)
+        return estimate_capacity(dataset, schedule=schedule, planned_generations=planned_generations, seed=seed, scoring_cells_per_origin=scoring_cells_per_origin, history_steps=history_steps)
     _strict_integer(planned_generations, "planned_generations", minimum=1)
     _strict_integer(seed, "seed")
     _strict_integer(
         scoring_cells_per_origin, "scoring_cells_per_origin", minimum=1
     )
     dataset_id, episode_id, _timestamps = _dataset_identity(dataset)
-    eligible, gaps = _eligible_origins(dataset)
+    eligible, gaps = _eligible_origins(dataset, history_steps=history_steps)
     selected = _selection_partition(dataset)
     required = schedule.required_unique_origins(planned_generations)
     # A non-empty eligible population can service any requested number of
@@ -872,6 +896,7 @@ def estimate_epoch_capacity(
         planned_generations=planned_generations,
         available_partition_origins=selected.size,
         available_eligible_origins=len(eligible),
+        origin_history_alignment_hours=history_steps,
         required_unique_origins=required,
         max_feasible_generations=max_generations,
         sufficient=bool(eligible),

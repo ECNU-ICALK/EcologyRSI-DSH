@@ -19,6 +19,10 @@ from ..core.model_execution_policy import (
 )
 from ..core.errors import dsh_native_runtime_evaluation_fatal
 from ..core.agent_prediction import PREDICTION_TOOL_CALL_BUDGET, validate_predictions, validate_agent_review
+from ..evolution.agent_policy import (
+    allowed_prediction_methods as _allowed_prediction_methods,
+    frozen_prediction_tool_call_budget,
+)
 from .origin_prompt import compact_origin_contexts
 from ..core.redaction import REMOTE_REASON_CODES
 from ..integrations.dsh_structured_roles import DshStructuredRoleRuntime
@@ -327,6 +331,10 @@ class DshSampleCollaborationAdapter:
         self.remote_review_enabled = True
         self.require_remote_planner = True
         self.require_remote_critic = require_success_critic
+        # One advisory-critic protocol failure is enough evidence that this
+        # route is unusable for this execution.  Latch it so the remaining
+        # low-confidence cells are not each charged another failed call.
+        self._advisory_critic_degraded_reason: str | None = None
         self.remote_critic_policy = _normalized_remote_critic_policy(remote_critic_policy)
         self.sample_planner_prompt_profile = normalized_sample_planner_prompt_profile(sample_planner_prompt_profile)
         self.operation_max_tokens = _normalized_operation_max_tokens(operation_max_tokens or NATIVE_SAMPLE_OPERATION_MAX_TOKENS)
@@ -401,6 +409,7 @@ class DshSampleCollaborationAdapter:
         samples: Sequence[Mapping[str, Any]],
         context: Mapping[str, Any],
         available_tools: Sequence[Mapping[str, Any]],
+        prediction_tool_call_budget: int | None = None,
     ) -> Any:
         # A transport/model failure before the Host tool executes advances the
         # sample attempt counter, so the generic adapter labels the next route
@@ -419,6 +428,9 @@ class DshSampleCollaborationAdapter:
         stage_attempt = max(1, int(wave_digest[:12], 16))
         idempotency_key = f"{self._decision_client.run_id}:sample.plan:{wave_digest}"
         frozen_requests = tuple(requests)
+        # One origin per wave under the strict origin contract; leave it unset
+        # rather than guess when a wave spans several.
+        origins = {request.origin_timestamp for request in frozen_requests}
         return self._prediction_tool_binder(
             run_id=self._decision_client.run_id,
             stage_attempt=stage_attempt,
@@ -429,6 +441,8 @@ class DshSampleCollaborationAdapter:
             executor=lambda tool_id, parameters: self._execute_agent_tool(
                 frozen_requests, tool_id, parameters
             ),
+            prediction_tool_call_budget=prediction_tool_call_budget,
+            origin_timestamp=next(iter(origins)) if len(origins) == 1 else None,
         )
 
     def set_resume_checkpoint(self, checkpoint: Mapping[str, Any] | None) -> None:
@@ -774,7 +788,9 @@ class DshSampleCollaborationAdapter:
         if role not in {"planner", "repair"}:
             return []
         return [
-            {"tool_id": "candidate-model", "version": "1", "purpose": "Candidate's evolved default model; optional", "parameters": {}},
+            {"tool_id": "candidate-model", "version": "1",
+             "purpose": "This candidate's own evolved model over the whole origin vector; the expected first evidence call",
+             "parameters": {}},
             {"tool_id": "persistence", "version": "1", "purpose": "Latest causal history value", "parameters": {}},
             *self._agent_tool_catalog,
         ]
@@ -829,20 +845,38 @@ class DshSampleCollaborationAdapter:
                 "; within origin_contexts, {shared_origin_ref: key} means the exact value in "
                 "shared_origin_values[key]. Resolve references without repeating the data or its analysis."
             )
+        prediction_tool_call_budget = frozen_prediction_tool_call_budget(
+            decision_context.get("agent_policy")
+        )
+        # Narrowed only by a candidate that authored a directive saying so; the
+        # full set otherwise, which is what every genome without one gets. Told
+        # to the planner below and enforced on its answer by
+        # validate_predictions, so the contract it read is the contract it is
+        # held to.
+        allowed_methods = _allowed_prediction_methods(
+            decision_context.get("candidate_agent_profile")
+        )
         context["prediction_contract"] = {
-            "owner": "sample_agent", "max_prediction_tool_calls": PREDICTION_TOOL_CALL_BUDGET,
+            "owner": "sample_agent", "max_prediction_tool_calls": prediction_tool_call_budget,
             "model_fit_cache_capacity": 8,
             "exploration_budget": "Per-attempt tool calls only; cache eviction does not remove capabilities",
             "analysis_stopping_rule": (
-                "Use inherited policy and causal observations first. Direct prediction is allowed. "
-                "Analyze the origin vector once, not each cell as a separate research task. "
-                "Use a second numerical call only for an unresolved discrepancy or uncertainty. "
-                "Two is the hard call limit, not a target. Do not manually reconstruct model fits. "
-                "Do not repeat equivalent parameter requests. Stop when evidence is sufficient "
-                "and submit the full prediction vector with concise reason codes."
+                "Open with one candidate-model call over the whole origin vector: those numbers "
+                "are this candidate's evolved parameters, and the evolution loop can only measure "
+                "them through a call you cite. Then reconcile them against the causal observations "
+                "and the inherited policy. Analyze the origin vector once, not each cell as a "
+                "separate research task. Spend further calls only on a discrepancy the previous "
+                "ones left unresolved, never to repeat an equivalent parameter request. A failed "
+                f"call still consumes budget, and {prediction_tool_call_budget} is the hard call "
+                "limit. Do not manually reconstruct model fits. Submit the full prediction "
+                "vector with concise reason codes as soon as the evidence is reconciled."
             ),
-            "final_prediction": "Agent submits numeric predictions; tools are optional evidence",
-            "allowed_methods": ["direct", "model", "blend", "adjusted"],
+            "final_prediction": (
+                "Agent submits the numeric predictions and cites the evidence calls behind them; "
+                "at least one cited candidate-model call per batch, and a cell that departs from "
+                "the model states why in its reason code"
+            ),
+            "allowed_methods": list(allowed_methods),
             "training_boundary": "Models fit training_fit only; evaluation labels are unavailable",
         }
         catalog = self._available_tool_catalog(selected[0], plans[indices[0]], role=role)
@@ -850,13 +884,15 @@ class DshSampleCollaborationAdapter:
             with self._prediction_tool_context(
                 role=role, model_id=self.strategy_model_id, requests=selected,
                 samples=samples, context=context, available_tools=catalog,
+                prediction_tool_call_budget=prediction_tool_call_budget,
             ) as binding:
                 raw = self._agent_decide(
                     self.strategy_model_id, role=role, samples=samples, context=context,
                     available_tools=catalog, allow_format_retry=False, diagnostics=diagnostics,
                 )
                 structured = {"schema_version": "ecology-sample-predictions@2", "wave_digest": binding.wave_digest, **raw}
-                rows = validate_predictions(structured, [r.sample_id for r in selected], wave_digest=binding.wave_digest)
+                rows = validate_predictions(structured, [r.sample_id for r in selected], wave_digest=binding.wave_digest,
+                                            allowed_methods=allowed_methods)
 
         except SampleExecutionControlError:
             raise
@@ -899,14 +935,59 @@ class DshSampleCollaborationAdapter:
                 "predicted": row["predicted"], "agent_decisions": [agent_step],
                 "tool_calls": [*tool_trace, final_step],
             })
-        review = [item for item in successful if self.require_remote_critic or self.remote_critic_policy is None
-                  or self.remote_critic_policy["version"] == "always@1"
-                  or item["decision"]["confidence"] < self.remote_critic_policy["min_planner_confidence"]]
+        review = [item for item in successful if self._requires_remote_review(item["decision"])]
         if self.remote_review_enabled and review:
-            self._review_successes(review, plans, outcomes, diagnostics)
+            self._review_successes(review, outcomes, diagnostics)
 
-    def _review_successes(self, successful, plans, outcomes, diagnostics, *, compact=False):
+    def _requires_remote_review(self, decision) -> bool:
+        """Decide whether one accepted decision goes to the remote critic.
+
+        `min_planner_confidence` is the candidate's own escalation threshold: the
+        evaluator overlays the value from the compiled candidate agent profile on
+        the run-level policy, so this is where an evolved instruction parameter
+        turns into a real difference in how much independent review the generation
+        buys. The two policy-shaped escapes above it stay the Host's: a missing
+        policy and `always@1` both mean "review everything", and no candidate can
+        opt out of them.
+        """
+
+        if self.require_remote_critic or self.remote_critic_policy is None:
+            return True
+        if self.remote_critic_policy["version"] == "always@1":
+            return True
+        return decision["confidence"] < self.remote_critic_policy["min_planner_confidence"]
+
+    def _advisory_critic_degradation(self, successful, outcomes, reason_code, failure_class):
+        """Record an unavailable advisory review as evidence, not as a failure."""
+        for item in successful:
+            critic_step = {
+                "role": "remote_critic_agent",
+                "decision": "reject_advisory_keep_scientific_prediction",
+                "status": "failed",
+                "model_id": self.review_model_id,
+                "reason_code": reason_code,
+                "response_digest": digest({
+                    "model_id": self.review_model_id, "role": "critic",
+                    "status": "failed", "failure_class": failure_class,
+                    "sample_id": item["request"].sample_id,
+                }),
+            }
+            outcomes[item["index"]] = SamplePredictionOutcome(
+                sample_id=item["request"].sample_id, result={
+                    "predicted": item["predicted"],
+                    "agent_decisions": [*item["agent_steps"], critic_step],
+                    "tool_calls": [*item["tool_trace"], item["tool_step"]],
+                },
+            )
+
+    def _review_successes(self, successful, outcomes, diagnostics):
         """Review causal evidence; all non-accept decisions return to the Agent."""
+        latched = self._advisory_critic_degraded_reason
+        if latched is not None and not self.require_remote_critic:
+            # This cohort already proved the advisory route unusable.  Do not
+            # spend another call per low-confidence cell to learn it again.
+            self._advisory_critic_degradation(successful, outcomes, *latched)
+            return
         samples = [{
             "sample_id": item["request"].sample_id,
             "target": item["request"].target,
@@ -932,21 +1013,62 @@ class DshSampleCollaborationAdapter:
             raise
         except Exception as exc:
             runtime_error = dsh_native_runtime_error_in_chain(exc)
-            if runtime_error is not None and (dsh_native_runtime_retryable(runtime_error)
-                                              or dsh_native_runtime_evaluation_fatal(runtime_error)):
+            if (
+                runtime_error is not None
+                and self.require_remote_critic
+                and dsh_native_runtime_retryable(runtime_error)
+            ):
+                # A transient runtime outage on a *required* review crosses the
+                # sample boundary so the executor can replay this attempt.  An
+                # advisory review is degraded in place instead: re-raising it
+                # would retry, and then resume, the whole batch once per
+                # low-confidence cell for an opinion nothing scores.
                 raise
-            # A selected review is part of this attempt's contract. Unavailability
-            # must be visible and cannot silently turn into scientific acceptance.
+            if (runtime_error is not None and self.require_remote_critic
+                    and dsh_native_runtime_evaluation_fatal(runtime_error)):
+                # A required review cannot be waived; an irrecoverable runtime
+                # fault there does make a complete frozen cohort impossible.
+                raise
+            failure_class, _, error_type = classify_sample_failure(exc)
+            reason_code = f"critic_unavailable_{failure_class}"[:160]
+            if not self.require_remote_critic:
+                # An advisory critic is consulted only when the planner doubts
+                # itself.  Its unavailability is recorded evidence against this
+                # cell, not grounds to void the whole run -- and it is a
+                # one-shot degradation: retrying a protocol fault per cell only
+                # replays the same failure and forces a batch resume each time.
+                self._advisory_critic_degraded_reason = (reason_code, failure_class)
+                self._advisory_critic_degradation(
+                    successful, outcomes, reason_code, failure_class
+                )
+                return
             for item in successful:
+                critic_step = {
+                    "role": "remote_critic_agent",
+                    "decision": "reject_advisory_keep_scientific_prediction",
+                    "status": "failed",
+                    "model_id": self.review_model_id,
+                    "reason_code": reason_code,
+                    "response_digest": digest({
+                        "model_id": self.review_model_id, "role": "critic",
+                        "status": "failed", "failure_class": failure_class,
+                        "sample_id": item["request"].sample_id,
+                    }),
+                }
+                decisions = [*item["agent_steps"], critic_step]
+                calls = [*item["tool_trace"], item["tool_step"]]
+                # A selected review is part of this attempt's contract.
+                # Unavailability must be visible and cannot silently turn into
+                # scientific acceptance.
+                failure = SampleExecutionAttemptError(
+                    "required Agent review failed", failure_class="invalid_output",
+                    retryable=True, error_type=error_type,
+                    agent_decisions=decisions, tool_calls=calls,
+                    previous_prediction=item["predicted"],
+                )
+                failure.__cause__ = exc
                 outcomes[item["index"]] = SamplePredictionOutcome(
-                    sample_id=item["request"].sample_id,
-                    error=SampleExecutionAttemptError(
-                        "required Agent review failed", failure_class="invalid_output",
-                        retryable=True, error_type=type(exc).__name__,
-                        agent_decisions=item["agent_steps"],
-                        tool_calls=[*item["tool_trace"], item["tool_step"]],
-                        previous_prediction=item["predicted"],
-                    ),
+                    sample_id=item["request"].sample_id, error=failure,
                 )
             return
         for item in successful:

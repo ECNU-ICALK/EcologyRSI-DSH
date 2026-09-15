@@ -27,6 +27,7 @@ from ..knowledge.algorithms import (
 from ..knowledge.models import KnowledgeSnapshot
 from ..knowledge.program_registry import ProgramRegistrySnapshot
 from .genome import (
+    CANDIDATE_WORKFLOW_TEMPLATE_ID,
     EcologyEvolutionPluginGenome,
     FrozenJsonObject,
     _domain_digest,
@@ -36,6 +37,14 @@ from .genome import (
 
 
 COMPILER_VERSION = "ecology-plugin-behavior-compiler@3"
+# Workflow parameters a host component actually reads. ``max_attempts`` reaches
+# ``SampleExecutionRegistry._sample_execution_policy``, which turns it into the
+# per-sample retry depth. ``max_concurrent`` and ``wave_size`` have no consumer
+# anywhere in ``src``, so they are withheld from the mutation catalog: an
+# advertised knob that changes nothing is worse than an absent one, because
+# ``behavior_digest`` covers the whole agent program and therefore reports the
+# edit as a real behaviour change while nothing at run time differs.
+EXECUTABLE_WORKFLOW_PARAMETERS = frozenset({"max_attempts"})
 DEFAULT_COMPILER_SEMANTIC_DIGEST = _domain_digest(
     "ecologyrsi-dsh/plugin-compiler-semantics/3",
     {
@@ -48,6 +57,12 @@ DEFAULT_COMPILER_SEMANTIC_DIGEST = _domain_digest(
         # into compiled_behavior_digest. Named here so a behavior compiled
         # before recipes existed can never collide with one compiled after.
         "feature_recipe": "ecologyrsi-dsh.feature-recipe/1",
+        # An authored directive is a behavior for the same reason: it replaces
+        # the registered template's text in the compiled profile and narrows
+        # the prediction methods the host will accept. Named here so a behavior
+        # compiled before directive authoring existed can never collide with
+        # one compiled after.
+        "authored_directive": "ecologyrsi-dsh.authored-directive/1",
     },
 )
 SECURITY_SEMANTIC_DIGEST = _domain_digest(
@@ -192,7 +207,7 @@ def compile_dsh_workflow_spec(
     template_id, template = _require_ref(
         registry, "workflow_templates", template_ref, "workflow template"
     )
-    if template_id != "candidate-sample-execution@1":
+    if template_id != CANDIDATE_WORKFLOW_TEMPLATE_ID:
         raise ValueError("candidate execution requires its registered workflow class")
     effective = _effective_parameters(
         registry, "workflow_templates", template_id, overrides
@@ -219,8 +234,18 @@ def compile_dsh_workflow_spec(
             "base_tool_policy_id",
             "enabled_tool_ids",
         }
-        if set(raw_profile) != required:
+        # Both authoring fields are optional and appear together; the genome
+        # validator enforces the pairing. Kept out of `required` so a genome
+        # archived before directive authoring existed still compiles.
+        optional = {"directive_policy_ref", "authored_directive"}
+        if not required <= set(raw_profile) <= required | optional:
             raise ValueError("role profile has unsupported or missing fields")
+        if ("directive_policy_ref" in raw_profile) != (
+            "authored_directive" in raw_profile
+        ):
+            raise ValueError(
+                "role profile requires directive_policy_ref and authored_directive together"
+            )
         role = _text(raw_profile["role"], "role")
         if role not in allowed_roles or role in seen_roles:
             raise ValueError("role profile is outside or duplicates workflow roles")
@@ -254,34 +279,42 @@ def compile_dsh_workflow_spec(
             raise ValueError("enabled tool ids must be unique")
         if not set(enabled_tools).issubset(base_tools):
             raise ValueError("enabled tool ids must be a subset of the base tool policy")
-        compiled_profiles.append(
-            {
-                "role": role,
-                "preset_id": _text(raw_profile["preset_id"], "preset_id"),
-                "instruction_template_id": instruction_id,
-                "instruction_template_digest": registry.program_ref(
-                    "instruction_templates", instruction_id
-                )["catalog_digest"],
-                "instruction_version": instruction["version"],
-                "skill_name": skill_name,
-                # The evolvable half of the instruction. It travels with the
-                # compiled profile because the Skill file is shared by every
-                # template and therefore says nothing about strategy; the
-                # template digest above already binds this text to identity.
-                "instruction_directive": _text(
-                    instruction.get("directive"), "instruction directive"
-                ),
-                "instruction_parameters": instruction_parameters,
-                "response_schema_id": _text(
-                    raw_profile["response_schema_id"], "response_schema_id"
-                ),
-                "base_tool_policy_id": policy_id,
-                "base_tool_policy_digest": registry.program_ref(
-                    "tool_policies", policy_id
-                )["catalog_digest"],
-                "enabled_tool_ids": sorted(enabled_tools),
-            }
-        )
+        compiled_profile = {
+            "role": role,
+            "preset_id": _text(raw_profile["preset_id"], "preset_id"),
+            "instruction_template_id": instruction_id,
+            "instruction_template_digest": registry.program_ref(
+                "instruction_templates", instruction_id
+            )["catalog_digest"],
+            "instruction_version": instruction["version"],
+            "skill_name": skill_name,
+            # The evolvable half of the instruction. It travels with the
+            # compiled profile because the Skill file is shared by every
+            # template and therefore says nothing about strategy; the
+            # template digest above already binds this text to identity.
+            "instruction_directive": _text(
+                instruction.get("directive"), "instruction directive"
+            ),
+            "instruction_parameters": instruction_parameters,
+            "response_schema_id": _text(
+                raw_profile["response_schema_id"], "response_schema_id"
+            ),
+            "base_tool_policy_id": policy_id,
+            "base_tool_policy_digest": registry.program_ref(
+                "tool_policies", policy_id
+            )["catalog_digest"],
+            "enabled_tool_ids": sorted(enabled_tools),
+        }
+        if "authored_directive" in raw_profile:
+            _compile_authored_directive(
+                compiled_profile,
+                raw_profile["authored_directive"],
+                raw_profile["directive_policy_ref"],
+                registry=registry,
+                enabled_tools=sorted(enabled_tools),
+                instruction_parameters=instruction_parameters,
+            )
+        compiled_profiles.append(compiled_profile)
     if seen_roles != allowed_roles:
         raise ValueError("role profiles do not cover the registered workflow roles")
     compiled_profiles.sort(key=lambda item: item["role"])
@@ -305,6 +338,68 @@ def compile_dsh_workflow_spec(
         "ecologyrsi-dsh/compiled-dsh-workflow/1", identity
     )
     return CompiledDshWorkflowSpec(_frozen_object(identity))
+
+
+def _compile_authored_directive(
+    compiled_profile: dict[str, Any],
+    raw_directive: Any,
+    raw_ref: Any,
+    *,
+    registry: ProgramRegistrySnapshot,
+    enabled_tools: Sequence[str],
+    instruction_parameters: Mapping[str, Any],
+) -> None:
+    """Render an authored directive into the slot the template would have filled.
+
+    The genome validator already enforced the clause whitelist and every static
+    bound. This is the second, *binding-aware* check -- the same division of
+    labour ``_compile_feature_recipe`` uses: the whitelist is global, but the
+    tools a run may actually plan come from the policy this profile bound
+    itself to, and the compiler is where profile and registry first meet.
+
+    Mutates ``compiled_profile`` in place, and only when a directive is present,
+    so a genome archived before directive authoring existed compiles to exactly
+    the bytes it always did.
+    """
+
+    # Deferred: evaluators/ reaches back into knowledge/, which imports this
+    # module, so a module-level import would close a cycle.
+    from ..evaluators.authored_directive import (
+        render_authored_directive,
+        validate_authored_directive,
+    )
+
+    policy = _compile_policy_ref(
+        registry, "directive_policies", raw_ref, "directive_policy_ref"
+    )
+    frozen = validate_authored_directive(
+        raw_directive, allowed_tool_ids=enabled_tools
+    )
+    ceilings = policy["effective_parameters"]
+    if frozen.step_count > ceilings["max_tool_plan_steps"]:
+        raise ValueError(
+            f"authored_directive plans {frozen.step_count} steps but "
+            f"{policy['id']} allows {ceilings['max_tool_plan_steps']}"
+        )
+    if len(frozen.rationale) > ceilings["max_rationale_length"]:
+        raise ValueError(
+            f"authored_directive rationale is {len(frozen.rationale)} characters "
+            f"but {policy['id']} allows {ceilings['max_rationale_length']}"
+        )
+    # Overwrites the registered template's text rather than appending to it:
+    # two strategy statements in one prompt is exactly the ambiguity the
+    # template/authoring split is meant to avoid. The template reference stays
+    # in the profile, so the archive still records what was replaced.
+    compiled_profile["instruction_directive"] = render_authored_directive(
+        frozen,
+        escalation_threshold=instruction_parameters.get("confidence_threshold"),
+    )
+    compiled_profile["directive_policy"] = policy
+    compiled_profile["authored_directive"] = frozen.to_dict()
+    compiled_profile["authored_directive_digest"] = frozen.digest
+    # Enforced downstream by `validate_predictions`, so the blend rule is a
+    # constraint the host checks and not merely a sentence the planner read.
+    compiled_profile["allowed_prediction_methods"] = list(frozen.allowed_methods)
 
 
 def _compile_policy_ref(
@@ -735,7 +830,7 @@ def resolve_candidate_agent_profile(
     )
     if profile is None:
         raise ValueError(f"candidate workflow has no {role} profile")
-    return {
+    resolved = {
         "schema_version": "ecologyrsi-dsh.candidate-agent-profile/1",
         "role": role,
         "preset_id": profile["preset_id"],
@@ -746,8 +841,31 @@ def resolve_candidate_agent_profile(
         "instruction_directive": profile["instruction_directive"],
         "instruction_parameters": dict(profile["instruction_parameters"]),
         "enabled_tool_ids": list(profile["enabled_tool_ids"]),
+        # The workflow half of the candidate's execution contract. Only the
+        # parameters in ``EXECUTABLE_WORKFLOW_PARAMETERS`` change anything, but
+        # the whole compiled set travels so the archived profile records what
+        # the candidate was actually run with. It rides here because this
+        # profile is the one per-candidate carrier the evaluator already reads
+        # (a run's TaskManifest is frozen per run, not per candidate).
+        "workflow_parameters": dict(workflow["effective_parameters"]),
         "workflow_digest": workflow["workflow_digest"],
     }
+    if "authored_directive" in profile:
+        # Present only when this candidate authored one, so a profile resolved
+        # from an archived genome keeps its historical twelve-key shape. The
+        # host compares this projection for strict equality against the
+        # archived copy before running a candidate, so an unconditional key
+        # would strand every archived proposal.
+        resolved["authored_directive"] = dict(profile["authored_directive"])
+        resolved["authored_directive_digest"] = profile["authored_directive_digest"]
+        resolved["directive_policy_id"] = profile["directive_policy"]["id"]
+        # Carried into the run because this is what the host enforces: the
+        # adapter states it in the prediction contract and
+        # ``validate_predictions`` rejects a decision that ignores it.
+        resolved["allowed_prediction_methods"] = list(
+            profile["allowed_prediction_methods"]
+        )
+    return resolved
 
 
 @dataclass(frozen=True, slots=True)
@@ -906,6 +1024,7 @@ __all__ = [
     "CompiledDshWorkflowSpec",
     "CompiledEcologyBehaviorSpec",
     "DEFAULT_COMPILER_SEMANTIC_DIGEST",
+    "EXECUTABLE_WORKFLOW_PARAMETERS",
     "bind_phenotype_instance",
     "compile_dsh_workflow_spec",
     "compile_plugin_behavior",

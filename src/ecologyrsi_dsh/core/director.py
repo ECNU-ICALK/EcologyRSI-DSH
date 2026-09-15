@@ -51,6 +51,7 @@ from ..evolution.workflow_ir import (
     resolve_candidate_agent_profile,
 )
 from ..evolution.promotion import assess_promotion_improvement
+from ..evolution.interventions import advisory_only_receipts
 from ..evolution.strategies import (
     DSHAdapter,
     FakeDSHAdapter,
@@ -1255,20 +1256,30 @@ class EvolutionDirector:
         intervention_overrides: dict[str, Any] = {}
         guidance_notes: list[str] = []
         constraint_notes: list[str] = []
+        knowledge_notes: list[str] = []
         for intervention in pending_interventions:
             if intervention.kind is InterventionKind.GUIDANCE:
                 guidance_notes.append(intervention.message)
             elif intervention.kind is InterventionKind.CONSTRAINT:
                 constraint_notes.append(intervention.message)
+            elif intervention.kind is InterventionKind.DOMAIN_KNOWLEDGE:
+                knowledge_notes.append(intervention.message)
             elif intervention.kind is InterventionKind.PARAMETER_OVERRIDE:
                 intervention_overrides.update(intervention.parameter_overrides)
         adapter_interventions = None
-        if guidance_notes or constraint_notes or intervention_overrides:
+        if (
+            guidance_notes
+            or constraint_notes
+            or knowledge_notes
+            or intervention_overrides
+        ):
             adapter_interventions = {"host_applies_interventions": True}
             if guidance_notes:
                 adapter_interventions["guidance"] = " | ".join(guidance_notes)
             if constraint_notes:
                 adapter_interventions["constraints"] = list(constraint_notes)
+            if knowledge_notes:
+                adapter_interventions["domain_knowledge"] = list(knowledge_notes)
             if intervention_overrides:
                 adapter_interventions["parameter_override"] = intervention_overrides
         proposal = None
@@ -1357,6 +1368,22 @@ class EvolutionDirector:
             [item.to_dict() for item in pending_interventions],
             selected_parent_candidate_id=parent_candidate_id,
         )
+        if (
+            proposal.metadata.get("execution_protocol")
+            == DSH_NATIVE_EVOLUTION_PROTOCOL
+        ):
+            # The call above still validates the proposal against the task
+            # parameter boundary, which is worth keeping. Its *result* is not:
+            # under the native protocol the genome is authoritative and
+            # `changes` only mirrors it, so writing a human-adjusted number
+            # here would desynchronize the two and report an execution that
+            # never happens. The interventions reach this proposal as expert
+            # directives in its stage context instead.
+            bounded_changes = dict(proposal.changes)
+            application_receipts = advisory_only_receipts(
+                [item.to_dict() for item in pending_interventions],
+                application_receipts,
+            )
         if application_receipts:
             rationale = proposal.rationale.strip()
             audit_notes = []
@@ -1369,6 +1396,11 @@ class EvolutionDirector:
                     "applied": "已应用",
                     "recorded": "仅记录、未执行",
                 }[status]
+                if (
+                    status == "recorded"
+                    and receipt.get("model_context_delivered") is True
+                ):
+                    status_text = "模型已读取、宿主未强制执行"
                 audit_notes.append(
                     f"人工干预{status_text}（{intervention.message}）："
                     f"{receipt['reason']}。"
@@ -2155,7 +2187,14 @@ class EvolutionDirector:
         if not isinstance(intervention, HumanIntervention):
             raise TypeError("intervention must be a HumanIntervention")
         state = self.state(intervention.run_id)
-        self._require_status(state.run, RunStatus.PAUSED)
+        # A paused run was the only way to leave a note, which made the whole
+        # channel an interrupt: the expert had to stop the evolution to say
+        # anything. Recording while RUNNING is safe because `start_generation_batch`
+        # freezes `intervention_ids` for the generation in flight -- anything
+        # written after that freeze is simply not in the batch, so it reaches the
+        # model at the *next* generation and cannot retroactively change a
+        # proposal that has already been produced or replayed.
+        self._require_status(state.run, RunStatus.PAUSED, RunStatus.RUNNING)
         existing = next(
             (
                 item

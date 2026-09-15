@@ -187,6 +187,46 @@ class ExpertConsultationHTTPTests(unittest.TestCase):
         )
         self.assertIs(answer_event["payload"]["audit_only"], True)
 
+    def test_persistent_flag_is_accepted_projected_and_defaults_off(self) -> None:
+        status, answered = self.request(f"/api/runs/{self.run_path}")
+        self.assertEqual(status, 200)
+        # Absent means one-off, so an older client keeps the prior semantics.
+        self.assertIs(
+            answered["projection"]["expert_consultations"][0]["persistent"],
+            False,
+        )
+
+        body = self.answer_body(key="durable-expert-answer")
+        body["persistent"] = True
+        status, answered = self.request(self.answer_path, "POST", body)
+
+        self.assertEqual(status, 201, answered)
+        consultation = answered["projection"]["expert_consultations"][0]
+        self.assertIs(consultation["persistent"], True)
+        self.assertTrue(
+            self.server.director.state(self.run_id)
+            .answer_for_consultation(self.consultation_id)
+            .persistent
+        )
+        events = self.request(f"/api/runs/{self.run_path}/events")[1]["events"]
+        answer_event = next(
+            item
+            for item in events
+            if item["kind"] == "ExpertConsultationAnswered"
+        )
+        self.assertIs(answer_event["payload"]["persistent"], True)
+
+    def test_non_boolean_persistent_is_rejected(self) -> None:
+        body = self.answer_body(key="bad-persistent")
+        body["persistent"] = "yes"
+        status, payload = self.request(self.answer_path, "POST", body)
+        self.assertEqual(status, 400, payload)
+        self.assertIsNone(
+            self.server.director.state(self.run_id).answer_for_consultation(
+                self.consultation_id
+            )
+        )
+
     def test_invalid_option_and_unknown_field_do_not_write_an_answer(self) -> None:
         invalid = self.answer_body(key="invalid-option")
         invalid["selected_option"] = "disable every constraint"

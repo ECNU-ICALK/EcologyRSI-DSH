@@ -12,7 +12,8 @@ from bisect import bisect_left
 from .epoch_cohorts import (
     CohortCapacityError, CohortCapacityReport, GenerationCohorts, PlannedBatch,
     PlannedCohort, RunAdaptationCohort, ISOLATED_PLANNER_SCHEMA,
-    ISOLATED_REUSE_POLICY, QUICK_REUSE_POLICY, _dataset_horizons, _eligible_origins,
+    DEFAULT_HISTORY_STEPS, ISOLATED_REUSE_POLICY, QUICK_REUSE_POLICY,
+    _dataset_horizons, _eligible_origins,
     _dataset_identity, _selection_partition, _strict_integer,
 )
 from ..core.models import digest
@@ -70,8 +71,8 @@ def _adaptation(eligible, schedule, seed, horizons):
                               planner_schema=ISOLATED_PLANNER_SCHEMA), cursor
 
 
-def plan_adaptation(dataset, *, schedule, seed):
-    eligible, _ = _eligible_origins(dataset)
+def plan_adaptation(dataset, *, schedule, seed, history_steps=DEFAULT_HISTORY_STEPS):
+    eligible, _ = _eligible_origins(dataset, history_steps=history_steps)
     return _adaptation(eligible, schedule, seed, _dataset_horizons(dataset))[0]
 
 
@@ -84,9 +85,10 @@ def _selection(cursor, schedule, horizons):
     return screening, holdout
 
 
-def plan_selection(dataset, *, schedule, generation, adaptation, seed):
+def plan_selection(dataset, *, schedule, generation, adaptation, seed,
+                   history_steps=DEFAULT_HISTORY_STEPS):
     _strict_integer(generation, "generation")
-    eligible, _ = _eligible_origins(dataset)
+    eligible, _ = _eligible_origins(dataset, history_steps=history_steps)
     expected, cursor = _adaptation(eligible, schedule, seed, _dataset_horizons(dataset))
     if expected.adaptation_digest != adaptation.adaptation_digest:
         raise ValueError("adaptation cohort does not match isolated dataset plan")
@@ -99,12 +101,13 @@ def plan_selection(dataset, *, schedule, generation, adaptation, seed):
     )
 
 
-def estimate_capacity(dataset, *, schedule, planned_generations, seed, scoring_cells_per_origin):
+def estimate_capacity(dataset, *, schedule, planned_generations, seed, scoring_cells_per_origin,
+                      history_steps=DEFAULT_HISTORY_STEPS):
     _strict_integer(planned_generations, "planned_generations", minimum=1)
     _strict_integer(seed, "seed")
     _strict_integer(scoring_cells_per_origin, "scoring_cells_per_origin", minimum=1)
     dataset_id, episode_id, _ = _dataset_identity(dataset)
-    eligible, gaps = _eligible_origins(dataset)
+    eligible, gaps = _eligible_origins(dataset, history_steps=history_steps)
     feasible, purged = 0, 0
     try:
         adaptation, cursor = _adaptation(eligible, schedule, seed, _dataset_horizons(dataset))
@@ -128,4 +131,5 @@ def estimate_capacity(dataset, *, schedule, planned_generations, seed, scoring_c
         cohort_reuse_policy=QUICK_REUSE_POLICY if schedule.quick else ISOLATED_REUSE_POLICY,
         reused_origin_occurrences=(planned_generations - 1) * schedule.formal_origin_count_per_finalist if schedule.quick else 0,
         planner_schema=ISOLATED_PLANNER_SCHEMA,
+        origin_history_alignment_hours=history_steps,
     )

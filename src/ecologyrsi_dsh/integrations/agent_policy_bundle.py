@@ -6,7 +6,7 @@ from ..core.models import digest
 from ..evolution.agent_policy import validate_agent_policy
 from ..version import __version__
 
-SCHEMA = 'ecologyrsi-dsh.agent-policy-bundle/1'
+SCHEMA = 'ecologyrsi-dsh.agent-policy-bundle/2'
 
 
 def export_policy_bundle(artifact):
@@ -19,6 +19,12 @@ def export_policy_bundle(artifact):
             'default_model': {'tool_id': artifact.model_id, 'parameters': dict(artifact.parameters),
                 'fit': {key: learned[key] for key in ('models', 'baseline_profile') if key in learned}},
             'optional_tool_catalog': learned['optional_tool_catalog'],
+            # Schema /2: the numerical tool catalog above advertises only the
+            # history the source run's cohort could serve, so the depth that
+            # narrowed it travels with it. Without it a redeployed policy
+            # rebuilt the catalog at the package ceiling and rejected its own
+            # exported contract.
+            'origin_history_alignment_hours': learned['origin_history_alignment_hours'],
             'requirements': {'training_partition': 'training_fit', 'prediction_owner': 'sample_agent',
                              'new_origin_requires_causal_history': True,
                              'provider_credentials': 'supplied_by_runtime_never_in_bundle'},
@@ -61,7 +67,9 @@ def create_policy_adapter(bundle, series, *, runtime_contract, **runtime_binding
     config = _CONFIGS[model['tool_id']].from_mapping(model['parameters'])
     fit = model['fit']
     bank = AgentModelTools(series, targets=sorted({m['target'] for m in fit['models']}),
-                          horizons=sorted({m['horizon_hours'] for m in fit['models']}))
+                          horizons=sorted({m['horizon_hours'] for m in fit['models']}),
+                          default_fit=fit, default_config=config,
+                          origin_history_alignment=bundle['origin_history_alignment_hours'])
     if bank.training_digest != bundle['training_data_digest']:
         raise ValueError('training data differs from the policy model recipe')
     if bank.catalog() != bundle['optional_tool_catalog']:

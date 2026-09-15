@@ -746,11 +746,16 @@ class EventEndpointsMixin:
             receipt = _public_intervention_receipt(payload, kind=kind)
             public_payload.update(
                 {
-                    "message": {
-                        "recorded": "人工意见仅记录到本轮提案，未执行。",
-                        "applied": "人工意见已应用到本轮提案。",
-                        "enforced": "人工意见已由宿主边界强制执行。",
-                    }[receipt["application_status"]],
+                    "message": (
+                        "人工意见原文已进入本轮提案上下文，宿主未强制执行。"
+                        if receipt["application_status"] == "recorded"
+                        and receipt.get("model_context_delivered") is True
+                        else {
+                            "recorded": "人工意见仅记录到本轮提案，未执行。",
+                            "applied": "人工意见已应用到本轮提案。",
+                            "enforced": "人工意见已由宿主边界强制执行。",
+                        }[receipt["application_status"]]
+                    ),
                     "intervention_id": intervention_id,
                     "proposal_id": payload.get("proposal_id"),
                     "kind": kind or None,
@@ -834,6 +839,7 @@ class EventEndpointsMixin:
                         else None
                     ),
                     "audit_only": effective_generation is None,
+                    "persistent": answer.get("persistent") is True,
                 }
             )
         elif event.kind == "ExpertConsultationApplied":

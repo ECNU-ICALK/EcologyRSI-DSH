@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { sessionEvents } from "./session-events.js";
+
 function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object") {
@@ -60,7 +62,13 @@ export class ChildBindingRegistry {
 
   claim(execAgent) {
     const parent = execAgent?.session?.header?.parentSession;
-    const label = this.foldDescriptor(execAgent?.session?.events || []);
+    // The child's own descriptor is only reachable through the Session adapter:
+    // a live DSH Session publishes its ordered log via snapshotEvents(), so
+    // reading `.events` directly resolved to no descriptor at all and made
+    // every claim fail as "missing reservation" -- which silently disabled the
+    // whole prediction-tool surface while structured persistence, which claims
+    // by the reserved label instead, kept working.
+    const label = this.foldDescriptor(sessionEvents(execAgent?.session) || []);
     return this.claimPublished(parent, label, execAgent.id);
   }
 

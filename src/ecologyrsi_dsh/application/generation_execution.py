@@ -26,6 +26,7 @@ from ..core.models import (
     PromotionDecision,
     Proposal,
     RunStatus,
+    TaskManifest,
     canonical_json,
     digest,
 )
@@ -68,6 +69,7 @@ from ..evaluators.epoch_cohorts import (
     plan_run_adaptation_cohort,
 )
 from ..evaluators.fitness import FitnessProfile
+from ..evaluators.greenhouse_prediction import origin_history_alignment_hours
 from ..evaluators.registry import RULE_JUDGE_ID, EvaluationBundle, EvaluatorRegistry
 from ..evaluators.generation_comparison import build_generation_comparison
 from ..evaluators.gateway_sample_adapter import ModelTokenBudgetExhaustedError
@@ -292,12 +294,19 @@ def _freeze_adaptive_generation_inputs(
         expected_split_manifest_digest=metadata.get("split_manifest_digest"),
         expected_data_protocol_digest=metadata.get("data_protocol_digest"),
     )
+    # Every planned origin bakes in the history depth it was planned at, so the
+    # planner has to read the alignment this run froze -- the same value the
+    # evaluator intersects the cohort down to. Planning deeper than the
+    # evaluator serves (or shallower) is the defect that turns one unservable
+    # origin into a non-retryable run failure.
+    history_steps = origin_history_alignment_hours(metadata)
     report = estimate_epoch_capacity(
         dataset,
         schedule=schedule,
         planned_generations=state.task_manifest.max_generations,
         seed=state.task_manifest.seed,
         scoring_cells_per_origin=int(metadata["prediction_cells_per_origin"]),
+        history_steps=history_steps,
     )
     frozen_report = metadata.get("cohort_capacity_report")
     expected_report = (capacity_with_inference_replicas(report, schedule)
@@ -310,6 +319,7 @@ def _freeze_adaptive_generation_inputs(
         dataset,
         schedule=schedule,
         seed=state.task_manifest.seed,
+        history_steps=history_steps,
     )
     planned = plan_generation_selection_cohorts(
         dataset,
@@ -317,6 +327,7 @@ def _freeze_adaptive_generation_inputs(
         generation=generation,
         adaptation=adaptation,
         seed=state.task_manifest.seed,
+        history_steps=history_steps,
     )
     _director_mutation(
         services,

@@ -116,6 +116,11 @@ class InterventionKind(str, Enum):
     PARAMETER_OVERRIDE = "parameter_override"
     CONSTRAINT = "constraint"
     PARENT_SELECTION = "parent_selection"
+    # Advisory-only channel. The other four kinds all try to become a numeric
+    # move inside the task parameter boundary; this one never does. It carries
+    # an expert's domain reasoning into the proposer's search context and is
+    # deliberately never host-enforced, so its receipt always says so.
+    DOMAIN_KNOWLEDGE = "domain_knowledge"
 
 
 class ExpertUncertaintyType(str, Enum):
@@ -767,6 +772,14 @@ class ExpertConsultationAnswer:
     selected_option: str | None = None
     effective_generation: int | None = None
     applied_generation: int | None = None
+    # A one-off answer leaves the model's view the moment a research iteration
+    # consumes it, which is right for "which of these two options do you want?"
+    # and wrong for durable domain knowledge: an expert who explains that night
+    # transpiration lags by two hours wants that to hold for the rest of the
+    # run, not for exactly one generation. A persistent answer keeps being
+    # offered after it is applied; `applied_generation` then records the most
+    # recent generation that read it rather than the one that consumed it.
+    persistent: bool = False
     created_at: str = field(default_factory=utc_now)
 
     def __post_init__(self) -> None:
@@ -798,6 +811,8 @@ class ExpertConsultationAnswer:
                 raise ValueError("applied answer requires an effective generation")
             if self.applied_generation < self.effective_generation:
                 raise ValueError("answer cannot be applied before its effective generation")
+        if not isinstance(self.persistent, bool):
+            raise ValueError("persistent must be a boolean")
 
     def to_dict(self) -> JsonObject:
         return {
@@ -809,6 +824,7 @@ class ExpertConsultationAnswer:
             "selected_option": self.selected_option,
             "effective_generation": self.effective_generation,
             "applied_generation": self.applied_generation,
+            "persistent": self.persistent,
             "created_at": self.created_at,
         }
 

@@ -105,8 +105,8 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
             "presets": [{"preset_id": preset, "declared": True, "preset_mountable": True,
                          "tool_surface_verified": True, "route_resolvable": True,
                          "live_agent_service_ready": True, "first_call_verified": False}
-                        for preset in ("ecology-coordinator-v5", "ecology-researcher-v12",
-                                       "ecology-candidate-proposer-v4", "ecology-sample-planner-v9",
+                        for preset in ("ecology-coordinator-v5", "ecology-researcher-v13",
+                                       "ecology-candidate-proposer-v5", "ecology-sample-planner-v11",
                                        "ecology-sample-critic-v5", "ecology-generation-judge-v8")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }

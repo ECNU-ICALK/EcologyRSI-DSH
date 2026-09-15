@@ -8,16 +8,45 @@ from time import monotonic
 from ..core.agent_prediction import PREDICTION_TOOL_CALL_BUDGET, validate_predictions
 from ..core.models import digest
 
+# The per-cell evidence contract accepts a flat map of bounded finite numbers
+# (evaluators.sample_execution._public_steps). Publishing anything else made the
+# Host reject its own accepted prediction as invalid_output: a recipe tool
+# reports parameters={'feature_recipe': {...}}, so every origin whose planner
+# successfully called it was retried, and an origin that called it on all three
+# attempts was scored at a registered physical bound. Project here, at the
+# boundary that produces the trace -- the full arguments and metadata stay in
+# the DshPredictionToolExecuted event, which has no such bound.
+_MAX_PUBLIC_PARAMETERS = 16
+_MAX_PUBLIC_PARAMETER_NAME = 100
+
+
+def _public_numeric_parameters(parameters):
+    if not isinstance(parameters, Mapping):
+        return {}
+    keep = {
+        name: value for name, value in parameters.items()
+        if isinstance(name, str) and 0 < len(name) <= _MAX_PUBLIC_PARAMETER_NAME
+        and type(value) in (int, float) and math.isfinite(value)
+    }
+    return {name: keep[name] for name in sorted(keep)[:_MAX_PUBLIC_PARAMETERS]}
+
 
 class DshPredictionToolBinding:
-    def __init__(self, *, run_id, stage_attempt, idempotency_key, wave_digest, sample_ids, catalog, executor):
+    def __init__(self, *, run_id, stage_attempt, idempotency_key, wave_digest, sample_ids, catalog, executor,
+                 budget=None, origin_timestamp=None):
         self.run_id = run_id
         self.stage_attempt = stage_attempt
         self.idempotency_key = idempotency_key
         self.wave_digest = wave_digest
         self.sample_ids = tuple(sample_ids)
+        # The forecast origin this wave serves, recorded so a ledger reader can
+        # attribute a tool call to an origin without joining through sample_ids.
+        self.origin_timestamp = origin_timestamp
         self.catalog = {item['tool_id']: dict(item) for item in catalog}
         self.executor = executor
+        # The budget this run froze into its Agent policy, not the current
+        # default: an archived wave must be restorable under the same ceiling.
+        self.budget = PREDICTION_TOOL_CALL_BUDGET if budget is None else budget
         self.calls = {}
         self._predictions = {}
         self._session_calls = {}
@@ -61,7 +90,7 @@ class DshPredictionToolBinding:
                 if p['arguments'] != arguments:
                     raise ValueError('prediction call_id was reused with different arguments')
             else:
-                if len(self.calls) >= PREDICTION_TOOL_CALL_BUDGET:
+                if len(self.calls) >= self.budget:
                     raise ValueError('prediction tool call budget exhausted')
                 result = {'tool_id': arguments['tool_id'], 'call_id': call_id, 'wave_digest': self.wave_digest}
                 started = monotonic()
@@ -88,8 +117,14 @@ class DshPredictionToolBinding:
                     from ..evaluators.sample_execution import SampleExecutionControlError
                     if isinstance(exc, SampleExecutionControlError):
                         raise
-                    # A failed capability is evidence for the Agent to choose another path.
+                    # A failed capability is evidence for the Agent to choose another path,
+                    # so it has to say why: an error_code alone made the planner spend the
+                    # rest of its budget on a call that could never succeed, and left the
+                    # ledger with no readable reason for a failure that killed a run.
+                    detail = str(exc).strip()[:200]
                     result.update(status='failed', error_code=type(exc).__name__)
+                    if detail:
+                        result['error_detail'] = detail
                 result['elapsed_ms'] = round((monotonic() - started) * 1000, 3)
                 p = {
                     'schema_version': 'ecologyrsi-dsh.dsh-prediction-tool-executed/2',
@@ -100,6 +135,8 @@ class DshPredictionToolBinding:
                     'arguments': deepcopy(dict(arguments)), 'request_digest': digest(arguments),
                     'result': result, 'output_digest': digest(result), 'execution_owner': 'dsh_agent_tool_call',
                 }
+                if self.origin_timestamp is not None:
+                    p['origin_timestamp'] = self.origin_timestamp
                 event = persist(p)
                 event_id = event.event_id
                 self.calls[call_id] = (p, event_id)
@@ -107,7 +144,7 @@ class DshPredictionToolBinding:
                     self._predictions.setdefault(computation_key, (deepcopy(result['outputs']), event_id))
             self._session_calls.setdefault(session_id, set()).add(call_id)
             return {'accepted': True, 'event_id': event_id, 'output_digest': p['output_digest'],
-                    'remaining_calls': max(0, PREDICTION_TOOL_CALL_BUDGET - len(self.calls)), **deepcopy(p['result'])}
+                    'remaining_calls': max(0, self.budget - len(self.calls)), **deepcopy(p['result'])}
 
     def final_receipt(self, structured, *, session_id):
         rows = validate_predictions(structured, self.sample_ids, wave_digest=self.wave_digest)
@@ -135,12 +172,17 @@ class DshPredictionToolBinding:
                     'output_digest': p['output_digest'], 'execution_owner': 'dsh_agent_tool_call',
                     'dsh_tool_event_id': event_id, 'dsh_tool_output_digest': p['output_digest'],
                     'elapsed_ms': p['result'].get('elapsed_ms', 0),
-                    'call_id': p['call_id'], 'parameters': deepcopy(p['arguments']['parameters']),
+                    'call_id': p['call_id'],
+                    'parameters': _public_numeric_parameters(p['arguments']['parameters']),
                     'used_as_evidence': p['call_id'] in evidence_call_ids,
                 }
+                if p['result'].get('error_detail'):
+                    item['error_detail'] = p['result']['error_detail']
                 output = next((row for row in p['result'].get('outputs', ()) if row['sample_id'] == sample_id), None)
                 if output is not None:
                     item['tool_predicted'] = output['predicted']
-                    item['parameters'] = deepcopy(output.get('metadata', {}).get('parameters', item['parameters']))
+                    reported = output.get('metadata', {}).get('parameters')
+                    if reported is not None:
+                        item['parameters'] = _public_numeric_parameters(reported)
                 trace.append(item)
             return trace

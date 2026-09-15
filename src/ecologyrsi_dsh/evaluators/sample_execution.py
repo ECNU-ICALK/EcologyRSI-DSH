@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import math
+import re
 import socket
 import time
 import zlib
@@ -51,6 +52,9 @@ _MAX_PLAN_BYTES = 16_384
 _MAX_SAMPLE_CONTEXT_BYTES = 32_768
 _MAX_PUBLIC_STEPS = 8
 _MAX_PERSISTED_RECORD_PREVIEW = 64
+# ASCII identifiers, field paths and punctuation only: enough for every message
+# this package raises, too little to carry a sentence a remote model wrote.
+_PUBLIC_REASON_DISALLOWED = re.compile(r"[^0-9A-Za-z .,:;_\-\[\]()/@]+")
 _FORBIDDEN_SAMPLE_CONTEXT_KEYS = frozenset(
     {
         "actual",
@@ -1696,6 +1700,7 @@ class CollaborativeSampleExecutor:
             )
             for attempt in range(1, sample_attempt_limit + 1):
                 attempts = attempt
+                raw_result: Any = None
                 try:
                     attempt_plan = dict(plan)
                     if failure_history:
@@ -1743,6 +1748,12 @@ class CollaborativeSampleExecutor:
                             exc, attempt if attempt_executed else 0
                         )
                     )
+                    if not exception_decisions and not exception_tools:
+                        # The adapter answered and the Host rejected the answer:
+                        # the remote work still happened and belongs in the record.
+                        exception_decisions, exception_tools = _salvaged_public_steps(
+                            raw_result
+                        )
                     attempt_entry = _attempt_trace_entry(
                         attempt if attempt_executed else 0,
                         exception_decisions,
@@ -2080,6 +2091,7 @@ class CollaborativeSampleExecutor:
             repair_tool_outcomes=repair_tool_outcomes,
         )
         tool_performance = summarize_tool_performance(records, scoring_rows)
+        agent_prediction_usage = summarize_agent_prediction_usage(scoring_rows)
         remote_planner_invocations = 0
         remote_critic_invocations = 0
         remote_reflection_invocations = 0
@@ -2191,21 +2203,24 @@ class CollaborativeSampleExecutor:
         complete_chain_sample_ids = {
             str(record.get("sample_id"))
             for record in records
-            if (
-                isinstance(record.get("sample_agent_chain"), Mapping)
-                and record["sample_agent_chain"].get("complete") is True
-            )
-            or (
-                isinstance(record.get("sample_reflection"), Mapping)
-                and any(
-                    item.get("role") == "remote_planner_agent"
-                    for item in record.get("agent_trace", ())
-                    if isinstance(item, Mapping)
+            if str(record.get("status") or "") == "succeeded"
+            and (
+                (
+                    isinstance(record.get("sample_agent_chain"), Mapping)
+                    and record["sample_agent_chain"].get("complete") is True
                 )
-                and any(
-                    item.get("role") == "remote_critic_agent"
-                    for item in record.get("agent_trace", ())
-                    if isinstance(item, Mapping)
+                or (
+                    isinstance(record.get("sample_reflection"), Mapping)
+                    and any(
+                        item.get("role") == "remote_planner_agent"
+                        for item in record.get("agent_trace", ())
+                        if isinstance(item, Mapping)
+                    )
+                    and any(
+                        item.get("role") == "remote_critic_agent"
+                        for item in record.get("agent_trace", ())
+                        if isinstance(item, Mapping)
+                    )
                 )
             )
         }
@@ -2275,6 +2290,7 @@ class CollaborativeSampleExecutor:
             "dsh_agent_prediction_tool_invocations": len(
                 dsh_agent_tool_event_ids
             ),
+            **agent_prediction_usage,
             "host_route_bypass_count": host_route_bypass_count,
             "complete_agent_chains": complete_agent_chains,
             # Provenance and availability answer different questions. A failed
@@ -3017,6 +3033,46 @@ def summarize_tool_performance(
     return result
 
 
+def summarize_agent_prediction_usage(
+    scoring_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Report how often the sample Agent actually reached the model tools.
+
+    The evolved ``scientific_parameter`` and ``registered_predictor`` axes only
+    change a *default* that the Agent has to opt into by calling a prediction
+    tool.  When the Agent answers every cell straight from the context, those
+    axes are inert and an edit spent there cannot move the score.  These
+    counters come from the scoring rows rather than the in-segment records so a
+    resumed batch still reports the whole cohort (``agent_prediction`` survives
+    checkpoint projection).
+    """
+
+    submitted = 0
+    tool_cells = 0
+    invocations = 0
+    method_counts: dict[str, int] = {}
+    for row in scoring_rows:
+        prediction = row.get("agent_prediction")
+        if not isinstance(prediction, Mapping):
+            continue
+        submitted += 1
+        method = prediction.get("method")
+        if isinstance(method, str) and method.strip():
+            key = method.strip()[:64]
+            method_counts[key] = method_counts.get(key, 0) + 1
+        tools = prediction.get("tools")
+        called = len(tools) if isinstance(tools, (list, tuple)) else 0
+        invocations += called
+        tool_cells += bool(called)
+    return {
+        "agent_prediction_cells": submitted,
+        "agent_tool_invocation_cells": tool_cells,
+        "agent_tool_invocations": invocations,
+        "agent_tool_usage_rate": tool_cells / submitted if submitted else None,
+        "agent_prediction_method_counts": dict(sorted(method_counts.items())),
+    }
+
+
 def _record_feedback_steps(
     decisions: Sequence[Mapping[str, Any]],
     tools: Sequence[Mapping[str, Any]],
@@ -3736,7 +3792,7 @@ def _invalid_input_scoring_row(
     *,
     target_bounds: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any] | None:
-    """Apply a bounded worst-case penalty when the adapter request is invalid."""
+    """Score an unusable adapter request at the baseline, never below it."""
 
     try:
         observed = _finite_float(row.get("observed"), "sample observed")
@@ -3746,15 +3802,12 @@ def _invalid_input_scoring_row(
         maximum = _finite_float(bounds.get("maximum"), "sample maximum")
     except (KeyError, SampleExecutionContractError, TypeError, ValueError):
         return None
-    bounded_baseline = min(maximum, max(minimum, baseline))
-    penalty_source, penalty_prediction = max(
-        (
-            ("bounded_persistence", bounded_baseline),
-            ("registered_minimum", minimum),
-            ("registered_maximum", maximum),
-        ),
-        key=lambda item: abs(float(item[1]) - observed),
-    )
+    # A malformed request is the host's own row, not something the candidate
+    # chose, so it is charged the trivial baseline rather than a registered
+    # physical bound -- same rule as `_fallback_scoring_row`, for the same
+    # reason: an invented worst-case prediction corrupts the selection signal.
+    penalty_source = "bounded_persistence"
+    penalty_prediction = min(maximum, max(minimum, baseline))
     result = dict(row)
     result["sample_id"] = record["sample_id"]
     result["predicted"] = penalty_prediction
@@ -4243,6 +4296,8 @@ def _public_steps(value: Any, *, kind: str, id_field: str) -> list[dict[str, Any
             "dsh_tool_event_id",
             "dsh_tool_output_digest",
             "call_id", "parameters", "used_as_evidence", "tool_predicted", "elapsed_ms",
+            # Why a capability failed, so a scored record says more than "failed".
+            "error_detail",
         }
     )
     required = (
@@ -4340,6 +4395,7 @@ def _attach_execution_trace(
                 "dsh_tool_event_id",
                 "dsh_tool_output_digest",
             "call_id", "parameters", "used_as_evidence", "tool_predicted", "elapsed_ms",
+            "error_detail",
             )
             if name in item
         }
@@ -4429,7 +4485,12 @@ def _sample_agent_chain_attestation(
         ),
         "required_remote_roles": list(required_roles),
         "complete": bool(
-            required_roles_complete
+            # A record whose prediction was rejected has no complete chain, no
+            # matter how much evidence survived the rejection. Salvaged planner
+            # and tool steps make a failure readable; they must never let
+            # `complete_agent_chains` reach `attempted` and pass the strict gate.
+            str(record.get("status") or "") == "succeeded"
+            and required_roles_complete
             and agent_prediction_submissions >= 1
             and host_route_bypass_count == 0
             and (not reflection_required or bool(response_digest))
@@ -4487,6 +4548,7 @@ def _attempt_trace_entry(
                 "dsh_tool_event_id",
                 "dsh_tool_output_digest",
             "call_id", "parameters", "used_as_evidence", "tool_predicted", "elapsed_ms",
+            "error_detail",
             )
             if name in selected
         }
@@ -4558,6 +4620,52 @@ def _failed_record(
     return record
 
 
+def _salvaged_public_steps(
+    value: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep the evidence a rejected result still proves, step by step.
+
+    One unpublishable field used to erase the whole chain, so a failed record
+    reported `planner_invocations: 0` while the ledger held three accepted
+    planner responses for the same cell. That is worse than silence: it points
+    every later reader, human or agent, at the wrong layer. Project each step on
+    its own and drop only the ones that genuinely violate the contract.
+    """
+
+    if not isinstance(value, Mapping):
+        return [], []
+
+    def kept(raw: Any, *, kind: str, id_field: str) -> list[dict[str, Any]]:
+        steps: list[dict[str, Any]] = []
+        for item in raw if isinstance(raw, (list, tuple)) else ():
+            try:
+                steps.extend(_public_steps([item], kind=kind, id_field=id_field))
+            except SampleExecutionContractError:
+                continue
+        return steps[:_MAX_PUBLIC_STEPS]
+
+    return (
+        kept(value.get("agent_decisions"), kind="agent", id_field="role"),
+        kept(value.get("tool_calls"), kind="tool", id_field="tool_id"),
+    )
+
+
+def _public_failure_reason(failure: BaseException) -> str:
+    """Say why a sample failed without letting model text into the archive.
+
+    The summary carries no prompts and no free model output, which is why it
+    used to carry no reason at all: a contract rejection that killed a whole run
+    left `failure_class` as its only account of itself, and reading the ledger
+    could not tell a host-side rejection from a tool crash. Keep the policy and
+    make the reason safe by construction instead -- collapse everything outside
+    a conservative character class, so the host's own field paths and messages
+    survive intact while anything smuggled through a payload key does not.
+    """
+
+    text = _PUBLIC_REASON_DISALLOWED.sub(" ", str(failure))
+    return " ".join(text.split())[:200] or type(failure).__name__[:160]
+
+
 def _sample_failure_summary(
     request: SamplePredictionRequest,
     adapter: SamplePredictionAdapter,
@@ -4571,6 +4679,15 @@ def _sample_failure_summary(
     decisions, tools = (
         _exception_public_steps(failure) if failure is not None else ([], [])
     )
+    if failure is not None:
+        decisions.append(
+            {
+                "role": "host_failure_reason",
+                "decision": type(failure).__name__[:160],
+                "status": "completed",
+                "reason_code": _public_failure_reason(failure),
+            }
+        )
     decisions.append(
         {
             "role": "host_adjudicator",
@@ -4613,17 +4730,22 @@ def _fallback_scoring_row(
 
     result = dict(row)
     observed = _finite_float(row.get("observed"), "sample observed")
+    # The penalty is "no better than doing nothing", never "as wrong as this
+    # target can physically be". A registered bound is not a prediction anyone
+    # made: on the DSH path, where proposed_prediction is always unset, it wrote
+    # -10 C into an archive as if the candidate had said it, giving one origin
+    # normalized_reward = -1.0 while its planner had in fact beaten the baseline
+    # on all three attempts. Failures still cannot be profitable -- the cell
+    # scores at the baseline, and `execution_validity` fails the run on the
+    # coverage gap regardless -- but they no longer invent evidence against a
+    # candidate, which is what corrupted the selection signal.
     alternatives = (
         [
             ("registered_algorithm_prediction", request.proposed_prediction),
             ("persistence_baseline", request.baseline),
         ]
         if request.proposed_prediction is not None
-        else [
-            ("persistence_baseline", request.baseline),
-            ("registered_minimum_bound", request.minimum),
-            ("registered_maximum_bound", request.maximum),
-        ]
+        else [("persistence_baseline", request.baseline)]
     )
     penalty_source, penalty_prediction = max(
         alternatives,

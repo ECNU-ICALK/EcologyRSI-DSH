@@ -9,10 +9,12 @@ from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.integrations.dsh_tools import DshToolService
 from ecologyrsi_dsh.api.projection import _candidate_projection
 from ecologyrsi_dsh.core.ledger import EventLedger
-from ecologyrsi_dsh.core.state import RunState
+from ecologyrsi_dsh.core.state import RunState, project_run_state
 from ecologyrsi_dsh.core.models import (
     CandidateStatus,
     Evaluation,
+    HumanIntervention,
+    InterventionKind,
     ModelArtifact,
     Promotion,
     PromotionDecision,
@@ -201,7 +203,13 @@ class GenomeReplayTests(unittest.TestCase):
         replay_parent = RunState.parent_genome_for_generation(state, 1)
         self.assertEqual(replay_parent.genome_digest, final.genome_digest)
 
-    def _proposal(self, run_id: str, *, slot_index: int = 0) -> Proposal:
+    def _proposal(
+        self,
+        run_id: str,
+        *,
+        slot_index: int = 0,
+        extra_metadata: dict | None = None,
+    ) -> Proposal:
         state = self.director.state(run_id)
         generation = state.run.generation
         parent = state.parent_genome_for_generation(generation)
@@ -254,11 +262,22 @@ class GenomeReplayTests(unittest.TestCase):
                     child,
                     current_program_registry(),
                 ),
+                **(extra_metadata or {}),
             },
         )
 
-    def _spawn(self, run_id: str, *, slot_index: int = 0):
-        proposal = self._proposal(run_id, slot_index=slot_index)
+    def _spawn(
+        self,
+        run_id: str,
+        *,
+        slot_index: int = 0,
+        extra_metadata: dict | None = None,
+    ):
+        proposal = self._proposal(
+            run_id,
+            slot_index=slot_index,
+            extra_metadata=extra_metadata,
+        )
         self.director.submit_proposal(proposal)
         return self.director.spawn_candidate(
             run_id,
@@ -268,6 +287,229 @@ class GenomeReplayTests(unittest.TestCase):
                 f"{slot_index}"
             ),
             slot_index=slot_index,
+        )
+
+    def _direction(self) -> dict:
+        return {
+            "direction_id": "direction-1",
+            "title": "Raise ridge regularization on the weak CO2 cells",
+            "hypothesis": (
+                "More regularization steadies the 24-hour CO2 horizon at a "
+                "small cost to the 1-hour fit."
+            ),
+            "target_weakness": "24h CO2 skill collapses on humid origins",
+            "capability_focus": "registered greenhouse ridge predictor",
+            "mutation_axis": "scientific_parameter",
+            "mutation_target": "ridge_alpha",
+            "mutation_direction": "increase",
+            "evidence_refs": ["a" * 64],
+            "expected_tradeoff": "short-horizon fit for long-horizon stability",
+            "success_criterion": "the paired diagnostic score improves",
+        }
+
+    def test_mutation_explanation_shows_the_parent_value_axis_and_hypothesis(
+        self,
+    ) -> None:
+        # The candidate card used to carry `changes` alone: the child's own
+        # absolute overrides, with no parent value beside them, no axis, and no
+        # statement of what the model hoped the move would buy. An expert asked
+        # to confirm a direction could read that alpha is 0.2 and nothing else.
+        run_id = self._start_new("run:mutation-explanation")
+        candidate = self._spawn(
+            run_id,
+            extra_metadata={
+                "mutation_operations": [
+                    {
+                        "op": "set_bounded_parameter",
+                        "name": "ridge_alpha",
+                        "value": 0.2,
+                    }
+                ],
+                "candidate_direction": self._direction(),
+            },
+        )
+
+        explanation = _candidate_projection(
+            self.director.state(run_id),
+            candidate,
+        )["mutation_explanation"]
+
+        self.assertTrue(explanation["available"])
+        self.assertTrue(explanation["parent_genome_available"])
+        self.assertEqual(explanation["parent_source"], "generation_parent_genome")
+        self.assertEqual(
+            explanation["mutation_operator_id"],
+            "bounded-single-parent-mutation@1",
+        )
+        # Previous → new for the one leaf that moved, not the eleven overrides
+        # the child happens to carry.
+        self.assertEqual(
+            explanation["diff"],
+            [
+                {
+                    "axis": "scientific_program",
+                    "path": "parameter_overrides.ridge_alpha",
+                    "name": "ridge_alpha",
+                    "previous_value": 0.1,
+                    "new_value": 0.2,
+                    "change_kind": "changed",
+                }
+            ],
+        )
+        self.assertEqual(explanation["diff_count"], 1)
+        self.assertEqual(
+            explanation["operations"],
+            [
+                {
+                    "op": "set_bounded_parameter",
+                    # The axis is joined in from the contract catalog, so the
+                    # card can say "scientific parameter" instead of leaving an
+                    # expert to recognize the operation name.
+                    "axis": "scientific_parameter",
+                    "detail": {"name": "ridge_alpha", "value": 0.2},
+                }
+            ],
+        )
+        self.assertEqual(explanation["operation_count"], 1)
+        direction = explanation["direction"]
+        self.assertEqual(direction["mutation_target"], "ridge_alpha")
+        self.assertEqual(direction["mutation_direction"], "increase")
+        self.assertIn("24-hour CO2 horizon", direction["hypothesis"])
+        self.assertEqual(direction["evidence_refs"], ["a" * 64])
+        # Recomputed from the parent, because only its digest is persisted.
+        # "It raised alpha" and "it raised alpha out of these eleven knobs" are
+        # different claims, and only the second is reviewable.
+        allowed = explanation["allowed_mutation_targets"]
+        self.assertIn("ridge_alpha", allowed["scientific_parameter"])
+        self.assertIn("history_steps", allowed["scientific_parameter"])
+        self.assertIn("instruction_profile", allowed)
+
+    def test_mutation_explanation_covers_a_non_parameter_axis(self) -> None:
+        # An instruction-profile move leaves `parameter_overrides` untouched, so
+        # `changes` reported it as no change at all -- the whole reason the
+        # non-scalar axes looked inert on the web.
+        run_id = self._start_new("run:mutation-explanation-instruction")
+        state = self.director.state(run_id)
+        parent = state.parent_genome_for_generation(0)
+        operations = [
+            {
+                "op": "select_instruction_template",
+                "role": "sample-planner",
+                "instruction_template_id": "sample-planner-anomaly-aware@1",
+            }
+        ]
+        child = apply_genome_mutation(
+            parent,
+            {
+                "schema_version": "ecologyrsi-dsh.genome-mutation/1",
+                "operations": operations,
+            },
+            GenomeMutationContextV1(
+                run_id=run_id,
+                generation=0,
+                slot_index=0,
+                slot_seed=100,
+                parent_candidate_id=None,
+                parent_genome_digest=parent.genome_digest,
+                generation_batch_digest="1" * 64,
+                research_iteration_digest="2" * 64,
+                knowledge_snapshot_digest="3" * 64,
+                mutation_budget_digest="4" * 64,
+                mutation_operator_id="bounded-single-parent-mutation@1",
+            ),
+            current_program_registry(),
+        )
+        proposal = Proposal(
+            proposal_id="proposal:instruction-axis",
+            run_id=run_id,
+            generation=0,
+            title="instruction profile child",
+            changes=dict(child.scientific_program["parameter_overrides"]),
+            metadata={
+                "execution_protocol": "dsh_native_plugin_evolution@1",
+                "evolution_genome_canonical_json": canonical_json(child.to_dict()),
+                "genome_digest": child.genome_digest,
+                "behavior_digest": child.behavior_digest,
+                "candidate_agent_profile": resolve_candidate_agent_profile(
+                    child,
+                    current_program_registry(),
+                ),
+                "mutation_operations": operations,
+            },
+        )
+        self.director.submit_proposal(proposal)
+        candidate = self.director.spawn_candidate(
+            run_id,
+            proposal,
+            candidate_id="candidate:instruction-axis",
+            slot_index=0,
+        )
+
+        projection = _candidate_projection(self.director.state(run_id), candidate)
+        explanation = projection["mutation_explanation"]
+
+        self.assertEqual(
+            projection["changes"],
+            dict(parent.scientific_program["parameter_overrides"]),
+        )
+        self.assertEqual(explanation["operations"][0]["axis"], "instruction_profile")
+        diff_by_name = {row["name"]: row for row in explanation["diff"]}
+        template = diff_by_name["id"]
+        self.assertEqual(
+            template["path"],
+            "candidate_execution_program.role_profiles.sample-planner"
+            ".instruction_template_ref.id",
+        )
+        self.assertEqual(template["axis"], "agent_program")
+        self.assertEqual(template["previous_value"], "sample-planner-balanced@1")
+        self.assertEqual(template["new_value"], "sample-planner-anomaly-aware@1")
+        # The operator clears the candidate's instruction parameters, and that
+        # clearing is a real behavior change the expert should see named.
+        self.assertEqual(diff_by_name["confidence_threshold"]["change_kind"], "removed")
+        self.assertEqual(diff_by_name["confidence_threshold"]["previous_value"], 0.5)
+
+    def test_mutation_explanation_degrades_for_a_legacy_candidate(self) -> None:
+        # A run recorded before the native protocol has no genome to diff.
+        legacy_manifest = _new_task().to_dict()
+        legacy_metadata = dict(legacy_manifest["metadata"])
+        legacy_metadata.pop("execution_protocol")
+        run_id = "run:mutation-explanation-legacy"
+        self.director.create_run(
+            TaskManifest.from_dict(
+                {**legacy_manifest, "metadata": legacy_metadata}
+            ),
+            run_id=run_id,
+        )
+        self.director.start_run(run_id)
+        proposal = Proposal(
+            proposal_id="proposal:legacy",
+            run_id=run_id,
+            generation=0,
+            title="pre-genome proposal",
+            changes={"ridge_alpha": 0.2},
+        )
+        self.director.submit_proposal(proposal)
+        candidate = self.director.spawn_candidate(
+            run_id,
+            proposal,
+            candidate_id="candidate:legacy",
+            slot_index=0,
+        )
+
+        explanation = _candidate_projection(
+            self.director.state(run_id),
+            candidate,
+        )["mutation_explanation"]
+
+        # The panel says so instead of failing the read or inventing a parent.
+        self.assertEqual(
+            explanation,
+            {
+                "available": False,
+                "reason": "historical_legacy_projection",
+                "operations": [],
+                "diff": [],
+            },
         )
 
     def test_cross_generation_experience_keeps_full_behavior_identity(self) -> None:
@@ -827,6 +1069,69 @@ class GenomeReplayTests(unittest.TestCase):
         self.assertEqual(
             batch.stage_context_digests["registry_catalog_digest"],
             current_program_registry().catalog_digest,
+        )
+
+    def test_native_parent_override_replays_without_a_missing_enum(self) -> None:
+        # A DSH-native generation-1 batch is the only path that evaluates the
+        # frozen parent-selection comparison in the reducer, and it evaluates it
+        # only when the batch actually froze an intervention. `InterventionKind`
+        # was never imported into core.state, so this replay raised NameError
+        # while every green test either used the non-native path or froze no
+        # interventions at all. Ledger replay must never depend on which branch
+        # a run happened to take.
+        run_id = self._start_new("run:native-parent-override")
+        start_generation_batch(self.director, run_id)
+        candidates = [
+            self._spawn(run_id, slot_index=slot_index) for slot_index in range(2)
+        ]
+        for candidate in candidates:
+            self._record_artifact_and_evaluation(run_id, candidate.candidate_id)
+            self.director.decide_promotion(
+                Promotion(
+                    promotion_id=f"promotion:{candidate.candidate_id}",
+                    run_id=run_id,
+                    candidate_id=candidate.candidate_id,
+                    decision=PromotionDecision.REJECTED,
+                    reason="test parent override",
+                )
+            )
+        chosen = candidates[0]
+        self.ledger.append(
+            run_id,
+            "GenerationAnalyzed",
+            {
+                "analysis": GenerationAnalysis(
+                    run_id=run_id,
+                    generation=0,
+                    candidate_count=2,
+                    eligible_count=0,
+                    outcome="no_eligible_candidate",
+                    search_parent_candidate_id=chosen.candidate_id,
+                ).to_dict()
+            },
+        )
+        self.director.advance_generation(run_id)
+        self.director.pause_run(run_id)
+        self.director.record_intervention(
+            HumanIntervention(
+                intervention_id="parent-override-1",
+                run_id=run_id,
+                kind=InterventionKind.PARENT_SELECTION,
+                message="继续演化这个候选。",
+                created_by="review-test",
+                target_candidate_id=chosen.candidate_id,
+            )
+        )
+        self.director.resume_run(run_id)
+
+        batch = start_generation_batch(self.director, run_id)
+        self.assertEqual(batch.intervention_ids, ("parent-override-1",))
+        self.assertEqual(batch.parent_candidate_id, chosen.candidate_id)
+        # Replayed from zero, not read off the live reducer: the defect only
+        # surfaced when the event was applied, so a cached state would hide it.
+        replayed = project_run_state(self.ledger.events(run_id))
+        self.assertEqual(
+            replayed.batch_for(1).parent_candidate_id, chosen.candidate_id
         )
 
     def test_next_generation_research_resolves_search_parent_before_batch_exists(

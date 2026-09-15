@@ -26,6 +26,7 @@ from ecologyrsi_dsh.evaluators.sample_execution import (
     SampleExecutionContractError,
     SamplePredictionRequest,
     classify_sample_failure,
+    summarize_agent_prediction_usage,
 )
 from ecologyrsi_dsh.evaluators.registry import EvaluatorRegistry
 from ecologyrsi_dsh.integrations.dsh_native_runtime import (
@@ -139,6 +140,33 @@ class _CriticUnavailableRuntime(_SampleRuntime):
             self.requests.append(request)
             raise RuntimeError("critic unavailable")
         return super().run_stage(request)
+
+
+class _RunawayCriticRuntime(_SampleRuntime):
+    """A planner that doubts itself and a critic child that runs away.
+
+    The observed production fault: the critic generated until it hit its
+    per-call output cap, which the DSH host reports as a non-retryable,
+    evaluation-fatal contract failure.
+    """
+
+    def run_stage(self, request: dict) -> dict:
+        if request["stage"] == "sample.critic":
+            self.requests.append(request)
+            raise DshNativeRuntimeUnavailableError(
+                "structured child exhausted its output budget",
+                error_code="structured_child_output_budget_exhausted",
+                status_code=422,
+                failure_domain="execution_contract",
+            )
+        response = super().run_stage(request)
+        if request["stage"] != "sample.plan":
+            return response
+        structured = dict(response["structured"])
+        structured["decisions"] = [
+            {**row, "confidence": 0.2} for row in structured["decisions"]
+        ]
+        return {"structured": structured, "result_digest": digest(structured)}
 
 
 class _PersistingRetryRuntime:
@@ -1797,6 +1825,147 @@ class DshSampleExecutionTests(unittest.TestCase):
             ["sample.plan", "sample.critic"],
         )
 
+    def _runaway_critic_adapter(
+        self,
+        runtime: _RunawayCriticRuntime,
+        *,
+        run_id: str,
+        remote_critic_policy: dict | None,
+    ) -> DshSampleCollaborationAdapter:
+        return DshSampleCollaborationAdapter(
+            run_id=run_id,
+            runtime_provider=lambda: runtime,
+            revision_provider=lambda _run_id: {
+                "run_state_revision": 7,
+                "ledger_expected_revision": 11,
+            },
+            identity_digests={
+                "genome_digest": "a" * 64,
+                "compiled_behavior_digest": "b" * 64,
+                "phenotype_instance_digest": "c" * 64,
+            },
+            strategy_model_id="dsh/strategy",
+            review_model_id="dsh/review",
+            forecast_bundle_tool=_constant_forecast_bundle(21.5),
+            prediction_tool_binder=_fake_agent_prediction_binder,
+            remote_critic_policy=remote_critic_policy,
+            sample_reflection_policy="candidate_aggregate_post_score@1",
+        )
+
+    def test_advisory_critic_output_budget_exhaustion_keeps_the_prediction(
+        self,
+    ) -> None:
+        runtime = _RunawayCriticRuntime()
+        adapter = self._runaway_critic_adapter(
+            runtime,
+            run_id="run-advisory-critic-runaway",
+            remote_critic_policy={
+                "version": "uncertain_or_failure@1",
+                "min_planner_confidence": 0.5,
+            },
+        )
+        plan = adapter.plan_batch(
+            {
+                "run_id": "run-advisory-critic-runaway",
+                "candidate_id": "candidate-1",
+                "dataset_digest": "d" * 64,
+                "algorithm_id": "registered-predictor",
+                "algorithm_version": "1",
+            }
+        )
+        self.assertNotIn("critic", plan["required_success_remote_roles"])
+
+        outcome = adapter.predict_samples(
+            (_request("sample-advisory-critic"),), (plan,), attempts=(1,)
+        )[0]
+
+        self.assertIsNone(outcome.error)
+        self.assertIsNotNone(outcome.result)
+        self.assertEqual(
+            [item["stage"] for item in runtime.requests],
+            ["sample.plan", "sample.critic"],
+        )
+        critic = outcome.result["agent_decisions"][-1]
+        self.assertEqual(critic["role"], "remote_critic_agent")
+        self.assertEqual(critic["status"], "failed")
+        self.assertEqual(
+            critic["decision"], "reject_advisory_keep_scientific_prediction"
+        )
+        self.assertEqual(critic["reason_code"], "critic_unavailable_remote_rejected")
+        self.assertIn(critic["reason_code"], REMOTE_REASON_CODES)
+        planner = outcome.result["agent_decisions"][0]
+        self.assertEqual(planner["role"], "remote_planner_agent")
+
+    def test_advisory_critic_runaway_keeps_the_cohort_scoreable(self) -> None:
+        runtime = _RunawayCriticRuntime()
+        adapter = self._runaway_critic_adapter(
+            runtime,
+            run_id="run-advisory-critic-cohort",
+            remote_critic_policy={
+                "version": "uncertain_or_failure@1",
+                "min_planner_confidence": 0.5,
+            },
+        )
+        request = _request("sample-advisory-cohort")
+        row = request.to_dict()
+        row["observed"] = 21.0
+
+        batch = CollaborativeSampleExecutor(adapter).execute(
+            (row,),
+            context={
+                "run_id": "run-advisory-critic-cohort",
+                "candidate_id": "candidate-1",
+                "dataset_digest": "d" * 64,
+                "partition": "training_feedback",
+                "algorithm_id": "registered-predictor",
+                "algorithm_version": "1",
+            },
+            target_bounds={
+                "air_temperature": {"minimum": -20.0, "maximum": 80.0}
+            },
+            algorithm_id="registered-predictor",
+            algorithm_version="1",
+        )
+
+        self.assertEqual(batch.summary["succeeded_examples"], 1)
+        self.assertEqual(batch.summary["failed_examples"], 0)
+        self.assertEqual(batch.records[0]["attempts"], 1)
+        # The unavailable advisor is recorded, counted, and penalised. The
+        # accepted count belongs to the host's own constraint critic.
+        self.assertEqual(batch.summary["remote_critic_invocations"], 1)
+        self.assertEqual(
+            batch.summary["critic_outcome_counts"], {"accepted": 1, "rejected": 1}
+        )
+        self.assertEqual(
+            batch.records[0]["agent_trace"][-1]["reason_code"],
+            "critic_unavailable_remote_rejected",
+        )
+        self.assertTrue(batch.summary["strict_agent_chain_pass"])
+        self.assertTrue(batch.summary["successful_agent_provenance_pass"])
+
+    def test_required_critic_output_budget_exhaustion_still_fails_closed(self) -> None:
+        runtime = _RunawayCriticRuntime()
+        adapter = self._runaway_critic_adapter(
+            runtime,
+            run_id="run-required-critic-runaway",
+            remote_critic_policy={"version": "always@1"},
+        )
+        plan = adapter.plan_batch(
+            {
+                "run_id": "run-required-critic-runaway",
+                "candidate_id": "candidate-1",
+                "dataset_digest": "d" * 64,
+                "algorithm_id": "registered-predictor",
+                "algorithm_version": "1",
+            }
+        )
+        self.assertIn("critic", plan["required_success_remote_roles"])
+
+        with self.assertRaises(DshNativeRuntimeUnavailableError):
+            adapter.predict_samples(
+                (_request("sample-required-critic"),), (plan,), attempts=(1,)
+            )
+
     def test_dsh_reason_code_schemas_exactly_match_host_enum(self) -> None:
         schema_root = (
             Path(__file__).resolve().parents[1]
@@ -1821,6 +1990,41 @@ class DshSampleExecutionTests(unittest.TestCase):
         )
         self.assertIn("wave_digest", reflection["required"])
         self.assertIn("sample_id", reflection["required"])
+
+    def test_agent_prediction_usage_counts_the_cells_that_reached_a_tool(self) -> None:
+        """The evolved parameter axes are only measurable through these counters."""
+
+        rows = [
+            {"agent_prediction": {"method": "direct", "tools": []}},
+            {"agent_prediction": {"method": "direct"}},
+            {"agent_prediction": {"method": "model", "tools": ["call-a"]}},
+            {"agent_prediction": {"method": "blend", "tools": ["call-a", "call-b"]}},
+            # A cell the Agent never submitted is not a denominator entry.
+            {"predicted": 1.0},
+        ]
+
+        self.assertEqual(
+            summarize_agent_prediction_usage(rows),
+            {
+                "agent_prediction_cells": 4,
+                "agent_tool_invocation_cells": 2,
+                "agent_tool_invocations": 3,
+                "agent_tool_usage_rate": 0.5,
+                "agent_prediction_method_counts": {
+                    "blend": 1,
+                    "direct": 2,
+                    "model": 1,
+                },
+            },
+        )
+        # A batch whose Agent answered every cell from context reports exactly
+        # zero, which is what closes the tool-dependent mutation axes.
+        all_direct = summarize_agent_prediction_usage(rows[:2])
+        self.assertEqual(all_direct["agent_tool_usage_rate"], 0.0)
+        # An unmeasured cohort reports None rather than a misleading zero.
+        self.assertIsNone(
+            summarize_agent_prediction_usage([])["agent_tool_usage_rate"]
+        )
 
 
 

@@ -6,6 +6,7 @@ from ..evolution.agent_policy import rebind_agent_policy
 
 import math
 from dataclasses import replace
+from statistics import median
 from typing import Any, Mapping
 from .ports import GenerationRuntime
 
@@ -39,20 +40,27 @@ from ..evolution.local_edits import (
     LocalEditContext,
     LocalEditProposal,
     LocalEditResult,
+    _operation_target,
     apply_or_reject_local_edit_bundle,
 )
 from ..evolution.strategies import (
+    _directive_authoring_contract,
     _genome_parameter_boundary,
     _registered_mutation_targets,
+    _registered_scalar_axis_targets,
+    mutation_axis_contract,
 )
 from ..evolution.parameter_activity import parameter_activity_contract
 from ..evolution.schedule import (
     PAIRED_LOCAL_EVALUATION_MODE,
     OptimizationSchedule,
 )
-from ..evolution.workflow_ir import resolve_candidate_agent_profile
+from ..evolution.workflow_ir import (
+    resolve_candidate_agent_profile,
+)
 from ..knowledge.algorithms import AlgorithmSpec, compile_algorithm_spec
 from ..knowledge.program_registry import current_program_registry
+from ..evaluators.authored_directive import AUTHORED_DIRECTIVE_POLICY_ID
 from ..evaluators.registry import EvaluatorRegistry
 from ..integrations.dsh_native_runtime import DshNativeRuntimeUnavailableError
 from ..integrations.dsh_structured_roles import DshStructuredRoleRuntime
@@ -658,6 +666,13 @@ def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRev
     )
     targets = {
         **targets,
+        # Every axis the batch-local editor may spend its one operation on is
+        # named here, including the two the proposer catalog above already
+        # supplies. Restating them off the shared helper costs nothing and keeps
+        # this one site a complete, readable answer to "what can a local edit
+        # touch" -- the alternative is a reader having to subtract
+        # `registered_predictor` from another function's return value and then
+        # guess which of the remaining axes are open.
         "workflow_template": tuple(
             item
             for item in registry.program_ids("workflow_templates")
@@ -665,31 +680,31 @@ def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRev
             and "sample-planner"
             in registry.program("workflow_templates", item)["graph"]["allowed_roles"]
         ),
-        "workflow_parameter": tuple(
-            sorted(registry.program("workflow_templates", workflow_id)["parameters"])
+        "workflow_parameter": _registered_scalar_axis_targets(
+            genome, "workflow_parameter"
         ),
         # Current feature/fit policies have no alternative implementation;
         # the registered UQ program is not connected to native prediction.
         "feature_policy": (),
         "fit_policy": (),
         "uncertainty_policy": (),
-        "instruction_tool_policy": tuple(
-            sorted(
-                str(profile["role"])
-                for profile in genome.agent_program["candidate_execution_program"]["role_profiles"]
-            )
+        # Closed on purpose, not for lack of an implementation. The operator can
+        # only narrow an inherited tool policy, and `sample-planner-tools@1`
+        # holds exactly one tool -- so the single legal edit is to switch the
+        # prediction tool off, which removes the only path by which the
+        # scientific parameters reach a prediction at all. Reopen this when the
+        # planner has a second tool and narrowing can express a real strategy.
+        "instruction_tool_policy": (),
+        "instruction_parameter": _registered_scalar_axis_targets(
+            genome, "instruction_parameter"
         ),
-        "instruction_parameter": tuple(
-            sorted(
-                {
-                    name
-                    for profile in genome.agent_program["candidate_execution_program"]["role_profiles"]
-                    for name in registry.program(
-                        "instruction_templates", profile["instruction_template_ref"]["id"]
-                    )["parameters"]
-                }
-            )
-        ),
+        # Open to the batch-local editor too, and it is the one axis that never
+        # exhausts: `instruction_profile` runs out of unused templates after a
+        # few edits, while a directive can always be rewritten. The single
+        # target is the grammar that bounds the text, so the allowed-target
+        # check asks whether this candidate may author at all, not whether a
+        # particular sentence is legal.
+        "instruction_directive": (AUTHORED_DIRECTIVE_POLICY_ID,),
     }
     _boundary, parameter_schemas = _genome_parameter_boundary(state.task_manifest, genome)
     cells = tuple(
@@ -795,10 +810,18 @@ def _execute_next_prequential_local_edit(
         return False
     revision = state.revision(pending.revision_id)
     context = _local_edit_context(state, candidate, revision, pending)
+    pending_metrics = state.batch_evaluation_for(
+        candidate_id, pending.batch_index
+    ).metrics
     recorded = state.local_edit_proposal_for(candidate_id, pending.batch_index)
     if recorded is None:
         safety_reason = _prequential_safety_reason(
-            state.batch_evaluation_for(candidate_id, pending.batch_index).metrics
+            pending_metrics
+        ) or _prequential_regression_reason(
+            state,
+            candidate_id,
+            revision,
+            pending.batch_index,
         )
         proposal = (
             LocalEditProposal(
@@ -809,6 +832,11 @@ def _execute_next_prequential_local_edit(
                 risk_cells=(),
             )
             if safety_reason is not None
+            or pending.batch_index == trajectory.batch_count - 1
+            # A child authored after the final batch is never evaluated in this
+            # trajectory, yet completion promotes the last active revision into
+            # the holdout arm.  Keep the measured revision instead, exactly as
+            # the paired mode already requires of its final batch.
             else _local_edit_proposal(services, state, candidate, pending, context)
         )
     else:
@@ -828,6 +856,7 @@ def _execute_next_prequential_local_edit(
             context.candidate_revision_id,
             proposal,
         )
+        or _inactive_axis_rejection_reason(pending_metrics, proposal)
     )
     safety_rollback = _safety_requires_rollback(safety_reason)
     # Commit the complete, schema-validated proposal before deriving a child
@@ -1058,7 +1087,7 @@ def _execute_next_paired_local_edit(
         pending.batch_index,
         revision.revision_id,
         proposal,
-    )
+    ) or _inactive_axis_rejection_reason(evaluation.metrics, proposal)
     if recorded is None:
         _director_mutation(
             services,
@@ -1179,6 +1208,9 @@ def execute_next_local_edit(
     )
 
 
+_REGRESSION_GUARDRAIL_REASON = "score_regression_guardrail_failed"
+
+
 def _prequential_safety_reason(metrics: Mapping[str, Any]) -> str | None:
     """Return a durable reason when a batch is unsafe to adapt from."""
 
@@ -1245,10 +1277,205 @@ def _prequential_safety_reason(metrics: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _batch_score(state: Any, candidate_id: str, batch_index: int) -> float | None:
+    """Return one finite prequential batch score, or None when unavailable."""
+
+    accessor = getattr(state, "batch_evaluation_for", None)
+    if not callable(accessor):
+        return None
+    score = getattr(accessor(candidate_id, batch_index), "score", None)
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None
+    return float(score) if math.isfinite(float(score)) else None
+
+
+def _batch_metrics(state: Any, candidate_id: str, batch_index: int) -> Any:
+    """Return one batch's recorded metrics mapping, or None."""
+
+    accessor = getattr(state, "batch_evaluation_for", None)
+    if not callable(accessor):
+        return None
+    return getattr(accessor(candidate_id, batch_index), "metrics", None)
+
+
+def _batch_score_coverage_gap(metrics: Any) -> str | None:
+    """Name the coverage damage that makes one batch score incomparable.
+
+    A (target, horizon) group with no scored cell contributes the frozen
+    ``OBJECTIVE_MISSING_PENALTY`` instead of a skill, which moves the batch
+    score by roughly a ninth of that penalty -- an order of magnitude more than
+    any bounded parameter edit can.  Such a batch measures availability, not
+    the edit, so it must neither trigger the regression rollback, define the
+    band that judges other batches, nor stand as the best block observed.  The
+    penalty itself is part of the frozen objective aggregation version and is
+    deliberately left unchanged: rescaling it would invalidate the archived
+    scores that replay reproduces.
+    """
+
+    if not isinstance(metrics, Mapping):
+        return "batch_metrics_unavailable"
+    weight_coverage = metrics.get("objective_weight_coverage")
+    if (
+        not isinstance(weight_coverage, bool)
+        and isinstance(weight_coverage, (int, float))
+        and math.isfinite(float(weight_coverage))
+        and float(weight_coverage) < 1.0
+    ):
+        return "objective_weight_coverage_incomplete"
+    failed_cells = metrics.get("failed_cell_count")
+    if (
+        not isinstance(failed_cells, bool)
+        and isinstance(failed_cells, (int, float))
+        and math.isfinite(float(failed_cells))
+        and float(failed_cells) > 0
+    ):
+        return "failed_scoring_cells"
+    if metrics.get("sample_execution_coverage_pass") is False:
+        return "sample_execution_coverage_failed"
+    sample = metrics.get("sample_execution")
+    if isinstance(sample, Mapping) and sample.get("coverage_pass") is False:
+        return "sample_execution_coverage_failed"
+    return None
+
+
+def _trajectory_batch_scores(
+    state: Any,
+    candidate_id: str,
+    through_batch_index: int,
+    *,
+    comparable_only: bool = False,
+) -> dict[int, float]:
+    """Return the finite scores this lane has actually measured so far."""
+
+    scores: dict[int, float] = {}
+    for index in range(int(through_batch_index) + 1):
+        score = _batch_score(state, candidate_id, index)
+        if score is None:
+            continue
+        if comparable_only and _batch_score_coverage_gap(
+            _batch_metrics(state, candidate_id, index)
+        ):
+            continue
+        scores[index] = score
+    return scores
+
+
+def _batch_revision_ids(state: Any, candidate_id: str) -> dict[int, str]:
+    """Map each formal batch index to the revision that batch actually scored."""
+
+    return {
+        int(item.batch_index): str(item.revision_id)
+        for item in getattr(state, "formal_batches", ())
+        if getattr(item, "candidate_id", None) == candidate_id
+        and isinstance(getattr(item, "batch_index", None), int)
+        and not isinstance(getattr(item, "batch_index", None), bool)
+        and isinstance(getattr(item, "revision_id", None), str)
+        and str(item.revision_id).strip()
+    }
+
+
+def _trajectory_score_history(
+    state: Any, candidate_id: str, through_batch_index: int
+) -> dict[str, Any]:
+    """Expose this lane's realized score series and its best measured block."""
+
+    scores = _trajectory_batch_scores(state, candidate_id, through_batch_index)
+    revision_ids = _batch_revision_ids(state, candidate_id)
+    series = []
+    for index in sorted(scores):
+        gap = _batch_score_coverage_gap(
+            _batch_metrics(state, candidate_id, index)
+        )
+        row = {
+            "batch_index": index,
+            "candidate_revision_id": revision_ids.get(index),
+            "score": scores[index],
+            "comparable": gap is None,
+        }
+        if gap is not None:
+            row["incomparable_reason"] = gap
+        series.append(row)
+    comparable = [row for row in series if row["comparable"]]
+    return {
+        "score_history": series,
+        # A coverage-damaged block carries a missing-group penalty, so it is
+        # never the bar a later batch is asked to beat.
+        "best_observed": max(comparable, key=lambda row: row["score"], default=None),
+    }
+
+
+def _regression_band_floor(state: Any) -> float:
+    """Never react below the run's own frozen selection tolerance."""
+
+    metadata = getattr(getattr(state, "task_manifest", None), "metadata", None)
+    if not isinstance(metadata, Mapping):
+        return LOCAL_MINIMUM_SCORE_DELTA
+    try:
+        floor = float(local_challenger_policy(metadata)["minimum_score_delta"])
+    except (KeyError, TypeError, ValueError):
+        return LOCAL_MINIMUM_SCORE_DELTA
+    return floor if math.isfinite(floor) and floor > 0 else LOCAL_MINIMUM_SCORE_DELTA
+
+
+def _prequential_regression_reason(
+    state: Any,
+    candidate_id: str,
+    revision: Any,
+    batch_index: int,
+) -> str | None:
+    """Undo the most recent local edit when its own block score clearly fell.
+
+    Prequential batches score different, time-forward blocks, so one drop can
+    be block difficulty rather than the edit.  The band therefore comes from
+    this lane's own realized volatility -- the median absolute consecutive
+    delta over the *earlier* batches, so the drop under test cannot widen the
+    band that judges it -- and never falls below the frozen selection
+    tolerance.  Only the edit authored on the previous batch is undone, and
+    only onto its parent, which is the exact revision a prequential rollback
+    is allowed to reactivate.
+
+    Batches whose objective weight coverage is incomplete are excluded on both
+    sides: their missing-group penalty is not a measurement of the edit, so it
+    may neither trigger a rollback nor widen the band.
+    """
+
+    parent_revision_id = getattr(revision, "parent_revision_id", None)
+    if not isinstance(parent_revision_id, str) or not parent_revision_id.strip():
+        # Without a parent there is no revision to return to, so a regression
+        # here is not actionable and the lane keeps exploring.
+        return None
+    source_batch_index = getattr(revision, "source_batch_index", None)
+    if isinstance(source_batch_index, bool) or not isinstance(source_batch_index, int):
+        return None
+    index = int(batch_index)
+    if source_batch_index != index - 1:
+        # The active revision predates the previous batch, so this drop is not
+        # attributable to a single edit and there is nothing to undo.
+        return None
+    scores = _trajectory_batch_scores(
+        state, candidate_id, index, comparable_only=True
+    )
+    current = scores.get(index)
+    parent = scores.get(index - 1)
+    if current is None or parent is None:
+        return None
+    deltas = [
+        abs(scores[position] - scores[position - 1])
+        for position in sorted(scores)
+        if position < index and position - 1 in scores
+    ]
+    if not deltas:
+        # One observed block cannot separate an edit effect from block noise.
+        return None
+    band = max(_regression_band_floor(state), median(deltas))
+    return _REGRESSION_GUARDRAIL_REASON if current < parent - band else None
+
+
 def _safety_requires_rollback(reason: Any) -> bool:
     return reason in {
         "constraint_guardrail_failed",
         "sample_constraint_guardrail_failed",
+        _REGRESSION_GUARDRAIL_REASON,
     }
 
 
@@ -1288,27 +1515,75 @@ def _local_edit_proposal(
         raise RuntimeError("local editor requires completed batch evidence")
     metrics = _local_edit_evidence_metrics(evaluation.metrics)
     revision = state.revision(context.candidate_revision_id)
+    tool_usage = _agent_tool_usage(evaluation.metrics)
+    inert_axes = _inert_mutation_axes(tool_usage)
+    advertised = {
+        axis: list(values)
+        for axis, values in context.allowed_mutation_targets.items()
+        if axis not in inert_axes
+    }
+    decision_policy = {
+        "prefer_smallest_effective_change": True,
+        "reject_exact_current_value": True,
+        "avoid_repeating_recent_rejected_operation": True,
+        "require_batch_evidence_for_structural_change": True,
+        "avoid_repeating_an_edit_whose_next_batch_score_regressed": True,
+        "host_rolls_back_a_clear_score_regression": True,
+    }
+    if inert_axes:
+        decision_policy["inert_mutation_axes"] = list(inert_axes)
+        decision_policy["inert_mutation_axes_are_rejected"] = True
+        decision_policy["inert_mutation_axis_explanation"] = (
+            "The sample Agent submitted every prediction of this batch without "
+            "calling a prediction tool, so these axes only changed a default "
+            "nothing read. Spend the operation on the Agent's instructions "
+            "instead, so a later batch can measure the scientific parameters."
+        )
     context_payload = {
         **context.to_dict(),
+        "allowed_mutation_targets": advertised,
+        # An axis name alone was not usable: the editor was shown six axes and
+        # the operation names for three of them (the Skill documents only those),
+        # so the other three could only be reached by guessing an operation id.
+        # Projected onto the axes that have at least one legal target, so an
+        # operation id never appears for an axis the editor cannot spend it on --
+        # the axis itself still appears above, with an empty target list, which is
+        # how a closed axis stays visible instead of silently missing.
+        **mutation_axis_contract(
+            axis for axis, values in advertised.items() if values
+        ),
         "current_candidate_state": _local_edit_current_state(revision),
-        "legal_parameter_neighborhoods": _legal_parameter_neighborhoods(
-            revision,
-            context,
+        "legal_parameter_neighborhoods": (
+            {}
+            if "scientific_parameter" in inert_axes
+            else _legal_parameter_neighborhoods(revision, context)
+        ),
+        "legal_workflow_parameter_bounds": _legal_workflow_parameter_bounds(
+            revision, context
+        ),
+        "legal_instruction_parameter_bounds": _legal_instruction_parameter_bounds(
+            revision, context
+        ),
+        # Only when the axis is actually open for this candidate. A grammar with
+        # no reachable operation is the kind of advertising this axis exists to
+        # replace: the editor would learn how to write a directive it cannot
+        # submit.
+        **(
+            {"legal_directive_grammar": _legal_directive_grammar(revision)}
+            if advertised.get("instruction_directive")
+            else {}
         ),
         "recent_edit_history": _recent_local_edit_history(
             state, candidate.candidate_id, batch.batch_index
         ),
-        "decision_policy": {
-            "prefer_smallest_effective_change": True,
-            "reject_exact_current_value": True,
-            "avoid_repeating_recent_rejected_operation": True,
-            "require_batch_evidence_for_structural_change": True,
-        },
+        **_trajectory_score_history(state, candidate.candidate_id, batch.batch_index),
+        "decision_policy": decision_policy,
         "batch_evidence": {
             "score": evaluation.score,
             "passed": evaluation.passed,
             "metrics": metrics,
             "scope_digest": evaluation.scope.scope_key,
+            **({"agent_tool_usage": tool_usage} if tool_usage is not None else {}),
         },
     }
     comparison = state.batch_comparison_for(
@@ -1426,6 +1701,16 @@ def _local_edit_current_state(revision: CandidateRevision) -> dict[str, Any]:
                     ],
                     "instruction_parameters": profile["instruction_parameters"],
                     "enabled_tool_ids": profile["enabled_tool_ids"],
+                    # Present only when this candidate authored one, which is
+                    # exactly the distinction between writing a first directive
+                    # and revising an existing one. An editor that cannot see
+                    # the current clauses can only propose a rewrite blind, and
+                    # a rewrite identical to the parent is refused.
+                    **(
+                        {"authored_directive": profile["authored_directive"]}
+                        if "authored_directive" in profile
+                        else {}
+                    ),
                 }
                 for profile in roles
             ],
@@ -1460,6 +1745,98 @@ def _legal_parameter_neighborhoods(
     return deep_thaw_json(result)
 
 
+def _legal_workflow_parameter_bounds(
+    revision: CandidateRevision,
+    context: LocalEditContext,
+) -> dict[str, dict[str, Any]]:
+    """Publish the registered bounds for the workflow knobs on offer.
+
+    Scientific parameters travel with a trust region; workflow parameters have
+    only the registered contract, and the editor was previously shown the target
+    name with no bounds at all -- so every attempt was a guess, and a guess that
+    lands outside the contract costs the batch its single operation.
+
+    ``current_value`` is the effective one: the candidate's override if it has
+    any, otherwise the template default, which is what the run would use.
+    """
+
+    genome = EcologyEvolutionPluginGenome.from_dict(dict(revision.genome))
+    execution = genome.agent_program["candidate_execution_program"]
+    registry = current_program_registry()
+    template = registry.program(
+        "workflow_templates", str(execution["workflow_template_ref"]["id"])
+    )
+    contracts = template["parameters"]
+    overrides = execution["workflow_overrides"]
+    result: dict[str, dict[str, Any]] = {}
+    for name in context.allowed_mutation_targets.get("workflow_parameter", ()):
+        contract = contracts.get(str(name))
+        if not isinstance(contract, Mapping):
+            continue
+        result[str(name)] = {
+            "current_value": overrides.get(str(name), contract["default"]),
+            **dict(contract),
+        }
+    return deep_thaw_json(result)
+
+
+def _legal_instruction_parameter_bounds(
+    revision: CandidateRevision,
+    context: LocalEditContext,
+) -> dict[str, dict[str, Any]]:
+    """Publish the registered bounds per role for the instruction knobs on offer.
+
+    Keyed by role, because `set_instruction_parameter` names a role as well as a
+    parameter, and two roles can declare the same parameter with different
+    bounds. `current_value` is the *effective* value: the candidate's override if
+    it has one, otherwise the template default, which is what the run would use.
+    Without this the editor knew the parameter's name and nothing else -- not its
+    range, not what it is set to now -- so it could only propose a value and hope.
+    """
+
+    genome = EcologyEvolutionPluginGenome.from_dict(dict(revision.genome))
+    registry = current_program_registry()
+    advertised = {
+        str(name)
+        for name in context.allowed_mutation_targets.get("instruction_parameter", ())
+    }
+    result: dict[str, dict[str, Any]] = {}
+    for profile in genome.agent_program["candidate_execution_program"][
+        "role_profiles"
+    ]:
+        template = registry.program(
+            "instruction_templates", str(profile["instruction_template_ref"]["id"])
+        )
+        overrides = profile["instruction_parameters"]
+        bounds = {
+            name: {
+                "current_value": overrides.get(name, contract["default"]),
+                **dict(contract),
+            }
+            for name, contract in template["parameters"].items()
+            if name in advertised
+        }
+        if bounds:
+            result[str(profile["role"])] = bounds
+    return deep_thaw_json(result)
+
+
+def _legal_directive_grammar(revision: CandidateRevision) -> dict[str, Any]:
+    """Publish the authoring grammar and the directive the candidate has now.
+
+    Same intent as the bounds publishers above: an axis name plus an operation
+    id was not enough here, because this operation's payload is a structure
+    rather than a number.  The directive the candidate holds today is not
+    repeated here -- `current_candidate_state` already carries it per role, and
+    the operator rejects an authored value equal to it -- so this publishes only
+    `current_directive_present`, which is the difference between writing a
+    first directive and revising one.
+    """
+
+    genome = EcologyEvolutionPluginGenome.from_dict(dict(revision.genome))
+    return deep_thaw_json(_directive_authoring_contract(genome))
+
+
 def _recent_local_edit_history(
     state: Any,
     candidate_id: str,
@@ -1467,15 +1844,7 @@ def _recent_local_edit_history(
 ) -> list[dict[str, Any]]:
     """Return only bounded proposal outcomes from earlier batches in this lane."""
 
-    revision_ids = {
-        int(item.batch_index): str(item.revision_id)
-        for item in getattr(state, "formal_batches", ())
-        if getattr(item, "candidate_id", None) == candidate_id
-        and isinstance(getattr(item, "batch_index", None), int)
-        and not isinstance(getattr(item, "batch_index", None), bool)
-        and isinstance(getattr(item, "revision_id", None), str)
-        and str(item.revision_id).strip()
-    }
+    revision_ids = _batch_revision_ids(state, candidate_id)
     for activation in getattr(state, "trajectory_revision_activations", ()):
         if (
             getattr(activation, "candidate_id", None) == candidate_id
@@ -1513,6 +1882,13 @@ def _recent_local_edit_history(
                 ][:5],
                 "outcome": outcome.get("outcome"),
                 "reason": outcome.get("reason"),
+                # The score this decision was taken on, and the score the next
+                # block actually produced, so the editor can read the realized
+                # effect of its own previous operation instead of guessing.
+                "batch_score": _batch_score(state, candidate_id, batch_index),
+                "next_batch_score": _batch_score(
+                    state, candidate_id, batch_index + 1
+                ),
             }
         )
     return deep_thaw_json(rows[-8:])
@@ -1574,6 +1950,93 @@ def _local_edit_policy_rejection_reason(
     return None
 
 
+# Axes whose evolved values only reach a prediction when the sample Agent
+# chooses to call a prediction tool.  ``instruction_profile`` and the other
+# Agent-policy axes always reach it, because the Host installs them.
+_TOOL_DEPENDENT_MUTATION_AXES = (
+    "scientific_parameter",
+    "registered_predictor",
+    "feature_policy",
+    "fit_policy",
+    "uncertainty_policy",
+)
+_INACTIVE_AXIS_REJECTION_REASON = "inactive_mutation_axis_without_tool_usage"
+
+
+def _agent_tool_usage(metrics: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return this batch's measured Agent prediction-tool usage, when known."""
+
+    sample = metrics.get("sample_execution")
+    if not isinstance(sample, Mapping):
+        return None
+    cells = sample.get("agent_prediction_cells")
+    rate = sample.get("agent_tool_usage_rate")
+    if isinstance(cells, bool) or not isinstance(cells, int) or cells <= 0:
+        return None
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+        return None
+
+    def count(key: str) -> int:
+        value = sample.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 0
+        return int(value)
+
+    methods = sample.get("agent_prediction_method_counts")
+    result = {
+        "agent_prediction_cells": cells,
+        "agent_tool_invocation_cells": count("agent_tool_invocation_cells"),
+        "agent_tool_invocations": count("agent_tool_invocations"),
+        "agent_tool_usage_rate": float(rate),
+    }
+    if isinstance(methods, Mapping):
+        result["prediction_method_counts"] = {
+            str(name): int(value)
+            for name, value in methods.items()
+            if isinstance(value, int) and not isinstance(value, bool)
+        }
+    return result
+
+
+def _inert_mutation_axes(tool_usage: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Name the axes that provably could not have moved this batch's score.
+
+    A ``scientific_parameter`` or registered-pipeline edit only changes the
+    default fit the prediction tools return.  When the batch shows the Agent
+    never called one, the whole axis is a dead coordinate for the next batch
+    too, and an operation spent there buys a guaranteed no-signal step.  The
+    measurement is required: an unmeasured batch keeps every axis open.
+    """
+
+    if tool_usage is None:
+        return ()
+    rate = tool_usage.get("agent_tool_usage_rate")
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)) or rate > 0.0:
+        return ()
+    return _TOOL_DEPENDENT_MUTATION_AXES
+
+
+def _inactive_axis_rejection_reason(
+    metrics: Mapping[str, Any],
+    proposal: LocalEditProposal,
+) -> str | None:
+    """Reject an edit authored on an axis this batch proved the Agent ignores."""
+
+    if proposal.decision.value != "mutate":
+        return None
+    inert = set(_inert_mutation_axes(_agent_tool_usage(metrics)))
+    if not inert:
+        return None
+    for operation in proposal.operations:
+        try:
+            axis, _target, _path = _operation_target(operation)
+        except (TypeError, ValueError):
+            return None
+        if axis in inert:
+            return _INACTIVE_AXIS_REJECTION_REASON
+    return None
+
+
 def _local_edit_evidence_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     """Return detached aggregate evidence safe for the native JSON boundary.
 
@@ -1632,6 +2095,13 @@ def _local_edit_evidence_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
                 "feedback_diagnostics_complete",
                 "feedback_executed_scoring_cells",
                 "feedback_resumed_scoring_cells",
+                # Whether the Agent ever reached a prediction tool decides
+                # which mutation axes can move the score at all.
+                "agent_prediction_cells",
+                "agent_tool_invocation_cells",
+                "agent_tool_invocations",
+                "agent_tool_usage_rate",
+                "agent_prediction_method_counts",
             )
             if key in sample
         }

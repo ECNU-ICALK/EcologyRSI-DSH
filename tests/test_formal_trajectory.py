@@ -15,7 +15,10 @@ from ecologyrsi_dsh import (
 )
 from ecologyrsi_dsh.application import formal_trajectory
 from ecologyrsi_dsh.application.formal_trajectory import (
+    _agent_tool_usage,
     _durable_batch_metrics,
+    _inactive_axis_rejection_reason,
+    _inert_mutation_axes,
     _local_edit_bundle_signature,
     _local_edit_context,
     _local_edit_current_state,
@@ -24,9 +27,14 @@ from ecologyrsi_dsh.application.formal_trajectory import (
     _local_edit_policy_rejection_reason,
     _local_edit_proposal,
     _local_challenger_policy,
+    _prequential_regression_reason,
     _prequential_safety_reason,
     _recent_local_edit_history,
     _safety_requires_rollback,
+    _trajectory_score_history,
+    _INACTIVE_AXIS_REJECTION_REASON,
+    _REGRESSION_GUARDRAIL_REASON,
+    _TOOL_DEPENDENT_MUTATION_AXES,
     execute_next_local_edit,
 )
 from ecologyrsi_dsh.core.models import digest
@@ -856,6 +864,390 @@ class FormalTrajectoryTests(unittest.TestCase):
         self.assertEqual(calls[1][3]["active_revision_id"], "revision:guard:r0")
         self.assertEqual(calls[2][1], "advance_trajectory_revision")
         self.assertEqual(calls[2][6], RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK)
+
+    @staticmethod
+    def _scored_state(
+        scores: dict[int, float],
+        candidate_id: str = "candidate:regress",
+        **overrides,
+    ) -> SimpleNamespace:
+        """A prequential lane whose observable per batch is one clean score."""
+
+        evaluations = {
+            index: SimpleNamespace(
+                score=score,
+                metrics={
+                    "constraint_violations": 0,
+                    "sample_execution": {"coverage_pass": True},
+                },
+            )
+            for index, score in scores.items()
+        }
+        fields: dict[str, object] = {
+            "batch_evaluation_for": lambda _candidate, index: evaluations.get(index),
+            "formal_batches": tuple(
+                SimpleNamespace(
+                    candidate_id=candidate_id,
+                    batch_index=index,
+                    revision_id=f"revision:regress:batch:{index}",
+                )
+                for index in sorted(scores)
+            ),
+        }
+        fields.update(overrides)
+        return SimpleNamespace(**fields)
+
+    def test_regression_band_rolls_back_the_last_local_edit(self) -> None:
+        """The observed b0..b3 collapse of run c4e2767b must now be undone."""
+
+        state = self._scored_state({0: 0.00944, 1: 0.04395, 2: 0.04607, 3: -0.04142})
+        revision = SimpleNamespace(
+            revision_id="revision:regress:batch:3",
+            parent_revision_id="revision:regress:batch:2",
+            source_batch_index=2,
+        )
+
+        self.assertEqual(
+            _prequential_regression_reason(state, "candidate:regress", revision, 3),
+            _REGRESSION_GUARDRAIL_REASON,
+        )
+        self.assertTrue(_safety_requires_rollback(_REGRESSION_GUARDRAIL_REASON))
+
+    def test_regression_band_tolerates_block_noise(self) -> None:
+        """Only a drop beyond this lane's own volatility may undo an edit."""
+
+        measured = {0: 0.00944, 1: 0.04395, 2: 0.04607}
+        child_of_batch_two = SimpleNamespace(
+            revision_id="revision:regress:batch:3",
+            parent_revision_id="revision:regress:batch:2",
+            source_batch_index=2,
+        )
+
+        # A dip inside the realized band is block difficulty, not the edit.
+        self.assertIsNone(
+            _prequential_regression_reason(
+                self._scored_state({**measured, 3: 0.040}),
+                "candidate:regress",
+                child_of_batch_two,
+                3,
+            )
+        )
+        # A single measured block cannot separate an edit from block noise.
+        self.assertIsNone(
+            _prequential_regression_reason(
+                self._scored_state({0: 0.04607, 1: -0.04142}),
+                "candidate:regress",
+                SimpleNamespace(
+                    revision_id="revision:regress:batch:1",
+                    parent_revision_id="revision:regress:batch:0",
+                    source_batch_index=0,
+                ),
+                1,
+            )
+        )
+        # Batch 7 was kept, so batch 8 re-scores the same genome on a new
+        # block: the -0.167 that follows is attributable to no local edit.
+        self.assertIsNone(
+            _prequential_regression_reason(
+                self._scored_state(
+                    {5: 0.02285, 6: -0.02368, 7: 0.00517, 8: -0.16744}
+                ),
+                "candidate:regress",
+                SimpleNamespace(
+                    revision_id="revision:regress:batch:7",
+                    parent_revision_id="revision:regress:batch:6",
+                    source_batch_index=6,
+                ),
+                8,
+            )
+        )
+
+    def test_prequential_regression_rolls_back_to_parent_without_new_edit(self) -> None:
+        candidate = SimpleNamespace(candidate_id="candidate:regress", generation=0)
+        revision = SimpleNamespace(
+            revision_id="revision:regress:batch:2",
+            genome={},
+            parent_revision_id="revision:regress:batch:1",
+            source_batch_index=1,
+        )
+        batch = SimpleNamespace(
+            candidate_id=candidate.candidate_id,
+            batch_index=2,
+            revision_id=revision.revision_id,
+        )
+        state = self._scored_state(
+            {0: 0.01, 1: 0.05, 2: -0.04},
+            formal_batches=(batch,),
+            run=SimpleNamespace(run_id="run:regress"),
+            candidate=lambda _id: candidate,
+            trajectory_for=lambda _id: SimpleNamespace(batch_count=4),
+            revision_activation_for=lambda *_args: None,
+            local_edit_outcomes=(),
+            local_edit_proposal_for=lambda *_args: None,
+            revision=lambda _id: revision,
+        )
+        server = SimpleNamespace(director=SimpleNamespace(state=lambda _id: state))
+        calls = []
+
+        with (
+            patch(
+                "ecologyrsi_dsh.application.formal_trajectory._local_edit_context",
+                return_value=SimpleNamespace(
+                    evidence_scope_digest="a" * 64,
+                    candidate_revision_id=revision.revision_id,
+                ),
+            ),
+            patch(
+                "ecologyrsi_dsh.application.formal_trajectory._local_edit_proposal"
+            ) as authored,
+            patch(
+                "ecologyrsi_dsh.application.formal_trajectory._director_mutation",
+                side_effect=lambda *args: calls.append(args),
+            ),
+        ):
+            self.assertTrue(
+                execute_next_local_edit(server, "run:regress", candidate.candidate_id)
+            )
+
+        authored.assert_not_called()
+        self.assertEqual(calls[0][1], "record_local_edit_proposal")
+        self.assertEqual(calls[0][3]["safety_reason"], _REGRESSION_GUARDRAIL_REASON)
+        self.assertEqual(calls[1][1], "decide_local_edit")
+        self.assertEqual(calls[1][3]["outcome"], LocalEditOutcome.ROLLED_BACK.value)
+        self.assertEqual(calls[1][3]["reason"], _REGRESSION_GUARDRAIL_REASON)
+        self.assertEqual(calls[1][3]["active_revision_id"], "revision:regress:batch:1")
+        self.assertEqual(calls[2][1], "advance_trajectory_revision")
+        self.assertEqual(calls[2][6], RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK)
+        self.assertEqual([call[1] for call in calls].count("complete_formal_trajectory"), 0)
+
+    def test_prequential_final_batch_never_authors_an_unevaluated_revision(self) -> None:
+        """Completion may only promote a revision the formal stage scored."""
+
+        candidate = SimpleNamespace(candidate_id="candidate:final", generation=0)
+        revision = SimpleNamespace(
+            revision_id="revision:final:batch:1",
+            genome={},
+            parent_revision_id="revision:final:batch:0",
+            source_batch_index=0,
+        )
+        batch = SimpleNamespace(
+            candidate_id=candidate.candidate_id,
+            batch_index=1,
+            revision_id=revision.revision_id,
+        )
+        state = self._scored_state(
+            {0: 0.01, 1: 0.05},
+            candidate_id=candidate.candidate_id,
+            formal_batches=(batch,),
+            run=SimpleNamespace(run_id="run:final"),
+            candidate=lambda _id: candidate,
+            trajectory_for=lambda _id: SimpleNamespace(batch_count=2),
+            revision_activation_for=lambda *_args: None,
+            local_edit_outcomes=(),
+            local_edit_proposal_for=lambda *_args: None,
+            revision=lambda _id: revision,
+        )
+        server = SimpleNamespace(director=SimpleNamespace(state=lambda _id: state))
+        calls = []
+
+        with (
+            patch(
+                "ecologyrsi_dsh.application.formal_trajectory._local_edit_context",
+                return_value=SimpleNamespace(
+                    evidence_scope_digest="a" * 64,
+                    candidate_revision_id=revision.revision_id,
+                ),
+            ),
+            patch(
+                "ecologyrsi_dsh.application.formal_trajectory._local_edit_proposal"
+            ) as authored,
+            patch(
+                "ecologyrsi_dsh.application.formal_trajectory."
+                "EcologyEvolutionPluginGenome.from_dict",
+                return_value=object(),
+            ),
+            patch(
+                "ecologyrsi_dsh.application.formal_trajectory."
+                "apply_or_reject_local_edit_bundle",
+                return_value=LocalEditResult(
+                    LocalEditOutcome.KEPT, (), None, "b" * 64
+                ),
+            ) as apply_edit,
+            patch(
+                "ecologyrsi_dsh.application.formal_trajectory._director_mutation",
+                side_effect=lambda *args: calls.append(args),
+            ),
+        ):
+            self.assertTrue(
+                execute_next_local_edit(server, "run:final", candidate.candidate_id)
+            )
+
+        authored.assert_not_called()
+        self.assertEqual(apply_edit.call_args.args[1].decision.value, "keep")
+        self.assertEqual(
+            [call[1] for call in calls],
+            [
+                "record_local_edit_proposal",
+                "decide_local_edit",
+                "advance_trajectory_revision",
+                "complete_formal_trajectory",
+            ],
+        )
+        self.assertEqual(calls[1][3]["outcome"], LocalEditOutcome.KEPT.value)
+        self.assertEqual(calls[3][4], revision.revision_id)
+
+    def test_recent_edit_history_reports_realized_batch_scores(self) -> None:
+        """The editor must be able to read what its own last operation did."""
+
+        proposals = {
+            index: {
+                "proposal": {
+                    "decision": "mutate",
+                    "operations": [
+                        {
+                            "op": "set_bounded_parameter",
+                            "name": "residual_scale_6h",
+                            "value": 0.0375 * (index + 1),
+                        }
+                    ],
+                }
+            }
+            for index in range(3)
+        }
+        state = self._scored_state(
+            {0: 0.00944, 1: 0.04395, 2: 0.04607},
+            local_edit_outcomes=tuple(
+                {
+                    "candidate_id": "candidate:regress",
+                    "batch_index": index,
+                    "outcome": "applied",
+                }
+                for index in range(3)
+            ),
+            local_edit_proposal_for=lambda _candidate, index: proposals.get(index),
+        )
+
+        history = _recent_local_edit_history(state, "candidate:regress", 2)
+
+        self.assertEqual(
+            [
+                (row["batch_index"], row["batch_score"], row["next_batch_score"])
+                for row in history
+            ],
+            [(0, 0.00944, 0.04395), (1, 0.04395, 0.04607)],
+        )
+
+    def test_coverage_damaged_block_neither_rolls_back_nor_sets_the_bar(self) -> None:
+        """A missing objective group measures availability, not the edit.
+
+        One unscored (target, horizon) group contributes the frozen missing
+        penalty, which dwarfs any bounded parameter step. Such a block must stay
+        out of the band, out of the rollback trigger, and out of ``best_observed``.
+        """
+
+        incomplete = {
+            "constraint_violations": 0,
+            "objective_weight_coverage": 8 / 9,
+            "sample_execution": {"coverage_pass": True},
+        }
+        state = self._scored_state({0: 0.01, 1: 0.05, 2: 0.048, 3: -0.06})
+        evaluations = {
+            index: SimpleNamespace(
+                score=score,
+                metrics=incomplete if index == 3 else {
+                    "constraint_violations": 0,
+                    "sample_execution": {"coverage_pass": True},
+                },
+            )
+            for index, score in {0: 0.01, 1: 0.05, 2: 0.048, 3: -0.06}.items()
+        }
+        state.batch_evaluation_for = lambda _candidate, index: evaluations.get(index)
+        revision = SimpleNamespace(
+            revision_id="revision:regress:batch:3",
+            parent_revision_id="revision:regress:batch:2",
+            source_batch_index=2,
+        )
+
+        self.assertIsNone(
+            _prequential_regression_reason(state, "candidate:regress", revision, 3)
+        )
+        history = _trajectory_score_history(state, "candidate:regress", 3)
+        self.assertEqual(
+            [(row["batch_index"], row["comparable"]) for row in history["score_history"]],
+            [(0, True), (1, True), (2, True), (3, False)],
+        )
+        self.assertEqual(
+            history["score_history"][3]["incomparable_reason"],
+            "objective_weight_coverage_incomplete",
+        )
+        self.assertEqual(history["best_observed"]["batch_index"], 1)
+
+        # A coverage-damaged block is also not allowed to be the high-water mark.
+        evaluations[3] = SimpleNamespace(score=0.9, metrics=incomplete)
+        self.assertEqual(
+            _trajectory_score_history(state, "candidate:regress", 3)["best_observed"][
+                "batch_index"
+            ],
+            1,
+        )
+
+    def test_zero_tool_usage_closes_the_axes_it_makes_unmeasurable(self) -> None:
+        """A batch the Agent answered from context cannot score a model edit."""
+
+        def metrics(rate: float | None, cells: int = 90) -> dict[str, object]:
+            sample: dict[str, object] = {"agent_prediction_cells": cells}
+            if rate is not None:
+                sample["agent_tool_usage_rate"] = rate
+                sample["agent_tool_invocation_cells"] = int(round(rate * cells))
+                sample["agent_tool_invocations"] = int(round(rate * cells))
+            return {"sample_execution": sample}
+
+        parameter_edit = LocalEditProposal(
+            decision="mutate",
+            operations=(
+                {"op": "set_bounded_parameter", "name": "ridge_alpha", "value": 0.15},
+            ),
+            evidence_refs=("batch:metrics",),
+            expected_effect_cells=(),
+            risk_cells=(),
+        )
+        instruction_edit = LocalEditProposal(
+            decision="mutate",
+            operations=(
+                {
+                    "op": "select_instruction_template",
+                    "role": "sample-planner",
+                    "instruction_template_id": "sample-planner-model-anchored@1",
+                },
+            ),
+            evidence_refs=("batch:metrics",),
+            expected_effect_cells=(),
+            risk_cells=(),
+        )
+
+        self.assertEqual(
+            _inert_mutation_axes(_agent_tool_usage(metrics(0.0))),
+            _TOOL_DEPENDENT_MUTATION_AXES,
+        )
+        self.assertEqual(
+            _inactive_axis_rejection_reason(metrics(0.0), parameter_edit),
+            _INACTIVE_AXIS_REJECTION_REASON,
+        )
+        # The instruction axis is exactly how the lane escapes, so it stays open.
+        self.assertIsNone(
+            _inactive_axis_rejection_reason(metrics(0.0), instruction_edit)
+        )
+        # Any measured usage reopens the parameter axis.
+        self.assertEqual(_inert_mutation_axes(_agent_tool_usage(metrics(0.05))), ())
+        self.assertIsNone(
+            _inactive_axis_rejection_reason(metrics(0.05), parameter_edit)
+        )
+        # An unmeasured batch may not close an axis on suspicion alone.
+        self.assertIsNone(_agent_tool_usage(metrics(None)))
+        self.assertEqual(_inert_mutation_axes(None), ())
+        self.assertIsNone(
+            _inactive_axis_rejection_reason(metrics(None), parameter_edit)
+        )
 
 
 class PairedFormalTrajectoryTests(unittest.TestCase):

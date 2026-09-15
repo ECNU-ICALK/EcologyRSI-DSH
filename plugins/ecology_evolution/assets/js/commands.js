@@ -754,7 +754,7 @@
   }
 
   function submitIntervention(payload) {
-    if (!state.activeRun || state.activeRun.status !== "paused") { showToast("请先暂停进化运行。" ); return Promise.resolve(false); }
+    if (!state.activeRun || ["paused", "running"].indexOf(state.activeRun.status) < 0) { showToast("只有运行中或已暂停的进化运行可以提交专家意见。"); return Promise.resolve(false); }
     if (!hasCapability("intervention.write")) { showToast("当前 DSH 会话未授予提交专家意见与答复的能力。"); return Promise.resolve(false); }
     var runId = state.activeRun.id;
     var signature = JSON.stringify(payload);
@@ -796,13 +796,17 @@
     var answer = String(payload && payload.answer || "").trim();
     var answeredBy = String(payload && payload.answered_by || "").trim();
     var selectedOption = String(payload && payload.selected_option || "").trim();
+    // Durable domain knowledge keeps reaching the model every round instead of
+    // being consumed by the first research iteration that reads it.
+    var persistent = payload && payload.persistent === true;
     if (!answer) { showToast("请填写专家答复。" ); return Promise.resolve(false); }
     if (!answeredBy) { showToast("请填写答复人。" ); return Promise.resolve(false); }
     var runId = run.id;
     var auditOnly = expertConsultationRunIsTerminal(run);
-    var signature = JSON.stringify({ run_id: runId, consultation_id: id, answer: answer, selected_option: selectedOption, answered_by: answeredBy });
+    var signature = JSON.stringify({ run_id: runId, consultation_id: id, answer: answer, selected_option: selectedOption, answered_by: answeredBy, persistent: persistent });
     var body = { answer: answer, answered_by: answeredBy, idempotency_key: commandKey("expert-consultation-answer", signature) };
     if (selectedOption) { body.selected_option = selectedOption; }
+    if (persistent) { body.persistent = true; }
     state.busy = true;
     state.pendingAction = "expert-consultation:" + id;
     state.commandError = null;
@@ -814,7 +818,7 @@
         var answeredAt = new Date().toISOString();
         state.activeRun.expert_consultations = state.activeRun.expert_consultations.map(function (item) {
           if (expertConsultationId(item) !== id) { return item; }
-          return Object.assign({}, item, { status: "answered", answer: answer, selected_option: selectedOption || null, answered_by: answeredBy, answered_at: answeredAt, effective_generation: auditOnly ? null : state.activeRun.generation + 1, applied_generation: null });
+          return Object.assign({}, item, { status: "answered", answer: answer, selected_option: selectedOption || null, answered_by: answeredBy, answered_at: answeredAt, effective_generation: auditOnly ? null : state.activeRun.generation + 1, applied_generation: null, persistent: persistent });
         });
         state.activeRun.projection_revision += 1;
         state.events.unshift({ id: "演示咨询事件-" + Date.now(), type: "expert_consultation.answered", occurred_at: answeredAt, payload: { consultation_id: id, audit_only: auditOnly, message: auditOnly ? "迟到专家答复已归档，不会改写运行结果。" : "专家答复已记录，将在后续轮次使用。" } });
@@ -824,7 +828,7 @@
           state.activeRun = normalizeRun(projection);
         } else {
           state.activeRun.expert_consultations = state.activeRun.expert_consultations.map(function (item) {
-            return expertConsultationId(item) === id ? Object.assign({}, item, { status: "answered", answer: answer, selected_option: selectedOption || null, answered_by: answeredBy, answered_at: new Date().toISOString(), effective_generation: auditOnly ? null : state.activeRun.generation + 1, applied_generation: null }) : item;
+            return expertConsultationId(item) === id ? Object.assign({}, item, { status: "answered", answer: answer, selected_option: selectedOption || null, answered_by: answeredBy, answered_at: new Date().toISOString(), effective_generation: auditOnly ? null : state.activeRun.generation + 1, applied_generation: null, persistent: persistent }) : item;
           });
         }
         state.runs = state.runs.map(function (item) { return item.id === runId ? state.activeRun : item; });

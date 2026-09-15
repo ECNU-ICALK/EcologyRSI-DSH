@@ -8,6 +8,7 @@ mutation.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
@@ -24,6 +25,15 @@ MATERIALIZER_VERSION = "seed-genome-materializer@2"
 TRUST_REGION_MUTATION_OPERATOR_ID = "bounded-trust-region-mutation@2"
 LOCAL_EDIT_MUTATION_OPERATOR_ID = "bounded-batch-local-edit@1"
 TRUST_REGION_MAX_NORMALIZED_STEP = 0.15
+# The one workflow class candidate sample execution can be compiled under. The
+# compiler pins it (`workflow_ir.compile_dsh_workflow_spec`), so a genome citing
+# any other registered template is not merely unusual: it cannot be compiled at
+# all. The mutation operator below checks it for that reason. Without the check a
+# third planner-eligible template would be accepted here, accepted by
+# `from_dict`, and then raise from `_revision_evaluation_inputs` on the next
+# batch -- failing the run instead of rejecting one proposal. This constant lives
+# here rather than in `workflow_ir` because the import runs the other way.
+CANDIDATE_WORKFLOW_TEMPLATE_ID = "candidate-sample-execution@1"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PROGRAM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*(?:@[A-Za-z0-9][A-Za-z0-9._-]*)?$")
@@ -319,11 +329,28 @@ def _role_profile(value: Any) -> dict[str, Any]:
             "response_schema_id",
             "base_tool_policy_id",
             "enabled_tool_ids",
+            "directive_policy_ref",
+            "authored_directive",
         },
+        # Optional, and omitted from the normalized result when absent rather
+        # than stored as null or {} -- the same discipline `scientific_program`
+        # uses for `feature_recipe`. That keeps the historical seven-key
+        # projection byte-identical, so every archived genome_digest,
+        # behavior_digest and genome_id stays reproducible and replayable.
+        optional=frozenset({"directive_policy_ref", "authored_directive"}),
     )
     role = _text(raw["role"], "role_profile.role", pattern=_PRESET_ID_RE)
     if role not in {"sample-planner", "sample-repair"}:
         raise ValueError("candidate role_profile cannot select reproduction or reviewer roles")
+    # Both authoring fields travel together: a policy reference without a
+    # directive advertises a grammar nothing uses, and a directive without the
+    # reference cannot say which grammar bounded it.
+    if ("directive_policy_ref" in raw) != ("authored_directive" in raw):
+        raise ValueError(
+            "role_profile requires directive_policy_ref and authored_directive together"
+        )
+    if "authored_directive" in raw and role != "sample-planner":
+        raise ValueError("only the sample-planner role can author a directive")
     instruction_parameters = _bounded_overrides(
         raw["instruction_parameters"], "instruction_parameters"
     )
@@ -344,7 +371,7 @@ def _role_profile(value: Any) -> dict[str, Any]:
         if not 0.0 <= float(threshold) <= 1.0:
             raise ValueError("instruction confidence_threshold must be between 0 and 1")
         instruction_parameters["confidence_threshold"] = threshold
-    return {
+    result = {
         "role": role,
         "preset_id": _text(raw["preset_id"], "role_profile.preset_id", pattern=_PRESET_ID_RE),
         "instruction_template_ref": _program_ref(
@@ -361,6 +388,39 @@ def _role_profile(value: Any) -> dict[str, Any]:
             raw["enabled_tool_ids"], "enabled_tool_ids", pattern=_PROGRAM_ID_RE
         ),
     }
+    if "authored_directive" in raw:
+        # Validated by the host clause whitelist, which is the single source of
+        # the enumerations and of every bound. Deferred import for the same
+        # reason feature_recipe is: the evaluators module reaches back into
+        # knowledge/ for the executable-field rejection, and genome.py is
+        # imported from there.
+        from ..evaluators.authored_directive import validate_authored_directive
+
+        ref = _exact_mapping(
+            raw["directive_policy_ref"],
+            "directive_policy_ref",
+            {"id", "catalog_digest", "overrides"},
+        )
+        result["directive_policy_ref"] = {
+            **_program_ref(
+                {"id": ref["id"], "catalog_digest": ref["catalog_digest"]},
+                "directive_policy_ref",
+            ),
+            "overrides": _bounded_overrides(
+                ref["overrides"], "directive_policy_ref.overrides"
+            ),
+        }
+        # to_dict() is the canonical, key-sorted projection, so two genomes
+        # carrying the same directive written in different key order share one
+        # behavior_digest.
+        result["authored_directive"] = validate_authored_directive(
+            raw["authored_directive"],
+            # The tool plan is cross-checked against this profile's own grant
+            # here rather than only in the compiler: a genome that plans a tool
+            # its policy withheld must never reach the archive at all.
+            allowed_tool_ids=result["enabled_tool_ids"],
+        ).to_dict()
+    return result
 
 
 def _agent_program(value: Any) -> dict[str, Any]:
@@ -1087,6 +1147,43 @@ def apply_genome_mutation(
                 raise ValueError(f"mutation operation {op} does not change the pipeline")
             scientific["predictor_ref"] = predictor_ref
             scientific["parameter_overrides"] = parameter_overrides
+        elif op == "author_feature_recipe":
+            item = _operation(raw_operation, {"feature_recipe"}, op)
+            predictor_id = str(scientific["predictor_ref"]["id"])
+            predictor = registry.program("predictors", predictor_id)
+            if predictor.get("feature_policy_id") is None:
+                raise ValueError(
+                    f"predictor {predictor_id} does not accept a feature_recipe"
+                )
+            # Deferred for the same import cycle the scientific-program
+            # validator documents: evaluators/ reaches back into knowledge/.
+            from ..evaluators.feature_recipe import validate_feature_recipe
+            from ..knowledge.autonomous_cycle import (
+                MAX_RECIPE_TERM_EDITS_PER_MUTATION,
+            )
+
+            authored = validate_feature_recipe(item["feature_recipe"]).to_dict()
+            previous = scientific.get("feature_recipe")
+            if previous == authored:
+                raise ValueError(f"mutation operation {op} does not change the recipe")
+            if previous is not None:
+                # The structural trust region. Compared as canonical JSON per
+                # term because a term is a small mapping and equality on it is
+                # exactly "same primitive, same parameters" -- an edited lag is
+                # one removal plus one addition, which is the honest count.
+                before = [_canonical_bytes(term) for term in previous["features"]]
+                after = [_canonical_bytes(term) for term in authored["features"]]
+                kept = Counter(before) & Counter(after)
+                changed = (len(before) - sum(kept.values())) + (
+                    len(after) - sum(kept.values())
+                )
+                if changed > MAX_RECIPE_TERM_EDITS_PER_MUTATION:
+                    raise ValueError(
+                        f"feature_recipe edit changes {changed} terms but "
+                        f"{MAX_RECIPE_TERM_EDITS_PER_MUTATION} is the per-mutation "
+                        "ceiling"
+                    )
+            scientific["feature_recipe"] = authored
         elif op in {
             "select_registered_feature_policy",
             "select_registered_fit_policy",
@@ -1120,6 +1217,11 @@ def apply_genome_mutation(
             workflow_id = _text(
                 item["workflow_template_id"], "workflow_template_id", pattern=_PROGRAM_ID_RE
             )
+            if workflow_id != CANDIDATE_WORKFLOW_TEMPLATE_ID:
+                raise ValueError(
+                    "candidate execution requires its registered workflow class: "
+                    f"{CANDIDATE_WORKFLOW_TEMPLATE_ID}"
+                )
             workflow_ref = registry.program_ref("workflow_templates", workflow_id)
             workflow_overrides = registry.workflow_defaults(workflow_id)
             execution_program = agent["candidate_execution_program"]
@@ -1227,6 +1329,43 @@ def apply_genome_mutation(
             if set(requested) == inherited:
                 raise ValueError(f"mutation operation {op} does not change {role}")
             profile["enabled_tool_ids"] = requested
+        elif op == "author_role_directive":
+            item = _operation(raw_operation, {"role", "authored_directive"}, op)
+            role = _text(item["role"], "mutation role", pattern=_PRESET_ID_RE)
+            if role != "sample-planner":
+                raise ValueError("only the sample-planner role can author a directive")
+            profile = next(
+                (
+                    profile
+                    for profile in agent["candidate_execution_program"]["role_profiles"]
+                    if profile["role"] == role
+                ),
+                None,
+            )
+            if profile is None:
+                raise ValueError("mutation role is not registered in candidate execution")
+            from ..evaluators.authored_directive import (
+                AUTHORED_DIRECTIVE_POLICY_ID,
+                validate_authored_directive,
+            )
+
+            # Bound by the profile's own grant, not by the registry's base
+            # policy: a directive may plan only tools this candidate still has
+            # after any narrowing it inherited.
+            authored = validate_authored_directive(
+                item["authored_directive"],
+                allowed_tool_ids=profile["enabled_tool_ids"],
+            ).to_dict()
+            if profile.get("authored_directive") == authored:
+                raise ValueError(f"mutation operation {op} does not change {role}")
+            profile["authored_directive"] = authored
+            # Re-resolved on every authoring edit rather than carried forward,
+            # so the reference always names the grammar that actually bounded
+            # the text now in the genome.
+            profile["directive_policy_ref"] = {
+                **registry.program_ref("directive_policies", AUTHORED_DIRECTIVE_POLICY_ID),
+                "overrides": {},
+            }
         else:
             raise ValueError(f"unsupported genome mutation operation: {op}")
 
@@ -1264,6 +1403,7 @@ def apply_genome_mutation(
 
 
 __all__ = [
+    "CANDIDATE_WORKFLOW_TEMPLATE_ID",
     "EcologyEvolutionPluginGenome",
     "FrozenJson",
     "FrozenJsonArray",

@@ -322,6 +322,88 @@ class ExpertConsultationTests(unittest.TestCase):
         )
         self.assertEqual(replayed.available_expert_answers(1), ())
 
+    def test_persistent_answer_survives_the_round_that_reads_it(self) -> None:
+        # A one-off answer is consumed exactly once, which is right for "pick
+        # option A or B" and wrong for a standing fact about the domain: the
+        # expert had to re-enter the same knowledge every generation.
+        self.director.record_expert_consultation(self.consultation())
+        durable = self.director.answer_expert_consultation(
+            ExpertConsultationAnswer(
+                answer_id="answer:durable",
+                run_id=self.run_id,
+                consultation_id="consultation:water-threshold",
+                answer="夜间蒸腾滞后约两小时，阈值判断应按此校正。",
+                answered_by="domain-expert",
+                selected_option="retain default",
+                effective_generation=1,
+                persistent=True,
+                created_at="2026-08-20T02:00:00+00:00",
+            )
+        )
+        self.assertTrue(durable.persistent)
+        self.assertTrue(
+            ExpertConsultationAnswer.from_dict(durable.to_dict()).persistent
+        )
+
+        self.director.advance_generation(self.run_id)
+        knowledge = self.record_knowledge()
+        self.director.record_research_iteration(
+            self.research_iteration(
+                generation=1,
+                knowledge_snapshot_digest=knowledge.snapshot_digest,
+                expert_answer_ids=(durable.answer_id,),
+            )
+        )
+        state = self.director.state(self.run_id)
+        applied = state.answer_for_consultation("consultation:water-threshold")
+        assert applied is not None
+        self.assertEqual(applied.applied_generation, 1)
+        # Read by generation 1, so that generation cannot consume it twice --
+        # but every later generation still sees it.
+        self.assertEqual(state.available_expert_answers(1), ())
+        self.assertEqual(
+            [item.answer_id for item in state.available_expert_answers(2)],
+            ["answer:durable"],
+        )
+
+        self.director.advance_generation(self.run_id)
+        later_knowledge = self.record_knowledge()
+        self.director.record_research_iteration(
+            self.research_iteration(
+                generation=2,
+                knowledge_snapshot_digest=later_knowledge.snapshot_digest,
+                expert_answer_ids=(durable.answer_id,),
+            )
+        )
+        replayed = EvolutionDirector(self.ledger, FakeDSHAdapter()).replay(self.run_id)
+        reread = replayed.answer_for_consultation("consultation:water-threshold")
+        assert reread is not None
+        self.assertTrue(reread.persistent)
+        # `applied_generation` tracks the most recent read, not a one-way latch.
+        self.assertEqual(reread.applied_generation, 2)
+        self.assertEqual(
+            [item.answer_id for item in replayed.available_expert_answers(3)],
+            ["answer:durable"],
+        )
+
+    def test_a_one_off_answer_keeps_its_prior_single_use_lifecycle(self) -> None:
+        self.director.record_expert_consultation(self.consultation())
+        answer = self.director.answer_expert_consultation(self.answer())
+        self.assertFalse(answer.persistent)
+
+        self.director.advance_generation(self.run_id)
+        knowledge = self.record_knowledge()
+        self.director.record_research_iteration(
+            self.research_iteration(
+                generation=1,
+                knowledge_snapshot_digest=knowledge.snapshot_digest,
+                expert_answer_ids=(answer.answer_id,),
+            )
+        )
+        state = self.director.state(self.run_id)
+        self.assertEqual(state.available_expert_answers(1), ())
+        self.assertEqual(state.available_expert_answers(5), ())
+
     def test_empty_expert_answer_ids_preserve_legacy_iteration_digest(self) -> None:
         plan = {"strategy": {"id": "autonomous_model@1"}}
         adoption = resolve_predictor_adoption(self.task, plan).to_dict()
