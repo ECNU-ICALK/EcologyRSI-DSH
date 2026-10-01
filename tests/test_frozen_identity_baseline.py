@@ -103,7 +103,8 @@ PREDICTOR_IDENTITY = {
 #   814833bfc2f2c9a2337b5aac4a0d024d41f7c2ea8168d836597e1f7235e3cd69
 #     -> seed planner `preset_id` v10 -> v11, whose Skill states the real call
 #        ceiling instead of the retired literal two
-PROGRAM_CATALOG_DIGEST = '79bcad24da22c93e2f1e8313219d404e3654abd7f0bea6e58b1e39338c852417'
+# Added causal_planner_skills@1 as a new catalog category; existing entries retain their identities.
+PROGRAM_CATALOG_DIGEST = '1b0ea11aeae0407a26cb73bd11da63544cd85e7d332ac23a1f411aa7dbc8db9a'
 
 # The evaluator digest payload, field for field. dataset_ids is deliberately
 # absent: the per-dataset whitelists are an admission rule, not identity, so

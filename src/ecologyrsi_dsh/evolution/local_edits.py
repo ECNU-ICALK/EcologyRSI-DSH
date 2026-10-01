@@ -129,10 +129,19 @@ class LocalEditProposal:
     expected_effect_cells: Sequence[str]
     risk_cells: Sequence[str]
     schema_version: str = LOCAL_EDIT_SCHEMA_VERSION
+    revisit: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != LOCAL_EDIT_SCHEMA_VERSION:
             raise ValueError("unsupported local edit schema_version")
+        if self.revisit is not None:
+            if (not isinstance(self.revisit, Mapping) or set(self.revisit) != {"reason", "justification"}
+                    or self.revisit.get("reason") not in {"safety_recovery", "new_batch_evidence", "paired_recheck"}
+                    or not isinstance(self.revisit.get("justification"), str)
+                    or not self.revisit["justification"].strip()
+                    or len(self.revisit["justification"]) > 400):
+                raise ValueError("invalid local edit revisit reason")
+            object.__setattr__(self, "revisit", dict(self.revisit))
         object.__setattr__(self, "decision", LocalEditProposalDecision(self.decision))
         if isinstance(self.operations, (str, bytes)) or not isinstance(
             self.operations, Sequence
@@ -152,6 +161,7 @@ class LocalEditProposal:
             "evidence_refs": list(self.evidence_refs),
             "expected_effect_cells": list(self.expected_effect_cells),
             "risk_cells": list(self.risk_cells),
+            **({"revisit": dict(self.revisit)} if self.revisit is not None else {}),
         }
 
     @classmethod
@@ -164,8 +174,10 @@ class LocalEditProposal:
             "expected_effect_cells",
             "risk_cells",
         }
-        if not isinstance(value, Mapping) or set(value) != expected:
+        if not isinstance(value, Mapping) or set(value) not in (expected, expected | {"revisit"}):
             raise ValueError("local edit proposal fields do not match schema")
+        if "revisit" in value and value["revisit"] is None:
+            raise ValueError("local edit revisit must be an object when present")
         return cls(**dict(value))
 
 
@@ -180,6 +192,9 @@ class LocalEditResult:
 
 def _operation_target(operation: Mapping[str, Any]) -> tuple[str, str, str]:
     op = str(operation.get("op") or "")
+    if op == "author_skill_program":
+        from ..evaluators.skill_program import SKILL_POLICY_ID
+        return "skill_program", SKILL_POLICY_ID, "skill-program:" + str(operation.get("role") or "")
     if op == "set_bounded_parameter":
         name = str(operation.get("name") or "")
         return "scientific_parameter", name, f"parameter:{name}"

@@ -5,6 +5,8 @@ description: Judge aggregate candidate evidence under the frozen evidence budget
 
 # Batch scientific reflection over the full objective
 
+For `skill_program`, use `author_skill_program` for the sample-planner and follow `legal_skill_grammar`. Inspect the current candidate's skill program before editing it. The allowed mutation targets may restrict this trajectory to its preregistered family; keep edits inside that family. Host skill receipts prove diagnostics and conditional guidance delivery, not LLM compliance or scientific improvement. Text changes alone do not establish behavioral novelty.
+
 Treat the completed candidate batch as a controlled comparison over one frozen cohort. Read earlier-generation analysis and reflection so lessons, failed assumptions, and unresolved questions accumulate rather than reset.
 
 Use `candidate_outcomes` as the only authoritative candidate-level mapping. It is Host-generated and sorted by ascending scientific `rank`, with unscored candidates last. Bind every observation through the explicit `candidate_id`, `direction_id`, and `direction_digest` fields. A rank is an outcome position, not a direction identifier: never infer that rank 1 means direction `d1`, that rank 2 means `d2`, or that array position encodes a direction. Do not reconstruct candidate identities from `generation_analysis` or prose.

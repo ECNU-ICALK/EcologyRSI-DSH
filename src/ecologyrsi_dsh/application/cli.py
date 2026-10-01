@@ -392,8 +392,10 @@ def advance_command(args: argparse.Namespace) -> int:
     owner = RuntimeOwnerLease(args.db)
     try:
         ledger = _open(args.db)
+        services = None
         try:
             services = ApplicationRuntime(ledger)
+            services.host_activity.start()
             state = complete_if_budget_exhausted(services, args.run_id)
             for _ in range(args.steps):
                 if state.run.status is not RunStatus.RUNNING:
@@ -401,6 +403,8 @@ def advance_command(args: argparse.Namespace) -> int:
                 state = execute_generation(services, args.run_id)
             print(json.dumps(state_snapshot(state), ensure_ascii=False, indent=2, allow_nan=False))
         finally:
+            if services is not None:
+                services.host_activity.close()
             ledger.close()
     finally:
         owner.release()

@@ -5,9 +5,16 @@ import json
 
 def compact_origin_contexts(contexts):
     counts = Counter()
+    encodings = {}
 
     def encoded(value):
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        # Hold the object as well as its identity: temporary output wrappers
+        # must not collide with a subsequently recycled Python object ID.
+        cached = encodings.get(id(value))
+        if cached is None:
+            cached = (value, json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False))
+            encodings[id(value)] = cached
+        return cached[1]
 
     def count(value):
         if not isinstance(value, (dict, list)):

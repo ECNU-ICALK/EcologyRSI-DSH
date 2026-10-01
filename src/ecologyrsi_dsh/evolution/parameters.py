@@ -22,6 +22,13 @@ PARAMETER_RULES = {
 
 def run_parameter_contract(profile: Any = None) -> dict[str, Any]:
     parameters = deepcopy(PARAMETER_RULES)
+    # Validate the whole default before publishing it to an API or browser.
+    # Individually legal inputs can still describe an impossible experiment.
+    defaults = {name: rule["default"] for name, rule in parameters.items()}
+    if defaults["formal_origin_count"] % defaults["local_batch_origin_count"]:
+        raise ValueError("default local_batch_origin_count must divide formal_origin_count")
+    if defaults["max_candidates"] < defaults["rounds"] * defaults["candidates_per_generation"]:
+        raise ValueError("default candidate budget must cover all generations")
     result = {"schema_version": "ecologyrsi-dsh.run-parameters/1", "parameters": parameters,
               "local_comparison_mode": "exploratory_paired_point_comparison",
               "constraints": ["formal_origins_divisible_by_batch", "candidate_budget_covers_epochs",

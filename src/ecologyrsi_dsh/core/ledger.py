@@ -492,6 +492,7 @@ class EventLedger:
         event_id: str | None = None,
         created_at: str | None = None,
         expected_run_seq: int | None = None,
+        expected_run_created_seq: int | None = None,
         commit_guard: Callable[[bool], Any] | None = None,
     ) -> Event:
         """Append one event, returning an existing event for duplicate IDs.
@@ -524,10 +525,24 @@ class EventLedger:
             raise ValueError("expected_run_seq must be a non-negative integer")
         if commit_guard is not None and not callable(commit_guard):
             raise TypeError("commit_guard must be callable")
+        if expected_run_created_seq is not None and (
+            isinstance(expected_run_created_seq, bool)
+            or not isinstance(expected_run_created_seq, int)
+            or expected_run_created_seq <= 0
+        ):
+            raise ValueError("expected_run_created_seq must be a positive integer")
 
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
+                if expected_run_created_seq is not None:
+                    incarnation = self._connection.execute(
+                        "SELECT seq FROM evolution_events WHERE run_id = ? "
+                        "AND kind = 'RunCreated' ORDER BY seq LIMIT 1",
+                        (run_id.strip(),),
+                    ).fetchone()
+                    if incarnation is None or incarnation["seq"] != expected_run_created_seq:
+                        raise ConcurrentRunMutationError("run incarnation was deleted or replaced")
                 if expected_run_seq is not None:
                     current = int(
                         self._connection.execute(

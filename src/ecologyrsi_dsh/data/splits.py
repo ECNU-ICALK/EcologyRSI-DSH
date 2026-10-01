@@ -9,6 +9,10 @@ import json
 from typing import Any, Iterable, Protocol, Sequence
 
 
+class NoOptimizationEpisodesError(ValueError):
+    """Every supplied episode belongs to the excluded external cohort."""
+
+
 class EpisodeLike(Protocol):
     episode_id: str
     timestamps: Sequence[int]
@@ -410,7 +414,12 @@ def build_split_manifest(
 
     normalized_patterns = tuple(item.casefold() for item in external_episode_patterns if item)
     optimization = tuple(item for item in items if not any(
-        pattern in item.episode_id.casefold() for pattern in normalized_patterns)) or items
+        pattern in item.episode_id.casefold() for pattern in normalized_patterns))
+    if not optimization:
+        raise NoOptimizationEpisodesError(
+            "no optimization episodes found after filtering external patterns; "
+            "all episodes matched the external_episode_patterns filter"
+        )
     if any(not item.timestamps for item in items):
         raise ValueError("cannot split an empty episode")
     # One calendar boundary for all teams; gaps do not shift a team's test

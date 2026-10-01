@@ -62,3 +62,6 @@ def research_execution_policy(metadata: Mapping[str, Any]) -> dict[str, Any] | N
                    for key, expected in RESEARCH_EXECUTION_POLICY.items())):
         raise ValueError("invalid frozen research execution policy")
     return dict(value)
+
+
+LOCAL_EDIT_CONTEXT_POLICY = "cohort_scoped_edit_evidence@2"

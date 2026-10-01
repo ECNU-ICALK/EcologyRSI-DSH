@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from ..evolution.diversity import enabled as diversity_enabled, diversity_report
+
+from ..core.errors import safe_binding_diagnostics
+
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS, QUICK_OPTIMIZATION_PROTOCOL
 
 from ..core.dsh_usage import active_session_ids, session_usage_projection
@@ -258,6 +262,8 @@ def _run_failure_projection(state: Any) -> tuple[str | None, dict[str, Any] | No
             "batch_count": terminal_context.get("batch_count"),
             "created_at": failed_event.created_at,
             "evidence": "terminal_run_failure_context",
+            **({"binding_drift": safe_binding_diagnostics(terminal_context["binding_drift"])}
+               if safe_binding_diagnostics(terminal_context.get("binding_drift")) else {}),
         }
     stage_event = next(
         (
@@ -466,14 +472,32 @@ def _rounds_projection(state: Any) -> list[dict[str, Any]]:
 def _runtime_failure_projection(state: Any) -> dict[str, Any] | None:
     """Latest durable diagnostic, not an inference of current route health."""
     for event in reversed(state.events):
-        if event.kind == "DshChildExecutionFailed" and isinstance(event.payload.get("runtime_failure"), Mapping):
-            failure = event.payload["runtime_failure"]
+        if event.kind == "DshChildExecutionFailed":
+            failure = event.payload.get("runtime_failure")
+            if not isinstance(failure, Mapping):
+                code = event.payload.get("error_code")
+                if code not in {"structured_role_operational_timeout", "provider_queue_timeout",
+                                "structured_child_aborted", "dsh_native_runtime_transport_error"}:
+                    continue
+                failure = {"error_code": code, "failure_domain": "runtime",
+                           "retryable": True, "provider_status": None,
+                           "affected_scope": "stage", "retry_after_ms": None}
             stage = event.payload["identity"]["stage"]
             metadata = state.task_manifest.metadata
             route = metadata.get("review_model_id" if stage in {"sample.critic", "sample.reflect", "generation.reflect"} else "strategy_model_id")
             return {**dict(failure), "recorded_at": event.created_at,
                     "stage": stage, "model_route": route, "source": "child_failure_ledger"}
     return None
+
+
+def _host_activity_projection(state: Any) -> dict[str, Any]:
+    interruptions = [e.payload for e in state.events if e.kind == "HostExecutionInterrupted"]
+    return {"interruption_count": len(interruptions),
+            "observed_gap_seconds": round(sum(p["gap_seconds"] for p in interruptions), 3),
+            "last_resumed_at": interruptions[-1]["resumed_at"] if interruptions else None,
+            "evidence": "host_heartbeat_gap" if interruptions else "no_recorded_host_gap",
+            "cause": "sleep_or_host_scheduling_gap_not_provider_diagnosis"}
+
 
 
 def _execution_diagnostics(state: Any) -> dict[str, Any]:
@@ -3475,6 +3499,13 @@ def _adaptive_progress_projection(
             )
         except (TypeError, ValueError):
             continue
+    host_recoveries = [e for e in runtime_events if e.kind == "HostExecutionInterrupted"]
+    recovery_events = [e for e in runtime_events if e.kind in {
+        "HostExecutionInterrupted", "RunResumed", "EvaluationSampleResultsResumed"}]
+    last_recovery = recovery_events[-1] if recovery_events else None
+    if last_recovery is not None:
+        cutoff = datetime.fromisoformat(last_recovery.created_at.replace("Z", "+00:00"))
+        phase_throughput_rows = [row for row in phase_throughput_rows if row[0] > cutoff]
     phase_throughput_rows.sort(key=lambda row: row[0])
 
     # Sample-result batches are the earliest Host-owned durable settlement
@@ -3506,7 +3537,7 @@ def _adaptive_progress_projection(
         # A run resume also fences already sealed candidates: their old
         # screening rows cannot fill the window while other lanes restart.
         run_resume_after_seq = max(
-            (int(event.seq) for event in runtime_events if event.kind == "RunResumed"),
+            (int(event.seq) for event in runtime_events if event.kind in {"RunResumed", "HostExecutionInterrupted"}),
             default=-1,
         )
         resume_after_seq: dict[str, int] = {}
@@ -3587,6 +3618,8 @@ def _adaptive_progress_projection(
                 )
             except (TypeError, ValueError):
                 continue
+    if last_recovery is not None:
+        origin_throughput_rows = [row for row in origin_throughput_rows if row[0] > cutoff]
     origin_throughput_rows.sort(key=lambda row: row[0])
     use_origin_boundaries = len(origin_throughput_rows) >= 2
     throughput_rows = (
@@ -3636,7 +3669,14 @@ def _adaptive_progress_projection(
     if phase != "formal_batch":
         active_batch = None
         active_candidate = None
-    live_fields: dict[str, Any] = {}
+    live_fields: dict[str, Any] = {
+        "eta_status": "collecting_after_resume" if last_recovery is not None and len(throughput_rows) < 2
+                      else "estimated" if rolling_rate else "insufficient_observations",
+        "host_interruption_count": len(host_recoveries),
+    }
+    if last_recovery is not None and len(throughput_rows) < 2:
+        rolling_rate = None
+        rolling_eta = None
     live_formal_completed = 0
     live_holdout_completed = 0
     if live_screening is not None and phase == "screening":
@@ -4095,7 +4135,20 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
                 "fallback_scoring_cells": _finite_number(
                     sample.get("scoring_fallback_examples")
                 ),
+                "scientific_diagnostics": {
+                    "status": "passed" if metrics.get("scientific_pass") is True else "not_established" if evaluation is not None else "pending",
+                    "paired_time_blocks": metrics.get("promotion_block_evidence", {}).get("block_count"),
+                    "minimum_paired_blocks": metrics.get("cell_noninferiority_evidence", {}).get("minimum_paired_blocks"),
+                    "evidence_sufficient": metrics.get("cell_noninferiority_evidence", {}).get("evidence_sufficient"),
+                    "evidence_failure": metrics.get("cell_noninferiority_evidence", {}).get("evidence_failure"),
+                    "negative_skill_cells": sum(1 for item in metrics.get("targets", ())
+                        if isinstance(item, Mapping) and isinstance(item.get("skill_score"), (int, float))
+                        and item["skill_score"] < 0),
+                    "interpretation": "batch_diagnostic_not_edit_effect_or_independent_certification",
+                },
                 "edit_decision": edit_decision,
+                "revisit": sanitize_public_value(proposal_detail.get("revisit"), text_limit=400)
+                    if isinstance(proposal_detail, Mapping) else None,
                 "edit_outcome": outcome.get("outcome") if outcome else None,
                 "edit_reason": sanitize_public_value(
                     edit_reason,
@@ -4575,6 +4628,29 @@ def _evolution_evidence_projection(state: Any) -> dict[str, Any]:
     }
 
 
+def _last_evidence_candidate_id(state: Any) -> str | None:
+    # A proposal slot is not evidence of execution. Preserve the last candidate
+    # identified by actual training/evaluation events when live identity clears.
+    candidate_ids = {candidate.candidate_id for candidate in getattr(state, "candidates", ())}
+    for event in reversed(state.events):
+        if event.kind in {"EvaluationProgressRecorded", "EvaluationSampleResultsStarted", "EvaluationSampleResultBatchRecorded"}:
+            identity = event.payload.get("candidate_id")
+        elif event.kind == "FormalBatchStarted":
+            identity = event.payload.get("batch", {}).get("candidate_id")
+        elif event.kind in {"EvaluationRecorded", "FormalBatchEvaluated", "HoldoutEvaluationRecorded"}:
+            identity = event.payload.get("evaluation", {}).get("candidate_id")
+        elif event.kind == "ArtifactRecorded":
+            identity = event.payload.get("artifact", {}).get("candidate_id")
+        elif event.kind == "EvolutionStageRecorded" and event.payload.get("stage") in {"training", "evaluation"}:
+            identity = event.payload.get("candidate_id")
+        else:
+            continue
+        if isinstance(identity, str) and identity in candidate_ids:
+            return identity
+
+    return None
+
+
 def _run_execution_progress(
     state: Any,
     admission_snapshot: Mapping[str, Any] | None = None,
@@ -4730,6 +4806,8 @@ def _run_execution_progress(
             1,
         )
 
+    last_evidence_candidate_id = _last_evidence_candidate_id(state)
+
     if status in {"completed", "cancelled", "failed"}:
         current_stage = None
         active_candidate_id = None
@@ -4779,6 +4857,7 @@ def _run_execution_progress(
         "total_generations": total_generations,
         "current_generation": min(state.run.generation + 1, total_generations),
         "current_candidate_id": active_candidate_id,
+        "last_evidence_candidate_id": last_evidence_candidate_id,
         "current_stage": current_stage,
         "stage_progress": stage_progress,
         "superseded_sample_revision": superseded_sample_revision,
@@ -5346,6 +5425,8 @@ def _candidate_projection(state: Any, candidate: Any, *, summary_only: bool = Fa
         "generation": candidate.generation + 1,
         "slot_index": candidate.slot_index,
         "status": status,
+        "selection_reason": next((event.payload.get("reason") for event in reversed(state.events)
+            if event.kind == "CandidateScreenedOut" and event.payload.get("candidate_id") == candidate.candidate_id), None),
         "selection_disposition": _candidate_selection_disposition(
             candidate_id=candidate.candidate_id,
             incumbent_id=incumbent_id,
@@ -5593,7 +5674,7 @@ def _candidate_projection(state: Any, candidate: Any, *, summary_only: bool = Fa
                 "generation_rank": ranking.get("rank"),
                 "eligible": ranking.get("eligible"),
                 "classification": ranking.get("classification"),
-                "selection_reason": ranking.get("selection_reason"),
+                "selection_reason": result.get("selection_reason") or ranking.get("selection_reason"),
                 "worst_skill_score": ranking.get("worst_skill_score"),
                 "parameter_distance": ranking.get("parameter_distance"),
             }
@@ -5776,6 +5857,23 @@ def _dsh_runtime_projection(state: Any) -> dict[str, Any]:
             **totals,
         }
     provider_usage["accounting_coverage"] = accounting_coverage
+    # Aggregate the same deduplicated provider snapshots as the total. Accepted
+    # results and later receipts must never be counted as separate charges.
+    stages_by_session = {}
+    for event in state.events:
+        if event.kind in {"DshSessionUsageRecorded", "DshStructuredResultAccepted"}:
+            identity = event.payload.get("identity", {})
+            stages_by_session[identity.get("session_id")] = identity.get("stage", "unknown")
+    by_stage = {}
+    for session_id, (_seq, metrics) in metrics_by_session.items():
+        usage = metrics.get("provider_usage", {})
+        if usage.get("available") is not True:
+            continue
+        stage = stages_by_session.get(session_id, "unknown")
+        row = by_stage.setdefault(stage, {"session_count": 0, "total_tokens": 0})
+        row["session_count"] += 1
+        row["total_tokens"] += int(usage.get("totals", {}).get("total_tokens", 0))
+    provider_usage["by_stage"] = by_stage
     retrieval_events = [
         event
         for event in state.events
@@ -6205,12 +6303,16 @@ def _projection_json(
         "optimization_protocol": metadata.get("optimization_protocol"),
         "optimization_schedule": metadata.get("optimization_schedule"),
         "local_comparison_policy": metadata.get("local_comparison_policy"),
+        "prequential_performance_policy": metadata.get("prequential_performance_policy"),
+        "mutation_policy": metadata.get("mutation_policy"),
+        "mutation_policy_digest": metadata.get("mutation_policy_digest"),
         "search_guard_policy": metadata.get("search_guard_policy"),
         "research_execution_policy": metadata.get("research_execution_policy"),
         "search_probation": search_probation_projection(state),
         "require_model_contract_preflight": metadata.get("require_model_contract_preflight", False),
         "model_contract_preflight": model_preflight_projection(state),
         "latest_runtime_failure": _runtime_failure_projection(state),
+        "host_activity": _host_activity_projection(state),
         "samples_per_update": metadata.get("samples_per_update"),
         "minimum_selection_samples_per_update": metadata.get(
             "minimum_selection_samples_per_update"
@@ -6276,6 +6378,7 @@ def _projection_json(
             "research_domain_id": metadata.get("research_domain", task.domain_pack),
         },
         "configuration": configuration,
+        **({"evolution_diversity": diversity_report(state)} if diversity_enabled(metadata) else {}),
         "dataset": {
             "id": dataset_id,
             "display_name": metadata.get("dataset_display_name", dataset_id),
@@ -6466,6 +6569,8 @@ def _monitor_payload(
             "candidates_count": len(search_candidates),
             "max_candidates": task.max_candidates,
             "model_contract_preflight": model_preflight_projection(state),
+            "latest_runtime_failure": _runtime_failure_projection(state),
+            "host_activity": _host_activity_projection(state),
             "execution_progress": _run_execution_progress(
                 state, admission_snapshot
             ),

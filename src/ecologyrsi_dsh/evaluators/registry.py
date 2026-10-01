@@ -2758,6 +2758,9 @@ class EvaluatorRegistry:
             and successful_agent_provenance_passes(sample_batch.summary)
         )
         sample_execution_summary = dict(sample_batch.summary)
+        from ..evolution.diversity import enabled as diversity_enabled, summarize_behavior
+        if diversity_enabled(task.metadata):
+            sample_execution_summary["observed_behavior"] = summarize_behavior(sample_records, scoring_rows)
         sample_execution_summary.update(
             {
                 "result_vector_expected_examples": len(raw_prediction_rows),
@@ -3514,6 +3517,9 @@ class EvaluatorRegistry:
             sample_records,
             scoring_rows,
         )
+        from ..evolution.diversity import enabled as diversity_enabled, summarize_behavior
+        if diversity_enabled(task.metadata):
+            sample_execution_summary["observed_behavior"] = summarize_behavior(sample_records, scoring_rows)
         sample_execution_summary.update(
             {
                 "result_vector_expected_examples": len(generated_feedback_rows),
@@ -4603,6 +4609,9 @@ class EvaluatorRegistry:
             sample_records, scored_feedback_rows,
             source_phase=(task.metadata.get("_evaluation_scope") or {}).get("phase", "training_feedback"),
         )
+        from ..evolution.diversity import enabled as diversity_enabled, summarize_behavior
+        if diversity_enabled(task.metadata):
+            sample_execution_summary["observed_behavior"] = summarize_behavior(sample_records, scored_feedback_rows)
         sample_execution_summary.update(
             {
                 "result_vector_expected_examples": len(generated_feedback_rows),

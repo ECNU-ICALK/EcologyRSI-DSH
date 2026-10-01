@@ -78,17 +78,24 @@
           : pressure.scope === "active_sessions" && pressure.session_count === 0 ? "DSH 上下文压力：无活跃计量会话" : "DSH 上下文压力：等待 Session 计量";
       var parts = [pressureText];
       if (Number.isFinite(pressureRatio)) {
-        if (pressureRatio >= 1) { parts.push("硬上限已到达，停止新请求"); }
+        if (pressureRatio >= 1) { parts.push("上下文窗口压力已达上限，需检查会话状态"); }
         else if (pressureRatio >= 0.85) { parts.push("高压力预警（≥85%）"); }
         else if (pressureRatio >= 0.70) { parts.push("压力提醒（≥70%）"); }
       }
       if (provider.available === true && Number.isFinite(Number(provider.total_tokens))) {
         parts.push("供应商报告累计用量：" + formatNumber(Number(provider.total_tokens)) + " Token");
+        var stages = provider.by_stage || {};
+        var stageUsage = Object.keys(stages).sort(function (a, b) { return Number(stages[b].total_tokens) - Number(stages[a].total_tokens); }).map(function (stage) {
+          var label = {"sample.plan": "逐时点预测", "sample.critic": "预测评审", "sample.repair": "预测修复", "candidate.local_edit": "局部修订", "generation.reflect": "轮次评审"}[stage] || compactTechnicalText(stage);
+          return label + " " + formatNumber(Number(stages[stage].total_tokens) || 0) + " Token";
+        });
+        if (stageUsage.length) { parts.push("阶段用量：" + stageUsage.join("；")); }
       } else {
         parts.push("供应商累计用量：尚未报告");
       }
       var coverage = provider.accounting_coverage || {};
       parts.push("调用用量完整记录 " + formatNumber(Number(coverage.complete_session_count) || 0) + "/" + formatNumber(Number(coverage.launched_session_count) || 0) + "；" + (coverage.complete === true ? "子会话已结算" : "当前为已观测下限") + "；不含外部检索计费");
+      parts.push("用量仅观测；不因累计 Token 自动降低模型、推理额度或评测样本量");
       return parts.join(" · ");
     }
     var usage = run && run.model_usage && typeof run.model_usage === "object" ? run.model_usage : {};
@@ -379,6 +386,7 @@
     // Adaptive screening ends a candidate before the legacy six-stage rows
     // receive formal evaluation events. Its terminal disposition is authoritative.
     if (roundCandidateScreenedOut(round, run)) {
+      if (roundCandidateSummary(round, run).selection_reason === "outside_preregistered_quick_trajectory" && ["training", "evaluation", "judge", "decision"].indexOf(key) >= 0) { return "not_selected_for_training"; }
       if (key === "training") { return "completed"; }
       if (key === "evaluation" || key === "decision") { return "screened_out"; }
       if (key === "judge") { return "skipped"; }
@@ -418,6 +426,7 @@
     }
     if (["completed", "done", "recorded", "passed", "approved", "accepted"].indexOf(status) >= 0) { return "已完成"; }
     if (status === "skipped" || status === "duplicate") { return "已跳过"; }
+    if (status === "not_selected_for_training") { return "未进入训练"; }
     if (status === "screened_out") { return "初筛未入围"; }
     if (["failed", "error", "rejected"].indexOf(status) >= 0) { return "未通过"; }
     if (status === "paused") { return "已暂停"; }
@@ -497,6 +506,7 @@
     if (status === "aborted") { return {text: "已中止", className: "is-failed"}; }
     if (status === "not_recorded") { return {text: "未封存", className: "is-pending"}; }
     if (status === "details") { return {text: "详见候选详情", className: "is-pending"}; }
+    if (status === "not_selected_for_training") { return {text: "未进入训练", className: "is-skipped"}; }
     if (status === "screened_out") { return {text: "初筛未入围", className: "is-skipped"}; }
     if (["failed", "error", "compile_failed", "debug_failed"].indexOf(status) >= 0) { return {text: "失败", className: "is-failed"}; }
     if (["degraded", "research_only", "partial"].indexOf(status) >= 0) { return {text: "部分完成", className: "is-warning"}; }
@@ -528,18 +538,20 @@
       aborted: statuses.filter(function (status) { return status === "aborted"; }).length,
       notRecorded: statuses.filter(function (status) { return status === "not_recorded"; }).length,
       screenedOut: statuses.filter(function (status) { return status === "screened_out"; }).length,
+      notSelected: statuses.filter(function (status) { return status === "not_selected_for_training"; }).length,
       skipped: statuses.filter(function (status) { return ["skipped", "duplicate"].indexOf(status) >= 0; }).length,
       failed: statuses.filter(function (status) { return ["failed", "error", "rejected"].indexOf(status) >= 0; }).length
     };
   }
   function roundResearchAggregateStatus(counts) {
     if (counts.running > 0) { return "running"; }
-    if (counts.completed > 0 && counts.completed + (counts.screenedOut || 0) + (counts.skipped || 0) === counts.total) { return "completed"; }
+    if (counts.completed > 0 && counts.completed + (counts.screenedOut || 0) + (counts.notSelected || 0) + (counts.skipped || 0) === counts.total) { return "completed"; }
     if (counts.completed > 0) { return "partial"; }
     if (counts.paused > 0) { return "paused"; }
     if (counts.aborted > 0) { return "aborted"; }
     if (counts.failed > 0) { return "failed"; }
     if (counts.notRecorded > 0) { return "not_recorded"; }
+    if (counts.notSelected > 0 && counts.notSelected === counts.total) { return "not_selected_for_training"; }
     if (counts.screenedOut > 0 && counts.screenedOut === counts.total) { return "screened_out"; }
     if (counts.skipped > 0 && counts.skipped === counts.total) { return "skipped"; }
     return "pending";
@@ -596,7 +608,7 @@
       roundResearchChainStep(2, "最终方案", finalPlan.status, planIdentity, formatNumber(operators.length) + " 个操作子 · 参数 " + (parameters.length ? parameters.slice(0, 5).map(humanizeTechnicalText).join("、") : "未指定"), run),
       roundResearchChainStep(3, "注册与编译", compileStatus, compilePassed ? formatNumber(compilePassed) + " / " + formatNumber(Math.max(candidates.length, compilePassed)) + " 个候选已编译" : executionEvidenceUnavailable ? "在候选详情中查看编译证据" : "等待 AlgorithmSpec 与已登记适配器绑定", implementationMode, run),
       roundResearchChainStep(4, "training_fit smoke", smokeStatus, smokePassed ? formatNumber(smokePassed) + " / " + formatNumber(Math.max(candidates.length, smokePassed)) + " 个候选通过" : executionEvidenceUnavailable ? "在候选详情中查看拟合分区预检证据" : "等待训练拟合分区预检", "仅 training_fit，不读取后续分区", run),
-      roundResearchChainStep(5, "training_feedback 训练反馈评测", evaluationStatus, evaluationCounts.total ? formatNumber(evaluationCounts.completed) + " / " + formatNumber(evaluationCounts.total) + " 个候选完成" + (evaluationCounts.screenedOut ? " · " + formatNumber(evaluationCounts.screenedOut) + " 个初筛未入围" : "") : "等待逐样本反馈评测", evaluationCounts.failed ? formatNumber(evaluationCounts.failed) + " 个失败" : "迭代训练反馈分区", run),
+      roundResearchChainStep(5, "training_feedback 训练反馈评测", evaluationStatus, evaluationCounts.total ? formatNumber(evaluationCounts.completed) + " / " + formatNumber(evaluationCounts.total) + " 个候选完成" + (evaluationCounts.screenedOut ? " · " + formatNumber(evaluationCounts.screenedOut) + " 个初筛未入围" : "") + (evaluationCounts.notSelected ? " · " + formatNumber(evaluationCounts.notSelected) + " 个按预登记规则未进入训练" : "") : "等待逐样本反馈评测", evaluationCounts.failed ? formatNumber(evaluationCounts.failed) + " 个失败" : "迭代训练反馈分区", run),
       roundResearchChainStep(6, adaptiveCompletion ? "轮末独立建议评审" : "独立评审", judgeStatus, adaptiveCompletion ? (adaptiveCompletion.advisory_review_recorded ? "本轮共享反思已记录" : "等待轮末建议性评审") : judgeCounts.total ? formatNumber(judgeCounts.completed) + " / " + formatNumber(judgeCounts.total) + " 个候选完成" : "等待独立模型评审", adaptiveCompletion ? "建议性输出，宿主执行认证门禁" : judgeCounts.failed ? formatNumber(judgeCounts.failed) + " 个未通过" : "与策略模型角色分离", run)
     ].join("");
     return "<section class=\"round-research-evidence\" aria-label=\"分析总结、最终方案、实现与测试证据链\"><div class=\"round-research-heading\"><div><span>研究迭代证据</span><strong>分析总结 → 最终方案 → 实现 → 测试</strong></div><code title=\"" + escapeHTML(iteration.iteration_digest || "") + "\">" + escapeHTML(shortId(iteration.iteration_digest || "未生成迭代校验值")) + "</code></div><ol class=\"round-research-chain\">" + steps + "</ol>" + renderResearchDiagnosis(iteration) + "</section>";
@@ -617,7 +629,7 @@
       var parentId = round.parent_id || round.parent_candidate_id || "当前基线";
       var candidates = Array.isArray(round.candidates) ? round.candidates : [];
       var candidateRows = candidates.length ? candidates.slice().sort(function (left, right) { return Number(left.slot_index || 0) - Number(right.slot_index || 0); }).map(function (candidate) {
-        var selectionReason = roundCandidateScreenedOut(candidate, run) ? "not_selected_by_screening_top_k" : candidate.selection_reason;
+        var selectionReason = roundCandidateScreenedOut(candidate, run) ? roundCandidateSummary(candidate, run).selection_reason || "not_selected_by_screening_top_k" : candidate.selection_reason;
         var stages = Object.keys(stageLabels).map(function (key) {
           var value = roundStageStatus(candidate, key, run);
           return "<div class=\"round-stage-step " + roundStageClass(key, value, run) + "\"><span>" + (key === "judge" && round.adaptive_completion ? "共享轮末建议评审" : stageLabels[key]) + "</span><strong>" + roundStageText(key, value, run) + "</strong></div>";
@@ -984,11 +996,12 @@
     if (!run) { return null; }
     var candidates = processCandidates(run).slice();
     var progress = run.execution_progress && typeof run.execution_progress === "object" ? run.execution_progress : run.execution && typeof run.execution === "object" ? run.execution : {};
-    var requestedId = progress.active_candidate_id || progress.current_candidate_id || progress.candidate_id;
+    var requestedId = progress.active_candidate_id || progress.current_candidate_id || progress.candidate_id || progress.last_evidence_candidate_id;
     if (requestedId) {
       var requested = candidates.find(function (candidate) { return candidate.id === requestedId || candidate.candidate_id === requestedId; });
       if (requested) { return requested; }
     }
+    if (executionRunIsTerminal(run)) { return null; }
     var batchStage = String(progress.current_stage || progress.phase || "").toLowerCase();
     if (!requestedId && ["research", "proposal", "gateway_retry", "starting"].indexOf(batchStage) >= 0) {
       // These stages are generation-scoped until the service records a
@@ -1242,7 +1255,7 @@
     }
     var explicitProgress = run && run.execution_progress && typeof run.execution_progress === "object" ? run.execution_progress : {};
     var candidateId = candidate.id || candidate.candidate_id;
-    var projectedCandidateId = explicitProgress.current_candidate_id;
+    var projectedCandidateId = explicitProgress.current_candidate_id || explicitProgress.last_evidence_candidate_id;
     var projectedCurrentStage = !projectedCandidateId || projectedCandidateId === candidateId ? explicitProgress.current_stage : null;
     var rawCurrentStage = projectedCurrentStage || candidate.execution && candidate.execution.current_stage;
     var runStatus = String(run && run.status || "").toLowerCase();
@@ -1270,7 +1283,7 @@
     var previewRows = executionPredictionRows(candidate, run);
     var validPreviewCount = previewRows.filter(function (row) { return !executionRowUsesScoringFallback(row); }).length;
     var penaltyPreviewCount = previewRows.length - validPreviewCount;
-    var adaptiveProgress = explicitProgress.stage_progress && typeof explicitProgress.stage_progress === "object" ? explicitProgress.stage_progress : {};
+    var adaptiveProgress = projectedCandidateId === candidateId && explicitProgress.stage_progress && typeof explicitProgress.stage_progress === "object" ? explicitProgress.stage_progress : {};
     var adaptiveBatchText = Number.isFinite(Number(adaptiveProgress.batch_index)) && Number.isFinite(Number(adaptiveProgress.batch_count))
       ? "批次 " + formatNumber(adaptiveProgress.batch_index) + " / " + formatNumber(adaptiveProgress.batch_count) + " · 本轮已结算 " + formatNumber(adaptiveProgress.completed_samples || 0) + " / " + formatNumber(adaptiveProgress.total_samples || 0) + " 个预测时点"
       : "";
@@ -1601,10 +1614,14 @@
       evaluationDetail = "筛选、配对更新与留出合计 " + formatNumber(adaptiveCells) + " 个评分项" + (hasPartialEvidence ? "；另有未封存部分证据" : "；不重复累计候选汇总");
       workloadDetail = "训练目标 " + (trainingUsed == null ? "—" : formatNumber(trainingUsed)) + " · 已封存反馈评分项 " + formatNumber(adaptiveCells);
     }
+    if (!hasTrainingRecord && adaptiveOrigins > 0) {
+      trainingValue = "无独立拟合产物记录";
+      trainingDetail = "已完成预测；按需调用数值工具，不能从此字段推断未执行拟合。";
+    }
     var effectivePasses = fitPasses != null ? fitPasses : legacyEpochs;
     var fitDetail;
     if (!hasTrainingRecord && !(effectivePasses != null && effectivePasses > 0)) {
-      fitDetail = "等待拟合证据";
+      fitDetail = adaptiveOrigins > 0 ? "拟合明细未单独封存；预测执行证据见样本工具记录" : "等待拟合证据";
     } else if (iterativeEpochTraining === false) {
       fitDetail = "无神经网络 epoch · 累计 " + formatNumber(effectivePasses) + " 次 fit pass" + (fitPassesPerCandidate == null ? "" : " · 每候选 " + formatNumber(fitPassesPerCandidate) + " 次");
     } else if (iterativeEpochTraining === true) {
@@ -1629,7 +1646,7 @@
       executionDiagnosticMarkup("累计候选工作量", workloadValue, workloadDetail, ""),
       executionDiagnosticMarkup("拟合机制", executionFitMethodText(diagnostics.fit_method), fitDetail, ""),
       executionDiagnosticMarkup("候选提案来源", sourceValue || "尚未产生提案", sourceCounts ? "按已记录提案计数" : "等待来源计数", diagnostics.fallback_used ? "is-warning" : ""),
-      executionDiagnosticMarkup("策略调用", executionModeText(diagnostics.execution_mode), remoteStatus + " · " + remoteDetail + fallbackDetail, diagnostics.fallback_used ? "is-warning" : "")
+      executionDiagnosticMarkup("策略调用", remoteCalls > 0 ? remoteStatus : executionModeText(diagnostics.execution_mode), remoteStatus + " · " + remoteDetail + fallbackDetail, diagnostics.fallback_used ? "is-warning" : "")
     ].join("");
   }
 
@@ -1919,6 +1936,9 @@
     var evidenceQualifierText = stageProgress && !stageProgress.live && stageProgress.evidence_qualifier ? " · " + stageProgress.evidence_qualifier : "";
     var phaseProgressText = executionAdaptivePhaseProgressText(stageProgress, progressUnitLabel);
     var skippedProgressText = executionAdaptiveSkippedProgressText(stageProgress);
+    if (stageProgress && stageProgress.eta_status === "collecting_after_resume") {
+      remainingText = "恢复后正在重新估算耗时";
+    }
     sampleNode.textContent = stageProgress ? "全轮" + progressUnitLabel + "进度：" + formatNumber(stageProgress.completed_samples) + " / " + formatNumber(stageProgress.total_samples) + (phaseProgressText ? " · " + phaseProgressText : "") + (skippedProgressText ? " · " + skippedProgressText : "") + settledText + verifiedOutcomeText + evidenceQualifierText + causalWaveText + admissionText + admissionWaitingText + inFlightText + queuedText + awaitingSubmissionText + awaitingSettlementText + predictionPendingText + childFailureText + requestBreakdownText + repairWaveText + gatewayAttemptsText + sampleRateText + (remainingText ? " · " + remainingText : "") + (supersededRevisionText ? " · " + supersededRevisionText : "") : "预测评分单元：" + formatNumber(sampleRows.length) + (supersededRevisionText ? " · " + supersededRevisionText : "");
     if (tokenNode) {
       tokenNode.title = tokenBudgetScopeText(run);
@@ -2072,6 +2092,18 @@
         ? "<strong>" + escapeHTML(Number.isFinite(championScore) ? "原版本 " + formatNumber(championScore, 4) : "原版本待评测") + " · " + escapeHTML(Number.isFinite(challengerScore) ? "新版本 " + formatNumber(challengerScore, 4) : "新版本待评测") + "</strong><small>" + escapeHTML(Number.isFinite(scoreDelta) ? "提高值 " + signedNumber(scoreDelta, 4) : "提高值待计算") + " · " + escapeHTML(Number.isFinite(minimumScoreDelta) ? "须超过 " + formatNumber(minimumScoreDelta, 4) : "阈值待确认") + "</small>"
         : "<strong>得分 " + escapeHTML(Number.isFinite(score) ? formatNumber(score, 4) : "等待评测") + "</strong><small>预测完成率 " + escapeHTML(originSuccessText) + " · 评分单元覆盖率 " + escapeHTML(coverageText) + "</small>";
       var executionCounts = [batch.succeeded_origins != null ? "成功时点 " + formatNumber(batch.succeeded_origins) : "", batch.failed_origins != null ? "失败时点 " + formatNumber(batch.failed_origins) : "", Number(batch.fallback_scoring_cells) > 0 ? "备用评分项 " + formatNumber(batch.fallback_scoring_cells) : ""].filter(Boolean).join(" · ");
+      var scientific = batch.scientific_diagnostics || {};
+      if (batch.revisit && batch.revisit.justification) {
+        var revisitLabel = {safety_recovery: "安全恢复", new_batch_evidence: "新批证据", paired_recheck: "同批复核"}[batch.revisit.reason] || "重访既有策略";
+        operationHtml += "<small>重访依据：" + escapeHTML(revisitLabel) + " · " + escapeHTML(batch.revisit.justification) + "</small>";
+      }
+      if (scientific.status && scientific.status !== "pending") {
+        var scientificText = scientific.status === "passed" ? "本批科学检查通过" : "本批尚未建立科学通过证据";
+        if (scientific.paired_time_blocks != null) { scientificText += " · 配对时间块 " + formatNumber(scientific.paired_time_blocks) + (scientific.minimum_paired_blocks != null ? " / 要求 " + formatNumber(scientific.minimum_paired_blocks) : ""); }
+        if (scientific.evidence_sufficient === false) { scientificText += " · 配对证据不足"; }
+        if (Number(scientific.negative_skill_cells) > 0) { scientificText += " · 低于基线的目标/时距 " + formatNumber(scientific.negative_skill_cells) + " 项"; }
+        scoreHtml += "<small>" + escapeHTML(scientificText) + "</small><small>本批诊断不等于修订效果或独立认证</small>";
+      }
       return "<tr>"
         + "<td><div class=\"adaptive-trajectory-cell\"><strong>第 " + escapeHTML(formatNumber(Number(lane.generation || 0) + 1)) + " 轮 · " + escapeHTML(shortId(lane.candidate_id)) + "</strong><small>轨迹 " + escapeHTML(formatNumber(lane.completed_batch_count || 0)) + " / " + escapeHTML(formatNumber(lane.batch_count || 0)) + "</small>" + (lane.strategy_label ? "<small>" + escapeHTML(lane.strategy_label) + "</small>" : "") + "</div></td>"
         + "<td><div class=\"adaptive-trajectory-cell\"><strong>批次 " + escapeHTML(formatNumber(batch.batch_index)) + " / " + escapeHTML(formatNumber(batch.batch_count || lane.batch_count || 0)) + "</strong><span>" + escapeHTML(originText) + "</span><details class=\"technical-details\"><summary>数据批次编号</summary><code>" + escapeHTML(batch.cohort_digest || "未记录") + "</code></details></div></td>"
@@ -2119,6 +2151,8 @@
       below_practical_score_delta: "提高值未超过认证阈值",
       challenger_improved: "同批得分提高，满足保留条件",
       scientific_gate_failed: "科学约束检查未通过",
+      repeated_behavior_requires_revisit_reason: "回到既有策略须说明安全恢复、新批证据或同批复核依据",
+      duplicate_recent_rejected_bundle: "重复提交了相同父版本上已拒绝的修订",
       constraint_violations: "存在约束违规",
       coverage_failed: "有效预测覆盖不足",
       objective_grid_incomplete: "预测目标或时距不完整",
@@ -2292,6 +2326,9 @@
       ["独立评测器", catalogReferenceLabel("evaluators", configuration.evaluator_id, configuration.evaluator_id || "历史运行未记录")],
       ["局部搜索门槛", (run.search_guard_policy || configuration.search_guard_policy) === "practical_delta_cell_noninferiority_paired_blocks@1" ? "提高值须超过 0.005，各分项不退化，配对时间块与置信区间通过检查；证据不足则待复核" : run.search_guard_policy || configuration.search_guard_policy || "沿用该运行冻结的比较规则"],
       ["创建前模型预检", modelContractPreflightText(run)],
+      ["宿主运行间断", run.host_activity && run.host_activity.interruption_count > 0
+        ? formatNumber(run.host_activity.interruption_count) + " 次 · 观测间断约 " + compactDuration(run.host_activity.observed_gap_seconds) + "；可能为休眠或宿主调度中断"
+        : "尚无已记录的宿主心跳间断；合盖或关闭电脑可能中断本机执行"],
       ["最近执行故障（账本）", failure ? (failure.model_route || "") + " · " + failure.stage + " · " + failure.error_code + (failure.provider_status ? " · HTTP " + failure.provider_status : "") + (failure.retryable ? " · 可恢复" : " · 执行契约未通过") : "尚无本协议的故障记录"],
       ["研究执行约束", run.research_execution_policy && run.research_execution_policy.schema_version === "ecologyrsi-dsh.research-execution-policy/1" ? "紧凑研究上下文；综合单次输出上限 " + formatNumber(run.research_execution_policy.synthesis_max_output_tokens) + " tokens；相同预算耗尽请求不重试" : "沿用该运行冻结的研究契约"],
       ["每轮候选", formatNumber(run.candidates_per_generation || 1) + " 个版本"],
@@ -2318,7 +2355,22 @@
     ];
     node.innerHTML = values.map(function (item) {
       return "<div class=\"dataset-stat\"><span>" + escapeHTML(item[0]) + "</span><strong title=\"" + escapeHTML(item[1]) + "\">" + escapeHTML(item[1]) + "</strong></div>";
-    }).join("") + modelContractPreflightDetails(run);
+    }).join("") + renderDiversitySummary(run) + modelContractPreflightDetails(run);
+  }
+
+  function renderDiversitySummary(run) {
+    var report = run && run.evolution_diversity;
+    if (!report || !report.policy) { return ""; }
+    var labels = {prompt: "提示词", skill: "Skill", scientific: "参数与模型", execution: "执行策略", unknown: "历史未分类"};
+    var proposed = report.proposed_by_family || {};
+    var trained = report.trained_by_family || {};
+    var rows = Object.keys(labels).filter(function (key) { return proposed[key] || trained[key]; }).map(function (key) {
+      return labels[key] + "：提案 " + (proposed[key] || 0) + " / 已训练 " + (trained[key] || 0);
+    });
+    var archive = report.archive && Array.isArray(report.archive.entries) ? report.archive.entries.length : 0;
+    return "<div class=\"dataset-stat\"><span>进化多样性 · 按类型轮转训练</span><strong>" + escapeHTML(rows.join("；") || "等待首轮候选")
+      + "</strong><span>训练侧探索档案 " + escapeHTML(String(archive)) + " 项；行为签名 " + escapeHTML(String(report.observed_signature_count || 0))
+      + " 种（描述性统计，尚非新颖性或性能认证）</span></div>";
   }
 
   function renderProcess() {

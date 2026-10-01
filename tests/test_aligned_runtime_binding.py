@@ -54,7 +54,8 @@ class AlignedRuntimeBindingTests(unittest.TestCase):
         session = adapter.open_session(run, task)
         seed = adapter.propose(run, task, session)
         self.assertEqual(set(seed.changes), PARAMETERS)
-        self.assertTrue(all(seed.changes[f"residual_scale_{h}h"] == 0 for h in (1, 6, 24)))
+        # The sweep deliberately starts with an active residual learner.
+        self.assertTrue(all(seed.changes[f"residual_scale_{h}h"] == 0.5 for h in (1, 6, 24)))
         compiled = compile_algorithm_spec(task, seed, None)
         self.assertEqual(compiled.adapter_id, BASELINE_ALIGNED_RIDGE_MODEL_ID)
         parent = {
@@ -114,6 +115,8 @@ class AlignedRuntimeBindingTests(unittest.TestCase):
                     run_id = created["projection"]["run_id"]
                     state = self.server.director.state(run_id)
                     metadata = state.task_manifest.metadata
+                    self.assertEqual(metadata["evolution_diversity_policy"], "executed_family_rotation@1")
+                    self.assertEqual(created["projection"]["evolution_diversity"]["proposed_by_family"], {})
                     from ecologyrsi_dsh.core.model_execution_policy import RESEARCH_EXECUTION_POLICY
                     self.assertEqual(dict(metadata["research_execution_policy"]), dict(RESEARCH_EXECUTION_POLICY))
                     self.assertEqual(created["projection"]["research_execution_policy"], dict(RESEARCH_EXECUTION_POLICY))

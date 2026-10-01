@@ -3686,7 +3686,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
             projection["failure_code"], "frozen_runtime_binding_drift"
         )
         self.assertIn("请使用当前配置新建进化运行", projection["failure_reason"])
-        self.assertNotIn("0" * 64, json.dumps(projection, ensure_ascii=False))
+        self.assertEqual(projection["failed_stage"]["binding_drift"]["current_digest"], "0" * 64)
+        self.assertEqual(projection["failed_stage"]["binding_drift"]["binding_label"], "进化策略实现")
 
     def test_recovery_does_not_queue_an_archived_running_run(self) -> None:
         status, created = self.request(

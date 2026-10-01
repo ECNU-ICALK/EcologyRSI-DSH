@@ -13,7 +13,7 @@ import math
 import re
 from typing import Any
 
-from ..core.models import TaskManifest
+from ..core.models import TaskManifest, digest
 from ..knowledge.algorithm_ir import (
     algorithm_behavior_projection,
     build_registered_algorithm_ir,
@@ -36,7 +36,7 @@ from .genome import (
 )
 
 
-COMPILER_VERSION = "ecology-plugin-behavior-compiler@3"
+COMPILER_VERSION = "ecology-plugin-behavior-compiler@4"
 # Workflow parameters a host component actually reads. ``max_attempts`` reaches
 # ``SampleExecutionRegistry._sample_execution_policy``, which turns it into the
 # per-sample retry depth. ``max_concurrent`` and ``wave_size`` have no consumer
@@ -46,7 +46,7 @@ COMPILER_VERSION = "ecology-plugin-behavior-compiler@3"
 # edit as a real behaviour change while nothing at run time differs.
 EXECUTABLE_WORKFLOW_PARAMETERS = frozenset({"max_attempts"})
 DEFAULT_COMPILER_SEMANTIC_DIGEST = _domain_digest(
-    "ecologyrsi-dsh/plugin-compiler-semantics/3",
+    "ecologyrsi-dsh/plugin-compiler-semantics/4",
     {
         "compiler_version": COMPILER_VERSION,
         "algorithm_behavior_projection": "algorithm_behavior_projection@1",
@@ -63,6 +63,7 @@ DEFAULT_COMPILER_SEMANTIC_DIGEST = _domain_digest(
         # compiled before directive authoring existed can never collide with
         # one compiled after.
         "authored_directive": "ecologyrsi-dsh.authored-directive/1",
+        "skill_program": "ecologyrsi-dsh.skill-program/1",
     },
 )
 SECURITY_SEMANTIC_DIGEST = _domain_digest(
@@ -237,7 +238,7 @@ def compile_dsh_workflow_spec(
         # Both authoring fields are optional and appear together; the genome
         # validator enforces the pairing. Kept out of `required` so a genome
         # archived before directive authoring existed still compiles.
-        optional = {"directive_policy_ref", "authored_directive"}
+        optional = {"directive_policy_ref", "authored_directive", "skill_program", "skill_policy_ref"}
         if not required <= set(raw_profile) <= required | optional:
             raise ValueError("role profile has unsupported or missing fields")
         if ("directive_policy_ref" in raw_profile) != (
@@ -314,6 +315,19 @@ def compile_dsh_workflow_spec(
                 enabled_tools=sorted(enabled_tools),
                 instruction_parameters=instruction_parameters,
             )
+        if ("skill_program" in raw_profile) != ("skill_policy_ref" in raw_profile):
+            raise ValueError("role profile requires skill_program and skill_policy_ref together")
+        if "skill_program" in raw_profile:
+            from ..evaluators.skill_program import SKILL_POLICY_ID, validate_skill_program
+            if role != "sample-planner":
+                raise ValueError("only sample-planner can author skills")
+            policy_id, _ = _require_ref(registry, "skill_policies", raw_profile["skill_policy_ref"], "skill policy")
+            if policy_id != SKILL_POLICY_ID:
+                raise ValueError("unsupported skill policy")
+            program = validate_skill_program(raw_profile["skill_program"])
+            compiled_profile["skill_program"] = program
+            compiled_profile["skill_program_digest"] = digest(program)
+            compiled_profile["skill_policy_ref"] = dict(raw_profile["skill_policy_ref"])
         compiled_profiles.append(compiled_profile)
     if seen_roles != allowed_roles:
         raise ValueError("role profiles do not cover the registered workflow roles")
@@ -865,6 +879,10 @@ def resolve_candidate_agent_profile(
         resolved["allowed_prediction_methods"] = list(
             profile["allowed_prediction_methods"]
         )
+    if "skill_program" in profile:
+        resolved["skill_program"] = deep_thaw_json(profile["skill_program"])
+        resolved["skill_program_digest"] = profile["skill_program_digest"]
+        resolved["skill_policy_ref"] = dict(profile["skill_policy_ref"])
     return resolved
 
 

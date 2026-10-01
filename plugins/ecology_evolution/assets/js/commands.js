@@ -248,8 +248,12 @@
           var receipt = result && Array.isArray(result.receipts) && result.receipts.find(function (item) { return item.passed !== true; });
           var failure = receipt && receipt.failure;
           var identity = receipt && receipt.identity || {};
-          var context = receipt ? (identity.model_id || "所选模型") + " / " + (identity.stage || "预检") + "：" : "";
+          var modelLabel = [identity.provider_id, identity.model_id].filter(Boolean).join("/") || "所选模型";
+          var context = receipt ? modelLabel + " / " + (identity.stage || "预检") + "：" : "";
           var reason = failure && failure.code;
+          if (reason === "structured_child_tool_protocol_error") {
+            throw new Error(context + "模型接口将工具调用返回为普通文本，DSH 无法执行。请更换支持标准工具调用的模型，或由服务方修复工具调用解析；尚未创建运行。（" + reason + "）");
+          }
           if (reason === "model_canary_provider_unavailable" || reason === "model_canary_rate_limited" || reason === "model_canary_transport_failure") {
             throw new Error(context + "模型服务暂不可用" + (failure.provider_status ? "（HTTP " + failure.provider_status + "）" : "") + "，尚未创建运行；服务恢复后可重试。");
           }

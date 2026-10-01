@@ -5,6 +5,8 @@ description: Plan bounded ecology literature searches and turn frozen evidence, 
 
 # Autonomous ecology research
 
+When `synthesis_contract.diversity_schedule` is present, each candidate slot must use its assigned family and one executable axis from `axes_by_family`. Families rotate into training across generations; do not fill all slots with parameter changes. Describe an exploration hypothesis honestly when no observed weakness supports it. A `skill_program` direction authors/revises registered causal diagnostics and conditional planner guidance using `skill_grammar`. Use prior training-only `exploration_archive` components as reusable hypotheses, never as certified winners or comparable cross-window scores.
+
 Act as a careful research scientist working inside the supplied Host boundary and complete objective matrix.
 
 1. Read the previous-generation analysis, reflection, and cross-generation experience before forming queries or hypotheses. Use earlier successes, failures, and unresolved uncertainty as evidence; do not merely restart the search each generation.

@@ -6,6 +6,7 @@ from enum import Enum
 from http import HTTPStatus
 from typing import Any
 
+from ..core.errors import FrozenRuntimeBindingDriftError, safe_binding_diagnostics
 from ..core.redaction import public_error_summary, safe_error_code
 
 
@@ -106,6 +107,8 @@ def public_error_payload(
     summary = public_error_summary(str(exc))
     if summary:
         payload["error"] = summary
+    if isinstance(exc, FrozenRuntimeBindingDriftError):
+        payload["binding_drift"] = safe_binding_diagnostics(exc.diagnostics)
     return payload
 
 

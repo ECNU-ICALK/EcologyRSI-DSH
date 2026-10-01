@@ -72,6 +72,10 @@ export function resolvePluginConfig(config = {}, { defaultStaticRoot, env = proc
       positiveInteger(config.researchStageTimeoutMs, 1_800_000, "researchStageTimeoutMs"),
       "researchStageTimeoutMs",
     ),
+    samplePlannerStageTimeoutMs: validateStructuredTimeoutMs(
+      positiveInteger(config.samplePlannerStageTimeoutMs, 1_800_000, "samplePlannerStageTimeoutMs"),
+      "samplePlannerStageTimeoutMs",
+    ),
     sampleCriticStageTimeoutMs: validateStructuredTimeoutMs(
       positiveInteger(config.sampleCriticStageTimeoutMs, 600_000, "sampleCriticStageTimeoutMs"),
       "sampleCriticStageTimeoutMs",

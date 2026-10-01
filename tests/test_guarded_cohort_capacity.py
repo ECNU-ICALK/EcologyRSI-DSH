@@ -6,7 +6,9 @@ from unittest.mock import Mock, patch
 
 from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.data.splits import IndexRange
-from ecologyrsi_dsh.evaluators.greenhouse_prediction import BASELINE_ALIGNED_RIDGE_MODEL_ID
+from ecologyrsi_dsh.evaluators.greenhouse_prediction import (
+    BASELINE_ALIGNED_RIDGE_MODEL_ID, COHORT_HISTORY_HOURS,
+)
 from ecologyrsi_dsh.evolution.evidence_capacity import (
     guarded_cohort_evidence_capacity, require_guarded_cohort_evidence_capacity,
 )
@@ -64,7 +66,9 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
     def test_capacity_preview_enforces_the_same_day_blocks_and_counts_inference_replicas(self):
         from ecologyrsi_dsh.evaluators.epoch_cohorts import estimate_epoch_capacity
         data = dataset_fixture(2000)
-        with patch.object(self.server.datasets, "selection_view", return_value=data):
+        with patch.object(self.server.datasets, "selection_view", return_value=data), patch.object(
+            self.server.datasets, "partition_summary", return_value={}
+        ):
             status, rejected = self.request("/evolution-capacity", "POST", {
                 "dataset_id": "agc_cucumber_2018", "episode_id": None,
                 "optimization_schedule": schedule(10).to_dict(), "planned_generations": 1,
@@ -80,7 +84,8 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(report["sufficient"])
         self.assertTrue(report["guarded_evidence"]["sufficient"])
-        original = estimate_epoch_capacity(data, schedule=valid, planned_generations=1, seed=0)
+        original = estimate_epoch_capacity(data, schedule=valid, planned_generations=1, seed=0,
+                                          history_steps=COHORT_HISTORY_HOURS)
         self.assertEqual(report["required_unique_origins"], original.required_unique_origins)
         self.assertEqual(report["holdout_inference_replicas"], 2)
         self.assertEqual(report["candidate_origin_executions_per_generation"],
@@ -88,6 +93,84 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
         self.assertEqual(report["scoring_cells_for_run"],
                          report["candidate_origin_executions_for_run"] * 9)
         self.assertEqual(report["planner_digest"], digest({key: report[key] for key in original.identity_dict()}))
+
+    def test_preview_and_preflight_agree_at_native_history_capacity_boundary(self):
+        from ecologyrsi_dsh.evaluators.epoch_cohorts import estimate_epoch_capacity
+        # The legacy 12-hour preview admits five rounds, while native 48-hour
+        # prediction needs the same purged timeline that admits only four.
+        fixture = dataset_fixture(754)
+        view = SimpleNamespace(**{
+            **vars(fixture), "dataset_id": "agc_cucumber_2018",
+            "episode_id": "agc_cucumber_2018:test", "data_protocol_digest": "c" * 64,
+            "selection_view_digest": "e" * 64,
+        })
+        valid = OptimizationSchedule.for_new_run()
+        legacy = estimate_epoch_capacity(view, schedule=valid, planned_generations=5, seed=0)
+        self.assertTrue(legacy.sufficient)
+        expected = estimate_epoch_capacity(view, schedule=valid, planned_generations=5, seed=0,
+                                          history_steps=COHORT_HISTORY_HOURS)
+        self.assertFalse(expected.sufficient)
+        self.assertEqual(expected.max_feasible_generations, 4)
+        self.server.dsh_native_runtime = Mock()
+        self.server.dsh_native_runtime.capabilities.return_value = {
+            "schema_version": "ecology-agent-runtime-capabilities/1", "ready": True,
+            "root_services": {"required": ["agents"], "missing": [], "declared": True},
+            "presets": [{"preset_id": preset, "declared": True, "preset_mountable": True,
+                         "tool_surface_verified": True, "route_resolvable": True,
+                         "live_agent_service_ready": True, "first_call_verified": False}
+                        for preset in ("ecology-coordinator-v5", "ecology-researcher-v13",
+                                       "ecology-candidate-proposer-v5", "ecology-sample-planner-v11",
+                                       "ecology-sample-critic-v5", "ecology-generation-judge-v8")],
+            "live_agent_service_ready": True, "first_call_verified": False,
+        }
+        description = {"descriptor": {"runnable": True, "display_name_zh": "测试温室序列",
+                                      "domain_id": "greenhouse_test", "adapter_id": "greenhouse_test"},
+                       "readiness": {"ready": True}}
+        series = SimpleNamespace(digest="d" * 64, split_manifest_digest_sha256="b" * 64,
+                                 episode_id=view.episode_id)
+        preview = {"dataset_id": view.dataset_id, "episode_id": view.episode_id,
+                   "optimization_schedule": valid.to_dict(), "planned_generations": 5}
+        body = {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                "domain_pack_id": "greenhouse_environment@1", "dataset_id": view.dataset_id,
+                "strategy_model_id": "stub/strategy", "review_model_id": "stub/review",
+                "autonomous_mode": True, "prediction_model_id": BASELINE_ALIGNED_RIDGE_MODEL_ID,
+                "budget": {"max_generations": 5, "max_candidates": 20, "candidates_per_generation": 4},
+                "optimization_schedule": valid.to_dict(), "auto_advance": 0,
+                "idempotency_key": "native-history-capacity-boundary"}
+        with (patch.object(self.server.datasets, "selection_view", return_value=view),
+              patch.object(self.server.datasets, "partition_summary", return_value={}),
+              patch.object(self.server.datasets, "describe", return_value=description),
+              patch.object(self.server.datasets, "series", return_value=series),
+              patch("ecologyrsi_dsh.api.handler.run_preflight") as paid_preflight):
+            status, report = self.request("/evolution-capacity", "POST", preview)
+            self.assertEqual(status, 200)
+            self.assertFalse(report["sufficient"])
+            self.assertEqual(report["origin_history_alignment_hours"], COHORT_HISTORY_HOURS)
+            self.assertEqual(report["available_eligible_origins"], expected.available_eligible_origins)
+            self.assertEqual(report["max_feasible_generations"], 4)
+            for route in ("/model-preflight", "/runs"):
+                status, rejected = self.request(route, "POST", body)
+                self.assertEqual(status, 400, rejected)
+                self.assertEqual(rejected["error_code"], "insufficient_cohort_capacity", rejected)
+                self.assertIn("max_generations=4", rejected["error"])
+            paid_preflight.assert_not_called()
+            preview["planned_generations"] = 4
+            status, report = self.request("/evolution-capacity", "POST", preview)
+            self.assertEqual(status, 200)
+            self.assertTrue(report["sufficient"])
+            evidence = require_guarded_cohort_evidence_capacity(
+                dataset=view, schedule=valid, planned_generations=4, seed=0,
+                profile=self.server.evaluators.fitness_profile("greenhouse_multihorizon_time_forward@3", view.dataset_id),
+                history_steps=COHORT_HISTORY_HOURS)
+            self.assertEqual(report["guarded_evidence"], evidence)
+            body.update(check_only=True, budget={
+                "max_generations": 4, "max_candidates": 16, "candidates_per_generation": 4,
+            })
+            status, checked = self.request("/model-preflight", "POST", body)
+            self.assertEqual(status, 200, checked)
+            self.assertEqual(checked, {"passed": False, "pending": False})
+            paid_preflight.assert_not_called()
+        self.server.dsh_native_runtime.run_stage.assert_not_called()
 
     def test_small_guarded_run_rejected_before_any_model_stage_and_legacy_remains_accepted(self):
         description = {"descriptor": {"runnable": True, "display_name_zh": "测试温室序列",

@@ -142,8 +142,8 @@
               <section class="panel parameter-form-panel" aria-labelledby="parameter-form-title">
                 <div class="panel-heading"><div><span>运行超参数</span><h2 id="parameter-form-title">更新与执行预算</h2></div><strong>应用于下次创建</strong></div>
                 <div class="parameter-groups">
-                  <section class="parameter-group" data-group="outer-search"><header><strong>每轮生成与筛选</strong><span>4 个方案 → 同组 64 个时点评测 → 2 个入围</span></header><div class="form-grid parameter-grid">
-                    <label><span>最大进化轮数</span><input id="max-generations" name="rounds" form="start-form" type="number" min="1" max="50" value="5" required><small>默认先运行 5 轮；快速模式复用训练时点，每轮使用新评测时点。独立验证和最终测试另行启动。</small></label>
+                  <section class="parameter-group" data-group="outer-search"><header><strong>每轮生成与筛选</strong><span id="outer-search-flow">4 个方案 → 按预登记规则选择 1 条训练主线</span></header><div class="form-grid parameter-grid">
+                    <label><span>最大进化轮数</span><input id="max-generations" name="rounds" form="start-form" type="number" min="1" max="50" value="5" required><small id="rounds-default-note">默认最多运行 5 轮，并按数据容量调整；手动填写的轮数不会自动改动。每轮使用新评测时点。</small></label>
                     <label><span>每轮生成方案数</span><input id="candidates-per-generation" name="candidates_per_generation" form="start-form" type="number" value="4" readonly aria-readonly="true" required><small>固定生成 4 个提案。快速模式预先指定首个提案进入单主线；正式对照才预筛 Top 2。</small></label>
                     <label><span>候选总预算</span><input id="max-candidates" name="max_candidates" form="start-form" type="number" min="4" max="256" value="20" aria-describedby="max-candidates-help" required><small id="max-candidates-help">默认随轮数同步；当前完整预算需要 20 个候选。</small></label>
                   </div></section>
@@ -159,7 +159,7 @@
                     <label><span>单时点向量单元容量</span><input id="sample-agent-batch-size" name="sample_agent_batch_size" form="start-form" type="number" value="9" readonly aria-readonly="true" required><small>固定为 3 个目标 × 3 个时距；单个预测时点始终由一条向量链原子处理。</small></label>
                     <label><span>同时预测的时点数</span><input id="sample-concurrency" name="sample_concurrency" form="start-form" type="number" min="1" max="128" step="1" value="64" required><small>默认并发上限 64，最高 128；从 8 个时点起步，按模型服务负载自动调整。</small></label>
                   </div></section>
-                  <section class="parameter-group parameter-policy" data-group="scientific-policy"><header><strong>科学策略（只读）</strong><span>完整 origin 原子提交</span></header><div class="parameter-policy-grid"><span>64 时点初筛</span><span>现有确定性 Top 2</span><span>完整 9 评分单元</span><span>轮末三臂同 cohort</span></div></section>
+                  <section class="parameter-group parameter-policy" data-group="scientific-policy"><header><strong>科学策略（只读）</strong><span>完整 origin 原子提交</span></header><div class="parameter-policy-grid" id="parameter-policy-grid"><span>不执行预筛</span><span>单条训练主线</span><span>完整向量提交</span><span>轮末双臂同组比较</span></div></section>
                 </div>
                 <div class="parameter-switches">
                   <label class="checkbox-row"><input id="fixed-seed" name="fixed_seed" form="start-form" type="checkbox" checked><span><strong>固定随机种子</strong><small>冻结样本抽取顺序与候选随机源，保证同配置可复现。</small></span></label>
@@ -171,7 +171,7 @@
                   <div class="panel-heading"><div><span>数据使用边界</span><h2 id="parameter-scope-title">拟合与更新分离</h2></div><span class="pill pill-green">同轮公平比较</span></div>
                   <div class="parameter-scope-list">
                     <div><span>训练预测器</span><strong>完整训练拟合分区</strong><small>用于拟合数值模型的参数，与后续选择版本的数据分开。</small></div>
-                    <div><span>逐批优化方案</span><strong id="agent-update-scope">每个入围候选 10 × 10</strong><small>新修改与当前版本在同批数据上比较，轮末再统一选择；不等于最终验证。</small></div>
+                    <div><span>逐批优化方案</span><strong id="agent-update-scope">每个入围候选 10 × 10</strong><small id="agent-update-policy">批次修订待轮末同组比较；不同批次的分数变化不能证明修改有效。</small></div>
                   </div>
                 </section>
                 <section class="panel parameter-summary-panel" aria-labelledby="parameter-summary-title">
@@ -328,7 +328,7 @@
             </section>
           </section>
 
-          <footer class="footer-note"><span>插件版本 0.7.10 · 可交付候选版（未签名）</span><span id="last-updated">尚未同步</span></footer>
+          <footer class="footer-note"><span>插件版本 0.7.15 · 可交付候选版（未签名）</span><span id="last-updated">尚未同步</span></footer>
         </main>
       </div>
     </div>

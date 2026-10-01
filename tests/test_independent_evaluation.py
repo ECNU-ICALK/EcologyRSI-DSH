@@ -1,13 +1,14 @@
 """Independent evaluation opens frozen data once and never updates the search."""
 from dataclasses import replace
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 import threading
 import unittest
 from unittest.mock import Mock, patch
 
 from ecologyrsi_dsh.application.independent_evaluation import IndependentEvaluationService
+from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 from ecologyrsi_dsh.core.exposure_registry import ScientificExposureRegistry, raw_holdout_exposure_key
-from ecologyrsi_dsh.core.ledger import EventLedger
+from ecologyrsi_dsh.core.ledger import ConcurrentRunMutationError, EventLedger
 from ecologyrsi_dsh.core.models import CandidateStatus, RunStatus, digest
 from ecologyrsi_dsh.data.greenhouse import CanonicalEpisode, CanonicalSeries, feature_specs
 from ecologyrsi_dsh.data.registry import DatasetRegistry
@@ -35,6 +36,10 @@ class IndependentJobTests(unittest.TestCase):
             datasets=SimpleNamespace(data_protocol=Mock(return_value=protocol)),
             dsh_tools=Mock(), sample_admission=Mock(),
             validate_frozen_runtime_bindings=Mock())
+        self.server._generation_locks_guard = threading.Lock()
+        self.server._generation_locks = {}
+        for name in ("reserve_run_work", "generation_lock", "try_acquire_generation_purge_lease", "release_generation_purge_lease"):
+            setattr(self.server, name, MethodType(getattr(EvolutionHTTPServer, name), self.server))
         self.service = IndependentEvaluationService(self.server)
         self.addCleanup(self.service.close)
 
@@ -52,6 +57,9 @@ class IndependentJobTests(unittest.TestCase):
                 self.service.start(f.run_id, "final_test")
             self.service.start(f.run_id, "validation")
             self.assertTrue(entered.wait(3))
+            # The worker has no admitted sample at this barrier, but still owns
+            # the run until evaluation and admission cleanup have both finished.
+            self.assertIsNone(self.server.try_acquire_generation_purge_lease(f.run_id))
             report = self.service.start(f.run_id, "validation")
             self.assertEqual(report["stages"][0]["status"], "running")
             release.set()
@@ -62,6 +70,9 @@ class IndependentJobTests(unittest.TestCase):
             self.service.start(f.run_id, "final_test")
             self.service.workers[0].join(3)
             self.assertEqual(call.call_count, 2)
+        lease = self.server.try_acquire_generation_purge_lease(f.run_id)
+        self.assertIsNotNone(lease)
+        self.server.release_generation_purge_lease(lease, purged=False)
         after = f.director.state(f.run_id)
         self.assertEqual(after.run.final_test_candidate_id, f.candidate.candidate_id)
         self.assertEqual(self.server.dsh_tools.open_run_admissions.call_count, 2)
@@ -94,6 +105,39 @@ class IndependentJobTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "先完成进化训练"):
             self.service.start(f.run_id, "validation")
         self.assertFalse(ScientificExposureRegistry(f.ledger).formal_stage_tokens())
+
+    def test_worker_start_failure_seals_partition_and_releases_reservation(self):
+        with patch("threading.Thread.start", side_effect=RuntimeError("start failed")):
+            with self.assertRaisesRegex(RuntimeError, "start failed"):
+                self.service.start(self.fixture.run_id, "validation")
+        self.assertEqual(self.service.workers, [])
+        self.assertEqual(self.service.status(self.fixture.run_id)["stages"][0]["outcome"], "inconclusive")
+        lease = self.server.try_acquire_generation_purge_lease(self.fixture.run_id)
+        self.assertIsNotNone(lease)
+        self.server.release_generation_purge_lease(lease, purged=False)
+
+    def _late_result_after_purge(self, recreate):
+        f = self.fixture
+        original = f.ledger.events_after(f.run_id, limit=1)[0]
+        token = f.director.reserve_formal_stage(f.run_id, stage="validation",
+            candidate_id=f.candidate.candidate_id, objective_family_digest="a" * 64,
+            analysis_plan_digest="b" * 64, partition_digest=digest("validation"),
+            idempotency_key="late-result")
+        def evaluate():
+            f.ledger.archive_run(f.run_id)
+            f.ledger.purge_run(f.run_id, confirmation=f.run_id, terminal_status="completed")
+            if recreate:
+                f.ledger.append(f.run_id, "RunCreated", original.payload)
+            return {"outcome": "passed"}
+        with self.assertRaises(ConcurrentRunMutationError):
+            f.director.execute_formal_stage(f.run_id, token, evaluate)
+        self.assertEqual([e.kind for e in f.ledger.events_after(f.run_id)], ["RunCreated"] if recreate else [])
+
+    def test_direct_late_result_cannot_resurrect_purged_run(self):
+        self._late_result_after_purge(False)
+
+    def test_direct_late_result_cannot_attach_to_recreated_run(self):
+        self._late_result_after_purge(True)
 
 
 class FormalDatasetViewTests(unittest.TestCase):

@@ -43,7 +43,7 @@ PYTHONPATH=src .venv/bin/python -m ecologyrsi_dsh serve \
 页面加载后向父窗口发送握手，目标 origin 取 `parent_origin` 查询参数，缺省为自身 origin：
 
 ```json
-{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.7.10","context_protocol":"ecology-evolution.host-context/1","supported_api_bases":["/api/ecology-evolution"]}
+{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.7.15","context_protocol":"ecology-evolution.host-context/1","supported_api_bases":["/api/ecology-evolution"]}
 ```
 
 宿主用 `postMessage` 回 `dsh.context`。只接受来自父窗口且 origin 为自身或已登记 `parent_origin` 的消息；字段可平铺，也可嵌在 `context` 对象中。最小合同只要求同源代理地址和短期能力令牌，身份、能力范围和模型目录可选：

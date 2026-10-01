@@ -30,6 +30,7 @@ from ..evaluators.greenhouse_prediction import (
     GREENHOUSE_SEED_EXOGENOUS_COLUMNS,
     seed_feature_recipe,
 )
+from ..evaluators.skill_program import SKILL_POLICY_ID, skill_grammar
 
 
 REGISTRY_SCHEMA_VERSION = "ecologyrsi-dsh.program-registry/1"
@@ -454,6 +455,9 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
             # was shown is recoverable from the genome's catalog_digest alone.
             "grammar": directive_grammar(),
         },
+    },
+    "skill_policies": {
+        SKILL_POLICY_ID: {"version": "causal-planner-skills/1", "grammar": skill_grammar()},
     },
     "tool_policies": {
         "sample-planner-tools@1": {

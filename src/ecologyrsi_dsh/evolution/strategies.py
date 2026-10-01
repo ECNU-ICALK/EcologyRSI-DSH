@@ -7,6 +7,9 @@ code or receives evaluator internals.
 
 from __future__ import annotations
 
+from .diversity import enabled as diversity_enabled, direction_schedule, validate_direction_schedule
+from ..evaluators.skill_program import SKILL_POLICY_ID, skill_grammar, skill_preflight_programs
+
 from ..core.prediction_policy import (
     BASELINE_REFERENCE_PREDICTOR_ID, RUNTIME_PREDICTION_POLICY, prediction_usage,
 )
@@ -82,6 +85,7 @@ from .genome import (
     EcologyEvolutionPluginGenome,
     GenomeMutationContextV1,
     apply_genome_mutation,
+    mutation_policy_contract,
     parameter_trust_region_neighborhood,
 )
 from .agent_policy import build_agent_policy
@@ -809,7 +813,7 @@ class FakeDSHAdapter:
 
 
 def _deterministic_fallback_directions(
-    allowed_targets: Mapping[str, Sequence[str]], count: int
+    allowed_targets: Mapping[str, Sequence[str]], count: int, *, family_schedule=None, parent=None
 ) -> list[dict[str, Any]]:
     """Materialize bounded directions when research recovery has no model list."""
 
@@ -829,6 +833,16 @@ def _deterministic_fallback_directions(
     directions: list[dict[str, Any]] = []
     for index in range(count):
         axis, target = options[index % len(options)]
+        if family_schedule:
+            family = family_schedule["required_family_by_slot"][index]
+            choices = [(a, t) for a, t in options if a in family_schedule["axes_by_family"][family]]
+            axis, target = choices[index % len(choices)]
+        direction = MUTATION_DIRECTIONS_BY_AXIS[axis][0]
+        if parent is not None and axis in {"instruction_directive", "skill_program", "feature_recipe"}:
+            profile = resolve_candidate_agent_profile(parent, current_program_registry())
+            current = (parent.scientific_program.get("feature_recipe") if axis == "feature_recipe"
+                       else profile.get("authored_directive" if axis == "instruction_directive" else "skill_program"))
+            direction = "revise" if current is not None else "author"
         directions.append({
             "direction_id": f"host-fallback-{index + 1}",
             "title": "保留当前搜索空间并生成有界变体",
@@ -840,7 +854,7 @@ def _deterministic_fallback_directions(
             # The catalog lists each axis's legal directions; the first one is the
             # conservative reading for every axis it covers -- `select` where the
             # axis picks a registered program, `increase` where it moves a scalar.
-            "mutation_direction": MUTATION_DIRECTIONS_BY_AXIS[axis][0],
+            "mutation_direction": direction,
             "evidence_refs": [],
             "expected_tradeoff": "保持当前预测器和评测边界不变，等待下一轮真实样本反馈。",
             "success_criterion": "候选可编译、样本覆盖完整且不降低既有门禁证据。",
@@ -1035,7 +1049,7 @@ class StrategyRouterDSHAdapter:
                 "宿主只执行已登记且有界的参数方案。"
             ),
             "requires_authenticated_model": True,
-            "implementation": "model-search-reflect-candidate-directions/19",
+            "implementation": "model-search-reflect-candidate-directions/20",
         },
     }
 
@@ -1059,10 +1073,17 @@ class StrategyRouterDSHAdapter:
         "ridge_alpha": {"type": "number", "minimum": 0.0001, "maximum": 1.0},
         **{f"residual_scale_{horizon}h": {"type": "number", "minimum": 0.0, "maximum": 1.0} for horizon in (1, 6, 24)},
     }
-    _GREENHOUSE_ALIGNED_RIDGE_SWEEP: ClassVar[tuple[dict[str, Any], ...]] = tuple(
-        {"history_steps": 6, "ridge_alpha": .1, "residual_scale_1h": one,
-         "residual_scale_6h": six, "residual_scale_24h": day}
-        for one, six, day in ((0.,0.,0.),(.25,0.,0.),(0.,.25,0.),(0.,0.,.25))
+    _GREENHOUSE_ALIGNED_RIDGE_SWEEP: ClassVar[tuple[dict[str, Any], ...]] = (
+        # Four anchors spanning the (history_steps, ridge_alpha) space so the
+        # quick-trajectory gate accepts mutations in any direction, not only
+        # residual-scale moves from a single (6, 0.1) point.  Ridge_alpha
+        # follows the same 0.01/0.10/0.50 ladder used by every other sweep
+        # table; residual scales ramp with history so longer windows start
+        # with stronger corrections.
+        {"history_steps": 3,  "ridge_alpha": 0.01, "residual_scale_1h": 0.50, "residual_scale_6h": 0.50, "residual_scale_24h": 0.50},
+        {"history_steps": 6,  "ridge_alpha": 0.10, "residual_scale_1h": 0.25, "residual_scale_6h": 0.00, "residual_scale_24h": 0.00},
+        {"history_steps": 9,  "ridge_alpha": 0.10, "residual_scale_1h": 0.75, "residual_scale_6h": 0.50, "residual_scale_24h": 0.25},
+        {"history_steps": 12, "ridge_alpha": 0.50, "residual_scale_1h": 1.00, "residual_scale_6h": 1.00, "residual_scale_24h": 1.00},
     )
     _GREENHOUSE_TARGETWISE_RIDGE_SCHEMAS: ClassVar[dict[str, dict[str, Any]]] = {
         "history_steps": {"type": "integer", "minimum": 1, "maximum": 12},
@@ -1326,6 +1347,7 @@ class StrategyRouterDSHAdapter:
                 "strategy_id": strategy_id,
                 "implementation": descriptor["implementation"],
                 "host_parameter_boundary": "prediction-model-specific/1",
+                "mutation_policy": mutation_policy_contract(),
             }
         )
 
@@ -1785,6 +1807,7 @@ class StrategyRouterDSHAdapter:
                 allowed_mutation_targets = mutation_catalog[
                     "allowed_mutation_targets"
                 ]
+                family_schedule = direction_schedule(task.metadata, allowed_mutation_targets, run.generation, candidate_count)
                 allowed_evidence_refs = _frozen_evidence_refs(knowledge)
                 evolution_reflection = _native_evolution_reflection_from_experience(
                     cross_generation_experience,
@@ -1804,6 +1827,7 @@ class StrategyRouterDSHAdapter:
                             "exactly_one_operation_per_direction": True,
                             "one_operation_must_fully_test_the_hypothesis": True,
                             **deepcopy(mutation_catalog),
+                            **({"diversity_schedule": family_schedule} if family_schedule else {}),
                             "prior_failure_advice": deepcopy(
                                 evolution_reflection["review_behaviors"]
                             ),
@@ -1899,6 +1923,7 @@ class StrategyRouterDSHAdapter:
                             allowed_evidence_refs=allowed_evidence_refs,
                             allowed_mutation_targets=allowed_mutation_targets,
                         )
+                        validate_direction_schedule(normalized["candidate_directions"], family_schedule)
                         direction_preflight = _validate_candidate_direction_realizability(
                             normalized["candidate_directions"],
                             run=run,
@@ -1934,6 +1959,9 @@ class StrategyRouterDSHAdapter:
                                 "candidate_directions"
                             ],
                             "candidate_direction_preflight": direction_preflight,
+                            **({"exploration_archive": cross_generation_experience["exploration_archive"]}
+                               if isinstance(cross_generation_experience, Mapping) and "exploration_archive" in cross_generation_experience else {}),
+                            **({"diversity_schedule": family_schedule} if family_schedule else {}),
                             "report_size_advisories": research_report_size_diagnostics(normalized) if execution_policy is not None else [],
                             "previous_generation_reflection": (
                                 safe_aggregate_feedback(
@@ -2992,8 +3020,10 @@ class StrategyRouterDSHAdapter:
             else {}
         )
         assigned_direction = None
+        family_schedule = {}
         if _model_search_cycle_enabled(task):
             allowed_mutation_targets = _registered_mutation_targets(task, parent)
+            family_schedule = direction_schedule(task.metadata, allowed_mutation_targets, run.generation, int(batch["batch_size"]))
             raw_directions = research_plan.get("candidate_directions")
             if (
                 raw_directions is None
@@ -3008,6 +3038,7 @@ class StrategyRouterDSHAdapter:
                 raw_directions = _deterministic_fallback_directions(
                     allowed_mutation_targets,
                     int(batch["batch_size"]),
+                    family_schedule=family_schedule, parent=parent,
                 )
             directions = normalize_candidate_directions(
                 raw_directions,
@@ -3015,6 +3046,7 @@ class StrategyRouterDSHAdapter:
                 allowed_mutation_targets=allowed_mutation_targets,
             )
             assigned_direction = directions[slot_index]
+            validate_direction_schedule([direction.to_dict() for direction in directions], family_schedule)
         assigned_direction_execution = (
             _candidate_direction_execution_view(assigned_direction)
             if assigned_direction is not None
@@ -3076,6 +3108,8 @@ class StrategyRouterDSHAdapter:
         mutation_catalog = _mutation_contract_catalog(task, parent)
         mutation_contract = {
             "schema_version": "ecologyrsi-dsh.genome-mutation-contract/1",
+            **({"exploration_archive": research_plan["exploration_archive"]}
+               if diversity_enabled(task.metadata) and "exploration_archive" in research_plan else {}),
             "mutation_operator_id": TRUST_REGION_MUTATION_OPERATOR_ID,
             "maximum_operations": 1,
             "maximum_normalized_parameter_step": (
@@ -3343,6 +3377,8 @@ class StrategyRouterDSHAdapter:
                     # and whether it is `author` or `revise` by the check just
                     # below, which needs the parent to answer.
                     "instruction_directive": {"role": "sample-planner"},
+                    "skill_program": {"role": "sample-planner"},
+                    "feature_recipe": {},
                 }
                 if assigned_direction.mutation_axis not in expected_fields_by_axis:
                     host_rejections.append(
@@ -3413,6 +3449,11 @@ class StrategyRouterDSHAdapter:
                         or assigned_direction.mutation_direction
                         not in {"author", "revise"}
                     )
+                if not direction_mismatch and assigned_direction.mutation_axis in {"skill_program", "feature_recipe"}:
+                    current = (resolve_candidate_agent_profile(parent, current_program_registry()).get("skill_program")
+                               if assigned_direction.mutation_axis == "skill_program"
+                               else parent.scientific_program.get("feature_recipe"))
+                    direction_mismatch = (assigned_direction.mutation_direction == "author") == (current is not None)
                 if direction_mismatch:
                     host_rejections.append(
                         {
@@ -3529,6 +3570,7 @@ class StrategyRouterDSHAdapter:
             metadata={
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "proposal_source": "dsh_native_agent",
+                **({"diversity_schedule": family_schedule} if family_schedule else {}),
                 "agent_policy": agent_policy,
                 "tool_experience": agent_policy["experience"]["rows"],
                 "remote_strategy_called": True,
@@ -4004,6 +4046,7 @@ def _registered_mutation_targets(
         if (
             instruction.get("role") == "sample-planner"
             and instruction_id != current_profile["instruction_template_id"]
+            and not (diversity_enabled(task.metadata) and "authored_directive" in current_profile)
         ):
             instruction_ids.append(instruction_id)
 
@@ -4040,6 +4083,7 @@ def _registered_mutation_targets(
         # writes its first. Unlike `instruction_profile`, this axis does not
         # run out of unused options.
         "instruction_directive": (AUTHORED_DIRECTIVE_POLICY_ID,),
+        "skill_program": (SKILL_POLICY_ID,),
     }
 
 
@@ -4152,6 +4196,8 @@ def _mutation_contract_catalog(
         # to see both, and one that authors without the grammar can only guess
         # at the enumerations its text will be rejected against.
         "directive_grammar": _directive_authoring_contract(genome),
+        **({"skill_grammar": skill_grammar(), "current_skill_program": resolve_candidate_agent_profile(genome, registry).get("skill_program")}
+           if targets.get("skill_program") else {}),
     }
 
 
@@ -4476,6 +4522,24 @@ def _validate_candidate_direction_realizability(
                     str(direction.mutation_direction),
                 )
             )
+        elif direction.mutation_axis == "skill_program":
+            current = resolve_candidate_agent_profile(parent, registry).get("skill_program")
+            if (direction.mutation_direction == "author") == (current is not None):
+                raise ValueError("skill direction must author an absent program or revise an existing one")
+            operations = tuple({"op": "author_skill_program", "role": "sample-planner", "skill_program": program}
+                               for program in skill_preflight_programs() if program != current)
+        elif direction.mutation_axis == "feature_recipe":
+            current = parent.to_dict()["scientific_program"].get("feature_recipe")
+            if (direction.mutation_direction == "author") == (current is not None):
+                raise ValueError("feature direction must author an absent recipe or revise an existing one")
+            from ..evaluators.greenhouse_prediction import seed_feature_recipe
+            recipe = deepcopy(current) if current else seed_feature_recipe(horizons=task.metadata.get("fitness_profile", {}).get("expected_horizons", (1, 6, 24)))
+            operations_list = []
+            for lag in (4, 5, 6):
+                alternative = deepcopy(recipe)
+                alternative["features"][0] = {"op": "target_lag", "k": lag}
+                operations_list.append({"op": "author_feature_recipe", "feature_recipe": alternative})
+            operations = tuple(operations_list)
         elif direction.mutation_axis == "instruction_directive":
             # Not a scalar move, so there are no numeric witnesses: the
             # witnesses are whole directives, and the preflight proves the axis

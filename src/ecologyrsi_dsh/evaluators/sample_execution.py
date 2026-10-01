@@ -4298,6 +4298,7 @@ def _public_steps(value: Any, *, kind: str, id_field: str) -> list[dict[str, Any
             "call_id", "parameters", "used_as_evidence", "tool_predicted", "elapsed_ms",
             # Why a capability failed, so a scored record says more than "failed".
             "error_detail",
+            "behavior_signature",
         }
     )
     required = (
@@ -4572,6 +4573,9 @@ def _attempt_trace_entry(
             }
         )
     result["model_evidence"] = [dict(tool) for tool in tools if tool.get("execution_owner") == "dsh_agent_tool_call"]
+    skills = [dict(tool) for tool in tools if tool.get("execution_owner") == "host_causal_skill"]
+    if skills:
+        result["skill_evidence"] = skills
     result["critic_decisions"] = critic_decisions
     if isinstance(requested_tool_id, str) and requested_tool_id.strip():
         result["requested_repair_tool"] = requested_tool_id.strip()[:160]

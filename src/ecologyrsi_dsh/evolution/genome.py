@@ -40,6 +40,24 @@ _PROGRAM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*(?:@[A-Za-z0-9][A-Za-z
 _PRESET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
+def mutation_policy_contract() -> dict[str, Any]:
+    """Public numerical rules included in the frozen strategy identity.
+
+    @2 retains its original 0.15 boundary. A wider search needs a new policy
+    version and new runs, rather than changing what an existing ID accepts.
+    """
+
+    return {
+        "schema_version": "ecologyrsi-dsh.mutation-policy/1",
+        "mutation_operator_id": TRUST_REGION_MUTATION_OPERATOR_ID,
+        "local_edit_operator_id": LOCAL_EDIT_MUTATION_OPERATOR_ID,
+        "maximum_normalized_step": TRUST_REGION_MAX_NORMALIZED_STEP,
+        "coordinate_policy": "log_if_positive_range_ratio_gte_100_else_linear@1",
+        "candidate_maximum_operations": 1,
+        "local_maximum_operations": 5,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class FrozenJsonObject(Mapping[str, "FrozenJson"]):
     """Tuple-backed immutable JSON object with deterministic key order."""
@@ -331,13 +349,15 @@ def _role_profile(value: Any) -> dict[str, Any]:
             "enabled_tool_ids",
             "directive_policy_ref",
             "authored_directive",
+            "skill_program",
+            "skill_policy_ref",
         },
         # Optional, and omitted from the normalized result when absent rather
         # than stored as null or {} -- the same discipline `scientific_program`
         # uses for `feature_recipe`. That keeps the historical seven-key
         # projection byte-identical, so every archived genome_digest,
         # behavior_digest and genome_id stays reproducible and replayable.
-        optional=frozenset({"directive_policy_ref", "authored_directive"}),
+        optional=frozenset({"directive_policy_ref", "authored_directive", "skill_program", "skill_policy_ref"}),
     )
     role = _text(raw["role"], "role_profile.role", pattern=_PRESET_ID_RE)
     if role not in {"sample-planner", "sample-repair"}:
@@ -420,6 +440,14 @@ def _role_profile(value: Any) -> dict[str, Any]:
             # its policy withheld must never reach the archive at all.
             allowed_tool_ids=result["enabled_tool_ids"],
         ).to_dict()
+    if ("skill_program" in raw) != ("skill_policy_ref" in raw):
+        raise ValueError("role_profile requires skill_program and skill_policy_ref together")
+    if "skill_program" in raw:
+        from ..evaluators.skill_program import validate_skill_program
+        if role != "sample-planner":
+            raise ValueError("only sample-planner can author skills")
+        result["skill_program"] = validate_skill_program(raw["skill_program"])
+        result["skill_policy_ref"] = _program_ref(raw["skill_policy_ref"], "skill_policy_ref")
     return result
 
 
@@ -1329,6 +1357,17 @@ def apply_genome_mutation(
             if set(requested) == inherited:
                 raise ValueError(f"mutation operation {op} does not change {role}")
             profile["enabled_tool_ids"] = requested
+        elif op == "author_skill_program":
+            from ..evaluators.skill_program import SKILL_POLICY_ID, validate_skill_program
+            item = _operation(raw_operation, {"role", "skill_program"}, op)
+            if item["role"] != "sample-planner":
+                raise ValueError("only sample-planner can author skills")
+            profile = next(p for p in agent["candidate_execution_program"]["role_profiles"] if p["role"] == "sample-planner")
+            program = validate_skill_program(item["skill_program"])
+            if profile.get("skill_program") == program:
+                raise ValueError("skill mutation does not change the program")
+            profile["skill_program"] = program
+            profile["skill_policy_ref"] = registry.program_ref("skill_policies", SKILL_POLICY_ID)
         elif op == "author_role_directive":
             item = _operation(raw_operation, {"role", "authored_directive"}, op)
             role = _text(item["role"], "mutation role", pattern=_PRESET_ID_RE)

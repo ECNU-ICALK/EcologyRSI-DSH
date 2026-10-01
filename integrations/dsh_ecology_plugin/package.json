@@ -1,6 +1,6 @@
 {
   "name": "@ecologyrsi/dsh-evolution-plugin",
-  "version": "0.7.10",
+  "version": "0.7.15",
   "description": "DeepSeek Harness host bridge for the EcologyRSI evolution workbench",
   "private": true,
   "type": "module",
@@ -8,6 +8,7 @@
   "exports": {
     ".": "./lib/index.js",
     "./agent-plugin": "./lib/tools/agent-plugin.js",
+    "./session-visibility": "./lib/runtime/session-visibility.js",
     "./client": "./lib/client.js",
     "./runtime/capabilities": "./lib/runtime/capabilities.js",
     "./runtime/structured-roles": "./lib/runtime/structured-roles.js",

@@ -40,7 +40,9 @@ class DatasetIdentityView(Protocol):
 
 
 class CohortCapacityError(ValueError):
-    """Raised when no eligible causal origin exists for a requested cohort."""
+    """Raised when requested causal cohorts cannot fit the training timeline."""
+
+    error_code = "insufficient_cohort_capacity"
 
     def __init__(
         self,

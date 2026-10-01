@@ -417,7 +417,11 @@ def _paired_bootstrap_interval(
     block_ids: Sequence[str],
     *,
     seed_material: Any,
+    confidence_level: float = PROMOTION_CONFIDENCE_LEVEL,
 ) -> tuple[float, float]:
+    confidence_level = _finite(confidence_level, "confidence_level")
+    if not 0 < confidence_level < 1:
+        raise ValueError("confidence_level must be between zero and one")
     randomizer = random.Random(int(digest(seed_material)[:16], 16))
     count = len(block_ids)
     deltas = []
@@ -428,9 +432,10 @@ def _paired_bootstrap_interval(
             - _resampled_objective(incumbent, sampled)
         )
     deltas.sort()
+    tail = (1.0 - confidence_level) / 2.0
     return (
-        deltas[int(0.025 * (len(deltas) - 1))],
-        deltas[int(0.975 * (len(deltas) - 1))],
+        deltas[int(tail * (len(deltas) - 1))],
+        deltas[int((1.0 - tail) * (len(deltas) - 1))],
     )
 
 
@@ -512,6 +517,7 @@ def assess_promotion_improvement(
                 current,
                 incumbent,
                 block_ids,
+                confidence_level=PROMOTION_CONFIDENCE_LEVEL,
                 seed_material={
                     "evaluation_index_digest": _contract_value(
                         evaluation, "evaluation_index_digest"

@@ -2,6 +2,45 @@
 
 ## 未发布
 
+### 0.7.15 多类型进化与 Skill 程序
+
+- 新原生运行冻结进化类型轮转规则，覆盖提示词、Skill、参数与模型、执行策略；训练槽位在评分前确定，局部编辑保持同一类型，历史规则仍可重放。
+- 新增版本化因果 Skill 程序，支持模块组合、条件触发和策略文本修订，接入 genome、编译、原生样本预测与执行回执，不增加模型调用次数。
+- 补齐 DSH 研究、反思、候选与局部编辑 schema 的指令、特征配方、Skill 等进化轴，避免 Python 支持但模型无法提交的能力缺口。
+- 增加实际行为摘要、训练侧探索组件档案与页面覆盖率展示；档案不读取独立评测，不授予晋升资格。新增 Skill 目录与 compiler@4 明确区分新旧执行身份。
+
+### 待发布 · 对齐岭回归种子多样性修正
+
+- 仅改 Python 后端，未改插件与网页资源，故不上调版本号，随下一次版本一并发布。`.venv` 为 editable 安装，后端重启即生效。
+- `_GREENHOUSE_ALIGNED_RIDGE_SWEEP` 四行原本共用 `history_steps=6, ridge_alpha=0.1`，只改残差尺度。候选种子按 `sweep[(generation * batch_size + slot_index) % len(sweep)]` 取行，故每代四个槽位都从同一参数点出发，两个共享超参在整轮运行中从未被搜索。改为 `history_steps` 3/6/9/12、`ridge_alpha` 0.01/0.10/0.50 的四个锚点，与另外三张岭回归扫描表同一阶梯；保留 `(6, 0.1)` 作为对照锚。
+- 取值仍在 `_GREENHOUSE_ALIGNED_RIDGE_SCHEMAS` 声明边界内，未改 schema 上下限、信赖域步长、候选单次操作数与任何科学门槛。可辨识批次仍让所有槽位共用同一行，同批比较的参照点不受影响。
+
+### 0.7.14 慢模型执行修正
+
+- 为 `sample.plan` 增加独立的 `samplePlannerStageTimeoutMs`，默认 30 分钟。真实样本在仍有输出活动、累计仅约 6900 Token 时被普通阶段 10 分钟截止中止，故调整规划生命周期以容纳多次工具比较与慢推理。
+- 超时仍覆盖准入、所有重试、模型调用及持久化，重试不延长绝对截止时间；取消、晚到结果隔离、30 分钟协议上限、其他角色时限与全部输出和科学设置保持不变。
+
+### 0.7.13 网页实跑修正
+
+- 修复轮末反思第三次提交已成功、宿主仍报 `structured_result_missing` 的问题。仅该阶段允许最多两次有明确 `ToolArgsError/INVALID_ARGS` 回执的格式纠正，最终必须唯一成功，调用与回执来源、顺序和完成状态均严格匹配。
+- 明确反思输出使用原生 JSON 数组、必填停止建议及已声明字段；补充真实会话回放和运行时持久化回归验证，保留模型、采样数量和科学门槛。
+
+### 0.7.12 运行过程修正
+
+- 新运行冻结按 cohort 区分证据的局部修订策略，跨批次分数仅作诊断；重访既有行为须说明依据，并保留崩溃后的幂等回放。
+- 宿主心跳记录调度间断；受间断影响且没有服务商状态证据的超时不再触发拥塞降并发，明确的 429/503 继续退避。截止时间与晚到结果隔离保持不变。
+- 恢复后的 ETA 排除间断前样本与批次记录，重新积累完成样本；网页显示科学证据不足、未单列拟合产物、真实策略调用和未分类超时。
+- 按阶段汇总去重的供应商 Token 回执，保留模型、推理额度、全量样本及科学门槛；因果上下文共享的重复序列化改为本次调用内复用，输出内容保持一致。
+- 本地运行 `run:0aa6dd12` 继续使用冻结的 0.7.11 后端与 DSH 插件，0.7.12 不在实验中途替换。
+
+### 0.7.11 review 修正
+
+- 恢复自洽的默认预算与统计门槛，置信区间随标称置信度计算，数值变异策略纳入冻结摘要。
+- 新快速运行将跨批次性能判断延迟至轮末同组比较；保留即时执行与物理约束保护。
+- 独立评测期间阻止删除；事务内隔离删除 / 重建运行的晚到结果。漂移错误增加安全摘要诊断。
+- 修正未训练提案、终态候选身份及模式说明；补充只读用量审计，纠正历史终止原因分析。
+- 重建包含 session-visibility 的 0.7.11 插件包，安装前校验实际归档内容。
+
 - 修复研究综合阶段因输出预算耗尽而整轮进化终止的缺陷。`run:017aa4b5` 死在 `generation.research-synthesis`：子会话在 `pjlab/glm-5.2` 上第二步恰好用满 16384 个输出 token（62023 字符的推理散文、零次工具调用），随后 `turn/end → {kind: "max-tokens"}`；`stage-runner.js` 把它归类为 `output-budget`，宿主侧 `auto_progress` 照 `retryable:false` 直接写 `RunFailed`。这不是一次可修的坏输出，而是一次**根本没有产出**的回合——推理与工具参数共用同一个单次调用上限，而该路线不接受 `reasoningEffort` 降档，提示里也从未出现过预算数值或提交次序，因此模型没有任何依据知道自己正在透支。实测不是孤例：11 次综合调用中 2 次触顶，另一次（`run:4c89e560`）仅因偶然用空参数触发 `INVALID_ARGS` 把回合续了一命才幸存，而那正是阶段指令明令禁止的动作。现在宿主把预算耗尽当作一次可纠正的校验拒绝，复用既有的 `_NATIVE_MAX_SEMANTIC_CONTRACT_ATTEMPTS = 2` 有界修复环：经 `host_validation_feedback`（`rejection_code: output_budget_exhausted_before_structured_output`）告知模型透支了多少 token、违反了什么次序，同一轮里把预算数值写进阶段指令与 researcher SKILL.md，要求先提交结构化输出再展开推理。**冻结策略 `RESEARCH_EXECUTION_POLICY` 一字未动**：请求内容已因反馈而改变，故不违反 `retry_identical_exhausted_request: False`；`host_validation_feedback` 是既有条件键，无留言时整键省略，stage identity 与重放不变。第二次仍然耗尽则照旧终止，非预算类原生错误不进入该分支（各由测试固定）。作用域有意只限综合阶段——`generation.search-plan` 与 `generation.reflect` 的预算远未触顶，保持原终止语义。该 SKILL.md 改动随预设一并升版 `ecology-researcher-v12` → `ecology-researcher-v13`：预设 id 是模型契约金丝雀身份与归档回执的一部分，就地改写内容会让同一个 id 在不同机器上指向不同提示，安装器的漂移守卫也会据此拒绝安装（与本轮 `ecology-candidate-proposer-v4` → `v5`、`ecology-sample-planner-v9` → `v11` 同一条约定）。
 - 修复专家主动提交的知识在生产路径上被静默丢弃的缺陷。`StrategyRouterDSHAdapter.propose()` 判到 `dsh_native_plugin_evolution@1` 就转入 `_propose_native`，而该方法从未接收 `interventions`（实测出现次数为 0）；非原生路径拼装的 `human_input` 在生产里根本不走。后果是专家写的每一句 `guidance` / `constraint` 从来没有进入过模型上下文，而 `director.request_proposal` 照常调用 `apply_bounded_interventions`、照常写 `HumanInterventionApplied`、前端照常显示「已应用」——回执与事实完全脱节。现在 `_native_expert_directives` 把这些原文重建成与研究阶段同一套顾问块（`ecologyrsi-dsh.expert-directives/1`：每条带 `kind`、原文、`host_enforcement`，外加一段说明「顾问意见不由宿主强制执行、不能扩大数据与工具权限、不能放宽变异契约」的策略），随 `candidate.propose` 的 stage context 下发。没有任何专家留言时该键**整个不出现**（而非置为 `null`），因此无干预的运行其 stage identity 逐字节不变、归档账本仍可重放；`test_the_directive_block_is_the_only_stage_context_difference` 固定这一点。
 - 与上一条配套：原生协议下的人工干预回执不再声称一次没有发生的执行。原生协议中候选基因组是唯一权威来源，`Proposal.changes` 只是 `genome.scientific_program["parameter_overrides"]` 的镜像且下游无人交叉校验，因此宿主按人工语句改写 `changes` 唯一改变的是网页上打印的那个数字，运行仍在执行未被触碰的基因组。`advisory_only_receipts` 把这类回执的执行字段整体移入 `host_did_not_enforce`（保留宿主解析读到了什么，供专家判断措辞是否被理解），加上 `model_context_delivered`，状态回落为 `recorded`，文案改为「模型已读取、宿主未强制执行」。`parent_selection` 原样放行——父代确实由批次选定，那条回执从来不是关于提案参数的断言。网页端与事件流同步改为这套措辞，避免「仅记录」被读成「已忽略」。

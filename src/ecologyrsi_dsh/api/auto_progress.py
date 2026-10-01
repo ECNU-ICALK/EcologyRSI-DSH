@@ -254,6 +254,7 @@ def _failure_diagnostics(
         return native_error.error_code, context
     binding_drift = find_exception(exc, FrozenRuntimeBindingDriftError)
     if binding_drift is not None:
+        context["binding_drift"] = dict(binding_drift.diagnostics)
         return FrozenRuntimeBindingDriftError.error_code, context
     suffixes = {
         ValueError: "host_value_error",

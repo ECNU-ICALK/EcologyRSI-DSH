@@ -17,7 +17,7 @@
   };
   var candidateStatusLabels = {
     accepted: "已保留用于优化", promoted: "已保留用于优化", retained: "已保留用于优化", released: "已发布", evaluating: "评测中",
-    evaluated: "已评测", pending: "待评测", spawned: "待评测", screened_out: "初筛未入围", rejected: "未保留", failed: "执行失败", duplicate: "重复版本",
+    evaluated: "已评测", pending: "待评测", spawned: "待评测", screened_out: "未进入训练主线", rejected: "未保留", failed: "执行失败", duplicate: "重复版本",
     paused: "已暂停", aborted: "已中止", not_recorded: "未封存"
   };
   var metricLabels = {
@@ -91,7 +91,7 @@
   var mutationAxisLabels = {
     scientific_parameter: "科学参数", registered_predictor: "预测模型选择",
     instruction_profile: "指令模板", instruction_parameter: "指令参数",
-    instruction_directive: "指令正文", instruction_tool_policy: "工具权限",
+    instruction_directive: "指令正文", skill_program: "Skill 程序", instruction_tool_policy: "工具权限",
     workflow_template: "执行流程模板", workflow_parameter: "执行流程参数",
     feature_policy: "特征处理规则", feature_recipe: "特征配方",
     fit_policy: "拟合策略", uncertainty_policy: "不确定性估计策略",
@@ -99,6 +99,7 @@
   };
   var mutationOperationLabels = {
     set_bounded_parameter: "设定有界科学参数", select_registered_pipeline: "选择已注册预测流水线",
+    author_skill_program: "编写或修订 Skill 程序",
     select_instruction_template: "选择指令模板", set_instruction_parameter: "设定指令参数",
     author_role_directive: "撰写角色指令正文", narrow_role_tool_policy: "收紧角色工具权限",
     select_registered_workflow_template: "选择已注册执行流程", set_bounded_workflow_parameter: "设定有界执行流程参数",
@@ -118,15 +119,15 @@
     "research.started": "模型自主调研已开始", "research.completed": "模型自主调研已完成",
     "implementation.started": "预测模型与进化策略能力编译已开始", "implementation.completed": "宿主能力编译已完成",
     "optimization.started": "迭代优化分析已开始", "optimization.completed": "迭代优化决策已完成",
-    "candidate.submitted": "候选方案已提交", "candidate.accepted": "候选方案已在训练反馈搜索中保留", "candidate.failed": "候选方案生成失败", "candidate.duplicate": "重复候选已跳过", "candidate.screening_recorded": "候选初筛结果已记录", "candidate.screened_out": "候选未进入 Top 2",
-    "formal.selection_cohort_frozen": "Top 2 正式评测队列已冻结", "formal.batch_started": "正式 epoch 微批已启动", "formal.batch_evaluated": "正式 epoch 微批已完成",
+    "candidate.submitted": "候选方案已提交", "candidate.accepted": "候选方案已在训练反馈搜索中保留", "candidate.failed": "候选方案生成失败", "candidate.duplicate": "重复候选已跳过", "candidate.screening_recorded": "候选初筛结果已记录", "candidate.screened_out": "候选未进入训练主线",
+    "formal.selection_cohort_frozen": "正式评测队列已冻结", "formal.batch_started": "正式 epoch 微批已启动", "formal.batch_evaluated": "正式 epoch 微批已完成",
     "holdout.arm_started": "轮末留出评测臂已启动", "generation.comparison_recorded": "轮末三臂比较结果已记录",
     "artifact.recorded": "候选训练产物已记录",
     "evaluation.progress": "真实样本评测正在推进", "evaluation.sample_results_started": "样本评测结果开始写入", "evaluation.sample_result_batch": "样本评测结果批次已写入", "evaluation.sample_results_completed": "样本评测结果已写入", "evaluation.completed": "训练反馈检查已完成", "evaluation.judged": "候选方案独立评审结论已记录", "promotion.decided": "搜索保留决策已记录", "promotion.pending": "等待搜索保留决策",
     "intervention.recorded": "专家主动意见已记录", "intervention.applied": "专家主动意见处理结果已记录", "intervention.submitted": "专家主动意见已提交",
     "expert_consultation.requested": "模型已提交专家咨询", "expert_consultation.answered": "专家咨询已答复", "expert_consultation.applied": "专家答复已用于后续轮次",
     "consultation.requested": "模型已提交专家咨询", "consultation.answered": "专家咨询已答复", "consultation.applied": "专家答复已用于后续轮次",
-    "stage.recorded": "进化阶段状态已更新", "gateway.retry_scheduled": "网关繁忙，已安排延迟重试", "model.usage_recorded": "模型调用用量已记录",
+    "stage.recorded": "进化阶段状态已更新", "gateway.retry_scheduled": "网关繁忙，已安排延迟重试", "model.usage_recorded": "模型调用用量已记录", "host.execution_interrupted": "宿主运行间断已记录",
     "dsh.child_execution_failed": "DSH 子任务请求失败", "dshchildlaunchreserved": "DSH 子任务已获得执行槽位", "dshretrievalexecuted": "DSH 资料检索已执行", "dshpredictiontoolexecuted": "DSH 预测工具已执行", "dshstructuredresultaccepted": "DSH 结构化结果已验收"
   };
   var state = {
@@ -211,6 +212,8 @@
     eventReadRequest: 0,
     eventReadPending: null,
     candidateBudgetManual: false,
+    roundsManuallyEdited: false,
+    defaultRoundsAdjustment: null,
     cohortCapacityReport: null,
     cohortCapacitySignature: null,
     cohortCapacityLoading: false,
@@ -510,7 +513,11 @@
   }
   function runFailureMessage(run, events) {
     if (String(run && run.failure_code || "") === "frozen_runtime_binding_drift") {
-      return "该运行的冻结算法或模型绑定与当前服务版本不一致。为保证可复现性，系统已停止继续执行；请使用当前配置新建进化运行。";
+      var drift = run && run.failed_stage && run.failed_stage.binding_drift || {};
+      var detail = drift.binding_label ? " 漂移项：" + drift.binding_label + "。" : "";
+      if (/^[0-9a-f]{64}$/.test(drift.expected_digest || "") && /^[0-9a-f]{64}$/.test(drift.current_digest || "")) { detail += " 摘要：" + drift.expected_digest.slice(0, 12) + " → " + drift.current_digest.slice(0, 12) + "。"; }
+      if (drift.runtime_version) { detail += " 当前版本：" + drift.runtime_version + "。"; }
+      return "该运行的冻结算法或模型绑定与当前服务版本不一致。为保证可复现性，系统已停止继续执行；请使用当前配置新建进化运行。" + detail;
     }
     var direct = [
       run && run.failure_reason,
@@ -1200,8 +1207,16 @@
     return creation && creation.state === "failed" && !creation.runId ? creation : pendingCreateStatus();
   }
 
-  function localizeError(message, errorCode) {
+  function localizeError(message, errorCode, status) {
     var text = String(message || "");
+    var capacity = /^insufficient causal cohort capacity: required=\d+, available=\d+, max_generations=(\d+)$/.exec(text);
+    if (capacity) {
+      return "训练数据的时间窗口不足：扣除历史窗口和预测间隔后，当前配置最多支持 " + capacity[1]
+        + " 轮。请减少训练轮数或选择覆盖时间更长的数据；系统不会自动缩减样本量或放宽验证要求。";
+    }
+    if (String(errorCode || "") === "insufficient_cohort_capacity") {
+      return "训练数据的时间窗口不足，请根据启动条件中的可用轮数调整配置，或选择覆盖时间更长的数据。";
+    }
     if (String(errorCode || "") === "frozen_runtime_binding_drift") {
       return "该运行的冻结算法或模型绑定与当前服务版本不一致。为保证可复现性，请使用当前配置新建进化运行。";
     }
@@ -1217,11 +1232,14 @@
     if (/run must be running/i.test(text)) { return "只有运行中的任务可以执行下一轮。"; }
     if (/unknown run/i.test(text)) { return "未找到指定的进化运行。"; }
     if (/idempotency/i.test(text)) { return "请求标识与已有操作冲突。"; }
-    return "服务请求失败，请检查配置和当前运行状态。";
+    var diagnostics = [];
+    if (/^[A-Za-z0-9_.-]{1,100}$/.test(String(errorCode || ""))) { diagnostics.push("错误码 " + errorCode); }
+    if (Number.isInteger(status) && status >= 400 && status <= 599) { diagnostics.push("HTTP " + status); }
+    return "服务请求失败，请检查配置和当前运行状态。" + (diagnostics.length ? "（" + diagnostics.join("；") + "）" : "");
   }
   function errorMessage(error) {
     if (error && error.name === "AbortError") { return "请求超时。"; }
-    return localizeError(error && error.message || error, error && error.errorCode);
+    return localizeError(error && error.message || error, error && error.errorCode, error && error.status);
   }
   function showToast(message) {
     var node = $("#toast");

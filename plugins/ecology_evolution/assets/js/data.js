@@ -218,6 +218,9 @@
 
   function latestCandidateIdForSamples(run) {
     var candidates = sampleCandidates(run);
+    var evidenceId = run && run.execution_progress && run.execution_progress.last_evidence_candidate_id;
+    if (evidenceId && candidates.some(function (candidate) { return (candidate.id || candidate.candidate_id) === evidenceId; })) { return evidenceId; }
+    if (["completed", "failed", "cancelled"].indexOf(String(run && run.status || "")) >= 0) { return null; }
     var rounds = run && Array.isArray(run.rounds) ? run.rounds.slice() : [];
     rounds.sort(function (left, right) { return Number(right.generation || 0) - Number(left.generation || 0); });
     for (var roundIndex = 0; roundIndex < rounds.length; roundIndex += 1) {

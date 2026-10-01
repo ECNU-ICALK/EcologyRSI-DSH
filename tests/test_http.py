@@ -34,13 +34,22 @@ from ecologyrsi_dsh.evolution.schedule import (
 from ecologyrsi_dsh.integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 
 
+def _native_control_capabilities() -> dict:
+    # Control-only transport doubles still need the frozen preset inventory.
+    return {"ready": True, "presets": [
+        {"preset_id": preset, "declared": True, "preset_mountable": True,
+         "tool_surface_verified": True, "route_resolvable": True}
+        for preset in handler_module._DSH_NATIVE_PRESET_IDS
+    ]}
+
+
 class _ImmediateNativeControlRuntime:
     def __init__(self) -> None:
         self.paused: list[dict] = []
         self.cancelled: list[dict] = []
 
     def capabilities(self) -> dict:
-        return {"ready": True}
+        return _native_control_capabilities()
 
     def require_capabilities(
         self,
@@ -891,7 +900,7 @@ class HTTPContractTests(unittest.TestCase):
                 self.entered = threading.Event()
 
             def capabilities(self) -> dict:
-                return {"ready": True}
+                return _native_control_capabilities()
 
             def require_capabilities(self, _payload: dict, _required: object, **_kwargs: object) -> None:
                 return
@@ -1188,7 +1197,7 @@ class HTTPContractTests(unittest.TestCase):
                 self.release_retry = threading.Event()
 
             def capabilities(self) -> dict:
-                return {"ready": True}
+                return _native_control_capabilities()
 
             def require_capabilities(
                 self,

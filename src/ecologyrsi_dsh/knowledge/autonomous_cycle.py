@@ -39,6 +39,7 @@ MUTATION_OPERATION_BY_AXIS: dict[str, str] = {
     "instruction_profile": "select_instruction_template",
     "instruction_parameter": "set_instruction_parameter",
     "instruction_directive": "author_role_directive",
+    "skill_program": "author_skill_program",
     "instruction_tool_policy": "narrow_role_tool_policy",
     "workflow_template": "select_registered_workflow_template",
     "workflow_parameter": "set_bounded_workflow_parameter",
@@ -57,6 +58,7 @@ MUTATION_DIRECTIONS_BY_AXIS: dict[str, tuple[str, ...]] = {
     # one the parent already had. Keeping them distinct lets a reflection say
     # which of the two the evidence supports.
     "instruction_directive": ("author", "revise"),
+    "skill_program": ("author", "revise"),
     "instruction_tool_policy": ("narrow",),
     "workflow_template": ("select",),
     "workflow_parameter": ("increase", "decrease"),
@@ -70,6 +72,12 @@ MUTATION_DIRECTIONS_BY_AXIS: dict[str, tuple[str, ...]] = {
     "uncertainty_policy": ("select",),
 }
 MUTATION_AXIS_EFFECTS: dict[str, str] = {
+    "skill_program": (
+        "Authors or revises an ordered, versioned skill program. Host modules compute causal observation "
+        "diagnostics and activate conditional planner guidance before prediction. Changes module composition, "
+        "order, triggers or guidance, without extra model calls or changes to data, tools, scores or gates. "
+        "A receipt proves host execution and guidance delivery, not planner compliance."
+    ),
     "scientific_parameter": (
         "Changes exactly one optional default-tool parameter within its "
         "Host trust region and in the declared increase/decrease "
@@ -200,6 +208,7 @@ def mutation_axis_contract(axes: Iterable[str]) -> dict[str, Any]:
 # policy, so a candidate on a scalar-tunable predictor never sees it.
 CANDIDATE_MUTATION_AXES = frozenset(
     {
+        "skill_program",
         "scientific_parameter",
         "feature_recipe",
         "registered_predictor",

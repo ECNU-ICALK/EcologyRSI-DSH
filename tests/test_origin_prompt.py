@@ -25,6 +25,10 @@ class OriginPromptTests(unittest.TestCase):
 
         self.assertEqual(expand(compact), before)
         self.assertEqual(contexts, before)
+        self.assertEqual(shared, {"v1": history})
+        self.assertEqual(compact, {f'cell-{i}': {
+            'history': {'shared_origin_ref': 'v1'}, 'horizon': i,
+            'causal_provenance': {'cutoff': 47, 'latest': 47}} for i in range(9)})
         self.assertLess(len(json.dumps([compact, shared])), len(json.dumps(contexts)) / 2)
 
     def test_unique_contexts_are_left_intact(self):

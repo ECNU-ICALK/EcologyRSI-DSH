@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..evolution.diversity import preregister_candidate
+
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
 
 from .dsh_usage import validate_session_metrics as _validate_dsh_session_metrics
@@ -2853,9 +2855,9 @@ class RunStateReducer:
             selected = payload["selected_candidate_ids"]
             schedule = OptimizationSchedule.from_dict(self.task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
             if schedule.quick:
-                first = min((c for c in self.candidates.values() if c.generation == generation and c.role is CandidateRole.SEARCH), key=lambda c: c.slot_index)
+                first = preregister_candidate((c for c in self.candidates.values() if c.generation == generation and c.role is CandidateRole.SEARCH), self.proposals.__getitem__, self.task.metadata, generation)
                 if selected != [first.candidate_id]:
-                    raise ValueError("quick trajectory must preregister the first proposal")
+                    raise ValueError("quick trajectory must preregister the frozen policy's proposal")
             if (
                 isinstance(generation, bool)
                 or not isinstance(generation, int)
@@ -3751,6 +3753,9 @@ class RunStateReducer:
                 )
             ):
                 raise ValueError("DshChildLaunchReserved contract is invalid")
+        elif event.kind == "HostExecutionInterrupted":
+            from ..execution.host_activity import validate_host_interruption
+            validate_host_interruption(dict(payload))
         elif event.kind == "DshSessionUsageRecorded":
             validate_session_usage(payload, run_id=event.run_id)
             # These indexes contain only already validated earlier events,

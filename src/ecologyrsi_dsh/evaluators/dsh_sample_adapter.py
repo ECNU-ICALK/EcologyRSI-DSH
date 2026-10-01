@@ -837,6 +837,22 @@ class DshSampleCollaborationAdapter:
             "evolution_context": {key: decision_context[key] for key in
                                   ("candidate_parameters", "tool_experience", "agent_policy") if key in decision_context},
         }
+        skill_traces = {}
+        profile = decision_context.get("candidate_agent_profile")
+        if isinstance(profile, Mapping) and profile.get("skill_program") is not None:
+            from .skill_program import execute_skill_program
+            receipts = {}
+            for request in selected:
+                receipt = execute_skill_program(profile["skill_program"], request.label_free_context, request.horizon_hours)
+                receipts[request.sample_id] = receipt
+                signature = digest([(step["module_id"], step["when"], step["triggered"],
+                                     step["output"].get("branch")) for step in receipt["steps"]])
+                skill_traces[request.sample_id] = [{"tool_id": "causal-skill-program", "version": "1",
+                    "status": "completed", "execution_owner": "host_causal_skill",
+                    "input_digest": digest(request.label_free_context), "output_digest": receipt["receipt_digest"],
+                    "behavior_signature": signature}]
+            context["skill_execution"] = receipts
+            context["skill_execution_contract"] = "Host diagnostics are computed from causal inputs. Apply triggered guidance within the frozen prediction contract. Guidance cannot change tools, labels, budgets or scoring rules."
         compact, shared = compact_origin_contexts(origin_contexts)
         if shared:
             context["origin_contexts"] = compact
@@ -905,7 +921,8 @@ class DshSampleCollaborationAdapter:
             for index in indices:
                 failure = SampleExecutionAttemptError("sample Agent attempt failed", failure_class=failure_class,
                     retryable=retryable, error_type=error_type,
-                    tool_calls=binding.public_trace(requests[index].sample_id) if "binding" in locals() else ())
+                    tool_calls=[*skill_traces.get(requests[index].sample_id, ()),
+                                *(binding.public_trace(requests[index].sample_id) if "binding" in locals() else ())])
                 failure.__cause__ = exc
                 outcomes[index] = SamplePredictionOutcome(sample_id=requests[index].sample_id, error=failure)
             return
@@ -914,7 +931,8 @@ class DshSampleCollaborationAdapter:
         for index in indices:
             request = requests[index]
             row = by_id[request.sample_id]
-            tool_trace = binding.public_trace(request.sample_id, row["evidence_call_ids"])
+            tool_trace = [*skill_traces.get(request.sample_id, ()),
+                          *binding.public_trace(request.sample_id, row["evidence_call_ids"])]
             final_step = {
                 "tool_id": "agent-final-prediction", "version": "2", "status": "completed",
                 "input_digest": binding.wave_digest, "output_digest": digest(structured),

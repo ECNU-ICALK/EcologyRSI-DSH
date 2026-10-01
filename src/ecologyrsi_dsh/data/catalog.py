@@ -23,7 +23,7 @@ def _assert_snapshot_digest(
         raise ValueError(f"{label}的冻结校验值必须是非空字符串")
     normalized = expected.strip()
     if normalized != actual:
-        raise FrozenRuntimeBindingDriftError(label)
+        raise FrozenRuntimeBindingDriftError(label, expected_digest=normalized, current_digest=actual)
 
 
 def _default_data_root() -> Path:

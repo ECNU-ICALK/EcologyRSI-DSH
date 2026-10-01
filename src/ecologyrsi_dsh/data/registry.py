@@ -36,6 +36,7 @@ from .preparation import (
     _validated_source,
 )
 from .splits import (
+    NoOptimizationEpisodesError,
     SplitManifest,
     build_four_stage_data_protocol,
     build_split_manifest,
@@ -639,7 +640,10 @@ class DatasetRegistry:
     def _split_manifest(self, descriptor: DatasetDescriptor, series: CanonicalSeries) -> SplitManifest:
         cached = self._split_cache.get(descriptor.dataset_id)
         if cached is None:
-            cached = build_split_manifest(descriptor.dataset_id, series.episodes)
+            try:
+                cached = build_split_manifest(descriptor.dataset_id, series.episodes)
+            except NoOptimizationEpisodesError as exc:
+                raise PermissionError("dataset contains no accessible optimization episode") from exc
             self._split_cache[descriptor.dataset_id] = cached
         return cached
 

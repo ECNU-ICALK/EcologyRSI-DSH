@@ -300,6 +300,8 @@ function directSampleHarness({
   failurePhase = null,
   failureCode = null,
   persistenceError = null,
+  timing = {},
+  startDelayMs = 0,
 }) {
   const starts = [];
   const reservations = [];
@@ -329,6 +331,7 @@ function directSampleHarness({
           error.code = failureCode;
           throw error;
         }
+        if (startDelayMs) await new Promise(resolve => setTimeout(resolve, startDelayMs));
         const result = failurePhase === "result"
           ? Promise.reject(Object.assign(
             new Error(`private ${failurePhase} failure`),
@@ -390,6 +393,7 @@ function directSampleHarness({
       },
     },
     structuredStageMaxAttempts: maxAttempts,
+    ...timing,
     providerStageGate: {
       run: async (_provider, operation) => operation(),
       penalize: (provider, milliseconds, options) => {
@@ -748,6 +752,7 @@ test("native stage runner rejects over-ceiling structured timers at construction
   for (const option of [
     { structuredStageTimeoutMs: 1_800_001 },
     { researchStageTimeoutMs: 2_147_483_648 },
+    { samplePlannerStageTimeoutMs: 1_800_001 },
     { sampleCriticStageTimeoutMs: 1_800_001 },
   ]) {
     assert.throws(
@@ -2413,4 +2418,118 @@ test("a real protocol probe recovers after Skill without accepting serialized te
   assert.equal(harness.starts.length,2); assert.equal(harness.persisted.length,1);
   assert.equal(harness.failures[0].error_code,"structured_child_tool_protocol_error");
   assert.deepEqual(harness.starts[0].request.prompt,harness.starts[1].request.prompt);
+});
+
+
+function twiceCorrectedReflectionEvents() {
+  const events = correctedOutputEvents();
+  for (const item of events) {
+    if (item.type === 'tool/call' && item.data.name === 'skill') item.data.arguments = JSON.stringify({name: 'batch-scientific-reflection'});
+  }
+  const filtered = events.filter(e => !(e.type === 'tool/call' && e.data.name === 'ecology_execute_prediction_tool')
+    && !(e.type === 'tool/result' && e.data.message.content[0].toolCallId === 'prediction-call'));
+  const terminal = filtered.pop();
+  const rejection = filtered.find(e => e.type === 'tool/result' && e.data.step === 1);
+  rejection.data.error = {name: 'ToolArgsError', code: 'INVALID_ARGS'};
+  rejection.data.message.content[0].isError = true;
+  const seq = filtered.at(-1).seq;
+  filtered.push(
+    {seq: seq + 1, type: 'tool/call', data: {turn: 1, step: 2, callId: 'final-output', name: 'structured_output', arguments: '{}'}},
+    {seq: seq + 2, type: 'tool/result', sourceEventSeqs: [seq + 1], data: {turn: 1, step: 2,
+      message: {content: [{type: 'tool-result', toolCallId: 'final-output', isError: false}]}}},
+    {...terminal, seq: seq + 3});
+  return filtered;
+}
+
+test('generation reflection accepts two source-bound schema corrections and exactly one success', () => {
+  const events = twiceCorrectedReflectionEvents();
+  const options = {stage: 'generation.reflect', skillName: 'batch-scientific-reflection'};
+  const evidence = skillInvocationEvidence(events, options);
+  assert.equal(evidence.next_tool_call_seq, events.find(e => e.data.callId === 'final-output').seq);
+  assert.throws(() => skillInvocationEvidence(events, {...options, stage: 'sample.plan'}));
+});
+
+test('generation reflection persists a twice-corrected result without launching the judge again', async () => {
+  const stage = 'generation.reflect';
+  const structured = {summary: 'Preserve the incumbent after failed scientific gates.'};
+  const binding = directSampleBinding(stage, {});
+  binding.request.role = 'generation-judge';
+  binding.request.output_schema_id = 'ecology-generation-reflection@1';
+  const harness = directSampleHarness({stage, maxAttempts: 1,
+    results: [{stopReason: 'completed', structured}], sessionEvents: twiceCorrectedReflectionEvents});
+  const result = await harness.runner.run(binding);
+  assert.deepEqual(result.structured, structured);
+  assert.equal(harness.starts.length, 1);
+  assert.equal(harness.persisted.length, 1);
+  assert.equal(harness.failures.length, 0);
+  const prompt = JSON.parse(harness.starts[0].request.prompt[0].text);
+  assert.match(JSON.stringify(prompt), /at most three/);
+});
+
+test('reflection schema repairs still refuse excess attempts, duplicate success, forged source and intervening tools', () => {
+  const options = {stage: 'generation.reflect', skillName: 'batch-scientific-reflection'};
+  const mutations = [
+    events => { const e = events.find(e => e.data.error); delete e.data.error; e.data.message.content[0].isError = false; },
+    events => { events.find(e => e.data.error).data.error.code = 'UNAVAILABLE'; },
+    events => { events.find(e => e.data.error).sourceEventSeqs = [0]; },
+    events => { events.push({seq: 100, type: 'tool/call', data: {name: 'web_search', callId: 'late'}}); },
+    events => { events.push({seq: 100, type: 'tool/call', data: {name: 'structured_output', callId: 'fourth'}}); },
+  ];
+  for (const mutate of mutations) {
+    const events = twiceCorrectedReflectionEvents(); mutate(events);
+    assert.throws(() => skillInvocationEvidence(events, options));
+  }
+});
+
+
+test('planner keeps working beyond the general deadline and reserves its independent bounded window', async () => {
+  const structured = {schema_version: 'ecology-sample-predictions@2', wave_digest: 'f'.repeat(64), decisions: []};
+  const harness = directSampleHarness({stage: 'sample.plan', maxAttempts: 1, startDelayMs: 60,
+    timing: {structuredStageTimeoutMs: 20, samplePlannerStageTimeoutMs: 1000},
+    results: [{stopReason: 'completed', structured}], sessionEvents: () => correctedOutputEvents()});
+  const result = await harness.runner.run(directSampleBinding('sample.plan', samplePlanContext()));
+  assert.deepEqual(result.structured, structured);
+  assert.equal(harness.reservationRequests[0].timeout_ms, 1000);
+  assert.equal(harness.persisted.length, 1);
+  assert.equal(harness.failures.length, 0);
+});
+
+test('planner deadline remains absolute across attempts and rejects late results', async () => {
+  const harness = directSampleHarness({stage: 'sample.plan', maxAttempts: 2, startDelayMs: 60,
+    timing: {structuredStageTimeoutMs: 1000, samplePlannerStageTimeoutMs: 20},
+    results: [{stopReason: 'completed', structured: {}}], sessionEvents: () => correctedOutputEvents()});
+  await assert.rejects(harness.runner.run(directSampleBinding('sample.plan', samplePlanContext())),
+    e => e.code === 'structured_role_operational_timeout');
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(harness.starts.length, 1);
+  assert.equal(harness.reservationRequests[0].timeout_ms, 20);
+  assert.equal(harness.persisted.length, 0);
+});
+
+test('planner default uses thirty minutes without extending sample reflection or critic', async () => {
+  for (const [stage, timeout, skillName, context] of [
+    ['sample.plan', 1800000, 'origin-vector-forecasting', samplePlanContext()],
+    ['sample.critic', 600000, 'origin-vector-review', {schema_version:'ecologyrsi-dsh.sample-review-wave/1',wave_digest:'f'.repeat(64),samples:[{sample_id:'one'}]}],
+    ['sample.reflect', 600000, 'origin-vector-review', {schema_version:'ecologyrsi-dsh.sample-reflection-context/1',wave_digest:'f'.repeat(64),sample:{sample_id:'one'},outcome:{cells:[]}}],
+  ]) {
+    const harness = directSampleHarness({stage, results: [{stopReason:'completed', structured:{}}],
+      sessionEvents: () => stage === 'sample.plan' ? correctedOutputEvents() : skillFirstEvents(skillName)});
+    await harness.runner.run(directSampleBinding(stage, context));
+    assert.equal(harness.reservationRequests[0].timeout_ms, timeout, stage);
+  }
+});
+
+test('planner retry shares the first attempt deadline instead of receiving another full window', async () => {
+  const harness = directSampleHarness({stage: 'sample.plan', maxAttempts: 2, startDelayMs: 60,
+    timing: {samplePlannerStageTimeoutMs: 100},
+    results: [{stopReason: 'error'}, {stopReason: 'completed', structured: {}}],
+    sessionEvents: attempt => attempt === 1 ? rc6ConsumedEvents('origin-vector-forecasting', {
+      prediction: true, terminalKind: 'error', terminalError: {code: 'SERVER', status: 503},
+    }) : correctedOutputEvents()});
+  await assert.rejects(harness.runner.run(directSampleBinding('sample.plan', samplePlanContext())),
+    e => e.code === 'structured_role_operational_timeout');
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(harness.starts.length, 2);
+  assert.deepEqual(harness.reservationRequests.map(r => r.timeout_ms), [100, 100]);
+  assert.equal(harness.persisted.length, 0);
 });

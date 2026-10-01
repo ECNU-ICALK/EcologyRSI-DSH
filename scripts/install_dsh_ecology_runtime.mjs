@@ -80,6 +80,44 @@ async function fileDigest(target) {
   return createHash("sha256").update(await readFile(target)).digest("hex");
 }
 
+export async function validatePluginArchive({ archive, pluginRoot }) {
+  // Inspect bytes without extracting untrusted paths or touching a DSH profile.
+  const tar = (args) => {
+    const result = spawnSync("tar", args, { maxBuffer: 32 * 1024 * 1024 });
+    if (result.error || result.status !== 0) throw new Error("invalid DSH plugin archive");
+    return result.stdout;
+  };
+  const entries = tar(["-tzf", archive]).toString("utf8").trim().split("\n");
+  if (new Set(entries).size !== entries.length || entries.some((entry) =>
+    !entry.startsWith("package/") || entry.split("/").includes(".."))) {
+    throw new Error("unsafe or duplicate DSH plugin archive paths");
+  }
+  const required = ["package.json", "lib/index.js", "lib/runtime/session-visibility.js"];
+  async function collect(relative) {
+    for (const entry of await readdir(path.join(pluginRoot, relative), { withFileTypes: true })) {
+      const next = path.posix.join(relative, entry.name);
+      if (entry.isDirectory()) await collect(next);
+      else if (entry.isFile()) required.push(next);
+      else throw new Error(`unsupported plugin source entry: ${next}`);
+    }
+  }
+  await collect("lib");
+  await collect("presets");
+  await collect("schemas");
+  for (const relative of new Set(required)) {
+    const member = `package/${relative}`;
+    if (!entries.includes(member)) throw new Error(`DSH plugin archive is missing ${member}`);
+    const contents = tar(["-xOf", archive, member]);
+    if (!contents.equals(await readFile(path.join(pluginRoot, relative)))) {
+      throw new Error(`DSH plugin archive does not match source: ${member}`);
+    }
+  }
+  const manifest = JSON.parse(await readFile(path.join(pluginRoot, "package.json"), "utf8"));
+  if (manifest.exports?.["./session-visibility"] !== "./lib/runtime/session-visibility.js") {
+    throw new Error("DSH plugin session-visibility export is missing");
+  }
+}
+
 async function fsyncFile(target) {
   const handle = await open(target, "r");
   try { await handle.sync(); } finally { await handle.close(); }
@@ -180,9 +218,10 @@ export async function installPresetTree({ sourceRoot, dshHome, dshBin = null }) 
   }
 }
 
-export function managedPatchText({ staticRoot }) {
+export function managedPatchText({ staticRoot, sessionVisibilityModule = "@ecologyrsi/dsh-evolution-plugin/session-visibility" }) {
   const safeRoot = String(staticRoot).replaceAll("'", "''");
-  return `${BEGIN}\n- insert:\n    - id: ecologyrsi-evolution\n      name: '@ecologyrsi/dsh-evolution-plugin'\n      inject: [webServer, agents, sessions, tokenMeter, subagents, tools, sessionPersistence, sessionProjections, agentPresets, llm, web]\n      config:\n        staticRoot: '${safeRoot}'\n        backendOrigin: 'http://127.0.0.1:8777'\n${END}\n`;
+  const safeVisibilityModule = String(sessionVisibilityModule).replaceAll("'", "''");
+  return `${BEGIN}\n- insert:\n    - id: ecologyrsi-evolution\n      name: '@ecologyrsi/dsh-evolution-plugin'\n      inject: [webServer, agents, sessions, tokenMeter, subagents, tools, sessionPersistence, sessionProjections, agentPresets, llm, web]\n      config:\n        staticRoot: '${safeRoot}'\n        backendOrigin: 'http://127.0.0.1:8777'\n    - id: ecologyrsi-session-visibility\n      name: '${safeVisibilityModule}'\n      inject: [sessions, sessionPersistence]\n${END}\n`;
 }
 
 async function atomicWrite(target, content) {
@@ -198,7 +237,16 @@ export async function installManagedPatch({ dshHome, staticRoot, profile = "web"
   if (!/^[a-z0-9][a-z0-9-]*$/.test(profile)) throw new Error("invalid DSH profile name");
   const target = path.join(dshHome, "profiles", profile, "cordis.patch.yml");
   await assertNoSymlink(target, dshHome);
-  const managed = managedPatchText({ staticRoot });
+  // A running DSH may have cached the previous package.json exports. Resolve
+  // this new, independent entry by installed path so live config reload can
+  // add it without restarting the evolution controller and its active Agents.
+  const managed = managedPatchText({
+    staticRoot,
+    sessionVisibilityModule: path.join(
+      path.resolve(dshHome), "profiles", profile, "node_modules", "@ecologyrsi",
+      "dsh-evolution-plugin", "lib", "runtime", "session-visibility.js",
+    ),
+  });
   let previous = "";
   if (await exists(target)) previous = await readFile(target, "utf8");
   const begin = previous.indexOf(BEGIN);
@@ -261,6 +309,7 @@ export async function installRuntime({
       if (archives.length !== 1) throw new Error("npm pack did not produce exactly one archive");
       packed = path.join(temporary, archives[0]);
     }
+    await validatePluginArchive({ archive: packed, pluginRoot });
     const cache = path.join(dshHome, "plugin-cache", "ecologyrsi");
     await mkdir(cache, { recursive: true, mode: 0o700 });
     const stable = path.join(cache, path.basename(packed));

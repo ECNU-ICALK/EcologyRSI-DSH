@@ -2,8 +2,10 @@
 from __future__ import annotations
 import os
 import threading
+from datetime import datetime
 from ..core.director import EvolutionDirector
 from ..core.ledger import EventLedger
+from ..core.models import digest
 from ..data.registry import DatasetRegistry
 from ..evaluators.registry import EvaluatorRegistry
 from ..evolution.strategies import StrategyRouterDSHAdapter
@@ -25,7 +27,28 @@ def initialize_runtime(self: GenerationRuntime, ledger: EventLedger) -> None:
         if manager is not None:
             manager.abort_native_evaluation(run_id)
 
-    self.sample_admission = RunSampleAdmission(on_execution_failure=abort_failed_evaluation)
+    from ..execution.host_activity import HostActivityMonitor, HOST_INTERRUPTION_EVENT
+    def record_host_gap(payload):
+        # Run incarnation and terminal checks use the same lock as lifecycle
+        # mutations. A removed/recreated run can never receive a late heartbeat.
+        with self.mutation_lock:
+            for run_id in self.ledger.run_ids(include_archived=False):
+                if self.ledger.latest_run_lifecycle_kind(run_id) not in {"RunStarted", "RunResumed"}:
+                    continue
+                created_events = self.ledger.events_by_kind(run_id, "RunCreated")
+                if not created_events:
+                    continue
+                created = created_events[0]
+                # A delayed diagnostic must not be attached to an experiment
+                # created after the interruption it describes.
+                if datetime.fromisoformat(created.created_at.replace("Z", "+00:00")) > datetime.fromisoformat(payload["resumed_at"]):
+                    continue
+                self.ledger.append(run_id, HOST_INTERRUPTION_EVENT, payload,
+                    event_id="host-gap:" + digest([run_id, created.seq, payload]),
+                    expected_run_created_seq=created.seq)
+    self.host_activity = HostActivityMonitor(on_gap=record_host_gap)
+    self.sample_admission = RunSampleAdmission(on_execution_failure=abort_failed_evaluation,
+                                               host_activity=self.host_activity)
     self.datasets = DatasetRegistry()
     self.model_gateway = ModelGateway.from_env(verification_store=self.ledger)
     runtime_origin = os.environ.get("ECOLOGYRSI_DSH_RUNTIME_URL", "").strip()

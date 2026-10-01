@@ -43,7 +43,7 @@ for (const [id, value] of [
   assert.match(html, new RegExp(`id="${id}"[^>]*value="${value}"`));
 }
 assert.match(html, /id="max-generations"[^>]*value="5"/);
-assert.match(html, /默认先运行 5 轮/);
+assert.match(html, /默认最多运行 5 轮，并按数据容量调整/);
 assert.doesNotMatch(html, /id="samples-per-update"/);
 assert.match(commandsSource, /function normalizedOptimizationSchedule\(values\)/);
 assert.match(commandsSource, /optimization_protocol: optimizationSchedule\.finalist_count === 1 \? "quick_adaptive_epoch@1" : "top2_adaptive_epoch@1"/);
@@ -382,7 +382,7 @@ const screenedOutCandidate = {
   status: "screened_out",
   selection_reason: "not_selected_by_screening_top_k",
 };
-assert.equal(modelSandbox.candidateStatusText(screenedOutCandidate.status), "初筛未入围");
+assert.equal(modelSandbox.candidateStatusText(screenedOutCandidate.status), "未进入训练主线");
 assert.equal(modelSandbox.candidateStatusClass(screenedOutCandidate.status), "pill-neutral");
 assert.equal(modelSandbox.candidateOutcome(screenedOutCandidate, {status: "running"}).text, "初筛未入围");
 assert.equal(modelSandbox.selectionReasonText(screenedOutCandidate.selection_reason), "初筛未入围，不参加正式评测");
@@ -1161,7 +1161,7 @@ const terminalCandidateFollowingRun = {
   status: "completed",
   generation: 1,
   best_observed_candidate_id: "candidate:prior-best",
-  execution_progress: {phase: "completed", current_generation: 2, current_candidate_id: null},
+  execution_progress: {phase: "completed", current_generation: 2, current_candidate_id: null, last_evidence_candidate_id: "candidate:latest-aborted"},
   candidates: [
     {id: "candidate:prior-best", generation: 1, slot_index: 0, status: "rejected"},
     {id: "candidate:latest-aborted", generation: 2, slot_index: 0, status: "aborted"},
@@ -1505,11 +1505,15 @@ const nativeDshUsageText = modelSandbox.modelUsageTokenProgressText({
       available: true,
       session_count: 3,
       total_tokens: 8192,
+      by_stage: {"sample.plan": {total_tokens: 7000, session_count: 2}, "sample.critic": {total_tokens: 1192, session_count: 1}},
     },
   },
 });
 assert.ok(nativeDshUsageText.includes("DSH 上下文压力（活跃会话最大值）：4,096 Token"));
 assert.ok(nativeDshUsageText.includes("供应商报告累计用量：8,192 Token"));
+
+assert.ok(nativeDshUsageText.includes("逐时点预测 7,000 Token"));
+assert.ok(nativeDshUsageText.includes("不因累计 Token 自动降低模型、推理额度或评测样本量"));
 
 // A paused run can retain a durable active phase so it can resume from the
 // exact checkpoint.  The control state must win in the UI without hiding the
@@ -1922,6 +1926,9 @@ const screeningRun = {
     },
   },
 };
+modelSandbox.renderExecutionMonitor({...screeningRun, execution_progress: {...screeningRun.execution_progress,
+  stage_progress: {...screeningRun.execution_progress.stage_progress, eta_status: "collecting_after_resume"}}});
+assert.ok(monitorNodes["#execution-sample-progress"].textContent.includes("恢复后正在重新估算耗时"));
 modelSandbox.renderExecutionMonitor(screeningRun);
 assert.equal(monitorNodes["#execution-monitor-status"].textContent, "模型执行中");
 assert.ok(monitorNodes["#execution-progress-detail"].textContent.includes("样本评测"));
@@ -2391,6 +2398,8 @@ const terminalTwoRoundRun = {
   ],
   execution_progress: {
     ...completedProgressRun.execution_progress,
+    current_candidate_id: null,
+    last_evidence_candidate_id: latestAbortedCandidate.id,
     current_generation: 2,
   },
 };
@@ -4041,6 +4050,12 @@ assert.ok(diagnosticNodes["#execution-diagnostics-grid"].innerHTML.includes("等
 assert.ok(diagnosticNodes["#execution-diagnostics-grid"].innerHTML.includes("等待拟合证据"));
 assert.equal(diagnosticNodes["#execution-diagnostics-grid"].innerHTML.includes("已评测 0"), false);
 
+diagnosticSandbox.renderExecutionDiagnostics({execution_diagnostics: {
+  remote_strategy_calls: 5, remote_strategy_successes: 5, remote_strategy_status: "completed",
+  adaptive_all_settled_origins: 100, execution_mode: "pending", training_artifact_count: 0,
+}});
+assert.ok(diagnosticNodes["#execution-diagnostics-grid"].innerHTML.includes("无独立拟合产物记录"));
+assert.equal(diagnosticNodes["#execution-diagnostics-grid"].innerHTML.includes("策略调用</dt><dd>等待执行"), false);
 diagnosticSandbox.renderExecutionDiagnostics({execution_diagnostics: Object.assign({}, partialDiagnostics, {execution_evidence_status: "retained_partial"})});
 assert.equal(diagnosticNodes["#execution-diagnostics-summary"].textContent, "已保留部分证据 · 反馈 6 / 9 · 候选工作量 6");
 assert.ok(diagnosticNodes["#execution-diagnostics-grid"].innerHTML.includes("已保留 6 / 9 个反馈目标样本"));
@@ -4546,6 +4561,26 @@ for (const name of ["core", "catalog", "data", "commands", "render_shell", "rend
   vm.runInContext(read(`assets/js/${name}.js`), formSubmissionSandbox);
 }
 vm.runInContext(read("app.js").split("\n    bindEvents();")[0], formSubmissionSandbox);
+const capacityFailure = Object.assign(new Error(
+  "insufficient causal cohort capacity: required=350, available=683, max_generations=4"
+), {errorCode: "insufficient_cohort_capacity", status: 400});
+assert.match(formSubmissionSandbox.errorMessage(capacityFailure), /最多支持 4 轮/);
+assert.match(formSubmissionSandbox.errorMessage(capacityFailure), /不会自动缩减样本量/);
+assert.doesNotMatch(formSubmissionSandbox.errorMessage(capacityFailure), /服务请求失败/);
+// Existing servers retain their old generic code; the known numeric capacity
+// message still has the same actionable interpretation.
+assert.match(formSubmissionSandbox.errorMessage({...capacityFailure,
+  message: capacityFailure.message, errorCode: "invalid_request"}), /最多支持 4 轮/);
+assert.match(formSubmissionSandbox.errorMessage({message: "unexpected failure",
+  errorCode: "invalid_request", status: 400}), /错误码 invalid_request；HTTP 400/);
+assert.doesNotMatch(formSubmissionSandbox.errorMessage({message: "unexpected failure",
+  errorCode: "secret=private-value", status: 400}), /private-value/);
+const quickCapacity = {cohort_reuse_policy: "training_replay_fresh_epoch_holdouts@1",
+  planned_generations: 5, max_feasible_generations: 4, sufficient: false,
+  required_unique_origins: 350, available_eligible_origins: 683};
+assert.match(formSubmissionSandbox.cohortCapacityLabel(quickCapacity), /计划 5 轮.*最多支持 4 轮/);
+assert.equal(formSubmissionSandbox.cohortCapacityLabel({...quickCapacity,
+  rejection_reason: "选择留出窗口不足"}), "选择留出窗口不足");
 formSubmissionSandbox.readiness = () => [{ready: true}];
 formSubmissionSandbox.hasCapability = () => true;
 formSubmissionSandbox.showToast = () => {};
@@ -4600,6 +4635,21 @@ assert.equal(formSubmissionSandbox.pendingCreateStatus(), null);
 assert.equal(formSubmissionSandbox.createDisplayStatus().state, "failed");
 assert.equal(formSubmissionSandbox.createPhaseLabel(formSubmissionSandbox.createDisplayStatus()), "本次启动未成功");
 assert.equal(formSubmissionSandbox.state.createStatus.runId, null);
+
+submittedRequests.length = 0;
+formSubmissionSandbox.request = async (route) => {
+  submittedRequests.push(route);
+  return {passed: false, receipts: [{passed: false,
+    identity: {provider_id: "pjlab", model_id: "deepseek-v4-flash-0731", stage: "generation.reflect"},
+    failure: {code: "structured_child_tool_protocol_error"}}]};
+};
+const protocolRejectedRun = await submitNode("#start-form").listeners.submit({preventDefault() {}, currentTarget: {fields: submittedFields}});
+assert.equal(protocolRejectedRun, null);
+assert.deepEqual(submittedRequests, ["/model-preflight"]);
+assert.match(formSubmissionSandbox.state.commandError, /pjlab\/deepseek-v4-flash-0731/);
+assert.match(formSubmissionSandbox.state.commandError, /工具调用返回为普通文本/);
+assert.match(formSubmissionSandbox.state.commandError, /由服务方修复工具调用解析/);
+assert.match(formSubmissionSandbox.state.commandError, /尚未创建运行/);
 
 assert.equal(formSubmissionSandbox.pendingCreateStatus(), null);
 // A lost preflight response must be reconciled before creating exactly once.
@@ -4669,6 +4719,54 @@ submitNode("#formal-origin-count").value = "288";
 assert.equal(formSubmissionSandbox.capacityVerificationPending(), true);
 formSubmissionSandbox.state.cohortCapacityError = "查询失败";
 assert.equal(formSubmissionSandbox.capacityVerificationPending(), false, "failed verification remains explainable rather than permanently disabling the form");
+
+// Untouched defaults must form an executable plan without overriding user
+// input or reusing the capacity receipt for the originally rejected plan.
+for (const [selector, value] of Object.entries({"#experiment-mode": "quick", "#max-generations": "5",
+  "#candidates-per-generation": "4", "#max-candidates": "20", "#formal-origin-count": "100",
+  "#local-batch-origin-count": "10", "#selection-holdout-origin-count": "50"})) {
+  submitNode(selector).value = value;
+}
+submitNode("#max-candidates").setCustomValidity = () => {};
+formSubmissionSandbox.state.busy = false;
+formSubmissionSandbox.state.roundsManuallyEdited = false;
+const defaultCapacityRequests = [];
+formSubmissionSandbox.request = async (route, options) => {
+  assert.equal(route, "/evolution-capacity");
+  defaultCapacityRequests.push(options.body);
+  return {...quickCapacity, planned_generations: options.body.planned_generations,
+    sufficient: options.body.planned_generations <= 4};
+};
+await formSubmissionSandbox.refreshEvolutionCapacity();
+assert.deepEqual(defaultCapacityRequests.map(r => r.planned_generations), [5, 4]);
+assert.equal(submitNode("#max-generations").value, "4");
+assert.equal(submitNode("#max-candidates").value, "16");
+assert.equal(submitNode("#formal-origin-count").value, "100");
+assert.equal(submitNode("#selection-holdout-origin-count").value, "50");
+assert.equal(formSubmissionSandbox.state.cohortCapacityReport.sufficient, true);
+assert.equal(formSubmissionSandbox.capacityVerificationPending(), false);
+assert.match(formSubmissionSandbox.createRunHint(null, true, []), /默认轮数从 5 调整为 4/);
+// New data can restore the normal default, but never invent more rounds.
+assert.equal(formSubmissionSandbox.fitDefaultRoundsToCapacity({...quickCapacity, max_feasible_generations: 9}), true);
+assert.equal(submitNode("#max-generations").value, "5");
+assert.equal(formSubmissionSandbox.state.defaultRoundsAdjustment, null);
+assert.equal(formSubmissionSandbox.capacityVerificationPending(), true);
+assert.equal(formSubmissionSandbox.fitDefaultRoundsToCapacity({...quickCapacity, max_feasible_generations: 0}), false);
+assert.equal(formSubmissionSandbox.fitDefaultRoundsToCapacity({...quickCapacity, rejection_reason: "证据不足"}), false);
+// Even retyping the default while a request is in flight is an explicit choice.
+formSubmissionSandbox.renderReadiness = () => {};
+formSubmissionSandbox.renderParameters = () => {};
+formSubmissionSandbox.scheduleEvolutionCapacityRefresh = () => {};
+let resolveDefaultCapacity;
+formSubmissionSandbox.request = () => new Promise(resolve => { resolveDefaultCapacity = resolve; });
+const editingCapacity = formSubmissionSandbox.refreshEvolutionCapacity();
+submitNode("#max-generations").listeners.input();
+assert.equal(formSubmissionSandbox.state.roundsManuallyEdited, true);
+resolveDefaultCapacity(quickCapacity);
+await editingCapacity;
+assert.equal(submitNode("#max-generations").value, "5");
+assert.equal(formSubmissionSandbox.state.cohortCapacityReport.sufficient, false);
+assert.equal(formSubmissionSandbox.state.defaultRoundsAdjustment, null);
 
 const historicalPreflight = {model_contract_preflight: {status: "verified", scope: "tool_and_schema_transport_only", checked_at: "2020-01-01T00:00:00Z", audit_digest: "audit-digest", roles: [{role: "researcher", model_id: "provider/model", receipt_id: "receipt:<script>", checked_at: "2020-01-01T00:00:00Z", expires_at: "2020-01-01T01:00:00Z", identity_digest: "identity-digest", receipt_digest: "receipt-digest"}]}};
 assert.match(formSubmissionSandbox.modelContractPreflightText(historicalPreflight), /创建前已核验/);
@@ -4768,3 +4866,18 @@ assert.equal(modelSandbox.executionDshActivityPresentation(liveRemote).statusTex
 liveRemote.remote_activity.updated_at = new Date(Date.now()-180000).toISOString();
 assert.match(modelSandbox.executionDshActivityPresentation(liveRemote).statusText, /未收到模型进度/);
 assert.match(modelSandbox.executionDshActivityPresentation(liveRemote).detail, /尚不能确认/);
+
+// Terminal identity must come from durable execution evidence, never the last proposal slot.
+const reviewTerminalRun = {status: "failed", candidates: [
+  {id: "candidate:trained", slot_index: 0}, {id: "candidate:untrained", slot_index: 3}],
+  execution_progress: {last_evidence_candidate_id: "candidate:trained"}};
+assert.equal(modelSandbox.executionCandidateFor(reviewTerminalRun, {candidates: [{candidate_id: "candidate:untrained"}]}).id, "candidate:trained");
+assert.equal(modelSandbox.executionCandidateFor({...reviewTerminalRun, execution_progress: {}}, null), null);
+const reviewQuickRun = {status: "failed", candidates: [{id: "candidate:untrained", status: "screened_out", selection_reason: "outside_preregistered_quick_trajectory"}]};
+for (const stage of ["training", "evaluation", "judge", "decision"]) {
+  assert.equal(modelSandbox.roundStageStatus({candidate_id: "candidate:untrained"}, stage, reviewQuickRun), "not_selected_for_training");
+}
+assert.equal(modelSandbox.candidateOutcome(reviewQuickRun.candidates[0], reviewQuickRun).text, "按预登记规则未进入训练");
+
+assert.equal(modelSandbox.roundResearchAggregateStatus({total: 4, completed: 1, notSelected: 3}), "completed");
+assert.equal(modelSandbox.roundResearchAggregateStatus({total: 3, completed: 0, notSelected: 3}), "not_selected_for_training");

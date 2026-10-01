@@ -17,6 +17,9 @@ import statistics
 from ecologyrsi_dsh.core.dsh_usage import session_usage_projection
 from ecologyrsi_dsh.core.ledger import Event
 from ecologyrsi_dsh.core.sample_results import decode_sample_result_batch
+from ecologyrsi_dsh.core.errors import safe_binding_diagnostics
+from ecologyrsi_dsh.core.models import digest
+from ecologyrsi_dsh.core.redaction import public_error_summary
 
 
 def metrics(rows):
@@ -36,6 +39,12 @@ def analyze(events):
     created = next(e for e in events if e.kind == 'RunCreated')
     manifest = created.payload['task_manifest']
     metadata = manifest['metadata']
+    session_stages = {e.payload['session_metrics']['session_id']: e.payload.get('identity', {}).get('stage', 'unknown')
+                      for e in events if e.kind in ('DshSessionUsageRecorded', 'DshStructuredResultAccepted')
+                      and e.payload.get('session_metrics')}
+    tokens_by_stage = Counter()
+    for session_id, (_, measurement) in usages.items():
+        tokens_by_stage[session_stages.get(session_id, 'unknown')] += measurement['provider_usage'].get('totals', {}).get('total_tokens', 0)
     cells = {}
     candidates = {}
     checkpoints = {}
@@ -108,10 +117,23 @@ def analyze(events):
     statuses = {'RunCreated':'created','RunStarted':'running','RunResumed':'running','RunPaused':'paused',
                 'RunFailed':'failed','RunCancelled':'cancelled','RunCompleted':'completed'}
     status = next(statuses[e.kind] for e in reversed(events) if e.kind in statuses)
+    terminal = next((e for e in reversed(events) if e.kind in ('RunFailed', 'RunPaused', 'RunCancelled', 'RunCompleted')), None)
+    formal_results = [dict(stage=e.payload.get('stage'), outcome=e.payload.get('outcome'),
+                           event_id=e.event_id, seq=e.seq) for e in events if e.kind == 'FormalStageCompleted']
     return dict(run_id=created.run_id, status=status, last_seq=events[-1].seq,
+                run_created_seq=created.seq, task_manifest_digest=digest(manifest),
+                budget=manifest.get('budget'), optimization_protocol=metadata.get('optimization_protocol'),
+                latest_stop=(dict(kind=terminal.kind, seq=terminal.seq, event_id=terminal.event_id,
+                    created_at=terminal.created_at, error_code=terminal.payload.get('error_code'),
+                    reason=public_error_summary(str(terminal.payload.get('reason') or '')),
+                    stage=terminal.payload.get('failure_context', {}).get('stage'),
+                    binding_drift=safe_binding_diagnostics(terminal.payload.get('failure_context', {}).get('binding_drift')))
+                    if terminal else None),
+                independent_evaluation_results=formal_results,
                 dataset_id=metadata.get('dataset_id') or manifest['visible_datasets'][0], episode_id=metadata.get('episode_id'),
                 configuration={k:metadata.get(k) for k in ('strategy_model_id','review_model_id','prediction_model_id','optimization_schedule','data_protocol_digest','derived_execution_budget')},
                 event_counts=dict(Counter(e.kind for e in events)), reported_tokens=usage, usage_coverage=coverage,
+                tokens_by_stage=dict(tokens_by_stage), token_accounting='maximum_cumulative_snapshot_per_session_not_billing',
                 scoring_rows=len(cells), statuses=dict(Counter(r['status'] for r in cells.values())),
                 public_failures=[dict(time=e.created_at, kind=e.kind,
                     code=e.payload.get('error_code') or e.payload.get('code'),
@@ -124,10 +146,14 @@ def analyze(events):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('manifest',type=Path)
+    parser.add_argument('manifest',type=Path,nargs='?')
     parser.add_argument('--db',type=Path,required=True)
+    parser.add_argument('--run-id',action='append',default=[])
+    parser.add_argument('--output',type=Path)
     args=parser.parse_args()
-    config=json.loads(args.manifest.read_text())
+    if bool(args.manifest) == bool(args.run_id):
+        parser.error('provide either a campaign manifest or one or more --run-id arguments')
+    config=json.loads(args.manifest.read_text()) if args.manifest else {'runs': [{'run_id': rid, 'label': rid} for rid in args.run_id]}
     reports=[]
     with sqlite3.connect(args.db.resolve().as_uri()+'?mode=ro',uri=True) as db:
         db.execute('PRAGMA query_only=ON')
@@ -142,7 +168,10 @@ def main():
                 continue
             reports.append(dict(label=run['label'], **analyze(events)))
     result=dict(observed_at=datetime.now(timezone.utc).isoformat(),runs=reports)
-    out=args.manifest.parent/'analysis.json'
+    out=args.output or (args.manifest.parent/'analysis.json' if args.manifest else None)
+    if out is None:
+        print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
+        return
     out.write_text(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
     print(json.dumps({'analysis_path':str(out),'runs':[{k:r.get(k) for k in ('label','status','reported_tokens','scoring_rows','statuses')} for r in reports]},ensure_ascii=False))
 

@@ -900,6 +900,16 @@ def _candidate_row(state: Any, candidate: Any, parent_id: str | None) -> dict[st
         if tool_performance:
             row["tool_performance"] = tool_performance
     row["agent_tool_performance"] = prior_candidate_tool_experience(state, candidate, metrics)
+    from .diversity import enabled as diversity_enabled, candidate_family
+    if diversity_enabled(state.task_manifest.metadata):
+        row["evolution_family"] = candidate_family(proposal)
+        measured = [item for item in getattr(state, "formal_batch_evaluations", ())
+                    if item.scope.candidate_id == candidate.candidate_id]
+        if measured:
+            latest = max(measured, key=lambda item: item.scope.batch_index)
+            behavior = latest.metrics.get("sample_execution", {}).get("observed_behavior")
+            if behavior is not None:
+                row["observed_training_behavior"] = dict(behavior)
     return row
 
 
@@ -3118,6 +3128,10 @@ def build_cross_generation_experience(
         },
         "contains_raw_samples": False,
     }
+    from .diversity import exploration_archive
+    archive = exploration_archive(state, generation)
+    if archive:
+        result["exploration_archive"] = archive
     result = _fit_cross_generation_experience(result)
     result.update(
         _historical_experience_payload(

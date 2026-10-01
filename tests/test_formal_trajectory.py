@@ -913,6 +913,14 @@ class FormalTrajectoryTests(unittest.TestCase):
         )
         self.assertTrue(_safety_requires_rollback(_REGRESSION_GUARDRAIL_REASON))
 
+    def test_new_policy_defers_cross_window_performance_to_paired_epoch(self):
+        from ecologyrsi_dsh.evolution.schedule import PREQUENTIAL_PERFORMANCE_POLICY
+        state = self._scored_state({0: 0.00944, 1: 0.04395, 2: 0.04607, 3: -0.04142},
+            task_manifest=SimpleNamespace(metadata={"prequential_performance_policy": PREQUENTIAL_PERFORMANCE_POLICY}))
+        revision = SimpleNamespace(revision_id="revision:regress:batch:3",
+            parent_revision_id="revision:regress:batch:2", source_batch_index=2)
+        self.assertIsNone(_prequential_regression_reason(state, "candidate:regress", revision, 3))
+
     def test_regression_band_tolerates_block_noise(self) -> None:
         """Only a drop beyond this lane's own volatility may undo an edit."""
 

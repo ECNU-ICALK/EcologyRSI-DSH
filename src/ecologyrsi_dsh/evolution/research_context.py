@@ -107,6 +107,8 @@ def compact_research_context(context: Mapping[str, Any], *, parent: EcologyEvolu
         **({"extra_schema_fields": extra_schema_fields} if extra_schema_fields else {}),
     }
     contract["direction_diversity"] = (
+        "When diversity_schedule is present, every slot must use its assigned family. "
+        "An exploratory hypothesis need not assert an observed weakness. "
         "Distinct directions do not require distinct axes or targets. A parameter target may recur "
         "with a different falsifiable hypothesis; the candidate proposer must choose a distinct legal "
         "behavior under sibling avoidance. Prose is audit-only; do not invent "

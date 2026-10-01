@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..evolution.diversity import preregister_candidate
+
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
 
 from ..evaluators.agent_stability import REPLICA_COUNT, replica_summary, stability_evidence, capacity_with_inference_replicas
@@ -506,7 +508,7 @@ def _prepare_formal_finalists(
     if frozen is None and schedule.quick:
         # Preregister the first proposal before seeing any evaluation labels.
         # Other proposals are never scored or ranked in the quick protocol.
-        selected = min(candidates, key=lambda item: item.slot_index)
+        selected = preregister_candidate(candidates, state.proposal, state.task_manifest.metadata, generation)
         frozen = _director_mutation(services, "freeze_formal_selection_cohort", run_id,
             generation=generation, selected_candidate_ids=(selected.candidate_id,),
             screening_digest=screening_cohort_digest(()))

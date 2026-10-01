@@ -64,11 +64,12 @@ class _RunAdmissionState:
 class RunSampleAdmission:
     """Enforce one immutable logical limit with adaptive physical admission."""
 
-    def __init__(self, *, on_execution_failure: Callable[[str], None] | None = None) -> None:
+    def __init__(self, *, on_execution_failure: Callable[[str], None] | None = None, host_activity=None) -> None:
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._states: dict[str, _RunAdmissionState] = {}
         self._on_execution_failure = on_execution_failure
+        self.host_activity = host_activity
 
     def _state_for(self, run_id: str, limit: int) -> _RunAdmissionState:
         if not isinstance(run_id, str) or not run_id.strip():
@@ -126,10 +127,12 @@ class RunSampleAdmission:
             state.active += 1
             admission_adjustment_epoch = state.adjustment_epoch
             admission_congestion_epoch = state.congestion_epoch
+        host_epoch = self.host_activity.observe() if self.host_activity is not None else 0
         outcome = AdmissionOutcome()
         try:
             yield outcome
         except BaseException as exc:
+            resumed = self.host_activity is not None and self.host_activity.observe() != host_epoch
             notify_failure = False
             with self._condition:
                 state.active -= 1
@@ -140,6 +143,8 @@ class RunSampleAdmission:
                 if (
                     dsh_error is not None
                     and dsh_native_runtime_retryable(dsh_error)
+                    and not (resumed and dsh_error.provider_status is None)
+                    and dsh_error.error_code != "dsh_native_runtime_transport_error"
                     and admission_congestion_epoch == state.congestion_epoch
                 ):
                     state.adaptive_limit = max(1, state.adaptive_limit // 2)

@@ -98,6 +98,8 @@ const STAGES = Object.freeze({
     instruction: [
       "Review only aggregate evidence and the Host mutation catalog for the completed batch.",
       "Read current_candidate_state and recent_edit_history before choosing an operation; never repeat an exact bundle rejected for the same candidate revision and never repeat an unchanged current value.",
+      "Honor decision_policy: when cross_batch_scores_measure_edit_effect is false, scores from different batch cohorts are diagnostic only, not evidence of a mutation's gain or regression. Performance conclusions require same-cohort paired evidence; physical and execution guards remain active.",
+      "When repeated_behavior_requires_revisit_reason is true, inspect recent_behavior_states. A return to a prior behavior must include revisit with reason safety_recovery, new_batch_evidence, or paired_recheck and a specific justification grounded in the supplied evidence_refs. A missing-rationale rejection can be repaired by supplying this explanation; it does not waive other rejection guards.",
       "Return exactly one local-edit object. Choose keep with an empty operations array or mutate with only registered operations.",
       "If no distinct registered local change is admissible, return keep instead of recycling a recent rejected bundle.",
       "Never include raw observations, predictions, timestamps, prompts, or executable code.",
@@ -128,6 +130,7 @@ const STAGES = Object.freeze({
       "Assess the complete forecast_objective target-horizon matrix and preserve non-targeted cells when recommending the next directions.",
       "Explain why candidate directions succeeded or failed without making causal claims.",
       "Return exactly direction_count distinct next-step directions and bounded search queries.",
+      "candidate_directions, lessons, and recommended_search_queries must be native JSON arrays, never JSON-encoded strings. Include stop_recommendation and every required schema field. Do not add undeclared fields such as mutation_axis2.",
       "Each direction must select one mutation_axis and one exact target from host_boundary.allowed_mutation_targets.",
       "Set mutation_direction to increase or decrease for scientific_parameter and select for the other axes; only the structured mutation coordinates are executable; prose remains audit-only.",
       "For every evidence_ref copy one string verbatim from host_boundary.allowed_evidence_refs; entries of allowed_mutation_targets are mutation coordinates, not evidence, and citing one is rejected. Never invent a source.",
@@ -694,14 +697,21 @@ function correctedRetrievalArgumentResult(events, call, retrievalCalls, terminal
   return corrected ? failed : null;
 }
 
-function correctedStructuredArgumentCall(events) {
+function maximumStructuredOutputAttempts(stage) {
+  // A generation reflection carries a nested direction array and may need two
+  // schema-only corrections. Forecast and candidate contracts retain one.
+  return stage === "generation.reflect" ? 3 : 2;
+}
+
+function correctedStructuredArgumentCall(events, maximumAttempts = 2) {
   const calls = events.filter(({ event }) => event?.type === "tool/call"
     && eventData(event).name === "structured_output");
-  if (calls.length !== 2) return null;
-  const [first, last] = calls;
+  if (calls.length < 2 || calls.length > maximumAttempts) return null;
+  const first = calls[0], last = calls.at(-1);
   const firstData = eventData(first.event), lastData = eventData(last.event);
-  if (!firstData.callId || !lastData.callId || firstData.callId === lastData.callId
-    || firstData.turn !== lastData.turn) return null;
+  const ids = calls.map(call => eventData(call.event).callId);
+  if (ids.some(id => typeof id !== "string" || !id) || new Set(ids).size !== ids.length
+    || calls.some(call => eventData(call.event).turn !== firstData.turn)) return null;
   function resultFor(call) {
     const data = eventData(call.event);
     const matches = events.filter((item) => item.event?.type === "tool/result"
@@ -712,19 +722,23 @@ function correctedStructuredArgumentCall(events) {
       && result.event.sourceEventSeqs?.length === 1 && result.event.sourceEventSeqs[0] === call.seq
       ? result : null;
   }
-  const rejected = resultFor(first), accepted = resultFor(last);
-  const error = eventData(rejected?.event).error;
+  for (let index = 0; index < calls.length - 1; index += 1) {
+    const rejected = resultFor(calls[index]);
+    const error = eventData(rejected?.event).error;
+    if (!rejected || rejected.seq >= calls[index + 1].seq
+      || toolResultIdentity(rejected.event)?.isError !== true
+      || error?.name !== "ToolArgsError" || error?.code !== "INVALID_ARGS") return null;
+  }
+  const accepted = resultFor(last);
   const terminal = consumedTerminalEnd(events.map((item) => item.event));
-  if (!rejected || !accepted || rejected.seq >= last.seq
-    || toolResultIdentity(rejected.event)?.isError !== true
-    || error?.name !== "ToolArgsError" || error?.code !== "INVALID_ARGS"
-    || toolResultIdentity(accepted.event)?.isError !== false
+  if (!accepted || toolResultIdentity(accepted.event)?.isError !== false
     || eventData(terminal).reason?.kind !== "completed"
     || eventData(terminal).turn !== lastData.turn || terminal.seq <= accepted.seq) return null;
-  // Corrections edit only output arguments; no new evidence or second result
-  // may be introduced after the first submission.
+  // Corrections can change only output arguments, after an exact source-bound
+  // schema rejection. Never admit a second success or intervening tool work.
+  const outputEvents = new Set(calls.map(call => call.event));
   if (events.some(({ event, seq }) => event?.type === "tool/call"
-    && seq > first.seq && event !== last.event)) return null;
+    && seq > first.seq && !outputEvents.has(event))) return null;
   return last;
 }
 
@@ -840,7 +854,7 @@ export async function synchronizedStructuredCaptureDisposition(
 function verifiedSkillInvocationEvidence(events, options) {
   const ordered = Array.isArray(events) ? events.map((event, index) => ({ event, seq: eventSequence(event, index) }))
     .sort((a, b) => a.seq - b.seq) : [];
-  if (exactInvalidStructuredArgsSeen(events) && !correctedStructuredArgumentCall(ordered)) {
+  if (exactInvalidStructuredArgsSeen(events) && !correctedStructuredArgumentCall(ordered, maximumStructuredOutputAttempts(options.stage))) {
     throw structuredPhaseError("capture");
   }
   try { return skillInvocationEvidence(events, options); }
@@ -957,7 +971,7 @@ export function skillInvocationEvidence(
 
   const nextToolName = "structured_output";
   const nextCalls = calls.filter((item) => eventData(item.event).name === nextToolName);
-  const corrected = correctedStructuredArgumentCall(events);
+  const corrected = correctedStructuredArgumentCall(events, maximumStructuredOutputAttempts(stage));
   if ((nextCalls.length !== 1 && !corrected) || nextCalls[0].seq <= skillResult.seq) {
     throw new Error(`the required ${nextToolName} call did not follow the Skill result`);
   }
@@ -1022,6 +1036,7 @@ export class NativeStageRunner {
     sidecar,
     structuredStageTimeoutMs = 600_000,
     researchStageTimeoutMs = 1_800_000,
+    samplePlannerStageTimeoutMs = 1_800_000,
     sampleCriticStageTimeoutMs = 600_000,
     structuredStageMinIntervalMs = 0,
     structuredStageMaxInFlight = MAX_STRUCTURED_STAGE_IN_FLIGHT,
@@ -1044,6 +1059,10 @@ export class NativeStageRunner {
     this.sampleCriticStageTimeoutMs = validateStructuredTimeoutMs(
       sampleCriticStageTimeoutMs,
       "sampleCriticStageTimeoutMs",
+    );
+    this.samplePlannerStageTimeoutMs = validateStructuredTimeoutMs(
+      samplePlannerStageTimeoutMs,
+      "samplePlannerStageTimeoutMs",
     );
     this.structuredStageMaxAttempts = positiveStageAttempts(structuredStageMaxAttempts);
     // Route outage recovery is longer than the provider's short request backoff.
@@ -1156,9 +1175,11 @@ export class NativeStageRunner {
     }
     const stageTimeoutMs = contract.role === "researcher"
       ? this.researchStageTimeoutMs
-      : binding.stage === "sample.critic"
-        ? this.sampleCriticStageTimeoutMs
-        : this.structuredStageTimeoutMs;
+      : binding.stage === "sample.plan"
+        ? this.samplePlannerStageTimeoutMs
+        : binding.stage === "sample.critic"
+          ? this.sampleCriticStageTimeoutMs
+          : this.structuredStageTimeoutMs;
     // Start the stage deadline before provider admission so FIFO queueing,
     // reservation, model execution, and persistence share one budget.
     const lifecycle = {
@@ -1328,7 +1349,9 @@ export class NativeStageRunner {
           `${dynamicRetrieval ? "Then" : "After the Skill result,"} call structured_output exactly once with one concise object matching the supplied output schema.`,
           "Do not emit prose before or after it.",
         ]),
-        "If structured_output returns INVALID_ARGS, correct the arguments once using the error feedback. Do not call other tools, repeat an accepted output, or make more than two output attempts.",
+        binding.stage === "generation.reflect"
+          ? "If structured_output returns INVALID_ARGS, correct only the schema errors up to twice. Do not call other tools or repeat an accepted output; at most three output attempts are allowed."
+          : "If structured_output returns INVALID_ARGS, correct the arguments once using the error feedback. Do not call other tools, repeat an accepted output, or make more than two output attempts.",
         // Reasoning and tool arguments share one per-call cap. A model that
         // cannot be asked for a lower reasoning tier will otherwise spend the
         // whole cap thinking and end the turn with no structured_output call

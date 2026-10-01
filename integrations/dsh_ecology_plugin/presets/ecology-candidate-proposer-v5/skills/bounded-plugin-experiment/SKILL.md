@@ -7,6 +7,8 @@ description: Implement one assigned ecology research direction as one exact regi
 
 Implement the assigned direction as a delta over the supplied parent Genome.
 
+`skill_program` maps to `author_skill_program` for `sample-planner`. Use the supplied `skill_grammar` (or `legal_skill_grammar` in local editing) to compose up to three registered causal modules, each with `module_id`, `when`, and bounded `guidance`. The Host executes the diagnostics and delivers guidance only when its trigger applies. Inspect the current program before authoring/revising. You may reuse components from `exploration_archive`, but they remain training examples requiring fresh evaluation; their scores from different windows cannot be ranked. One skill program replacement is one mutation operation.
+
 - `scientific_parameter` maps only to `set_bounded_parameter` with the exact target name and a value inside the stated trust region. Read the parent value: `increase` requires a strictly larger value and `decrease` requires a strictly smaller value.
 - `registered_predictor` maps only to `select_registered_pipeline` with the exact target predictor.
 - `instruction_profile` maps only to `select_instruction_template` for role `sample-planner` with the exact target template.

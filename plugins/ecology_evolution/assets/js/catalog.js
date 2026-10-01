@@ -721,11 +721,16 @@
     var required = formatNumber(capacity.planned_origin_occurrences == null ? capacity.required_unique_origins : capacity.planned_origin_occurrences);
     var available = formatNumber(capacity.available_source_origins == null ? capacity.available_eligible_origins : capacity.available_source_origins);
     var maximum = formatNumber(capacity.max_feasible_generations);
+    if (capacity.sufficient !== true && capacity.rejection_reason) { return String(capacity.rejection_reason); }
     if (capacity.cohort_reuse_policy === "training_replay_fresh_epoch_holdouts@1") {
+      if (capacity.sufficient !== true) {
+        return "训练数据时间窗口不足：计划 " + formatNumber(capacity.planned_generations)
+          + " 轮，按历史窗口和预测间隔隔离后最多支持 " + maximum
+          + " 轮。每轮比较需要新的时点，请减少训练轮数或选择覆盖时间更长的数据。";
+      }
       return (capacity.sufficient ? "数据量可满足运行" : "可用数据量不足") + "（需要 " + formatNumber(capacity.required_unique_origins) + " 个不同起点 / 可用 " + available + "；训练回放 " + formatNumber(capacity.reused_origin_occurrences || 0) + " 次，每轮比较使用新时点；最多 " + maximum + " 轮）";
     }
     if (capacity.sufficient !== true) {
-      if (capacity.rejection_reason) { return String(capacity.rejection_reason); }
       if (capacity.cohort_reuse_policy === "training_epochs_fixed_partitions@1") {
         return "单轮训练配置超过可用时间窗口（不同起点 " + formatNumber(capacity.required_unique_origins) + "，另需预测时距隔离 / 可用 " + available + "）。请减少每个方案的优化时点数；增加训练轮数不会消耗独立评测区。";
       }
@@ -769,6 +774,26 @@
       && (!state.cohortCapacityReport || state.cohortCapacitySignature !== planned.signature));
   }
 
+  function fitDefaultRoundsToCapacity(report) {
+    // Only untouched defaults may follow the current data boundary. An
+    // explicitly entered round count remains visible and is never clamped.
+    if (state.roundsManuallyEdited || state.busy || !report || report.rejection_reason
+      || report.cohort_reuse_policy !== "training_replay_fresh_epoch_holdouts@1") { return false; }
+    var maximum = report.max_feasible_generations;
+    var recommended = runParameterRule("rounds").default;
+    var field = $("#max-generations");
+    var current = Number(field.value);
+    var previous = state.defaultRoundsAdjustment;
+    if (!Number.isInteger(maximum) || maximum < 1
+      || current !== recommended && (!previous || current !== previous.rounds)) { return false; }
+    var rounds = Math.min(recommended, maximum);
+    if (rounds === current) { return false; }
+    field.value = String(rounds);
+    state.defaultRoundsAdjustment = rounds < recommended ? {from: recommended, rounds: rounds} : null;
+    syncCandidateBudget();
+    return true;
+  }
+
   function refreshEvolutionCapacity() {
     var planned = evolutionCapacityRequest();
     var body = planned.body;
@@ -805,6 +830,13 @@
       if (requestId !== state.cohortCapacityRequest || evolutionCapacityRequest().signature !== planned.signature) { return null; }
       state.cohortCapacityReport = report;
       state.cohortCapacitySignature = planned.signature;
+      if (fitDefaultRoundsToCapacity(report)) {
+        // Recheck the exact adjusted plan, including its day-block evidence,
+        // before enabling creation. Never reuse the rejected plan's receipt.
+        state.cohortCapacityReport = null;
+        state.cohortCapacitySignature = null;
+        return refreshEvolutionCapacity();
+      }
       return report;
     }).catch(function (error) {
       if (requestId !== state.cohortCapacityRequest) { return null; }

@@ -11,6 +11,7 @@ test("research stages have an independent long-running timeout", () => {
   });
   assert.equal(defaults.structuredStageTimeoutMs, 600_000);
   assert.equal(defaults.researchStageTimeoutMs, 1_800_000);
+  assert.equal(defaults.samplePlannerStageTimeoutMs, 1_800_000);
   assert.equal(defaults.sampleCriticStageTimeoutMs, 600_000);
   assert.equal(defaults.structuredStageMinIntervalMs, 6_000);
   assert.equal(defaults.structuredStageMaxInFlight, 128);
@@ -18,12 +19,14 @@ test("research stages have an independent long-running timeout", () => {
 
   const configured = resolvePluginConfig({
     researchStageTimeoutMs: 900_000,
+    samplePlannerStageTimeoutMs: 1_200_000,
     sampleCriticStageTimeoutMs: 120_000,
   }, {
     defaultStaticRoot: "/tmp/ecologyrsi-static",
     env: {},
   });
   assert.equal(configured.researchStageTimeoutMs, 900_000);
+  assert.equal(configured.samplePlannerStageTimeoutMs, 1_200_000);
   assert.equal(configured.sampleCriticStageTimeoutMs, 120_000);
 });
 
@@ -72,6 +75,7 @@ test("all structured stage timeouts respect the protocol ceiling", () => {
   for (const name of [
     "structuredStageTimeoutMs",
     "researchStageTimeoutMs",
+    "samplePlannerStageTimeoutMs",
     "sampleCriticStageTimeoutMs",
   ]) {
     for (const value of [1_800_001, 2_147_483_648]) {
@@ -84,4 +88,10 @@ test("all structured stage timeouts respect the protocol ceiling", () => {
       );
     }
   }
+});
+
+
+test('sample planner stage timeout rejects nonpositive values', () => {
+  assert.throws(() => resolvePluginConfig({samplePlannerStageTimeoutMs: 0},
+    {defaultStaticRoot: '/tmp/ecologyrsi-static', env: {}}), /samplePlannerStageTimeoutMs must be positive/);
 });

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+import re
+
+from ..version import __version__
 
 
 def walk_exception_graph(
@@ -79,6 +82,15 @@ _PUBLIC_BINDING_LABELS = frozenset(
         "预测模型实现",
         "候选生成模型配置",
         "独立评审模型配置",
+        "Host evolution runtime",
+        "dataset task adapter",
+        "fitness profile",
+        "fitness profile digest",
+        "selection sample threshold",
+        "origin-bundle selection threshold",
+        "DSH preset capability",
+        "候选生成模型 DSH 路由",
+        "独立评审模型 DSH 路由",
     }
 )
 
@@ -88,7 +100,8 @@ class FrozenRuntimeBindingDriftError(ValueError):
 
     error_code = FROZEN_RUNTIME_BINDING_DRIFT_CODE
 
-    def __init__(self, binding_label: str = "冻结运行时绑定") -> None:
+    def __init__(self, binding_label: str = "冻结运行时绑定", *,
+                 expected_digest: str | None = None, current_digest: str | None = None) -> None:
         # Only host-owned labels may reach an HTTP response. In particular,
         # neither side of the digest comparison is retained in this message.
         label = (
@@ -96,10 +109,33 @@ class FrozenRuntimeBindingDriftError(ValueError):
             if binding_label in _PUBLIC_BINDING_LABELS
             else "冻结运行时绑定"
         )
+        self.diagnostics = {"binding_label": label, "runtime_version": __version__}
+        for key, value in (("expected_digest", expected_digest), ("current_digest", current_digest)):
+            if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value):
+                self.diagnostics[key] = value
         super().__init__(
             f"{label}发生漂移；为保证可复现性，旧运行已拒绝继续。"
             "请使用当前配置新建进化运行。"
         )
+
+
+def safe_binding_diagnostics(value: object) -> dict[str, str]:
+    """Validate persisted diagnostics; never copy model routes or credentials."""
+    from collections.abc import Mapping
+    if not isinstance(value, Mapping):
+        return {}
+    result = {}
+    label = value.get("binding_label")
+    if isinstance(label, str) and (label in _PUBLIC_BINDING_LABELS or label == "冻结运行时绑定"):
+        result["binding_label"] = label
+    for key in ("expected_digest", "current_digest"):
+        item = value.get(key)
+        if isinstance(item, str) and re.fullmatch(r"[0-9a-f]{64}", item):
+            result[key] = item
+    version = value.get("runtime_version")
+    if isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[a-zA-Z0-9.+-]{0,32})?", version):
+        result["runtime_version"] = version
+    return result
 
 
 DSH_NATIVE_RUNTIME_UNAVAILABLE_CODE = "dsh_native_runtime_unavailable"

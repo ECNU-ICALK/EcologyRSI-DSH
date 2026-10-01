@@ -14,6 +14,13 @@
 当前交付只启动两个进程：DSH Web Profile 监听 `8848`，EcologyRSI Python
 sidecar 监听 `127.0.0.1:8777`；无需再启动独立前端服务或其他项目端口。
 
+自进化创建的角色会话及其子会话仅保留在本地 DSH 日志中，不进入 Workspaces /
+Ungrouped 会话列表。安装器同时挂载独立的 `session-visibility` 插件，按角色会话 ID、
+生态 preset 和父子关系识别已有及新建记录，不根据工作目录或标题隐藏普通聊天。
+识别结果缓存在 DSH session 根目录的 `.ecology-workspace-hidden.json` 中，后续列表
+请求直接跳过已识别的日志目录及摘要构建。缓存缺失时首次请求会重建索引；日志不移动、
+不删除，按 ID 读取、恢复、计费和自进化工作台继续使用原始记录。
+
 研究、候选提议、样本规划/批评和代际评审均由 DSH Agent Session、受限 preset
 与直接、一次性的结构化子 Agent 执行。Python sidecar 只保留科学数值工具、不可变基因组编译
 和追加式事件账本。上下文压缩与角色生命周期由 DSH 管理；不设跨调用的逐样本
@@ -56,6 +63,8 @@ config:
   # 普通结构化阶段 10 分钟；长上下文调研阶段默认 30 分钟
   structuredStageTimeoutMs: 600000
   researchStageTimeoutMs: 1800000
+  # 预测规划含多次工具比较与长推理，单独给予 30 分钟
+  samplePlannerStageTimeoutMs: 1800000
   # 评分前 sample critic 独立上限 10 分钟
   sampleCriticStageTimeoutMs: 600000
   # 可选：也可以省略此项，直接使用 Node 进程环境变量
@@ -65,7 +74,8 @@ config:
 `researchStageTimeoutMs` 只用于搜索规划和证据综合等 researcher 阶段，
 避免大上下文、慢推理模型被普通 10 分钟阶段上限误伤。
 `sampleCriticStageTimeoutMs` 只用于评分前 `sample.critic`；默认 10 分钟，以覆盖高并发下正常的长响应，同时仍限制无效结构化输出后的异常长生成；
-样本预测、候选提案、评分和反思使用 `structuredStageTimeoutMs`。
+`samplePlannerStageTimeoutMs` 只用于 `sample.plan`，默认 30 分钟：实跑中仍有生成活动的样本曾在 10 分钟时被中止，累计输出仅约 6900 Token。此时间包含准入排队、所有子调用、重试及持久化，不因重试而重置；达到截止时间仍中止并隔离晚到结果。输出额度、模型、预测工具次数和科学门槛保持不变。
+候选提案、评分和反思使用 `structuredStageTimeoutMs`。
 
 `serviceToken` 也可以省略，插件会读取 Node 进程的
 `ECOLOGYRSI_SERVICE_TOKEN`。配置后，代理在服务端覆盖 iframe 请求中的

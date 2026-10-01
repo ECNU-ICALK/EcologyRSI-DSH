@@ -58,6 +58,7 @@ _EVENT_TYPE_ALIASES = {
     "GatewayRetryScheduled": "gateway.retry_scheduled",
     "DshChildExecutionFailed": "dsh.child_execution_failed",
     "ModelUsageRecorded": "model.usage_recorded",
+    "HostExecutionInterrupted": "host.execution_interrupted",
 }
 
 _PLUGIN_FILES = {

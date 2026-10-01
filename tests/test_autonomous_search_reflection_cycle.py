@@ -550,6 +550,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                 # an authored value identical to the one already on the profile,
                 # so the two directions are not interchangeable.
                 "instruction_directive": ["author", "revise"],
+                "skill_program": ["author", "revise"],
             },
         )
         self.assertEqual(

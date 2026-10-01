@@ -88,47 +88,61 @@ class IndependentEvaluationService:
         if stage not in {"validation", "final_test"}:
             raise ValueError("独立评测阶段必须为 validation 或 final_test")
         with self.lock:
-            if self.stopping.is_set():
-                raise ValueError("服务正在关闭，请稍后重试")
-            report = self.status(run_id)
-            item = next(s for s in report["stages"] if s["stage"] == stage)
-            if item["status"] in {"running", "completed", "sealed"}:
-                return report
-            if not item["available"]:
-                raise ValueError(item["reason"])
-            if any(worker.is_alive() for worker in self.workers):
-                raise ValueError("已有独立评测正在执行，请等待完成后再启动")
-            state = self.server.director.state(run_id)
-            task = state.task_manifest
-            if task.metadata.get("sample_agent_mode") != "dsh_native_agent":
-                raise ValueError("独立评测要求已冻结的逐样本 Agent 运行")
-            self.server.validate_frozen_runtime_bindings(task, run_id=run_id)
-            protocol = self.server.datasets.data_protocol(task.dataset, task.metadata["episode_id"])
-            if protocol.protocol_digest != task.metadata.get("data_protocol_digest"):
-                raise ValueError("时间分区已变化，请完成当前协议下的新训练运行")
-            candidate_id = item["candidate_id"]
-            artifact = state.artifact_for(candidate_id)
-            if artifact.candidate_revision_id is None:
-                raise ValueError("独立评测要求明确的候选版本和模型产物绑定")
-            adapter = dataset_adapter(task.dataset)
-            plan = {"schema_version": "ecologyrsi-dsh.independent-analysis-plan/1", "stage": stage,
-                    "dataset_task": adapter.contract(), "partition_digest": protocol.partition_digests[stage],
-                    "sampling": "all_eligible_origins_in_time_order", "inference_replicas": 2,
-                    "fit_policy": "original_calibration_fit_only_verify_frozen_coefficients",
-                    "candidate_updates": False, "raw_results_exposed": False,
-                    "post_score_agent_feedback": False}
-            token = self.server.director.reserve_formal_stage(run_id, stage=stage,
-                candidate_id=candidate_id, objective_family_digest=adapter.contract()["contract_digest"],
-                analysis_plan_digest=digest(plan), partition_digest=protocol.partition_digests[stage],
-                idempotency_key=f"{run_id}:independent:{stage}")
-            self.jobs[(run_id, stage)] = {"status": "running", "progress": {}}
-            worker = threading.Thread(target=self._execute, args=(run_id, token, plan), daemon=True,
-                                      name=f"independent-{stage}")
-            self.workers = [worker]
-            worker.start()
-            return self.status(run_id)
+            reservation = self.server.reserve_run_work(run_id)
+            worker_started = False
+            try:
+                if self.stopping.is_set():
+                    raise ValueError("服务正在关闭，请稍后重试")
+                report = self.status(run_id)
+                item = next(s for s in report["stages"] if s["stage"] == stage)
+                if item["status"] in {"running", "completed", "sealed"}:
+                    return report
+                if not item["available"]:
+                    raise ValueError(item["reason"])
+                if any(worker.is_alive() for worker in self.workers):
+                    raise ValueError("已有独立评测正在执行，请等待完成后再启动")
+                state = self.server.director.state(run_id)
+                task = state.task_manifest
+                if task.metadata.get("sample_agent_mode") != "dsh_native_agent":
+                    raise ValueError("独立评测要求已冻结的逐样本 Agent 运行")
+                self.server.validate_frozen_runtime_bindings(task, run_id=run_id)
+                protocol = self.server.datasets.data_protocol(task.dataset, task.metadata["episode_id"])
+                if protocol.protocol_digest != task.metadata.get("data_protocol_digest"):
+                    raise ValueError("时间分区已变化，请完成当前协议下的新训练运行")
+                candidate_id = item["candidate_id"]
+                artifact = state.artifact_for(candidate_id)
+                if artifact.candidate_revision_id is None:
+                    raise ValueError("独立评测要求明确的候选版本和模型产物绑定")
+                adapter = dataset_adapter(task.dataset)
+                plan = {"schema_version": "ecologyrsi-dsh.independent-analysis-plan/1", "stage": stage,
+                        "dataset_task": adapter.contract(), "partition_digest": protocol.partition_digests[stage],
+                        "sampling": "all_eligible_origins_in_time_order", "inference_replicas": 2,
+                        "fit_policy": "original_calibration_fit_only_verify_frozen_coefficients",
+                        "candidate_updates": False, "raw_results_exposed": False,
+                        "post_score_agent_feedback": False}
+                token = self.server.director.reserve_formal_stage(run_id, stage=stage,
+                    candidate_id=candidate_id, objective_family_digest=adapter.contract()["contract_digest"],
+                    analysis_plan_digest=digest(plan), partition_digest=protocol.partition_digests[stage],
+                    idempotency_key=f"{run_id}:independent:{stage}")
+                self.jobs[(run_id, stage)] = {"status": "running", "progress": {}}
+                worker = threading.Thread(target=self._execute, args=(run_id, token, plan, reservation), daemon=True,
+                                          name=f"independent-{stage}")
+                self.workers = [worker]
+                try:
+                    worker.start()
+                except Exception:
+                    self.workers = []
+                    self.jobs[(run_id, stage)]["status"] = "failed"
+                    self.server.director.execute_formal_stage(run_id, token, lambda: {
+                        "outcome": "inconclusive", "reason_code": "worker_start_failed"})
+                    raise
+                worker_started = True
+                return self.status(run_id)
+            finally:
+                if not worker_started:
+                    reservation.release()
 
-    def _execute(self, run_id, token, plan):
+    def _execute(self, run_id, token, plan, reservation):
         def evaluate():
             self.server.sample_admission.forget(run_id)
             self.server.dsh_tools.open_run_admissions(run_id)
@@ -142,7 +156,10 @@ class IndependentEvaluationService:
             with self.lock:
                 self.jobs[(run_id, token.stage)].update(status="failed", error="评测中断，当前分区已封存。详情见服务日志。")
         finally:
-            self.server.dsh_tools.close_run_admissions(run_id)
+            try:
+                self.server.dsh_tools.close_run_admissions(run_id)
+            finally:
+                reservation.release()
 
     def _evaluate(self, run_id, token, plan):
         from .formal_trajectory import _revision_evaluation_inputs

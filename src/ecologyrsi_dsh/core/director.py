@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..evolution.diversity import preregister_candidate
+
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
 
 from ..evolution.agent_policy import build_agent_policy, validate_agent_policy
@@ -1124,6 +1126,7 @@ class EvolutionDirector:
                 "candidate_id",
                 "batch_id",
                 "failure_domain",
+                "binding_drift",
             } | integer_fields
             context = dict(failure_context)
             if not context or not set(context) <= allowed:
@@ -1131,7 +1134,11 @@ class EvolutionDirector:
             if not isinstance(context.get("generation"), int):
                 raise ValueError("failure_context generation must be an integer")
             for key, value in context.items():
-                if key in integer_fields:
+                if key == "binding_drift":
+                    from .errors import safe_binding_diagnostics
+                    if not isinstance(value, Mapping) or not value or safe_binding_diagnostics(value) != value:
+                        raise ValueError("failure_context binding_drift has an invalid shape")
+                elif key in integer_fields:
                     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                         raise ValueError(f"failure_context {key} must be non-negative")
                 elif not isinstance(value, str) or not value.strip() or len(value) > 160:
@@ -2578,9 +2585,9 @@ class EvolutionDirector:
         if len(selected) != schedule.finalist_count or len(selected) != len(set(selected)):
             raise ValueError("formal selection cohort must contain exactly 2 candidates")
         if schedule.quick:
-            first = min((c for c in state.candidates if c.generation == generation and c.role is CandidateRole.SEARCH), key=lambda c: c.slot_index)
+            first = preregister_candidate((c for c in state.candidates if c.generation == generation and c.role is CandidateRole.SEARCH), state.proposal, state.task_manifest.metadata, generation)
             if selected != (first.candidate_id,):
-                raise ValueError("quick trajectory must preregister the first proposal")
+                raise ValueError("quick trajectory must preregister the frozen policy's proposal")
         for candidate_id in selected:
             candidate = state.candidate(candidate_id)
             if candidate.generation != generation:
@@ -6149,6 +6156,13 @@ class EvolutionDirector:
             raise ValueError("formal token belongs to another run")
         if not callable(evaluator):
             raise TypeError("evaluator must be callable")
+        first_events = self.ledger.events_after(run_id, limit=1)
+        if not first_events or first_events[0].kind != "RunCreated":
+            raise KeyError(f"unknown run: {run_id}")
+        incarnation = first_events[0].seq
+        frozen = self.ledger.event_by_id(f"{run_id}:formal:{token.stage}:frozen", run_id=run_id)
+        if frozen is None or frozen.seq < incarnation or frozen.payload.get("token_digest") != token.token_digest:
+            raise ConcurrentRunMutationError("formal token is not frozen in the current run incarnation")
         registry = ScientificExposureRegistry(self.ledger)
         outcome = "failed"
         try:
@@ -6173,6 +6187,7 @@ class EvolutionDirector:
                     "assessment": result_dict,
                 },
                 event_id=f"{run_id}:formal:{token.stage}:completed",
+                expected_run_created_seq=incarnation,
             )
             return result_dict
         finally:
@@ -6189,6 +6204,7 @@ class EvolutionDirector:
                     "outcome": outcome,
                 },
                 event_id=f"{run_id}:formal:{token.stage}:sealed",
+                expected_run_created_seq=incarnation,
             )
 
     def state(self, run_id: str) -> RunState:

@@ -116,11 +116,17 @@ class TransportMixin:
             self._send(HTTPStatus.NOT_FOUND, public_error_payload(exc, status=HTTPStatus.NOT_FOUND))
         except KeyError as exc:
             self._send(HTTPStatus.NOT_FOUND, public_error_payload(exc, status=HTTPStatus.NOT_FOUND))
+        except (AttributeError, IndexError) as exc:
+            self._send(HTTPStatus.INTERNAL_SERVER_ERROR, public_error_payload(exc, status=HTTPStatus.INTERNAL_SERVER_ERROR))
         except (RuntimeError, TypeError, ValueError) as exc:
             self._send(HTTPStatus.BAD_REQUEST, public_error_payload(exc, status=HTTPStatus.BAD_REQUEST))
 
     def _body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
+        raw_length = self.headers.get("Content-Length", "0")
+        try:
+            length = int(raw_length)
+        except ValueError:
+            raise ValueError(f"Content-Length must be a non-negative integer, got: {raw_length!r}")
         if length > 1_000_000:
             raise ValueError("request body is too large")
         raw = self.rfile.read(length) if length else b"{}"

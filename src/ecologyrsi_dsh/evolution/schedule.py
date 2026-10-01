@@ -9,6 +9,10 @@ from ..core.agent_prediction import PREDICTION_TOOL_CALL_BUDGET
 from .parameters import PARAMETER_RULES
 
 
+# Newly created quick runs never attribute a different window's score to an
+# edit. Historical manifests without this field retain their frozen heuristic.
+PREQUENTIAL_PERFORMANCE_POLICY = "defer_performance_to_paired_epoch@1"
+
 LEGACY_SCHEDULE_SCHEMA_VERSION = (
     "ecologyrsi-dsh.top2-adaptive-epoch-schedule/1"
 )

@@ -7,6 +7,7 @@ const root = new URL("../", import.meta.url);
 test("package exposes an isolated agent-plane entry and pins DSH rc dependencies", async () => {
   const pkg = JSON.parse(await readFile(new URL("package.json", root), "utf8"));
   assert.equal(pkg.exports["./agent-plugin"], "./lib/tools/agent-plugin.js");
+  assert.equal(pkg.exports["./session-visibility"], "./lib/runtime/session-visibility.js");
   assert.ok(pkg.files.includes("presets/**/*.yml"));
   assert.deepEqual(pkg.dependencies, {});
   for (const [name, version] of Object.entries({
@@ -23,4 +24,7 @@ test("package exposes an isolated agent-plane entry and pins DSH rc dependencies
   assert.deepEqual(module.inject, ["tools", "web", "ecologyAgentTools", "llm"]);
   const rootModule = await import("../lib/index.js");
   assert.ok(rootModule.inject.includes("web"));
+  const visibility = await import("../lib/runtime/session-visibility.js");
+  assert.deepEqual(visibility.inject, ["sessions", "sessionPersistence"]);
+  assert.equal(typeof visibility.apply, "function");
 });

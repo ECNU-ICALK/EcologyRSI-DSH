@@ -465,6 +465,7 @@
       judge_rejected: "科学门禁通过，独立评审未接受",
       judge_unavailable: "独立评审不可用，未作正式晋升",
       not_selected_by_screening_top_k: "初筛未入围，不参加正式评测",
+      outside_preregistered_quick_trajectory: "按预登记规则未进入训练（未执行预筛）",
       execution_failed: "训练或评测失败",
       duplicate: "参数重复，未重复评测"
     }[String(value || "")] || String(value || "等待轮末统一选择");
@@ -553,7 +554,7 @@
       failed: "执行失败",
       rejected: "未通过门禁",
       duplicate: "重复候选",
-      screened_out: "初筛淘汰"
+      screened_out: "未进入训练主线"
     }[String(value || "").toLowerCase()] || "角色未记录";
   }
   function candidateOutcome(candidate, run) {
@@ -562,7 +563,7 @@
     if (run && run.best_candidate_id && candidate.id === run.best_candidate_id) { return { text: "当前保留", className: "pill-green" }; }
     if (run && run.best_observed_candidate_id && candidate.id === run.best_observed_candidate_id) { return { text: "原始最高观测", className: "pill-blue" }; }
     if (String(candidate.status || "").toLowerCase() === "failed") { return { text: "执行失败", className: "pill-red" }; }
-    if (String(candidate.status || "").toLowerCase() === "screened_out") { return { text: "初筛未入围", className: "pill-neutral" }; }
+    if (String(candidate.status || "").toLowerCase() === "screened_out") { return { text: candidate.selection_reason === "outside_preregistered_quick_trajectory" ? "按预登记规则未进入训练" : "初筛未入围", className: "pill-neutral" }; }
     if (String(candidate.status || "").toLowerCase() === "rejected") { return { text: "未保留", className: "pill-red" }; }
     if (String(candidate.status || "").toLowerCase() === "duplicate") { return { text: "重复跳过", className: "pill-neutral" }; }
     return { text: candidateStatusText(candidate.status), className: candidateStatusClass(candidate.status) };

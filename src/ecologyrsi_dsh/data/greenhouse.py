@@ -287,7 +287,7 @@ def _derive_tomato_resource_totals(values: dict[str, list[float | None]]) -> Non
     peak = values.get("electricity_peak_use")
     offpeak = values.get("electricity_offpeak_use")
     if peak is not None or offpeak is not None:
-        length = len(peak or offpeak or ())
+        length = len(peak) if peak is not None else len(offpeak)
         total: list[float | None] = []
         for index in range(length):
             parts = [items[index] if items is not None else None for items in (peak, offpeak)]

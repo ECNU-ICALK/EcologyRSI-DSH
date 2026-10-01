@@ -77,7 +77,15 @@
     $("#dataset-id").addEventListener("change", function () { alignDatasetBinding(); updateSelectionHelp(); loadSelectionPreview(); scheduleEvolutionCapacityRefresh(); });
     $("#episode-id").addEventListener("change", function () { updateSelectionHelp(); loadSelectionPreview(); scheduleEvolutionCapacityRefresh(); });
     ["#max-generations", "#candidates-per-generation"].forEach(function (selector) {
-      $(selector).addEventListener("input", function () { syncCandidateBudget(); renderReadiness(); renderParameters(); scheduleEvolutionCapacityRefresh(); });
+      ["input", "change"].forEach(function (type) {
+        $(selector).addEventListener(type, function () {
+          if (selector === "#max-generations") {
+            state.roundsManuallyEdited = true;
+            state.defaultRoundsAdjustment = null;
+          }
+          syncCandidateBudget(); renderReadiness(); renderParameters(); scheduleEvolutionCapacityRefresh();
+        });
+      });
     });
     $("#max-candidates").addEventListener("input", function () { syncCandidateBudget({ markManual: true }); renderReadiness(); renderParameters(); });
     ["#experiment-mode", "#formal-origin-count", "#local-batch-origin-count", "#max-local-edits-per-batch", "#selection-holdout-origin-count", "#candidate-concurrency", "#sample-agent-batch-size", "#sample-concurrency", "#fixed-seed", "#knowledge-online-enabled"].forEach(function (selector) {

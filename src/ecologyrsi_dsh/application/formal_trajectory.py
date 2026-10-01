@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..evaluators.skill_program import skill_grammar
+
 from ..evolution.agent_policy import rebind_agent_policy
 
 import math
@@ -11,6 +13,7 @@ from typing import Any, Mapping
 from .ports import GenerationRuntime
 
 from ..core.models import Candidate, canonical_json, digest
+from ..core.model_execution_policy import LOCAL_EDIT_CONTEXT_POLICY
 from ..core.search_policy import PAIRED_EXECUTION_QUALIFICATION, local_challenger_policy
 from ..core.trajectory import (
     BatchEvaluation,
@@ -52,6 +55,7 @@ from ..evolution.strategies import (
 )
 from ..evolution.parameter_activity import parameter_activity_contract
 from ..evolution.schedule import (
+    PREQUENTIAL_PERFORMANCE_POLICY,
     PAIRED_LOCAL_EVALUATION_MODE,
     OptimizationSchedule,
 )
@@ -707,6 +711,11 @@ def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRev
         "instruction_directive": (AUTHORED_DIRECTIVE_POLICY_ID,),
     }
     _boundary, parameter_schemas = _genome_parameter_boundary(state.task_manifest, genome)
+    from ..evolution.diversity import enabled as diversity_enabled, candidate_family, FAMILY_AXES
+    if diversity_enabled(state.task_manifest.metadata):
+        family = candidate_family(state.proposal(candidate.proposal_id))
+        if family in FAMILY_AXES:
+            targets = {axis: values if axis in FAMILY_AXES[family] else () for axis, values in targets.items()}
     cells = tuple(
         f"{target}@{horizon}h"
         for target in state.task_manifest.metadata["fitness_profile"]["expected_targets"]
@@ -899,6 +908,7 @@ def _execute_next_prequential_local_edit(
             context,
             current_program_registry(),
         )
+    validated = _check_behavior_revisit(state, candidate_id, proposal, validated, batch_index=pending.batch_index)
     active_revision_id = revision.revision_id
     advance_reason = RevisionAdvanceReason.KEPT
     if validated is not None and validated.child is not None:
@@ -1119,6 +1129,7 @@ def _execute_next_paired_local_edit(
             context,
             current_program_registry(),
         )
+    validated = _check_behavior_revisit(state, candidate_id, proposal, validated, batch_index=pending.batch_index)
     active_revision_id = revision.revision_id
     advance_reason = RevisionAdvanceReason.KEPT
     if validated.child is not None:
@@ -1277,6 +1288,36 @@ def _prequential_safety_reason(metrics: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _cohort_scoped_editor(state: Any) -> bool:
+    metadata = getattr(getattr(state, "task_manifest", None), "metadata", {})
+    return metadata.get("local_edit_context_policy") == LOCAL_EDIT_CONTEXT_POLICY
+
+
+def _recent_behavior_states(state: Any, candidate_id: str) -> list[dict[str, Any]]:
+    """Expose executable prior states, without treating their windows as trials."""
+    revisions = [r for r in getattr(state, "candidate_revisions", ())
+                 if r.candidate_id == candidate_id]
+    return [{"revision_id": r.revision_id, "behavior_digest": r.behavior_digest,
+             "candidate_state": _local_edit_current_state(r)} for r in revisions[-8:]]
+
+
+def _check_behavior_revisit(state: Any, candidate_id: str, proposal: LocalEditProposal,
+                            result: LocalEditResult | None, *, batch_index: int) -> LocalEditResult | None:
+    if not _cohort_scoped_editor(state) or result is None or result.child is None:
+        return result
+    # Replay may already contain this batch's child after a crash between the
+    # child and decision events. It is not a previous behavior revisit.
+    repeated = any(r.candidate_id == candidate_id
+                   and (r.source_batch_index is None or r.source_batch_index < batch_index)
+                   and r.behavior_digest == result.child.behavior_digest
+                   for r in getattr(state, "candidate_revisions", ()))
+    if repeated and proposal.revisit is None:
+        return LocalEditResult(outcome=LocalEditOutcome.REJECTED, operations=result.operations,
+                               child=None, proposal_digest=result.proposal_digest,
+                               rejection_reason="repeated_behavior_requires_revisit_reason")
+    return result
+
+
 def _batch_score(state: Any, candidate_id: str, batch_index: int) -> float | None:
     """Return one finite prequential batch score, or None when unavailable."""
 
@@ -1390,7 +1431,11 @@ def _trajectory_score_history(
             "batch_index": index,
             "candidate_revision_id": revision_ids.get(index),
             "score": scores[index],
-            "comparable": gap is None,
+            "comparable": gap is None and not _cohort_scoped_editor(state),
+            **({"coverage_complete": gap is None,
+                "cohort_digest": (_batch_metrics(state, candidate_id, index) or {}).get("feedback_update_cohort_digest"),
+                "comparison_scope": "different_batch_cohort_diagnostic_only"}
+               if _cohort_scoped_editor(state) else {}),
         }
         if gap is not None:
             row["incomparable_reason"] = gap
@@ -1439,6 +1484,12 @@ def _prequential_regression_reason(
     may neither trigger a rollback nor widen the band.
     """
 
+    metadata = getattr(getattr(state, "task_manifest", None), "metadata", {})
+    if metadata.get("prequential_performance_policy") == PREQUENTIAL_PERFORMANCE_POLICY:
+        # The parent was scored on a different window. Keep the new revision
+        # provisional until the paired epoch comparison; physical/execution
+        # guardrails are checked separately and still cause immediate rollback.
+        return None
     parent_revision_id = getattr(revision, "parent_revision_id", None)
     if not isinstance(parent_revision_id, str) or not parent_revision_id.strip():
         # Without a parent there is no revision to return to, so a regression
@@ -1530,6 +1581,16 @@ def _local_edit_proposal(
         "avoid_repeating_an_edit_whose_next_batch_score_regressed": True,
         "host_rolls_back_a_clear_score_regression": True,
     }
+    if _cohort_scoped_editor(state):
+        decision_policy.update({
+            "avoid_repeating_an_edit_whose_next_batch_score_regressed": False,
+            "host_rolls_back_a_clear_score_regression": False,
+            "cross_batch_scores_measure_edit_effect": False,
+            "performance_decision": "use_same_cohort_paired_evidence_only",
+            "physical_and_execution_guards_remain_active": True,
+            "repeated_behavior_requires_revisit_reason": True,
+            "revisit_reasons": ["safety_recovery", "new_batch_evidence", "paired_recheck"],
+        })
     if inert_axes:
         decision_policy["inert_mutation_axes"] = list(inert_axes)
         decision_policy["inert_mutation_axes_are_rejected"] = True
@@ -1573,11 +1634,14 @@ def _local_edit_proposal(
             if advertised.get("instruction_directive")
             else {}
         ),
+        **({"legal_skill_grammar": skill_grammar()} if advertised.get("skill_program") else {}),
         "recent_edit_history": _recent_local_edit_history(
             state, candidate.candidate_id, batch.batch_index
         ),
         **_trajectory_score_history(state, candidate.candidate_id, batch.batch_index),
         "decision_policy": decision_policy,
+        **({"recent_behavior_states": _recent_behavior_states(state, candidate.candidate_id)}
+           if _cohort_scoped_editor(state) else {}),
         "batch_evidence": {
             "score": evaluation.score,
             "passed": evaluation.passed,
@@ -1701,6 +1765,7 @@ def _local_edit_current_state(revision: CandidateRevision) -> dict[str, Any]:
                     ],
                     "instruction_parameters": profile["instruction_parameters"],
                     "enabled_tool_ids": profile["enabled_tool_ids"],
+                    **({"skill_program": profile["skill_program"]} if "skill_program" in profile else {}),
                     # Present only when this candidate authored one, which is
                     # exactly the distinction between writing a first directive
                     # and revising an existing one. An editor that cannot see
@@ -1882,9 +1947,11 @@ def _recent_local_edit_history(
                 ][:5],
                 "outcome": outcome.get("outcome"),
                 "reason": outcome.get("reason"),
-                # The score this decision was taken on, and the score the next
-                # block actually produced, so the editor can read the realized
-                # effect of its own previous operation instead of guessing.
+                # Preserve observed scores but keep different batch cohorts
+                # distinct from a same-cohort comparison of edit effects.
+                **({"revisit": dict(detail["revisit"])} if isinstance(detail.get("revisit"), Mapping) else {}),
+                **({"score_comparability": "different_batch_cohort_diagnostic_only",
+                    "edit_effect_established": False} if _cohort_scoped_editor(state) else {}),
                 "batch_score": _batch_score(state, candidate_id, batch_index),
                 "next_batch_score": _batch_score(
                     state, candidate_id, batch_index + 1
@@ -1944,6 +2011,11 @@ def _local_edit_policy_rejection_reason(
             or row.get("candidate_revision_id") != candidate_revision_id
             or row.get("decision") != "mutate"
         ):
+            continue
+        if (_cohort_scoped_editor(state) and proposal.revisit is not None
+                and row.get("reason") == "repeated_behavior_requires_revisit_reason"):
+            # Supplying the missing rationale may repair this specific
+            # rejection. It cannot override schema, safety or no-op guards.
             continue
         if _local_edit_bundle_signature(row.get("operations")) == proposed_signature:
             return "duplicate_recent_rejected_bundle"

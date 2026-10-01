@@ -43,6 +43,7 @@ def build_configuration(task: Any, state: Any, profile: str = "full") -> dict[st
         "cohort_capacity_report": metadata.get("cohort_capacity_report"),
         "cohort_capacity_enforced": metadata.get("cohort_capacity_enforced"),
         "host_runtime_build": metadata.get("host_runtime_build"),
+        "evolution_diversity_policy": metadata.get("evolution_diversity_policy"),
         "domain_pack_id": task.domain_pack,
         "dataset_id": dataset_id,
         "dataset_task": metadata.get("dataset_task"),

@@ -2,33 +2,465 @@
   "$id": "ecology-local-edit@1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "decision", "operations", "evidence_refs", "expected_effect_cells", "risk_cells"],
+  "required": [
+    "schema_version",
+    "decision",
+    "operations",
+    "evidence_refs",
+    "expected_effect_cells",
+    "risk_cells"
+  ],
   "properties": {
-    "schema_version": {"const": "ecology-local-edit@1"},
-    "decision": {"enum": ["keep", "mutate"]},
+    "schema_version": {
+      "const": "ecology-local-edit@1"
+    },
+    "decision": {
+      "enum": [
+        "keep",
+        "mutate"
+      ]
+    },
     "operations": {
       "type": "array",
       "minItems": 0,
       "maxItems": 5,
       "items": {
         "oneOf": [
-          {"type":"object","additionalProperties":false,"required":["op","name","value"],"properties":{"op":{"const":"set_bounded_parameter"},"name":{"type":"string","minLength":1,"maxLength":120},"value":{"type":"number"}}},
-          {"type":"object","additionalProperties":false,"required":["op","predictor_id"],"properties":{"op":{"const":"select_registered_pipeline"},"predictor_id":{"type":"string","minLength":1,"maxLength":160}}},
-          {"type":"object","additionalProperties":false,"required":["op","program_id"],"properties":{"op":{"enum":["select_registered_feature_policy","select_registered_fit_policy","select_registered_uncertainty_policy"]},"program_id":{"type":"string","minLength":1,"maxLength":160}}},
-          {"type":"object","additionalProperties":false,"required":["op","workflow_template_id"],"properties":{"op":{"const":"select_registered_workflow_template"},"workflow_template_id":{"type":"string","minLength":1,"maxLength":160}}},
-          {"type":"object","additionalProperties":false,"required":["op","name","value"],"properties":{"op":{"const":"set_bounded_workflow_parameter"},"name":{"type":"string","minLength":1,"maxLength":120},"value":{"type":"number"}}},
-          {"type":"object","additionalProperties":false,"required":["op","role","instruction_template_id"],"properties":{"op":{"const":"select_instruction_template"},"role":{"enum":["sample-planner","sample-repair"]},"instruction_template_id":{"type":"string","minLength":1,"maxLength":160}}},
-          {"type":"object","additionalProperties":false,"required":["op","role","name","value"],"properties":{"op":{"const":"set_instruction_parameter"},"role":{"enum":["sample-planner","sample-repair"]},"name":{"type":"string","minLength":1,"maxLength":120},"value":{"type":["string","number","integer","boolean"]}}},
-          {"type":"object","additionalProperties":false,"required":["op","role","enabled_tool_ids"],"properties":{"op":{"const":"narrow_role_tool_policy"},"role":{"enum":["sample-planner","sample-repair"]},"enabled_tool_ids":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":160}}}}
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "name",
+              "value"
+            ],
+            "properties": {
+              "op": {
+                "const": "set_bounded_parameter"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "value": {
+                "type": "number"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "predictor_id"
+            ],
+            "properties": {
+              "op": {
+                "const": "select_registered_pipeline"
+              },
+              "predictor_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "program_id"
+            ],
+            "properties": {
+              "op": {
+                "enum": [
+                  "select_registered_feature_policy",
+                  "select_registered_fit_policy",
+                  "select_registered_uncertainty_policy"
+                ]
+              },
+              "program_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "workflow_template_id"
+            ],
+            "properties": {
+              "op": {
+                "const": "select_registered_workflow_template"
+              },
+              "workflow_template_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "name",
+              "value"
+            ],
+            "properties": {
+              "op": {
+                "const": "set_bounded_workflow_parameter"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "value": {
+                "type": "number"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "role",
+              "instruction_template_id"
+            ],
+            "properties": {
+              "op": {
+                "const": "select_instruction_template"
+              },
+              "role": {
+                "enum": [
+                  "sample-planner",
+                  "sample-repair"
+                ]
+              },
+              "instruction_template_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "role",
+              "name",
+              "value"
+            ],
+            "properties": {
+              "op": {
+                "const": "set_instruction_parameter"
+              },
+              "role": {
+                "enum": [
+                  "sample-planner",
+                  "sample-repair"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "number",
+                  "integer",
+                  "boolean"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "role",
+              "enabled_tool_ids"
+            ],
+            "properties": {
+              "op": {
+                "const": "narrow_role_tool_policy"
+              },
+              "role": {
+                "enum": [
+                  "sample-planner",
+                  "sample-repair"
+                ]
+              },
+              "enabled_tool_ids": {
+                "type": "array",
+                "maxItems": 32,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "role",
+              "skill_program"
+            ],
+            "properties": {
+              "op": {
+                "const": "author_skill_program"
+              },
+              "role": {
+                "const": "sample-planner"
+              },
+              "skill_program": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "steps"
+                ],
+                "properties": {
+                  "schema_version": {
+                    "const": "ecologyrsi-dsh.skill-program/1"
+                  },
+                  "steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "module_id",
+                        "when",
+                        "guidance"
+                      ],
+                      "properties": {
+                        "module_id": {
+                          "enum": [
+                            "observation-audit@1",
+                            "horizon-routing@1",
+                            "trend-check@1"
+                          ]
+                        },
+                        "when": {
+                          "enum": [
+                            "always",
+                            "missing_history",
+                            "long_horizon",
+                            "trend_reversal"
+                          ]
+                        },
+                        "guidance": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 360
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "role",
+              "authored_directive"
+            ],
+            "properties": {
+              "op": {
+                "const": "author_role_directive"
+              },
+              "role": {
+                "const": "sample-planner"
+              },
+              "authored_directive": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "anchor",
+                  "blend_rule",
+                  "tool_plan",
+                  "rationale"
+                ],
+                "properties": {
+                  "schema_version": {
+                    "const": "ecologyrsi-dsh.authored-directive/1"
+                  },
+                  "anchor": {
+                    "enum": [
+                      "fit_selected_baseline",
+                      "persistence",
+                      "candidate_model"
+                    ]
+                  },
+                  "blend_rule": {
+                    "enum": [
+                      "none",
+                      "mean",
+                      "confidence_weighted"
+                    ]
+                  },
+                  "tool_plan": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 2,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "tool_id",
+                        "purpose"
+                      ],
+                      "properties": {
+                        "tool_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64
+                        },
+                        "purpose": {
+                          "enum": [
+                            "candidate_model_baseline",
+                            "discrepancy_check",
+                            "sensitivity_probe",
+                            "alternate_parameterization"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "rationale": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 600
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "feature_recipe"
+            ],
+            "properties": {
+              "op": {
+                "const": "author_feature_recipe"
+              },
+              "feature_recipe": {
+                "type": "object",
+                "description": "Validated by the frozen Host feature recipe grammar."
+              }
+            }
+          }
         ]
       }
     },
-    "evidence_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 160}},
-    "expected_effect_cells": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9_]+@[0-9]+h$"}},
-    "risk_cells": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9_]+@[0-9]+h$"}}
+    "evidence_refs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      }
+    },
+    "expected_effect_cells": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_]+@[0-9]+h$"
+      }
+    },
+    "risk_cells": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_]+@[0-9]+h$"
+      }
+    },
+    "revisit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "justification"
+      ],
+      "properties": {
+        "reason": {
+          "enum": [
+            "safety_recovery",
+            "new_batch_evidence",
+            "paired_recheck"
+          ]
+        },
+        "justification": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        }
+      }
+    }
   },
   "allOf": [
-    {"if": {"properties": {"decision": {"const": "keep"}}}, "then": {"properties": {"operations": {"maxItems": 0}}}},
-    {"if": {"properties": {"decision": {"const": "mutate"}}}, "then": {"properties": {"operations": {"minItems": 1}}}}
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "keep"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "operations": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "mutate"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "operations": {
+            "minItems": 1
+          }
+        }
+      }
+    }
   ]
 }

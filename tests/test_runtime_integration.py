@@ -48,6 +48,10 @@ class _AuthenticatedModelStubHandler(BaseHTTPRequestHandler):
 
 class RuntimeIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
+        if "ECOLOGYRSI_DSH_MODELS_JSON" not in os.environ:
+            catalog_env = patch.dict(os.environ, {"ECOLOGYRSI_DSH_MODELS_JSON": "[]"})
+            catalog_env.start()
+            self.addCleanup(catalog_env.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.db_path = Path(self.directory.name) / "events.sqlite3"
         self.server = EvolutionHTTPServer(
@@ -1293,8 +1297,10 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
             rejected["error_code"], "frozen_runtime_binding_drift"
         )
         encoded_rejection = json.dumps(rejected, ensure_ascii=False)
-        self.assertNotIn(frozen_digest, encoded_rejection)
-        self.assertNotIn(current_digest, encoded_rejection)
+        self.assertEqual(rejected["binding_drift"]["expected_digest"], frozen_digest)
+        self.assertEqual(rejected["binding_drift"]["current_digest"], current_digest)
+        self.assertNotIn("policy-model-v2", encoded_rejection)
+        self.assertNotIn("Authorization", encoded_rejection)
         self.assertEqual(self.server.ledger.pending_command_keys(), ())
         self.assertEqual(
             len(self.model_server.requests), 0  # type: ignore[attr-defined]

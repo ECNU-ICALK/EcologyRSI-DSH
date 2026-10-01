@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from ..evolution.diversity import DIVERSITY_POLICY, enabled as diversity_enabled
+
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
 
-from ..core.model_execution_policy import NATIVE_SAMPLE_OPERATION_MAX_TOKENS
+from ..core.model_execution_policy import NATIVE_SAMPLE_OPERATION_MAX_TOKENS, LOCAL_EDIT_CONTEXT_POLICY
 
 from ..data.adapters import dataset_adapter
 from ..core.prediction_policy import (RUNTIME_PREDICTION_POLICY, RUNTIME_EVALUATOR_ID, BASELINE_REFERENCE_PREDICTOR_ID)
@@ -60,7 +62,7 @@ from ..core.state import (
     validate_identity_binding,
 )
 from ..data.registry import DatasetRegistry
-from ..evaluators.epoch_cohorts import estimate_epoch_capacity
+from ..evaluators.epoch_cohorts import CohortCapacityError, estimate_epoch_capacity
 from ..evaluators.greenhouse_prediction import (
     COHORT_HISTORY_HOURS,
     MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
@@ -72,7 +74,8 @@ from ..evaluators.registry import (
     TOY_DATASET_ID,
     EvaluatorRegistry,
 )
-from ..evolution.schedule import OPTIMIZATION_PROTOCOL, TRAINING_SCHEDULE_SCHEMA_VERSION, OptimizationSchedule
+from ..evolution.schedule import OPTIMIZATION_PROTOCOL, TRAINING_SCHEDULE_SCHEMA_VERSION, OptimizationSchedule, PREQUENTIAL_PERFORMANCE_POLICY
+from ..evolution.genome import mutation_policy_contract
 from ..evolution.parameters import PARAMETER_RULES, run_parameter_contract, validate_run_parameter
 from ..evolution.strategies import StrategyRouterDSHAdapter
 from ..core.search_policy import SEARCH_GUARD_POLICY
@@ -251,10 +254,15 @@ def _dsh_native_stable_preset_catalog(
         for item in capabilities.get("presets", [])
         if isinstance(item, dict)
     }
+    missing = [pid for pid in _DSH_NATIVE_PRESET_IDS if pid not in by_id]
+    if missing:
+        raise ValueError(
+            f"required DSH preset(s) missing from capabilities: {missing!r}; "
+            "check DSH version compatibility before creating a run"
+        )
     return [
         {field: by_id[preset_id].get(field) for field in _DSH_NATIVE_STABLE_PRESET_FIELDS}
         for preset_id in _DSH_NATIVE_PRESET_IDS
-        if preset_id in by_id
     ]
 
 PLUGIN_MANIFEST = {
@@ -370,6 +378,25 @@ def _mark_auto_progress_task(
     )
     data["metadata"] = metadata
     return TaskManifest.from_dict(data)
+
+
+class _RunWorkReservation:
+    """Transferable lifetime reservation for work executed on another thread.
+
+    Unlike an RLock ownership, this reference may be released by the worker.
+    It fences purge even between sample requests, without serializing unrelated
+    runs or requiring the HTTP thread to wait for scientific work.
+    """
+
+    def __init__(self, lease: "_GenerationLease") -> None:
+        self._lease = lease
+        self._released = False
+
+    def release(self) -> None:
+        with self._lease._server._generation_locks_guard:
+            if not self._released:
+                self._lease._reservations -= 1
+                self._released = True
 
 
 class _GenerationLease:
@@ -514,6 +541,7 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
             # Continuous autonomous runs are progressed by a bounded worker pool.
             # Recovery is projection-driven and only picks up manifests that
             # explicitly opted into this mode.
+            self.host_activity.start()
             self.auto_progress = AutoProgressManager(self)
             self.auto_progress.recover_native_quiescence()
             self.auto_progress.recover_running()
@@ -521,6 +549,8 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
             self.independent_evaluation = IndependentEvaluationService(self)
             self.independent_evaluation.recover_interrupted()
         except BaseException:
+            if hasattr(self, "host_activity"):
+                self.host_activity.close()
             if hasattr(self, "socket"):
                 self.server_close()
             if hasattr(self, "ledger"):
@@ -782,6 +812,22 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
             lease._lock.release()
             return True
 
+    def reserve_run_work(self, run_id: str) -> _RunWorkReservation:
+        """Reserve one run until asynchronous work and its cleanup finish."""
+
+        key = str(run_id).strip()
+        if not key:
+            raise ValueError("run_id must be non-empty")
+        with self._generation_locks_guard:
+            lease = self._generation_locks.get(key)
+            if lease is None or lease._retired:
+                lease = _GenerationLease(self, key)
+                self._generation_locks[key] = lease
+            if lease._retiring or lease._retired:
+                raise CommandInProgressError("run deletion is in progress")
+            lease._reservations += 1
+            return _RunWorkReservation(lease)
+
     def try_acquire_generation_purge_lease(
         self, run_id: str
     ) -> _GenerationLease | None:
@@ -878,6 +924,7 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
         }
 
     def close(self) -> None:
+        self.host_activity.close()
         independent_stopped = self.independent_evaluation.close()
         worker_stopped = self.auto_progress.close()
         # A urllib request cannot be interrupted safely. If shutdown reaches
@@ -1244,11 +1291,16 @@ class EvolutionRequestHandler(
             dataset = self.server.datasets.series(dataset_id, episode_id)
         else:
             dataset = self.server.datasets.selection_view(dataset_id, episode_id)
+        # The browser previews native runs. Use the same history envelope as
+        # _task_from_request, including the day-block evidence check below.
+        history_steps = (MAX_EXOGENOUS_RIDGE_HISTORY_STEPS if dataset_id == TOY_DATASET_ID
+                         else COHORT_HISTORY_HOURS)
         report = estimate_epoch_capacity(
             dataset,
             schedule=schedule,
             planned_generations=planned_generations,
             seed=0,
+            history_steps=history_steps,
             scoring_cells_per_origin=(1 if dataset_id == TOY_DATASET_ID
                                       else dataset_adapter(dataset_id).contract()["prediction_cells_per_origin"]),
         )
@@ -1263,6 +1315,7 @@ class EvolutionRequestHandler(
                         dataset=dataset, schedule=schedule,
                         planned_generations=planned_generations, seed=0,
                         profile=profile,
+                        history_steps=history_steps,
                     )
                 except ValueError as exc:
                     payload = capacity_with_inference_replicas(replace(report, sufficient=False), schedule)
@@ -1325,8 +1378,8 @@ class EvolutionRequestHandler(
         purge_lease = self.server.try_acquire_generation_purge_lease(run_id)
         if purge_lease is None:
             raise CommandInProgressError(
-                "run still has an active or waiting generation; retry deletion "
-                "after that generation releases its lease"
+                "run still has active generation or independent evaluation work; "
+                "retry deletion after that work finishes"
             )
         purged = False
         state = None
@@ -2820,6 +2873,9 @@ class EvolutionRequestHandler(
                 **metadata,
                 "strategy_id": strategy_id,
                 "strategy_digest": strategy_digest,
+                "mutation_policy": mutation_policy_contract(),
+                "local_edit_context_policy": LOCAL_EDIT_CONTEXT_POLICY,
+                "mutation_policy_digest": digest(mutation_policy_contract()),
                 "evaluator_id": evaluator_id,
                 "evaluator_digest": evaluator_digest,
                 "objective_profile": objective_profile,
@@ -2974,12 +3030,10 @@ class EvolutionRequestHandler(
                     history_steps=origin_history_alignment,
                 )
                 if not cohort_capacity_report.sufficient:
-                    raise ValueError(
-                        "insufficient causal cohort capacity: "
-                        f"required={cohort_capacity_report.required_unique_origins}, "
-                        f"available={cohort_capacity_report.available_eligible_origins}, "
-                        "max_generations="
-                        f"{cohort_capacity_report.max_feasible_generations}"
+                    raise CohortCapacityError(
+                        required=cohort_capacity_report.required_unique_origins,
+                        available=cohort_capacity_report.available_eligible_origins,
+                        max_generations=cohort_capacity_report.max_feasible_generations,
                     )
                 if (metadata.get("search_guard_policy") == SEARCH_GUARD_POLICY
                         or schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION or schedule.quick):
@@ -3057,6 +3111,7 @@ class EvolutionRequestHandler(
             prediction_model_id
         )
         supplied_runtime_build = metadata.get("host_runtime_build")
+        diversity_enabled(metadata)
         if (
             supplied_runtime_build is not None
             and not _runtime_build_compatible(supplied_runtime_build)
@@ -3067,8 +3122,15 @@ class EvolutionRequestHandler(
         metadata.update(
             {
                 "host_runtime_build": _host_runtime_build(),
+                "evolution_diversity_policy": metadata.get("evolution_diversity_policy", DIVERSITY_POLICY if native_protocol else None),
                 "strategy_id": strategy_id,
                 "strategy_digest": strategy_digest,
+                "mutation_policy": mutation_policy_contract(),
+                "local_edit_context_policy": LOCAL_EDIT_CONTEXT_POLICY,
+                "mutation_policy_digest": digest(mutation_policy_contract()),
+                "prequential_performance_policy": (
+                    PREQUENTIAL_PERFORMANCE_POLICY if schedule is not None and schedule.quick else None
+                ),
                 "evaluator_id": evaluator_id,
                 "evaluator_digest": evaluator_digest,
                 # Freeze the objective definition with the run so the score
@@ -3490,11 +3552,11 @@ class EvolutionRequestHandler(
         if frozen_runtime_build is not None and not _runtime_build_compatible(
             frozen_runtime_build
         ):
-            raise FrozenRuntimeBindingDriftError("Host evolution runtime")
+            raise FrozenRuntimeBindingDriftError("Host evolution runtime", expected_digest=digest(frozen_runtime_build), current_digest=digest(_host_runtime_build()))
         if dataset_id != TOY_DATASET_ID:
             contract = dataset_adapter(dataset_id).contract()
             if metadata.get("dataset_task") != contract or metadata.get("dataset_task_digest") != contract["contract_digest"]:
-                raise FrozenRuntimeBindingDriftError("dataset task adapter")
+                raise FrozenRuntimeBindingDriftError("dataset task adapter", expected_digest=digest(metadata.get("dataset_task")), current_digest=digest(contract))
         dataset_digest = metadata.get("dataset_digest")
         split_digest = metadata.get("split_manifest_digest")
         if not isinstance(dataset_digest, str) or not dataset_digest.strip():
@@ -3509,9 +3571,9 @@ class EvolutionRequestHandler(
             expected_split_manifest_digest=split_digest,
         )
         if series.digest != dataset_digest:
-            raise FrozenRuntimeBindingDriftError("数据集快照")
+            raise FrozenRuntimeBindingDriftError("数据集快照", expected_digest=dataset_digest, current_digest=series.digest)
         if series.split_manifest_digest_sha256 != split_digest:
-            raise FrozenRuntimeBindingDriftError("时间分区快照")
+            raise FrozenRuntimeBindingDriftError("时间分区快照", expected_digest=split_digest, current_digest=series.split_manifest_digest_sha256)
 
         for id_field, digest_field, label, resolver in (
             (
@@ -3544,7 +3606,7 @@ class EvolutionRequestHandler(
             except (KeyError, ValueError) as exc:
                 raise FrozenRuntimeBindingDriftError(f"{label}实现") from exc
             if expected_digest != current_digest:
-                raise FrozenRuntimeBindingDriftError(f"{label}实现")
+                raise FrozenRuntimeBindingDriftError(f"{label}实现", expected_digest=expected_digest, current_digest=current_digest)
 
         if metadata.get("execution_protocol") == DSH_NATIVE_EXECUTION_PROTOCOL:
             evaluator_id = str(metadata.get("evaluator_id") or "").strip()
@@ -3555,9 +3617,9 @@ class EvolutionRequestHandler(
                     "DSH-native 运行缺少冻结的完整 fitness_profile，已拒绝继续"
                 )
             if frozen_profile != expected_profile.to_dict():
-                raise FrozenRuntimeBindingDriftError("fitness profile")
+                raise FrozenRuntimeBindingDriftError("fitness profile", expected_digest=digest(frozen_profile), current_digest=digest(expected_profile.to_dict()))
             if metadata.get("fitness_profile_digest") != expected_profile.profile_digest:
-                raise FrozenRuntimeBindingDriftError("fitness profile digest")
+                raise FrozenRuntimeBindingDriftError("fitness profile digest", expected_digest=metadata.get("fitness_profile_digest"), current_digest=expected_profile.profile_digest)
             raw_schedule = metadata.get("optimization_schedule")
             expected_origins = expected_profile.minimum_origins_for_schedule(
                 OptimizationSchedule.from_dict(raw_schedule) if raw_schedule is not None else None
@@ -3590,7 +3652,7 @@ class EvolutionRequestHandler(
                 _dsh_native_stable_preset_catalog(capabilities)
             )
             if metadata.get("dsh_preset_catalog_digest") != preset_catalog_digest:
-                raise FrozenRuntimeBindingDriftError("DSH preset capability")
+                raise FrozenRuntimeBindingDriftError("DSH preset capability", expected_digest=metadata.get("dsh_preset_catalog_digest"), current_digest=preset_catalog_digest)
             cls._validate_frozen_model_aliases(metadata)
             for id_field, digest_field, role, label in (
                 ("policy_model_id", "policy_model_digest", "strategy", "候选生成模型"),
@@ -3608,7 +3670,7 @@ class EvolutionRequestHandler(
                     }
                 )
                 if metadata.get(digest_field) != current_digest:
-                    raise FrozenRuntimeBindingDriftError(f"{label} DSH 路由")
+                    raise FrozenRuntimeBindingDriftError(f"{label} DSH 路由", expected_digest=metadata.get(digest_field), current_digest=current_digest)
             if run_id is not None:
                 target_run_id = str(run_id).strip()
                 if not target_run_id:
@@ -3715,7 +3777,7 @@ class EvolutionRequestHandler(
                         f"旧运行缺少冻结的{label}配置校验值，远程模型已拒绝继续"
                     )
             if expected_digest != current_digest:
-                raise FrozenRuntimeBindingDriftError(f"{label}配置")
+                raise FrozenRuntimeBindingDriftError(f"{label}配置", expected_digest=expected_digest, current_digest=current_digest)
             if builtin_model_configuration_digest(model_id) is None:
                 cls._validate_frozen_remote_model(
                     model_id,

@@ -7,6 +7,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  rm,
   realpath,
   symlink,
   writeFile,
@@ -14,6 +15,8 @@ import {
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import {
   PRESET_IDS,
@@ -21,9 +24,28 @@ import {
   installPresetTree,
   managedPatchText,
   resolveDshHome,
+  validatePluginArchive,
+  installRuntime,
 } from "../../../scripts/install_dsh_ecology_runtime.mjs";
 
 const source = new URL("../presets/", import.meta.url);
+
+test("bundled archive includes exact runtime and rejects missing visibility before changing a profile", async (t) => {
+  const pluginRoot = fileURLToPath(new URL("../", import.meta.url));
+  const manifest = JSON.parse(await readFile(path.join(pluginRoot, "package.json"), "utf8"));
+  const archive = path.join(pluginRoot, "dist", `ecologyrsi-dsh-evolution-plugin-${manifest.version}.tgz`);
+  await validatePluginArchive({ archive, pluginRoot });
+  const tmp = await realpath(await mkdtemp(path.join(os.tmpdir(), "ecology-archive-review-")));
+  t.after(() => rm(tmp, { recursive: true, force: true }));
+  assert.equal(spawnSync("tar", ["-xzf", archive, "-C", tmp]).status, 0);
+  await rm(path.join(tmp, "package/lib/runtime/session-visibility.js"));
+  const broken = path.join(tmp, "broken.tgz");
+  assert.equal(spawnSync("tar", ["-czf", broken, "-C", tmp, "package"]).status, 0);
+  const dshHome = path.join(tmp, "profile-must-stay-absent");
+  await assert.rejects(installRuntime({ packageArchive: broken, dshHome, pluginRoot,
+    projectRoot: path.resolve(pluginRoot, "../..") }), /missing package\/lib\/runtime\/session-visibility.js/);
+  await assert.rejects(access(dshHome), { code: "ENOENT" });
+});
 
 async function installedDshBin() {
   const candidate = process.env.DSH_BIN || path.join(
@@ -140,6 +162,9 @@ test("managed Host patch has the exact DSH service injection and no embedded cre
     "sessionPersistence", "sessionProjections", "agentPresets", "llm", "web",
   ]) assert.match(text, new RegExp(`\\b${name}\\b`));
   assert.doesNotMatch(text, /credentials|serviceToken|runtimeToken|secret/i);
+  assert.match(text, /id: ecologyrsi-session-visibility/);
+  assert.match(text, /name: '@ecologyrsi\/dsh-evolution-plugin\/session-visibility'/);
+  assert.match(text, /inject: \[sessions, sessionPersistence\]/);
 });
 
 test("managed Host patch replaces a freshly initialized empty patch document", async () => {
@@ -151,10 +176,60 @@ test("managed Host patch replaces a freshly initialized empty patch document", a
 
   await installManagedPatch({ dshHome: tmp, staticRoot: "/safe/static", profile: "web" });
   const first = await readFile(target, "utf8");
+  assert.ok(first.includes(path.join(profileRoot, "node_modules", "@ecologyrsi",
+    "dsh-evolution-plugin", "lib", "runtime", "session-visibility.js")));
   assert.doesNotMatch(first, /^\s*\[\]\s*$/m);
   assert.match(first, /# BEGIN ECOLOGYRSI DSH RUNTIME/);
   assert.match(first, /- insert:/);
 
   await installManagedPatch({ dshHome: tmp, staticRoot: "/safe/static", profile: "web" });
   assert.equal(await readFile(target, "utf8"), first);
+});
+
+test("validated runtime installation works fresh, upgrades an old profile, and is idempotent", async (t) => {
+  const pluginRoot = fileURLToPath(new URL("../", import.meta.url));
+  const manifest = JSON.parse(await readFile(path.join(pluginRoot, "package.json"), "utf8"));
+  const archive = path.join(pluginRoot, "dist", `ecologyrsi-dsh-evolution-plugin-${manifest.version}.tgz`);
+  const tmp = await realpath(await mkdtemp(path.join(os.tmpdir(), "ecology-full-install-")));
+  t.after(() => rm(tmp, { recursive: true, force: true }));
+  const fakeDsh = path.join(tmp, "fake-dsh.cjs");
+  await writeFile(fakeDsh, `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const {execFileSync} = require('node:child_process');
+const args = process.argv.slice(2);
+if (args[0] === 'plugin') {
+  const profile = args[args.indexOf('--profile') + 1];
+  const target = path.join(process.cwd(), 'profiles', profile, 'node_modules', '@ecologyrsi', 'dsh-evolution-plugin');
+  fs.mkdirSync(target, {recursive: true});
+  execFileSync('tar', ['-xzf', args.at(-1).slice(5), '-C', target, '--strip-components', '1']);
+}
+`);
+  await chmod(fakeDsh, 0o755);
+  const previous = process.env.DSH_BIN;
+  process.env.DSH_BIN = fakeDsh;
+  t.after(() => { if (previous === undefined) delete process.env.DSH_BIN; else process.env.DSH_BIN = previous; });
+  for (const scenario of ["fresh", "upgrade"]) {
+    const dshHome = path.join(tmp, scenario);
+    const installed = path.join(dshHome, "profiles/web/node_modules/@ecologyrsi/dsh-evolution-plugin");
+    if (scenario === "upgrade") {
+      await mkdir(installed, { recursive: true });
+      await writeFile(path.join(installed, "package.json"), JSON.stringify({version: "0.7.10"}));
+      await mkdir(path.join(dshHome, "plugin-cache/ecologyrsi"), {recursive: true});
+      await writeFile(path.join(dshHome, "plugin-cache/ecologyrsi/old-version.tgz"), "old immutable cache");
+    }
+    const options = {projectRoot: path.resolve(pluginRoot, "../.."), pluginRoot,
+      staticRoot: path.join(tmp, "static"), packageArchive: archive, dshHome};
+    await installRuntime(options);
+    const patchPath = path.join(dshHome, "profiles/web/cordis.patch.yml");
+    const first = await readFile(patchPath, "utf8");
+    await installRuntime(options);
+    assert.equal(await readFile(patchPath, "utf8"), first);
+    assert.equal(JSON.parse(await readFile(path.join(installed, "package.json"), "utf8")).version, manifest.version);
+    assert.deepEqual(await readFile(path.join(installed, "lib/runtime/session-visibility.js")),
+      await readFile(path.join(pluginRoot, "lib/runtime/session-visibility.js")));
+    if (scenario === "upgrade") {
+      assert.equal(await readFile(path.join(dshHome, "plugin-cache/ecologyrsi/old-version.tgz"), "utf8"), "old immutable cache");
+    }
+  }
 });

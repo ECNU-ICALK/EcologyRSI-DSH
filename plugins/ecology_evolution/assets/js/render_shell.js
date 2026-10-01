@@ -183,6 +183,11 @@
   }
 
   function renderReadiness() {
+    var roundsNote = $("#rounds-default-note");
+    if (roundsNote) {
+      roundsNote.textContent = defaultRoundsNotice()
+        || "默认最多运行 5 轮，并按数据容量调整；手动填写的轮数不会自动改动。每轮使用新评测时点。";
+    }
     var checks = readiness();
     var allReady = checks.every(function (item) { return item.ready; });
     var unmetChecks = checks.filter(function (item) { return !item.ready; });
@@ -237,7 +242,13 @@
       return "未满足：" + unmetChecks.map(function (item) { return item.label; }).join("；");
     }
     if (createStatus) { return createStatus.message; }
-    return "开始后配置将固定。后台会持续执行，您可以在“运行过程”查看进度。";
+    return defaultRoundsNotice() + "开始后配置将固定。后台会持续执行，您可以在“运行过程”查看进度。";
+  }
+
+  function defaultRoundsNotice() {
+    var adjustment = state.defaultRoundsAdjustment;
+    return adjustment ? "已按当前数据容量将默认轮数从 " + adjustment.from + " 调整为 " + adjustment.rounds
+      + " 轮；每轮样本量和验证要求保持不变。" : "";
   }
 
   function renderParameters() {
@@ -266,6 +277,9 @@
     var batchCount = schedule.formal_origin_count_per_finalist / schedule.local_batch_origin_count;
     var pairedMode = String(schedule.local_evaluation_mode || "").toLowerCase() === "paired_champion_challenger";
     var quick = schedule.finalist_count === 1;
+    if ($("#outer-search-flow")) { $("#outer-search-flow").textContent = quick ? "4 个方案 → 按预登记规则选择 1 条训练主线" : "4 个方案 → 同组 " + formatNumber(schedule.screening_origin_count) + " 个时点评测 → 2 个入围"; }
+    if ($("#parameter-policy-grid")) { $("#parameter-policy-grid").innerHTML = (quick ? ["不执行预筛", "单条训练主线", "完整 " + cellsPerOrigin + " 评分单元", "轮末双臂同组比较"] : [formatNumber(schedule.screening_origin_count) + " 时点初筛", "确定性 Top 2", "完整 " + cellsPerOrigin + " 评分单元", "轮末三臂同组比较"]).map(function (text) { return "<span>" + escapeHTML(text) + "</span>"; }).join(""); }
+    if ($("#agent-update-policy")) { $("#agent-update-policy").textContent = quick ? "批次修订待轮末同组比较；不同批次的分数变化不能证明修改有效。" : "新旧版本在同批数据上比较，轮末统一选择；独立验证另行执行。"; }
     var capacity = state.cohortCapacityReport;
     var plan = capacity && capacity.execution_plan;
     var matchingPlan = plan && plan.schedule && Object.keys(schedule).every(function (key) { return plan.schedule[key] === schedule[key]; }) && plan.generations === budget.max_generations;
@@ -300,7 +314,7 @@
       ["请求组织", "每个预测时点使用一条完整向量链 · " + formatNumber(microbatch) + " 个评分单元原子提交"],
       ["并发上限", formatNumber(candidateConcurrency) + " 个方案；全运行共享 " + formatNumber(concurrency) + " 个同时预测的时点"],
       ["候选总预算", formatNumber(budget.requested_max_candidates) + " 个（至少 " + formatNumber(budget.required_candidates) + " 个）"],
-      ["上下文与输出", "单次生成额度：Planner/Repair 8,192，Critic 4,096 tokens；多步会话累计用量单独记录"],
+      ["上下文与输出", "单次生成额度：Planner/Repair 16,384，Critic 8,192 tokens；多步会话累计用量单独记录，不因累计用量降低预测质量"],
       ["复现与检索", ($("#fixed-seed").checked ? "固定种子" : "记录生成种子") + " · " + ($("#knowledge-online-enabled").checked ? "在线检索" : "内置目录")]
     ];
     $("#parameter-summary").innerHTML = values.map(function (item) {

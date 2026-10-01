@@ -9,6 +9,7 @@ from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import digest
 from ecologyrsi_dsh.evaluators.registry import EvaluatorRegistry
 from ecologyrsi_dsh.evolution.strategies import FakeDSHAdapter, StrategyRouterDSHAdapter, _parent_context
+from ecologyrsi_dsh.evolution.genome import mutation_policy_contract
 from ecologyrsi_dsh.evolution.batches import start_generation_batch
 from ecologyrsi_dsh.evolution.context import safe_aggregate_feedback
 from ecologyrsi_dsh.integrations.dsh_native_runtime import (
@@ -1323,8 +1324,8 @@ class StrategyRouterTests(unittest.TestCase):
                 "authenticated-structured-proposal/6",
             ),
             "autonomous_model@1": (
+                "model-search-reflect-candidate-directions/20",
                 "model-search-reflect-candidate-directions/19",
-                "model-search-reflect-candidate-directions/18",
             ),
         }
         for strategy_id, (
@@ -1336,6 +1337,7 @@ class StrategyRouterTests(unittest.TestCase):
                     {
                         "strategy_id": strategy_id,
                         "implementation": implementation,
+                        "mutation_policy": mutation_policy_contract(),
                         "host_parameter_boundary": "prediction-model-specific/1",
                     }
                 )
