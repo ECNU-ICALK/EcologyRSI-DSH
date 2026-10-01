@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .shared import public_fields
+
 from ..evolution.diversity import enabled as diversity_enabled, diversity_report
 
 from ..core.errors import safe_binding_diagnostics
@@ -44,10 +46,10 @@ from ..core.state import (
 from ..evaluators.registry import (
     EXOGENOUS_RIDGE_MODEL_ID,
     GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
-    TOY_DATASET_ID,
     TOY_EVALUATOR_ID,
     TOY_PREDICTOR_MODEL_ID,
 )
+from ..evaluators.catalog import TOY_DATASET_ID
 from ..evolution.analysis import (
     evaluation_cohort_comparison,
     evaluation_cohort_digest,
@@ -253,13 +255,7 @@ def _run_failure_projection(state: Any) -> tuple[str | None, dict[str, Any] | No
     )
     if isinstance(terminal_context, Mapping):
         return reason, {
-            "generation": terminal_context.get("generation"),
-            "stage": terminal_context.get("stage"),
-            "work_unit_kind": terminal_context.get("work_unit_kind"),
-            "candidate_id": terminal_context.get("candidate_id"),
-            "batch_id": terminal_context.get("batch_id"),
-            "batch_index": terminal_context.get("batch_index"),
-            "batch_count": terminal_context.get("batch_count"),
+            **public_fields(terminal_context, 'generation stage work_unit_kind candidate_id batch_id batch_index batch_count'),
             "created_at": failed_event.created_at,
             "evidence": "terminal_run_failure_context",
             **({"binding_drift": safe_binding_diagnostics(terminal_context["binding_drift"])}
@@ -278,11 +274,7 @@ def _run_failure_projection(state: Any) -> tuple[str | None, dict[str, Any] | No
         return reason, None
     payload = stage_event.payload
     return reason, {
-        "generation": payload.get("generation"),
-        "stage": payload.get("stage"),
-        "attempt": payload.get("attempt"),
-        "proposal_id": payload.get("proposal_id"),
-        "candidate_id": payload.get("candidate_id"),
+        **public_fields(payload, 'generation stage attempt proposal_id candidate_id'),
         "public_error": public_error_summary(payload.get("public_error")),
         "created_at": stage_event.created_at,
     }
@@ -316,16 +308,7 @@ def _run_pause_projection(
         circuit = {
             "open": True,
             "code": code,
-            "retry_class": payload.get("retry_class"),
-            "generation": payload.get("generation"),
-            "stage": payload.get("stage"),
-            "breaker_epoch": payload.get("breaker_epoch"),
-            "consecutive_failures": payload.get("consecutive_failures"),
-            "retry_limit": payload.get("retry_limit"),
-            "first_failure_at": payload.get("first_failure_at"),
-            "last_failure_at": payload.get("last_failure_at"),
-            "last_error_code": payload.get("last_error_code"),
-            "suggested_action": payload.get("suggested_action"),
+            **public_fields(payload, 'retry_class generation stage breaker_epoch consecutive_failures retry_limit first_failure_at last_failure_at last_error_code suggested_action'),
             "pause_event_id": paused_event.event_id,
             "updated_at": paused_event.created_at,
         }
@@ -886,15 +869,7 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
             if state.task_manifest.metadata.get("samples_per_update") is not None
             else "full_frozen_partition_per_candidate"
         ),
-        "samples_per_update": state.task_manifest.metadata.get(
-            "samples_per_update"
-        ),
-        "sample_concurrency": state.task_manifest.metadata.get(
-            "sample_concurrency"
-        ),
-        "candidate_concurrency": state.task_manifest.metadata.get(
-            "candidate_concurrency"
-        ),
+        **public_fields(state.task_manifest.metadata, 'samples_per_update sample_concurrency candidate_concurrency'),
         "training_partition_rows": training_partition_rows,
         "training_eligible_examples": training_eligible_examples,
         "training_used_examples": training_used_examples,
@@ -1028,36 +1003,7 @@ def _public_evaluation_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
                     "score": _finite_number(evaluation.get("score")),
                     "scientific_pass": control_metrics.get("scientific_pass"),
                     "evaluation_cohort_digest": control_cohort_digest,
-                    "strict_agent_chain_pass": sample_summary.get(
-                        "strict_agent_chain_pass"
-                    ),
-                    "complete_agent_chains": sample_summary.get(
-                        "complete_agent_chains"
-                    ),
-                    "complete_origin_agent_chains": sample_summary.get(
-                        "complete_origin_agent_chains"
-                    ),
-                    "remote_planner_invocations": sample_summary.get(
-                        "remote_planner_invocations"
-                    ),
-                    "remote_critic_invocations": sample_summary.get(
-                        "remote_critic_invocations"
-                    ),
-                    "remote_reflection_invocations": sample_summary.get(
-                        "remote_reflection_invocations"
-                    ),
-                    "attempted_examples": sample_summary.get(
-                        "attempted_examples"
-                    ),
-                    "attempted_origin_samples": sample_summary.get(
-                        "attempted_origin_samples"
-                    ),
-                    "prediction_cell_count": sample_summary.get(
-                        "prediction_cell_count"
-                    ),
-                    "host_route_bypass_count": sample_summary.get(
-                        "host_route_bypass_count"
-                    ),
+                    **public_fields(sample_summary, 'strict_agent_chain_pass complete_agent_chains complete_origin_agent_chains remote_planner_invocations remote_critic_invocations remote_reflection_invocations attempted_examples attempted_origin_samples prediction_cell_count host_route_bypass_count'),
                 }
             )
         result["generation_controls"] = controls
@@ -1489,15 +1435,10 @@ def _evaluation_progress_projection(
             else None
         )
     return {
-        "schema_version": payload.get("schema_version"),
-        "revision": payload.get("revision"),
-        "progress_id": payload.get("progress_id"),
+        **public_fields(payload, 'schema_version revision progress_id'),
         "progress_kind": payload.get("progress_kind", "completed_batch"),
         "role": "planner",
-        "model_id": payload.get("model_id"),
-        "batch_index": payload.get("batch_index"),
-        "batch_count": payload.get("batch_count"),
-        "batch_size": payload.get("batch_size"),
+        **public_fields(payload, 'model_id batch_index batch_count batch_size'),
         "completed_samples": completed,
         "total_samples": total,
         "succeeded_samples": payload.get("succeeded_samples"),
@@ -1708,26 +1649,14 @@ def _gateway_retry_projection(state: Any) -> dict[str, Any] | None:
     payload = event.payload
     projected = {
         "waiting": True,
-        "generation": payload.get("generation"),
-        "retry_at": payload.get("retry_at"),
-        "delay_seconds": payload.get("delay_seconds"),
-        "attempt": payload.get("attempt"),
-        "error_code": payload.get("error_code"),
-        "reason": payload.get("reason"),
+        **public_fields(payload, 'generation retry_at delay_seconds attempt error_code reason'),
         "event_seq": event.seq,
         "updated_at": event.created_at,
     }
     if payload.get("schema_version") == "ecologyrsi-dsh.gateway-retry-scheduled/2":
         projected.update(
             {
-                "retry_class": payload.get("retry_class"),
-                "stage": payload.get("stage"),
-                "breaker_epoch": payload.get("breaker_epoch"),
-                "consecutive_failures": payload.get("consecutive_failures"),
-                "retry_limit": payload.get("retry_limit"),
-                "first_failure_at": payload.get("first_failure_at"),
-                "last_failure_at": payload.get("last_failure_at"),
-                "last_error_code": payload.get("last_error_code"),
+                **public_fields(payload, 'retry_class stage breaker_epoch consecutive_failures retry_limit first_failure_at last_failure_at last_error_code'),
                 "suggested_action": "wait_for_scheduled_retry",
             }
         )
@@ -3949,9 +3878,9 @@ def _trajectory_operation_projection(operation: Mapping[str, Any]) -> dict[str, 
     # vocabulary, and it is also what tells an expert whether the run is
     # exploring one axis over and over.
     try:
-        from ..evolution.local_edits import _operation_target
+        from ..evolution.mutation_specs import mutation_coordinates
 
-        axis, target, _slot = _operation_target(operation)
+        axis, target, _slot = mutation_coordinates(operation)
     except Exception:  # noqa: BLE001 - an unregistered op still deserves a row
         return projected
     projected["axis"] = axis
@@ -4138,9 +4067,7 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
                 "scientific_diagnostics": {
                     "status": "passed" if metrics.get("scientific_pass") is True else "not_established" if evaluation is not None else "pending",
                     "paired_time_blocks": metrics.get("promotion_block_evidence", {}).get("block_count"),
-                    "minimum_paired_blocks": metrics.get("cell_noninferiority_evidence", {}).get("minimum_paired_blocks"),
-                    "evidence_sufficient": metrics.get("cell_noninferiority_evidence", {}).get("evidence_sufficient"),
-                    "evidence_failure": metrics.get("cell_noninferiority_evidence", {}).get("evidence_failure"),
+                    **public_fields(metrics.get('cell_noninferiority_evidence', {}), 'minimum_paired_blocks evidence_sufficient evidence_failure'),
                     "negative_skill_cells": sum(1 for item in metrics.get("targets", ())
                         if isinstance(item, Mapping) and isinstance(item.get("skill_score"), (int, float))
                         and item["skill_score"] < 0),
@@ -5363,9 +5290,7 @@ def _mutation_explanation_projection(state: Any, candidate: Any, proposal: Any) 
             else "generation_parent_genome"
         ),
         "parent_genome_available": parent is not None,
-        "origin_kind": lineage.get("origin_kind"),
-        "mutation_operator_id": lineage.get("mutation_operator_id"),
-        "mutation_digest": lineage.get("mutation_digest"),
+        **public_fields(lineage, 'origin_kind mutation_operator_id mutation_digest'),
         "operations": operations,
         "operation_count": (
             len(raw_operations)
@@ -6300,34 +6225,13 @@ def _projection_json(
         "candidates_count": len(search_candidates),
         "max_candidates": task.max_candidates,
         "candidates_per_generation": task.candidates_per_generation,
-        "optimization_protocol": metadata.get("optimization_protocol"),
-        "optimization_schedule": metadata.get("optimization_schedule"),
-        "local_comparison_policy": metadata.get("local_comparison_policy"),
-        "prequential_performance_policy": metadata.get("prequential_performance_policy"),
-        "mutation_policy": metadata.get("mutation_policy"),
-        "mutation_policy_digest": metadata.get("mutation_policy_digest"),
-        "search_guard_policy": metadata.get("search_guard_policy"),
-        "research_execution_policy": metadata.get("research_execution_policy"),
+        **public_fields(metadata, 'optimization_protocol optimization_schedule local_comparison_policy prequential_performance_policy mutation_policy mutation_policy_digest search_guard_policy research_execution_policy'),
         "search_probation": search_probation_projection(state),
         "require_model_contract_preflight": metadata.get("require_model_contract_preflight", False),
         "model_contract_preflight": model_preflight_projection(state),
         "latest_runtime_failure": _runtime_failure_projection(state),
         "host_activity": _host_activity_projection(state),
-        "samples_per_update": metadata.get("samples_per_update"),
-        "minimum_selection_samples_per_update": metadata.get(
-            "minimum_selection_samples_per_update"
-        ),
-        "minimum_selection_origin_samples_per_update": metadata.get(
-            "minimum_selection_origin_samples_per_update"
-        ),
-        "prediction_cells_per_origin": metadata.get(
-            "prediction_cells_per_origin"
-        ),
-        "sample_agent_protocol": metadata.get("sample_agent_protocol"),
-        "sample_budget_class": metadata.get("sample_budget_class"),
-        "sample_agent_batch_size": metadata.get("sample_agent_batch_size"),
-        "sample_concurrency": metadata.get("sample_concurrency"),
-        "candidate_concurrency": metadata.get("candidate_concurrency"),
+        **public_fields(metadata, 'samples_per_update minimum_selection_samples_per_update minimum_selection_origin_samples_per_update prediction_cells_per_origin sample_agent_protocol sample_budget_class sample_agent_batch_size sample_concurrency candidate_concurrency'),
         "two_stage_evaluation_enabled": metadata.get(
             "two_stage_evaluation_enabled", True
         ),

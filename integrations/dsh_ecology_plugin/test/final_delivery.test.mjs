@@ -7,7 +7,7 @@ import { observeSessionUsage } from '../lib/runtime/session-usage.js';
 const base = JSON.parse(readFileSync(new URL('../schemas/research-synthesis.schema.json', import.meta.url)));
 function context(ref) {
   return { knowledge_snapshot: { evidence_catalog: [{ knowledge_id: ref, capability_ids: ['cap-a'] }] },
-    synthesis_contract: { allowed_mutation_targets: {
+    synthesis_contract: { mutation_directions_by_axis: { scientific_parameter: ["increase", "decrease"], registered_predictor: ["select"], instruction_profile: ["select"] }, allowed_mutation_targets: {
       scientific_parameter: ['ridge_alpha'], registered_predictor: ['ridge@1'], instruction_profile: ['profile@1'],
     } }, required_candidate_direction_count: 4 };
 }
@@ -26,6 +26,42 @@ test('research schema binds evidence and axis/target choices without changing ca
   assert.equal(JSON.stringify(next).includes('ref-a'), false);
   const invalid = context(''); invalid.knowledge_snapshot.evidence_catalog = [];
   assert.throws(() => specializeResearchOutputSchema('generation.research-synthesis', structuredClone(base), invalid), /empty/);
+});
+
+test('research schema preserves every advertised family and rejects unsatisfiable schedules', () => {
+  const ctx = context('paper:one');
+  Object.assign(ctx.synthesis_contract.allowed_mutation_targets, {
+    instruction_parameter: ['confidence_threshold'], instruction_directive: ['authored_directive@1'],
+    skill_program: ['causal_planner_skills@1'], workflow_parameter: ['max_attempts'],
+    feature_recipe: ['authored_causal_features@1'],
+  });
+  Object.assign(ctx.synthesis_contract.mutation_directions_by_axis, {
+    instruction_parameter: ['increase', 'decrease'], instruction_directive: ['author', 'revise'],
+    skill_program: ['author', 'revise'], workflow_parameter: ['increase', 'decrease'], feature_recipe: ['author', 'revise'],
+  });
+  ctx.synthesis_contract.diversity_schedule = {
+    required_family_by_slot: ['prompt', 'skill', 'scientific', 'execution'],
+    axes_by_family: { prompt: ['instruction_directive', 'instruction_profile'], skill: ['skill_program'],
+      scientific: ['scientific_parameter', 'registered_predictor'], execution: ['workflow_parameter', 'instruction_parameter'] },
+  };
+  const schema = structuredClone(base);
+  specializeResearchOutputSchema('generation.research-synthesis', schema, ctx);
+  const variants = schema.properties.candidate_directions.items.oneOf;
+  assert.deepEqual(variants.map(v => v.properties.mutation_axis.const), Object.keys(ctx.synthesis_contract.allowed_mutation_targets));
+  for (const variant of variants) {
+    const axis = variant.properties.mutation_axis.const;
+    assert.deepEqual(variant.properties.mutation_direction.enum, ctx.synthesis_contract.mutation_directions_by_axis[axis]);
+    assert.deepEqual(variant.properties.mutation_target.enum, ctx.synthesis_contract.allowed_mutation_targets[axis]);
+  }
+  for (const corrupt of [
+    c => { c.synthesis_contract.allowed_mutation_targets.skill_program = []; },
+    c => { delete c.synthesis_contract.mutation_directions_by_axis.skill_program; },
+    c => { c.synthesis_contract.mutation_directions_by_axis.skill_program = ['execute']; },
+    c => { c.synthesis_contract.allowed_mutation_targets.unregistered = ['unsafe']; },
+  ]) {
+    const invalid = structuredClone(ctx); corrupt(invalid);
+    assert.throws(() => specializeResearchOutputSchema('generation.research-synthesis', structuredClone(base), invalid), /mutation/);
+  }
 });
 
 test('usage observer persists failed/cancelled calls and retries transport independently of result admission', async () => {

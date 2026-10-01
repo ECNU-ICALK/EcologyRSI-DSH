@@ -23,11 +23,9 @@ from ecologyrsi_dsh.evaluators.authored_directive import (
     MAX_DIRECTIVE_TOOL_PLAN_STEPS,
 )
 from ecologyrsi_dsh.evaluators.dsh_sample_adapter import DshSampleCollaborationAdapter
-from ecologyrsi_dsh.evaluators.registry import (
-    TOY_DATASET_ID,
-    EvaluatorRegistry,
-    _candidate_remote_critic_policy,
-)
+from ecologyrsi_dsh.evaluators.catalog import TOY_DATASET_ID
+from ecologyrsi_dsh.evaluators.registry import EvaluatorRegistry
+from ecologyrsi_dsh.evaluators.pipeline import _candidate_remote_critic_policy
 from ecologyrsi_dsh.evaluators.sample_contracts import _normalized_remote_critic_policy
 from ecologyrsi_dsh.evolution.agent_policy import (
     allowed_prediction_methods as _allowed_prediction_methods,

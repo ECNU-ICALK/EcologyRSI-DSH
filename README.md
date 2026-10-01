@@ -6,9 +6,13 @@ EcologyRSI-DSH 是一个基于 DeepSeek Harness 的 **AI for Ecology** 框架，
 
 这里的 RSI 指 Recursive Self-Improvement（循环自进化）：根据上一轮证据继续提出和检验方案。目前可执行的改进受已登记模型、参数与工具边界约束；新算法或新生态任务需要先适配和登记。搜索版本与严格认证版本分别记录，分数上升只有在相应比较资格和门槛通过后才允许更新。一次运行也可以正常结束且没有合格改进。
 
-> 当前工作树：`0.7.15` 多类型进化与 Skill 程序版（独立科学验收待完成） · Python 3.10+ · DSH `0.1.5-rc.2` · 本地服务端口 `8777/8848`
+> 当前工作树：`0.8.4` 统一契约与评估流程重构版（独立科学验收待完成） · Python 3.10+ · DSH `0.2.0-rc.2` · 本地服务端口 `8777/8848`
 
 当前主实例入口为 `http://127.0.0.1:8848/plugins/ecology/evolution/`，后端 8777。快速协议改造与验收见 [本次实施记录](docs/refactor/QUICK-OPTIMIZATION-IMPLEMENTATION-20260909.md)。`dist/0.7.10/` 属于此前的交付快照，不包含本次修改；此前完成的长运行也不能代替新协议验收。
+
+本版将角色、阶段与工具权限集中到插件角色清单，变异操作集中到 `evolution/mutation_specs.py`；评估登记、执行、单元评分分别位于 `evaluators/catalog.py`、`pipeline.py`、`cell_scoring.py`。普通候选、初筛、正式批次和 holdout 共用 `EvaluationSession` 的结果与检查点回调。API 的事件投影保留明确字段白名单和脱敏。
+
+`0.8.4` 要求 Harness `0.2.0-rc.2`。局部编辑事件只接受嵌套 `proposal` 的当前格式；不再接收旧版扁平 `decision/operations` 事件。既有研究数据不自动迁移；旧进程继续使用其固定版本，新版本使用独立运行目录。版本升级和代码重构不代表已完成真实模型的独立科学验收。
 
 ## 先看这里
 
@@ -224,18 +228,18 @@ python -m ecologyrsi_dsh export-policy RUN_ID CANDIDATE_ID --db run.sqlite3 --ou
 
 ## 快速启动
 
-本项目当前固定使用 DSH `0.1.5-rc.2`。请先安装 Node.js（包含 `npm`）和
+本项目当前固定使用 DSH `0.2.0-rc.2`。请先安装 Node.js（包含 `npm`）和
 Python 3.10 或更高版本，再按以下顺序执行。
 
 ### 1. 安装 DSH
 
 ```bash
-npm install --global @deepseek-ai/dsh@0.1.5-rc.2
+npm install --global @deepseek-ai/dsh@0.2.0-rc.2
 dsh --help
 ```
 
 如果本机已经安装了这个版本，可以跳过本步骤。不要直接省略版本号安装最新预览版，
-因为 DSH 仍在快速迭代，本项目的宿主插件和 preset 已按 `0.1.5-rc.2` 的运行时接口冻结。
+因为 DSH 仍在快速迭代，本项目的宿主插件和 preset 已按 `0.2.0-rc.2` 的运行时接口冻结。
 
 ### 2. 安装 EcologyRSI-DSH
 

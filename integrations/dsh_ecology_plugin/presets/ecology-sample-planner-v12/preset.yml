@@ -1,2 +1,2 @@
-name: Ecology Sample Planner v11
+name: Ecology Sample Planner v12
 description: Autonomous sample analysis anchored on the candidate's own evolved model, with Agent-owned final predictions. The strategy directive arrives at run time; the Skill holds only the invariant protocol.

@@ -8,16 +8,16 @@ import { RuntimeRunRegistry } from "../lib/runtime/run-registry.js";
 import { NativeStageRunner, jsonDigest } from "../lib/runtime/stage-runner.js";
 
 const REALISTIC_PRESET_CATALOG = Object.freeze([
-  "ecology-coordinator-v5",
-  "ecology-researcher-v13",
-  "ecology-candidate-proposer-v5",
-  "ecology-sample-planner-v11",
-  "ecology-sample-critic-v5",
-  "ecology-generation-judge-v8",
+  "ecology-coordinator-v6",
+  "ecology-researcher-v15",
+  "ecology-candidate-proposer-v6",
+  "ecology-sample-planner-v12",
+  "ecology-sample-critic-v6",
+  "ecology-generation-judge-v9",
 ].map((preset_id) => ({
   preset_id,
   tool_profile: "dynamic-retrieval-v1",
-  required_tools: preset_id === "ecology-sample-planner-v11"
+  required_tools: preset_id === "ecology-sample-planner-v12"
     ? ["ecology_execute_prediction_tool", "skill", "web_search"]
     : ["skill", "web_search"],
 })));
@@ -45,7 +45,7 @@ async function startReadyControllerRun(controller, startBinding) {
   const roleAgents = controller.roleAgents;
   controller.stageRunner = null;
   controller.presetCatalog = [
-    { preset_id: "ecology-researcher-v13", tool_profile: "test" },
+    { preset_id: "ecology-researcher-v15", tool_profile: "test" },
   ];
   controller.roleAgents = {
     createRoleAgent: async () => ({ dispose: async () => {} }),
@@ -62,7 +62,7 @@ async function startReadyControllerRun(controller, startBinding) {
 
 function liveCapabilityContext({ beforeCreate = async () => {} } = {}) {
   const toolsByPreset = new Map(REALISTIC_PRESET_CATALOG.map((item) => [
-    `standing:${item.preset_id}`,
+    item.preset_id,
     item.required_tools,
   ]));
   return {
@@ -71,7 +71,7 @@ function liveCapabilityContext({ beforeCreate = async () => {} } = {}) {
         await beforeCreate(options);
         const agent = {
           session: { append: async () => {}, flush: async () => {} },
-          waitForIdle: async () => {},
+          whenIdle: async () => {},
         };
         await options.setup?.(agent);
         return { agent, dispose: async () => {} };
@@ -82,13 +82,14 @@ function liveCapabilityContext({ beforeCreate = async () => {} } = {}) {
     subagents: {},
     tools: {
       schemas: async (standingKey) => (
-        toolsByPreset.get(standingKey)?.map((name) => ({ name })) || []
+        toolsByPreset.get(standingKey.presetId)?.map((name) => ({ name })) || []
       ),
     },
     sessionPersistence: {},
     sessionProjections: {},
     agentPresets: {
-      standingKeyFor: async (presetId) => `standing:${presetId}`,
+      resolve: async (presetId) => ({ id: presetId }),
+      acquireScope: async (presetId) => ({ key: { presetId: presetId }, async [Symbol.asyncDispose]() {} }),
       mount: async (_agent, presetId) => ({ id: presetId }),
       serviceFor: async (_agent, serviceName) => ({ serviceName }),
     },

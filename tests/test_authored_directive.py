@@ -30,7 +30,7 @@ from ecologyrsi_dsh.evolution.genome import (
     apply_genome_mutation,
     materialize_seed_genome,
 )
-from ecologyrsi_dsh.evolution.local_edits import _operation_target
+from ecologyrsi_dsh.evolution.mutation_specs import mutation_coordinates
 from ecologyrsi_dsh.evolution.workflow_ir import resolve_candidate_agent_profile
 from ecologyrsi_dsh.knowledge.autonomous_cycle import (
     CANDIDATE_MUTATION_AXES,
@@ -359,7 +359,7 @@ class AuthoredDirectiveGenomeTests(unittest.TestCase):
         parent = _seed_genome()
         for role in ("sample-critic", "candidate-proposer"):
             with self.subTest(role=role), self.assertRaisesRegex(
-                ValueError, "only the sample-planner role can author a directive"
+                ValueError, "candidate cannot mutate reproduction or reviewer role instructions"
             ):
                 _author(parent, _directive(), role=role)
 
@@ -373,7 +373,7 @@ class AuthoredDirectiveGenomeTests(unittest.TestCase):
             "author_role_directive",
         )
         self.assertEqual(
-            _operation_target(
+            mutation_coordinates(
                 {"op": "author_role_directive", "role": "sample-planner"}
             ),
             (

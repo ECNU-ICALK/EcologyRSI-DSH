@@ -26,6 +26,27 @@ const ROOT_SERVICES = [
   "sessionPersistence", "sessionProjections", "agentPresets", "llm", "web",
 ];
 
+test("DSH 0.2 scope leases are released on success and catalog failure without exposing keys", async () => {
+  const ctx = Object.fromEntries(ROOT_SERVICES.map(name => [name, {}]));
+  let released = 0;
+  const key = { toJSON() { throw new Error("opaque key must stay inside the host"); } };
+  ctx.agentPresets.acquireScope = async () => ({
+    key, async [Symbol.asyncDispose]() { released += 1; },
+  });
+  ctx.agentPresets.standingKeyFor = () => { throw new Error("obsolete API"); };
+  ctx.llm.resolveCallConfig = async () => ({});
+  ctx.tools.schemas = scope => { assert.equal(scope, key); return [{ name: "skill" }]; };
+  const catalog = [{ preset_id: "p", required_tools: ["skill"] }];
+  const success = await runtimeCapabilities(ctx, catalog);
+  assert.equal(success.ready, true);
+  assert.equal(success.presets[0].standing_key, null);
+  assert.doesNotThrow(() => JSON.stringify(success));
+  assert.equal(released, 1);
+  ctx.tools.schemas = () => { throw new Error("catalog unavailable"); };
+  assert.equal((await runtimeCapabilities(ctx, catalog)).ready, false);
+  assert.equal(released, 2);
+});
+
 test("missing root services are reported truthfully", async () => {
   const result = await runtimeCapabilities({ webServer: {} }, []);
   assert.equal(result.ready, false);
@@ -38,14 +59,14 @@ test("preset mount, tool surface and route resolution do not create probe agents
   let created = 0;
   const ctx = Object.fromEntries(ROOT_SERVICES.map((name) => [name, {}]));
   ctx.agents.create = () => { created += 1; throw new Error("must not create"); };
-  ctx.agentPresets.standingKeyFor = async (id) => `standing:${id}`;
-  ctx.tools.schemas = (key) => key.endsWith("ecology-researcher-v13")
+  ctx.agentPresets.acquireScope = async id => ({ key: { presetId: id }, async [Symbol.asyncDispose]() {} });
+  ctx.tools.schemas = (key) => key.presetId.endsWith("ecology-researcher-v15")
     ? [{ name: "read_generation_context" }]
     : [];
   ctx.llm.resolveCallConfig = async ({ model }) => ({ model, provider: "fake" });
   const result = await runtimeCapabilities(ctx, [
     {
-      preset_id: "ecology-researcher-v13",
+      preset_id: "ecology-researcher-v15",
       required_tools: ["read_generation_context"],
       model: "fake/model",
     },
@@ -61,14 +82,14 @@ test("preset mount, tool surface and route resolution do not create probe agents
 
 test("tool surface verification rejects undeclared extra tools", async () => {
   const ctx = Object.fromEntries(ROOT_SERVICES.map((name) => [name, {}]));
-  ctx.agentPresets.standingKeyFor = async (id) => `standing:${id}`;
+  ctx.agentPresets.acquireScope = async id => ({ key: { presetId: id }, async [Symbol.asyncDispose]() {} });
   ctx.tools.schemas = () => [
     { name: "ecology_execute_prediction_tool" },
     { name: "unexpected_global_tool" },
   ];
   ctx.llm.resolveCallConfig = async () => ({ provider: "fake", model: "model" });
   const result = await runtimeCapabilities(ctx, [{
-    preset_id: "ecology-sample-planner-v11",
+    preset_id: "ecology-sample-planner-v12",
     required_tools: ["ecology_execute_prediction_tool"],
   }]);
   assert.equal(result.presets[0].tool_surface_verified, false);

@@ -14,11 +14,8 @@ from ..integrations.model_bindings import (
     builtin_model_configuration_digest,
     model_supports_role,
 )
-from ..evaluators.registry import (
-    TOY_DATASET_ID,
-    TOY_EVALUATOR_ID,
-    TOY_PREDICTOR_MODEL_ID,
-)
+from ..evaluators.catalog import TOY_DATASET_ID
+from ..evaluators.registry import TOY_EVALUATOR_ID, TOY_PREDICTOR_MODEL_ID
 from .projection import (
     _admission_progress_fields,
     _assert_http_scope,

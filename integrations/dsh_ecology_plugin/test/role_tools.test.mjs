@@ -25,8 +25,8 @@ test("role tool sets are exact and one-shot roles have no submit channel", () =>
     assert.deepEqual(ROLE_TOOL_NAMES[role], ["skill", "web_search"]);
     assert.deepEqual(ROLE_PLUGIN_TOOL_NAMES[role], ["web_search"]);
   }
-  assert.deepEqual(roleToolNames("researcher"), ["skill"]);
-  assert.deepEqual(rolePluginToolNames("researcher"), []);
+  assert.deepEqual(roleToolNames("researcher"), ["skill", "web_search"]);
+  assert.deepEqual(rolePluginToolNames("researcher"), ["web_search"]);
   assert.deepEqual(
     roleToolNames("researcher", "dynamic-retrieval-v1"),
     ["skill", "web_search"],

@@ -32,7 +32,7 @@ from ecologyrsi_dsh.evaluators.greenhouse_prediction import (
     MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
     fit_predict_exogenous_ridge,
 )
-from ecologyrsi_dsh.evaluators.registry import _select_planned_evaluation_cohort
+from ecologyrsi_dsh.evaluators.pipeline import _select_planned_evaluation_cohort
 from ecologyrsi_dsh.evolution.schedule import (
     LEGACY_SCHEDULE_SCHEMA_VERSION,
     PREQUENTIAL_LOCAL_EVALUATION_MODE,
@@ -272,12 +272,11 @@ class ScopedSampleExecutionTests(unittest.TestCase):
         self.director.record_local_edit_proposal(
             self.run_id,
             {
-                "proposal_id": "local:scope:0",
-                "candidate_id": candidate.candidate_id,
-                "batch_index": 0,
-                "evidence_scope_digest": first_scope.scope_key,
-                "decision": "keep",
-                "operations": [],
+                'proposal_id': "local:scope:0",
+                'candidate_id': candidate.candidate_id,
+                'batch_index': 0,
+                'evidence_scope_digest': first_scope.scope_key,
+                "proposal": {"schema_version": "ecology-local-edit@1", "decision": "keep", "operations": [], "evidence_refs": ["batch:score"], "expected_effect_cells": [], "risk_cells": []}
             },
         )
         self.director.decide_local_edit(

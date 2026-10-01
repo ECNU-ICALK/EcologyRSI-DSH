@@ -3,34 +3,134 @@
   "protocol": "dsh_native_plugin_evolution@1",
   "presets": [
     {
-      "preset_id": "ecology-coordinator-v5",
+      "preset_id": "ecology-coordinator-v6",
       "tool_profile": "dynamic-retrieval-v1",
-      "required_tools": ["skill", "web_search"]
+      "required_tools": [
+        "skill",
+        "web_search"
+      ],
+      "role": "coordinator",
+      "model_route": "policy"
     },
     {
-      "preset_id": "ecology-researcher-v13",
+      "preset_id": "ecology-researcher-v15",
       "tool_profile": "dynamic-retrieval-v1",
-      "required_tools": ["skill", "web_search"]
+      "required_tools": [
+        "skill",
+        "web_search"
+      ],
+      "role": "researcher",
+      "model_route": "policy"
     },
     {
-      "preset_id": "ecology-candidate-proposer-v5",
+      "preset_id": "ecology-candidate-proposer-v6",
       "tool_profile": "dynamic-retrieval-v1",
-      "required_tools": ["skill", "web_search"]
+      "required_tools": [
+        "skill",
+        "web_search"
+      ],
+      "role": "candidate-proposer",
+      "model_route": "policy"
     },
     {
-      "preset_id": "ecology-sample-planner-v11",
+      "preset_id": "ecology-sample-planner-v12",
       "tool_profile": "dynamic-retrieval-v1",
-      "required_tools": ["ecology_execute_prediction_tool", "skill", "web_search"]
+      "required_tools": [
+        "skill",
+        "web_search",
+        "ecology_execute_prediction_tool"
+      ],
+      "role": "sample-planner",
+      "model_route": "policy"
     },
     {
-      "preset_id": "ecology-sample-critic-v5",
+      "preset_id": "ecology-sample-critic-v6",
       "tool_profile": "dynamic-retrieval-v1",
-      "required_tools": ["skill", "web_search"]
+      "required_tools": [
+        "skill",
+        "web_search"
+      ],
+      "role": "sample-critic",
+      "model_route": "review"
     },
     {
-      "preset_id": "ecology-generation-judge-v8",
+      "preset_id": "ecology-generation-judge-v9",
       "tool_profile": "dynamic-retrieval-v1",
-      "required_tools": ["skill", "web_search"]
+      "required_tools": [
+        "skill",
+        "web_search"
+      ],
+      "role": "generation-judge",
+      "model_route": "review"
     }
+  ],
+  "stages": {
+    "generation.research": {
+      "role": "researcher",
+      "schema": "ecology-research-result@1",
+      "file": "research-result",
+      "skillName": "autonomous-ecology-research"
+    },
+    "generation.search-plan": {
+      "role": "researcher",
+      "schema": "ecology-research-search-plan@1",
+      "file": "research-search-plan",
+      "skillName": "autonomous-ecology-research"
+    },
+    "generation.research-synthesis": {
+      "role": "researcher",
+      "schema": "ecology-research-synthesis@1",
+      "file": "research-synthesis",
+      "skillName": "autonomous-ecology-research"
+    },
+    "candidate.propose": {
+      "role": "candidate-proposer",
+      "schema": "ecology-genome-mutation@1",
+      "file": "genome-mutation",
+      "skillName": "bounded-plugin-experiment"
+    },
+    "candidate.local_edit": {
+      "role": "candidate-proposer",
+      "schema": "ecology-local-edit@1",
+      "file": "local-edit",
+      "skillName": "bounded-plugin-experiment"
+    },
+    "generation.judge": {
+      "role": "generation-judge",
+      "schema": "ecology-generation-review@1",
+      "file": "generation-review",
+      "skillName": "candidate-scientific-review"
+    },
+    "generation.reflect": {
+      "role": "generation-judge",
+      "schema": "ecology-generation-reflection@1",
+      "file": "generation-reflection",
+      "skillName": "batch-scientific-reflection"
+    },
+    "sample.plan": {
+      "role": "sample-planner",
+      "schema": "ecology-sample-predictions@2",
+      "file": "sample-decisions",
+      "allowsPredictionTools": true,
+      "canarySkillName": "origin-vector-forecasting"
+    },
+    "sample.critic": {
+      "role": "sample-critic",
+      "schema": "ecology-sample-review@2",
+      "file": "sample-review",
+      "skillName": "origin-vector-review"
+    },
+    "sample.reflect": {
+      "role": "sample-critic",
+      "schema": "ecology-sample-reflection@1",
+      "file": "sample-reflection",
+      "skillName": "origin-vector-review"
+    }
+  },
+  "canary_stages": [
+    "generation.search-plan",
+    "generation.reflect",
+    "sample.critic",
+    "sample.plan"
   ]
 }

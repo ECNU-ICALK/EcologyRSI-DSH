@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.models import JsonObject, canonical_json, digest, utc_now
+from ..evolution.mutation_specs import MUTATION_SPECS
 
 
 AUTONOMOUS_RESEARCH_PROTOCOL = "dsh-model-search-reflect@1"
@@ -33,44 +34,8 @@ MAX_RECIPE_TERM_EDITS_PER_MUTATION = 2
 # it, or what it changes. Both project these maps down to the axes they actually
 # advertise, so a model is never shown an operation it may not use, and never an
 # axis without the operation name that would let it use it.
-MUTATION_OPERATION_BY_AXIS: dict[str, str] = {
-    "scientific_parameter": "set_bounded_parameter",
-    "registered_predictor": "select_registered_pipeline",
-    "instruction_profile": "select_instruction_template",
-    "instruction_parameter": "set_instruction_parameter",
-    "instruction_directive": "author_role_directive",
-    "skill_program": "author_skill_program",
-    "instruction_tool_policy": "narrow_role_tool_policy",
-    "workflow_template": "select_registered_workflow_template",
-    "workflow_parameter": "set_bounded_workflow_parameter",
-    "feature_policy": "select_registered_feature_policy",
-    "feature_recipe": "author_feature_recipe",
-    "fit_policy": "select_registered_fit_policy",
-    "uncertainty_policy": "select_registered_uncertainty_policy",
-}
-MUTATION_DIRECTIONS_BY_AXIS: dict[str, tuple[str, ...]] = {
-    "scientific_parameter": ("increase", "decrease"),
-    "registered_predictor": ("select",),
-    "instruction_profile": ("select",),
-    "instruction_parameter": ("increase", "decrease"),
-    # Authoring is not a scalar move, so it has no increase/decrease. `author`
-    # writes a directive where none existed; `revise` rewrites the clauses of
-    # one the parent already had. Keeping them distinct lets a reflection say
-    # which of the two the evidence supports.
-    "instruction_directive": ("author", "revise"),
-    "skill_program": ("author", "revise"),
-    "instruction_tool_policy": ("narrow",),
-    "workflow_template": ("select",),
-    "workflow_parameter": ("increase", "decrease"),
-    "feature_policy": ("select",),
-    # Structural like `instruction_directive`, so it shares that axis's
-    # author/revise split rather than a scalar direction: `author` writes a
-    # recipe onto a candidate that had none, `revise` rewrites the terms of one
-    # the parent already carried. A term-count change is not a direction.
-    "feature_recipe": ("author", "revise"),
-    "fit_policy": ("select",),
-    "uncertainty_policy": ("select",),
-}
+MUTATION_OPERATION_BY_AXIS = {spec.axis: op for op, spec in MUTATION_SPECS.items()}
+MUTATION_DIRECTIONS_BY_AXIS = {spec.axis: spec.directions for spec in MUTATION_SPECS.values()}
 MUTATION_AXIS_EFFECTS: dict[str, str] = {
     "skill_program": (
         "Authors or revises an ordered, versioned skill program. Host modules compute causal observation "

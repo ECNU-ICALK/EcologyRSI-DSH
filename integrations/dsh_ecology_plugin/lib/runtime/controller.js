@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { readFileSync } from "node:fs";
+import { PRESET_MANIFEST } from "./contracts.js";
 
 import { RuntimeRunRegistry } from "./run-registry.js";
 import { runtimeCapabilities } from "./capabilities.js";
@@ -7,24 +7,7 @@ import { RoleAgentManager } from "./agents.js";
 import { NativeStageRunner } from "./stage-runner.js";
 import { ModelContractCanary } from "./model-canary.js";
 
-const PRESET_MANIFEST = Object.freeze(JSON.parse(readFileSync(
-  new URL("../../presets/preset-manifest.json", import.meta.url),
-  "utf8",
-)));
-if (
-  PRESET_MANIFEST.schema_version !== "ecologyrsi-dsh.preset-manifest/1"
-  || !Array.isArray(PRESET_MANIFEST.presets)
-  || PRESET_MANIFEST.presets.length === 0
-) {
-  throw new Error("preset-manifest.json is invalid");
-}
-const DEFAULT_PRESETS = Object.freeze(PRESET_MANIFEST.presets.map((item) => (
-  Object.freeze({
-    preset_id: String(item.preset_id),
-    tool_profile: String(item.tool_profile),
-    required_tools: Object.freeze([...item.required_tools].map(String)),
-  })
-)));
+const DEFAULT_PRESETS = PRESET_MANIFEST.presets;
 
 export const CURRENT_PRESET_MANIFEST = PRESET_MANIFEST;
 
@@ -157,8 +140,8 @@ export class RuntimeController {
     const reviewModel = frozen.review_model_id;
     try {
       const creations = await Promise.allSettled(this.presetCatalog.map(({ preset_id, tool_profile }) => {
-        const role = preset_id.replace(/^ecology-/, "").replace(/-v\d+$/, "");
-        const reviewRole = role === "sample-critic" || role === "generation-judge";
+        const { role, model_route } = PRESET_MANIFEST.presets.find(item => item.preset_id === preset_id);
+        const reviewRole = model_route === "review";
         return this.roleAgents.createRoleAgent({
           run_id: binding.run_id,
           role,

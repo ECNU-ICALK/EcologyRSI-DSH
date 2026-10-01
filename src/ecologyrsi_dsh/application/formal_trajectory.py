@@ -39,11 +39,11 @@ from ..evolution.champion_challenger import (
     assess_local_challenger,
     local_challenger_safety_reason,
 )
+from ..evolution.mutation_specs import mutation_coordinates
 from ..evolution.local_edits import (
     LocalEditContext,
     LocalEditProposal,
     LocalEditResult,
-    _operation_target,
     apply_or_reject_local_edit_bundle,
 )
 from ..evolution.strategies import (
@@ -69,7 +69,7 @@ from ..evaluators.registry import EvaluatorRegistry
 from ..integrations.dsh_native_runtime import DshNativeRuntimeUnavailableError
 from ..integrations.dsh_structured_roles import DshStructuredRoleRuntime
 from .generation_execution import (
-    _ScopedEvaluationCallbacks,
+    EvaluationSession,
     _director_mutation,
     _phase_task_manifest,
 )
@@ -241,7 +241,7 @@ def _evaluate_formal_batch_arm(
         revision_id,
         task,
     )
-    callbacks = _ScopedEvaluationCallbacks(
+    callbacks = EvaluationSession(
         services,
         run_id=run_id,
         generation=candidate.generation,
@@ -711,7 +711,11 @@ def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRev
         "instruction_directive": (AUTHORED_DIRECTIVE_POLICY_ID,),
     }
     _boundary, parameter_schemas = _genome_parameter_boundary(state.task_manifest, genome)
-    from ..evolution.diversity import enabled as diversity_enabled, candidate_family, FAMILY_AXES
+    from ..evolution.diversity import (
+        enabled as diversity_enabled,
+        candidate_family,
+        FAMILY_AXES,
+    )
     if diversity_enabled(state.task_manifest.metadata):
         family = candidate_family(state.proposal(candidate.proposal_id))
         if family in FAMILY_AXES:
@@ -2101,7 +2105,7 @@ def _inactive_axis_rejection_reason(
         return None
     for operation in proposal.operations:
         try:
-            axis, _target, _path = _operation_target(operation)
+            axis, _target, _path = mutation_coordinates(operation)
         except (TypeError, ValueError):
             return None
         if axis in inert:

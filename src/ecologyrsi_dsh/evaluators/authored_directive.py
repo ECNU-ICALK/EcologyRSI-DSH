@@ -40,7 +40,7 @@ AUTHORED_DIRECTIVE_SCHEMA_VERSION = "ecologyrsi-dsh.authored-directive/1"
 # The registry entry that publishes this grammar. Named here rather than spelled
 # out at each use site so the genome's `directive_policy_ref` and the registered
 # entry cannot come to disagree about which policy bounded a directive.
-AUTHORED_DIRECTIVE_POLICY_ID = "authored_directive@1"
+from ..evolution.mutation_specs import AUTHORED_DIRECTIVE_POLICY_ID
 
 # Matches the registered-directive ceiling in `knowledge.program_registry`,
 # which imports this name so the two cannot drift. A registry template and an

@@ -20,3 +20,24 @@ export function sessionEvents(session) {
 export function sessionEventLog(ctx, sessionId) {
   return sessionEvents(ctx?.sessions?.get?.(sessionId));
 }
+
+// Harness 0.2 stores tool identity on the tool message, whose content is the
+// result body. Keep every evidence reader on this one normalization boundary.
+export function toolResultIdentity(event) {
+  if (event?.type !== "tool/result") return null;
+  const data = event.data || {};
+  const message = data.message;
+  if (message?.role === "tool" && ("toolCallId" in message || message.source?.kind === "tool")) {
+    const callId = message.toolCallId;
+    if (typeof callId !== "string" || !callId || message.source?.kind !== "tool"
+      || message.source.callId !== callId) return null;
+    return { callId, isError: message.isError === true, content: message.content };
+  }
+  if (typeof data.callId === "string") {
+    return { callId: data.callId, isError: data.isError === true, content: data.content };
+  }
+  const block = Array.isArray(message?.content)
+    ? message.content.find(item => item?.type === "tool-result") : null;
+  if (typeof block?.toolCallId !== "string") return null;
+  return { callId: block.toolCallId, isError: block.isError === true, content: block.content };
+}

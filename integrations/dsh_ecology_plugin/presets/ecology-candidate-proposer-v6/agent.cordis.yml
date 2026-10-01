@@ -1,13 +1,19 @@
+- id: tool-presentation
+  name: '@deepseek-ai/dsh-agent-tool-presentation'
+  config:
+    mode: native
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
     prefix: >-
-      You coordinate an autonomous ecology-model evolution run. Follow the
-      frozen stage plan, preserve Host-owned data and promotion boundaries,
-      and use only the supplied structured tools. After Skill, use web_search
-      only when the current reasoning step needs evidence; submit queries and
-      retrieval_key only and never select a provider because routing and
-      fallback are automatic.
+      You propose one auditable ecology plugin-genome mutation. Never modify
+      DSH itself. Implement the assigned_candidate_direction, and treat
+      operations as a small delta over the supplied parent: omit unchanged
+      values, never reconstruct the parent genome, load the required Skill
+      first, and then return only the schema-bound structured result. After
+      Skill, use web_search only when the current reasoning step needs evidence;
+      submit queries and retrieval_key only and never select a provider because
+      routing and fallback are automatic.
     complete: true
     includeRuntimeContext: false
 - id: skill-filesystem
@@ -21,7 +27,7 @@
 - id: ecology-agent-tools
   name: '@ecologyrsi/dsh-evolution-plugin/agent-plugin'
   config:
-    role: coordinator
+    role: candidate-proposer
     toolProfile: dynamic-retrieval-v1
 - id: compaction
   name: cordis:group

@@ -118,9 +118,9 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
             "presets": [{"preset_id": preset, "declared": True, "preset_mountable": True,
                          "tool_surface_verified": True, "route_resolvable": True,
                          "live_agent_service_ready": True, "first_call_verified": False}
-                        for preset in ("ecology-coordinator-v5", "ecology-researcher-v13",
-                                       "ecology-candidate-proposer-v5", "ecology-sample-planner-v11",
-                                       "ecology-sample-critic-v5", "ecology-generation-judge-v8")],
+                        for preset in ("ecology-coordinator-v6", "ecology-researcher-v15",
+                                       "ecology-candidate-proposer-v6", "ecology-sample-planner-v12",
+                                       "ecology-sample-critic-v6", "ecology-generation-judge-v9")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }
         description = {"descriptor": {"runnable": True, "display_name_zh": "测试温室序列",
@@ -188,9 +188,9 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
             "presets": [{"preset_id": preset, "declared": True, "preset_mountable": True,
                          "tool_surface_verified": True, "route_resolvable": True,
                          "live_agent_service_ready": True, "first_call_verified": False}
-                        for preset in ("ecology-coordinator-v5", "ecology-researcher-v13",
-                                       "ecology-candidate-proposer-v5", "ecology-sample-planner-v11",
-                                       "ecology-sample-critic-v5", "ecology-generation-judge-v8")],
+                        for preset in ("ecology-coordinator-v6", "ecology-researcher-v15",
+                                       "ecology-candidate-proposer-v6", "ecology-sample-planner-v12",
+                                       "ecology-sample-critic-v6", "ecology-generation-judge-v9")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }
         self.server.dsh_native_runtime = native

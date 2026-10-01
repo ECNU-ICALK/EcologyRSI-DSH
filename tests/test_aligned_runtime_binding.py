@@ -17,7 +17,10 @@ from ecologyrsi_dsh.evolution.schedule import OPTIMIZATION_PROTOCOL, Optimizatio
 from ecologyrsi_dsh.evaluators.registry import GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID
 from ecologyrsi_dsh.evolution.strategies import StrategyRouterDSHAdapter
 from ecologyrsi_dsh.integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
-from ecologyrsi_dsh.knowledge.algorithms import compile_algorithm_spec, resolve_predictor_adoption
+from ecologyrsi_dsh.knowledge.algorithms import (
+    compile_algorithm_spec,
+    resolve_predictor_adoption,
+)
 from ecologyrsi_dsh.knowledge.algorithm_ir import registered_algorithm_blueprint
 from tests import test_runtime_integration as runtime_test_helpers
 
@@ -89,9 +92,9 @@ class AlignedRuntimeBindingTests(unittest.TestCase):
             "presets": [{"preset_id": preset, "declared": True, "preset_mountable": True,
                          "tool_surface_verified": True, "route_resolvable": True,
                          "live_agent_service_ready": True, "first_call_verified": False}
-                        for preset in ("ecology-coordinator-v5", "ecology-researcher-v13",
-                                       "ecology-candidate-proposer-v5", "ecology-sample-planner-v11",
-                                       "ecology-sample-critic-v5", "ecology-generation-judge-v8")],
+                        for preset in ("ecology-coordinator-v6", "ecology-researcher-v15",
+                                       "ecology-candidate-proposer-v6", "ecology-sample-planner-v12",
+                                       "ecology-sample-critic-v6", "ecology-generation-judge-v9")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }
         self.server.dsh_native_runtime = native_runtime
@@ -117,11 +120,13 @@ class AlignedRuntimeBindingTests(unittest.TestCase):
                     metadata = state.task_manifest.metadata
                     self.assertEqual(metadata["evolution_diversity_policy"], "executed_family_rotation@1")
                     self.assertEqual(created["projection"]["evolution_diversity"]["proposed_by_family"], {})
-                    from ecologyrsi_dsh.core.model_execution_policy import RESEARCH_EXECUTION_POLICY
+                    from ecologyrsi_dsh.core.model_execution_policy import (
+                        RESEARCH_EXECUTION_POLICY,
+                    )
                     self.assertEqual(dict(metadata["research_execution_policy"]), dict(RESEARCH_EXECUTION_POLICY))
                     self.assertEqual(created["projection"]["research_execution_policy"], dict(RESEARCH_EXECUTION_POLICY))
                     self.assertEqual(metadata["evaluator_id"], GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID)
-                    self.assertEqual(metadata["seed_genome_template_id"], "greenhouse-baseline-aligned-default@1")
+                    self.assertEqual(metadata["seed_genome_template_id"], "greenhouse-baseline-aligned-default@2")
                     catalog = metadata["runtime_component_catalog"]["prediction_models"]
                     self.assertEqual([item["id"] for item in catalog], [BASELINE_ALIGNED_RIDGE_MODEL_ID])
                     self.assertEqual(set(catalog[0]["parameter_schemas"]), PARAMETERS)
@@ -174,9 +179,9 @@ class AlignedRuntimeBindingTests(unittest.TestCase):
             "presets": [{"preset_id": preset, "declared": True, "preset_mountable": True,
                          "tool_surface_verified": True, "route_resolvable": True,
                          "live_agent_service_ready": True, "first_call_verified": False}
-                        for preset in ("ecology-coordinator-v5", "ecology-researcher-v13",
-                                       "ecology-candidate-proposer-v5", "ecology-sample-planner-v11",
-                                       "ecology-sample-critic-v5", "ecology-generation-judge-v8")],
+                        for preset in ("ecology-coordinator-v6", "ecology-researcher-v15",
+                                       "ecology-candidate-proposer-v6", "ecology-sample-planner-v12",
+                                       "ecology-sample-critic-v6", "ecology-generation-judge-v9")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }
         self.server.dsh_native_runtime = native_runtime

@@ -3,12 +3,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const ids = [
-  "ecology-coordinator-v5",
-  "ecology-researcher-v13",
-  "ecology-candidate-proposer-v5",
-  "ecology-sample-planner-v11",
-  "ecology-sample-critic-v5",
-  "ecology-generation-judge-v8",
+  "ecology-coordinator-v6",
+  "ecology-researcher-v15",
+  "ecology-candidate-proposer-v6",
+  "ecology-sample-planner-v12",
+  "ecology-sample-critic-v6",
+  "ecology-generation-judge-v9",
 ];
 
 test("six legal role presets expose only the narrow agent plane", async () => {
@@ -19,6 +19,7 @@ test("six legal role presets expose only the narrow agent plane", async () => {
     const composition = await readFile(new URL("agent.cordis.yml", root), "utf8");
     assert.match(metadata, /name:/);
     assert.match(composition, /@deepseek-ai\/dsh-persona/);
+    assert.match(composition, /@deepseek-ai\/dsh-agent-tool-presentation'[\s\S]*mode: native/);
     assert.match(composition, /@ecologyrsi\/dsh-evolution-plugin\/agent-plugin/);
     assert.match(composition, /@deepseek-ai\/dsh-compaction-basic/);
     assert.match(composition, /web_search/);
@@ -38,13 +39,13 @@ test("no retained role mounts the unused Workflow worker service", async () => {
 test("generation judge preset separates candidate review from batch reflection", async () => {
   const composition = await readFile(
     new URL(
-      "../presets/ecology-generation-judge-v8/agent.cordis.yml",
+      "../presets/ecology-generation-judge-v9/agent.cordis.yml",
       import.meta.url,
     ),
     "utf8",
   );
   const skillsRoot = new URL(
-    "../presets/ecology-generation-judge-v8/skills/",
+    "../presets/ecology-generation-judge-v9/skills/",
     import.meta.url,
   );
   const candidateReview = await readFile(

@@ -1,3 +1,4 @@
+import { CANARY_PRESETS } from "./contracts.js";
 // Independent, bounded transport canary. Never writes scientific run events.
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -5,7 +6,7 @@ import { RoleAgentManager, dshSessionMetrics } from "./agents.js";
 import { PendingChildStarts } from "./pending-child-starts.js";
 import { runStructuredRole } from "./structured-roles.js";
 import { sessionUsageComplete } from "./session-usage.js";
-import { sessionEventLog } from "./session-events.js";
+import { sessionEventLog, toolResultIdentity } from "./session-events.js";
 import { createStructuredDeadline, remainingStructuredDeadlineMs } from "./structured-deadline.js";
 import { structuredFailureContract } from "./structured-stage-errors.js";
 import {
@@ -16,12 +17,7 @@ import {
 
 export const CANARY_SCHEMA = "ecologyrsi-dsh.model-contract-canary/1";
 export const CANARY_RECEIPT_SCHEMA = "ecologyrsi-dsh.model-contract-canary-receipt/1";
-const PRESETS = Object.freeze({
-  "generation.search-plan": "ecology-researcher-v13",
-  "generation.reflect": "ecology-generation-judge-v8",
-  "sample.critic": "ecology-sample-critic-v5",
-  "sample.plan": "ecology-sample-planner-v11",
-});
+
 const DIGEST_FIELDS = ["preset_content_digest", "standing_tool_surface_digest", "route_config_digest"];
 const IDENTITY_KEYS = ["provider_id", "model_id", "stage", "role", "preset_id", "output_schema_id", ...DIGEST_FIELDS];
 const SCOPE = "tool_and_schema_transport_only";
@@ -33,9 +29,9 @@ export function validateCanaryRequest(request) {
     || request.schema_version !== CANARY_SCHEMA) throw invalid();
   const identity = request.identity, bounds = request.bounds;
   if (!identity || Object.keys(identity).sort().join() !== [...IDENTITY_KEYS].sort().join()) throw invalid();
-  if (!PRESETS[identity.stage]) { const e = invalid(); e.code = "model_canary_stage_unsupported"; throw e; }
+  if (!CANARY_PRESETS[identity.stage]) { const e = invalid(); e.code = "model_canary_stage_unsupported"; throw e; }
   const stage = STAGES[identity.stage];
-  if (identity.role !== stage.role || identity.preset_id !== PRESETS[identity.stage]
+  if (identity.role !== stage.role || identity.preset_id !== CANARY_PRESETS[identity.stage]
     || identity.output_schema_id !== stage.schema) throw invalid();
   if (![identity.provider_id, identity.model_id].every(v => typeof v === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,119}$/.test(v))) throw invalid();
   if (!DIGEST_FIELDS.every(k => /^[a-f0-9]{64}$/.test(identity[k]))) throw invalid();
@@ -44,7 +40,7 @@ export function validateCanaryRequest(request) {
     || !integer(bounds.max_reported_tokens, 1024, 50000) || !integer(bounds.total_timeout_ms, 1000, 180000)
     || !integer(bounds.ttl_seconds, 60, 86400)) throw invalid();
   return { identity: structuredClone(identity), bounds: structuredClone(bounds),
-    contract: identity.stage === "sample.plan" ? { ...stage, skillName: "origin-vector-forecasting" } : stage };
+    contract: { ...stage, skillName: stage.canarySkillName || stage.skillName } };
 }
 
 // A schema-valid fixed transport fixture, not a scientific response. The Host
@@ -69,9 +65,10 @@ function exactTerminalToolEvidence(events, expected) {
   let args = calls[1].data.arguments;
   if (typeof args === "string") { try { args = JSON.parse(args); } catch { return false; } }
   if (jsonDigest(args) !== jsonDigest(expected)) return false;
-  return events.some(e => e.type === "tool/result" && e.seq > calls[1].seq
-    && (e.data?.callId === calls[1].data.callId && e.data?.isError === false
-      || e.data?.message?.content?.some(b => b.type === "tool-result" && b.toolCallId === calls[1].data.callId && b.isError === false)));
+  return events.some(e => {
+    const result = toolResultIdentity(e);
+    return e.seq > calls[1].seq && result?.callId === calls[1].data.callId && result.isError === false;
+  });
 }
 function terminalCode(ctx, sessionId) {
   const events = sessionEventLog(ctx, sessionId);

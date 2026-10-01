@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .local_edit_events import local_edit_key, validate_local_edit_event
+
 from ..evolution.diversity import preregister_candidate
 
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
@@ -23,7 +25,11 @@ from ..evolution.analysis import (
     GenerationBatch,
     sample_update_windows_enabled,
 )
-from .search_policy import guarded_search, local_challenger_policy, paired_execution_qualification_required
+from .search_policy import (
+    guarded_search,
+    local_challenger_policy,
+    paired_execution_qualification_required,
+)
 from .model_preflight import AUDIT_EVENT, preflight_audit_required, validate_preflight_audit
 from .artifact_identity import (
     ARTIFACT_EVENT_V2, EVALUATION_EVENT_V2, FORMAL_STAGE_V2,
@@ -654,7 +660,10 @@ def validate_generation_comparison_binding(
             "generation comparison evaluations differ from durable holdout evidence"
         )
     validate_exploration_generation_comparison(task, formal, comparison)
-    from .finalist_review import finalist_review_evidence, finalist_review_qualification_required
+    from .finalist_review import (
+        finalist_review_evidence,
+        finalist_review_qualification_required,
+    )
     review_required = finalist_review_qualification_required(
         task.metadata, comparison.gate_results.get("finalist_review_qualification")
     )
@@ -4194,110 +4203,18 @@ class RunStateReducer:
         used to carry inline; the branches and their order are unchanged.
         """
         if event.kind == "LocalEditProposalRecorded":
-            legacy_fields = {
-                "proposal_id",
-                "candidate_id",
-                "batch_index",
-                "evidence_scope_digest",
-                "decision",
-                "operations",
-            }
-            fields = {
-                "proposal_id",
-                "candidate_id",
-                "batch_index",
-                "evidence_scope_digest",
-                "proposal",
-            }
-            if set(payload) not in (legacy_fields, fields, fields | {"safety_reason"}):
-                raise ValueError("local edit proposal payload is invalid")
-            candidate_id = payload["candidate_id"]
-            batch_index = payload["batch_index"]
-            if (
-                not isinstance(candidate_id, str)
-                or not candidate_id
-                or isinstance(batch_index, bool)
-                or not isinstance(batch_index, int)
-                or batch_index < 0
-            ):
-                raise ValueError("local edit proposal scope is invalid")
-            key = (candidate_id, batch_index)
+            candidate_id, batch_index = key = local_edit_key(payload)
             existing_event = self.local_edit_proposal_events.get(key)
             if existing_event is not None:
                 if canonical_json(existing_event.payload) == canonical_json(payload):
                     return True  # handled; the DSH usage index below does not apply
                 raise ValueError("conflicting local edit proposal")
-            evaluation = self.replay_batch_evaluation_for(candidate_id, batch_index)
-            schedule = OptimizationSchedule.from_dict(
-                self.task.metadata["optimization_schedule"]
+            normalized = validate_local_edit_event(
+                payload, evaluation=self.replay_batch_evaluation_for(candidate_id, batch_index),
+                schedule=OptimizationSchedule.from_dict(self.task.metadata["optimization_schedule"]),
+                trajectory=self.formal_trajectories.get(candidate_id),
+                comparison=self.formal_batch_comparisons.get(key),
             )
-            if (
-                schedule.local_evaluation_mode
-                == PAIRED_LOCAL_EVALUATION_MODE
-            ):
-                trajectory = self.formal_trajectories.get(candidate_id)
-                if (
-                    trajectory is None
-                    or trajectory.status is not TrajectoryStatus.RUNNING
-                ):
-                    raise ValueError(
-                        "paired local edit requires a running trajectory"
-                    )
-                if batch_index >= trajectory.batch_count - 1:
-                    raise ValueError(
-                        "paired final batch cannot record a local edit proposal"
-                    )
-            if "proposal" in payload:
-                from ..evolution.local_edits import LocalEditProposal
-
-                proposal_value = LocalEditProposal.from_dict(payload["proposal"])
-                decision = proposal_value.decision
-                operations = list(proposal_value.operations)
-            else:
-                decision = LocalEditProposalDecision(payload["decision"])
-                operations = payload["operations"]
-            if (
-                evaluation is None
-                or (
-                    schedule.local_evaluation_mode
-                    == PAIRED_LOCAL_EVALUATION_MODE
-                    and key not in self.formal_batch_comparisons
-                )
-                or payload["evidence_scope_digest"] != evaluation.scope.scope_key
-                or not isinstance(operations, list)
-                or len(operations) > schedule.max_local_edits_per_batch
-                or (decision is LocalEditProposalDecision.KEEP and operations)
-                or (decision is LocalEditProposalDecision.MUTATE and not operations)
-            ):
-                raise ValueError("local edit proposal evidence is invalid")
-            if "safety_reason" in payload and (
-                decision is not LocalEditProposalDecision.KEEP
-                or not isinstance(payload["safety_reason"], str)
-                or not payload["safety_reason"].strip()
-            ):
-                raise ValueError("local edit safety reason is invalid")
-            normalized = {
-                "proposal_id": payload["proposal_id"],
-                "candidate_id": candidate_id,
-                "batch_index": batch_index,
-                "evidence_scope_digest": payload["evidence_scope_digest"],
-                "proposal": (
-                    proposal_value.to_dict()
-                    if "proposal" in payload
-                    else {
-                        "schema_version": "ecology-local-edit@1",
-                        "decision": decision.value,
-                        "operations": [dict(item) for item in operations],
-                        "evidence_refs": ["batch:score"],
-                        "expected_effect_cells": [],
-                        "risk_cells": [],
-                    }
-                ),
-                "decision": decision.value,
-                "operations": [dict(item) for item in operations],
-            }
-            if "safety_reason" in payload:
-                normalized["safety_reason"] = payload["safety_reason"]
             existing = self.local_edit_proposals.get(key)
             if existing is not None and canonical_json(existing) != canonical_json(normalized):
                 raise ValueError("conflicting local edit proposal")

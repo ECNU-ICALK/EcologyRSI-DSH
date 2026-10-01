@@ -17,8 +17,11 @@ from ecologyrsi_dsh.evolution.diversity import (
     preregister_candidate, summarize_behavior, exploration_archive,
 )
 from ecologyrsi_dsh.evolution.genome import apply_genome_mutation, EcologyEvolutionPluginGenome
-from ecologyrsi_dsh.evolution.local_edits import _operation_target
-from ecologyrsi_dsh.evolution.workflow_ir import resolve_candidate_agent_profile, compile_dsh_workflow_spec
+from ecologyrsi_dsh.evolution.mutation_specs import mutation_coordinates
+from ecologyrsi_dsh.evolution.workflow_ir import (
+    resolve_candidate_agent_profile,
+    compile_dsh_workflow_spec,
+)
 from ecologyrsi_dsh.knowledge.autonomous_cycle import CANDIDATE_MUTATION_AXES
 from ecologyrsi_dsh.knowledge.program_registry import current_program_registry
 from tests.test_authored_directive import _seed_genome, _mutation_context, _directive
@@ -27,7 +30,10 @@ from tests import test_research_context as research
 from tests import test_autonomous_search_reflection_cycle as cycle
 from tests.test_evolution_genome import _initialization
 from ecologyrsi_dsh.evolution.genome import materialize_seed_genome
-from ecologyrsi_dsh.evolution.strategies import StrategyRouterDSHAdapter, _deterministic_fallback_directions
+from ecologyrsi_dsh.evolution.strategies import (
+    StrategyRouterDSHAdapter,
+    _deterministic_fallback_directions,
+)
 
 
 def skill_child(program=None):
@@ -46,7 +52,7 @@ class SkillProgramTests(unittest.TestCase):
         self.assertEqual(profile["skill_program_digest"], digest(seed_skill_program()))
         self.assertNotEqual(parent.behavior_digest, child.behavior_digest)
         self.assertEqual(EcologyEvolutionPluginGenome.from_dict(child.to_dict()).to_dict(), child.to_dict())
-        self.assertEqual(_operation_target({"op": "author_skill_program", "role": "sample-planner"}),
+        self.assertEqual(mutation_coordinates({"op": "author_skill_program", "role": "sample-planner"}),
                          ("skill_program", SKILL_POLICY_ID, "skill-program:sample-planner"))
 
     def test_program_ref_cannot_be_forged(self):
@@ -141,7 +147,10 @@ class DiversityPolicyTests(unittest.TestCase):
     def test_skill_training_revises_skills_and_rejects_parameter_drift(self):
         from ecologyrsi_dsh.application.formal_trajectory import _local_edit_context
         from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
-        from ecologyrsi_dsh.evolution.local_edits import LocalEditProposal, apply_or_reject_local_edit_bundle
+        from ecologyrsi_dsh.evolution.local_edits import (
+            LocalEditProposal,
+            apply_or_reject_local_edit_bundle,
+        )
         _, parent = skill_child()
         task = cycle._task()
         task = replace(task, metadata={**task.metadata, "evolution_diversity_policy": DIVERSITY_POLICY,

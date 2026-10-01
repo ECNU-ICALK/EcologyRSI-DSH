@@ -4,21 +4,21 @@ import { RuntimeController } from "../../lib/runtime/controller.js";
 import { registerRuntimeRoutes } from "../../lib/runtime/routes.js";
 
 const presetCatalog = [
-  "ecology-coordinator-v5",
-  "ecology-researcher-v13",
-  "ecology-candidate-proposer-v5",
-  "ecology-sample-planner-v11",
-  "ecology-sample-critic-v5",
-  "ecology-generation-judge-v8",
+  "ecology-coordinator-v6",
+  "ecology-researcher-v15",
+  "ecology-candidate-proposer-v6",
+  "ecology-sample-planner-v12",
+  "ecology-sample-critic-v6",
+  "ecology-generation-judge-v9",
 ].map((preset_id) => ({
   preset_id,
   tool_profile: "dynamic-retrieval-v1",
-  required_tools: preset_id === "ecology-sample-planner-v11"
+  required_tools: preset_id === "ecology-sample-planner-v12"
     ? ["ecology_execute_prediction_tool", "skill", "web_search"]
     : ["skill", "web_search"],
 }));
 const toolsByStandingKey = new Map(presetCatalog.map((item) => [
-  `standing:${item.preset_id}`,
+  item.preset_id,
   item.required_tools,
 ]));
 let runtimeHandler;
@@ -33,7 +33,7 @@ const ctx = {
     create: async (options) => {
       const agent = {
         session: { append: async () => {}, flush: async () => {} },
-        waitForIdle: async () => {},
+        whenIdle: async () => {},
       };
       await options.setup?.(agent);
       return { agent, dispose: async () => {} };
@@ -44,13 +44,14 @@ const ctx = {
   subagents: {},
   tools: {
     schemas: async (standingKey) => (
-      toolsByStandingKey.get(standingKey)?.map((name) => ({ name })) || []
+      toolsByStandingKey.get(standingKey.presetId)?.map((name) => ({ name })) || []
     ),
   },
   sessionPersistence: {},
   sessionProjections: {},
   agentPresets: {
-    standingKeyFor: async (presetId) => `standing:${presetId}`,
+    resolve: async (presetId) => ({ id: presetId }),
+      acquireScope: async (presetId) => ({ key: { presetId: presetId }, async [Symbol.asyncDispose]() {} }),
     mount: async (_agent, presetId) => ({ id: presetId }),
     serviceFor: async (_agent, serviceName) => ({ serviceName }),
   },

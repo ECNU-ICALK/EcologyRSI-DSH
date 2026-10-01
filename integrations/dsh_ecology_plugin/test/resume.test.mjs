@@ -7,7 +7,7 @@ function binding(overrides = {}) {
   const value = {
     run_id: "run-1",
     role: "researcher",
-    preset_id: "ecology-researcher-v13",
+    preset_id: "ecology-researcher-v15",
     model: "dsh/strategy",
     cwd: "/tmp",
     preset_content_digest: "a".repeat(64),
@@ -45,7 +45,8 @@ test("empty flushed role-host resumes only with its exact frozen identity", asyn
     sessionPersistence: { stat: async (id) => stored({ ...value, session_id: id }) },
     agents: { resume: async (options) => { calls.push(options); return { agent, dispose: async () => {} }; } },
     agentPresets: {
-      standingKeyFor: async (id) => `standing:${id}`,
+      resolve: async (id) => ({ id: id }),
+      acquireScope: async (id) => ({ key: { presetId: id }, async [Symbol.asyncDispose]() {} }),
       mount: async (_agentCtx, id) => ({ id }),
       serviceFor: async () => ({ ready: true }),
     },
@@ -87,7 +88,7 @@ test("resume rejects a header whose id or preset does not match", async () => {
   const value = binding();
   const cases = [
     [{ id: "session-elsewhere" }, /role-host header is invalid/],
-    [{ agentPreset: "ecology-coordinator-v5" }, /role-host agentPreset drifted/],
+    [{ agentPreset: "ecology-coordinator-v6" }, /role-host agentPreset drifted/],
   ];
   for (const [overrides, expected] of cases) {
     let resumed = false;

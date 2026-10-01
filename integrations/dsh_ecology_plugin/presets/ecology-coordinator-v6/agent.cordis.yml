@@ -1,13 +1,17 @@
+- id: tool-presentation
+  name: '@deepseek-ai/dsh-agent-tool-presentation'
+  config:
+    mode: native
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
     prefix: >-
-      You critically review complete ecology forecast-origin vectors and their
-      target-horizon cells. Reject unsupported claims and return only the
-      requested schema. After Skill, use web_search only when a reasoning step
-      needs evidence; submit queries and retrieval_key only and never select a
-      provider because routing and fallback are automatic. Search cannot alter
-      the immutable prediction vector.
+      You coordinate an autonomous ecology-model evolution run. Follow the
+      frozen stage plan, preserve Host-owned data and promotion boundaries,
+      and use only the supplied structured tools. After Skill, use web_search
+      only when the current reasoning step needs evidence; submit queries and
+      retrieval_key only and never select a provider because routing and
+      fallback are automatic.
     complete: true
     includeRuntimeContext: false
 - id: skill-filesystem
@@ -21,7 +25,7 @@
 - id: ecology-agent-tools
   name: '@ecologyrsi/dsh-evolution-plugin/agent-plugin'
   config:
-    role: sample-critic
+    role: coordinator
     toolProfile: dynamic-retrieval-v1
 - id: compaction
   name: cordis:group

@@ -38,7 +38,7 @@ async function startReadyRun(controller, startBinding = binding()) {
   const roleAgents = controller.roleAgents;
   controller.stageRunner = null;
   controller.presetCatalog = [
-    { preset_id: "ecology-researcher-v13", tool_profile: "test" },
+    { preset_id: "ecology-researcher-v15", tool_profile: "test" },
   ];
   controller.roleAgents = {
     createRoleAgent: async () => ({ dispose: async () => {} }),
@@ -93,8 +93,8 @@ test("role hosts do not require an unused Workflow service", async () => {
   const created = [];
   const controller = new RuntimeController({}, {
     presetCatalog: [
-      { preset_id: "ecology-coordinator-v5", tool_profile: "test" },
-      { preset_id: "ecology-sample-planner-v11", tool_profile: "test" },
+      { preset_id: "ecology-coordinator-v6", tool_profile: "test" },
+      { preset_id: "ecology-sample-planner-v12", tool_profile: "test" },
     ],
   });
   controller.roleAgents = {
@@ -242,7 +242,7 @@ test("a second controller cannot resume registry-only paused hosts", async () =>
   const ownerCalls = [];
   const owner = new RuntimeController({}, {
     registry,
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => ownerCalls.push("close"),
       openLaunchFence: () => ownerCalls.push("open"),
@@ -269,7 +269,7 @@ test("a second controller cannot resume registry-only paused hosts", async () =>
   const externalCalls = [];
   const external = new RuntimeController({}, {
     registry,
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => externalCalls.push("close"),
       openLaunchFence: () => externalCalls.push("open"),
@@ -318,7 +318,7 @@ test("an exact shared-registry start replay does not duplicate or claim role hos
   });
   const owner = new RuntimeController({}, {
     registry,
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => {},
       openLaunchFence: () => assert.fail("restored paused owner must not open"),
@@ -339,7 +339,7 @@ test("an exact shared-registry start replay does not duplicate or claim role hos
   let replayOpens = 0;
   const replay = new RuntimeController({}, {
     registry,
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => {},
       openLaunchFence: () => { replayOpens += 1; },
@@ -382,7 +382,7 @@ test("a changed same-key start on another controller conflicts without replacing
   });
   const owner = new RuntimeController({}, {
     registry,
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: { closeLaunchFence: () => {}, openLaunchFence: () => {} },
   });
   owner.roleAgents = {
@@ -395,7 +395,7 @@ test("a changed same-key start on another controller conflicts without replacing
   let replacementOpens = 0;
   const replacement = new RuntimeController({}, {
     registry,
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => {},
       openLaunchFence: () => { replacementOpens += 1; },
@@ -440,7 +440,7 @@ test("stale ready hosts cannot resume while a new paused generation is creating"
   });
   const owner = new RuntimeController({}, {
     registry,
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => ownerCalls.push("close"),
       openLaunchFence: () => ownerCalls.push("open"),
@@ -460,7 +460,7 @@ test("stale ready hosts cannot resume while a new paused generation is creating"
   const replacementCalls = [];
   const replacement = new RuntimeController({}, {
     registry,
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => replacementCalls.push("close"),
       openLaunchFence: () => replacementCalls.push("open"),
@@ -524,7 +524,7 @@ test("stale ready hosts cannot resume across a replacement start failure", async
   });
   const owner = new RuntimeController({}, {
     registry,
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => {},
       openLaunchFence: () => { ownerOpens += 1; },
@@ -543,7 +543,7 @@ test("stale ready hosts cannot resume across a replacement start failure", async
   let replacementOpens = 0;
   const replacement = new RuntimeController({}, {
     registry,
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => {},
       openLaunchFence: () => { replacementOpens += 1; },
@@ -589,7 +589,7 @@ test("a start superseded by a new generation cleans its hosts and never opens ad
   const calls = [];
   const controller = new RuntimeController({}, {
     registry,
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => calls.push(["close"]),
       openLaunchFence: () => calls.push(["open"]),
@@ -647,7 +647,7 @@ test("stale ready host generation rejects stage admission before the runner", as
   let stageRuns = 0;
   const controller = new RuntimeController({}, {
     registry,
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => calls.push("close"),
       openLaunchFence: () => calls.push("open"),
@@ -1165,7 +1165,7 @@ test("start failure preserves its primary error while cleanup closes and deletes
               append: async () => {},
               flush: async () => {},
             },
-            waitForIdle: async () => {},
+            whenIdle: async () => {},
           },
           dispose: async () => {
             calls.push(["dispose", role]);
@@ -1175,15 +1175,16 @@ test("start failure preserves its primary error while cleanup closes and deletes
       },
     },
     agentPresets: {
-      standingKeyFor: async (presetId) => `standing:${presetId}`,
+      resolve: async (presetId) => ({ id: presetId }),
+      acquireScope: async (presetId) => ({ key: { presetId: presetId }, async [Symbol.asyncDispose]() {} }),
       mount: async (_agentCtx, presetId) => ({ id: presetId }),
       serviceFor: async () => ({ ready: true }),
     },
   };
   const controller = new RuntimeController(ctx, {
     presetCatalog: [
-      { preset_id: "ecology-researcher-v13", tool_profile: "test" },
-      { preset_id: "ecology-candidate-proposer-v5", tool_profile: "test" },
+      { preset_id: "ecology-researcher-v15", tool_profile: "test" },
+      { preset_id: "ecology-candidate-proposer-v6", tool_profile: "test" },
     ],
     stageRunner: {
       closeLaunchFence: () => calls.push(["close"]),
@@ -1211,7 +1212,7 @@ test("start failure preserves its primary error while cleanup closes and deletes
 test("failed restored-paused start is deleted when no control supersedes it", async () => {
   let opens = 0;
   const controller = new RuntimeController({}, {
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => {},
       openLaunchFence: () => { opens += 1; },
@@ -1253,13 +1254,14 @@ test("pause joins a failing start cleanup and failed hosts can never resume", as
       },
     },
     agentPresets: {
-      standingKeyFor: async (presetId) => `standing:${presetId}`,
+      resolve: async (presetId) => ({ id: presetId }),
+      acquireScope: async (presetId) => ({ key: { presetId: presetId }, async [Symbol.asyncDispose]() {} }),
       mount: async (_agentCtx, presetId) => ({ id: presetId }),
       serviceFor: async () => ({ ready: true }),
     },
   };
   const controller = new RuntimeController(ctx, {
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => {},
       openLaunchFence: () => { opens += 1; },
@@ -1308,7 +1310,7 @@ test("queued resume rejected by a failing start leaves the completed pause durab
   const releaseCreate = deferred();
   let opens = 0;
   const controller = new RuntimeController({}, {
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => {},
       openLaunchFence: () => { opens += 1; },
@@ -1367,7 +1369,7 @@ test("identical starts are one flight and resume waits for every stale cleanup",
   let cleanupCalls = 0;
   let opens = 0;
   const controller = new RuntimeController({}, {
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => {},
       openLaunchFence: () => { opens += 1; },
@@ -1449,7 +1451,7 @@ for (const control of ["pause", "cancel"]) {
     const calls = [];
     let creationSettled = false;
     const controller = new RuntimeController({}, {
-      presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+      presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
       stageRunner: {
         closeLaunchFence: () => calls.push(["close"]),
         openLaunchFence: () => calls.push(["open"]),
@@ -1510,7 +1512,7 @@ test("stale failing startRun preserves terminal cancellation and disposes late h
   const calls = [];
   let creationSettled = false;
   const controller = new RuntimeController({}, {
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => calls.push(["close"]),
       openLaunchFence: () => calls.push(["open"]),
@@ -1590,7 +1592,7 @@ test("terminal cancel dominates an exact same-key retry after failed start clean
   let createCalls = 0;
   let opens = 0;
   const controller = new RuntimeController({}, {
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => {},
       openLaunchFence: () => { opens += 1; },
@@ -1666,7 +1668,7 @@ test("failed start cleanup preserves another controller's same-key cancel tombst
   let opens = 0;
   const starter = new RuntimeController({}, {
     registry,
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => {},
       openLaunchFence: () => { opens += 1; },
@@ -1746,7 +1748,7 @@ test("resume waits for stale startRun cleanup before reopening admission", async
   const calls = [];
   let creationSettled = false;
   const controller = new RuntimeController({}, {
-    presetCatalog: [{ preset_id: "ecology-researcher-v13", tool_profile: "test" }],
+    presetCatalog: [{ preset_id: "ecology-researcher-v15", tool_profile: "test" }],
     stageRunner: {
       closeLaunchFence: () => calls.push(["close"]),
       openLaunchFence: () => calls.push(["open"]),

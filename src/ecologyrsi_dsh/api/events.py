@@ -18,7 +18,7 @@ from ..core.sample_results import (
     decode_sample_results,
 )
 from .projection import _public_intervention_receipt
-from .shared import _assert_http_scope, _event_type
+from .shared import _assert_http_scope, _event_type, public_fields
 
 
 _PRIVATE_SAMPLE_EVENT_KINDS = frozenset(
@@ -86,6 +86,25 @@ def _screening_completion_matches(state, candidate, start, completed):
             for event in state.events
         )
     )
+
+
+_EVENT_FIELDS = {
+    'GenerationBatchStarted': ('batch', 'generation batch_size parent_candidate_id context_digest'),
+    'CandidateRevisionCreated': ('revision', 'generation candidate_id revision_id parent_revision_id source_batch_index status revision_digest genome_digest behavior_digest mutation_digest'),
+    'FormalTrajectoryStarted': ('trajectory', 'trajectory_id generation candidate_id initial_revision_id batch_count status'),
+    'FormalBatchStarted': ('batch', 'batch_id trajectory_id generation candidate_id revision_id batch_index batch_count cohort_digest origin_count'),
+    'TrajectoryRevisionAdvanced': ('activation', 'activation_id generation candidate_id batch_index from_revision_id to_revision_id reason'),
+    'FormalTrajectoryCompleted': ('', 'candidate_id final_revision_id'),
+    'HoldoutArmStarted': ('', 'generation holdout_arm candidate_id candidate_revision_id origin_count cohort_digest'),
+    'CandidateEffectiveRevisionFrozen': ('', 'generation selected_candidate_id selected_revision_id comparison_digest'),
+    'CandidateMarkedDuplicate': ('', 'candidate_id duplicate_of_candidate_id'),
+    'ArtifactRecorded': ('artifact', 'artifact_id candidate_id'),
+    'EvaluationRecorded': ('evaluation', 'candidate_id score passed'),
+    'EvaluationSampleResultsStarted': ('', 'generation candidate_id revision'),
+    'EvaluationSampleResultBatchRecorded': ('', 'candidate_id revision batch_index record_count result_digest'),
+    'EvaluationSampleResultsRecorded': ('', 'candidate_id evaluation_id revision record_count result_digest'),
+    'HumanInterventionRecorded': ('intervention', 'intervention_id kind'),
+}
 
 
 class EventEndpointsMixin:
@@ -158,30 +177,17 @@ class EventEndpointsMixin:
             "AlgorithmAttemptRecorded": "候选算法编译或调试证据已记录。",
         }.get(event.kind, "运行记录已更新。")
         public_payload: dict[str, Any] = {"message": message}
-        if event.kind == "GenerationAdvanced":
+        if event.kind in _EVENT_FIELDS:
+            path, fields = _EVENT_FIELDS[event.kind]
+            source = payload.get(path, {}) if path else payload
+            public_payload.update(public_fields(source, fields))
+        elif event.kind == "GenerationAdvanced":
             public_payload["generation"] = payload.get("generation")
-        elif event.kind == "GenerationBatchStarted":
-            batch = payload.get("batch", {})
-            public_payload.update(
-                {
-                    "generation": batch.get("generation"),
-                    "batch_size": batch.get("batch_size"),
-                    "parent_candidate_id": batch.get("parent_candidate_id"),
-                    "context_digest": batch.get("context_digest"),
-                }
-            )
         elif event.kind == "GenerationSearchPlanned":
             search_plan = payload.get("search_plan", {})
             public_payload.update(
                 {
-                    "generation": search_plan.get("generation"),
-                    "search_plan_digest": search_plan.get("search_plan_digest"),
-                    "source_analysis_digest": search_plan.get(
-                        "source_analysis_digest"
-                    ),
-                    "source_reflection_digest": search_plan.get(
-                        "source_reflection_digest"
-                    ),
+                    **public_fields(search_plan, 'generation search_plan_digest source_analysis_digest source_reflection_digest'),
                     "search_queries": sanitize_public_value(
                         search_plan.get("search_queries", []),
                         max_depth=2,
@@ -201,9 +207,7 @@ class EventEndpointsMixin:
             cards = snapshot.get("cards", [])
             public_payload.update(
                 {
-                    "generation": snapshot.get("generation"),
-                    "snapshot_digest": snapshot.get("snapshot_digest"),
-                    "retrieval_status": snapshot.get("retrieval_status"),
+                    **public_fields(snapshot, 'generation snapshot_digest retrieval_status'),
                     "source_count": len(cards) if isinstance(cards, list) else 0,
                     "adopted_count": sum(
                         1
@@ -235,15 +239,7 @@ class EventEndpointsMixin:
             historical_provenance = iteration.get("historical_provenance", {})
             public_payload.update(
                 {
-                    "generation": iteration.get("generation"),
-                    "status": iteration.get("status"),
-                    "iteration_digest": iteration.get("iteration_digest"),
-                    "knowledge_snapshot_digest": iteration.get(
-                        "knowledge_snapshot_digest"
-                    ),
-                    "source_analysis_digest": iteration.get(
-                        "source_analysis_digest"
-                    ),
+                    **public_fields(iteration, 'generation status iteration_digest knowledge_snapshot_digest source_analysis_digest'),
                     "historical_source_digest": (
                         historical_provenance.get("source_digest")
                         if isinstance(historical_provenance, dict)
@@ -256,12 +252,7 @@ class EventEndpointsMixin:
             analysis = payload.get("analysis", {})
             public_payload.update(
                 {
-                    "generation": analysis.get("generation"),
-                    "analysis_digest": analysis.get("analysis_digest"),
-                    "candidate_count": analysis.get("candidate_count"),
-                    "eligible_count": analysis.get("eligible_count"),
-                    "outcome": analysis.get("outcome"),
-                    "champion_candidate_id": analysis.get("champion_candidate_id"),
+                    **public_fields(analysis, 'generation analysis_digest candidate_count eligible_count outcome champion_candidate_id'),
                     "next_generation_focus": sanitize_public_value(
                         analysis.get("next_generation_focus"),
                         max_depth=4,
@@ -287,9 +278,7 @@ class EventEndpointsMixin:
             directions = reflection.get("candidate_directions", [])
             public_payload.update(
                 {
-                    "generation": reflection.get("generation"),
-                    "reflection_digest": reflection.get("reflection_digest"),
-                    "analysis_digest": reflection.get("analysis_digest"),
+                    **public_fields(reflection, 'generation reflection_digest analysis_digest'),
                     "summary": redact_sensitive_text(
                         str(reflection.get("summary", "")), limit=1000
                     ),
@@ -310,55 +299,10 @@ class EventEndpointsMixin:
                         "champion_candidate_id",
                         payload.get("selected_candidate_id"),
                     ),
-                    "selected_candidate_id": payload.get("selected_candidate_id"),
-                    "selected_revision_id": payload.get("selected_revision_id"),
-                    "incumbent_after_candidate_id": payload.get("incumbent_after_candidate_id"),
+                    **public_fields(payload, 'selected_candidate_id selected_revision_id incumbent_after_candidate_id'),
                     "selection_reason": redact_sensitive_text(
                         str(payload.get("selection_reason", "")), limit=500
                     ),
-                }
-            )
-        elif event.kind == "CandidateRevisionCreated":
-            revision = payload.get("revision", {})
-            public_payload.update(
-                {
-                    "generation": revision.get("generation"),
-                    "candidate_id": revision.get("candidate_id"),
-                    "revision_id": revision.get("revision_id"),
-                    "parent_revision_id": revision.get("parent_revision_id"),
-                    "source_batch_index": revision.get("source_batch_index"),
-                    "status": revision.get("status"),
-                    "revision_digest": revision.get("revision_digest"),
-                    "genome_digest": revision.get("genome_digest"),
-                    "behavior_digest": revision.get("behavior_digest"),
-                    "mutation_digest": revision.get("mutation_digest"),
-                }
-            )
-        elif event.kind == "FormalTrajectoryStarted":
-            trajectory = payload.get("trajectory", {})
-            public_payload.update(
-                {
-                    "trajectory_id": trajectory.get("trajectory_id"),
-                    "generation": trajectory.get("generation"),
-                    "candidate_id": trajectory.get("candidate_id"),
-                    "initial_revision_id": trajectory.get("initial_revision_id"),
-                    "batch_count": trajectory.get("batch_count"),
-                    "status": trajectory.get("status"),
-                }
-            )
-        elif event.kind == "FormalBatchStarted":
-            batch = payload.get("batch", {})
-            public_payload.update(
-                {
-                    "batch_id": batch.get("batch_id"),
-                    "trajectory_id": batch.get("trajectory_id"),
-                    "generation": batch.get("generation"),
-                    "candidate_id": batch.get("candidate_id"),
-                    "revision_id": batch.get("revision_id"),
-                    "batch_index": batch.get("batch_index"),
-                    "batch_count": batch.get("batch_count"),
-                    "cohort_digest": batch.get("cohort_digest"),
-                    "origin_count": batch.get("origin_count"),
                 }
             )
         elif event.kind == "FormalBatchEvaluated":
@@ -367,15 +311,8 @@ class EventEndpointsMixin:
             public_payload.update(
                 {
                     "evaluation_id": evaluation.get("evaluation_id"),
-                    "generation": scope.get("generation"),
-                    "candidate_id": scope.get("candidate_id"),
-                    "candidate_revision_id": scope.get("candidate_revision_id"),
-                    "batch_index": scope.get("batch_index"),
-                    "origin_count": scope.get("origin_count"),
-                    "cohort_digest": scope.get("cohort_digest"),
-                    "score": evaluation.get("score"),
-                    "passed": evaluation.get("passed"),
-                    "evaluator_digest": evaluation.get("evaluator_digest"),
+                    **public_fields(scope, 'generation candidate_id candidate_revision_id batch_index origin_count cohort_digest'),
+                    **public_fields(evaluation, 'score passed evaluator_digest'),
                 }
             )
             if scope.get("formal_batch_arm") is not None:
@@ -389,33 +326,7 @@ class EventEndpointsMixin:
             )
             public_payload.update(
                 {
-                    "comparison_id": comparison.get("comparison_id"),
-                    "generation": comparison.get("generation"),
-                    "candidate_id": comparison.get("candidate_id"),
-                    "batch_index": comparison.get("batch_index"),
-                    "cohort_digest": comparison.get("cohort_digest"),
-                    "champion_before_revision_id": comparison.get(
-                        "champion_before_revision_id"
-                    ),
-                    "challenger_revision_id": comparison.get(
-                        "challenger_revision_id"
-                    ),
-                    "champion_score": comparison.get("champion_score"),
-                    "challenger_score": comparison.get("challenger_score"),
-                    "score_delta": comparison.get("score_delta"),
-                    "minimum_score_delta": comparison.get(
-                        "minimum_score_delta"
-                    ),
-                    "safety_gate_passed": comparison.get(
-                        "safety_gate_passed"
-                    ),
-                    "cell_regression_gate_passed": comparison.get(
-                        "cell_regression_gate_passed"
-                    ),
-                    "decision": comparison.get("decision"),
-                    "champion_after_revision_id": comparison.get(
-                        "champion_after_revision_id"
-                    ),
+                    **public_fields(comparison, 'comparison_id generation candidate_id batch_index cohort_digest champion_before_revision_id challenger_revision_id champion_score challenger_score score_delta minimum_score_delta safety_gate_passed cell_regression_gate_passed decision champion_after_revision_id'),
                     "reason": reason,
                 }
             )
@@ -426,10 +337,7 @@ class EventEndpointsMixin:
             operations = proposal.get("operations")
             public_payload.update(
                 {
-                    "proposal_id": payload.get("proposal_id"),
-                    "candidate_id": payload.get("candidate_id"),
-                    "batch_index": payload.get("batch_index"),
-                    "evidence_scope_digest": payload.get("evidence_scope_digest"),
+                    **public_fields(payload, 'proposal_id candidate_id batch_index evidence_scope_digest'),
                     "decision": proposal.get("decision"),
                     "operation_count": len(operations)
                     if isinstance(operations, list)
@@ -440,11 +348,7 @@ class EventEndpointsMixin:
             raw_reason = payload.get("reason")
             public_payload.update(
                 {
-                    "proposal_id": payload.get("proposal_id"),
-                    "candidate_id": payload.get("candidate_id"),
-                    "batch_index": payload.get("batch_index"),
-                    "outcome": payload.get("outcome"),
-                    "active_revision_id": payload.get("active_revision_id"),
+                    **public_fields(payload, 'proposal_id candidate_id batch_index outcome active_revision_id'),
                     "reason": (
                         redact_sensitive_text(str(raw_reason), limit=300)
                         if raw_reason is not None
@@ -452,35 +356,12 @@ class EventEndpointsMixin:
                     ),
                 }
             )
-        elif event.kind == "TrajectoryRevisionAdvanced":
-            activation = payload.get("activation", {})
-            public_payload.update(
-                {
-                    "activation_id": activation.get("activation_id"),
-                    "generation": activation.get("generation"),
-                    "candidate_id": activation.get("candidate_id"),
-                    "batch_index": activation.get("batch_index"),
-                    "from_revision_id": activation.get("from_revision_id"),
-                    "to_revision_id": activation.get("to_revision_id"),
-                    "reason": activation.get("reason"),
-                }
-            )
-        elif event.kind == "FormalTrajectoryCompleted":
-            public_payload.update(
-                {
-                    "candidate_id": payload.get("candidate_id"),
-                    "final_revision_id": payload.get("final_revision_id"),
-                }
-            )
         elif event.kind == "GenerationHoldoutFrozen":
             holdout = payload.get("holdout", {})
             arm_bindings = holdout.get("arm_bindings")
             public_payload.update(
                 {
-                    "holdout_id": holdout.get("holdout_id"),
-                    "generation": holdout.get("generation"),
-                    "cohort_digest": holdout.get("cohort_digest"),
-                    "origin_count": holdout.get("origin_count"),
+                    **public_fields(holdout, 'holdout_id generation cohort_digest origin_count'),
                     "arm_count": len(arm_bindings)
                     if isinstance(arm_bindings, dict)
                     else 0,
@@ -492,28 +373,8 @@ class EventEndpointsMixin:
             public_payload.update(
                 {
                     "evaluation_id": evaluation.get("evaluation_id"),
-                    "generation": scope.get("generation"),
-                    "holdout_arm": scope.get("holdout_arm"),
-                    "candidate_id": scope.get("candidate_id"),
-                    "candidate_revision_id": scope.get("candidate_revision_id"),
-                    "origin_count": scope.get("origin_count"),
-                    "cohort_digest": scope.get("cohort_digest"),
-                    "score": evaluation.get("score"),
-                    "passed": evaluation.get("passed"),
-                    "evaluator_digest": evaluation.get("evaluator_digest"),
-                }
-            )
-        elif event.kind == "HoldoutArmStarted":
-            public_payload.update(
-                {
-                    "generation": payload.get("generation"),
-                    "holdout_arm": payload.get("holdout_arm"),
-                    "candidate_id": payload.get("candidate_id"),
-                    "candidate_revision_id": payload.get(
-                        "candidate_revision_id"
-                    ),
-                    "origin_count": payload.get("origin_count"),
-                    "cohort_digest": payload.get("cohort_digest"),
+                    **public_fields(scope, 'generation holdout_arm candidate_id candidate_revision_id origin_count cohort_digest'),
+                    **public_fields(evaluation, 'score passed evaluator_digest'),
                 }
             )
         elif event.kind == "GenerationComparisonRecorded":
@@ -523,31 +384,8 @@ class EventEndpointsMixin:
                 gates = {}
             public_payload.update(
                 {
-                    "comparison_id": comparison.get("comparison_id"),
-                    "comparison_digest": comparison.get("comparison_digest"),
-                    "generation": comparison.get("generation"),
-                    "cohort_digest": comparison.get("cohort_digest"),
-                    "selected_candidate_id": comparison.get(
-                        "selected_candidate_id"
-                    ),
-                    "selected_revision_id": comparison.get("selected_revision_id"),
-                    "selection_policy": gates.get("selection_policy"),
-                    "certification_selected_arm": gates.get(
-                        "certification_selected_arm"
-                    ),
-                    "selected_search_certification_status": gates.get(
-                        "selected_search_certification_status"
-                    ),
-                    "delta_to_incumbent": gates.get("delta_to_incumbent"),
-                }
-            )
-        elif event.kind == "CandidateEffectiveRevisionFrozen":
-            public_payload.update(
-                {
-                    "generation": payload.get("generation"),
-                    "selected_candidate_id": payload.get("selected_candidate_id"),
-                    "selected_revision_id": payload.get("selected_revision_id"),
-                    "comparison_digest": payload.get("comparison_digest"),
+                    **public_fields(comparison, 'comparison_id comparison_digest generation cohort_digest selected_candidate_id selected_revision_id'),
+                    **public_fields(gates, 'selection_policy certification_selected_arm selected_search_certification_status delta_to_incumbent'),
                 }
             )
         elif event.kind == "RunAdaptationCohortFrozen":
@@ -556,9 +394,7 @@ class EventEndpointsMixin:
             batches = adaptation.get("batches")
             public_payload.update(
                 {
-                    "dataset_id": adaptation.get("dataset_id"),
-                    "episode_id": adaptation.get("episode_id"),
-                    "adaptation_digest": adaptation.get("adaptation_digest"),
+                    **public_fields(adaptation, 'dataset_id episode_id adaptation_digest'),
                     "cohort_digest": cohort.get("cohort_digest"),
                     "origin_count": cohort.get("origin_count"),
                     "batch_count": len(batches) if isinstance(batches, list) else 0,
@@ -571,11 +407,7 @@ class EventEndpointsMixin:
             batch_digests = planned.get("adaptation_batch_digests")
             public_payload.update(
                 {
-                    "generation": planned.get("generation"),
-                    "generation_cohorts_digest": planned.get(
-                        "generation_cohorts_digest"
-                    ),
-                    "adaptation_digest": planned.get("adaptation_digest"),
+                    **public_fields(planned, 'generation generation_cohorts_digest adaptation_digest'),
                     "adaptation_batch_count": len(batch_digests)
                     if isinstance(batch_digests, list)
                     else 0,
@@ -617,50 +449,10 @@ class EventEndpointsMixin:
                     ),
                 }
             )
-        elif event.kind == "CandidateMarkedDuplicate":
-            public_payload.update(
-                {
-                    "candidate_id": payload.get("candidate_id"),
-                    "duplicate_of_candidate_id": payload.get("duplicate_of_candidate_id"),
-                }
-            )
-        elif event.kind == "ArtifactRecorded":
-            artifact = payload.get("artifact", {})
-            public_payload.update(
-                {
-                    "artifact_id": artifact.get("artifact_id"),
-                    "candidate_id": artifact.get("candidate_id"),
-                }
-            )
-        elif event.kind == "EvaluationRecorded":
-            evaluation = payload.get("evaluation", {})
-            public_payload.update(
-                {
-                    "candidate_id": evaluation.get("candidate_id"),
-                    "score": evaluation.get("score"),
-                    "passed": evaluation.get("passed"),
-                }
-            )
         elif event.kind == "EvaluationProgressRecorded":
             public_payload.update(
                 {
-                    "generation": payload.get("generation"),
-                    "proposal_id": payload.get("proposal_id"),
-                    "candidate_id": payload.get("candidate_id"),
-                    "role": payload.get("role"),
-                    "model_id": payload.get("model_id"),
-                    "revision": payload.get("revision"),
-                    "progress_id": payload.get("progress_id"),
-                    "progress_kind": payload.get("progress_kind"),
-                    "batch_index": payload.get("batch_index"),
-                    "batch_count": payload.get("batch_count"),
-                    "batch_size": payload.get("batch_size"),
-                    "completed_samples": payload.get("completed_samples"),
-                    "total_samples": payload.get("total_samples"),
-                    "succeeded_samples": payload.get("succeeded_samples"),
-                    "failed_samples": payload.get("failed_samples"),
-                    "in_flight_batches": payload.get("in_flight_batches"),
-                    "queued_batches": payload.get("queued_batches"),
+                    **public_fields(payload, 'generation proposal_id candidate_id role model_id revision progress_id progress_kind batch_index batch_count batch_size completed_samples total_samples succeeded_samples failed_samples in_flight_batches queued_batches'),
                     "gateway_request_count": payload.get(
                         "gateway_request_count", payload.get("batch_index")
                     ),
@@ -677,34 +469,6 @@ class EventEndpointsMixin:
                     "adaptive_split_failed_samples": payload.get(
                         "adaptive_split_failed_samples", 0
                     ),
-                }
-            )
-        elif event.kind == "EvaluationSampleResultsStarted":
-            public_payload.update(
-                {
-                    "generation": payload.get("generation"),
-                    "candidate_id": payload.get("candidate_id"),
-                    "revision": payload.get("revision"),
-                }
-            )
-        elif event.kind == "EvaluationSampleResultBatchRecorded":
-            public_payload.update(
-                {
-                    "candidate_id": payload.get("candidate_id"),
-                    "revision": payload.get("revision"),
-                    "batch_index": payload.get("batch_index"),
-                    "record_count": payload.get("record_count"),
-                    "result_digest": payload.get("result_digest"),
-                }
-            )
-        elif event.kind == "EvaluationSampleResultsRecorded":
-            public_payload.update(
-                {
-                    "candidate_id": payload.get("candidate_id"),
-                    "evaluation_id": payload.get("evaluation_id"),
-                    "revision": payload.get("revision"),
-                    "record_count": payload.get("record_count"),
-                    "result_digest": payload.get("result_digest"),
                 }
             )
         elif event.kind == "EvaluationJudged":
@@ -727,14 +491,6 @@ class EventEndpointsMixin:
                     "reason": redact_sensitive_text(
                         str(promotion.get("reason", "")), limit=500
                     ),
-                }
-            )
-        elif event.kind == "HumanInterventionRecorded":
-            intervention = payload.get("intervention", {})
-            public_payload.update(
-                {
-                    "intervention_id": intervention.get("intervention_id"),
-                    "kind": intervention.get("kind"),
                 }
             )
         elif event.kind == "HumanInterventionApplied":
@@ -868,12 +624,7 @@ class EventEndpointsMixin:
         elif event.kind == "EvolutionStageRecorded":
             public_payload.update(
                 {
-                    "generation": payload.get("generation"),
-                    "stage": payload.get("stage"),
-                    "status": payload.get("status"),
-                    "attempt": payload.get("attempt"),
-                    "proposal_id": payload.get("proposal_id"),
-                    "candidate_id": payload.get("candidate_id"),
+                    **public_fields(payload, 'generation stage status attempt proposal_id candidate_id'),
                     "public_error": public_error_summary(
                         payload.get("public_error")
                     ),
@@ -882,11 +633,7 @@ class EventEndpointsMixin:
         elif event.kind == "GatewayRetryScheduled":
             public_payload.update(
                 {
-                    "generation": payload.get("generation"),
-                    "retry_at": payload.get("retry_at"),
-                    "delay_seconds": payload.get("delay_seconds"),
-                    "attempt": payload.get("attempt"),
-                    "error_code": payload.get("error_code"),
+                    **public_fields(payload, 'generation retry_at delay_seconds attempt error_code'),
                     "reason": redact_sensitive_text(str(payload.get("reason") or "网关暂时繁忙，等待后重试"), limit=240),
                 }
             )
@@ -896,16 +643,7 @@ class EventEndpointsMixin:
             ):
                 public_payload.update(
                     {
-                        "retry_class": payload.get("retry_class"),
-                        "stage": payload.get("stage"),
-                        "breaker_epoch": payload.get("breaker_epoch"),
-                        "consecutive_failures": payload.get(
-                            "consecutive_failures"
-                        ),
-                        "retry_limit": payload.get("retry_limit"),
-                        "first_failure_at": payload.get("first_failure_at"),
-                        "last_failure_at": payload.get("last_failure_at"),
-                        "last_error_code": payload.get("last_error_code"),
+                        **public_fields(payload, 'retry_class stage breaker_epoch consecutive_failures retry_limit first_failure_at last_failure_at last_error_code'),
                         "suggested_action": "wait_for_scheduled_retry",
                     }
                 )
@@ -936,31 +674,13 @@ class EventEndpointsMixin:
             }:
                 public_payload.update(
                     {
-                        "retry_class": payload.get("retry_class"),
-                        "generation": payload.get("generation"),
-                        "stage": payload.get("stage"),
-                        "breaker_epoch": payload.get("breaker_epoch"),
-                        "consecutive_failures": payload.get(
-                            "consecutive_failures"
-                        ),
-                        "retry_limit": payload.get("retry_limit"),
-                        "first_failure_at": payload.get("first_failure_at"),
-                        "last_failure_at": payload.get("last_failure_at"),
-                        "last_error_code": payload.get("last_error_code"),
-                        "suggested_action": payload.get("suggested_action"),
+                        **public_fields(payload, 'retry_class generation stage breaker_epoch consecutive_failures retry_limit first_failure_at last_failure_at last_error_code suggested_action'),
                     }
                 )
         elif event.kind == "ModelUsageRecorded":
             public_payload.update(
                 {
-                    "schema_version": payload.get("schema_version"),
-                    "generation": payload.get("generation"),
-                    "candidate_id": payload.get("candidate_id"),
-                    "role": payload.get("role"),
-                    "model_id": payload.get("model_id"),
-                    "prompt_tokens": payload.get("prompt_tokens"),
-                    "completion_tokens": payload.get("completion_tokens"),
-                    "total_tokens": payload.get("total_tokens"),
+                    **public_fields(payload, 'schema_version generation candidate_id role model_id prompt_tokens completion_tokens total_tokens'),
                     "usage_reported": payload.get("usage_reported", True),
                     "outcome": payload.get("outcome", "succeeded"),
                     "call_count": 1,
@@ -975,14 +695,7 @@ class EventEndpointsMixin:
             attempt = payload.get("algorithm_attempt", {})
             public_payload.update(
                 {
-                    "generation": attempt.get("generation"),
-                    "proposal_id": attempt.get("proposal_id"),
-                    "candidate_id": attempt.get("candidate_id"),
-                    "phase": attempt.get("phase"),
-                    "attempt": attempt.get("attempt"),
-                    "status": attempt.get("status"),
-                    "algorithm_spec_digest": attempt.get("algorithm_spec_digest"),
-                    "failure_code": attempt.get("failure_code"),
+                    **public_fields(attempt, 'generation proposal_id candidate_id phase attempt status algorithm_spec_digest failure_code'),
                     "public_error": public_error_summary(
                         attempt.get("public_error")
                     ),

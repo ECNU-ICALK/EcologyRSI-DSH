@@ -32,7 +32,7 @@ HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID = (
     "greenhouse-horizon-targetwise-ridge@1"
 )
 RECIPE_RIDGE_MODEL_ID = "greenhouse-recipe-ridge@1"
-RECIPE_FEATURE_POLICY_ID = "authored_causal_features@1"
+from ..evolution.mutation_specs import RECIPE_FEATURE_POLICY_ID
 
 _RESULT_SCHEMA = "ecologyrsi-dsh.greenhouse-exogenous-ridge-result/1"
 _TARGETWISE_RESULT_SCHEMA = "ecologyrsi-dsh.greenhouse-targetwise-ridge-result/1"

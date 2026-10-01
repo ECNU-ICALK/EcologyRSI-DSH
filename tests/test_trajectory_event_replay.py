@@ -8,7 +8,13 @@ from threading import Barrier, Event as ThreadEvent, Lock
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from ecologyrsi_dsh import Evaluation, EventLedger, EvolutionDirector, FakeDSHAdapter, TaskManifest
+from ecologyrsi_dsh import (
+    Evaluation,
+    EventLedger,
+    EvolutionDirector,
+    FakeDSHAdapter,
+    TaskManifest,
+)
 from ecologyrsi_dsh.application import formal_trajectory, generation_execution
 from ecologyrsi_dsh.core.models import CandidateRole, digest
 from ecologyrsi_dsh.core.sample_results import build_sample_results
@@ -514,12 +520,11 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             self.director.record_local_edit_proposal(
                 self.run_id,
                 {
-                    "proposal_id": proposal_id,
-                    "candidate_id": candidate.candidate_id,
-                    "batch_index": batch_index,
-                    "evidence_scope_digest": scope.scope_key,
-                    "decision": "keep",
-                    "operations": [],
+                    'proposal_id': proposal_id,
+                    'candidate_id': candidate.candidate_id,
+                    'batch_index': batch_index,
+                    'evidence_scope_digest': scope.scope_key,
+                    "proposal": {"schema_version": "ecology-local-edit@1", "decision": "keep", "operations": [], "evidence_refs": ["batch:score"], "expected_effect_cells": [], "risk_cells": []}
                 },
             )
             self.director.decide_local_edit(
@@ -1549,7 +1554,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             replica_scope = replace(scope, inference_replica=replica)
             replica_checkpoint = {**checkpoint, "inference_replica": replica,
                                   "execution_scope_digest": replica_scope.scope_key}
-            callback = generation_execution._ScopedEvaluationCallbacks(
+            callback = generation_execution.EvaluationSession(
                 services, run_id=self.run_id, generation=0,
                 proposal_id=candidate.proposal_id, candidate_id=candidate.candidate_id,
                 scope=replica_scope,
@@ -1808,19 +1813,18 @@ class TrajectoryEventReplayTests(unittest.TestCase):
 
         proposal_id = f"local:{candidate.candidate_id}:0"
         proposal_payload = {
-            "proposal_id": proposal_id,
-            "candidate_id": candidate.candidate_id,
-            "batch_index": 0,
-            "evidence_scope_digest": warmup.scope.scope_key,
-            "decision": "mutate",
-            "operations": [
+                               'proposal_id': proposal_id,
+                               'candidate_id': candidate.candidate_id,
+                               'batch_index': 0,
+                               'evidence_scope_digest': warmup.scope.scope_key,
+                               "proposal": {"schema_version": "ecology-local-edit@1", "decision": "mutate", "operations": [
                 {
                     "op": "set_bounded_parameter",
                     "name": "ridge_alpha",
                     "value": 0.5,
                 }
-            ],
-        }
+            ], "evidence_refs": ["batch:score"], "expected_effect_cells": [], "risk_cells": []}
+                           }
         self.director.record_local_edit_proposal(run_id, proposal_payload)
         if stop_after_proposal:
             return SimpleNamespace(
@@ -2013,7 +2017,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
                 proposal_id=case.candidate.proposal_id,
                 candidate_id=case.candidate.candidate_id, scope=scope,
             )
-            callbacks = generation_execution._ScopedEvaluationCallbacks(services, **kwargs)
+            callbacks = generation_execution.EvaluationSession(services, **kwargs)
             opened = callbacks.prepare_checkpoint(checkpoint)
             self.assertFalse(opened["resumed"])
             rows = [
@@ -2031,7 +2035,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             callbacks.record_results(rows[:45])
             self.director.pause_run(case.run_id)
             self.director.resume_run(case.run_id)
-            resumed = generation_execution._ScopedEvaluationCallbacks(services, **kwargs)
+            resumed = generation_execution.EvaluationSession(services, **kwargs)
             prepared = resumed.prepare_checkpoint(checkpoint)
             self.assertTrue(prepared["resumed"])
             self.assertEqual(prepared["revision"], opened["revision"])
@@ -2508,7 +2512,7 @@ class TrajectoryEventReplayTests(unittest.TestCase):
                 forged_events = tuple(
                     replace(
                         event,
-                        payload={**event.payload, "operations": operations},
+                        payload={**event.payload, "proposal": {**event.payload["proposal"], "operations": operations}},
                     )
                     if event.kind == "LocalEditProposalRecorded"
                     else event
@@ -2668,15 +2672,12 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             proposal_case.comparison,
         )
         final_payload = {
-            "proposal_id": "local:paired:final",
-            "candidate_id": proposal_case.candidate.candidate_id,
-            "batch_index": 1,
-            "evidence_scope_digest": (
-                proposal_case.challenger_evaluation.scope.scope_key
-            ),
-            "decision": "keep",
-            "operations": [],
-        }
+                            'proposal_id': "local:paired:final",
+                            'candidate_id': proposal_case.candidate.candidate_id,
+                            'batch_index': 1,
+                            'evidence_scope_digest': proposal_case.challenger_evaluation.scope.scope_key,
+                            "proposal": {"schema_version": "ecology-local-edit@1", "decision": "keep", "operations": [], "evidence_refs": ["batch:score"], "expected_effect_cells": [], "risk_cells": []}
+                        }
         before = self.ledger.count(proposal_case.run_id)
         with self.assertRaisesRegex(ValueError, "final batch"):
             self.director.record_local_edit_proposal(
@@ -2720,14 +2721,11 @@ class TrajectoryEventReplayTests(unittest.TestCase):
             proposal_case.run_id,
             "LocalEditProposalRecorded",
             {
-                "proposal_id": "local:paired:final:raw",
-                "candidate_id": proposal_case.candidate.candidate_id,
-                "batch_index": 1,
-                "evidence_scope_digest": (
-                    proposal_case.challenger_evaluation.scope.scope_key
-                ),
-                "decision": "keep",
-                "operations": [],
+                'proposal_id': "local:paired:final:raw",
+                'candidate_id': proposal_case.candidate.candidate_id,
+                'batch_index': 1,
+                'evidence_scope_digest': proposal_case.challenger_evaluation.scope.scope_key,
+                "proposal": {"schema_version": "ecology-local-edit@1", "decision": "keep", "operations": [], "evidence_refs": ["batch:score"], "expected_effect_cells": [], "risk_cells": []}
             },
             event_id=f"{proposal_case.run_id}:forged-final-proposal",
         )

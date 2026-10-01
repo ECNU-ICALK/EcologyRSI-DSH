@@ -1,3 +1,5 @@
+import { withPresetScope } from "./preset-scope.js";
+
 const ROOT_SERVICES = Object.freeze([
   "agents",
   "sessions",
@@ -33,23 +35,19 @@ export async function runtimeCapabilities(ctx, presetCatalog = []) {
     let toolSurfaceVerified = false;
     let routeResolvable = false;
     try {
-      standingKey = await ctx?.agentPresets?.standingKeyFor?.(presetId);
-      presetMountable = (
-        (typeof standingKey === "string" && standingKey.length > 0)
-        || (standingKey != null && typeof standingKey === "object")
-      );
-    } catch {}
-    if (presetMountable) {
-      try {
-        const schemas = await ctx?.tools?.schemas?.(standingKey);
+      await withPresetScope(ctx?.agentPresets, presetId, async (key) => {
+        presetMountable = true;
+        // Opaque process-local keys must not escape through the JSON API.
+        standingKey = typeof key === "string" ? key : null;
+        const schemas = await ctx?.tools?.schemas?.(key);
         const names = new Set(Array.isArray(schemas) ? schemas.map(schemaName) : []);
         const expected = new Set(requiredTools);
         toolSurfaceVerified = (
           names.size === expected.size
           && [...expected].every((name) => names.has(name))
         );
-      } catch {}
-    }
+      });
+    } catch { toolSurfaceVerified = false; }
     const resolveCallConfig = ctx?.llm?.resolveCallConfig;
     if (typeof raw?.model !== "string" || !raw.model) {
       routeResolvable = typeof resolveCallConfig === "function";

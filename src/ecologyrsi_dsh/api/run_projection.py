@@ -7,10 +7,10 @@ from typing import Any
 from ..evaluators.registry import (
     EXOGENOUS_RIDGE_MODEL_ID,
     GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
-    TOY_DATASET_ID,
     TOY_EVALUATOR_ID,
     TOY_PREDICTOR_MODEL_ID,
 )
+from ..evaluators.catalog import TOY_DATASET_ID
 from ..integrations.model_bindings import HOST_PARAMETER_GENERATOR_ID, RULE_JUDGE_ID
 
 

@@ -1,8 +1,8 @@
+import { STAGE_CONTRACTS } from "./contracts.js";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import {
-  DYNAMIC_RETRIEVAL_TOOL_PROFILE,
   roleToolNames,
 } from "../tools/roles.js";
 import { MAX_REQUEST_TIMEOUT_MS, SidecarClient } from "../sidecar/client.js";
@@ -34,20 +34,12 @@ import {
 import { PendingChildStarts } from "./pending-child-starts.js";
 import { RouteHealth } from "./route-health.js";
 import { checkSampleStageBudget, SAMPLE_STAGE_LIMITS } from "./sample-stage-budget.js";
-import { sessionEventLog } from "./session-events.js";
+import { sessionEventLog, toolResultIdentity } from "./session-events.js";
 
-const STAGES = Object.freeze({
+const STAGE_INSTRUCTIONS = Object.freeze({
   "generation.research": Object.freeze({
-    role: "researcher",
-    schema: "ecology-research-result@1",
-    file: "research-result",
-    skillName: "autonomous-ecology-research",
   }),
   "generation.search-plan": Object.freeze({
-    role: "researcher",
-    schema: "ecology-research-search-plan@1",
-    file: "research-search-plan",
-    skillName: "autonomous-ecology-research",
     instruction: [
       "Plan the literature search from the previous aggregate result and reflection.",
       "Use every target and horizon in forecast_objective as the full scientific scope; a later generation may prioritize frozen weak cells but must not silently collapse the task to one target.",
@@ -58,10 +50,6 @@ const STAGES = Object.freeze({
     ].join(" "),
   }),
   "generation.research-synthesis": Object.freeze({
-    role: "researcher",
-    schema: "ecology-research-synthesis@1",
-    file: "research-synthesis",
-    skillName: "autonomous-ecology-research",
     instruction: [
       "Use only the frozen evidence_catalog supplied by the Host.",
       "Treat synthesis_contract.predictor_semantics as implementation facts. Ridge coefficients are independent per target and horizon in all ridge variants. Residual scales are fixed genome controls, not automatically fitted; selecting a pipeline only installs its defaults. Never claim otherwise in prose.",
@@ -69,16 +57,12 @@ const STAGES = Object.freeze({
       "For every evidence_ref copy one string verbatim from synthesis_contract.allowed_evidence_refs, which lists the frozen knowledge_id, evidence_digest, and registered capability_id/capability_ids values; never invent a source.",
       "Return exactly required_candidate_direction_count distinct, implementable directions.",
       "Each direction must select exactly one mutation_axis and one matching target from synthesis_contract.allowed_mutation_targets.",
-      "Set mutation_direction to increase or decrease for scientific_parameter, and to select for registered_predictor or instruction_profile. Baseline values may be described for context; prose is audit-only and only the structured mutation coordinates are executable.",
+      "Read synthesis_contract.mutation_directions_by_axis for the chosen axis: numeric parameters use increase or decrease, registered selections use select, and authored prompts or Skills use author or revise. Follow the exact family assigned by diversity_schedule.required_family_by_slot. Baseline values may be described for context; prose is audit-only and only the structured mutation coordinates are executable.",
       "If host_validation_feedback is present, correct its validation_detail in a fresh complete response and drop or replace every string it lists in rejected_evidence_refs.",
       "If host_validation_feedback.rejection_code is output_budget_exhausted_before_structured_output, the previous turn spent its whole output budget reasoning and submitted nothing: call structured_output immediately with the shortest object that satisfies the schema.",
     ].join(" "),
   }),
   "candidate.propose": Object.freeze({
-    role: "candidate-proposer",
-    schema: "ecology-genome-mutation@1",
-    file: "genome-mutation",
-    skillName: "bounded-plugin-experiment",
     instruction: [
       "The operations array is a mutation delta over parent_genome, not a replacement genome.",
       "Omit every unchanged parameter, policy, instruction, tool policy, and workflow setting.",
@@ -91,10 +75,6 @@ const STAGES = Object.freeze({
     ].join(" "),
   }),
   "candidate.local_edit": Object.freeze({
-    role: "candidate-proposer",
-    schema: "ecology-local-edit@1",
-    file: "local-edit",
-    skillName: "bounded-plugin-experiment",
     instruction: [
       "Review only aggregate evidence and the Host mutation catalog for the completed batch.",
       "Read current_candidate_state and recent_edit_history before choosing an operation; never repeat an exact bundle rejected for the same candidate revision and never repeat an unchanged current value.",
@@ -107,10 +87,6 @@ const STAGES = Object.freeze({
     ].join(" "),
   }),
   "generation.judge": Object.freeze({
-    role: "generation-judge",
-    schema: "ecology-generation-review@1",
-    file: "generation-review",
-    skillName: "candidate-scientific-review",
     instruction: [
       "Review only the supplied evidence for the single candidate identified by candidate_id, proposal_id, and generation.",
       "Use only scientific_evaluation, including its Host-computed score, passed result, aggregate metrics, and evidence digests, together with fitness_profile_digest and evaluation_cohort_digest.",
@@ -121,10 +97,6 @@ const STAGES = Object.freeze({
     ].join(" "),
   }),
   "generation.reflect": Object.freeze({
-    role: "generation-judge",
-    schema: "ecology-generation-reflection@1",
-    file: "generation-reflection",
-    skillName: "batch-scientific-reflection",
     instruction: [
       "Reflect only on the supplied aggregate batch outcomes; raw sample rows are unavailable.",
       "Assess the complete forecast_objective target-horizon matrix and preserve non-targeted cells when recommending the next directions.",
@@ -132,17 +104,13 @@ const STAGES = Object.freeze({
       "Return exactly direction_count distinct next-step directions and bounded search queries.",
       "candidate_directions, lessons, and recommended_search_queries must be native JSON arrays, never JSON-encoded strings. Include stop_recommendation and every required schema field. Do not add undeclared fields such as mutation_axis2.",
       "Each direction must select one mutation_axis and one exact target from host_boundary.allowed_mutation_targets.",
-      "Set mutation_direction to increase or decrease for scientific_parameter and select for the other axes; only the structured mutation coordinates are executable; prose remains audit-only.",
+      "Choose mutation_direction from host_boundary.mutation_directions_by_axis for the selected axis. Numeric parameters use increase or decrease, registered selections use select, and authored prompts or Skills use author or revise; prose remains audit-only.",
       "For every evidence_ref copy one string verbatim from host_boundary.allowed_evidence_refs; entries of allowed_mutation_targets are mutation coordinates, not evidence, and citing one is rejected. Never invent a source.",
       "When host_validation_feedback is present, drop or replace every string it lists in rejected_evidence_refs instead of resubmitting them.",
       "Every reflected direction is advisory and must pass the next research synthesis Host preflight before candidate use. Your stop recommendation is advisory; the Host owns selection and termination.",
     ].join(" "),
   }),
   "sample.plan": Object.freeze({
-    role: "sample-planner",
-    schema: "ecology-sample-predictions@2",
-    file: "sample-decisions",
-    allowsPredictionTools: true,
     instruction: [
       "Analyze the label-free forecast origin using the candidate-selected Skill. You own the final numeric predictions.",
       "Choose whether to use tools. Call ecology_execute_prediction_tool zero to two times using a catalog tool_id, unique call_id, exact wave_digest, and permitted parameters. Track remaining_calls returned by the Host; zero means submit now. Use parameters={} for defaults and never borrow parameter names from another tool. Compare results and revise your approach as needed.",
@@ -152,10 +120,6 @@ const STAGES = Object.freeze({
     ].join(" "),
   }),
   "sample.critic": Object.freeze({
-    role: "sample-critic",
-    schema: "ecology-sample-review@2",
-    file: "sample-review",
-    skillName: "origin-vector-review",
     instruction: [
       "Review exactly the supplied immutable prediction decisions and use the exact wave_digest from context.",
       "Copy the exact Host wave_digest and every exact Host samples[].sample_id into the structured result.",
@@ -165,10 +129,6 @@ const STAGES = Object.freeze({
     ].join(" "),
   }),
   "sample.reflect": Object.freeze({
-    role: "sample-critic",
-    schema: "ecology-sample-reflection@1",
-    file: "sample-reflection",
-    skillName: "origin-vector-review",
     instruction: [
       "Reflect on exactly one completed historical training-feedback forecast origin, including every supplied target-horizon cell.",
       "Copy the exact Host wave_digest and the exact outer Host context.sample.sample_id into the structured result.",
@@ -179,6 +139,11 @@ const STAGES = Object.freeze({
     ].join(" "),
   }),
 });
+const STAGES = Object.freeze(Object.fromEntries(
+  Object.entries(STAGE_CONTRACTS).map(([stage, contract]) => [
+    stage, Object.freeze({ ...contract, ...STAGE_INSTRUCTIONS[stage] }),
+  ]),
+));
 
 const DSH_SCHEMA_KEYS = new Set([
   "type", "oneOf", "properties", "required", "additionalProperties",
@@ -444,18 +409,6 @@ function callArguments(event) {
   }
 }
 
-function toolResultIdentity(event) {
-  const data = eventData(event);
-  if (typeof data.callId === "string") {
-    return { callId: data.callId, isError: data.isError === true };
-  }
-  const content = data.message?.content;
-  if (!Array.isArray(content)) return null;
-  const block = content.find((item) => item?.type === "tool-result");
-  if (!block || typeof block.toolCallId !== "string") return null;
-  return { callId: block.toolCallId, isError: block.isError === true };
-}
-
 function accountsForConsumedClaim(reason) {
   return reason?.kind !== "completed";
 }
@@ -669,16 +622,12 @@ function correctedRetrievalArgumentResult(events, call, retrievalCalls, terminal
     if (item.event?.type !== "tool/result" || item.seq <= call.seq || item.seq >= terminalSeq) return false;
     const data = eventData(item.event);
     const identity = toolResultIdentity(item.event);
-    const blocks = data.message?.content;
-    const result = Array.isArray(blocks)
-      ? blocks.find((block) => block?.type === "tool-result" && block.toolCallId === callData.callId)
-      : null;
     return identity?.callId === callData.callId && identity.isError === true
       && data.turn === callData.turn && data.step === callData.step
       && Array.isArray(item.event.sourceEventSeqs)
       && item.event.sourceEventSeqs.length === 1 && item.event.sourceEventSeqs[0] === call.seq
-      && result?.content?.length === 1 && result.content[0]?.type === "text"
-      && result.content[0].text === expectedError;
+      && identity.content?.length === 1 && identity.content[0]?.type === "text"
+      && identity.content[0].text === expectedError;
   });
   if (!failed) return null;
   const corrected = retrievalCalls.some((retry) => {
@@ -1251,10 +1200,6 @@ export class NativeStageRunner {
     lifecycle,
     signal = null,
   }) {
-    const dynamicRetrieval = (
-      roleHost.binding?.tool_profile === DYNAMIC_RETRIEVAL_TOOL_PROFILE
-      && !["generation.search-plan", "generation.research-synthesis"].includes(binding.stage)
-    );
     if (lifecycle.deadline !== null) requireStructuredDeadline(lifecycle.deadline);
     const reservationTimeoutMs = lifecycle.deadline === null
       ? Math.min(lifecycle.timeoutMs, MAX_REQUEST_TIMEOUT_MS)
@@ -1312,10 +1257,7 @@ export class NativeStageRunner {
       genome_digest: exactDigest(identityDigests.genome_digest, "genome_digest"),
       compiled_behavior_digest: exactDigest(identityDigests.compiled_behavior_digest, "compiled_behavior_digest"),
       phenotype_instance_digest: exactDigest(identityDigests.phenotype_instance_digest, "phenotype_instance_digest"),
-      allowed_tools: roleToolNames(
-        contract.role,
-        dynamicRetrieval ? DYNAMIC_RETRIEVAL_TOOL_PROFILE : null,
-      ),
+      allowed_tools: roleToolNames(contract.role, roleHost.binding?.tool_profile),
     };
     const reservation = this.childBindings.reserve(roleHost.sessionId, launch, frozenIdentity);
     const skillName = expectedSkillName(contract, request);
@@ -1334,19 +1276,20 @@ export class NativeStageRunner {
       requireStructuredDeadline(lifecycle.deadline);
       const responseProtocol = [
         "Do not narrate analysis.",
+        "Pass the result object directly as structured_output arguments. Include every field in output_contract.required_fields and copy output_contract.fixed_fields exactly; these are required even when the tool schema supplies a const.",
+        "Use native JSON objects and arrays, not JSON-encoded strings. Do not wrap the result in value, result, or output_contract, and do not prefix field names with value.",
+        "In INVALID_ARGS feedback, value is the validator's root path: missing value.schema_version means add schema_version at the top level, not a value wrapper or a value.schema_version key. Correct the named field and preserve all other valid fields.",
         ...(["generation.search-plan", "generation.research-synthesis"].includes(binding.stage) ? [
           "Do not call web_search in this stage. The Host executes the search plan and freezes the evidence catalog before synthesis.",
           "Keep findings concise. Every citation must be a literal identifier in the supplied frozen evidence catalog.",
         ] : []),
         `Your first response must call skill exactly once with name ${skillName}.`,
-        ...(dynamicRetrieval ? [
-          "After the Skill result, make zero to three web_search calls only when current reasoning needs external evidence; submit queries and retrieval_key only, and never choose a provider.",
-        ] : []),
+        "After the Skill result, make zero to three web_search calls only when current reasoning needs external evidence; submit queries and retrieval_key only, and never choose a provider.",
         ...(contract.allowsPredictionTools ? [
           "After the Skill result, analyze the sample and optionally call prediction tools up to two times, interleaving searches when useful. Use unique call_ids; wait for each tool result before continuing.",
           "When ready, call structured_output once with your final numerical predictions and evidence references. Emit no prose.",
         ] : [
-          `${dynamicRetrieval ? "Then" : "After the Skill result,"} call structured_output exactly once with one concise object matching the supplied output schema.`,
+          "Then call structured_output exactly once with one concise object matching the supplied output schema.",
           "Do not emit prose before or after it.",
         ]),
         binding.stage === "generation.reflect"
@@ -1367,6 +1310,12 @@ export class NativeStageRunner {
           contract.instruction || "",
         ].filter(Boolean).join(" "),
         stage: binding.stage,
+        output_contract: {
+          required_fields: outputSchema.required || [],
+          fixed_fields: Object.fromEntries(Object.entries(outputSchema.properties || {})
+            .filter(([, field]) => Object.hasOwn(field, "const"))
+            .map(([name, field]) => [name, field.const])),
+        },
         context: request.context,
       });
       requireStructuredDeadline(lifecycle.deadline);
@@ -1413,7 +1362,7 @@ export class NativeStageRunner {
             stage: binding.stage,
             skillName,
             allowsPredictionTools: contract.allowsPredictionTools === true,
-            allowDynamicRetrieval: dynamicRetrieval,
+            allowDynamicRetrieval: true,
           };
           const evidence = await synchronizedSkillInvocationEvidence(
             this.ctx,

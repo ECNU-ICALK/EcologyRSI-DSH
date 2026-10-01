@@ -706,12 +706,12 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     "first_call_verified": False,
                 }
                 for preset_id in (
-                    "ecology-coordinator-v5",
-                    "ecology-researcher-v13",
-                    "ecology-candidate-proposer-v5",
-                    "ecology-sample-planner-v11",
-                    "ecology-sample-critic-v5",
-                    "ecology-generation-judge-v8",
+                    "ecology-coordinator-v6",
+                    "ecology-researcher-v15",
+                    "ecology-candidate-proposer-v6",
+                    "ecology-sample-planner-v12",
+                    "ecology-sample-critic-v6",
+                    "ecology-generation-judge-v9",
                 )
             ],
             "live_agent_service_ready": True,

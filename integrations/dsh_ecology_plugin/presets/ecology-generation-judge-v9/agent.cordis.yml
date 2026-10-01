@@ -1,3 +1,7 @@
+- id: tool-presentation
+  name: '@deepseek-ai/dsh-agent-tool-presentation'
+  config:
+    mode: native
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:

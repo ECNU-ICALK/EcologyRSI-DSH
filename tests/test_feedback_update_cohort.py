@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import unittest
 
-from ecologyrsi_dsh.evaluators.registry import _select_feedback_update_cohort
+from ecologyrsi_dsh.evaluators.pipeline import _select_feedback_update_cohort
 
 
 def _rows(*, rows_per_task: int = 120) -> list[dict]:

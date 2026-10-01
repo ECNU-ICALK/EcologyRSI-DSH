@@ -33,7 +33,7 @@ const baseContext = {
   wave_digest: "a".repeat(64), samples: [{ sample_id: "sample:one" }], sample: { sample_id: "origin:one" },
   knowledge_snapshot: { evidence_catalog: [{ knowledge_id: "paper:one" }] },
   required_candidate_direction_count: 4,
-  synthesis_contract: { allowed_mutation_targets: {
+  synthesis_contract: { mutation_directions_by_axis: { scientific_parameter: ["increase", "decrease"], registered_predictor: ["select"], instruction_profile: ["select"] }, allowed_mutation_targets: {
     scientific_parameter: ["ridge_alpha"], registered_predictor: ["ridge@1"], instruction_profile: ["balanced@1"],
   } },
 };

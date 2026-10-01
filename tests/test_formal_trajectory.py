@@ -1464,7 +1464,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
             ),
             patch.object(
                 formal_trajectory,
-                "_ScopedEvaluationCallbacks",
+                "EvaluationSession",
                 _NoopScopedCallbacks,
             ),
             patch.object(
@@ -1738,7 +1738,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
             ),
             patch.object(
                 formal_trajectory,
-                "_ScopedEvaluationCallbacks",
+                "EvaluationSession",
                 _NoopScopedCallbacks,
             ),
             patch.object(

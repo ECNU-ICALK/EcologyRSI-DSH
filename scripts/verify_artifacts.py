@@ -41,12 +41,12 @@ INTERNAL_SOURCE_MARKERS = (
 
 CURRENT_DSH_PRESET_IDS = frozenset(
     {
-        "ecology-coordinator-v5",
-        "ecology-researcher-v13",
-        "ecology-candidate-proposer-v5",
-        "ecology-sample-planner-v11",
-        "ecology-sample-critic-v5",
-        "ecology-generation-judge-v8",
+        "ecology-coordinator-v6",
+        "ecology-researcher-v15",
+        "ecology-candidate-proposer-v6",
+        "ecology-sample-planner-v12",
+        "ecology-sample-critic-v6",
+        "ecology-generation-judge-v9",
     }
 )
 _MANAGED_DSH_PRESET_ID = re.compile(
@@ -215,7 +215,7 @@ def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
                 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js",
                 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/lib/tools/agent-plugin.js",
                 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/schemas/genome-mutation.schema.json",
-                "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v5/preset.yml",
+                "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v6/preset.yml",
                 f"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-{version}.tgz",
                 "share/ecologyrsi-dsh/scripts/install_dsh_ecology_runtime.mjs",
                 ".dist-info/licenses/LICENSE",
@@ -368,7 +368,7 @@ def verify_sdist(sdist: Path, source_root: Path, version: str) -> None:
             "/integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js",
             "/integrations/dsh_ecology_plugin/lib/tools/agent-plugin.js",
             "/integrations/dsh_ecology_plugin/schemas/genome-mutation.schema.json",
-            "/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v5/preset.yml",
+            "/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v6/preset.yml",
             f"/integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-{version}.tgz",
             "/integrations/dsh_ecology_plugin/test/proxy_security.mjs",
             "/scripts/install_dsh_ecology_runtime.mjs",
@@ -468,7 +468,7 @@ def verify_delivery_archive(
                 "/integrations/dsh_ecology_plugin/lib/client.js",
                 "/integrations/dsh_ecology_plugin/lib/tools/retrieval.js",
                 "/integrations/dsh_ecology_plugin/lib/runtime/stage-runner.js",
-                "/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v5/preset.yml",
+                "/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v6/preset.yml",
                 "/scripts/install_dsh_ecology_runtime.mjs",
                 "/integrations/dsh_ecology_plugin/test/proxy_security.mjs",
                 "/src/ecologyrsi_dsh/application/cli.py",
@@ -593,10 +593,10 @@ def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
             "package/lib/tools/retrieval.js",
             "package/lib/runtime/stage-runner.js",
             "package/schemas/genome-mutation.schema.json",
-            "package/presets/ecology-coordinator-v5/preset.yml",
-            "package/presets/ecology-generation-judge-v8/agent.cordis.yml",
-            "package/presets/ecology-generation-judge-v8/skills/batch-scientific-reflection/SKILL.md",
-            "package/presets/ecology-generation-judge-v8/skills/candidate-scientific-review/SKILL.md",
+            "package/presets/ecology-coordinator-v6/preset.yml",
+            "package/presets/ecology-generation-judge-v9/agent.cordis.yml",
+            "package/presets/ecology-generation-judge-v9/skills/batch-scientific-reflection/SKILL.md",
+            "package/presets/ecology-generation-judge-v9/skills/candidate-scientific-review/SKILL.md",
         }
         missing = sorted(required - names)
         if missing:
@@ -614,9 +614,9 @@ def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
         peer_meta = package.get("peerDependenciesMeta", {})
         for name, required_version in peers.items():
             if name.startswith("@deepseek-ai/dsh-"):
-                if required_version != "0.1.5-rc.2":
+                if required_version != "0.2.0-rc.2":
                     raise RuntimeError(
-                        "npm plugin DSH peer dependency is not exact 0.1.5-rc.2"
+                        "npm plugin DSH peer dependency is not exact 0.2.0-rc.2"
                     )
                 if peer_meta.get(name, {}).get("optional") is not True:
                     raise RuntimeError("npm plugin DSH peer must be host-provided and optional")
@@ -743,7 +743,7 @@ def installed_smoke(wheel: Path, version: str) -> None:
             if not (
                 dsh_home
                 / ".agent-presets"
-                / "ecology-coordinator-v5"
+                / "ecology-coordinator-v6"
                 / "preset.yml"
             ).is_file():
                 raise RuntimeError("installed wheel did not install DSH presets")

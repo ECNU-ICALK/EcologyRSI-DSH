@@ -61,12 +61,11 @@ class TrajectoryPublicEventTests(unittest.TestCase):
         proposal = self._project(
             "LocalEditProposalRecorded",
             {
-                "proposal_id": "local-proposal:1",
-                "candidate_id": "candidate:1",
-                "batch_index": 0,
-                "evidence_scope_digest": "scope-digest",
-                "decision": "edit",
-                "operations": [{"private_code": "SECRET-OPERATION"}],
+                'proposal_id': "local-proposal:1",
+                'candidate_id': "candidate:1",
+                'batch_index': 0,
+                'evidence_scope_digest': "scope-digest",
+                "proposal": {"schema_version": "ecology-local-edit@1", "decision": "edit", "operations": [{"private_code": "SECRET-OPERATION"}], "evidence_refs": ["batch:score"], "expected_effect_cells": [], "risk_cells": []}
             },
         )
 

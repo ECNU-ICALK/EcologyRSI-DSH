@@ -7,7 +7,7 @@ import { STAGES } from "../lib/runtime/stage-runner.js";
 function request(stage = "generation.search-plan") {
   return { schema_version: CANARY_SCHEMA,
     identity: { provider_id: "provider", model_id: "model", stage, role: STAGES[stage]?.role || "sample-planner",
-      preset_id: ({"generation.reflect":"ecology-generation-judge-v8", "sample.plan":"ecology-sample-planner-v11", "sample.critic":"ecology-sample-critic-v5"})[stage] || "ecology-researcher-v13", output_schema_id: STAGES[stage]?.schema,
+      preset_id: ({"generation.reflect":"ecology-generation-judge-v9", "sample.plan":"ecology-sample-planner-v12", "sample.critic":"ecology-sample-critic-v6"})[stage] || "ecology-researcher-v15", output_schema_id: STAGES[stage]?.schema,
       preset_content_digest: "a".repeat(64), standing_tool_surface_digest: "b".repeat(64), route_config_digest: "c".repeat(64) },
     bounds: { max_attempts: 2, max_output_tokens: 1024, max_reported_tokens: 30000, total_timeout_ms: 1000, ttl_seconds: 3600 } };
 }
@@ -22,12 +22,17 @@ function fixture(mode = "ok") {
       const sid = `child-${launches.length}`;
       const events = [{seq:1,type:"turn/start",data:{turn:1}}, {seq:2,type:"step/start",data:{turn:1,step:1}}];
       function call(seq,name,args,id) { events.push({seq,type:"tool/call",data:{turn:1,step:1,callId:id,name,arguments:JSON.stringify(args)}}); }
-      function result(seq,id,isError=false) { events.push({seq,type:"tool/result",data:{turn:1,step:1,message:{content:[{type:"tool-result",toolCallId:id,isError,content:[]}]}}}); }
+      function result(seq,id,isError=false) {
+        const message = mode.startsWith("native")
+          ? {role:"tool",toolCallId:id,source:{kind:"tool",callId:id},...(isError ? {isError:true} : {}),content:[{type:"text",text:"accepted"}]}
+          : {content:[{type:"tool-result",toolCallId:id,isError,content:[]}]};
+        events.push({seq,type:"tool/result",data:{turn:1,step:1,message}});
+      }
       const wireText = mode === "dsml" || mode === "dsml-once" && launches.length === 1;
       if (mode !== "text") {
         call(3,"skill",{name:skillName},"skill-1"); result(4,"skill-1");
         if (wireText) events.push({seq:5,type:"assistant/message",data:{turn:1,message:{content:[{type:"text",text:'<｜DSML｜tool_calls><｜DSML｜invoke name="structured_output"></｜DSML｜invoke></｜DSML｜tool_calls>'}]}}});
-        else {call(5,"structured_output",structured,"result-1"); result(6,"result-1",mode === "rejected");}
+        else {call(5,"structured_output",structured,"result-1"); result(6,"result-1",mode === "rejected" || mode === "native-rejected");}
       }
       events.push({seq:7,type:"assistant/message",data:{usage:{inputTokens:200,outputTokens:100}}}, {seq:8,type:"step/end",data:{turn:1,step:1}}, {seq:9,type:"turn/end",data:{turn:1,reason:{kind:"completed"}}});
       if (mode === "budget") events.at(-1).data.reason = {kind:"max-tokens"};
@@ -53,6 +58,16 @@ test("real canary seam mounts exact roles and requires actual tool/schema captur
 });
 test("text-only tool claims, failed tools and invented success cannot pass or retry", async()=>{
   for(const mode of ["text","rejected","mismatch"]){const f=fixture(mode),receipt=await f.canary.run(request());assert.equal(receipt.passed,false,mode);assert.equal(f.launches.length,1);assert.equal(receipt.recommendation,"isolate_configuration");}
+});
+test("Harness 0.2 message-level tool results prove successful calls and reject errors", async () => {
+  for (const stage of ["generation.search-plan", "generation.reflect", "sample.plan", "sample.critic"]) {
+    const accepted = await fixture("native").canary.run(request(stage));
+    assert.equal(accepted.passed, true, JSON.stringify(accepted.failure));
+    assert.equal(accepted.tool_evidence.order_verified, true);
+    const rejected = await fixture("native-rejected").canary.run(request(stage));
+    assert.equal(rejected.passed, false);
+    assert.equal(rejected.failure.code, "model_canary_evidence_invalid");
+  }
 });
 test("output exhaustion is terminal; only classified transport gets a bounded second child",async()=>{
   const b=fixture("budget"),r=await b.canary.run(request()); assert.equal(r.passed,false); assert.equal(b.launches.length,1); assert.equal(r.failure.code,"structured_child_output_budget_exhausted");

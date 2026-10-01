@@ -9,18 +9,8 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
-// Must stay in the manifest's order and membership; tests/test_preset_roster_consistency.py
-// pins this list, `presets/preset-manifest.json`, the installed directories, and the
-// delivery manifests against one another. A superseded id left behind here would keep
-// its directory installed and ship two rosters in one artifact.
-export const PRESET_IDS = Object.freeze([
-  "ecology-coordinator-v5",
-  "ecology-researcher-v13",
-  "ecology-candidate-proposer-v5",
-  "ecology-sample-planner-v11",
-  "ecology-sample-critic-v5",
-  "ecology-generation-judge-v8",
-]);
+import { PRESET_MANIFEST } from "../integrations/dsh_ecology_plugin/lib/runtime/contracts.js";
+export const PRESET_IDS = Object.freeze(PRESET_MANIFEST.presets.map(item => item.preset_id));
 const MANAGED_PRESET_ID = /^ecology-(?:coordinator|researcher|candidate-proposer|sample-planner|sample-critic|generation-judge|local-editor)-v[0-9]+$/;
 
 const BEGIN = "# BEGIN ECOLOGYRSI DSH RUNTIME (managed)";
@@ -152,36 +142,48 @@ async function resolveExecutable(command, env = process.env) {
   throw new Error(`DSH executable is not available: ${command}`);
 }
 
-async function validatePresetTreeWithDsh(sourcePath, dshBin) {
+export async function dshPackageJson(dshBin) {
   const executable = await resolveExecutable(dshBin);
-  let packageJson;
-  try {
-    packageJson = await realpath(path.resolve(
-      path.dirname(executable),
-      "..",
-      "@deepseek-ai",
-      "dsh",
-      "package.json",
-    ));
-  } catch (error) {
-    if (error.code === "ENOENT") return;
-    throw error;
+  let directory = path.dirname(executable);
+  while (true) {
+    const candidate = path.join(directory, "package.json");
+    if (await exists(candidate)) {
+      const manifest = JSON.parse(await readFile(candidate, "utf8"));
+      if (manifest.name === "@deepseek-ai/dsh") return candidate;
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) return null; // Standalone test doubles have no package.
+    directory = parent;
+  }
+}
+
+async function validatePresetTreeWithDsh(sourcePath, dshBin) {
+  const packageJson = await dshPackageJson(dshBin);
+  if (packageJson == null) return;
+  const manifest = JSON.parse(await readFile(packageJson, "utf8"));
+  if (manifest.version !== "0.2.0-rc.2") {
+    throw new Error(`this plugin requires DSH 0.2.0-rc.2; found ${manifest.version}`);
   }
   const requireFromDsh = createRequire(packageJson);
-  let modulePath;
-  try {
-    modulePath = requireFromDsh.resolve("@deepseek-ai/dsh-agent-presets");
-  } catch (error) {
-    if (error.code === "MODULE_NOT_FOUND") return;
-    throw error;
-  }
-  const { scanRoot } = await import(pathToFileURL(modulePath).href);
-  const rows = await scanRoot({ path: sourcePath, trust: "user" });
-  const byId = new Map(rows.map((row) => [row.id, row]));
+  // Use exactly the host's parser and row validator, including !!js expressions.
+  // Missing modules in a real installation are an incompatibility, not a skip.
+  const { entryListSchema } = await import(pathToFileURL(
+    requireFromDsh.resolve("@deepseek-ai/cordis-plugin-include"),
+  ).href);
+  const { entryListProblem } = await import(pathToFileURL(
+    requireFromDsh.resolve("@deepseek-ai/dsh-agent-preset-registry"),
+  ).href);
+  const yaml = requireFromDsh("js-yaml");
   for (const id of PRESET_IDS) {
-    const row = byId.get(id);
-    if (row == null) throw new Error(`DSH preset is missing: ${id}`);
-    if (row.broken) throw new Error(`DSH preset ${id} is invalid: ${row.broken}`);
+    let rows;
+    try {
+      rows = yaml.load(await readFile(path.join(sourcePath, id, "agent.cordis.yml"), "utf8"),
+        { schema: entryListSchema });
+    } catch (error) {
+      throw new Error(`DSH preset ${id} is not valid YAML`, { cause: error });
+    }
+    const problem = entryListProblem(rows, id);
+    if (problem) throw new Error(`DSH preset ${id} is invalid: ${problem}`);
   }
 }
 
@@ -218,10 +220,39 @@ export async function installPresetTree({ sourceRoot, dshHome, dshBin = null }) 
   }
 }
 
-export function managedPatchText({ staticRoot, sessionVisibilityModule = "@ecologyrsi/dsh-evolution-plugin/session-visibility" }) {
-  const safeRoot = String(staticRoot).replaceAll("'", "''");
-  const safeVisibilityModule = String(sessionVisibilityModule).replaceAll("'", "''");
-  return `${BEGIN}\n- insert:\n    - id: ecologyrsi-evolution\n      name: '@ecologyrsi/dsh-evolution-plugin'\n      inject: [webServer, agents, sessions, tokenMeter, subagents, tools, sessionPersistence, sessionProjections, agentPresets, llm, web]\n      config:\n        staticRoot: '${safeRoot}'\n        backendOrigin: 'http://127.0.0.1:8777'\n    - id: ecologyrsi-session-visibility\n      name: '${safeVisibilityModule}'\n      inject: [sessions, sessionPersistence]\n${END}\n`;
+export function managedPatchText({
+  staticRoot,
+  sessionVisibilityModule = "@ecologyrsi/dsh-evolution-plugin/session-visibility",
+  presetRoot = fileURLToPath(new URL("../integrations/dsh_ecology_plugin/presets/", import.meta.url)),
+}) {
+  const quote = value => `'${String(value).replaceAll("'", "''")}'`;
+  // DSH 0.2 discovers declarations in the composition, not .agent-presets folders.
+  // Includes keep !!js baseUrl relative to each installed preset's own skills.
+  const declarations = PRESET_IDS.map((id, order) => `    - id: preset-${id}
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: ${id}
+        name: ${quote(id)}
+        order: ${100 + order}
+        plugins:
+          - id: composition
+            name: '@deepseek-ai/cordis-plugin-include'
+            config:
+              path: ${quote(pathToFileURL(path.join(presetRoot, id, "agent.cordis.yml")).href)}
+`).join("");
+  return `${BEGIN}
+- insert:
+    - id: ecologyrsi-evolution
+      name: '@ecologyrsi/dsh-evolution-plugin'
+      inject: [webServer, agents, sessions, tokenMeter, subagents, tools, sessionPersistence, sessionProjections, agentPresets, llm, web]
+      config:
+        staticRoot: ${quote(staticRoot)}
+        backendOrigin: 'http://127.0.0.1:8777'
+    - id: ecologyrsi-session-visibility
+      name: ${quote(sessionVisibilityModule)}
+      inject: [sessions, sessionPersistence]
+${declarations}${END}
+`;
 }
 
 async function atomicWrite(target, content) {
@@ -242,6 +273,8 @@ export async function installManagedPatch({ dshHome, staticRoot, profile = "web"
   // add it without restarting the evolution controller and its active Agents.
   const managed = managedPatchText({
     staticRoot,
+    presetRoot: path.join(path.resolve(dshHome), "profiles", profile,
+      "node_modules", "@ecologyrsi", "dsh-evolution-plugin", "presets"),
     sessionVisibilityModule: path.join(
       path.resolve(dshHome), "profiles", profile, "node_modules", "@ecologyrsi",
       "dsh-evolution-plugin", "lib", "runtime", "session-visibility.js",
@@ -310,6 +343,10 @@ export async function installRuntime({
       packed = path.join(temporary, archives[0]);
     }
     await validatePluginArchive({ archive: packed, pluginRoot });
+    const dshBin = process.env.DSH_BIN || "dsh";
+    // Refuse an incompatible host or invalid composition before changing its
+    // package installation, cache, or managed patch.
+    await validatePresetTreeWithDsh(path.join(pluginRoot, "presets"), dshBin);
     const cache = path.join(dshHome, "plugin-cache", "ecologyrsi");
     await mkdir(cache, { recursive: true, mode: 0o700 });
     const stable = path.join(cache, path.basename(packed));
@@ -319,7 +356,6 @@ export async function installRuntime({
       await cp(packed, stable, { errorOnExist: true, force: false });
       await fsyncFile(stable);
     }
-    const dshBin = process.env.DSH_BIN || "dsh";
     run(
       dshBin,
       ["plugin", "--profile", profile, "add", "--save-exact", `file:${stable}`],

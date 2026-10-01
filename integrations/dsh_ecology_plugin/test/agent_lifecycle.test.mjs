@@ -84,6 +84,29 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+test("DSH 0.2 role hosts resolve presets and await whenIdle before flushing and disposing", async () => {
+  const events = [];
+  const release = deferred();
+  const agent = {
+    session: { append: async () => {}, flush: async () => events.push("flush") },
+    whenIdle() { assert.equal(this, agent); events.push("idle"); return release.promise; },
+    waitForIdle() { throw new Error("obsolete API"); },
+  };
+  const manager = new RoleAgentManager({
+    agents: { create: async () => ({ agent, dispose: async () => events.push("dispose") }) },
+    agentPresets: { resolve: async id => ({ id }), serviceFor: () => ({}) },
+  });
+  await manager.createRoleAgent({ run_id: "new-host", role: "coordinator",
+    preset_id: "ecology-coordinator-v6", model: "test/model", cwd: "/tmp" });
+  events.length = 0;
+  const cleanup = manager.quiesceRun("new-host", { dispose: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ["idle"]);
+  release.resolve();
+  await cleanup;
+  assert.deepEqual(events, ["idle", "flush", "dispose"]);
+});
+
 function outcome(promise) {
   return Promise.resolve(promise).then(
     (value) => ({ status: "fulfilled", value }),
@@ -109,13 +132,14 @@ test("role-host creation is single-flight, resumable and has no token hard cap",
   const ctx = {
     agents: { create: async (options) => { calls.push(["create", options]); return handle; } },
     agentPresets: {
-      standingKeyFor: async (id) => `standing:${id}`,
+      resolve: async (id) => ({ id: id }),
+      acquireScope: async (id) => ({ key: { presetId: id }, async [Symbol.asyncDispose]() {} }),
       mount: async (_agentCtx, id) => ({ id }),
       serviceFor: (_agent, name) => ({ name }),
     },
   };
   const manager = new RoleAgentManager(ctx);
-  const binding = { run_id: "r1", role: "coordinator", preset_id: "ecology-coordinator-v5", model: "p/m", cwd: "/tmp" };
+  const binding = { run_id: "r1", role: "coordinator", preset_id: "ecology-coordinator-v6", model: "p/m", cwd: "/tmp" };
   const [a, b] = await Promise.all([manager.createRoleAgent(binding), manager.createRoleAgent(binding)]);
   assert.equal(a, b);
   assert.equal(calls.filter(([name]) => name === "create").length, 1);
@@ -150,12 +174,12 @@ test("run quiescence waits pending creations and disposes every published host",
   const researcherBinding = {
     ...common,
     role: "researcher",
-    preset_id: "ecology-researcher-v13",
+    preset_id: "ecology-researcher-v15",
   };
   const proposerBinding = {
     ...common,
     role: "candidate-proposer",
-    preset_id: "ecology-candidate-proposer-v5",
+    preset_id: "ecology-candidate-proposer-v6",
   };
   const ctx = {
     agents: {
@@ -173,7 +197,8 @@ test("run quiescence waits pending creations and disposes every published host",
       },
     },
     agentPresets: {
-      standingKeyFor: async (presetId) => `standing:${presetId}`,
+      resolve: async (presetId) => ({ id: presetId }),
+      acquireScope: async (presetId) => ({ key: { presetId: presetId }, async [Symbol.asyncDispose]() {} }),
       mount: async (_agentCtx, presetId) => ({ id: presetId }),
       serviceFor: async () => ({ ready: true }),
     },
@@ -192,7 +217,7 @@ test("run quiescence waits pending creations and disposes every published host",
   releaseResearcher.resolve({
     agent: {
       session: { append: async () => {}, flush: async () => {} },
-      waitForIdle: async () => {
+      whenIdle: async () => {
         throw new Error("private researcher idle failure");
       },
     },
@@ -204,7 +229,7 @@ test("run quiescence waits pending creations and disposes every published host",
   releaseProposer.resolve({
     agent: {
       session: { append: async () => {}, flush: async () => {} },
-      waitForIdle: async () => {},
+      whenIdle: async () => {},
     },
     dispose: async () => { disposals.push("candidate-proposer"); },
   });
@@ -240,7 +265,8 @@ test("role creation preserves its setup error when private disposal also fails",
       }),
     },
     agentPresets: {
-      standingKeyFor: async (presetId) => `standing:${presetId}`,
+      resolve: async (presetId) => ({ id: presetId }),
+      acquireScope: async (presetId) => ({ key: { presetId: presetId }, async [Symbol.asyncDispose]() {} }),
       mount: async (_agentCtx, presetId) => ({ id: presetId }),
       serviceFor: async () => { throw new Error("primary role service failure"); },
     },
@@ -249,7 +275,7 @@ test("role creation preserves its setup error when private disposal also fails",
   const result = await outcome(manager.createRoleAgent({
     run_id: "run-primary-role-error",
     role: "researcher",
-    preset_id: "ecology-researcher-v13",
+    preset_id: "ecology-researcher-v15",
     model: "provider/model",
     cwd: "/tmp",
   }));

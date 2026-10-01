@@ -19,28 +19,13 @@ MANAGED_PRESET_ID = re.compile(
 QUOTED = re.compile(r"[\"']([^\"']+)[\"']")
 
 
-def _block(relative_path: str, opener: str, closer: str) -> str:
-    """Return the literal body a roster is declared in, without evaluating the file."""
-    source = (ROOT / relative_path).read_text(encoding="utf-8")
-    start = source.index(opener) + len(opener)
-    return source[start : source.index(closer, start)]
-
-
-def _ordered_ids(relative_path: str, opener: str, closer: str) -> tuple[str, ...]:
-    return tuple(
-        value
-        for value in QUOTED.findall(_block(relative_path, opener, closer))
-        if MANAGED_PRESET_ID.fullmatch(value)
-    )
-
-
 def _mentioned_ids(relative_path: str) -> frozenset[str]:
     text = (ROOT / relative_path).read_text(encoding="utf-8")
     return frozenset(MANAGED_PRESET_ID.findall(text))
 
 
 class PresetRosterConsistencyTests(unittest.TestCase):
-    """The manifest is the single source of truth; nine other sites restate it."""
+    """Contract consumers and shipped resources agree with the shared manifest."""
 
     def setUp(self) -> None:
         manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -58,20 +43,11 @@ class PresetRosterConsistencyTests(unittest.TestCase):
             self.assertTrue((PRESET_ROOT / preset_id / "preset.yml").is_file(), preset_id)
             self.assertTrue((PRESET_ROOT / preset_id / "agent.cordis.yml").is_file(), preset_id)
 
-    def test_ordered_rosters_match_the_manifest_order(self):
-        # api/handler.py projects native capabilities in roster order, and the installer
-        # verifies presets in roster order, so order is part of the contract.
-        cases = {
-            "src/ecologyrsi_dsh/api/handler.py": (
-                "_DSH_NATIVE_PRESET_IDS = (", ")"),
-            "scripts/verify_artifacts.py": (
-                "CURRENT_DSH_PRESET_IDS = frozenset(", ")"),
-            "scripts/install_dsh_ecology_runtime.mjs": (
-                "PRESET_IDS = Object.freeze([", "]"),
-        }
-        for relative_path, (opener, closer) in cases.items():
-            with self.subTest(path=relative_path):
-                self.assertEqual(_ordered_ids(relative_path, opener, closer), self.roster)
+    def test_python_consumers_read_the_shared_contract(self):
+        from ecologyrsi_dsh.api.handler import _DSH_NATIVE_PRESET_IDS
+        from ecologyrsi_dsh.integrations.role_contracts import PRESET_IDS
+        self.assertEqual(PRESET_IDS, self.roster)
+        self.assertEqual(_DSH_NATIVE_PRESET_IDS, PRESET_IDS)
 
     def test_delivery_manifests_mention_exactly_the_current_roster(self):
         # These two must stay literal: pyproject data-files map install targets and
@@ -80,35 +56,49 @@ class PresetRosterConsistencyTests(unittest.TestCase):
             with self.subTest(path=relative_path):
                 self.assertEqual(_mentioned_ids(relative_path), frozenset(self.roster))
 
-    def test_role_scoped_rosters_are_subsets_of_the_manifest(self):
-        # The canaries and the program registry only bind the roles they execute.
-        for relative_path in (
-            "src/ecologyrsi_dsh/integrations/model_canary.py",
-            "integrations/dsh_ecology_plugin/lib/runtime/model-canary.js",
-            "src/ecologyrsi_dsh/knowledge/program_registry.py",
-        ):
-            with self.subTest(path=relative_path):
-                mentioned = _mentioned_ids(relative_path)
-                self.assertTrue(mentioned, "no managed preset id found; the parser drifted")
-                self.assertLessEqual(mentioned, frozenset(self.roster))
+    def test_new_run_seed_bindings_use_current_presets(self):
+        from ecologyrsi_dsh.api.handler import _DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR
+        from ecologyrsi_dsh.knowledge.program_registry import current_program_registry
 
-    def test_both_model_canaries_bind_the_same_preset_per_stage(self):
-        # The Python receipt builder and the Node verifier are hand-aligned; if they
-        # disagree the canary rejects a legitimately frozen identity at run time.
-        python_block = _block(
-            "src/ecologyrsi_dsh/integrations/model_canary.py", "_ROLES = (", "\n)")
-        python_stages = {
-            stage: preset
-            for _route, _digest, _role, preset, stage, _schema in re.findall(
-                r"\(" + ", ".join([r'"([^"]+)"'] * 6) + r"\)", python_block)
-        }
-        node_block = _block(
-            "integrations/dsh_ecology_plugin/lib/runtime/model-canary.js",
-            "const PRESETS = Object.freeze({", "})")
-        node_stages = dict(re.findall(r'"([^"]+)":\s*"([^"]+)"', node_block))
-        self.assertEqual(python_stages, node_stages)
-        self.assertTrue(python_stages, "no canary stage bindings found; the parser drifted")
-        self.assertLessEqual(frozenset(python_stages.values()), frozenset(self.roster))
+        registry = current_program_registry()
+        for template_id in _DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR.values():
+            with self.subTest(template=template_id):
+                self.assertTrue(template_id.endswith("@2"))
+                template = registry.seed_template(template_id).to_dict()
+                profiles = template["agent_program"]["candidate_execution_program"]["role_profiles"]
+                self.assertTrue(profiles)
+                self.assertLessEqual({item["preset_id"] for item in profiles}, set(self.roster))
+        # The sole historical reference belongs to the byte-preserved @1 seeds.
+        # Active bindings above must never select it.
+        mentioned = _mentioned_ids("src/ecologyrsi_dsh/knowledge/program_registry.py")
+        self.assertEqual(mentioned - set(self.roster), {"ecology-sample-planner-v11"})
+
+    def test_node_installer_stages_and_python_canaries_share_the_contract(self):
+        import subprocess
+        from ecologyrsi_dsh.integrations.role_contracts import CANARY_ROLES, STAGES
+        result = subprocess.run(["node", "--input-type=module", "-e", """
+            import { PRESET_IDS } from './scripts/install_dsh_ecology_runtime.mjs';
+            import { CANARY_PRESETS, STAGE_CONTRACTS } from './integrations/dsh_ecology_plugin/lib/runtime/contracts.js';
+            console.log(JSON.stringify({presets: PRESET_IDS, canaries: CANARY_PRESETS, stages: STAGE_CONTRACTS}));
+        """], cwd=ROOT, check=True, text=True, capture_output=True)
+        node = json.loads(result.stdout)
+        self.assertEqual(node["presets"], list(self.roster))
+        self.assertEqual(node["stages"], STAGES)
+        self.assertEqual(node["canaries"], {row[4]: row[3] for row in CANARY_ROLES})
+        for stage in STAGES.values():
+            schema = json.loads((PRESET_ROOT.parent / "schemas" / (stage["file"] + ".schema.json")).read_text())
+            self.assertEqual(schema["$id"], stage["schema"])
+
+    def test_mutation_schemas_match_the_host_operation_catalog(self):
+        from ecologyrsi_dsh.evolution.mutation_specs import MUTATION_SPECS
+        for name in ("genome-mutation", "local-edit"):
+            schema = json.loads((PRESET_ROOT.parent / "schemas" / (name + ".schema.json")).read_text())
+            declared = {}
+            for variant in schema["properties"]["operations"]["items"]["oneOf"]:
+                op = variant["properties"]["op"]
+                for name in op.get("enum", [op.get("const")]):
+                    declared[name] = set(variant["required"]) - {"op"}
+            self.assertEqual(declared, {op: set(spec.fields.split()) for op, spec in MUTATION_SPECS.items()})
 
 
 if __name__ == "__main__":

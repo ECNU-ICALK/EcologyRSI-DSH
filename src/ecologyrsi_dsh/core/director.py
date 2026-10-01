@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .local_edit_events import local_edit_key, validate_local_edit_event
+
 from ..evolution.diversity import preregister_candidate
 
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
@@ -3117,28 +3119,8 @@ class EvolutionDirector:
         self, run_id: str, proposal_payload: Mapping[str, Any]
     ) -> Event:
         payload = dict(proposal_payload)
-        legacy_fields = {
-            "proposal_id",
-            "candidate_id",
-            "batch_index",
-            "evidence_scope_digest",
-            "decision",
-            "operations",
-        }
-        fields = {
-            "proposal_id",
-            "candidate_id",
-            "batch_index",
-            "evidence_scope_digest",
-            "proposal",
-        }
-        if set(payload) not in (legacy_fields, fields, fields | {"safety_reason"}):
-            raise ValueError("local edit proposal payload is invalid")
+        candidate_id, batch_index = local_edit_key(payload)
         state = self.state(run_id)
-        candidate_id = str(payload["candidate_id"])
-        batch_index = payload["batch_index"]
-        if isinstance(batch_index, bool) or not isinstance(batch_index, int):
-            raise TypeError("batch_index must be an integer")
         existing_event = next(
             (
                 event
@@ -3154,54 +3136,12 @@ class EvolutionDirector:
                 return existing_event
             raise ValueError("conflicting local edit proposal")
         evaluation = state.batch_evaluation_for(candidate_id, batch_index)
-        if "proposal" in payload:
-            from ..evolution.local_edits import LocalEditProposal
-            proposal = LocalEditProposal.from_dict(payload["proposal"])
-            decision = proposal.decision
-            operations = list(proposal.operations)
-        else:
-            decision = LocalEditProposalDecision(payload["decision"])
-            operations = payload["operations"]
-        schedule = OptimizationSchedule.from_dict(
-            state.task_manifest.metadata["optimization_schedule"]
+        validate_local_edit_event(
+            payload, evaluation=evaluation,
+            schedule=OptimizationSchedule.from_dict(state.task_manifest.metadata["optimization_schedule"]),
+            trajectory=state.trajectory_for(candidate_id),
+            comparison=state.batch_comparison_for(candidate_id, batch_index),
         )
-        if (
-            schedule.local_evaluation_mode
-            == PAIRED_LOCAL_EVALUATION_MODE
-        ):
-            trajectory = state.trajectory_for(candidate_id)
-            if (
-                trajectory is None
-                or trajectory.status is not TrajectoryStatus.RUNNING
-            ):
-                raise ValueError(
-                    "paired local edit requires a running trajectory"
-                )
-            if batch_index >= trajectory.batch_count - 1:
-                raise ValueError(
-                    "paired final batch cannot record a local edit proposal"
-                )
-        if (
-            evaluation is None
-            or (
-                schedule.local_evaluation_mode
-                == PAIRED_LOCAL_EVALUATION_MODE
-                and state.batch_comparison_for(candidate_id, batch_index) is None
-            )
-            or payload["evidence_scope_digest"] != evaluation.scope.scope_key
-            or not isinstance(operations, list)
-            or len(operations) > schedule.max_local_edits_per_batch
-            or (decision is LocalEditProposalDecision.KEEP and operations)
-            or (decision is LocalEditProposalDecision.MUTATE and not operations)
-        ):
-            raise ValueError("local edit proposal evidence or operation count is invalid")
-        if "safety_reason" in payload:
-            if (
-                decision is not LocalEditProposalDecision.KEEP
-                or not isinstance(payload["safety_reason"], str)
-                or not payload["safety_reason"].strip()
-            ):
-                raise ValueError("local edit safety reason requires a keep proposal")
         return self.ledger.append(
             run_id,
             "LocalEditProposalRecorded",

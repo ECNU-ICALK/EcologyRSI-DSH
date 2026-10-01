@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { sessionEventLog } from "../lib/runtime/session-events.js";
+import { sessionEventLog, toolResultIdentity } from "../lib/runtime/session-events.js";
 import { checkSampleStageBudget } from "../lib/runtime/sample-stage-budget.js";
 import { sessionUsageComplete } from "../lib/runtime/session-usage.js";
 import { ChildBindingRegistry } from "../lib/runtime/child-bindings.js";
@@ -17,6 +17,17 @@ const EVENTS = [
   { seq: 2, type: "tool/call", data: { turn: 1, step: 1, callId: "c1", name: "skill" } },
   { seq: 3, type: "turn/end", data: { turn: 1, reason: { kind: "stop" } } },
 ];
+
+test("Harness 0.2 tool result identity cannot be borrowed from a different call", () => {
+  const event = {type:"tool/result",data:{message:{role:"tool",toolCallId:"call-1",
+    source:{kind:"tool",callId:"call-1"},content:[{type:"text",text:"result"}]}}};
+  assert.deepEqual(toolResultIdentity(event), {callId:"call-1",isError:false,content:event.data.message.content});
+  event.data.message.isError = true;
+  assert.equal(toolResultIdentity(event).isError, true);
+  event.data.message.source.callId = "other-call";
+  assert.equal(toolResultIdentity(event), null);
+  assert.equal(toolResultIdentity({type:"assistant/message",data:event.data}), null);
+});
 
 // The installed Session: an ordered log behind a method, plus unrelated members.
 function snapshotSession(events = EVENTS) {

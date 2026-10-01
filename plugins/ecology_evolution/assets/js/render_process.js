@@ -419,21 +419,7 @@
     return stage || "pending";
   }
   function roundStageText(key, value, run) {
-    var status = String(executionStatusValue(executionStatusForRun(run, value)) || "pending").toLowerCase();
-    if (key === "decision") {
-      if (["approved", "accepted", "retained", "promoted"].indexOf(status) >= 0) { return "训练反馈搜索保留"; }
-      if (["rejected", "declined", "denied"].indexOf(status) >= 0) { return "未保留"; }
-    }
-    if (["completed", "done", "recorded", "passed", "approved", "accepted"].indexOf(status) >= 0) { return "已完成"; }
-    if (status === "skipped" || status === "duplicate") { return "已跳过"; }
-    if (status === "not_selected_for_training") { return "未进入训练"; }
-    if (status === "screened_out") { return "初筛未入围"; }
-    if (["failed", "error", "rejected"].indexOf(status) >= 0) { return "未通过"; }
-    if (status === "paused") { return "已暂停"; }
-    if (status === "aborted") { return "已中止"; }
-    if (status === "not_recorded") { return "未封存"; }
-    if (["running", "in_progress", "evaluating"].indexOf(status) >= 0) { return "进行中"; }
-    return "等待";
+    return executionStageText(executionStatusForRun(run, value), key, "未通过");
   }
   function roundStageClass(key, value, run) {
     var text = roundStageText(key, value, run);
@@ -929,7 +915,7 @@
     if (["failed", "error", "rejected", "declined", "aborted"].indexOf(status) >= 0) { return "is-failed"; }
     return "is-pending";
   }
-  function executionStageText(value, key) {
+  function executionStageText(value, key, failedText) {
     var status = String(executionStatusValue(value)).toLowerCase();
     if (key === "decision" && ["approved", "accepted", "retained", "promoted"].indexOf(status) >= 0) { return "训练反馈搜索保留"; }
     if (key === "decision" && ["rejected", "declined", "denied"].indexOf(status) >= 0) { return "未保留"; }
@@ -938,7 +924,9 @@
     if (status === "paused") { return "已暂停"; }
     if (status === "aborted") { return "已中止"; }
     if (status === "not_recorded") { return "未封存"; }
-    if (["failed", "error", "rejected", "declined"].indexOf(status) >= 0) { return "失败"; }
+    if (["failed", "error", "rejected", "declined"].indexOf(status) >= 0) { return failedText || "失败"; }
+    if (status === "not_selected_for_training") { return "未进入训练"; }
+    if (status === "screened_out") { return "初筛未入围"; }
     if (["skipped", "duplicate"].indexOf(status) >= 0) { return "已跳过"; }
     return "等待";
   }
@@ -1042,20 +1030,16 @@
   }
   function executionStageValues(candidate, round, run) {
     var source = executionStageSource(candidate, round);
-    var progress = run && run.execution_progress && typeof run.execution_progress === "object" ? run.execution_progress : {};
-    var stageProgress = progress.stage_progress && typeof progress.stage_progress === "object" ? progress.stage_progress : {};
-    var adaptivePhase = String(stageProgress.evaluation_phase || "").toLowerCase();
-    if ((executionRunAllowsLiveStatus(run) || String(run && run.status || "").toLowerCase() === "paused") && ["screening", "formal_batch", "holdout"].indexOf(adaptivePhase) >= 0) {
-      if (["pending", "waiting", ""].indexOf(String(source.training || "pending").toLowerCase()) >= 0) { source.training = "completed"; }
-      source.evaluation = String(run.status || "").toLowerCase() === "paused" ? "paused" : "running";
-    }
     if (round && round.adaptive_completion && round.adaptive_completion.comparison_recorded) {
       var row = (round.candidates || []).find(function (item) { return candidate && item.candidate_id === (candidate.id || candidate.candidate_id); });
       if (row && row.stages) {
         ["evaluation", "judge", "decision"].forEach(function (key) { if (row.stages[key] != null) { source[key] = row.stages[key]; } });
       }
     }
-    return executionStageKeys.map(function (key) { return { key: key, value: source[key] || "pending" }; });
+    var view = Object.assign({}, candidate || {}, { stages: source });
+    return executionStageKeys.map(function (key) {
+      return { key: key, value: roundStageStatus(view, key, run) };
+    });
   }
   function executionHasRunningStage(stages) {
     return stages.some(function (item) { return executionStatusClass(item.value) === "is-running"; });

@@ -8,6 +8,8 @@ mutation.
 
 from __future__ import annotations
 
+from .mutation_specs import mutation_spec
+
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -979,8 +981,8 @@ class GenomeMutationContextV1:
         }
 
 
-def _operation(raw_value: Any, fields: set[str], op_name: str) -> dict[str, Any]:
-    raw = _exact_mapping(raw_value, f"mutation operation {op_name}", fields | {"op"})
+def _operation(raw_value: Any, op_name: str) -> dict[str, Any]:
+    raw = _exact_mapping(raw_value, f"mutation operation {op_name}", set(mutation_spec(op_name).fields.split()) | {"op"})
     if raw["op"] != op_name:
         raise ValueError("mutation operation name mismatch")
     return raw
@@ -1134,8 +1136,19 @@ def apply_genome_mutation(
         if not isinstance(raw_operation, Mapping):
             raise TypeError("mutation operation must be an object")
         op = _text(raw_operation.get("op"), "mutation op", pattern=_PROGRAM_ID_RE)
+        spec = mutation_spec(op)
+        item = _operation(raw_operation, op)
+        if spec.roles:
+            role = _text(item["role"], "mutation role", pattern=_PRESET_ID_RE)
+            if role not in spec.roles:
+                raise ValueError("candidate cannot mutate reproduction or reviewer role instructions")
+            profile = next(
+                (p for p in agent["candidate_execution_program"]["role_profiles"] if p["role"] == role),
+                None,
+            )
+            if profile is None:
+                raise ValueError("mutation role is not registered in candidate execution")
         if op == "set_bounded_parameter":
-            item = _operation(raw_operation, {"name", "value"}, op)
             name = _text(item["name"], "parameter name", pattern=_PROGRAM_ID_RE)
             value = _finite_number(item["value"], f"parameter {name}")
             registry.validate_parameter(
@@ -1164,7 +1177,6 @@ def apply_genome_mutation(
                 )
             scientific["parameter_overrides"][name] = value
         elif op == "select_registered_pipeline":
-            item = _operation(raw_operation, {"predictor_id"}, op)
             predictor_id = _text(item["predictor_id"], "predictor_id", pattern=_PROGRAM_ID_RE)
             predictor_ref = registry.program_ref("predictors", predictor_id)
             parameter_overrides = registry.predictor_defaults(predictor_id)
@@ -1176,7 +1188,6 @@ def apply_genome_mutation(
             scientific["predictor_ref"] = predictor_ref
             scientific["parameter_overrides"] = parameter_overrides
         elif op == "author_feature_recipe":
-            item = _operation(raw_operation, {"feature_recipe"}, op)
             predictor_id = str(scientific["predictor_ref"]["id"])
             predictor = registry.program("predictors", predictor_id)
             if predictor.get("feature_policy_id") is None:
@@ -1230,7 +1241,6 @@ def apply_genome_mutation(
                     "uncertainty_policies",
                 ),
             }
-            item = _operation(raw_operation, {"program_id"}, op)
             field_name, category = field_by_op[op]
             ref = registry.program_ref(
                 category,
@@ -1241,7 +1251,6 @@ def apply_genome_mutation(
                 raise ValueError(f"mutation operation {op} does not change {field_name}")
             scientific[field_name] = selected
         elif op == "select_registered_workflow_template":
-            item = _operation(raw_operation, {"workflow_template_id"}, op)
             workflow_id = _text(
                 item["workflow_template_id"], "workflow_template_id", pattern=_PROGRAM_ID_RE
             )
@@ -1261,7 +1270,6 @@ def apply_genome_mutation(
             execution_program["workflow_template_ref"] = workflow_ref
             execution_program["workflow_overrides"] = workflow_overrides
         elif op == "set_bounded_workflow_parameter":
-            item = _operation(raw_operation, {"name", "value"}, op)
             name = _text(item["name"], "workflow parameter", pattern=_PROGRAM_ID_RE)
             value = _finite_number(item["value"], f"workflow parameter {name}")
             workflow_id = agent["candidate_execution_program"]["workflow_template_ref"]["id"]
@@ -1271,20 +1279,6 @@ def apply_genome_mutation(
                 raise ValueError(f"mutation operation {op} does not change {name}")
             workflow_overrides[name] = value
         elif op == "select_instruction_template":
-            item = _operation(raw_operation, {"role", "instruction_template_id"}, op)
-            role = _text(item["role"], "mutation role", pattern=_PRESET_ID_RE)
-            if role not in {"sample-planner", "sample-repair"}:
-                raise ValueError("candidate cannot mutate reproduction or reviewer role instructions")
-            profile = next(
-                (
-                    profile
-                    for profile in agent["candidate_execution_program"]["role_profiles"]
-                    if profile["role"] == role
-                ),
-                None,
-            )
-            if profile is None:
-                raise ValueError("mutation role is not registered in candidate execution")
             instruction_template_id = _text(
                 item["instruction_template_id"],
                 "instruction_template_id",
@@ -1310,20 +1304,6 @@ def apply_genome_mutation(
             profile["instruction_template_ref"] = instruction_template_ref
             profile["instruction_parameters"] = {}
         elif op == "set_instruction_parameter":
-            item = _operation(raw_operation, {"role", "name", "value"}, op)
-            role = _text(item["role"], "mutation role", pattern=_PRESET_ID_RE)
-            if role not in {"sample-planner", "sample-repair"}:
-                raise ValueError("candidate cannot mutate reproduction or reviewer role instructions")
-            profile = next(
-                (
-                    profile
-                    for profile in agent["candidate_execution_program"]["role_profiles"]
-                    if profile["role"] == role
-                ),
-                None,
-            )
-            if profile is None:
-                raise ValueError("mutation role is not registered in candidate execution")
             name = _text(item["name"], "instruction parameter", pattern=_PROGRAM_ID_RE)
             value = item["value"]
             registry.validate_instruction_parameter(
@@ -1333,20 +1313,6 @@ def apply_genome_mutation(
                 raise ValueError(f"mutation operation {op} does not change {name}")
             profile["instruction_parameters"][name] = value
         elif op == "narrow_role_tool_policy":
-            item = _operation(raw_operation, {"role", "enabled_tool_ids"}, op)
-            role = _text(item["role"], "mutation role", pattern=_PRESET_ID_RE)
-            if role not in {"sample-planner", "sample-repair"}:
-                raise ValueError("candidate cannot mutate reviewer tool policy")
-            profile = next(
-                (
-                    profile
-                    for profile in agent["candidate_execution_program"]["role_profiles"]
-                    if profile["role"] == role
-                ),
-                None,
-            )
-            if profile is None:
-                raise ValueError("mutation role is not registered in candidate execution")
             requested = _unique_sorted_texts(
                 item["enabled_tool_ids"], "enabled_tool_ids", pattern=_PROGRAM_ID_RE
             )
@@ -1359,30 +1325,12 @@ def apply_genome_mutation(
             profile["enabled_tool_ids"] = requested
         elif op == "author_skill_program":
             from ..evaluators.skill_program import SKILL_POLICY_ID, validate_skill_program
-            item = _operation(raw_operation, {"role", "skill_program"}, op)
-            if item["role"] != "sample-planner":
-                raise ValueError("only sample-planner can author skills")
-            profile = next(p for p in agent["candidate_execution_program"]["role_profiles"] if p["role"] == "sample-planner")
             program = validate_skill_program(item["skill_program"])
             if profile.get("skill_program") == program:
                 raise ValueError("skill mutation does not change the program")
             profile["skill_program"] = program
             profile["skill_policy_ref"] = registry.program_ref("skill_policies", SKILL_POLICY_ID)
         elif op == "author_role_directive":
-            item = _operation(raw_operation, {"role", "authored_directive"}, op)
-            role = _text(item["role"], "mutation role", pattern=_PRESET_ID_RE)
-            if role != "sample-planner":
-                raise ValueError("only the sample-planner role can author a directive")
-            profile = next(
-                (
-                    profile
-                    for profile in agent["candidate_execution_program"]["role_profiles"]
-                    if profile["role"] == role
-                ),
-                None,
-            )
-            if profile is None:
-                raise ValueError("mutation role is not registered in candidate execution")
             from ..evaluators.authored_directive import (
                 AUTHORED_DIRECTIVE_POLICY_ID,
                 validate_authored_directive,

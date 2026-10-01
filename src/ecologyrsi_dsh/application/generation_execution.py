@@ -6,7 +6,12 @@ from ..evolution.diversity import preregister_candidate
 
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
 
-from ..evaluators.agent_stability import REPLICA_COUNT, replica_summary, stability_evidence, capacity_with_inference_replicas
+from ..evaluators.agent_stability import (
+    REPLICA_COUNT,
+    replica_summary,
+    stability_evidence,
+    capacity_with_inference_replicas,
+)
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -417,7 +422,7 @@ def _screen_candidate(services: GenerationRuntime, run_id: str, candidate_id: st
         origin_count=screening_cohort.origin_count,
     )
 
-    callbacks = _ScopedEvaluationCallbacks(
+    callbacks = EvaluationSession(
         services,
         run_id=run_id,
         generation=candidate.generation,
@@ -861,7 +866,7 @@ def _model_token_budget_state(state: Any) -> dict[str, int]:
     }
 
 
-class _ScopedEvaluationCallbacks:
+class EvaluationSession:
     """Durable per-origin callbacks shared by every adaptive evaluation scope.
 
     Screening, one formal batch, and one holdout arm still publish their
@@ -878,7 +883,7 @@ class _ScopedEvaluationCallbacks:
         generation: int,
         proposal_id: str,
         candidate_id: str,
-        scope: EvaluationScope,
+        scope: EvaluationScope | None = None,
         on_evaluation_started: Any = None,
     ) -> None:
         self.services = services
@@ -919,7 +924,7 @@ class _ScopedEvaluationCallbacks:
             proposal_id=self.proposal_id,
             candidate_id=self.candidate_id,
             checkpoint=checkpoint,
-            scope=self.scope,
+            **({"scope": self.scope} if self.scope is not None else {}),
         )
         revision = prepared.get("revision")
         next_batch_index = prepared.get("next_batch_index")
@@ -2078,166 +2083,13 @@ def _evaluate_candidate(services: GenerationRuntime, run_id: str, candidate_id: 
         evaluation_kwargs: dict[str, Any] = {
             "on_training_complete": start_evaluation,
         }
-        sample_results_revision: str | None = None
+        session = EvaluationSession(
+            services, run_id=run_id, generation=candidate.generation,
+            proposal_id=proposal.proposal_id, candidate_id=candidate.candidate_id,
+            on_evaluation_started=start_evaluation,
+        )
         if isinstance(services.evaluators, EvaluatorRegistry):
-            evaluation_kwargs["algorithm_spec"] = algorithm_spec
-            sample_result_batch_index = 0
-
-            def sample_run_control() -> str:
-                """Expose only the owning run's current scheduling state."""
-
-                return _sample_run_control(services.director, run_id)
-
-            def accepts_sample_publication() -> bool:
-                return _sample_publication_open(
-                    services.director, run_id
-                )
-
-            evaluation_kwargs["on_sample_control"] = sample_run_control
-
-            def prepare_sample_checkpoint(
-                checkpoint: Mapping[str, Any],
-            ) -> Mapping[str, Any]:
-                """Open or resume one exact evaluation cohort before API work."""
-
-                nonlocal sample_results_revision, sample_result_batch_index
-                if not evaluation_started:
-                    start_evaluation()
-                prepared = _director_mutation(
-                    services,
-                    "prepare_evaluation_sample_checkpoint",
-                    run_id,
-                    generation=candidate.generation,
-                    proposal_id=proposal.proposal_id,
-                    candidate_id=candidate.candidate_id,
-                    checkpoint=checkpoint,
-                )
-                revision = prepared.get("revision")
-                next_batch_index = prepared.get("next_batch_index")
-                if not isinstance(revision, str) or not revision.strip():
-                    raise RuntimeError("sample checkpoint did not return a revision")
-                if (
-                    isinstance(next_batch_index, bool)
-                    or not isinstance(next_batch_index, int)
-                    or next_batch_index < 1
-                ):
-                    raise RuntimeError("sample checkpoint returned an invalid batch index")
-                if (
-                    sample_results_revision is not None
-                    and sample_results_revision != revision
-                ):
-                    raise RuntimeError("sample checkpoint changed revisions mid-evaluation")
-                sample_results_revision = revision
-                sample_result_batch_index = next_batch_index - 1
-                return {
-                    **prepared,
-                    "token_budget_state": _model_token_budget_state(
-                        services.director.state(run_id)
-                    ),
-                }
-
-            def record_sample_results(
-                scoring_rows: Any,
-            ) -> None:
-                nonlocal sample_result_batch_index
-                if not accepts_sample_publication():
-                    return
-                if not evaluation_started:
-                    start_evaluation()
-                if sample_results_revision is None:
-                    raise RuntimeError("sample result callback ran before checkpoint")
-                projected = build_sample_results(
-                    candidate.candidate_id, scoring_rows
-                )
-                if not projected:
-                    return
-                sample_result_batch_index += 1
-                try:
-                    _director_mutation(
-                        services,
-                        "record_evaluation_sample_result_batch",
-                        run_id,
-                        sample_result_batch_event_payload(
-                            run_id,
-                            candidate.candidate_id,
-                            projected,
-                            revision=sample_results_revision,
-                            batch_index=sample_result_batch_index,
-                        ),
-                    )
-                except Exception:
-                    # Cancellation may win between the read-only guard and the
-                    # ledger append. The completed physical call is accounted by
-                    # its separate usage callback, while its outcome is discarded.
-                    if not accepts_sample_publication():
-                        return
-                    raise
-
-            evaluation_kwargs["on_sample_results"] = record_sample_results
-            evaluation_kwargs["on_sample_checkpoint"] = prepare_sample_checkpoint
-
-            def record_model_usage(receipts: Any) -> Mapping[str, Any]:
-                """Durably publish physical gateway receipts before continuing."""
-
-                if sample_results_revision is None:
-                    raise SampleResultCallbackError(
-                        "model usage callback ran before checkpoint"
-                    )
-                try:
-                    _director_mutation(
-                        services,
-                        "record_model_usage_batch",
-                        run_id,
-                        generation=candidate.generation,
-                        candidate_id=candidate.candidate_id,
-                        revision=sample_results_revision,
-                        receipts=receipts,
-                    )
-                except Exception as exc:  # noqa: BLE001 - retain retry boundary
-                    raise SampleResultCallbackError(
-                        "model usage receipts could not be persisted"
-                    ) from exc
-                return _model_token_budget_state(
-                    services.director.state(run_id)
-                )
-
-            evaluation_kwargs["on_model_usage"] = record_model_usage
-
-            def record_evaluation_progress(progress: Mapping[str, Any]) -> None:
-                # Planner microbatches cover the complete evaluation cohort.
-                # Sparse repair calls are reflected in the final aggregate
-                # metrics and would reset their own per-call denominator.
-                if progress.get("role") != "planner":
-                    return
-                if not accepts_sample_publication():
-                    return
-                if not evaluation_started:
-                    start_evaluation()
-                if sample_results_revision is None:
-                    raise SampleResultCallbackError(
-                        "evaluation progress callback ran before checkpoint"
-                    )
-                try:
-                    _director_mutation(
-                        services,
-                        "record_evaluation_progress",
-                        run_id,
-                        generation=candidate.generation,
-                        proposal_id=proposal.proposal_id,
-                        candidate_id=candidate.candidate_id,
-                        progress=progress,
-                        revision=sample_results_revision,
-                    )
-                except Exception as exc:  # noqa: BLE001 - retry ledger boundary
-                    if not accepts_sample_publication():
-                        return
-                    raise SampleResultCallbackError(
-                        "evaluation progress heartbeat could not be persisted"
-                    ) from exc
-
-            evaluation_kwargs["on_evaluation_progress"] = (
-                record_evaluation_progress
-            )
+            evaluation_kwargs.update(algorithm_spec=algorithm_spec, **session.evaluation_kwargs())
         bundle = services.evaluators.evaluate_scientific(
             evaluation_task,
             candidate,
@@ -2305,10 +2157,10 @@ def _evaluate_candidate(services: GenerationRuntime, run_id: str, candidate_id: 
             sample_results_event_payload(
                 bundle.evaluation,
                 bundle.sample_results,
-                revision=sample_results_revision,
+                revision=session.revision,
             )
             if bundle.sample_results is not None
-            and sample_results_revision is not None
+            and session.revision is not None
             else None
         )
         scientific_evaluation = _director_mutation(
@@ -2870,7 +2722,7 @@ def _execute_adaptive_holdout_arm(
         task,
     )
 
-    callbacks = _ScopedEvaluationCallbacks(
+    callbacks = EvaluationSession(
         services,
         run_id=run_id,
         generation=generation,
@@ -2896,7 +2748,7 @@ def _execute_adaptive_holdout_arm(
         replicas = [replica_summary(scope, bundle.evaluation)]
         for replica_index in range(1, REPLICA_COUNT):
             replica_scope = replace(scope, inference_replica=replica_index)
-            replica_callbacks = _ScopedEvaluationCallbacks(
+            replica_callbacks = EvaluationSession(
                 services, run_id=run_id, generation=generation,
                 proposal_id=candidate.proposal_id, candidate_id=candidate.candidate_id, scope=replica_scope,
             )

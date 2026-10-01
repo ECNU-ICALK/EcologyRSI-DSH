@@ -26,6 +26,7 @@ import {
   resolveDshHome,
   validatePluginArchive,
   installRuntime,
+  dshPackageJson,
 } from "../../../scripts/install_dsh_ecology_runtime.mjs";
 
 const source = new URL("../presets/", import.meta.url);
@@ -47,6 +48,27 @@ test("bundled archive includes exact runtime and rejects missing visibility befo
   await assert.rejects(access(dshHome), { code: "ENOENT" });
 });
 
+test("an older packaged Harness is rejected before changing its profile", async (t) => {
+  const pluginRoot = fileURLToPath(new URL("../", import.meta.url));
+  const manifest = JSON.parse(await readFile(path.join(pluginRoot, "package.json"), "utf8"));
+  const archive = path.join(pluginRoot, "dist", `ecologyrsi-dsh-evolution-plugin-${manifest.version}.tgz`);
+  const tmp = await realpath(await mkdtemp(path.join(os.tmpdir(), "ecology-old-host-")));
+  t.after(() => rm(tmp, { recursive: true, force: true }));
+  await mkdir(path.join(tmp, "old-dsh/lib"), { recursive: true });
+  await writeFile(path.join(tmp, "old-dsh/package.json"), JSON.stringify({
+    name: "@deepseek-ai/dsh", version: "0.1.5-rc.2",
+  }));
+  const bin = path.join(tmp, "old-dsh/lib/bin.js");
+  await writeFile(bin, "throw new Error('must not execute before validation');\n");
+  const previous = process.env.DSH_BIN;
+  process.env.DSH_BIN = bin;
+  t.after(() => { if (previous === undefined) delete process.env.DSH_BIN; else process.env.DSH_BIN = previous; });
+  const dshHome = path.join(tmp, "profile-must-stay-absent");
+  await assert.rejects(installRuntime({ packageArchive: archive, dshHome, pluginRoot,
+    projectRoot: path.resolve(pluginRoot, "../..") }), /requires DSH 0\.2\.0-rc\.2/);
+  await assert.rejects(access(dshHome), { code: "ENOENT" });
+});
+
 async function installedDshBin() {
   const candidate = process.env.DSH_BIN || path.join(
     os.homedir(),
@@ -59,6 +81,8 @@ async function installedDshBin() {
   );
   try {
     await access(candidate);
+    const packageJson = await dshPackageJson(candidate);
+    if (packageJson == null || JSON.parse(await readFile(packageJson, "utf8")).version !== "0.2.0-rc.2") return null;
     return candidate;
   } catch {
     return null;
@@ -102,7 +126,7 @@ test("preset installation is exact, idempotent, and refuses drift", async () => 
     .sort();
   assert.deepEqual(installedIds, [...PRESET_IDS, unmanagedId].sort());
 
-  const target = path.join(dshHome, ".agent-presets", "ecology-researcher-v13", "preset.yml");
+  const target = path.join(dshHome, ".agent-presets", "ecology-researcher-v15", "preset.yml");
   assert.match(await readFile(target, "utf8"), /Ecology Researcher/);
   await writeFile(target, "drift\n");
   await assert.rejects(installPresetTree({ sourceRoot: source, dshHome }), /drift/);
@@ -111,7 +135,7 @@ test("preset installation is exact, idempotent, and refuses drift", async () => 
 test("preset installation rejects a composition that DSH cannot parse", async (t) => {
   const dshBin = await installedDshBin();
   if (dshBin == null) {
-    t.skip("a local DSH CLI is required for parser parity");
+    t.skip("a local DSH 0.2.0-rc.2 CLI is required for parser parity (DSH_BIN)");
     return;
   }
   const tmp = await realpath(await mkdtemp(path.join(os.tmpdir(), "ecology-dsh-invalid-preset-")));
@@ -120,13 +144,13 @@ test("preset installation rejects a composition that DSH cannot parse", async (t
   await cp(source, sourceRoot, { recursive: true });
   await mkdir(dshHome);
   await writeFile(
-    path.join(sourceRoot, "ecology-researcher-v13", "agent.cordis.yml"),
+    path.join(sourceRoot, "ecology-researcher-v15", "agent.cordis.yml"),
     "- id: persona\n  name: '@deepseek-ai/dsh-persona'\n  config:\n    text: invalid plain scalar: parsed as a mapping\n",
   );
 
   await assert.rejects(
     installPresetTree({ sourceRoot, dshHome, dshBin }),
-    /ecology-researcher-v13[\s\S]*not valid YAML|not valid YAML[\s\S]*ecology-researcher-v13/i,
+    /ecology-researcher-v15[\s\S]*not valid YAML|not valid YAML[\s\S]*ecology-researcher-v15/i,
   );
 });
 
@@ -141,7 +165,7 @@ test("preset installation supports a DSH test double without packaged parser mod
   await installPresetTree({ sourceRoot: source, dshHome, dshBin });
 
   assert.match(
-    await readFile(path.join(dshHome, ".agent-presets", "ecology-researcher-v13", "preset.yml"), "utf8"),
+    await readFile(path.join(dshHome, ".agent-presets", "ecology-researcher-v15", "preset.yml"), "utf8"),
     /Ecology Researcher/,
   );
 });
@@ -165,6 +189,12 @@ test("managed Host patch has the exact DSH service injection and no embedded cre
   assert.match(text, /id: ecologyrsi-session-visibility/);
   assert.match(text, /name: '@ecologyrsi\/dsh-evolution-plugin\/session-visibility'/);
   assert.match(text, /inject: \[sessions, sessionPersistence\]/);
+  for (const id of PRESET_IDS) {
+    assert.match(text, new RegExp(`id: preset-${id}`));
+    assert.ok(text.includes(`${id}/agent.cordis.yml`));
+  }
+  assert.equal((text.match(/name: '@deepseek-ai\/dsh-agent-preset'/g) || []).length, 6);
+  assert.match(text, /name: '@deepseek-ai\/cordis-plugin-include'/);
 });
 
 test("managed Host patch replaces a freshly initialized empty patch document", async () => {
@@ -178,6 +208,7 @@ test("managed Host patch replaces a freshly initialized empty patch document", a
   const first = await readFile(target, "utf8");
   assert.ok(first.includes(path.join(profileRoot, "node_modules", "@ecologyrsi",
     "dsh-evolution-plugin", "lib", "runtime", "session-visibility.js")));
+  assert.ok(first.includes("node_modules/@ecologyrsi/dsh-evolution-plugin/presets/"));
   assert.doesNotMatch(first, /^\s*\[\]\s*$/m);
   assert.match(first, /# BEGIN ECOLOGYRSI DSH RUNTIME/);
   assert.match(first, /- insert:/);

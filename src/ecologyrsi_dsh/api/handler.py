@@ -2,18 +2,30 @@
 
 from __future__ import annotations
 
+from ..integrations.role_contracts import PRESET_IDS as _DSH_NATIVE_PRESET_IDS
+
 from ..evolution.diversity import DIVERSITY_POLICY, enabled as diversity_enabled
 
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
 
-from ..core.model_execution_policy import NATIVE_SAMPLE_OPERATION_MAX_TOKENS, LOCAL_EDIT_CONTEXT_POLICY
+from ..core.model_execution_policy import (
+    NATIVE_SAMPLE_OPERATION_MAX_TOKENS,
+    LOCAL_EDIT_CONTEXT_POLICY,
+)
 
 from ..data.adapters import dataset_adapter
-from ..core.prediction_policy import (RUNTIME_PREDICTION_POLICY, RUNTIME_EVALUATOR_ID, BASELINE_REFERENCE_PREDICTOR_ID)
+from ..core.prediction_policy import (
+    RUNTIME_PREDICTION_POLICY,
+    RUNTIME_EVALUATOR_ID,
+    BASELINE_REFERENCE_PREDICTOR_ID,
+)
 
 from ..application.runtime import initialize_runtime
 from ..execution.ownership import RuntimeOwnerLease as _SidecarOwnerLease
-from ..application.runtime_bindings import dsh_revision_snapshot as _dsh_revision_snapshot, ValidatedCandidateIdentityCache as _ValidatedCandidateIdentityCache
+from ..application.runtime_bindings import (
+    dsh_revision_snapshot as _dsh_revision_snapshot,
+    ValidatedCandidateIdentityCache as _ValidatedCandidateIdentityCache,
+)
 
 import fcntl
 import json
@@ -71,17 +83,31 @@ from ..evaluators.registry import (
     GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
     GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID,
     GREENHOUSE_RECIPE_EVALUATOR_ID,
-    TOY_DATASET_ID,
     EvaluatorRegistry,
 )
-from ..evolution.schedule import OPTIMIZATION_PROTOCOL, TRAINING_SCHEDULE_SCHEMA_VERSION, OptimizationSchedule, PREQUENTIAL_PERFORMANCE_POLICY
+from ..evaluators.catalog import TOY_DATASET_ID
+from ..evolution.schedule import (
+    OPTIMIZATION_PROTOCOL,
+    TRAINING_SCHEDULE_SCHEMA_VERSION,
+    OptimizationSchedule,
+    PREQUENTIAL_PERFORMANCE_POLICY,
+)
 from ..evolution.genome import mutation_policy_contract
-from ..evolution.parameters import PARAMETER_RULES, run_parameter_contract, validate_run_parameter
+from ..evolution.parameters import (
+    PARAMETER_RULES,
+    run_parameter_contract,
+    validate_run_parameter,
+)
 from ..evolution.strategies import StrategyRouterDSHAdapter
 from ..core.search_policy import SEARCH_GUARD_POLICY
 from ..integrations.model_canary import run_preflight, require_model_preflight
 from ..evaluators.agent_stability import REPLICA_COUNT, capacity_with_inference_replicas
-from ..core.model_preflight import AUDIT_EVENT, AUDIT_SCHEMA, AUDIT_METADATA_KEY, preflight_audit_required
+from ..core.model_preflight import (
+    AUDIT_EVENT,
+    AUDIT_SCHEMA,
+    AUDIT_METADATA_KEY,
+    preflight_audit_required,
+)
 from ..integrations.dsh_native_runtime import (
     DSH_NATIVE_EXECUTION_PROTOCOL,
     DshNativeAgentRuntimeClient,
@@ -218,14 +244,7 @@ _STRICT_SAMPLE_REMOTE_CRITIC_POLICY = {
     "min_planner_confidence": 0.5,
 }
 _STRICT_SAMPLE_REFLECTION_POLICY = "candidate_aggregate_post_score@1"
-_DSH_NATIVE_PRESET_IDS = (
-    "ecology-coordinator-v5",
-    "ecology-researcher-v13",
-    "ecology-candidate-proposer-v5",
-    "ecology-sample-planner-v11",
-    "ecology-sample-critic-v5",
-    "ecology-generation-judge-v8",
-)
+
 _DSH_NATIVE_STABLE_PRESET_FIELDS = (
     "preset_id",
     "declared",
@@ -235,12 +254,12 @@ _DSH_NATIVE_STABLE_PRESET_FIELDS = (
     "content_digest",
 )
 _DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR = {
-    "greenhouse-rolling-residual@1": "greenhouse-rolling-default@1",
-    "greenhouse-exogenous-ridge@1": "greenhouse-exogenous-default@1",
-    "greenhouse-baseline-aligned-ridge@1": "greenhouse-baseline-aligned-default@1",
-    "greenhouse-targetwise-ridge@1": "greenhouse-targetwise-default@1",
-    "greenhouse-horizon-targetwise-ridge@1": "greenhouse-default@1",
-    "toy-rolling-water@1": "toy-default@1",
+    "greenhouse-rolling-residual@1": "greenhouse-rolling-default@2",
+    "greenhouse-exogenous-ridge@1": "greenhouse-exogenous-default@2",
+    "greenhouse-baseline-aligned-ridge@1": "greenhouse-baseline-aligned-default@2",
+    "greenhouse-targetwise-ridge@1": "greenhouse-targetwise-default@2",
+    "greenhouse-horizon-targetwise-ridge@1": "greenhouse-default@2",
+    "toy-rolling-water@1": "toy-default@2",
 }
 
 
@@ -3040,7 +3059,9 @@ class EvolutionRequestHandler(
                     # Count the actual planned day identities before launching
                     # paid stages. Origin count alone cannot establish paired
                     # evidence capacity for sparse or small local batches.
-                    from ..evolution.evidence_capacity import require_guarded_cohort_evidence_capacity
+                    from ..evolution.evidence_capacity import (
+                        require_guarded_cohort_evidence_capacity,
+                    )
                     metadata["guarded_cohort_evidence_capacity"] = require_guarded_cohort_evidence_capacity(
                         dataset=selection_view,
                         schedule=schedule,

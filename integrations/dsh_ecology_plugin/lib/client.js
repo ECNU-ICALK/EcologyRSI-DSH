@@ -7,8 +7,8 @@ window.__ModuleLoader__.load({
 
     const React = require("react");
     const {
-      IconCloseOutline16,
-      IconEnhanceOutline16,
+      IconCloseOutlineRegular,
+      IconEnhanceOutlineRegular,
     } = require("@deepseek-ai/dsh-client-ui-primitives");
 
     const PLUGIN_URL = "/plugins/ecology/evolution/?api=/api/ecology-evolution";
@@ -271,7 +271,7 @@ window.__ModuleLoader__.load({
             "aria-label": "打开生态模型进化工作台",
             onClick: openWorkbench,
           },
-          React.createElement(IconEnhanceOutline16, { size: wide ? 16 : 18 }),
+          React.createElement(IconEnhanceOutlineRegular, { size: wide ? 16 : 18 }),
           wide && React.createElement(
             "span",
             { className: "ecology-dsh-entry__label" },
@@ -348,7 +348,7 @@ window.__ModuleLoader__.load({
         React.createElement(
           "header",
           { className: "ecology-dsh-overlay__bar" },
-          React.createElement(IconEnhanceOutline16, { size: 18 }),
+          React.createElement(IconEnhanceOutlineRegular, { size: 18 }),
           React.createElement(
             "strong",
             { className: "ecology-dsh-overlay__title" },
@@ -368,7 +368,7 @@ window.__ModuleLoader__.load({
               "aria-label": "关闭生态模型进化工作台",
               onClick: () => setVisible(false),
             },
-            React.createElement(IconCloseOutline16, { size: 18 }),
+            React.createElement(IconCloseOutlineRegular, { size: 18 }),
           ),
         ),
         React.createElement("iframe", {

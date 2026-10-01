@@ -772,6 +772,19 @@ class ProgramRegistrySnapshot:
                 feature_policy_id="registered_toy_features@1",
             ),
         )
+        if seed_templates is None:
+            # Harness 0.2 changes the executable preset identity. Preserve the
+            # archived @1 templates byte for byte; new runs select @2 explicitly.
+            harness_templates = []
+            for template in templates:
+                value = template.to_dict()
+                value.pop("template_digest", None)
+                value["template_id"] = value["template_id"].removesuffix("@1") + "@2"
+                profiles = value["agent_program"]["candidate_execution_program"]["role_profiles"]
+                for profile in profiles:
+                    profile["preset_id"] = "ecology-sample-planner-v12"
+                harness_templates.append(SeedGenomeTemplate.from_dict(value))
+            templates = (*templates, *harness_templates)
         identity = {
             "schema_version": REGISTRY_SCHEMA_VERSION,
             "programs": thawed,

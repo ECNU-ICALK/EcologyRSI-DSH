@@ -36,7 +36,7 @@ from ecologyrsi_dsh.core.models import (
     TaskManifest,
 )
 from ecologyrsi_dsh.data.splits import IndexRange
-from ecologyrsi_dsh.evaluators.registry import (
+from ecologyrsi_dsh.evaluators.pipeline import (
     _aggregate_greenhouse_objective,
     _complete_scoring_rows,
     _select_feedback_update_cohort,
@@ -135,7 +135,11 @@ class _DshOriginRuntimeStub:
         return {"structured": structured, "result_digest": digest(structured)}
 
 
-from tests.agent_prediction_fixtures import agent_binding as _dsh_prediction_tool_binder, model_result, prediction_rows
+from tests.agent_prediction_fixtures import (
+    agent_binding as _dsh_prediction_tool_binder,
+    model_result,
+    prediction_rows,
+)
 
 
 def _series(
@@ -500,7 +504,7 @@ class GreenhouseEvaluationTests(unittest.TestCase):
             },
         ]
         with patch.dict(
-            "ecologyrsi_dsh.evaluators.registry.GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS",
+            "ecologyrsi_dsh.evaluators.catalog.GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS",
             {
                 "air_temperature": 0.6,
                 "relative_humidity": 0.3,
@@ -514,7 +518,7 @@ class GreenhouseEvaluationTests(unittest.TestCase):
 
     def test_weighted_objective_rejects_invalid_weights_and_horizons(self):
         with patch.dict(
-            "ecologyrsi_dsh.evaluators.registry.GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS",
+            "ecologyrsi_dsh.evaluators.catalog.GREENHOUSE_OBJECTIVE_TARGET_WEIGHTS",
             {"air_temperature": -1.0},
             clear=True,
         ):

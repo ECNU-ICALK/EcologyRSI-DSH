@@ -3928,7 +3928,7 @@ assert.equal(sealedStages.find(item => item.key === "judge").value, "completed")
 const runningAdaptiveStages = modelSandbox.executionStageValues(
   {id: "c:1", execution: {stages: {evaluation: "pending"}}},
   {adaptive_completion: {comparison_recorded: false}, candidates: [{candidate_id: "c:1", stages: {evaluation: "pending"}}]},
-  {status: "running", execution_progress: {stage_progress: {evaluation_phase: "formal_batch"}}},
+  {status: "running", execution_progress: {current_candidate_id: "c:1", stage_progress: {evaluation_phase: "formal_batch"}}},
 );
 assert.equal(runningAdaptiveStages.find(item => item.key === "evaluation").value, "running");
 const settledAdaptive = modelSandbox.executionSampleProgressSnapshot({

@@ -1,5 +1,7 @@
 # EcologyRSI DSH 宿主插件
 
+当前插件版本 `0.8.4`，适配 DeepSeek Harness `0.2.0-rc.2`（2026-10-01 核对 npm `latest`）。
+
 该插件把现有生态模型进化工作台接入 DeepSeek Harness Web Profile：
 
 - 在 DSH 侧栏注册“生态模型进化”入口；
@@ -44,7 +46,18 @@ ecologyrsi-dsh install-dsh-runtime --profile web
 ```
 
 安装器使用 `dsh plugin --profile web add --save-exact file:<tgz>`，安装六个当前
-不可变 preset ID，并写入受管 `cordis.patch.yml` 区块。
+不可变 preset ID，并在受管 `cordis.patch.yml` 区块声明六个 `@deepseek-ai/dsh-agent-preset`。
+新版 Harness 不再扫描 `.agent-presets`；声明从已安装插件内加载组合与 Skill，目录副本仅保留安装完整性检查。
+升级前应结束当前实验；旧运行冻结的 preset ID 不会自动迁移为新身份。新运行使用 `@2` 种子模板，历史 `@1` 模板保持原始内容。
+
+```bash
+npm install -g @deepseek-ai/dsh@0.2.0-rc.2
+ecologyrsi-dsh install-dsh-runtime --profile web
+# 源码目录内：隔离启动真实 Harness，用本地模型替身检查六类角色、结构化输出和恢复
+node scripts/verify_dsh_harness.mjs
+```
+
+验收脚本可用 `DSH_BIN` 指定待验证的 CLI，不使用用户 API key，也不调用远程模型。
 
 新建严格运行先让 4 个候选共享 64-origin 初筛，再让 Top 2 各执行一个
 500-origin adaptive epoch（默认 `10 × 50`，每批最多接受 2 处局部改动）；最后把

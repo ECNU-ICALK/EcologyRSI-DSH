@@ -1030,7 +1030,7 @@ function boundedSynthesisBinding({ policy = true, maxTokens = 16384 } = {}) {
     ...(policy ? { research_execution_policy: { ...RESEARCH_EXECUTION_POLICY } } : {}),
     knowledge_snapshot: { evidence_catalog: [{ knowledge_id: "paper:one" }] },
     required_candidate_direction_count: 4,
-    synthesis_contract: { allowed_mutation_targets: {
+    synthesis_contract: { mutation_directions_by_axis: { scientific_parameter: ["increase", "decrease"], registered_predictor: ["select"], instruction_profile: ["select"] }, allowed_mutation_targets: {
       scientific_parameter: ["ridge_alpha"], registered_predictor: [], instruction_profile: [],
     } },
   };
@@ -2357,6 +2357,35 @@ test('one rejected output followed by a captured correction persists without rep
   assert.equal(harness.failures.length, 0);
   assert.equal(result.skill_invocation_evidence.next_tool_call_seq,
     correctedOutputEvents().find(e => e.data?.callId === 'corrected').seq);
+});
+
+test('Harness 0.2 search output repairs one omitted field without weakening the correction limit', async () => {
+  const stage = 'generation.search-plan';
+  const binding = directSampleBinding(stage, {});
+  binding.request.role = 'researcher';
+  binding.request.output_schema_id = STAGES[stage].schema;
+  const structured = { schema_version: 'ecologyrsi-dsh.research-search-plan/1',
+    search_queries: ['greenhouse climate prediction'], focus_areas: ['multi-horizon prediction'], rationale: 'Compare available evidence.' };
+  const events = correctedOutputEvents().filter(e => !['prediction-call'].includes(e.data?.callId)
+    && e.data?.message?.content?.[0]?.toolCallId !== 'prediction-call');
+  events.find(e => e.type === 'tool/call' && e.data.name === 'skill').data.arguments = JSON.stringify({ name: 'autonomous-ecology-research' });
+  for (const event of events.filter(e => e.type === 'tool/result')) {
+    const block = event.data.message.content[0];
+    event.data.message = { role: 'tool', source: { kind: 'tool', callId: block.toolCallId },
+      toolCallId: block.toolCallId, isError: block.isError, content: [] };
+  }
+  const harness = directSampleHarness({ stage, results: [{ stopReason: 'completed', structured }], sessionEvents: () => events });
+  await harness.runner.run(binding);
+  const prompt = JSON.parse(harness.starts[0].request.prompt[0].text);
+  assert.deepEqual(prompt.output_contract.required_fields, ['schema_version', 'search_queries', 'focus_areas', 'rationale']);
+  assert.deepEqual(prompt.output_contract.fixed_fields, { schema_version: structured.schema_version });
+  assert.match(prompt.instruction, /validator's root path/);
+  assert.equal(harness.starts.length, 1);
+  assert.equal(harness.persisted.length, 1);
+  assert.deepEqual(harness.persisted[0].structured, structured);
+  assert.throws(() => skillInvocationEvidence(twiceCorrectedReflectionEvents(), {
+    stage, skillName: 'batch-scientific-reflection',
+  }));
 });
 
 test('output correction rejects ambiguous evidence, operational errors, extra calls and repeated successful output', () => {

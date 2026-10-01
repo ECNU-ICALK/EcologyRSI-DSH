@@ -18,11 +18,11 @@ from ecologyrsi_dsh.core.models import CandidateStatus, TaskManifest
 from ecologyrsi_dsh.core.sample_results import decode_sample_result_batch
 from ecologyrsi_dsh.evaluators.registry import (
     RULE_JUDGE_ID,
-    TOY_DATASET_ID,
     TOY_EVALUATOR_ID,
     TOY_PREDICTOR_MODEL_ID,
     EvaluatorRegistry,
 )
+from ecologyrsi_dsh.evaluators.catalog import TOY_DATASET_ID
 from ecologyrsi_dsh.evolution.batches import start_generation_batch
 from ecologyrsi_dsh.evolution.strategies import FakeDSHAdapter
 from ecologyrsi_dsh.integrations.model_gateway import GatewayResponseError

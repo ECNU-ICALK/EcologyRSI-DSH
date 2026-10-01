@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { assertPresetAvailable } from "./preset-scope.js";
 
 // DSH 0.1.5 narrowed the persisted session header to a closed shape: SessionStore
 // builds it from an explicit key allowlist (cwd, parentSession, isSeeded, origin,
@@ -157,7 +158,11 @@ export class RoleAgentManager {
       for (const [_key, handle] of selected) processed.add(handle);
       const quiesced = await Promise.allSettled(selected.map(async ([_key, handle]) => {
         const idle = await Promise.allSettled([
-          Promise.resolve().then(() => handle.agent?.waitForIdle?.()),
+          Promise.resolve().then(() => {
+            const idle = handle.agent?.whenIdle;
+            if (typeof idle !== "function") throw new Error("DSH Agent idle boundary is unavailable");
+            return idle.call(handle.agent);
+          }),
         ]);
         const flushed = await Promise.allSettled([
           Promise.resolve().then(() => handle.agent?.session?.flush?.()),
@@ -211,8 +216,7 @@ export class RoleAgentManager {
       throw new Error("persisted DSH role-host agentPreset drifted");
     }
     assertRoleSessionProvenance(sessionId, binding);
-    const standingKey = await this.ctx.agentPresets.standingKeyFor(presetId);
-    if (!standingKey) throw new Error(`DSH preset is not mountable: ${presetId}`);
+    const standingKey = await assertPresetAvailable(this.ctx.agentPresets, presetId);
     const rawHandle = await this.ctx.agents.resume({
       resumeSessionId: sessionId,
       agentOptions: agentOptionsFor(binding.model),
@@ -242,8 +246,7 @@ export class RoleAgentManager {
   async #create(binding, key) {
     const presetId = String(binding.preset_id || "");
     if (!/^[a-z0-9][a-z0-9-]*$/.test(presetId)) throw new Error("invalid DSH preset id");
-    const standingKey = await this.ctx.agentPresets.standingKeyFor(presetId);
-    if (!standingKey) throw new Error(`DSH preset is not mountable: ${presetId}`);
+    const standingKey = await assertPresetAvailable(this.ctx.agentPresets, presetId);
     const sessionId = roleSessionId(binding);
     const options = {
       sessionId,

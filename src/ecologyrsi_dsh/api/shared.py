@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 import ipaddress
 import os
 import sysconfig
@@ -10,7 +11,12 @@ from typing import Any
 
 from ..core.models import TaskManifest, digest
 from ..core.redaction import REDACTED, public_error_summary
-from ..evaluators.registry import TOY_DATASET_ID
+from ..evaluators.catalog import TOY_DATASET_ID
+
+
+def public_fields(source, fields: str):
+    """Copy only an explicit public allowlist; never pass through event payloads."""
+    return {field: source.get(field) for field in fields.split()}
 
 
 _EVENT_TYPE_ALIASES = {

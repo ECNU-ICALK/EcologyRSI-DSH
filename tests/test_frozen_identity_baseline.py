@@ -18,7 +18,11 @@ import unittest
 from ecologyrsi_dsh.data.adapters import dataset_adapter
 from ecologyrsi_dsh.data.registry import DatasetRegistry
 from ecologyrsi_dsh.evaluators.registry import EvaluatorRegistry
-from ecologyrsi_dsh.knowledge.program_registry import current_program_registry
+from ecologyrsi_dsh.knowledge.program_registry import (
+    ProgramRegistrySnapshot,
+    current_program_registry,
+)
+from ecologyrsi_dsh.evolution.genome import SeedGenomeTemplate
 
 # dataset_id -> (contract_digest, definition_digest)
 DATASET_IDENTITY = {
@@ -148,10 +152,24 @@ class FrozenIdentityBaselineTests(unittest.TestCase):
                 self.assertEqual(
                     self.registry.predictor_configuration_digest(model_id), configuration)
 
-    def test_program_catalog_digest_is_unchanged(self):
-        # workflow_ir validates the seed template against this digest, so a run
-        # whose genome cites another value can no longer spawn a candidate.
-        self.assertEqual(current_program_registry().catalog_digest, PROGRAM_CATALOG_DIGEST)
+    def test_harness_upgrade_preserves_legacy_catalog_and_versions_new_seeds(self):
+        # New runs use @2 templates. Removing those additions must reconstruct
+        # the exact historical catalog, including every @1 template digest.
+        current = current_program_registry()
+        catalog = current.to_dict()
+        legacy = tuple(SeedGenomeTemplate.from_dict(item) for item in catalog["seed_templates"]
+                       if item["template_id"].endswith("@1"))
+        historical = ProgramRegistrySnapshot.from_programs(catalog["programs"], seed_templates=legacy)
+        self.assertEqual(historical.catalog_digest, PROGRAM_CATALOG_DIGEST)
+        self.assertNotEqual(current.catalog_digest, PROGRAM_CATALOG_DIGEST)
+        for old in legacy:
+            expected = old.to_dict()
+            expected.pop("template_digest", None)
+            expected["template_id"] = old.template_id.removesuffix("@1") + "@2"
+            for profile in expected["agent_program"]["candidate_execution_program"]["role_profiles"]:
+                profile["preset_id"] = "ecology-sample-planner-v12"
+            self.assertEqual(current.seed_template(expected["template_id"]).to_dict(),
+                             SeedGenomeTemplate.from_dict(expected).to_dict())
 
     def test_dataset_admission_is_not_part_of_evaluator_identity(self):
         source = inspect.getsource(EvaluatorRegistry.catalog)

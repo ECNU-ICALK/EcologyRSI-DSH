@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 import ecologyrsi_dsh.evaluators.gateway_sample_adapter as gateway_sample_adapter_module
-import ecologyrsi_dsh.evaluators.registry as evaluator_registry_module
+import ecologyrsi_dsh.evaluators.pipeline as evaluator_registry_module
 import ecologyrsi_dsh.evaluators.sample_execution as sample_execution_module
 from ecologyrsi_dsh.core.models import Candidate, Proposal, TaskManifest, digest
 from ecologyrsi_dsh.core.sample_results import build_sample_results
@@ -28,11 +28,11 @@ from ecologyrsi_dsh.evaluators.registry import (
     GREENHOUSE_EVALUATOR_ID,
     GREENHOUSE_MULTIHORIZON_EVALUATOR_ID,
     GREENHOUSE_ROLLING_PREDICTOR_ID,
-    TOY_DATASET_ID,
     TOY_EVALUATOR_ID,
     TOY_PREDICTOR_MODEL_ID,
     EvaluatorRegistry,
 )
+from ecologyrsi_dsh.evaluators.catalog import TOY_DATASET_ID
 from ecologyrsi_dsh.evaluators.sample_execution import (
     COVERAGE_UNREACHABLE_NOT_EXECUTED_FAILURE,
     COVERAGE_UNREACHABLE_TERMINAL_REASON,
@@ -5537,7 +5537,7 @@ class SampleExecutionTests(unittest.TestCase):
         )
 
         with patch(
-            "ecologyrsi_dsh.evaluators.registry._rolling_tool_prediction",
+            "ecologyrsi_dsh.evaluators.pipeline._rolling_tool_prediction",
             side_effect=AssertionError("unselected rolling tool executed"),
         ) as rolling_tool:
             bundle = EvaluatorRegistry(
