@@ -83,10 +83,12 @@ def prior_candidate_tool_experience(state, candidate, metrics):
 
 
 def build_agent_policy(*, genome_digest, profile, parameters, previous_analysis, generation,
-                       prediction_tool_call_budget=None):
+                       prediction_tool_call_budget=None, prediction_formula_policy=None):
     budget = PREDICTION_TOOL_CALL_BUDGET if prediction_tool_call_budget is None else prediction_tool_call_budget
     if type(budget) is not int or not 1 <= budget <= MAX_PREDICTION_CALLS:
         raise ValueError('prediction tool call budget must be a positive int within the receipt cap')
+    if prediction_formula_policy not in (None, "mean-referenced-tools@1"):
+        raise ValueError("unsupported frozen prediction formula policy")
     experience = []
     if isinstance(previous_analysis, Mapping):
         source_generation = previous_analysis.get('generation')
@@ -111,6 +113,8 @@ def build_agent_policy(*, genome_digest, profile, parameters, previous_analysis,
                           'max_tool_calls_per_attempt': budget,
                           'model_parameter_selection': 'agent_within_registered_bounds',
                           'critic_protocol': 'ecology-sample-review@2', 'holdout_replicates': 2}}
+    if prediction_formula_policy is not None:
+        body['inference']['prediction_formula_policy'] = prediction_formula_policy
     return {**body, 'policy_digest': digest(body)}
 
 
@@ -171,7 +175,9 @@ def rebind_agent_policy(policy, *, genome_digest, profile, parameters):
         frozen_budget = frozen_prediction_tool_call_budget(policy)
     base = build_agent_policy(genome_digest=genome_digest, profile=profile, parameters=parameters,
                               previous_analysis=None, generation=0,
-                              prediction_tool_call_budget=frozen_budget)
+                              prediction_tool_call_budget=frozen_budget,
+                              prediction_formula_policy=(policy.get("inference", {}).get("prediction_formula_policy")
+                                                         if policy is not None else None))
     if policy is not None:
         base["experience"] = deepcopy(dict(policy["experience"]))
     base["policy_digest"] = digest({key: value for key, value in base.items() if key != "policy_digest"})

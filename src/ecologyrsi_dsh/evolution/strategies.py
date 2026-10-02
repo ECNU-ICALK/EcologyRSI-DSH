@@ -8,6 +8,10 @@ code or receives evaluator internals.
 from __future__ import annotations
 
 from .diversity import enabled as diversity_enabled, direction_schedule, validate_direction_schedule
+from .effect_contracts import resolve_mutation_effects
+from .execution_plan import DerivedExecutionPlan, derive_execution_plan
+from .schedule import EVIDENCE_GUIDED_SCHEDULE_SCHEMA
+from ..evaluators.sample_execution import SampleExecutionPolicy
 from ..evaluators.skill_program import SKILL_POLICY_ID, skill_grammar, skill_preflight_programs
 
 from ..core.prediction_policy import (
@@ -3009,6 +3013,14 @@ class StrategyRouterDSHAdapter:
             batch.get("previous_generation_analysis"),
             name="DSH-native previous generation analysis",
         )
+        raw_execution_plan = batch.get("derived_execution_plan")
+        execution_plan = (DerivedExecutionPlan.from_dict(raw_execution_plan)
+                          if isinstance(raw_execution_plan, Mapping) else derive_execution_plan(None))
+        base_policy = SampleExecutionPolicy.from_mapping(task.metadata.get("sample_execution_policy"))
+        runtime_constraints = {
+            "sample_max_attempts_floor": max(base_policy.max_attempts, execution_plan.sample_max_attempts),
+            "remote_critic_policy": task.metadata.get("sample_remote_critic_policy"),
+        }
         research_iteration = safe_aggregate_feedback(
             batch.get("research_iteration"),
             name="DSH-native research iteration",
@@ -3130,6 +3142,7 @@ class StrategyRouterDSHAdapter:
             },
             **deepcopy(mutation_catalog),
             "policy": "single_axis_reject_out_of_bounds_without_clamping",
+            "runtime_constraints": runtime_constraints,
         }
         explicit_sibling_feedback = research_execution_policy(task.metadata) is not None
         if explicit_sibling_feedback and assigned_direction is not None and assigned_direction.mutation_axis == "scientific_parameter":
@@ -3294,12 +3307,14 @@ class StrategyRouterDSHAdapter:
                     context,
                     current_program_registry(),
                     parameter_schemas=active_parameter_schemas,
+                    runtime_constraints=runtime_constraints,
                 )
             except (TypeError, ValueError) as exc:
                 message = str(exc)
                 rejection_code = (
                     "mutation_has_no_effect"
                     if "does not change" in message
+                    or "effective_noop" in message
                     or "same behavior as its parent" in message
                     else "mutation_validation_failed"
                 )
@@ -3552,6 +3567,9 @@ class StrategyRouterDSHAdapter:
             genome_digest=child.genome_digest, profile=candidate_agent_profile,
             parameters=child.scientific_program["parameter_overrides"],
             previous_analysis=previous_analysis, generation=run.generation,
+            prediction_formula_policy=("mean-referenced-tools@1"
+                if task.metadata.get("optimization_schedule", {}).get("schema_version") == EVIDENCE_GUIDED_SCHEDULE_SCHEMA
+                else None),
         )
         return Proposal(
             proposal_id=(
@@ -3581,6 +3599,10 @@ class StrategyRouterDSHAdapter:
                 "mutation_context": context.to_dict(),
                 "mutation_digest": child.lineage["mutation_digest"],
                 "mutation_operations": deepcopy(mutation["operations"]),
+                "effect_resolution": resolve_mutation_effects(
+                    parent, child, mutation["operations"], current_program_registry(),
+                    runtime_constraints=runtime_constraints,
+                ),
                 "candidate_agent_profile": candidate_agent_profile,
                 "candidate_direction": (
                     assigned_direction.to_dict()

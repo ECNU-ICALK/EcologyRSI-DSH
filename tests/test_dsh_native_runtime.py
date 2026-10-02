@@ -215,7 +215,7 @@ class DshNativeRuntimeClientTests(unittest.TestCase):
             "ecology-candidate-proposer-v6",
             "ecology-sample-planner-v12",
             "ecology-sample-critic-v6",
-            "ecology-generation-judge-v9",
+            "ecology-generation-judge-v10",
         )
         with _RealNodeRuntime() as client:
             cold = client.capabilities()
@@ -410,7 +410,7 @@ class _FakeNativeRuntime:
             "ecology-candidate-proposer-v6",
             "ecology-sample-planner-v12",
             "ecology-sample-critic-v6",
-            "ecology-generation-judge-v9",
+            "ecology-generation-judge-v10",
         ):
             presets.append(
                 {

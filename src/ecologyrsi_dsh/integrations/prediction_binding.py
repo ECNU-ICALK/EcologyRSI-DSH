@@ -33,7 +33,7 @@ def _public_numeric_parameters(parameters):
 
 class DshPredictionToolBinding:
     def __init__(self, *, run_id, stage_attempt, idempotency_key, wave_digest, sample_ids, catalog, executor,
-                 budget=None, origin_timestamp=None):
+                 budget=None, origin_timestamp=None, mean_blend_required=False):
         self.run_id = run_id
         self.stage_attempt = stage_attempt
         self.idempotency_key = idempotency_key
@@ -42,6 +42,7 @@ class DshPredictionToolBinding:
         # The forecast origin this wave serves, recorded so a ledger reader can
         # attribute a tool call to an origin without joining through sample_ids.
         self.origin_timestamp = origin_timestamp
+        self.mean_blend_required = mean_blend_required
         self.catalog = {item['tool_id']: dict(item) for item in catalog}
         self.executor = executor
         # The budget this run froze into its Agent policy, not the current
@@ -153,6 +154,7 @@ class DshPredictionToolBinding:
             successful = {key for key in visible if self.calls[key][0]['result']['status'] == 'completed'}
             if any(set(row['evidence_call_ids']) - successful for row in rows):
                 raise ValueError('Agent cites tool evidence it did not receive or that failed')
+            self.validate_formulas(rows)
             return {
                 'schema_version': 'ecologyrsi-dsh.agent-prediction-receipt/2',
                 'wave_digest': self.wave_digest, 'sample_ids': list(self.sample_ids),
@@ -160,6 +162,32 @@ class DshPredictionToolBinding:
                 'calls': [{'call_id': key, 'event_id': event_id, 'output_digest': p['output_digest']}
                           for key, (p, event_id) in self.calls.items() if key in visible],
             }
+
+    def validate_formulas(self, rows):
+        """Enforce only the frozen, fully specified mean rule, including replay.
+
+        Inputs are the cited successful outputs for this exact sample and wave.
+        No labels, inferred weights, or new prediction values are introduced.
+        """
+        if not self.mean_blend_required:
+            return
+        with self._lock:
+            for row in rows:
+                if row['method'] != 'blend':
+                    continue
+                values = []
+                for call_id in row['evidence_call_ids']:
+                    call = self.calls.get(call_id)
+                    if call is None or call[0]['result']['status'] != 'completed':
+                        raise ValueError('mean blend requires successful cited calls')
+                    output = next((item for item in call[0]['result']['outputs']
+                                   if item['sample_id'] == row['sample_id']), None)
+                    if output is None:
+                        raise ValueError('mean blend evidence belongs to another sample')
+                    values.append(output['predicted'])
+                if len(values) < 2 or not math.isclose(
+                        row['predicted'], math.fsum(values) / len(values), rel_tol=1e-9, abs_tol=1e-9):
+                    raise ValueError('mean blend prediction does not equal its cited outputs')
 
     def public_trace(self, sample_id=None, evidence_call_ids=()):
         """Bounded per-cell evidence, distinct from every call made in the wave."""
@@ -184,5 +212,6 @@ class DshPredictionToolBinding:
                     reported = output.get('metadata', {}).get('parameters')
                     if reported is not None:
                         item['parameters'] = _public_numeric_parameters(reported)
+                        item['effective_parameters_digest'] = digest(reported)
                 trace.append(item)
             return trace

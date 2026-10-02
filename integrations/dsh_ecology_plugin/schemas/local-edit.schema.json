@@ -377,6 +377,29 @@
                 "description": "Validated by the frozen Host feature recipe grammar."
               }
             }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "role",
+              "component"
+            ],
+            "properties": {
+              "op": {
+                "const": "reset_role_component"
+              },
+              "role": {
+                "const": "sample-planner"
+              },
+              "component": {
+                "enum": [
+                  "authored_directive",
+                  "skill_program"
+                ]
+              }
+            }
           }
         ]
       }

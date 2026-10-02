@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from ..evolution.diversity import preregister_candidate
+from ..evolution.effect_contracts import hard_effect_failure
+from ..core.training_race import race_bindings
+from ..core.training_effect_evidence import finalist_training_effect_evidence
+from ..core.review_policy import build_review_policy, review_result_metrics
 
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
 
@@ -185,6 +189,7 @@ def _select_screening_finalists(
     ranked = sorted(
         eligible,
         key=lambda candidate: (
+            bool(hard_effect_failure(screening_by_candidate_id[candidate.candidate_id].get("metrics", {}))),
             int(
                 screening_by_candidate_id[candidate.candidate_id].get(
                     "constraint_violations", 0
@@ -336,6 +341,8 @@ def _freeze_adaptive_generation_inputs(
         seed=state.task_manifest.seed,
         history_steps=history_steps,
     )
+    if schedule.race:
+        planned = replace(planned, revision_bindings=race_bindings(services.director.state(run_id), generation))
     _director_mutation(
         services,
         "freeze_run_adaptation_cohort",
@@ -385,36 +392,44 @@ def _phase_task_manifest(task: Any, generation: int, phase: str) -> Any:
     )
 
 
-def _screen_candidate(services: GenerationRuntime, run_id: str, candidate_id: str) -> None:
+def _screen_candidate(services: GenerationRuntime, run_id: str, candidate_id: str, *, generation: int | None = None) -> None:
     """Evaluate one restart-safe 64-origin screening cohort."""
 
     state = services.director.state(run_id)
     if state.run.status is not RunStatus.RUNNING:
         return
     candidate = state.candidate(candidate_id)
-    if candidate.candidate_id in _screening_records(state, candidate.generation):
+    generation = candidate.generation if generation is None else generation
+    schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata["optimization_schedule"])
+    if candidate.candidate_id in _screening_records(state, generation):
         return
-    if candidate.status is not CandidateStatus.SPAWNED:
+    if candidate.status is not CandidateStatus.SPAWNED and not schedule.race:
         return
-    proposal = state.proposal(candidate.proposal_id)
-    if not _ensure_candidate_algorithm_ready(services, state, proposal, candidate):
-        return
-    state = services.director.state(run_id)
-    candidate = state.candidate(candidate_id)
-    compiled = state.compiled_algorithm_for(candidate_id)
-    if compiled is None:
-        raise RuntimeError("screened candidate is missing its compiled algorithm")
-    screening_task = _phase_task_manifest(
-        state.task_manifest, candidate.generation, "screening"
-    )
-    revision = state.initial_revision_for(candidate_id)
-    generation_cohorts = state.generation_cohort_for(candidate.generation)
-    if revision is None or generation_cohorts is None:
-        raise RuntimeError("screening requires frozen R0 and generation cohort")
+    generation_cohorts = state.generation_cohort_for(generation)
+    if generation_cohorts is None:
+        raise RuntimeError("screening requires frozen generation cohorts")
+    screening_task = _phase_task_manifest(state.task_manifest, generation, "screening")
+    if schedule.race:
+        bound = (generation_cohorts.revision_bindings or {}).get(candidate_id)
+        if bound is None:
+            raise ValueError("candidate is not admitted to frozen training race")
+        revision = state.revision(bound)
+        candidate, proposal, algorithm = _holdout_replay_inputs(state, candidate, generation, bound, screening_task)
+        compiled = algorithm.to_dict()
+    else:
+        proposal = state.proposal(candidate.proposal_id)
+        if not _ensure_candidate_algorithm_ready(services, state, proposal, candidate):
+            return
+        state = services.director.state(run_id)
+        candidate = state.candidate(candidate_id)
+        compiled = state.compiled_algorithm_for(candidate_id)
+        revision = state.initial_revision_for(candidate_id)
+    if revision is None or compiled is None:
+        raise RuntimeError("screening requires compiled frozen revision")
     screening_cohort = generation_cohorts.screening
     screening_scope = EvaluationScope(
         run_id=run_id,
-        generation=candidate.generation,
+        generation=generation,
         candidate_id=candidate_id,
         candidate_revision_id=revision.revision_id,
         phase=EvaluationPhase.SCREENING,
@@ -425,7 +440,7 @@ def _screen_candidate(services: GenerationRuntime, run_id: str, candidate_id: st
     callbacks = EvaluationSession(
         services,
         run_id=run_id,
-        generation=candidate.generation,
+        generation=generation,
         proposal_id=proposal.proposal_id,
         candidate_id=candidate_id,
         scope=screening_scope,
@@ -447,6 +462,8 @@ def _screen_candidate(services: GenerationRuntime, run_id: str, candidate_id: st
     except Exception as exc:  # noqa: BLE001 - preserve remote retry boundary
         if _recoverable_evaluation_error(exc):
             raise
+        if schedule.race:
+            raise  # Preserve a resumable five-arm race; never hide missing control evidence.
         _director_mutation(
             services,
             "fail_candidate",
@@ -469,17 +486,20 @@ def _screen_candidate(services: GenerationRuntime, run_id: str, candidate_id: st
         if isinstance(summary, Mapping)
         else 0
     )
-    if attempted_origins < _SCREENING_ORIGIN_COUNT:
+    if attempted_origins != screening_cohort.origin_count:
         raise RuntimeError("screening did not cover the frozen 64-origin cohort")
     screening_evaluation_id = (
-        f"screening-evaluation:{candidate_id}:{candidate.generation}"
+        f"screening-evaluation:{candidate_id}:{generation}"
     )
+    from .formal_trajectory import _durable_batch_metrics
     _director_mutation(
         services,
         "record_candidate_screening",
         run_id,
         candidate_id=candidate_id,
-        generation=candidate.generation,
+        generation=generation,
+        **({"metrics": {**_durable_batch_metrics(bundle.evaluation.metrics), "screening_evaluator_digest": bundle.evaluation.evaluator_digest},
+            "candidate_revision_id": revision.revision_id} if schedule.race else {}),
         score=bundle.evaluation.score,
         passed=bundle.evaluation.passed,
         constraint_violations=max(
@@ -510,7 +530,7 @@ def _prepare_formal_finalists(
     generation = int(candidates[0].generation)
     frozen = _formal_selection_event(state, generation)
     schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata.get("optimization_schedule") or OptimizationSchedule.default().to_dict())
-    if frozen is None and schedule.quick:
+    if frozen is None and schedule.quick and not schedule.race:
         # Preregister the first proposal before seeing any evaluation labels.
         # Other proposals are never scored or ranked in the quick protocol.
         selected = preregister_candidate(candidates, state.proposal, state.task_manifest.metadata, generation)
@@ -519,19 +539,21 @@ def _prepare_formal_finalists(
             screening_digest=screening_cohort_digest(()))
         state = services.director.state(run_id)
     if frozen is None:
+        race_ids = state.generation_cohort_for(generation).revision_bindings if schedule.race else None
+        evaluation_candidates = tuple(state.candidate(cid) for cid in race_ids) if race_ids else candidates
         tasks = tuple(
             CandidateEvaluationTask(
-                slot_index=int(candidate.slot_index),
+                slot_index=index if schedule.race else int(candidate.slot_index),
                 candidate_id=str(candidate.candidate_id),
             )
-            for candidate in candidates
-            if candidate.status is CandidateStatus.SPAWNED
+            for index, candidate in enumerate(evaluation_candidates)
+            if candidate.status is CandidateStatus.SPAWNED or schedule.race
         )
         run_candidate_evaluations(
             tasks,
             max_concurrency=max_concurrency,
             evaluate=lambda candidate_id: _screen_candidate(
-                services, run_id, candidate_id
+                services, run_id, candidate_id, generation=generation
             ),
             admission_open=lambda: _run_admission_open(
                 services.director, run_id
@@ -545,14 +567,14 @@ def _prepare_formal_finalists(
         finalists = _select_screening_finalists(
             refreshed,
             screening,
-            top_k=_FORMAL_FINALIST_COUNT,
+            top_k=schedule.finalist_count,
         )
-        if len(finalists) < _FORMAL_FINALIST_COUNT:
+        if len(finalists) < schedule.finalist_count:
             _director_mutation(
                 services,
                 "fail_run",
                 run_id,
-                "两阶段评估失败：筛选阶段不足 2 个可用候选。",
+                f"两阶段评估失败：筛选阶段不足 {schedule.finalist_count} 个可用候选。",
             )
             return ()
         selected_ids = tuple(item.candidate_id for item in finalists)
@@ -565,7 +587,7 @@ def _prepare_formal_finalists(
             screening_digest=screening_cohort_digest(tuple(screening.values())),
             include_exploration_state=uses_global_incumbent_protocol(
                 state.task_manifest
-            ),
+            ) and not schedule.race,
         )
         state = services.director.state(run_id)
     selected_ids = tuple(frozen.payload["selected_candidate_ids"])
@@ -1498,6 +1520,9 @@ def _apply_candidate_judge(
     proposal: Any,
     artifact: Any,
     evaluation: Evaluation,
+    *,
+    incumbent: Any = None,
+    training_effect_evidence: Mapping | None = None,
 ) -> None:
     candidate = state.candidate(evaluation.candidate_id)
     _record_stage(
@@ -1522,7 +1547,10 @@ def _apply_candidate_judge(
                 dict(evaluation.metrics),
                 name="generation judge aggregate metrics",
             )
+            review_policy = build_review_policy(state.task_manifest, evaluation, incumbent,
+                                                training_effect_evidence=training_effect_evidence)
             context = {
+                "review_policy": review_policy,
                 "candidate_id": candidate.candidate_id,
                 "proposal_id": proposal.proposal_id,
                 "generation": candidate.generation,
@@ -1592,6 +1620,7 @@ def _apply_candidate_judge(
                 "judge_flags": list(flags),
                 "judge_parameter_override": {},
                 "judge_result_digest": digest(review),
+                **review_result_metrics(review_policy, review),
             }
             judged = EvaluationBundle(
                 artifact=artifact,
@@ -2639,6 +2668,13 @@ def _holdout_replay_inputs(
     _revision, revised_proposal, spec = _revision_evaluation_inputs(
         state, candidate, revision_id, task
     )
+    if source.generation != generation:
+        # A historical control is measured as frozen behavior, not as a new
+        # mutation against its former parent under this generation's retry floor.
+        control_metadata = dict(revised_proposal.metadata)
+        for field in ("effect_contract", "effect_resolution", "mutation_effect_resolution", "mutation_operations"):
+            control_metadata.pop(field, None)
+        revised_proposal = replace(revised_proposal, metadata=control_metadata)
     return candidate, revised_proposal, spec
 
 
@@ -3770,6 +3806,12 @@ def _ensure_finalist_reviews(services, run_id, evaluations):
     state = services.director.state(run_id)
     if not requires_finalist_review(state.task_manifest.metadata):
         return None
+    incumbent = next((item for item in evaluations if item.scope.holdout_arm is HoldoutArm.INCUMBENT), None)
+    if incumbent is None:
+        raise RuntimeError("finalist review requires the sealed same-cohort incumbent")
+    training_effects = finalist_training_effect_evidence(evaluations,
+        screening_events=getattr(state, "candidate_screening_events", ()),
+        batch_evaluations=getattr(state, "formal_batch_evaluations", ()))
     for holdout in evaluations:
         if holdout.scope.holdout_arm is HoldoutArm.INCUMBENT:
             continue
@@ -3783,7 +3825,8 @@ def _ensure_finalist_reviews(services, run_id, evaluations):
             raise RuntimeError("finalist review requires its sealed scientific artifact")
         if canonical.metrics.get("judge_status") not in {"completed", "unavailable"}:
             _apply_candidate_judge(services, state, state.proposal(candidate.proposal_id),
-                                   artifact, canonical)
+                                   artifact, canonical, incumbent=incumbent,
+                                   training_effect_evidence=training_effects)
     state = services.director.state(run_id)
     return finalist_review_evidence(evaluations,
         {item.candidate_id: item for item in state.evaluations},
@@ -3907,6 +3950,10 @@ def _finalize_adaptive_generation(services: GenerationRuntime, run_id: str, batc
         state = services.director.state(run_id)
         comparison = build_generation_comparison(
             quick_experiment=schedule.quick,
+            experiment_protocol=schedule.protocol,
+            training_effect_evidence=finalist_training_effect_evidence(evaluations,
+                screening_events=getattr(state, "candidate_screening_events", ()),
+                batch_evaluations=getattr(state, "formal_batch_evaluations", ())),
             finalist_reviews=reviews,
             run_id=run_id,
             generation=generation,

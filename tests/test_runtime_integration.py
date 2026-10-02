@@ -711,7 +711,7 @@ class AuthenticatedModelRuntimeTests(RuntimeIntegrationTests):
                     "ecology-candidate-proposer-v6",
                     "ecology-sample-planner-v12",
                     "ecology-sample-critic-v6",
-                    "ecology-generation-judge-v9",
+                    "ecology-generation-judge-v10",
                 )
             ],
             "live_agent_service_ready": True,

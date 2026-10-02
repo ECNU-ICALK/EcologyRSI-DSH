@@ -579,8 +579,12 @@
     return String(point && point.evaluation_cohort_digest || "");
   }
   function candidateDelta(candidate, candidates, run) {
-    var explicit = candidateMetricValue(candidate, "improvement");
-    if (explicit != null) { return { value: explicit, label: "相对基线改进" }; }
+    var evidence = candidate && candidate.score_evidence;
+    if (evidence) {
+      if (evidence.delta_vs_incumbent != null) { return {value: evidence.delta_vs_incumbent, label: "同组相对冠军增益"}; }
+      if (evidence.delta_vs_parent != null) { return {value: evidence.delta_vs_parent, label: "同组相对父修订增益"}; }
+      return {value: null, label: "尚无同组修改增益"};
+    }
     var score = candidateScoreValue(candidate);
     var parentScore = candidateParentScore(candidate, candidates);
     var candidateCohort = candidateEvaluationCohortDigest(run, candidate && candidate.id);
@@ -1023,8 +1027,9 @@
     var failureSection = failureReason ? "<section class=\"detail-section failure-detail candidate-section\"><h3>执行异常</h3><div class=\"failure-message\"><strong>" + escapeHTML(candidate.failed_stage ? "阶段：" + (evolutionStageLabels[candidate.failed_stage] || candidate.failed_stage) : "候选执行失败") + "</strong><p>" + escapeHTML(failureReason) + "</p><span>当前版本没有阶段级重试按钮；请保留同一任务证据并新建运行重试。</span></div></section>" : "";
     var header = "<header class=\"candidate-detail-header " + statusClass + "\"><div class=\"candidate-detail-heading\"><span class=\"candidate-detail-kicker\">候选方案 · 第 " + escapeHTML(candidate.generation || "—") + " 轮 / 槽位 " + escapeHTML(Number(candidate.slot_index || 0) + 1) + "</span><h2 title=\"" + escapeHTML(candidate.id) + "\">" + escapeHTML(shortId(candidate.id)) + "</h2><code title=\"" + escapeHTML(candidate.id) + "\">" + escapeHTML(candidate.id) + "</code><p>父方案：<span title=\"" + escapeHTML(candidate.parent_id || "") + "\">" + escapeHTML(shortId(candidate.parent_id || "当前基线")) + "</span> · 轮内排名 " + escapeHTML(candidate.generation_rank == null ? "—" : candidate.generation_rank) + "</p></div><div class=\"candidate-detail-outcome\"><span class=\"pill " + outcome.className + "\">" + escapeHTML(outcome.text) + "</span><strong class=\"candidate-detail-score " + scoreClass + "\">" + escapeHTML(score == null ? "—" : formatNumber(score, 3)) + "</strong><small>综合得分</small></div></header>";
     var keyMetrics = [
-      candidateMetricCard("综合得分", score == null ? "—" : formatNumber(score, 3), outcome.text, "is-score " + scoreClass),
-      candidateMetricCard(delta.label, delta.value == null ? "—" : signedNumber(delta.value, 3), "相对父方案或固定基线", delta.value == null ? "is-pending" : delta.value >= 0 ? "is-positive" : "is-negative"),
+      candidateMetricCard("相对固定基线的技能分", score == null ? "—" : formatNumber(score, 3), "不是本次修改的增益", "is-score " + scoreClass),
+      candidateMetricCard("同组相对父修订增益", candidate.score_evidence && candidate.score_evidence.delta_vs_parent != null ? signedNumber(candidate.score_evidence.delta_vs_parent, 3) : "—", "只使用已记录的父子配对", ""),
+      candidateMetricCard("同组相对冠军增益", candidate.score_evidence && candidate.score_evidence.delta_vs_incumbent != null ? signedNumber(candidate.score_evidence.delta_vs_incumbent, 3) : "—", "候选增益与最终选中方案增益分别记录", ""),
       candidateMetricCard("技能得分", skill == null ? "—" : signedNumber(skill, 3), "越高越好", skill == null ? "is-pending" : skill >= 0 ? "is-positive" : "is-negative"),
       candidateMetricCard("RMSE", rmse == null ? "—" : formatNumber(rmse, 4), sampleCount == null ? "反馈样本待提供" : formatNumber(sampleCount) + " 个样本", rmse == null ? "is-pending" : "")
     ].join("");

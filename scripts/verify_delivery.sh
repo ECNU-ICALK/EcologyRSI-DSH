@@ -87,8 +87,8 @@ integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v12/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-sample-planner-v12/agent.cordis.yml
 integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6/preset.yml
 integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6/agent.cordis.yml
-integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v9/preset.yml
-integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v9/agent.cordis.yml
+integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/preset.yml
+integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/agent.cordis.yml
 integrations/dsh_ecology_plugin/test/proxy_security.mjs
 "
 
@@ -112,7 +112,7 @@ current_presets = {
     "ecology-candidate-proposer-v6",
     "ecology-sample-planner-v12",
     "ecology-sample-critic-v6",
-    "ecology-generation-judge-v9",
+    "ecology-generation-judge-v10",
 }
 managed_preset = re.compile(
     r"ecology-(?:coordinator|researcher|candidate-proposer|sample-planner|sample-critic|generation-judge|local-editor)-v[0-9]+"

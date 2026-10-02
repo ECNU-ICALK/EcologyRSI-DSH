@@ -19,6 +19,7 @@ from .promotion import V2_MINIMUM_SCORE_DELTA, assess_promotion_improvement
 from ..core.search_policy import LOCAL_PAIRED_BLOCK_MINIMUM, PAIRED_EXECUTION_QUALIFICATION
 from ..evaluators.objectives import OBJECTIVE_AGGREGATION_VERSION
 from .execution_qualification import paired_scoring_evidence_complete
+from .effect_contracts import hard_effect_failure
 
 
 LOCAL_MINIMUM_SCORE_DELTA = V2_MINIMUM_SCORE_DELTA
@@ -65,6 +66,8 @@ def local_challenger_safety_reason(metrics: Mapping[str, Any]) -> str | None:
 
     if not isinstance(metrics, Mapping):
         return "batch_metrics_invalid"
+    if reason := hard_effect_failure(metrics):
+        return reason
     if "constraint_violations" not in metrics:
         return "constraint_guardrail_missing"
     violations = metrics["constraint_violations"]

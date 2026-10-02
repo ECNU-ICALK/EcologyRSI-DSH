@@ -94,7 +94,7 @@ class AlignedRuntimeBindingTests(unittest.TestCase):
                          "live_agent_service_ready": True, "first_call_verified": False}
                         for preset in ("ecology-coordinator-v6", "ecology-researcher-v15",
                                        "ecology-candidate-proposer-v6", "ecology-sample-planner-v12",
-                                       "ecology-sample-critic-v6", "ecology-generation-judge-v9")],
+                                       "ecology-sample-critic-v6", "ecology-generation-judge-v10")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }
         self.server.dsh_native_runtime = native_runtime
@@ -181,7 +181,7 @@ class AlignedRuntimeBindingTests(unittest.TestCase):
                          "live_agent_service_ready": True, "first_call_verified": False}
                         for preset in ("ecology-coordinator-v6", "ecology-researcher-v15",
                                        "ecology-candidate-proposer-v6", "ecology-sample-planner-v12",
-                                       "ecology-sample-critic-v6", "ecology-generation-judge-v9")],
+                                       "ecology-sample-critic-v6", "ecology-generation-judge-v10")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }
         self.server.dsh_native_runtime = native_runtime

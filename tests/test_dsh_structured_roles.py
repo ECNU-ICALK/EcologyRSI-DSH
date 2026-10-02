@@ -471,7 +471,10 @@ class DshStructuredRoleTests(unittest.TestCase):
         ledger = EventLedger()
         self.addCleanup(ledger.close)
         director = EvolutionDirector(ledger, adapter)
+        from dataclasses import replace
         task = _native_task()
+        task = replace(task, metadata={**task.metadata, "sample_remote_critic_policy": {
+            "version": "uncertain_or_failure@1", "min_planner_confidence": 0.5}})
         run_id = "run:native-distinct-agent-behavior"
         director.create_run(task, run_id=run_id)
         director.start_run(run_id)

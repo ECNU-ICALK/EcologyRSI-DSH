@@ -198,6 +198,7 @@
       // Predictor selection belongs to the runtime research loop.
       return createRun({
         autonomous_mode: form.get("autonomous_mode") === "true" || form.get("autonomous_mode") === "on",
+        experiment_mode: form.get("experiment_mode") || "quick",
         model_workflow: form.get("model_workflow") || "research_compile_evolve@1",
         dataset_id: form.get("dataset_id"),
         episode_id: form.get("episode_id") || undefined,

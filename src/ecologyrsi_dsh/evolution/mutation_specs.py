@@ -6,6 +6,7 @@ from dataclasses import dataclass
 SKILL_POLICY_ID = "causal_planner_skills@1"
 AUTHORED_DIRECTIVE_POLICY_ID = "authored_directive@1"
 RECIPE_FEATURE_POLICY_ID = "authored_causal_features@1"
+RESETTABLE_ROLE_COMPONENTS = ("authored_directive", "skill_program")
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,14 @@ class MutationSpec:
     def coordinates(self, operation):
         values = {field: str(operation.get(field) or "") for field in self.fields.split()}
         return self.axis, self.target.format_map(values), self.path.format_map(values)
+
+    @property
+    def effect_kind(self):
+        if self.axis in {"workflow_parameter", "workflow_template", "instruction_parameter", "instruction_tool_policy"}:
+            return "execution"
+        if self.axis in {"instruction_profile", "instruction_directive", "skill_program", "component_reset"}:
+            return "guidance"
+        return "prediction"
 
 
 _NUMERIC = ("increase", "decrease")
@@ -42,6 +51,9 @@ MUTATION_SPECS = {
     "author_skill_program": MutationSpec(
         "skill_program", "role skill_program", SKILL_POLICY_ID,
         "skill-program:{role}", _AUTHORING, ("sample-planner",)),
+    "reset_role_component": MutationSpec(
+        "component_reset", "role component", "{component}", "component:{role}:{component}",
+        ("reset",), ("sample-planner",)),
     "narrow_role_tool_policy": MutationSpec(
         "instruction_tool_policy", "role enabled_tool_ids", "{role}",
         "tool-policy:{role}", ("narrow",), _EXECUTION_ROLES),

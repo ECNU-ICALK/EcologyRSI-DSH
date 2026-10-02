@@ -8,6 +8,9 @@ from ecologyrsi_dsh.evaluators.epoch_cohorts import plan_run_adaptation_cohort, 
 from ecologyrsi_dsh.evaluators.generation_comparison import build_generation_comparison
 from ecologyrsi_dsh.application import formal_trajectory
 from ecologyrsi_dsh.core.trajectory import HoldoutArm, TrajectoryStatus
+from ecologyrsi_dsh.core.models import TaskManifest
+from ecologyrsi_dsh.core.state import validate_generation_comparison_binding
+from ecologyrsi_dsh.core.trajectory import GenerationHoldout
 from tests.test_epoch_cohort_planning import dataset_fixture
 from tests.test_run_parameter_consistency import small_holdout
 from tests.test_formal_trajectory import PairedFormalTrajectoryTests
@@ -65,6 +68,36 @@ class QuickPlanTests(unittest.TestCase):
         self.assertEqual(decision.selected_candidate_id, candidate.scope.candidate_id)
         self.assertIsNone(decision.gate_results["certification_selected_arm"])
         self.assertEqual(decision.gate_results["experiment_protocol"], "quick_adaptive_epoch@1")
+
+    def test_exploratory_protocol_identity_is_frozen_and_checked_on_replay(self):
+        candidate = small_holdout(HoldoutArm.FINALIST_1, .2)
+        incumbent = small_holdout(HoldoutArm.INCUMBENT, .1)
+        inputs = dict(run_id=candidate.scope.run_id, generation=0,
+            cohort_digest=candidate.scope.cohort_digest,
+            holdout_evaluations=(candidate, incumbent), quick_experiment=True)
+        holdout = GenerationHoldout(holdout_id="holdout:protocol-binding", run_id=candidate.scope.run_id,
+            generation=0, cohort_digest=candidate.scope.cohort_digest, origin_count=50,
+            arm_bindings={item.scope.holdout_arm.value: {"candidate_id": item.scope.candidate_id,
+                "candidate_revision_id": item.scope.candidate_revision_id} for item in (candidate, incumbent)})
+        for schedule in (OptimizationSchedule.for_new_run(), OptimizationSchedule.for_evidence_guided_run()):
+            with self.subTest(protocol=schedule.protocol):
+                decision = build_generation_comparison(**inputs, experiment_protocol=schedule.protocol)
+                self.assertEqual(decision.gate_results["experiment_protocol"], schedule.protocol)
+                self.assertIsNone(decision.gate_results["certification_selected_arm"])
+                task = TaskManifest(task_id="task:protocol-binding", objective="replay frozen protocol",
+                    domain_pack="greenhouse_environment@1", visible_datasets=("dataset",),
+                    budget={"max_candidates": 4, "max_generations": 1}, metadata={
+                        "execution_protocol": "dsh_native_plugin_evolution@1",
+                        "host_runtime_build": {"evolution_runtime_schema": "ecologyrsi-dsh.evolution-runtime/3"},
+                        "optimization_protocol": schedule.protocol,
+                        "optimization_schedule": schedule.to_dict()})
+                validate_generation_comparison_binding(task, candidate.scope.run_id, holdout, {}, decision,
+                    persisted_evaluations={item.scope.holdout_arm: item for item in (candidate, incumbent)})
+                wrong = "quick_adaptive_epoch@1" if schedule.race else "evidence_guided_epoch@1"
+                with self.assertRaisesRegex(ValueError, "deterministic Host comparison"):
+                    validate_generation_comparison_binding(task, candidate.scope.run_id, holdout, {},
+                        build_generation_comparison(**inputs, experiment_protocol=wrong),
+                        persisted_evaluations={item.scope.holdout_arm: item for item in (candidate, incumbent)})
 
 
 class QuickTrajectoryTests(unittest.TestCase):

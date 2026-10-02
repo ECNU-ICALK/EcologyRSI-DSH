@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..core.models import digest
+from ..evolution.analysis import evaluation_cohort_digest
 from ..core.redaction import (
     is_sensitive_key,
     public_error_summary,
@@ -586,9 +587,14 @@ def build_training_trajectory(
         if isinstance(parent, Mapping) and isinstance(parent.get("evaluation"), Mapping)
         else None
     )
+    parent_evaluation = state.evaluation_for(proposal.parent_candidate_id) if proposal.parent_candidate_id else None
+    current_cohort = evaluation_cohort_digest(evaluation) if evaluation is not None else None
+    parent_cohort = evaluation_cohort_digest(parent_evaluation) if parent_evaluation is not None else None
     score_delta = (
         score - parent_score
         if isinstance(score, (int, float)) and isinstance(parent_score, (int, float))
+        and current_cohort and current_cohort == parent_cohort
+        and evaluation.evaluator_digest == parent_evaluation.evaluator_digest
         else None
     )
     judge = {}

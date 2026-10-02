@@ -47,16 +47,22 @@ def guarded_cohort_evidence_capacity(
                                            history_steps=history_steps)
     formal = [
         {"batch_index": batch.batch_index,
-         **_cohort_evidence(batch.cohort, minimum=(1 if schedule.quick else 2 if schedule.exploratory_local_comparison
+         **_cohort_evidence(batch.cohort, minimum=(LOCAL_PAIRED_BLOCK_MINIMUM if schedule.race and batch.batch_index else 1 if schedule.quick else 2 if schedule.exploratory_local_comparison
                                                  else LOCAL_PAIRED_BLOCK_MINIMUM))}
         for batch in adaptation.batches
     ]
+    if schedule.race:
+        formal = []  # Fresh local cohorts must be checked in every generation.
     holdouts = []
     for generation in range(planned_generations):
         selection = plan_generation_selection_cohorts(
             dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed,
             history_steps=history_steps,
         )
+        if schedule.race:
+            formal.extend({"generation": generation, "batch_index": batch.batch_index,
+                **_cohort_evidence(batch.cohort, minimum=LOCAL_PAIRED_BLOCK_MINIMUM if batch.batch_index else 1)}
+                for batch in selection.adaptation.batches)
         evidence = _cohort_evidence(selection.holdout, minimum=2 if schedule.quick else profile.selection_minimum_paired_blocks)
         days = tuple(sorted({o.origin_timestamp // PROMOTION_BLOCK_HOURS for o in selection.holdout.origins}))
         starts = len(_legal_starts(days, profile.moving_block_days))
@@ -80,7 +86,7 @@ def guarded_cohort_evidence_capacity(
         "fitness_profile_digest": profile.profile_digest,
         "adaptation_digest": adaptation.adaptation_digest,
         "formal_batches": formal,
-        "local_comparison_mode": ("prequential_exploration_pending_epoch_validation" if schedule.quick else "exploratory_paired_point_comparison"
+        "local_comparison_mode": ("paired_day_block_confirmation" if schedule.race else "prequential_exploration_pending_epoch_validation" if schedule.quick else "exploratory_paired_point_comparison"
                                   if schedule.exploratory_local_comparison else "paired_day_block_confirmation"),
         "selection_holdouts": holdouts,
         "sufficient": all(row["sufficient"] for row in (*formal, *holdouts)),

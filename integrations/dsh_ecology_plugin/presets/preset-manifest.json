@@ -54,7 +54,7 @@
       "model_route": "review"
     },
     {
-      "preset_id": "ecology-generation-judge-v9",
+      "preset_id": "ecology-generation-judge-v10",
       "tool_profile": "dynamic-retrieval-v1",
       "required_tools": [
         "skill",

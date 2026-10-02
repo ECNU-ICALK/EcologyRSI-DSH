@@ -1086,6 +1086,7 @@ def apply_genome_mutation(
     registry: Any,
     *,
     parameter_schemas: Mapping[str, Mapping[str, Any]] | None = None,
+    runtime_constraints: Mapping[str, Any] | None = None,
 ) -> EcologyEvolutionPluginGenome:
     """Apply one host-validated mutation without ever accepting executable code."""
 
@@ -1323,6 +1324,20 @@ def apply_genome_mutation(
             if set(requested) == inherited:
                 raise ValueError(f"mutation operation {op} does not change {role}")
             profile["enabled_tool_ids"] = requested
+        elif op == "reset_role_component":
+            from .mutation_specs import RESETTABLE_ROLE_COMPONENTS
+
+            component = item["component"]
+            if component not in RESETTABLE_ROLE_COMPONENTS:
+                raise ValueError("role component is not resettable")
+            if component not in profile:
+                raise ValueError("reset does not change the role component")
+            policy_field = ("directive_policy_ref" if component == "authored_directive"
+                            else "skill_policy_ref")
+            # The compiled template remains the frozen baseline. Reset cannot
+            # change roles, tool grants, instruction parameters or host gates.
+            del profile[component]
+            profile.pop(policy_field, None)
         elif op == "author_skill_program":
             from ..evaluators.skill_program import SKILL_POLICY_ID, validate_skill_program
             program = validate_skill_program(item["skill_program"])
@@ -1386,7 +1401,12 @@ def apply_genome_mutation(
     }
     result["scientific_program"] = scientific
     result["agent_program"] = agent
-    return EcologyEvolutionPluginGenome.from_dict(result)
+    child = EcologyEvolutionPluginGenome.from_dict(result)
+    from .effect_contracts import resolve_mutation_effects
+    resolve_mutation_effects(
+        parent, child, operations, registry, runtime_constraints=runtime_constraints,
+    )
+    return child
 
 
 __all__ = [

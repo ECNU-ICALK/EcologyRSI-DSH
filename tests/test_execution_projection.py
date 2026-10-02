@@ -344,6 +344,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                 ),
                 score=score,
                 passed=passed,
+                evaluator_digest="e" * 64,
             )
 
         comparison = SimpleNamespace(
@@ -449,6 +450,11 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertTrue(decision["same_cohort"])
         self.assertEqual(len(decision["arms"]), 3)
         self.assertAlmostEqual(decision["arms"][0]["holdout_delta"], -0.02)
+        comparison.holdout_evaluations[0].scope.cohort_digest = "different-cohort"
+        mismatched = _evolution_evidence_projection(state)["generation_decisions"][0]
+        self.assertIsNone(mismatched["arms"][0]["delta_vs_incumbent"])
+        self.assertIsNone(mismatched["arms"][0]["holdout_delta"])
+        comparison.holdout_evaluations[0].scope.cohort_digest = "c" * 64
         self.assertTrue(decision["exploration_only"])
         self.assertTrue(decision["replan_required"])
         self.assertEqual(decision["selected_arm"], "incumbent")

@@ -37,6 +37,9 @@ MAX_RECIPE_TERM_EDITS_PER_MUTATION = 2
 MUTATION_OPERATION_BY_AXIS = {spec.axis: op for op, spec in MUTATION_SPECS.items()}
 MUTATION_DIRECTIONS_BY_AXIS = {spec.axis: spec.directions for spec in MUTATION_SPECS.values()}
 MUTATION_AXIS_EFFECTS: dict[str, str] = {
+    "component_reset": ("Removes one existing sample-planner authored_directive or skill_program "
+                        "and its paired policy reference. Restores the registered template behavior; "
+                        "never resets tools, permissions, scientific parameters, or data boundaries."),
     "skill_program": (
         "Authors or revises an ordered, versioned skill program. Host modules compute causal observation "
         "diagnostics and activate conditional planner guidance before prediction. Changes module composition, "

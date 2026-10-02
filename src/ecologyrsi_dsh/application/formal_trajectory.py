@@ -39,7 +39,9 @@ from ..evolution.champion_challenger import (
     assess_local_challenger,
     local_challenger_safety_reason,
 )
-from ..evolution.mutation_specs import mutation_coordinates
+from ..evolution.mutation_specs import mutation_coordinates, RESETTABLE_ROLE_COMPONENTS
+from ..evolution.execution_plan import DerivedExecutionPlan, derive_execution_plan
+from ..evaluators.sample_execution import SampleExecutionPolicy
 from ..evolution.local_edits import (
     LocalEditContext,
     LocalEditProposal,
@@ -94,6 +96,21 @@ def _revision_evaluation_inputs(
     genome = EcologyEvolutionPluginGenome.from_dict(dict(revision.genome))
     base = state.proposal(candidate.proposal_id)
     metadata = dict(base.metadata)
+    # A revision carries only its own edit's evidence, never its sibling's or
+    # the outer candidate's stale contract after a rollback/rebase.
+    for key in ("effect_contract", "effect_resolution", "mutation_effect_resolution"):
+        value = metadata.get(key)
+        if isinstance(value, Mapping) and value.get("child_genome_digest") != genome.genome_digest:
+            metadata.pop(key, None)
+            metadata.pop("mutation_operations", None)
+    outcome = next((item for item in state.local_edit_outcomes
+                    if item.get("active_revision_id") == revision.revision_id
+                    and item.get("outcome") == LocalEditOutcome.APPLIED.value), None)
+    if outcome is not None and "effect_contract" in outcome:
+        local_proposal = state.local_edit_proposal_for(candidate.candidate_id, revision.source_batch_index)
+        metadata.update(effect_contract=deep_thaw_json(outcome["effect_contract"]),
+                        effect_resolution=deep_thaw_json(outcome["effect_resolution"]),
+                        mutation_operations=deep_thaw_json(local_proposal["proposal"]["operations"]))
     metadata.update(
         {
             "evolution_genome_canonical_json": canonical_json(genome.to_dict()),
@@ -105,6 +122,12 @@ def _revision_evaluation_inputs(
             ),
         }
     )
+    if task.metadata.get("optimization_protocol") == "evidence_guided_epoch@1":
+        # Host reliability controls are shared by every arm in this epoch;
+        # inherited Agent experience and the selected genome remain frozen.
+        from ..evolution.execution_plan import derive_execution_plan
+        previous = state.analysis_for(candidate.generation - 1) if candidate.generation else None
+        metadata["derived_execution_plan"] = derive_execution_plan(previous).to_dict()
     metadata["agent_policy"] = rebind_agent_policy(metadata.get("agent_policy"),
         genome_digest=genome.genome_digest, profile=metadata["candidate_agent_profile"],
         parameters=genome.scientific_program["parameter_overrides"])
@@ -223,7 +246,7 @@ def _evaluate_formal_batch_arm(
 ) -> BatchEvaluation:
     state = services.director.state(run_id)
     candidate = state.candidate(candidate_id)
-    adaptation = state.run_adaptation_cohort
+    adaptation = state.adaptation_for_generation(candidate.generation)
     if adaptation is None:
         raise RuntimeError("formal evaluation requires frozen adaptation cohorts")
     planned_batch = adaptation.batches[formal_batch.batch_index]
@@ -241,6 +264,24 @@ def _evaluate_formal_batch_arm(
         revision_id,
         task,
     )
+    schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata["optimization_schedule"])
+    if schedule.race and formal_batch.batch_index == 0:
+        # No inference is rerun: this is a diagnostic view of a sealed race
+        # result, explicitly linked to its original scope and cost receipt.
+        source = state.screening_for(candidate.generation, candidate_id)
+        if source is None or source.payload.get("candidate_revision_id") != revision_id:
+            raise ValueError("diagnostic warmup requires the exact screened revision")
+        planned = state.generation_cohort_for(candidate.generation)
+        if planned.screening.origin_ids != planned_batch.origin_ids:
+            raise ValueError("screening reuse must preserve every origin")
+        metrics = {**deep_thaw_json(source.payload["metrics"]),
+                   "source_screening_event_id": source.event_id,
+                   "reused_screening_evidence": True, "additional_prediction_executions": 0}
+        evaluation = BatchEvaluation(
+            evaluation_id=f"formal-evaluation:{candidate_id}:0:champion",
+            scope=scope, score=source.payload["score"], passed=source.payload["passed"],
+            metrics=metrics, evaluator_digest=digest({"evaluator": metrics["screening_evaluator_digest"]}))
+        return _director_mutation(services, "record_formal_batch_evaluation", run_id, evaluation)
     callbacks = EvaluationSession(
         services,
         run_id=run_id,
@@ -306,7 +347,7 @@ def _execute_next_prequential_formal_batch(
     if trajectory.status is TrajectoryStatus.COMPLETED:
         return False
     candidate = state.candidate(candidate_id)
-    adaptation = state.run_adaptation_cohort
+    adaptation = state.adaptation_for_generation(candidate.generation)
     cohorts = state.generation_cohort_for(candidate.generation)
     if adaptation is None or cohorts is None:
         raise RuntimeError("formal batch requires frozen adaptation and generation cohorts")
@@ -720,6 +761,18 @@ def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRev
         family = candidate_family(state.proposal(candidate.proposal_id))
         if family in FAMILY_AXES:
             targets = {axis: values if axis in FAMILY_AXES[family] else () for axis, values in targets.items()}
+    schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata["optimization_schedule"])
+    if schedule.race:
+        role = next(row for row in genome.agent_program["candidate_execution_program"]["role_profiles"]
+                    if row["role"] == "sample-planner")
+        targets["component_reset"] = tuple(key for key in RESETTABLE_ROLE_COMPONENTS if key in role)
+    raw_plan = state.proposal(candidate.proposal_id).metadata.get("derived_execution_plan")
+    plan = DerivedExecutionPlan.from_dict(raw_plan) if isinstance(raw_plan, Mapping) else derive_execution_plan(None)
+    base_policy = SampleExecutionPolicy.from_mapping(state.task_manifest.metadata.get("sample_execution_policy"))
+    runtime_constraints = {
+        "sample_max_attempts_floor": max(base_policy.max_attempts, plan.sample_max_attempts),
+        "remote_critic_policy": state.task_manifest.metadata.get("sample_remote_critic_policy"),
+    }
     cells = tuple(
         f"{target}@{horizon}h"
         for target in state.task_manifest.metadata["fitness_profile"]["expected_targets"]
@@ -742,7 +795,16 @@ def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRev
         allowed_evidence_refs=("batch:score", "batch:metrics"),
         allowed_effect_cells=cells,
         parameter_schemas=parameter_schemas,
+        runtime_constraints=runtime_constraints,
+        evidence_phase="formal_batch",
     )
+
+
+def _effect_decision_payload(validated: LocalEditResult | None) -> dict[str, Any]:
+    if (validated is None or validated.child is None
+            or (validated.effect_contract is None and validated.effect_resolution is None)):
+        return {}
+    return {"effect_contract": validated.effect_contract, "effect_resolution": validated.effect_resolution}
 
 
 def _execute_next_prequential_local_edit(
@@ -957,6 +1019,7 @@ def _execute_next_prequential_local_edit(
                 else validated.outcome.value
             ),
             "active_revision_id": active_revision_id,
+            **_effect_decision_payload(validated),
             **(
                 {
                     "reason": (
@@ -1173,6 +1236,7 @@ def _execute_next_paired_local_edit(
             "batch_index": pending.batch_index,
             "outcome": validated.outcome.value,
             "active_revision_id": active_revision_id,
+            **_effect_decision_payload(validated),
             **(
                 {
                     "reason": (
@@ -2178,6 +2242,7 @@ def _local_edit_evidence_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
                 "agent_tool_invocations",
                 "agent_tool_usage_rate",
                 "agent_prediction_method_counts",
+                "mutation_effect_receipt",
             )
             if key in sample
         }

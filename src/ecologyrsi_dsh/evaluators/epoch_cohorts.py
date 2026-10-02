@@ -395,8 +395,17 @@ class GenerationCohorts:
     holdout: PlannedCohort
     schema_version: str = GENERATION_COHORTS_SCHEMA
     planner_schema: str = COHORT_PLANNER_SCHEMA
+    adaptation: RunAdaptationCohort | None = None
+    revision_bindings: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
+        if self.adaptation is None and self.revision_bindings is not None:
+            raise ValueError("revision bindings require a generation adaptation plan")
+        if isinstance(self.adaptation, Mapping):
+            object.__setattr__(self, "adaptation", RunAdaptationCohort.from_dict(self.adaptation))
+        if self.adaptation is not None:
+            from types import MappingProxyType
+            object.__setattr__(self, "revision_bindings", MappingProxyType(dict(self.revision_bindings or {})))
         _strict_integer(self.generation, "generation")
         _strict_integer(self.seed, "seed")
         _sha256(self.adaptation_digest, "adaptation_digest")
@@ -428,6 +437,7 @@ class GenerationCohorts:
             "episode_id": self.episode_id,
             "generation": self.generation,
             "seed": self.seed,
+            **({"adaptation": self.adaptation.to_dict(), "revision_bindings": dict(self.revision_bindings or {})} if self.adaptation is not None else {}),
             "adaptation_digest": self.adaptation_digest,
             "adaptation_batch_digests": list(self.adaptation_batch_digests),
             "screening": self.screening.identity_dict(),
@@ -497,7 +507,7 @@ class CohortCapacityReport:
             "origin_history_alignment_hours",
             minimum=1,
         )
-        if self.cohort_reuse_policy not in {COHORT_REUSE_POLICY, ISOLATED_REUSE_POLICY, TRAINING_REUSE_POLICY, QUICK_REUSE_POLICY}:
+        if self.cohort_reuse_policy not in {COHORT_REUSE_POLICY, ISOLATED_REUSE_POLICY, TRAINING_REUSE_POLICY, QUICK_REUSE_POLICY, "fresh_training_race_and_confirmation@1"}:
             raise ValueError(
                 f"cohort_reuse_policy must be {COHORT_REUSE_POLICY!r}"
             )
@@ -747,6 +757,9 @@ def plan_run_adaptation_cohort(
 ) -> RunAdaptationCohort:
     if not isinstance(schedule, OptimizationSchedule):
         raise TypeError("schedule must be OptimizationSchedule")
+    if schedule.race:
+        from .evidence_cohorts import plan_adaptation
+        return plan_adaptation(dataset, schedule=schedule, seed=seed, history_steps=history_steps)
     if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
         from .training_cohorts import plan_adaptation
         return plan_adaptation(dataset, schedule=schedule, seed=seed, history_steps=history_steps)
@@ -798,6 +811,9 @@ def plan_generation_selection_cohorts(
 ) -> GenerationCohorts:
     if not isinstance(schedule, OptimizationSchedule):
         raise TypeError("schedule must be OptimizationSchedule")
+    if schedule.race:
+        from .evidence_cohorts import plan_selection
+        return plan_selection(dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed, history_steps=history_steps)
     if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
         from .training_cohorts import plan_selection
         return plan_selection(dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed, history_steps=history_steps)
@@ -869,6 +885,9 @@ def estimate_epoch_capacity(
         adapter = DATASET_ADAPTERS.get(dataset.dataset_id)
         scoring_cells_per_origin = (len(adapter.targets) * len(adapter.horizons_hours)
                                     if adapter else DEFAULT_SCORING_CELLS_PER_ORIGIN)
+    if schedule.race:
+        from .evidence_cohorts import estimate_capacity
+        return estimate_capacity(dataset, schedule=schedule, planned_generations=planned_generations, seed=seed, scoring_cells_per_origin=scoring_cells_per_origin, history_steps=history_steps)
     if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
         from .training_cohorts import estimate_capacity
         return estimate_capacity(dataset, schedule=schedule, planned_generations=planned_generations, seed=seed, scoring_cells_per_origin=scoring_cells_per_origin, history_steps=history_steps)

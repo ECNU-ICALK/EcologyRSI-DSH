@@ -30,6 +30,8 @@ def screening_record_digest(payload: Mapping[str, Any]) -> str:
             "cohort_digest",
         )
     }
+    if payload.get("schema_version") == "ecologyrsi-dsh.candidate-screening/3":
+        normalized.update(candidate_revision_id=payload["candidate_revision_id"], metrics=payload["metrics"])
     return digest(normalized)
 
 

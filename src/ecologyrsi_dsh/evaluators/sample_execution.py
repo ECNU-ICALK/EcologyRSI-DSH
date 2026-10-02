@@ -4299,6 +4299,7 @@ def _public_steps(value: Any, *, kind: str, id_field: str) -> list[dict[str, Any
             # Why a capability failed, so a scored record says more than "failed".
             "error_detail",
             "behavior_signature",
+            "trigger_status", "effective_parameters_digest", "formula_status",
         }
     )
     required = (
@@ -4549,7 +4550,7 @@ def _attempt_trace_entry(
                 "dsh_tool_event_id",
                 "dsh_tool_output_digest",
             "call_id", "parameters", "used_as_evidence", "tool_predicted", "elapsed_ms",
-            "error_detail",
+            "error_detail", "formula_status",
             )
             if name in selected
         }

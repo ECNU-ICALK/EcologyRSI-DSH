@@ -529,6 +529,7 @@ class FormalTrajectoryTests(unittest.TestCase):
         )
         state = SimpleNamespace(
             run=SimpleNamespace(run_id="run:bounded-local"),
+            proposal=lambda _id: SimpleNamespace(metadata={}),
             task_manifest=SimpleNamespace(
                 metadata={
                     "optimization_schedule": OptimizationSchedule.default().to_dict(),
@@ -540,6 +541,7 @@ class FormalTrajectoryTests(unittest.TestCase):
         )
         candidate = SimpleNamespace(
             candidate_id="candidate:bounded-local",
+            proposal_id="proposal:bounded-local",
             generation=0,
         )
         batch = SimpleNamespace(batch_index=0)
@@ -1313,6 +1315,7 @@ class PairedFormalTrajectoryTests(unittest.TestCase):
                 "episode_id": "episode:paired-formal",
                 "optimization_protocol": self.schedule.protocol,
                 "optimization_schedule": self.schedule.to_dict(),
+                "fitness_profile": {"expected_targets": ["air_temperature"], "expected_horizons": [1]},
                 "prediction_cells_per_origin": 1,
             },
         )

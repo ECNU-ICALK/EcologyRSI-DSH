@@ -140,6 +140,9 @@ class CellNoninferiorityGateTests(unittest.TestCase):
             self.assertGreater(cell["d"], 0.0)
             self.assertLessEqual(cell["d"], cell["hard_cap_value"])
             self.assertLess(cell["d_lcb"], 0.0)
+            # This screen admits uncertainty around zero; it is not proof that
+            # an upper confidence bound satisfies a non-inferiority margin.
+            self.assertGreater(cell["d_ucb"], 0.0)
             self.assertEqual(cell["admitted_by"], ADMITTED_WITHIN_UNCERTAINTY)
             self.assertFalse(cell["legacy_no_regression_pass"])
         audit = assessment.audit

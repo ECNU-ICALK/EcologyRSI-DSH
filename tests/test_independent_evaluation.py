@@ -12,6 +12,8 @@ from ecologyrsi_dsh.core.ledger import ConcurrentRunMutationError, EventLedger
 from ecologyrsi_dsh.core.models import CandidateStatus, RunStatus, digest
 from ecologyrsi_dsh.data.greenhouse import CanonicalEpisode, CanonicalSeries, feature_specs
 from ecologyrsi_dsh.data.registry import DatasetRegistry
+from ecologyrsi_dsh.evaluators.fitness import FitnessProfile
+from ecologyrsi_dsh.evaluators.formal_evidence import certification_policy
 from tests import test_artifact_revision_identity as identity_fixture
 
 
@@ -26,7 +28,8 @@ class IndependentJobTests(unittest.TestCase):
                                 selection_incumbent_id=f.candidate.candidate_id)
         f.reducer.task = replace(f.reducer.task, visible_datasets=("agc_cucumber_2018",),
             metadata={**f.reducer.task.metadata, "episode_id": "episode:identity",
-                      "data_protocol_digest": "a" * 64, "sample_agent_mode": "dsh_native_agent"})
+                      "data_protocol_digest": "a" * 64, "sample_agent_mode": "dsh_native_agent",
+                      "fitness_profile": FitnessProfile().to_dict(), "fitness_profile_digest": FitnessProfile().profile_digest})
         self.state_patch = patch.object(f.director, "state", side_effect=f._state)
         self.state_patch.start()
         self.addCleanup(self.state_patch.stop)
@@ -175,3 +178,47 @@ class FormalDatasetViewTests(unittest.TestCase):
                 exposures.seal_formal_stage(token, outcome="inconclusive")
                 with self.assertRaises(PermissionError):
                     datasets.formal_view(dataset_id, token, exposures)
+
+
+class IndependentCertificationIntegrationTests(unittest.TestCase):
+    def test_service_requires_real_certificate_from_each_replica(self):
+        from ecologyrsi_dsh.evaluators.epoch_cohorts import PlannedOrigin
+        from ecologyrsi_dsh.core.models import Proposal, TaskManifest
+        from tests.test_formal_evidence import scored_evaluation
+
+        profile = FitnessProfile()
+        task = TaskManifest("independent", "frozen point certification", "greenhouse", ("agc_cucumber_2018",),
+                            metadata={"fitness_profile": profile.to_dict(), "fitness_profile_digest": profile.profile_digest})
+        candidate = SimpleNamespace(candidate_id="candidate:fixed", generation=0)
+        artifact = SimpleNamespace(digest="a" * 64, candidate_revision_id="revision:fixed", model_id="model:fixed",
+                                   learned_parameters={"agent_policy": {"experience": {"rows": []}}})
+        state = SimpleNamespace(task_manifest=task, candidate=lambda _: candidate, artifact_for=lambda _: artifact)
+        origins = tuple(PlannedOrigin(digest(i), task.dataset, "episode", i, (i // 6) * 24 + i % 6,
+                                      (i // 6) * 24 + i % 6 + 24, "d" * 64) for i in range(84))
+        proposal = Proposal("proposal:fixed", "run:fixed", 0, "frozen proposal", metadata={"genome_digest": "b" * 64})
+        token = SimpleNamespace(stage="validation", candidate_id=candidate.candidate_id,
+                                artifact_digest=artifact.digest, genome_digest="b" * 64)
+        plan = {"inference_replicas": 2, "certification_policy": certification_policy(profile),
+                "baseline_profile_digest": "b" * 64}
+        good = scored_evaluation()
+        # Both old evaluation.passed values are True; only computed formal
+        # statistics identify the second independent inference as a zero gain.
+        bad = scored_evaluation([1.] * 14)
+        evaluations = [replace(e, metrics={**dict(e.metrics), "prediction_owner": "sample_agent"})
+                       for e in (good, bad)]
+        ledger = EventLedger()
+        self.addCleanup(ledger.close)
+        server = SimpleNamespace(director=SimpleNamespace(state=lambda _: state), ledger=ledger,
+            datasets=SimpleNamespace(formal_view=Mock(return_value=object())),
+            evaluators=SimpleNamespace(_resolve_execution_plan=Mock(return_value=None),
+                _evaluate_greenhouse_ridge=Mock(side_effect=[SimpleNamespace(evaluation=e) for e in evaluations])))
+        service = IndependentEvaluationService(server)
+        self.addCleanup(service.close)
+        with patch("ecologyrsi_dsh.application.formal_trajectory._revision_evaluation_inputs", return_value=(None, proposal, None)), \
+             patch("ecologyrsi_dsh.application.independent_evaluation._eligible_origins", return_value=(origins, ())):
+            result = service._evaluate("run:fixed", token, plan)
+        self.assertEqual(result["outcome"], "failed")
+        self.assertFalse(result["formal_confirmation"])
+        self.assertTrue(all(replica["passed"] for replica in result["replicas"]))
+        self.assertEqual([replica["certification"]["outcome"] for replica in result["replicas"]], ["passed", "failed"])
+        self.assertFalse(result["feedback_to_evolution"])

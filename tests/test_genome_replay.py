@@ -911,6 +911,7 @@ class GenomeReplayTests(unittest.TestCase):
         v3_state.candidates = real_state.candidates
         v3_state.promotions = real_state.promotions
         v3_state.events = real_state.events
+        v3_state.formal_batch_comparisons = real_state.formal_batch_comparisons
         v3_state.generation_comparisons = (comparison,)
         v3_state.analysis_for = lambda generation: analysis if generation == 0 else None
         v3_state.comparison_for = (

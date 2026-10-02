@@ -158,11 +158,38 @@ def exploration_archive(state, generation: int) -> dict:
                  "training_scope_digest": batch.scope.scope_key,
                  "training_score": batch.score, "behavior_signature": behavior["signature"],
                  "qualification": "executable_training_example_not_certified"}
+        paired = next((item for item in reversed(getattr(state, "formal_batch_comparisons", ()))
+                       if item.candidate_id == candidate_id
+                       and item.challenger_revision_id == revision.revision_id
+                       and getattr(item.decision, "value", item.decision) != "initial_champion"
+                       and item.cohort_digest == getattr(batch.scope, "cohort_digest", None)), None)
+        effect_receipt = summary.get("mutation_effect_receipt")
+        observed = (isinstance(effect_receipt, Mapping)
+                    and effect_receipt.get("status") in {"passed", "failed", "inconclusive", "not_exercised"}
+                    and effect_receipt.get("receipt_digest") == digest({key: value for key, value in effect_receipt.items() if key != "receipt_digest"}))
+        entry.update(
+            score_vs_baseline=batch.score,
+            effect_evidence={"executed_revision": True,
+                "behavior_change_verified": False,
+                "execution_observation_status": effect_receipt["status"] if observed else None,
+                "execution_observation_receipt": effect_receipt["receipt_digest"] if observed else None,
+                "paired_comparison_id": getattr(paired, "comparison_id", None),
+                "delta_vs_parent": getattr(paired, "score_delta", None),
+                "paired_decision": getattr(getattr(paired, "decision", None), "value", getattr(paired, "decision", None)),
+                "retained_revision_id": getattr(paired, "champion_after_revision_id", None),
+                "status": "paired_training_evidence" if paired else "execution_only_effect_unverified"},
+            applicability_conditions={
+                "dataset_digest": metrics.get("dataset_digest"),
+                "split_manifest_digest": metrics.get("split_manifest_digest_sha256"),
+                "cohort_digest": getattr(batch.scope, "cohort_digest", None),
+                "evaluator_digest": getattr(batch, "evaluator_digest", None),
+                "candidate_revision_id": revision.revision_id,
+                "reuse_requires_new_child_and_fresh_evaluation": True})
         if len(canonical_json([*entries, entry]).encode("utf-8")) > 6000:
             continue
         entries.append(entry)
         counts[family] += 1
-    return {"schema_version": "ecologyrsi-dsh.exploration-archive/1", "entries": entries,
+    return {"schema_version": "ecologyrsi-dsh.exploration-archive/2", "entries": entries,
             "reuse": "Revise or recombine a component in a new candidate; re-evaluate before adoption.",
             "selection": "latest_distinct_per_family_no_cross_cohort_score_ranking",
             "source": "prior_generation_formal_training_only", "max_entries_per_family": 2}

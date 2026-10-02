@@ -12,6 +12,8 @@ from ..core.trajectory import EvaluationPhase, EvaluationScope
 from ..data.adapters import dataset_adapter
 from ..evaluators.epoch_cohorts import PlannedCohort, _eligible_origins
 from ..evaluators.greenhouse_prediction import origin_history_alignment_hours
+from ..evaluators.fitness import FitnessProfile
+from ..evaluators.formal_evidence import assess_independent_replica, certification_policy
 
 
 class IndependentEvaluationService:
@@ -114,8 +116,13 @@ class IndependentEvaluationService:
                 if artifact.candidate_revision_id is None:
                     raise ValueError("独立评测要求明确的候选版本和模型产物绑定")
                 adapter = dataset_adapter(task.dataset)
-                plan = {"schema_version": "ecologyrsi-dsh.independent-analysis-plan/1", "stage": stage,
+                profile = FitnessProfile.from_task(task)
+                selected_evaluation = state.evaluation_for(candidate_id)
+                plan = {"schema_version": "ecologyrsi-dsh.independent-analysis-plan/2", "stage": stage,
                         "dataset_task": adapter.contract(), "partition_digest": protocol.partition_digests[stage],
+                        "certification_policy": certification_policy(profile),
+                        "baseline_profile_digest": (selected_evaluation.metrics.get("baseline_profile_digest")
+                                                    if selected_evaluation is not None else None),
                         "sampling": "all_eligible_origins_in_time_order", "inference_replicas": 2,
                         "fit_policy": "original_calibration_fit_only_verify_frozen_coefficients",
                         "candidate_updates": False, "raw_results_exposed": False,
@@ -217,16 +224,27 @@ class IndependentEvaluationService:
             metrics = bundle.evaluation.metrics
             if metrics.get("prediction_owner") != "sample_agent":
                 raise ValueError("independent evaluation did not execute the frozen sample Agent")
+            certification = assess_independent_replica(
+                bundle.evaluation, FitnessProfile.from_task(task),
+                policy=plan["certification_policy"],
+                baseline_profile_digest=plan["baseline_profile_digest"],
+                frozen_baseline_uq_artifact=thaw_json(artifact.learned_parameters.get("baseline_uq_artifact", {})),
+            )
             replicas.append({"replica": replica + 1, "score": bundle.evaluation.score,
                 "passed": bundle.evaluation.passed,
+                "certification": certification,
                 "coverage": metrics["sample_execution_coverage"],
                 "targets": [{key: row.get(key) for key in ("target", "unit", "horizon_hours", "n",
                     "mae", "rmse", "bias", "baseline_rmse", "skill_score", "sample_execution_coverage",
                     "constraint_violations")} for row in metrics["targets"]],
                 "prediction_trace_digest": metrics.get("sample_execution_trace_digest")})
         coverage_ok = all(r["coverage"] >= adapter.selection_minimum_coverage for r in replicas)
-        outcome = "inconclusive" if not coverage_ok else "passed" if all(r["passed"] for r in replicas) else "failed"
+        certificates = [row["certification"] for row in replicas]
+        outcome = ("inconclusive" if not coverage_ok or any(c["outcome"] == "inconclusive" for c in certificates)
+                   else "passed" if all(c["outcome"] == "passed" for c in certificates) else "failed")
         return {"schema_version": "ecologyrsi-dsh.independent-assessment/1", "outcome": outcome,
+                "formal_confirmation": outcome == "passed",
+                "certification_scope": plan["certification_policy"]["claim_scope"],
                 "stage": token.stage, "artifact_digest": token.artifact_digest,
                 "genome_digest": token.genome_digest, "analysis_plan": plan,
                 "origin_count": cohort.origin_count, "replicas": replicas,

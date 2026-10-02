@@ -8,6 +8,7 @@ from __future__ import annotations
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
 from pathlib import Path
 from ..evolution.agent_policy import summarize_agent_tools, rebind_agent_policy
+from ..evolution.effect_contracts import observe_edit_effects, verify_runtime_effects
 from ..core.agent_prediction import successful_agent_provenance_passes
 from ..core.prediction_policy import prediction_usage
 import math
@@ -1516,6 +1517,17 @@ class EvaluationPipeline:
         scope = EvaluationScope.from_dict(raw)
         return {"evaluation_scope": scope.to_dict()}
 
+    @staticmethod
+    def _observed_edit_effects(task, proposal, records):
+        raw_scope = task.metadata.get("_evaluation_scope")
+        phase = raw_scope.get("phase", "training_feedback") if isinstance(raw_scope, Mapping) else "training_feedback"
+        return observe_edit_effects(
+            proposal.metadata, records,
+            scope_digest=(EvaluationScope.from_dict(raw_scope).scope_key if isinstance(raw_scope, Mapping)
+                          else digest({"task": task.digest, "proposal": proposal.proposal_id})),
+            phase=phase, parameters=proposal.changes,
+        )
+
 
     def evaluate(
         self,
@@ -1640,6 +1652,14 @@ class EvaluationPipeline:
             proposal,
             resolved_algorithm_spec,
         )
+        effect_resolution = proposal.metadata.get("effect_resolution", proposal.metadata.get("mutation_effect_resolution"))
+        if isinstance(effect_resolution, Mapping):
+            base_policy = SampleExecutionPolicy.from_mapping(task.metadata.get("sample_execution_policy"))
+            runtime_resolution = verify_runtime_effects(effect_resolution, {
+                "sample_max_attempts_floor": max(base_policy.max_attempts, execution_plan.sample_max_attempts),
+                "remote_critic_policy": task.metadata.get("sample_remote_critic_policy"),
+            })
+            proposal = replace(proposal, metadata={**dict(proposal.metadata), "effect_resolution": runtime_resolution})
         if evaluator_id == TOY_EVALUATOR_ID:
             bundle = self._evaluate_toy(
                 task,
@@ -2015,6 +2035,7 @@ class EvaluationPipeline:
             result_callback=on_sample_results,
             checkpoint_callback=on_sample_checkpoint,
         )
+        sample_records = list(sample_batch.records)
         scoring_rows = list(sample_batch.scoring_rows)
         evaluation_index_rows = [
             _feedback_sample_identity(row) for row in scoring_rows
@@ -2072,6 +2093,9 @@ class EvaluationPipeline:
             and successful_agent_provenance_passes(sample_batch.summary)
         )
         sample_execution_summary = dict(sample_batch.summary)
+        effect_receipt = self._observed_edit_effects(task, proposal, sample_records)
+        if effect_receipt is not None:
+            sample_execution_summary["mutation_effect_receipt"] = effect_receipt
         from ..evolution.diversity import enabled as diversity_enabled, summarize_behavior
         if diversity_enabled(task.metadata):
             sample_execution_summary["observed_behavior"] = summarize_behavior(sample_records, scoring_rows)
@@ -2639,6 +2663,9 @@ class EvaluationPipeline:
             and successful_agent_provenance_passes(sample_batch.summary)
         )
         sample_execution_summary = dict(sample_batch.summary)
+        effect_receipt = self._observed_edit_effects(task, proposal, sample_records)
+        if effect_receipt is not None:
+            sample_execution_summary["mutation_effect_receipt"] = effect_receipt
         sample_execution_summary["tool_performance"] = summarize_tool_performance(
             sample_records,
             scoring_rows,
@@ -3409,6 +3436,9 @@ class EvaluationPipeline:
             )
 
         sample_execution_summary = dict(sample_batch.summary)
+        effect_receipt = self._observed_edit_effects(task, proposal, sample_records)
+        if effect_receipt is not None:
+            sample_execution_summary["mutation_effect_receipt"] = effect_receipt
         sample_execution_summary["tool_performance"] = summarize_tool_performance(
             sample_records,
             scored_feedback_rows,

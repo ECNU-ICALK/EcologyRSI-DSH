@@ -1,38 +1,16 @@
-"""Per-cell statistical non-inferiority, replacing the per-cell 1e-12 knife edge.
+"""Uncertainty-aware per-cell regression screening with a fixed point cap.
 
-The gate this module implements answers a different question than the one it
-replaces. ``all_targets_no_regression`` asked "is every cell's normalized RMSE
-no worse than the baseline's, to within 1e-12" — a deterministic threshold on a
-quantity that is itself a noisy estimate from a few dozen paired origins. Paired
-with the overall requirement ``objective_score > 1e-9``, that made the feasible
-set empty in practice: a candidate identical to the baseline scores exactly zero
-skill and fails the overall gate, while any candidate that actually differs
-perturbs at least one of the nine cells upward by more than 1e-12 and fails the
-per-cell gate. Nothing improved because nothing *could*.
+The persisted ``per_cell_noninferiority@1`` identifier names a historical
+screening contract: ``d_lcb <= 0`` and ``d <= hard_cap_ratio * baseline_nrmse``,
+where d is candidate minus baseline normalized RMSE. This means no detected
+credible regression, not a confidence-bound demonstration of non-inferiority.
+A wide interval may admit a small positive point difference; the existing
+sample-capacity prerequisite and 3% point cap remain mandatory. No threshold
+is relaxed here. Independent point certification adds its own frozen evidence
+requirements, and predictive-interval certification needs real calibrated UQ.
 
-What replaces it is a two-part test, and both parts have to hold:
-
-1. ``d_lcb(cell) <= 0`` — the regression is only called a regression when it is
-   credible at the declared confidence level. Noisy cells get a wider tolerance
-   automatically; adding paired blocks tightens it automatically. The boundary
-   is derived from the data, not chosen by hand.
-2. ``d(cell) <= hard_cap_ratio * nRMSE_base(cell)`` — an absolute ceiling, so a
-   genuinely large regression can never hide behind a wide interval. The
-   2.25x blow-up at ``air_temperature@6h`` that sank the last run is refused by
-   this clause no matter how few blocks were collected.
-
-Two rejected alternatives, for the record. ``d_ucb <= 0`` demands that every
-cell be *significantly better*, which is stricter than the 1e-12 rule and would
-deepen the deadlock. A fixed additive margin cannot adapt to each cell's noise
-scale and is exactly the "quietly lowered the bar" move this design is meant to
-rule out.
-
-The statistic costs no new evaluation rows. ``build_promotion_block_evidence``
-already writes per-block per-cell ``succeeded`` counts and normalized squared
-error sums, and both are additive over blocks, so a paired interval is a
-resampling of numbers the evaluator has always produced. Because
-``PROMOTION_BLOCK_EVIDENCE_VERSION`` does not move, this gate can also be
-back-computed against archived runs to ask what it would have decided then.
+Block sufficient statistics are resampled together across cells; inference
+replicas and repeated evaluations are not additional independent time blocks.
 """
 
 from __future__ import annotations

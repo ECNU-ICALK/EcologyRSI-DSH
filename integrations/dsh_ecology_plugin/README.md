@@ -1,116 +1,94 @@
-# EcologyRSI DSH 宿主插件
+# EcologyRSI DSH 原生插件
 
-当前插件版本 `0.8.4`，适配 DeepSeek Harness `0.2.0-rc.2`（2026-10-01 核对 npm `latest`）。
+**版本 0.9.0，固定适配 DeepSeek Harness 0.2.0-rc.2。** 本插件属于本地研究交付，尚未签名或发布到官方插件市场。完整安装、数据准备、实验协议与验收状态以[仓库 README](../../README.md)为准；此文说明宿主集成合同。
 
-该插件把现有生态模型进化工作台接入 DeepSeek Harness Web Profile：
+## 组件与请求链路
 
-- 在 DSH 侧栏注册“生态模型进化”入口；
-- 在 DSH 覆盖层中加载工作台，不离开 DSH；
-- 由 DSH 在 `/plugins/ecology/evolution/` 托管静态资源；
-- 由 DSH 将 `/api/ecology-evolution/*` 同源代理到本机 Python 服务；
-- 打开工作台时通过 DSH Session Remote 的 `session/modelCatalog` 读取当前已登记
-  且可用的模型目录（宿主未安装该 Remote 命名空间时回退到同源 `/api/session/modelCatalog`
-  路由），只把 provider、模型 ID、显示名和职责元数据传给 iframe，不读取或转发密钥。
+- 在 Harness 侧栏注册“生态模型进化”，以覆盖层加载中文工作台。
+- 在 `/plugins/ecology/evolution/` 托管静态网页，将 `/api/ecology-evolution/*` 同源代理至 Python sidecar 的 `/api/*`。
+- 通过 Session Remote 的 `session/modelCatalog` 读取脱敏模型目录；缺少该 Remote 命名空间时使用同源 `/api/session/modelCatalog`。浏览器目录不能增加服务端未登记的可执行模型。
+- 由 Harness Agent Session 执行研究、提案、预测、条件评审与反思；Python Host 负责数值工具、能力编译、科学门禁和追加式事件账本。
 
-浏览器只需访问 DSH 端口。Python 服务仍在回环地址运行，但不再作为用户入口。
-当前交付只启动两个进程：DSH Web Profile 监听 `8848`，EcologyRSI Python
-sidecar 监听 `127.0.0.1:8777`；无需再启动独立前端服务或其他项目端口。
+默认只有两个服务：Harness `127.0.0.1:8848` 与 sidecar `127.0.0.1:8777`。浏览器访问 Harness，不需要单独启动前端开发服务。
 
-自进化创建的角色会话及其子会话仅保留在本地 DSH 日志中，不进入 Workspaces /
-Ungrouped 会话列表。安装器同时挂载独立的 `session-visibility` 插件，按角色会话 ID、
-生态 preset 和父子关系识别已有及新建记录，不根据工作目录或标题隐藏普通聊天。
-识别结果缓存在 DSH session 根目录的 `.ecology-workspace-hidden.json` 中，后续列表
-请求直接跳过已识别的日志目录及摘要构建。缓存缺失时首次请求会重建索引；日志不移动、
-不删除，按 ID 读取、恢复、计费和自进化工作台继续使用原始记录。
+安装器同时挂载 `session-visibility` 插件，按角色会话、preset 和父子关系隐藏进化会话，避免其混入普通 Workspaces 列表。识别缓存位于 Harness session 根目录的 `.ecology-workspace-hidden.json`；原始日志保留，按 ID 查询、恢复和用量核对不受影响。普通聊天不按标题或工作目录隐藏。
 
-研究、候选提议、样本规划/批评和代际评审均由 DSH Agent Session、受限 preset
-与直接、一次性的结构化子 Agent 执行。Python sidecar 只保留科学数值工具、不可变基因组编译
-和追加式事件账本。上下文压缩与角色生命周期由 DSH 管理；不设跨调用的逐样本
-Token 总预算；sample Planner/Repair 通过 `agentOptions.maxTokens` 限制最多输出
-4,096 tokens，Critic 最多输出 2,048 tokens。
-
-Generation Judge preset 内部使用两个职责隔离的 Skill：`candidate-scientific-review`
-只审查单个候选的冻结科学证据，`batch-scientific-reflection` 只读取 Host 生成的
-rank→candidate→direction 聚合映射并提出建议；后者不能替代下一代 Host 预检，也不拥有选择或晋级权限。
-
-当前六个活动角色 preset 都暴露同一个 `web_search`，安装包只交付这六个当前 ID。
-Agent 在必需 Skill 之后、阶段终端工具之前按需提交查询，不指定 provider；工具默认使用
-DSH `ctx.web.search`，技术失败或定量证据不足时由 Python sidecar 自动切到 OpenAlex
-元数据检索。结果和路由进入追加式事件账本并可重放。插件不挂载 `dsh-tool-web`、
-不开放 `web_fetch`，动态结果也不能替代冻结证据、登记预测工具或科学门禁。
-
-安装已打包的运行时：
+## 安装与模型发现
 
 ```bash
+npm install --global @deepseek-ai/dsh@0.2.0-rc.2
+export DSH_HOME="$PWD/.runtime/dsh-home"
 ecologyrsi-dsh install-dsh-runtime --profile web
+
+# Python Host 不会仅凭 DSH_HOME 切换模型配置路径，必须同时设置：
+export ECOLOGYRSI_DSH_SETTINGS_FILE="$DSH_HOME/settings.yaml"
+export ECOLOGYRSI_DSH_CREDENTIALS_FILE="$DSH_HOME/.credentials.yaml"
 ```
 
-安装器使用 `dsh plugin --profile web add --save-exact file:<tgz>`，安装六个当前
-不可变 preset ID，并在受管 `cordis.patch.yml` 区块声明六个 `@deepseek-ai/dsh-agent-preset`。
-新版 Harness 不再扫描 `.agent-presets`；声明从已安装插件内加载组合与 Skill，目录副本仅保留安装完整性检查。
-升级前应结束当前实验；旧运行冻结的 preset ID 不会自动迁移为新身份。新运行使用 `@2` 种子模板，历史 `@1` 模板保持原始内容。
+安装器调用 `dsh plugin --profile web add --save-exact file:<tgz>`，并在受管 `cordis.patch.yml` 区块声明六个 `@deepseek-ai/dsh-agent-preset`。新版 Harness 从已安装插件加载组合和 Skill；目录副本用于安装完整性检查。活动 preset 的唯一清单是 [`preset-manifest.json`](presets/preset-manifest.json)：
+
+| 角色 | 不可变 preset |
+|---|---|
+| 协调 | `ecology-coordinator-v6` |
+| 研究 | `ecology-researcher-v15` |
+| 提案 | `ecology-candidate-proposer-v6` |
+| 样本预测 | `ecology-sample-planner-v12` |
+| 条件样本评审 | `ecology-sample-critic-v6` |
+| 候选评审与批次反思 | `ecology-generation-judge-v10` |
+
+未提供 `ECOLOGYRSI_DSH_MODELS_JSON` 时，Host 从指定的 settings 与 credentials 文件发现模型；默认路径分别为 `~/.dsh/settings.yaml` 和 `~/.dsh/.credentials.yaml`。凭据文件须限制为当前用户可读写（`0600`），密钥也可由 provider 的 `apiKeyEnv` 引用服务端环境变量。可用 `ECOLOGYRSI_DSH_DISCOVERY=0` 关闭自动发现。
+
+显式 `ECOLOGYRSI_DSH_MODELS_JSON` 是服务端 JSON 模型目录，不应嵌入前端或提交 Git。模型 ID 推荐使用 `provider/model`，且须有对应职责、可执行路由和凭据。策略与评审连接 ID 必须不同；不同 ID 本身并不证明两个底层模型具有统计独立性。
+
+生产连接应使用 HTTPS。确需在受信任环境连接非回环 HTTP provider 时，Host 支持精确、区分大小写的逗号分隔白名单 `ECOLOGYRSI_DSH_ALLOW_INSECURE_HTTP_PROVIDERS`，不展开通配符。更改路由或模型能力后先收尾旧运行，再重启服务并重新预检，不能在原冻结运行中热换配置。
+
+## 认证与权限边界
+
+| 环境变量 | 用途 |
+|---|---|
+| `ECOLOGYRSI_DSH_RUNTIME_URL` | Python 调用原生运行时的 Harness 地址，默认部署使用 `http://127.0.0.1:8848` |
+| `ECOLOGYRSI_DSH_RUNTIME_TOKEN` | Python → Harness 原生阶段认证 |
+| `ECOLOGYRSI_SIDECAR_TOOL_TOKEN` | Harness → Python 登记工具认证 |
+| `ECOLOGYRSI_SERVICE_TOKEN` | 可选的进程级 HTTP API 认证，非回环 Host 监听必须配置 |
+
+前两类调用令牌须让两个进程继承相同的对应值；生成和启动示例见根 README。API 服务令牌配置后，代理在服务端覆盖请求的 `Authorization`，不把令牌写入静态资源、URL 或浏览器存储。
+
+进程级服务令牌可访问整个 EcologyRSI API，不是按用户划分的 scope。前端 capability 集合仅控制界面入口；多用户服务需要额外的可信身份与权限层。插件后端代理仅接受回环 origin。
+
+## 阶段与预算
+
+创建真实运行前执行工具和结构化结果预检，预检会产生调用；目录“可用”不等于真实模型已经通过。预检通过后才冻结运行身份。工具调用错误可以在有界范围内纠正，但失败结果、缺少必填字段或伪造输出不能成为成功回执。
+
+| 阶段限制 | 默认值 |
+|---|---:|
+| 普通结构化阶段 `structuredStageTimeoutMs` | 600,000 ms |
+| 研究 `researchStageTimeoutMs` | 1,800,000 ms |
+| 样本规划 `samplePlannerStageTimeoutMs` | 1,800,000 ms |
+| 条件样本评审 `sampleCriticStageTimeoutMs` | 600,000 ms |
+| Planner / Critic 最大步骤 | 10 / 4 |
+| Planner / Critic 单次输出额度 | 16,384 / 8,192 tokens |
+| Planner / Critic 累计输出回执中止阈值 | 32,768 / 16,384 tokens |
+
+阶段截止时间包含排队、子调用、重试及持久化，不因重试重置。累计回执阈值用于中止失控阶段，不是精确费用硬上限。每次 Planner 尝试最多调用两个登记预测工具，最终提交三目标 × 三时距的九个预测值。
+
+候选并发默认 4，样本并发默认 64、可配置 1–128；实际准入受自适应并发、冷却及 provider 全局上限共同约束。同 provider 的原生阶段物理在飞上限为 128。HTTP 429/503 等有界恢复与科学性能拒绝分别记录。
+
+0.9.0 默认使用快速模式，另有显式证据引导试点和正式对照模式。预测预算由创建时的冻结 schedule 计算，不能用某一模式的示例总量解释全部运行。各模式流程和容量见[实验模式与预算](../../README.md#实验模式与预算)。
+
+## 研究与评审
+
+六个活动角色均可使用 `web_search`，在必需 Skill 之后、阶段终端工具之前按需检索。默认使用 Harness `ctx.web.search`；技术失败或定量证据不足时，sidecar 可回退到 OpenAlex 元数据检索。结果与路由记入账本，外部内容只能作为研究线索，不能覆盖冻结规则或替代登记工具。
+
+Judge preset 包含职责隔离的 `candidate-scientific-review` 与 `batch-scientific-reflection`：前者审查单候选冻结证据，后者消费 Host 生成的排名与候选映射。0.9.0 评审还绑定搜索或认证用途；模型建议不拥有选择、晋级或放宽门槛的权限。
+
+## 升级与验收
+
+升级前暂停相关运行，等待活动子任务收尾，备份账本与本地配置。安装新版本后用独立运行目录创建实验；不可变 preset 不能原地改写，旧运行不自动迁移到新身份。不要把缓存、凭据、账本或原始会话加入插件归档。
 
 ```bash
-npm install -g @deepseek-ai/dsh@0.2.0-rc.2
-ecologyrsi-dsh install-dsh-runtime --profile web
-# 源码目录内：隔离启动真实 Harness，用本地模型替身检查六类角色、结构化输出和恢复
-node scripts/verify_dsh_harness.mjs
+# 从仓库根目录执行；隔离 Harness + 本地模型替身，不调用远程模型。
+DSH_BIN="$(command -v dsh)" node scripts/verify_dsh_harness.mjs
+make test-integration PYTHON="$PWD/.venv/bin/python"
 ```
 
-验收脚本可用 `DSH_BIN` 指定待验证的 CLI，不使用用户 API key，也不调用远程模型。
-
-新建严格运行先让 4 个候选共享 64-origin 初筛，再让 Top 2 各执行一个
-500-origin adaptive epoch（默认 `10 × 50`，每批最多接受 2 处局部改动）；最后把
-两个最终 revision 与 incumbent 放入同一 169-origin holdout。单轮合计 1,763
-candidate-origins；默认 9 单元温室任务对应 15,867 个评分单元。候选并发默认 4；
-逐样本并发默认 64、可配置 1–128。候选并发允许时，两条 finalist lane 会在同一
-调度轮各推进一个 50-origin batch，但共同使用同一个 run 级 64 请求 admission；
-同一 provider 的 DSH stage 全局物理在飞上限为 128，观测到拥塞或模型失败后会自适应降载。
-
-Node 宿主插件的 API 代理支持以下配置：
-
-```yaml
-config:
-  staticRoot: /absolute/path/to/EcologyRSI-DSH/plugins/ecology_evolution
-  backendOrigin: http://127.0.0.1:8777
-  # 普通结构化阶段 10 分钟；长上下文调研阶段默认 30 分钟
-  structuredStageTimeoutMs: 600000
-  researchStageTimeoutMs: 1800000
-  # 预测规划含多次工具比较与长推理，单独给予 30 分钟
-  samplePlannerStageTimeoutMs: 1800000
-  # 评分前 sample critic 独立上限 10 分钟
-  sampleCriticStageTimeoutMs: 600000
-  # 可选：也可以省略此项，直接使用 Node 进程环境变量
-  serviceToken: replace-with-runtime-token
-```
-
-`researchStageTimeoutMs` 只用于搜索规划和证据综合等 researcher 阶段，
-避免大上下文、慢推理模型被普通 10 分钟阶段上限误伤。
-`sampleCriticStageTimeoutMs` 只用于评分前 `sample.critic`；默认 10 分钟，以覆盖高并发下正常的长响应，同时仍限制无效结构化输出后的异常长生成；
-`samplePlannerStageTimeoutMs` 只用于 `sample.plan`，默认 30 分钟：实跑中仍有生成活动的样本曾在 10 分钟时被中止，累计输出仅约 6900 Token。此时间包含准入排队、所有子调用、重试及持久化，不因重试而重置；达到截止时间仍中止并隔离晚到结果。输出额度、模型、预测工具次数和科学门槛保持不变。
-候选提案、评分和反思使用 `structuredStageTimeoutMs`。
-
-`serviceToken` 也可以省略，插件会读取 Node 进程的
-`ECOLOGYRSI_SERVICE_TOKEN`。配置后，代理在服务端覆盖 iframe 请求中的
-`Authorization`，因此令牌不会出现在 URL、静态 JavaScript 或浏览器存储中。
-回环后端未设置服务令牌时保持免令牌兼容；非回环监听仍必须在 Python 服务端设置
-同一个 `ECOLOGYRSI_SERVICE_TOKEN`。
-
-策略模型和独立评审模型两个下拉框使用同一份宿主模型目录。浏览器再与 Python
-服务端 `dsh_models` 目录按模型 ID、provider/model 或别名取交集；宿主目录不能
-新增服务端未登记的可执行模型。服务端仍要求每个远程模型具备安全可执行路由、对应职责和服务端凭据；
-工作台不再要求手工连接预验证，连通性与 JSON 响应契约在真实提案/评审请求中检查。若未提供显式
-`ECOLOGYRSI_DSH_MODELS_JSON`，后端会从 `~/.dsh/settings.yaml` 与权限为 `0600` 的
-`~/.dsh/.credentials.yaml` 自动读取同一份 DSH 目录；可用
-`ECOLOGYRSI_DSH_DISCOVERY=0` 关闭，非回环 HTTP 需显式设置
-精确 provider 白名单，例如
-`ECOLOGYRSI_DSH_ALLOW_INSECURE_HTTP_PROVIDERS=newapi`。该名单使用逗号分隔、
-区分大小写且不展开通配符。旧 `ECOLOGYRSI_DSH_ALLOW_INSECURE_HTTP=1` 仍兼容，
-但会放行所有自动发现的非回环 HTTP provider，不推荐使用。
-
-`ECOLOGYRSI_SERVICE_TOKEN` 是进程级服务令牌，通过后可访问全部 EcologyRSI API。DSH 上下文中的 capability 列表只用于前端隐藏或禁用操作，不是服务端的用户级 scope 校验；多用户部署需要在可信代理层增加 scoped token 签发与校验。
-
-Python 目录中的 `id` 推荐使用 DSH 的 `provider/model` 形式，例如
-`newapi/glm-5.2`；若保留自定义 ID，至少填写相同的 `model` 字段，前端会用宿主
-目录公布的原始模型 ID 做别名匹配。策略和评审可以指向同一个 DSH 模型，但运行请求
-仍需使用两个不同的目录 ID，以保留独立职责和评审边界。
+真实 Harness 的本地替身验收用于验证适配器、六类角色、结构化结果与恢复链路。它不等于远程模型四轮完成，也不构成预测性能提升的证据。

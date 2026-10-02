@@ -2074,7 +2074,7 @@
       revisionHtml = "<details class=\"technical-details\"><summary>查看版本编号</summary><div>" + revisionHtml + "</div></details>";
       var scoreHtml = paired
         ? "<strong>" + escapeHTML(Number.isFinite(championScore) ? "原版本 " + formatNumber(championScore, 4) : "原版本待评测") + " · " + escapeHTML(Number.isFinite(challengerScore) ? "新版本 " + formatNumber(challengerScore, 4) : "新版本待评测") + "</strong><small>" + escapeHTML(Number.isFinite(scoreDelta) ? "提高值 " + signedNumber(scoreDelta, 4) : "提高值待计算") + " · " + escapeHTML(Number.isFinite(minimumScoreDelta) ? "须超过 " + formatNumber(minimumScoreDelta, 4) : "阈值待确认") + "</small>"
-        : "<strong>得分 " + escapeHTML(Number.isFinite(score) ? formatNumber(score, 4) : "等待评测") + "</strong><small>预测完成率 " + escapeHTML(originSuccessText) + " · 评分单元覆盖率 " + escapeHTML(coverageText) + "</small>";
+        : "<strong>基线技能得分 " + escapeHTML(Number.isFinite(score) ? formatNumber(score, 4) : "等待评测") + "</strong><small>修改增益：尚无同组配对证据</small><small>预测完成率 " + escapeHTML(originSuccessText) + " · 评分单元覆盖率 " + escapeHTML(coverageText) + "</small>";
       var executionCounts = [batch.succeeded_origins != null ? "成功时点 " + formatNumber(batch.succeeded_origins) : "", batch.failed_origins != null ? "失败时点 " + formatNumber(batch.failed_origins) : "", Number(batch.fallback_scoring_cells) > 0 ? "备用评分项 " + formatNumber(batch.fallback_scoring_cells) : ""].filter(Boolean).join(" · ");
       var scientific = batch.scientific_diagnostics || {};
       if (batch.revisit && batch.revisit.justification) {
@@ -2222,7 +2222,7 @@
             failures += "；原因：" + Array.from(new Set(reasons)).map(evolutionCheckText).join("、");
           }
         }
-        return "<div class=\"generation-evidence-arm " + (arm.arm === decision.selected_arm ? "is-selected" : "") + "\"><span>" + escapeHTML(evolutionEvidenceArmLabel(arm.arm)) + "</span><strong>绝对分 " + escapeHTML(arm.absolute_score == null ? "待评测" : formatNumber(arm.absolute_score, 4)) + "</strong><small>" + escapeHTML(positiveDeltaV3 ? "同批提高值 " : "相对上一轮版本 ") + escapeHTML(evolutionEvidenceSigned(arm.holdout_delta)) + "</small><small>" + escapeHTML(failures) + "</small></div>";
+        return "<div class=\"generation-evidence-arm " + (arm.arm === decision.selected_arm ? "is-selected" : "") + "\"><span>" + escapeHTML(evolutionEvidenceArmLabel(arm.arm)) + "</span><strong>基线技能分 " + escapeHTML(arm.absolute_score == null ? "待评测" : formatNumber(arm.absolute_score, 4)) + "</strong><small>" + escapeHTML(positiveDeltaV3 ? "同组相对冠军增益 " : "同组相对冠军增益 ") + escapeHTML(evolutionEvidenceSigned(arm.holdout_delta)) + "</small><small>" + escapeHTML(failures) + "</small></div>";
       }).join("");
       return "<article class=\"generation-evidence-card\"><header><div><span>第 " + escapeHTML(formatNumber(decision.generation || 0)) + " 代</span><strong>" + escapeHTML(decisionLabel) + "</strong></div><span class=\"pill " + (!committed ? "pill-neutral" : selectedIncumbent ? "pill-blue" : "pill-green") + "\">" + escapeHTML(!committed ? positiveDeltaV3 ? "尚未写入搜索版本" : "尚未写入全局冠军" : decision.same_cohort ? "同一组比较数据" : "cohort 异常") + "</span></header><div class=\"generation-evidence-arms\">" + armHtml + "</div>"
         + (decision.replan_required ? "<p class=\"generation-evidence-replan\">连续 " + escapeHTML(formatNumber(decision.consecutive_exploration_generations || 0)) + " 代无候选通过初筛，下一代必须重新规划。</p>" : "") + "</article>";
@@ -2283,12 +2283,13 @@
     var declaredTokenBudget = sampleAgentTokenBudget;
     var nativeDshRuntime = run.dsh_runtime && run.dsh_runtime.native === true;
     var schedule = run.optimization_schedule || configuration.optimization_schedule || {};
+    var guided = schedule.schema_version === "ecologyrsi-dsh.evidence-guided-epoch-schedule/1";
     var formalOrigins = Number(schedule.formal_origin_count_per_finalist || 0);
     var batchOrigins = Number(schedule.local_batch_origin_count || 0);
-    var batchCount = formalOrigins > 0 && batchOrigins > 0 ? formalOrigins / batchOrigins : 0;
+    var batchCount = guided ? 2 : formalOrigins > 0 && batchOrigins > 0 ? formalOrigins / batchOrigins : 0;
     var holdoutOrigins = Number(schedule.selection_holdout_origin_count || 0);
     var pairedMode = String(schedule.local_evaluation_mode || "").toLowerCase() === "paired_champion_challenger";
-    var formalOriginsPerFinalist = pairedMode && batchCount > 0
+    var formalOriginsPerFinalist = guided ? 50 : pairedMode && batchCount > 0
       ? batchOrigins + 2 * Math.max(0, batchCount - 1) * batchOrigins
       : formalOrigins;
     var formalCandidateOrigins = Number(schedule.finalist_count || 2) * formalOriginsPerFinalist;
@@ -2317,7 +2318,7 @@
       ["研究执行约束", run.research_execution_policy && run.research_execution_policy.schema_version === "ecologyrsi-dsh.research-execution-policy/1" ? "紧凑研究上下文；综合单次输出上限 " + formatNumber(run.research_execution_policy.synthesis_max_output_tokens) + " tokens；相同预算耗尽请求不重试" : "沿用该运行冻结的研究契约"],
       ["每轮候选", formatNumber(run.candidates_per_generation || 1) + " 个版本"],
       ["候选并发", Number(run.candidate_concurrency) > 0 ? formatNumber(run.candidate_concurrency) + " 个候选" : "历史运行按串行执行"],
-      ["入围候选轨迹", quick ? "单主线 " + formatNumber(batchCount) + " × " + formatNumber(batchOrigins) + "；批次修订待轮末共同验证" : batchCount > 0 ? pairedMode
+      ["入围候选轨迹", guided ? "四候选＋冠军各测 10 时点；复用初筛诊断后，只做一次 25 时点父子配对" : quick ? "单主线 " + formatNumber(batchCount) + " × " + formatNumber(batchOrigins) + "；批次修订待轮末共同验证" : batchCount > 0 ? pairedMode
         ? "Top 2 各 1 个 warm-up 批次 + " + formatNumber(Math.max(0, batchCount - 1)) + " 个冠军/挑战者配对微批；两条 lane 共用 " + formatNumber(formalOrigins) + " 个 formal origin occurrences"
         : "Top 2 各 " + formatNumber(batchCount) + " × " + formatNumber(batchOrigins) + " 个预测时点；每批最多 " + formatNumber(schedule.max_local_edits_per_batch) + " 处改动"
         : "等待冻结 schedule"],
@@ -2339,7 +2340,23 @@
     ];
     node.innerHTML = values.map(function (item) {
       return "<div class=\"dataset-stat\"><span>" + escapeHTML(item[0]) + "</span><strong title=\"" + escapeHTML(item[1]) + "\">" + escapeHTML(item[1]) + "</strong></div>";
-    }).join("") + renderDiversitySummary(run) + modelContractPreflightDetails(run);
+    }).join("") + renderDiversitySummary(run) + renderEvidenceFunnel(run) + modelContractPreflightDetails(run);
+  }
+
+  function renderEvidenceFunnel(run) {
+    var funnel = run && run.evolution_funnel;
+    if (!funnel) { return ""; }
+    var labels = {structural_validity: "登记修改的结构解析覆盖", behavior_change: "受控行为差异", screening_coverage: "初筛覆盖", training_coverage: "训练覆盖", local_pair_completion: "局部配对完成", local_positive_gain: "局部点估计为正", local_acceptance: "局部门禁接受", search_adoption: "轮末更新工作版本", independent_certification: "独立认证"};
+    var rows = Object.keys(labels).map(function (key) {
+      var item = (funnel.stages || {})[key] || {};
+      var measured = item.numerator != null && item.denominator != null;
+      return "<div class=\"dataset-stat\"><span>" + escapeHTML(labels[key]) + "</span><strong>" + escapeHTML(measured ? String(item.numerator) + " / " + String(item.denominator) : "未记录可核验分母") + "</strong><small>" + escapeHTML(measured && item.denominator === 0 ? "尚未开始" : item.rate != null ? formatNumber(item.rate * 100, 1) + "%" : "不计算成功率") + "</small></div>";
+    }).join("");
+    var failures = funnel.failure_observations || {};
+    var effects = funnel.execution_effect_observations;
+    if (effects) { rows += "<div class=\"dataset-stat\"><span>执行观测回执 " + escapeHTML(String(effects.recorded)) + " 条</span><strong>通过 " + escapeHTML(String(effects.passed)) + "；失败 " + escapeHTML(String(effects.failed)) + "；不确定 " + escapeHTML(String(effects.inconclusive)) + "；未触发 " + escapeHTML(String(effects.not_exercised)) + "</strong><small>按训练回执去重；执行观测不等于受控行为差异或性能提升。登记修改的结构解析覆盖不包含生成前被拒绝的输出。</small></div>"; }
+    var reasons = [["operational", "服务/执行"], ["invalid_change", "修改无效"], ["insufficient_evidence", "证据不足"], ["performance", "性能未过门槛"], ["unclassified", "未分类"]].map(function (pair) { return pair[1] + " " + String(failures[pair[0]] || 0); }).join("；");
+    return "<div class=\"dataset-stat\"><span>证据漏斗 · 仅本运行</span><strong>已登记候选 " + escapeHTML(String(funnel.registered_candidates)) + "；预算未分配 " + escapeHTML(String(funnel.budget_unallocated_candidates)) + "</strong><small>已应用修改 " + escapeHTML(String(funnel.applied_edits)) + " 次，应用不等于收益已验证</small><small>" + escapeHTML(reasons) + "（原因记录数，可重叠，不是候选失败率）</small></div>" + rows;
   }
 
   function renderDiversitySummary(run) {

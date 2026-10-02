@@ -59,6 +59,11 @@
 
   function normalizedOptimizationSchedule(values) {
     var input = values || {};
+    if (input.experiment_mode === "evidence_guided") {
+      return {schema_version: "ecologyrsi-dsh.evidence-guided-epoch-schedule/1", screening_origin_count: 10,
+        finalist_count: 1, formal_origin_count_per_finalist: 35, local_batch_origin_count: 25,
+        max_local_edits_per_batch: 1, selection_holdout_origin_count: 50, local_evaluation_mode: "paired_champion_challenger"};
+    }
     var quick = input.experiment_mode !== "comparison";
     var formal = runParameterInteger(input.formal_origin_count, "formal_origin_count", "每个入围候选更新时点数");
     var batch = runParameterInteger(input.local_batch_origin_count, "local_batch_origin_count", "局部 batch 时点数");
@@ -75,6 +80,11 @@
       selection_holdout_origin_count: holdout,
       local_evaluation_mode: quick ? "prequential" : "paired_champion_challenger"
     };
+  }
+
+  function optimizationProtocolForSchedule(schedule) {
+    return schedule.schema_version === "ecologyrsi-dsh.evidence-guided-epoch-schedule/1" ? "evidence_guided_epoch@1"
+      : schedule.finalist_count === 1 ? "quick_adaptive_epoch@1" : "top2_adaptive_epoch@1";
   }
 
   function optimizationScheduleFromControls() {
@@ -302,7 +312,7 @@
       dataset_id: payload.dataset_id || payload.datasetId,
       episode_id: payload.episode_id || payload.episodeId,
       execution_protocol: "dsh_native_plugin_evolution@1",
-      optimization_protocol: optimizationSchedule.finalist_count === 1 ? "quick_adaptive_epoch@1" : "top2_adaptive_epoch@1",
+      optimization_protocol: optimizationProtocolForSchedule(optimizationSchedule),
       optimization_schedule: optimizationSchedule,
       strategy_model_id: payload.strategy_model_id || payload.policy_model_id,
       review_model_id: payload.review_model_id || payload.judge_model_id,

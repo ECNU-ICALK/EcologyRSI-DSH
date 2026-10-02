@@ -113,8 +113,10 @@ class FinalistReviewTests(unittest.TestCase):
             evaluation_for=lambda key: self.judgments[key], artifact_for=lambda _: SimpleNamespace())
         state.evaluations = tuple(self.judgments.values())
         services = SimpleNamespace(director=SimpleNamespace(state=lambda _: state))
-        def finish(*args):
+        def finish(*args, incumbent=None, training_effect_evidence=None):
             self.assertEqual(args[-1].candidate_id, cid)
+            self.assertIs(incumbent, self.items[-1])
+            self.assertIsNone(training_effect_evidence)
             self.judgments[cid] = completed
             state.evaluations = tuple(self.judgments.values())
         with patch("ecologyrsi_dsh.application.generation_execution._apply_candidate_judge", side_effect=finish) as judge:

@@ -82,6 +82,7 @@ from ..execution.sample_admission import (
     MAX_SAMPLE_CONCURRENCY,
 )
 from .run_projection import build_configuration
+from .evidence_projection import candidate_score_evidence, evidence_funnel
 
 _TWO_STAGE_SCREENING_ORIGINS = 64
 _HISTORICAL_PREDICTION_CELLS_PER_ORIGIN = 9
@@ -159,7 +160,7 @@ def _paired_optimization_schedule(state: Any) -> OptimizationSchedule | None:
     except (TypeError, ValueError):
         return None
     if (
-        schedule.schema_version not in {SCHEDULE_SCHEMA_VERSION, ISOLATED_SCHEDULE_SCHEMA_VERSION, TRAINING_SCHEDULE_SCHEMA_VERSION}
+        schedule.schema_version not in {SCHEDULE_SCHEMA_VERSION, ISOLATED_SCHEDULE_SCHEMA_VERSION, TRAINING_SCHEDULE_SCHEMA_VERSION, "ecologyrsi-dsh.evidence-guided-epoch-schedule/1"}
         or schedule.local_evaluation_mode != PAIRED_LOCAL_EVALUATION_MODE
     ):
         return None
@@ -1883,6 +1884,14 @@ def _legacy_sample_launch_key(value: Any) -> tuple[str, str] | None:
     return None
 
 
+def _screening_candidates(state: Any, generation: int) -> tuple[Any, ...]:
+    if state.task_manifest.metadata.get("optimization_protocol") == "evidence_guided_epoch@1":
+        cohort = state.generation_cohort_for(generation)
+        bindings = getattr(cohort, "revision_bindings", {}) or {}
+        return tuple(candidate for candidate in state.candidates if candidate.candidate_id in bindings)
+    return tuple(candidate for candidate in _search_candidates(state) if int(candidate.generation) == generation)
+
+
 def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     """Project live two-stage screening from durable DSH child events.
 
@@ -1911,11 +1920,7 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
     ):
         return None
     generation = int(state.run.generation)
-    candidates = tuple(
-        candidate
-        for candidate in _search_candidates(state)
-        if int(candidate.generation) == generation
-    )
+    candidates = _screening_candidates(state, generation)
     if len(candidates) <= 2:
         return None
     batch_start = next(
@@ -2134,7 +2139,8 @@ def _screening_progress_projection(state: Any) -> dict[str, Any] | None:
         ):
             prediction_tool_pending_origins.add(member_digests)
 
-    total = len(candidates) * _TWO_STAGE_SCREENING_ORIGINS
+    screening_origins = 10 if metadata.get("optimization_protocol") == "evidence_guided_epoch@1" else _TWO_STAGE_SCREENING_ORIGINS
+    total = len(candidates) * screening_origins
     completed = min(total, len(completed_origins))
     if reflection_enabled:
         failed = sum(
@@ -3025,7 +3031,7 @@ def _formal_batch_live_projection(state: Any) -> dict[str, Any] | None:
 
 
 def _holdout_replica_count(state: Any) -> int:
-    if state.task_manifest.metadata.get("optimization_protocol") == "quick_adaptive_epoch@1":
+    if state.task_manifest.metadata.get("optimization_protocol") in {"quick_adaptive_epoch@1", "evidence_guided_epoch@1"}:
         return 1
     return REPLICA_COUNT if state.task_manifest.metadata.get("sample_agent_mode") == "dsh_native_agent" else 1
 
@@ -3226,9 +3232,7 @@ def _adaptive_progress_projection(
     screening_failed = 0
     screening_outcome_counted = 0
     screening_candidate_progress: list[dict[str, Any]] = []
-    for candidate in _search_candidates(state):
-        if int(candidate.generation) != generation:
-            continue
+    for candidate in _screening_candidates(state, generation):
         raw_candidate_id = getattr(candidate, "candidate_id", None)
         if not isinstance(raw_candidate_id, str) or not raw_candidate_id:
             continue
@@ -3359,6 +3363,7 @@ def _adaptive_progress_projection(
         int(item.scope.origin_count)
         for item in state.formal_batch_evaluations
         if item.scope.generation == generation
+        and getattr(item, "metrics", {}).get("reused_screening_evidence") is not True
     )
     holdout_completed = sum(
         _holdout_replica_count(state) * int(item.scope.origin_count)
@@ -3413,6 +3418,8 @@ def _adaptive_progress_projection(
             continue
     for item in (*state.formal_batch_evaluations, *state.holdout_evaluations):
         if item.scope.generation != generation:
+            continue
+        if getattr(item, "metrics", {}).get("reused_screening_evidence") is True:
             continue
         try:
             phase_throughput_rows.append(
@@ -4045,6 +4052,12 @@ def _adaptive_trajectory_projection(state: Any) -> list[dict[str, Any]]:
                     else legacy_status
                 ),
                 "score": evaluation.score if evaluation is not None else None,
+                "score_vs_baseline": evaluation.score if evaluation is not None else None,
+                "source_screening_event_id": metrics.get("source_screening_event_id"),
+                "additional_prediction_executions": metrics.get("additional_prediction_executions"),
+                "delta_vs_parent": getattr(comparison, "score_delta", None) if comparison_decision != "initial_champion" else None,
+                "delta_vs_incumbent": None,
+                "effect_status": "paired_comparison_recorded" if comparison is not None and comparison_decision != "initial_champion" else "applied_pending_validation" if outcome and outcome.get("outcome") == "applied" else "not_measured",
                 "passed": evaluation.passed if evaluation is not None else None,
                 "coverage": coverage,
                 "prediction_cell_coverage": coverage,
@@ -4365,6 +4378,12 @@ def _evolution_evidence_projection(state: Any) -> dict[str, Any]:
             if not isinstance(gate, Mapping):
                 gate = {}
             score = _finite_number(getattr(evaluation, "score", None))
+            comparable = bool(incumbent is not None
+                and evaluation.scope.cohort_digest
+                and evaluation.scope.cohort_digest == incumbent.scope.cohort_digest
+                and getattr(evaluation, "evaluator_digest", None)
+                and evaluation.evaluator_digest == getattr(incumbent, "evaluator_digest", None))
+            incumbent_delta = score - incumbent_score if comparable and score is not None and incumbent_score is not None else None
             failures = gate.get("failures")
             if not isinstance(failures, (list, tuple)):
                 failures = ()
@@ -4374,11 +4393,10 @@ def _evolution_evidence_projection(state: Any) -> dict[str, Any]:
                     "candidate_id": evaluation.scope.candidate_id,
                     "candidate_revision_id": evaluation.scope.candidate_revision_id,
                     "absolute_score": score,
-                    "holdout_delta": (
-                        score - incumbent_score
-                        if score is not None and incumbent_score is not None
-                        else None
-                    ),
+                    "score_vs_baseline": score,
+                    "delta_vs_parent": None,
+                    "delta_vs_incumbent": incumbent_delta,
+                    "holdout_delta": incumbent_delta,
                     "passed": bool(evaluation.passed),
                     "eligible": gate.get("eligible") is True,
                     "search_eligible": gate.get(
@@ -4443,7 +4461,7 @@ def _evolution_evidence_projection(state: Any) -> dict[str, Any]:
             {
                 "generation": comparison.generation + 1,
                 "cohort_digest": comparison.cohort_digest,
-                "same_cohort": len(arms) == 3
+                "same_cohort": len(arms) >= 2 and incumbent is not None
                 and all(
                     evaluation.scope.cohort_digest == comparison.cohort_digest
                     for evaluation in comparison.holdout_evaluations
@@ -5511,6 +5529,7 @@ def _candidate_projection(state: Any, candidate: Any, *, summary_only: bool = Fa
     result["execution"] = _candidate_execution_projection(
         state, candidate, proposal, evaluation, promotion
     )
+    result["score_evidence"] = candidate_score_evidence(state, candidate, evaluation)
     if not summary_only:
         artifact = state.artifact_for(candidate.candidate_id)
         result["algorithm_execution"] = _algorithm_execution_projection(state, candidate)
@@ -6282,6 +6301,7 @@ def _projection_json(
             "research_domain_id": metadata.get("research_domain", task.domain_pack),
         },
         "configuration": configuration,
+        "evolution_funnel": evidence_funnel(state),
         **({"evolution_diversity": diversity_report(state)} if diversity_enabled(metadata) else {}),
         "dataset": {
             "id": dataset_id,
@@ -6483,6 +6503,7 @@ def _monitor_payload(
             # candidate metrics or per-origin evidence on every poll.
             "adaptive_trajectories": _adaptive_trajectory_projection(state),
             "evolution_evidence": _evolution_evidence_projection(state),
+            "evolution_funnel": evidence_funnel(state),
             "token_usage_available": run_wide_usage["available"],
             "tokens_used": run_wide_usage["tokens_used"],
             "token_limit": run_wide_usage["token_limit"],

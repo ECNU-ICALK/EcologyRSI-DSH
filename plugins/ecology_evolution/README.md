@@ -1,12 +1,14 @@
 # 生态模型进化工作台
 
-工作台由 DSH 托管网页，Python Host 负责数据分区、执行编排、评分和 SQLite 事件账本。页面使用原生 HTML/CSS/JavaScript。安装与模型连接说明统一维护在[仓库 README](../../README.md)，本次实现与实跑结果见[优化记录](../../docs/refactor/QUICK-OPTIMIZATION-IMPLEMENTATION-20260909.md)。
+工作台由 DSH 托管网页，Python Host 负责数据分区、执行编排、评分和 SQLite 事件账本。页面使用原生 HTML/CSS/JavaScript。安装与模型连接说明统一维护在[仓库 README](../../README.md)，当前交付版本为 **0.9.0 本地研究版**，适配 Harness 0.2.0-rc.2；历史实施记录不作为当前版本的科学验收结论。
 
 ## 当前默认流程
 
 网页优先选择 2018 黄瓜或 2019 番茄数据集，以及 DSH 目录中的策略模型与评审模型。创建前检查研究、轮次评审、样本 Planner 与样本 Critic 的真实结构化工具协议；通过后冻结模型、数据、执行预算和插件内容指纹。
 
-默认 `quick_adaptive_epoch@1`：5 轮，每轮 100 个训练起点，每批 10 个，轮末用 50 个新起点比较候选和轮初冠军。每轮只训练一条主线，基础执行量为 200 次，五轮为 1000 次。研究、反思、条件 Critic 和故障恢复的模型调用另外计量。正式对照模式须显式选择，默认最多 936 次执行/轮。
+默认 `quick_adaptive_epoch@1`：每轮 100 个训练起点，每批 10 个，轮末候选和轮初冠军各在同组 50 个新起点执行。每轮只训练一条主线，基础预测执行量为 200 次。表单名义默认 5 轮，但会根据实际数据容量下调；0.9.0 默认参数下，黄瓜 AiCU 快速模式最多 4 轮。研究、反思、条件 Critic 和恢复调用另外计量。
+
+`evidence_guided_epoch@1` 须显式选择：四提案与冠军各 10 次初筛、父子各 25 次配对、候选与冠军各 50 次轮末比较，上界仍为每轮 200 次；初筛复用诊断不重复执行。每轮需要 85 个不同评分起点，历史上下文及成熟隔离另计；当前 AiCU 最多支持 3 轮。正式对照 `top2_adaptive_epoch@1` 也须显式选择，预算按冻结 schedule 计算。
 
 每批完整执行后反思，修订仅应用于下一批并标记为待验证。轮末固定最后一个合法修订，与轮初冠军共同评测；完整执行、总体实用增益和分项约束共同决定是否更新工作版本。快速实验不授予统计认证，独立评测使用隔离的时间分区。
 
@@ -16,18 +18,20 @@
 
 ## 页面与数据加载
 
-- **运行设置**：选择数据集、模型、实验模式和参数；容量与预算读取后端同一份冻结执行计划。
+- **开始运行、运行参数**：选择数据集、模型、实验模式和参数；容量与预算读取后端同一份冻结执行计划。
 - **训练数据**：按 `training_fit` / `training_feedback` 分区分页读取样本和字段定义。
 - **进化过程**：显示当前阶段、有效样本、在途任务、等待恢复、最近故障、真实用量和轮末选择。
 - **候选评测**：按需读取所选候选的参数、工具、三目标 × 三时距指标及同 cohort 对照。
 - **独立评测**：单独启动隔离数据评测，不将结果混入搜索反馈。
-- **人工协作**：暂停后追加方向建议，模型咨询与人工干预各自保留审计收据。
+- **人工审核**：运行中或暂停时追加方向建议；本轮已冻结后提交的意见在后续轮次生效。模型咨询与人工干预各自保留审计回执。
+
+0.9.0 分别显示相对基线技能分、同组父版本增益和同组冠军增益，并按阶段统计有明确分母的成功漏斗。缺少配对证据时增益为空；“修改已应用”不表示已经改善预测。
 
 列表和总览只加载摘要；工作区按照自身版本号失效，遥测变化不触发全部候选重载。明细、样本和事件均按需请求，过期响应不得覆盖当前运行或候选。浏览器只展示结构化脱敏证据。
 
 ## 本地运行
 
-当前 DSH 主实例页面为 `http://127.0.0.1:8848/plugins/ecology/evolution/`，后端端口为 8777。页面通过同源 `/api/ecology-evolution` 访问服务。完整安装与启动命令见仓库 README。
+默认 DSH 工作台地址为 `http://127.0.0.1:8848/plugins/ecology/evolution/`，后端端口为 8777。页面通过同源 `/api/ecology-evolution` 访问服务。完整安装与启动命令见仓库 README。
 
 只调试 Host 页面时可在仓库根目录运行：
 
@@ -43,10 +47,10 @@ PYTHONPATH=src .venv/bin/python -m ecologyrsi_dsh serve \
 页面加载后向父窗口发送握手，目标 origin 取 `parent_origin` 查询参数，缺省为自身 origin：
 
 ```json
-{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.8.4","context_protocol":"ecology-evolution.host-context/1","supported_api_bases":["/api/ecology-evolution"]}
+{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.9.0","context_protocol":"ecology-evolution.host-context/1","supported_api_bases":["/api/ecology-evolution"]}
 ```
 
-宿主用 `postMessage` 回 `dsh.context`。只接受来自父窗口且 origin 为自身或已登记 `parent_origin` 的消息；字段可平铺，也可嵌在 `context` 对象中。最小合同只要求同源代理地址和短期能力令牌，身份、能力范围和模型目录可选：
+宿主用 `postMessage` 回 `dsh.context`。只接受来自父窗口且 origin 为自身或已登记 `parent_origin` 的消息；字段可平铺，也可嵌在 `context` 对象中。消息可提供同源代理地址和内存中的能力令牌，身份、能力范围和模型目录可选。下列身份及模型 ID 仅为示例，必须替换为后端已登记值：
 
 ```json
 {
@@ -72,6 +76,7 @@ PYTHONPATH=src .venv/bin/python -m ecologyrsi_dsh serve \
 GET  /health
 GET  /catalog
 GET  /datasets/{dataset_id}/samples?partition=training_fit&offset=0&limit=20
+POST /evolution-capacity
 GET  /runs?view=summary&offset=0&limit=5
 GET  /runs/{run_id}?view=overview
 GET  /runs/{run_id}?view=process

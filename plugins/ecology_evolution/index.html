@@ -148,7 +148,7 @@
                     <label><span>候选总预算</span><input id="max-candidates" name="max_candidates" form="start-form" type="number" min="4" max="256" value="20" aria-describedby="max-candidates-help" required><small id="max-candidates-help">默认随轮数同步；当前完整预算需要 20 个候选。</small></label>
                   </div></section>
                   <section class="parameter-group" data-group="finalist-adaptation"><header><strong>入围方案逐批优化</strong><span>每个方案依次完成各批次</span></header><div class="form-grid parameter-grid">
-                    <label><span>实验模式</span><select id="experiment-mode" name="experiment_mode" form="start-form"><option value="quick" selected>快速实验：单主线，轮末双臂单次比较</option><option value="comparison">正式对照：预筛、Top 2、重复推理</option></select><small>快速实验选出工作版本；科学认证须另行使用独立评测数据。</small></label>
+                    <label><span>实验模式</span><select id="experiment-mode" name="experiment_mode" form="start-form"><option value="quick" selected>快速实验：单主线，轮末双臂单次比较</option><option value="evidence_guided">证据引导试点：四候选初筛＋一次局部配对</option><option value="comparison">正式对照：预筛、Top 2、重复推理</option></select><small>证据引导试点固定：10 时点初筛＋25 时点局部配对＋50 时点轮末比较，单轮 200 次时点执行。代价是覆盖时点减少、局部修改降为一次；是否优于快速模式须实测。独立认证数据和预算另计。</small></label>
                     <label><span>每个 epoch 的训练样本数</span><input id="formal-origin-count" name="formal_origin_count" form="start-form" type="number" min="2" step="1" value="100" required><small>默认 100 个训练时点，分为 10 个 batch。快速模式另加候选与冠军各 50 次评测，合计 200 次时点执行。</small></label>
                     <label><span>每批预测时点数</span><input id="local-batch-origin-count" name="local_batch_origin_count" form="start-form" type="number" min="2" step="1" value="10" required><small>默认每批 10 个样本。快速模式按时间连续取样，上一批目标成熟后再进入下一批；反思修订在轮末统一比较。</small></label>
                     <label><span>每批最多改动几处</span><input id="max-local-edits-per-batch" name="max_local_edits_per_batch" form="start-form" type="number" min="0" max="5" step="1" value="2" required><small>填 0 表示不修改；填 1–5 表示每批最多允许的改动数。</small></label>
@@ -328,7 +328,7 @@
             </section>
           </section>
 
-          <footer class="footer-note"><span>插件版本 0.8.4 · 可交付候选版（未签名）</span><span id="last-updated">尚未同步</span></footer>
+          <footer class="footer-note"><span>插件版本 0.9.0 · 可交付候选版（未签名）</span><span id="last-updated">尚未同步</span></footer>
         </main>
       </div>
     </div>

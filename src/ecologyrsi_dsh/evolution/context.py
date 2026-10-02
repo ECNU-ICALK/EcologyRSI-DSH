@@ -166,6 +166,7 @@ def batch_context(value: Mapping[str, Any] | None, run: Run) -> dict[str, Any] |
         "knowledge_snapshot_digest",
         "research_iteration",
         "frozen_runtime_binding",
+        "derived_execution_plan",
         "context_digest",
         "parent_genome_digest",
         "parent_genome_canonical_json",
@@ -239,6 +240,10 @@ def batch_context(value: Mapping[str, Any] | None, run: Run) -> dict[str, Any] |
     )
     if runtime_binding is not None and not isinstance(runtime_binding, Mapping):
         raise TypeError("frozen_runtime_binding must be an object or null")
+    raw_execution_plan = value.get("derived_execution_plan")
+    if raw_execution_plan is not None:
+        from .execution_plan import DerivedExecutionPlan
+        raw_execution_plan = DerivedExecutionPlan.from_dict(raw_execution_plan).to_dict()
     parent_digest = _optional_text(
         value.get("parent_genome_digest"),
         "batch_context.parent_genome_digest",
@@ -362,6 +367,7 @@ def batch_context(value: Mapping[str, Any] | None, run: Run) -> dict[str, Any] |
         "knowledge_snapshot_digest": knowledge_digest,
         "research_iteration": research_iteration,
         "frozen_runtime_binding": runtime_binding,
+        **({"derived_execution_plan": raw_execution_plan} if raw_execution_plan is not None else {}),
         "context_digest": context_digest,
         "parent_genome_digest": parent_digest,
         "parent_genome_canonical_json": parent_canonical,

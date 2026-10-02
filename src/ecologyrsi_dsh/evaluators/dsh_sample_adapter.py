@@ -431,6 +431,10 @@ class DshSampleCollaborationAdapter:
         # One origin per wave under the strict origin contract; leave it unset
         # rather than guess when a wave spans several.
         origins = {request.origin_timestamp for request in frozen_requests}
+        policy = context.get("evolution_context", {}).get("agent_policy") or {}
+        profile = context.get("candidate_agent_profile") or {}
+        mean_required = (policy.get("inference", {}).get("prediction_formula_policy") == "mean-referenced-tools@1"
+                         and profile.get("authored_directive", {}).get("blend_rule") == "mean")
         return self._prediction_tool_binder(
             run_id=self._decision_client.run_id,
             stage_attempt=stage_attempt,
@@ -442,6 +446,7 @@ class DshSampleCollaborationAdapter:
                 frozen_requests, tool_id, parameters
             ),
             prediction_tool_call_budget=prediction_tool_call_budget,
+            **({"mean_blend_required": True} if mean_required else {}),
             origin_timestamp=next(iter(origins)) if len(origins) == 1 else None,
         )
 
@@ -850,7 +855,8 @@ class DshSampleCollaborationAdapter:
                 skill_traces[request.sample_id] = [{"tool_id": "causal-skill-program", "version": "1",
                     "status": "completed", "execution_owner": "host_causal_skill",
                     "input_digest": digest(request.label_free_context), "output_digest": receipt["receipt_digest"],
-                    "behavior_signature": signature}]
+                    "behavior_signature": signature,
+                    "trigger_status": "triggered" if any(step["triggered"] for step in receipt["steps"]) else "not_triggered"}]
             context["skill_execution"] = receipts
             context["skill_execution_contract"] = "Host diagnostics are computed from causal inputs. Apply triggered guidance within the frozen prediction contract. Guidance cannot change tools, labels, budgets or scoring rules."
         compact, shared = compact_origin_contexts(origin_contexts)
@@ -909,6 +915,7 @@ class DshSampleCollaborationAdapter:
                 structured = {"schema_version": "ecology-sample-predictions@2", "wave_digest": binding.wave_digest, **raw}
                 rows = validate_predictions(structured, [r.sample_id for r in selected], wave_digest=binding.wave_digest,
                                             allowed_methods=allowed_methods)
+                binding.validate_formulas(rows)
 
         except SampleExecutionControlError:
             raise
@@ -937,6 +944,8 @@ class DshSampleCollaborationAdapter:
                 "tool_id": "agent-final-prediction", "version": "2", "status": "completed",
                 "input_digest": binding.wave_digest, "output_digest": digest(structured),
                 "execution_owner": "dsh_agent_prediction",
+                **({"formula_status": "passed" if row["method"] == "blend" else "not_exercised"}
+                   if binding.mean_blend_required else {}),
             }
             agent_step = {
                 "role": "remote_planner_agent", "decision": "submit_prediction:" + row["method"],

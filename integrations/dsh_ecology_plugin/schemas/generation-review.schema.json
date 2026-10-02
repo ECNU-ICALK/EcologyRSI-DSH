@@ -2,11 +2,32 @@
   "$id": "ecology-generation-review@1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "accepted", "rationale", "flags"],
+  "required": [
+    "schema_version",
+    "accepted",
+    "rationale",
+    "flags"
+  ],
   "properties": {
-    "schema_version": {"const": "ecology-generation-review@1"},
-    "accepted": {"type": "boolean"},
-    "rationale": {"type": "string", "minLength": 1, "maxLength": 8000},
-    "flags": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 400}}
+    "schema_version": {
+      "const": "ecology-generation-review@1"
+    },
+    "accepted": {
+      "type": "boolean",
+      "description": "Advisory evidence assessment within review_policy purpose; the Host owns admission and certification."
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8000
+    },
+    "flags": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "maxLength": 400
+      }
+    }
   }
 }

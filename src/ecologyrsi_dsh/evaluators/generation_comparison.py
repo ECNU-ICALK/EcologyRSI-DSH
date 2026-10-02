@@ -15,8 +15,10 @@ from .agent_stability import paired_stability_gate
 from .fitness import FitnessProfile, assess_generation_selection
 from ..core.search_policy import PAIRED_EXECUTION_QUALIFICATION
 from ..core.finalist_review import FINALIST_REVIEW_QUALIFICATION
+from ..core.review_policy import review_allows_host_decision
 from ..core.agent_prediction import successful_agent_provenance_passes
 from ..evolution.execution_qualification import paired_scoring_evidence_complete
+from ..evolution.effect_contracts import hard_effect_failure
 
 
 PROMOTION_CELL_REGRESSION_FLOOR = -FitnessProfile().selection_cell_regression_tolerance
@@ -245,6 +247,8 @@ def build_generation_comparison(
     require_paired_strict_chain: bool = False,
     finalist_reviews: Mapping[str, Mapping[str, Any]] | None = None,
     quick_experiment: bool = False,
+    experiment_protocol: str = "quick_adaptive_epoch@1",
+    training_effect_evidence: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> GenerationComparison:
     """Build one immutable three-arm comparison without model-authored ranking.
 
@@ -264,6 +268,8 @@ def build_generation_comparison(
     evaluations = tuple(holdout_evaluations)
     expected_arms = {HoldoutArm.FINALIST_1, HoldoutArm.INCUMBENT} if quick_experiment else set(HoldoutArm)
     if quick_experiment:
+        if experiment_protocol not in {"quick_adaptive_epoch@1", "evidence_guided_epoch@1"}:
+            raise ValueError("unsupported exploratory experiment protocol")
         positive_delta_search = True
     if len(evaluations) != len(expected_arms):
         raise ValueError("generation comparison requires exactly three holdout evaluations")
@@ -280,6 +286,17 @@ def build_generation_comparison(
     by_arm = {item.scope.holdout_arm: item for item in evaluations}
     finalist_evaluations = [by_arm[arm] for arm in HoldoutArm if arm in arms and arm is not HoldoutArm.INCUMBENT]
     incumbent = by_arm[HoldoutArm.INCUMBENT]
+    if training_effect_evidence is not None:
+        finalists = {item.scope.holdout_arm.value: item.scope for item in finalist_evaluations}
+        if set(training_effect_evidence) - set(finalists):
+            raise ValueError("training effect evidence is outside the finalist arms")
+        for arm, evidence in training_effect_evidence.items():
+            bound = finalists[arm]
+            if (evidence.get("generation"), evidence.get("candidate_id"), evidence.get("candidate_revision_id")) != (
+                    generation, bound.candidate_id, bound.candidate_revision_id):
+                raise ValueError("training effect evidence belongs to another finalist revision")
+            if evidence.get("failure") not in {None, "hard_mutation_effect_failed"}:
+                raise ValueError("training effect failure is invalid")
 
     def paired_evidence_complete(challenger: Any) -> bool:
         """Measure one arm against the incumbent, or replay a legacy verdict."""
@@ -332,11 +349,11 @@ def build_generation_comparison(
             if require_paired_strict_chain else True
         )
         review = finalist_reviews[item.scope.holdout_arm.value] if finalist_reviews is not None else None
-        review_pass = review is None or (
-            review.get("judge_status") == "completed" and review.get("judge_accepted") is True
-        )
+        review_pass = review_allows_host_decision(review, item, exploratory=quick_experiment)
+        training_effect = (training_effect_evidence or {}).get(item.scope.holdout_arm.value, {})
+        effect_failure = hard_effect_failure(item.metrics) or training_effect.get("failure")
         certification_eligible = bool(
-            review_pass and challenger_promotion_allowed
+            review_pass and not effect_failure and challenger_promotion_allowed
             and scientific_gate["eligible"]
             # Guarded scientific comparison cannot benefit from an incumbent's
             # transport/chain failure through the coverage-penalized objective.
@@ -357,6 +374,8 @@ def build_generation_comparison(
             and len(cell_gate.get("cell_deltas", {})) == len(expected_grid)
         )
         search_failures: list[str] = []
+        if effect_failure:
+            search_failures.append(effect_failure)
         if not review_pass:
             search_failures.append("independent_review_not_accepted")
         if scientific_gate["constraint_violations"] != 0:
@@ -390,6 +409,8 @@ def build_generation_comparison(
             # A successful first replica cannot bypass a failing second one.
             search_eligible = certification_eligible
         certification_failures = list(cell_gate.get("failures", ()))
+        if effect_failure:
+            certification_failures.append(effect_failure)
         if quick_experiment:
             certification_eligible = False
             certification_failures.append("quick_experiment_requires_independent_certification")
@@ -415,6 +436,8 @@ def build_generation_comparison(
             certification_failures.append("below_practical_score_delta")
         if legacy_runtime_v2_shape:
             legacy_failures = list(cell_gate.get("failures", ()))
+            if effect_failure:
+                legacy_failures.append(effect_failure)
             if not challenger_promotion_allowed:
                 legacy_failures.append("screening_exploration_only")
             if not selection.primary_selection_gate:
@@ -461,6 +484,12 @@ def build_generation_comparison(
         if review is not None:
             gate["judge_available"] = review.get("judge_status") == "completed"
             gate["judge_accepted"] = review_pass
+            if review.get("review_policy") is not None:
+                gate["judge_accepted"] = review.get("judge_accepted")
+                gate["judge_advisory_accepted"] = review.get("judge_accepted")
+                gate["review_gate_pass"] = review_pass
+                gate["review_purpose"] = review["review_policy"]["purpose"]
+                gate["review_decision_authority"] = "host_deterministic_gates"
         finalist_gates[item.scope.holdout_arm.value] = gate
         if search_eligible:
             search_eligible_finalists.append((item, gate))
@@ -553,6 +582,8 @@ def build_generation_comparison(
     incumbent_delta = selected.score - incumbent.score
     gate_results = {
         "schema_version": "ecologyrsi-dsh.generation-comparison/1",
+        **({"training_effect_evidence": _plain_json(training_effect_evidence)}
+           if training_effect_evidence is not None else {}),
         **({"finalist_review_qualification": FINALIST_REVIEW_QUALIFICATION,
             "finalist_reviews": _plain_json(finalist_reviews)} if finalist_reviews is not None else {}),
         **({"paired_execution_qualification": PAIRED_EXECUTION_QUALIFICATION}
@@ -590,7 +621,7 @@ def build_generation_comparison(
         "challenger_promotion_allowed": challenger_promotion_allowed,
     }
     if quick_experiment:
-        gate_results["experiment_protocol"] = "quick_adaptive_epoch@1"
+        gate_results["experiment_protocol"] = experiment_protocol
         gate_results["selection_rule"] = "complete_paired_practical_delta_cell_nonregression_else_incumbent"
     if not legacy_runtime_v2_shape:
         gate_results.update(

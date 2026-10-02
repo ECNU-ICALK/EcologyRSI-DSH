@@ -399,6 +399,7 @@ class ClosedAxisTests(unittest.TestCase):
         )
         state = SimpleNamespace(
             run=SimpleNamespace(run_id="run:axis-wiring"),
+            proposal=lambda _proposal_id: SimpleNamespace(metadata={}),
             task_manifest=SimpleNamespace(
                 metadata={
                     "optimization_schedule": OptimizationSchedule.default().to_dict(),
@@ -437,7 +438,8 @@ class ClosedAxisTests(unittest.TestCase):
         ):
             context = _local_edit_context(
                 state,
-                SimpleNamespace(candidate_id="candidate:axis-wiring", generation=0),
+                SimpleNamespace(candidate_id="candidate:axis-wiring", generation=0,
+                                proposal_id="proposal:axis-wiring"),
                 revision,
                 SimpleNamespace(batch_index=0),
             )

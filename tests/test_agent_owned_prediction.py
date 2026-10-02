@@ -305,6 +305,30 @@ class AgentOwnedPredictionTests(unittest.TestCase):
         self.assertEqual(outcome.result['predicted'], 20.4)
         self.assertEqual([s['status'] for s in outcome.result['tool_calls']], ['failed', 'completed', 'completed'])
 
+    def test_frozen_mean_rule_rejects_false_arithmetic_before_acceptance_and_replays(self):
+        for frozen, blend_rule, prediction, rejected in (
+            (True, 'mean', 22., True), (True, 'mean', 20.75, False),
+            (False, 'mean', 22., False), (True, 'confidence_weighted', 22., False),
+        ):
+            with self.subTest(frozen=frozen, rule=blend_rule, prediction=prediction):
+                def policy(context, call):
+                    call('candidate-model', 'model')
+                    call('persistence', 'baseline')
+                    return result(context, prediction, method='blend', refs=('model', 'baseline'))
+                adapter, plan, native, ledger = self.setup_agent(policy)
+                plan['decision_context']['candidate_agent_profile'] = {'authored_directive': {'blend_rule': blend_rule}}
+                plan['decision_context']['agent_policy'] = {'inference': {
+                    **({'prediction_formula_policy': 'mean-referenced-tools@1'} if frozen else {})}}
+                outcome = self.predict(adapter, plan)
+                self.assertEqual(outcome.error is not None, rejected)
+                if rejected:
+                    self.assertFalse(ledger.events_by_kind('run-agent', 'DshStructuredResultAccepted'))
+                else:
+                    self.assertEqual(self.predict(adapter, plan).result, outcome.result)
+                    self.assertEqual(len(native.requests), 1)
+                    formula = outcome.result['tool_calls'][-1].get('formula_status')
+                    self.assertEqual(formula, 'passed' if frozen and blend_rule == 'mean' else None)
+
     def test_host_rejection_returns_to_agent_instead_of_silent_clipping(self):
         def policy(c, call):
             attempt = c['samples'][0]['attempt']

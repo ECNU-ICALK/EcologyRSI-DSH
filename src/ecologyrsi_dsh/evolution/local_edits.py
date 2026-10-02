@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from ..core.models import canonical_json, digest
@@ -11,6 +11,13 @@ from ..core.trajectory import LocalEditOutcome, LocalEditProposalDecision
 from ..evaluators.authored_directive import AUTHORED_DIRECTIVE_POLICY_ID
 from ..evaluators.greenhouse_prediction import RECIPE_FEATURE_POLICY_ID
 from .mutation_specs import mutation_spec
+from .effect_contracts import (
+    TRAINING_EVIDENCE_PHASES,
+    build_edit_effect_contract,
+    resolve_mutation_effects,
+    mutation_effect_cells,
+    validate_runtime_constraints,
+)
 from .genome import (
     LOCAL_EDIT_MUTATION_OPERATOR_ID,
     EcologyEvolutionPluginGenome,
@@ -56,6 +63,8 @@ class LocalEditContext:
     allowed_evidence_refs: Sequence[str]
     allowed_effect_cells: Sequence[str]
     parameter_schemas: Mapping[str, Mapping[str, Any]]
+    runtime_constraints: Mapping[str, Any] = field(default_factory=dict)
+    evidence_phase: str = "formal_batch"
 
     def __post_init__(self) -> None:
         for name in ("run_id", "candidate_id", "candidate_revision_id"):
@@ -97,6 +106,9 @@ class LocalEditContext:
         )
         if not isinstance(self.parameter_schemas, Mapping):
             raise TypeError("parameter_schemas must be an object")
+        if self.evidence_phase not in TRAINING_EVIDENCE_PHASES:
+            raise ValueError("local edits require completed training evidence")
+        object.__setattr__(self, "runtime_constraints", validate_runtime_constraints(self.runtime_constraints))
         canonical_json(self.to_dict())
 
     def to_dict(self) -> dict[str, Any]:
@@ -119,6 +131,8 @@ class LocalEditContext:
                 str(name): dict(schema)
                 for name, schema in self.parameter_schemas.items()
             },
+            "runtime_constraints": dict(self.runtime_constraints),
+            "evidence_phase": self.evidence_phase,
         }
 
 
@@ -189,6 +203,8 @@ class LocalEditResult:
     child: EcologyEvolutionPluginGenome | None
     proposal_digest: str
     rejection_reason: str | None = None
+    effect_contract: Mapping[str, Any] | None = None
+    effect_resolution: Mapping[str, Any] | None = None
 
 
 
@@ -230,17 +246,7 @@ def validate_local_edit_proposal(
             raise ValueError("mutation requires training evidence and expected effect cells")
         # A horizon/target-specific coefficient has a known direct effect domain.
         # General model and Agent-policy changes may affect the entire grid.
-        effects: set[str] = set()
-        for operation in result.operations:
-            name = str(operation.get("name", ""))
-            if operation.get("op") != "set_bounded_parameter" or "residual_scale" not in name:
-                effects.update(context.allowed_effect_cells)
-                continue
-            for cell in context.allowed_effect_cells:
-                target, horizon = cell.rsplit("@", 1)
-                if name in {"residual_scale", f"residual_scale_{horizon}",
-                            f"{target}_residual_scale", f"{target}_{horizon}_residual_scale"}:
-                    effects.add(cell)
+        effects = mutation_effect_cells(result.operations, context.allowed_effect_cells)
         if not set(result.expected_effect_cells).issubset(effects):
             raise ValueError("expected effect cells do not match the executable parameter change")
     return result
@@ -296,14 +302,29 @@ def apply_local_edit_bundle(
         mutation_context,
         registry,
         parameter_schemas=context.parameter_schemas,
+        runtime_constraints=context.runtime_constraints,
     )
     if child.behavior_digest == parent.behavior_digest:
         raise ValueError("local edit did not change executable behavior")
+    resolution = resolve_mutation_effects(
+        parent, child, validated.operations, registry,
+        runtime_constraints=context.runtime_constraints,
+    )
+    contract = build_edit_effect_contract(
+        parent_revision_id=context.candidate_revision_id,
+        evidence_scope_digest=context.evidence_scope_digest,
+        evidence_refs=validated.evidence_refs,
+        affected_cells=mutation_effect_cells(validated.operations, context.allowed_effect_cells),
+        resolution=resolution,
+        source_phase=context.evidence_phase,
+    )
     return LocalEditResult(
         outcome=LocalEditOutcome.APPLIED,
         operations=tuple(validated.operations),
         child=child,
         proposal_digest=proposal_digest,
+        effect_contract=contract,
+        effect_resolution=resolution,
     )
 
 

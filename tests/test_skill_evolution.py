@@ -265,6 +265,9 @@ class DiversityPolicyTests(unittest.TestCase):
         archive = exploration_archive(state, 1)
         self.assertEqual(archive["entries"][0]["components"]["skill_program"], seed_skill_program())
         self.assertIn("not_certified", archive["entries"][0]["qualification"])
+        self.assertEqual(archive["entries"][0]["effect_evidence"]["status"], "execution_only_effect_unverified")
+        self.assertIsNone(archive["entries"][0]["effect_evidence"]["delta_vs_parent"])
+        self.assertTrue(archive["entries"][0]["applicability_conditions"]["reuse_requires_new_child_and_fresh_evaluation"])
         self.assertLess(len(json.dumps(archive).encode()), 6500)
         later_failed = batch(coverage=False)
         later_failed.scope.batch_index = 1

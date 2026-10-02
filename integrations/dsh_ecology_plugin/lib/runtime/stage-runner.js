@@ -88,12 +88,12 @@ const STAGE_INSTRUCTIONS = Object.freeze({
   }),
   "generation.judge": Object.freeze({
     instruction: [
-      "Review only the supplied evidence for the single candidate identified by candidate_id, proposal_id, and generation.",
+      "Review only the supplied evidence for the single candidate identified by candidate_id, proposal_id, and generation. Follow review_policy purpose and evidence binding; use its host_gate_summary for same-cohort score and cell deltas and applicable gates. The Host owns every blocking decision.",
       "Use only scientific_evaluation, including its Host-computed score, passed result, aggregate metrics, and evidence digests, together with fitness_profile_digest and evaluation_cohort_digest.",
       "Return exactly one ecology-generation-review@1 object containing only schema_version, accepted, rationale, and flags.",
       "Avoid causal claims that are not supported by the supplied candidate evidence.",
       "Do not propose next-generation directions, experiments, searches, mutations, or policy changes.",
-      "Acceptance is an advisory candidate-evidence assessment, not selection or promotion; never claim that either occurred.",
+      "Acceptance is an advisory candidate-evidence assessment, not selection or promotion; never claim that either occurred. In exploration, absent certification blocks or replicas and scientific passed=false alone are not disqualifications. Report limitations without inventing a certification requirement.",
     ].join(" "),
   }),
   "generation.reflect": Object.freeze({

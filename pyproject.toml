@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ecologyrsi-dsh"
-version = "0.8.4"
+version = "0.9.0"
 description = "A small, replayable evolution core for EcologyRSI-DSH"
 readme = "README.md"
 license = "LicenseRef-Proprietary"
@@ -88,8 +88,8 @@ where = ["src"]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6" = [
     "integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6/*.yml",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v9" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v9/*.yml",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/*.yml",
 ]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-coordinator-v6/skills/autonomous-ecology-research" = [
     "integrations/dsh_ecology_plugin/presets/ecology-coordinator-v6/skills/autonomous-ecology-research/SKILL.md",
@@ -106,14 +106,14 @@ where = ["src"]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6/skills/origin-vector-review" = [
     "integrations/dsh_ecology_plugin/presets/ecology-sample-critic-v6/skills/origin-vector-review/SKILL.md",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v9/skills/batch-scientific-reflection" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v9/skills/batch-scientific-reflection/SKILL.md",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/skills/batch-scientific-reflection" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/skills/batch-scientific-reflection/SKILL.md",
 ]
-"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v9/skills/candidate-scientific-review" = [
-    "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v9/skills/candidate-scientific-review/SKILL.md",
+"share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/skills/candidate-scientific-review" = [
+    "integrations/dsh_ecology_plugin/presets/ecology-generation-judge-v10/skills/candidate-scientific-review/SKILL.md",
 ]
 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/dist" = [
-    "integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.8.4.tgz",
+    "integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.9.0.tgz",
 ]
 "share/ecologyrsi-dsh/scripts" = [
     "scripts/install_dsh_ecology_runtime.mjs",

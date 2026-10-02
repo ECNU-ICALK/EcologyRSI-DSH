@@ -46,7 +46,7 @@ assert.match(html, /id="max-generations"[^>]*value="5"/);
 assert.match(html, /默认最多运行 5 轮，并按数据容量调整/);
 assert.doesNotMatch(html, /id="samples-per-update"/);
 assert.match(commandsSource, /function normalizedOptimizationSchedule\(values\)/);
-assert.match(commandsSource, /optimization_protocol: optimizationSchedule\.finalist_count === 1 \? "quick_adaptive_epoch@1" : "top2_adaptive_epoch@1"/);
+assert.match(commandsSource, /optimization_protocol: optimizationProtocolForSchedule\(optimizationSchedule\)/);
 assert.match(commandsSource, /optimization_schedule: optimizationSchedule/);
 assert.doesNotMatch(commandsSource, /samples_per_update:/);
 
@@ -695,7 +695,7 @@ modelSandbox.renderEvolutionEvidence({...evidenceRun, search_guard_policy: "prac
 assert.match(evolutionEvidenceNodes["#global-champion-card"].innerHTML, /稳健搜索规则/);
 modelSandbox.renderEvolutionEvidence(evidenceRun);
 const generationDecisionHtml = evolutionEvidenceNodes["#generation-decision-list"].innerHTML;
-for (const evidence of ["同一组比较数据", "绝对分 -0.4200", "相对上一轮版本 -0.0200", "仅探索，禁止晋升", "连续 2 代无候选通过初筛，下一代必须重新规划"]) {
+for (const evidence of ["同一组比较数据", "基线技能分 -0.4200", "同组相对冠军增益 -0.0200", "仅探索，禁止晋升", "连续 2 代无候选通过初筛，下一代必须重新规划"]) {
   assert.ok(generationDecisionHtml.includes(evidence), `generation evidence missing: ${evidence}`);
 }
 assert.ok(evolutionEvidenceNodes["#evolution-capacity-note"].innerHTML.includes("工程探索证据"));
@@ -744,7 +744,7 @@ const positiveDeltaEvidenceRun = modelSandbox.normalizeRun({
 modelSandbox.renderEvolutionEvidence(positiveDeltaEvidenceRun);
 assert.equal(evolutionEvidenceNodes["#evolution-evidence-status"].textContent, "已保留用于优化，认证结果见下方");
 assert.ok(evolutionEvidenceNodes["#global-champion-card"].innerHTML.includes("同批提高则继续优化，稳健认证另行判断"));
-for (const evidence of ["下一轮搜索版本", "暂无认证版本", "保留条件：满足", "认证条件：未满足", "部分指标有退化风险", "同批提高值 +0.0100"]) {
+for (const evidence of ["下一轮搜索版本", "暂无认证版本", "保留条件：满足", "认证条件：未满足", "部分指标有退化风险", "同组相对冠军增益 +0.0100"]) {
   const rendered = evolutionEvidenceNodes["#global-champion-card"].innerHTML + evolutionEvidenceNodes["#generation-decision-list"].innerHTML;
   assert.ok(rendered.includes(evidence), `positive-delta evidence missing: ${evidence}`);
 }
@@ -4273,7 +4273,7 @@ for (const adaptiveEventLabel of [
   assert.ok(app.includes(`\"${adaptiveEventLabel}\"`), `${adaptiveEventLabel} should have a UI event label`);
 }
 assert.match(app, /function normalizedOptimizationSchedule\(values\)/);
-assert.match(app, /optimization_protocol: optimizationSchedule\.finalist_count === 1 \? "quick_adaptive_epoch@1" : "top2_adaptive_epoch@1"/);
+assert.match(app, /optimization_protocol: optimizationProtocolForSchedule\(optimizationSchedule\)/);
 assert.match(app, /optimization_schedule: optimizationSchedule/);
 assert.doesNotMatch(commandsSource, /samples_per_update:/);
 assert.match(app, /formal_origin_count: Number\(form\.get\("formal_origin_count"\)\)/);
@@ -4625,6 +4625,27 @@ for (const request of submittedRequests) {
   assert.equal(request.body.require_model_contract_preflight, true);
 }
 submittedRequests.length = 0;
+const submittedGuidedRun = await submitNode("#start-form").listeners.submit({preventDefault() {}, currentTarget: {
+  fields: {...submittedFields, experiment_mode: "evidence_guided", formal_origin_count: "999", local_batch_origin_count: "999"}
+}});
+assert.equal(submittedGuidedRun.id, "run:form-created");
+assert.deepEqual(submittedRequests.map((request) => request.route), ["/model-preflight", "/runs"]);
+for (const request of submittedRequests) {
+  assert.equal(request.body.optimization_protocol, "evidence_guided_epoch@1");
+  assert.equal(request.body.optimization_schedule.schema_version, "ecologyrsi-dsh.evidence-guided-epoch-schedule/1");
+  assert.equal(request.body.optimization_schedule.screening_origin_count, 10);
+  assert.equal(request.body.optimization_schedule.formal_origin_count_per_finalist, 35);
+  assert.equal(request.body.optimization_schedule.local_batch_origin_count, 25);
+  assert.equal(request.body.optimization_schedule.selection_holdout_origin_count, 50);
+  assert.equal(request.body.optimization_schedule.max_local_edits_per_batch, 1);
+}
+const savedScheduleFromControls = formSubmissionSandbox.optimizationScheduleFromControls;
+formSubmissionSandbox.optimizationScheduleFromControls = () => submittedRequests[0].body.optimization_schedule;
+const guidedCapacityRequest = formSubmissionSandbox.evolutionCapacityRequest().body;
+assert.deepEqual(Object.keys(guidedCapacityRequest).sort(), ["dataset_id", "episode_id", "optimization_schedule", "planned_generations"]);
+assert.equal(guidedCapacityRequest.optimization_schedule.local_batch_origin_count, 25);
+formSubmissionSandbox.optimizationScheduleFromControls = savedScheduleFromControls;
+submittedRequests.length = 0;
 formSubmissionSandbox.request = async (route) => { submittedRequests.push(route); return {passed: false}; };
 const failedPreflightRun = await submitNode("#start-form").listeners.submit({preventDefault() {}, currentTarget: {fields: submittedFields}});
 assert.equal(failedPreflightRun, null);
@@ -4881,3 +4902,30 @@ assert.equal(modelSandbox.candidateOutcome(reviewQuickRun.candidates[0], reviewQ
 
 assert.equal(modelSandbox.roundResearchAggregateStatus({total: 4, completed: 1, notSelected: 3}), "completed");
 assert.equal(modelSandbox.roundResearchAggregateStatus({total: 3, completed: 0, notSelected: 3}), "not_selected_for_training");
+
+// Evidence quantities must retain their reference and unavailable denominators.
+const guidedTrial = modelSandbox.normalizedOptimizationSchedule({experiment_mode: "evidence_guided", formal_origin_count: 999});
+assert.equal(guidedTrial.screening_origin_count, 10);
+assert.equal(guidedTrial.formal_origin_count_per_finalist, 35);
+assert.equal(guidedTrial.local_batch_origin_count, 25);
+assert.equal(guidedTrial.max_local_edits_per_batch, 1);
+assert.equal(modelSandbox.optimizationProtocolForSchedule(guidedTrial), "evidence_guided_epoch@1");
+assert.match(html, /value="quick" selected/);
+const referenceDelta = modelSandbox.candidateDelta({score: -.02, metrics: {improvement: .8}, score_evidence: {score_vs_baseline: -.02, delta_vs_parent: null, delta_vs_incumbent: .03}}, [], {});
+assert.equal(referenceDelta.value, .03);
+assert.equal(referenceDelta.label, "同组相对冠军增益");
+const missingDelta = modelSandbox.candidateDelta({score: .5, score_evidence: {delta_vs_parent: null, delta_vs_incumbent: null}}, [], {});
+assert.equal(missingDelta.value, null);
+const funnelMarkup = modelSandbox.renderEvidenceFunnel({evolution_funnel: {registered_candidates: 4, budget_unallocated_candidates: 3, applied_edits: 4, stages: {local_acceptance: {numerator: 0, denominator: 0, rate: null}, structural_validity: {numerator: null, denominator: null, rate: null}}}});
+assert.match(funnelMarkup, /未记录可核验分母/);
+assert.match(funnelMarkup, /应用不等于收益已验证/);
+assert.match(funnelMarkup, /预算未分配 3/);
+const observedFunnel = modelSandbox.renderEvidenceFunnel({evolution_funnel: {
+  registered_candidates: 4, applied_edits: 1, budget_unallocated_candidates: 0,
+  stages: {structural_validity: {numerator: 4, denominator: 5, rate: .8}},
+  execution_effect_observations: {recorded: 4, passed: 1, failed: 1, inconclusive: 1, not_exercised: 1}
+}});
+assert.match(observedFunnel, /登记修改的结构解析覆盖/);
+assert.match(observedFunnel, /执行观测回执 4 条/);
+assert.match(observedFunnel, /未触发 1/);
+assert.match(observedFunnel, /不等于受控行为差异或性能提升/);

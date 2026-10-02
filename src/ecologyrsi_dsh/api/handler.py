@@ -2983,7 +2983,7 @@ class EvolutionRequestHandler(
                     f"optimization_protocol must be {OPTIMIZATION_PROTOCOL}"
                 )
             schedule = (
-                (OptimizationSchedule.for_comparison_run() if requested_optimization_protocol == OPTIMIZATION_PROTOCOL else OptimizationSchedule.for_new_run())
+                (OptimizationSchedule.for_evidence_guided_run() if requested_optimization_protocol == "evidence_guided_epoch@1" else OptimizationSchedule.for_comparison_run() if requested_optimization_protocol == OPTIMIZATION_PROTOCOL else OptimizationSchedule.for_new_run())
                 if requested_schedule is None
                 else OptimizationSchedule.from_dict(requested_schedule)
             )

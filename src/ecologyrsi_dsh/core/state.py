@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from .local_edit_events import local_edit_key, validate_local_edit_event
+from .training_race import validate_race_selection, validate_race_diagnostic_reuse, validate_race_plan, race_screening_revision
+from .local_edit_events import local_edit_key, validate_local_edit_event, validate_local_effect_event
 
 from ..evolution.diversity import preregister_candidate
 
@@ -636,6 +637,8 @@ def validate_generation_comparison_binding(
     *,
     persisted_evaluations: Mapping[HoldoutArm, HoldoutEvaluation],
     persisted_judgments: Mapping[str, Evaluation] | None = None,
+    persisted_screening_events=(),
+    persisted_batch_evaluations=(),
 ) -> None:
     """Bind a comparison to this run's exact durable evidence and Host gates."""
 
@@ -674,6 +677,11 @@ def validate_generation_comparison_binding(
     )
     if canonical_json(comparison.to_dict()["gate_results"].get("finalist_reviews")) != canonical_json(reviews):
         raise ValueError("generation comparison differs from durable independent judgments")
+    from .training_effect_evidence import finalist_training_effect_evidence
+    training_effects = finalist_training_effect_evidence(comparison.holdout_evaluations,
+        screening_events=persisted_screening_events, batch_evaluations=persisted_batch_evaluations)
+    if canonical_json(comparison.to_dict()["gate_results"].get("training_effect_evidence")) != canonical_json(training_effects):
+        raise ValueError("generation comparison differs from sealed training effect evidence")
     if not uses_global_incumbent_protocol(task):
         return
 
@@ -689,8 +697,11 @@ def validate_generation_comparison_binding(
         not uses_positive_delta_search_protocol(task)
         and "selection_policy" not in comparison.gate_results
     )
+    schedule = OptimizationSchedule.from_dict(task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
     expected = build_generation_comparison(
-        quick_experiment=OptimizationSchedule.from_dict(task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict())).quick,
+        quick_experiment=schedule.quick,
+        experiment_protocol=schedule.protocol,
+        training_effect_evidence=training_effects,
         finalist_reviews=reviews,
         run_id=run_id,
         generation=comparison.generation,
@@ -1610,6 +1621,10 @@ class RunState:
             ),
             None,
         )
+
+    def adaptation_for_generation(self, generation: int):
+        planned = self.generation_cohort_for(generation)
+        return planned.adaptation if planned is not None and planned.adaptation is not None else self.run_adaptation_cohort
 
     def formal_selection_for(self, generation: int) -> Event | None:
         return next(
@@ -2627,7 +2642,7 @@ class RunStateReducer:
                 != schedule.formal_origin_count_per_finalist
                 or len(adaptation.batches) != schedule.batch_count
                 or any(
-                    batch.origin_count != schedule.local_batch_origin_count
+                    batch.origin_count != schedule.batch_origin_count(batch.batch_index)
                     for batch in adaptation.batches
                 )
             ):
@@ -2645,6 +2660,8 @@ class RunStateReducer:
             schedule = OptimizationSchedule.from_dict(
                 self.task.metadata["optimization_schedule"]
             )
+            if not schedule.race and (planned.adaptation is not None or planned.revision_bindings is not None):
+                raise ValueError("generation race extensions require the evidence-guided protocol")
             generation_candidates = [
                 item for item in self.candidates.values()
                 if item.generation == planned.generation
@@ -2659,41 +2676,49 @@ class RunStateReducer:
                 for generation, _candidate_id in self.candidate_screening_events
             ):
                 raise ValueError("generation cohorts must precede screening")
-            if (
-                planned.dataset_id != self.run_adaptation_cohort.dataset_id
-                or planned.episode_id != self.run_adaptation_cohort.episode_id
-                or planned.seed != self.task.seed
-                or planned.adaptation_digest
-                != self.run_adaptation_cohort.adaptation_digest
-                or planned.adaptation_batch_digests
-                != self.run_adaptation_cohort.batch_digests
-                or planned.screening.origin_count
-                != schedule.screening_origin_count
-                or planned.screening.shared_candidate_count != 4
-                or planned.holdout.origin_count
-                != schedule.selection_holdout_origin_count
-                or planned.holdout.shared_arm_count != schedule.finalist_count + 1
-                or set(planned.screening.origin_occurrence_keys)
-                & set(self.run_adaptation_cohort.origin_occurrence_keys)
-                or set(planned.holdout.origin_occurrence_keys)
-                & set(self.run_adaptation_cohort.origin_occurrence_keys)
-            ):
-                raise ValueError("generation cohorts differ from frozen task")
-            prior_origins = {
-                origin_id
-                for item in self.generation_selection_cohorts.values()
-                for origin_id in (
-                    *item.screening.origin_occurrence_keys,
-                    *item.holdout.origin_occurrence_keys,
-                )
-            }
-            if prior_origins & set(
-                (
-                    *planned.screening.origin_occurrence_keys,
-                    *planned.holdout.origin_occurrence_keys,
-                )
-            ):
-                raise ValueError("generation selection origins cannot be reused")
+            if schedule.race:
+                if (planned.dataset_id != self.run_adaptation_cohort.dataset_id
+                        or planned.episode_id != self.run_adaptation_cohort.episode_id or planned.seed != self.task.seed):
+                    raise ValueError("race dataset identity differs from run")
+                validate_race_plan(planned, schedule, candidates=self.candidates, revisions=self.candidate_revisions,
+                    prior_revision_id=self.effective_revision_bindings.get(planned.generation - 1, {}).get("selected_revision_id"),
+                    previous=self.generation_selection_cohorts.values())
+            else:
+                if (
+                    planned.dataset_id != self.run_adaptation_cohort.dataset_id
+                    or planned.episode_id != self.run_adaptation_cohort.episode_id
+                    or planned.seed != self.task.seed
+                    or planned.adaptation_digest
+                    != self.run_adaptation_cohort.adaptation_digest
+                    or planned.adaptation_batch_digests
+                    != self.run_adaptation_cohort.batch_digests
+                    or planned.screening.origin_count
+                    != schedule.screening_origin_count
+                    or planned.screening.shared_candidate_count != 4
+                    or planned.holdout.origin_count
+                    != schedule.selection_holdout_origin_count
+                    or planned.holdout.shared_arm_count != schedule.finalist_count + 1
+                    or set(planned.screening.origin_occurrence_keys)
+                    & set(self.run_adaptation_cohort.origin_occurrence_keys)
+                    or set(planned.holdout.origin_occurrence_keys)
+                    & set(self.run_adaptation_cohort.origin_occurrence_keys)
+                ):
+                    raise ValueError("generation cohorts differ from frozen task")
+                prior_origins = {
+                    origin_id
+                    for item in self.generation_selection_cohorts.values()
+                    for origin_id in (
+                        *item.screening.origin_occurrence_keys,
+                        *item.holdout.origin_occurrence_keys,
+                    )
+                }
+                if prior_origins & set(
+                    (
+                        *planned.screening.origin_occurrence_keys,
+                        *planned.holdout.origin_occurrence_keys,
+                    )
+                ):
+                    raise ValueError("generation selection origins cannot be reused")
             existing = self.generation_selection_cohorts.get(planned.generation)
             if existing is not None and existing.to_dict() != planned.to_dict():
                 raise ValueError("conflicting generation cohorts")
@@ -2721,7 +2746,9 @@ class RunStateReducer:
                 "prediction_cell_count",
                 "cohort_digest",
             }
-            if schema_version == SCREENING_SCHEMA_V2:
+            if schema_version == "ecologyrsi-dsh.candidate-screening/3":
+                expected_fields.update({"record_digest", "candidate_revision_id", "metrics"})
+            elif schema_version == SCREENING_SCHEMA_V2:
                 expected_fields.add("record_digest")
             elif schema_version != SCREENING_SCHEMA_V1:
                 raise ValueError("unsupported candidate screening schema")
@@ -2740,9 +2767,16 @@ class RunStateReducer:
             candidate = self.candidates.get(candidate_id)
             if candidate is None:
                 raise ValueError("screening candidate is missing")
-            if candidate.generation != generation:
+            planned = self.generation_selection_cohorts.get(generation)
+            bound_revision = race_screening_revision(planned, candidate_id)
+            race = bound_revision is not None
+            if race and (payload.get("candidate_revision_id") != bound_revision or not isinstance(payload.get("metrics"), Mapping)):
+                raise ValueError("race screening revision or metrics mismatch")
+            if schema_version == "ecologyrsi-dsh.candidate-screening/3" and not race:
+                raise ValueError("race screening requires frozen bindings")
+            if candidate.generation != generation and not race:
                 raise ValueError("screening generation does not match candidate")
-            if candidate.role is not CandidateRole.SEARCH:
+            if candidate.role is not CandidateRole.SEARCH and not race:
                 raise ValueError("incumbent control cannot enter candidate screening")
             if (
                 self.task.metadata.get("optimization_protocol")
@@ -2809,14 +2843,14 @@ class RunStateReducer:
                     or isinstance(cells_per_origin, bool)
                     or not isinstance(cells_per_origin, int)
                     or cells_per_origin < 1
-                    or origin_count != 64
+                    or origin_count != (planned.screening.origin_count if race else 64)
                     or complete_origin_count(
                         prediction_cell_count, cells_per_origin
                     )
-                    != 64
+                    != (planned.screening.origin_count if race else 64)
                 ):
                     raise ValueError("strict-v4 screening evidence is incomplete")
-            if schema_version == SCREENING_SCHEMA_V2:
+            if schema_version in {SCREENING_SCHEMA_V2, "ecologyrsi-dsh.candidate-screening/3"}:
                 record_digest = payload["record_digest"]
                 if (
                     not isinstance(record_digest, str)
@@ -2834,7 +2868,7 @@ class RunStateReducer:
                 if canonical_json(existing.payload) != canonical_json(payload):
                     raise ValueError("conflicting screening record")
             else:
-                if candidate.status is not CandidateStatus.SPAWNED:
+                if candidate.status is not CandidateStatus.SPAWNED and not race:
                     raise ValueError("only a new candidate can be screened")
                 self.candidate_screening_events[key] = event
         elif event.kind == "FormalSelectionCohortFrozen":
@@ -2863,7 +2897,7 @@ class RunStateReducer:
             generation = payload["generation"]
             selected = payload["selected_candidate_ids"]
             schedule = OptimizationSchedule.from_dict(self.task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
-            if schedule.quick:
+            if schedule.quick and not schedule.race:
                 first = preregister_candidate((c for c in self.candidates.values() if c.generation == generation and c.role is CandidateRole.SEARCH), self.proposals.__getitem__, self.task.metadata, generation)
                 if selected != [first.candidate_id]:
                     raise ValueError("quick trajectory must preregister the frozen policy's proposal")
@@ -2885,7 +2919,7 @@ class RunStateReducer:
                     or candidate.role is not CandidateRole.SEARCH
                 ):
                     raise ValueError("formal selected candidate is outside generation")
-                if not schedule.quick and (generation, candidate_id) not in self.candidate_screening_events:
+                if (not schedule.quick or schedule.race) and (generation, candidate_id) not in self.candidate_screening_events:
                     raise ValueError("formal selection is missing screening evidence")
             screening_digest = payload["screening_digest"]
             if (
@@ -2902,6 +2936,8 @@ class RunStateReducer:
                 for (item_generation, _candidate_id), screening_event in self.candidate_screening_events.items()
                 if item_generation == generation
             ]
+            if schedule.race:
+                validate_race_selection(self.generation_selection_cohorts[generation], generation_records, selected, self.candidates.values())
             if screening_digest != screening_cohort_digest(generation_records):
                 raise ValueError("formal screening digest does not match screening cohort")
             if payload.get("schema_version") == FORMAL_SELECTION_SCHEMA_V3:
@@ -3156,7 +3192,8 @@ class RunStateReducer:
                 raise ValueError("screened-out candidate formal selection is missing")
             if candidate.candidate_id in formal.payload["selected_candidate_ids"]:
                 raise ValueError("selected candidate cannot be screened out")
-            quick = OptimizationSchedule.from_dict(self.task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict())).quick
+            selection_schedule = OptimizationSchedule.from_dict(self.task.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
+            quick = selection_schedule.quick and not selection_schedule.race
             if not quick and (generation, candidate.candidate_id) not in self.candidate_screening_events:
                 raise ValueError("screened-out candidate is missing screening evidence")
             if payload["reason"] != ("outside_preregistered_quick_trajectory" if quick else "not_selected_by_screening_top_k"):
@@ -4095,6 +4132,8 @@ class RunStateReducer:
                 or evaluation.scope.origin_count != batch.origin_count
             ):
                 raise ValueError("formal batch evaluation scope does not match batch")
+            if OptimizationSchedule.from_dict(self.task.metadata["optimization_schedule"]).race and evaluation.scope.batch_index == 0:
+                validate_race_diagnostic_reuse(evaluation, self.candidate_screening_events.get((evaluation.scope.generation, evaluation.scope.candidate_id)))
             existing = self.formal_batch_evaluations.get(key)
             if existing is not None and existing.to_dict() != evaluation.to_dict():
                 raise ValueError("conflicting formal batch evaluation")
@@ -4228,7 +4267,7 @@ class RunStateReducer:
                 "outcome",
                 "active_revision_id",
             }
-            if set(payload) not in (fields, fields | {"reason"}):
+            if not fields.issubset(payload) or set(payload) - fields - {"reason", "effect_contract", "effect_resolution"}:
                 raise ValueError("local edit outcome payload is invalid")
             key = (payload["candidate_id"], payload["batch_index"])
             existing_event = self.local_edit_outcome_events.get(key)
@@ -4332,6 +4371,13 @@ class RunStateReducer:
                 or not payload["reason"].strip()
             ):
                 raise ValueError("local edit outcome reason is invalid")
+            validate_local_effect_event(
+                payload, revision=revision, proposal=proposal,
+                parent_revision=self.candidate_revisions.get(revision.parent_revision_id),
+                allowed_effect_cells=tuple(f"{target}@{horizon}h"
+                    for target in self.task.metadata.get("fitness_profile", {}).get("expected_targets", ())
+                    for horizon in self.task.metadata.get("fitness_profile", {}).get("expected_horizons", ())),
+            )
             normalized = dict(payload)
             existing = self.local_edit_outcomes.get(key)
             if existing is not None and canonical_json(existing) != canonical_json(normalized):
@@ -4748,6 +4794,8 @@ class RunStateReducer:
                     if item is not None
                 },
                 persisted_judgments={item.candidate_id: item for item in self.evaluations.values()},
+                persisted_screening_events=self.candidate_screening_events.values(),
+                persisted_batch_evaluations=self.formal_batch_evaluations.values(),
             )
             existing = self.generation_comparisons.get(comparison.generation)
             if existing is not None and existing.to_dict() != comparison.to_dict():

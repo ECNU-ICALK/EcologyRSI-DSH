@@ -1239,11 +1239,15 @@ class TrajectoryEventReplayTests(unittest.TestCase):
         canonical_state.generation_holdout_for = state.generation_holdout_for
         canonical_state.holdout_evaluation_for = state.holdout_evaluation_for
         canonical_state.formal_selection_for = state.formal_selection_for
+        canonical_state.candidate_screening_events = ()
+        canonical_state.formal_batch_evaluations = ()
         with patch.object(self.director, "state", return_value=canonical_state):
             with self.assertRaisesRegex(ValueError, "deterministic Host comparison"):
                 self.director.record_generation_comparison(self.run_id, invalid)
 
         exploration_state = Mock(wraps=state)
+        exploration_state.candidate_screening_events = ()
+        exploration_state.formal_batch_evaluations = ()
         exploration_state.formal_selection_for = lambda _generation: SimpleNamespace(
             payload={
                 "schema_version": "ecologyrsi-dsh.formal-selection-cohort/3",

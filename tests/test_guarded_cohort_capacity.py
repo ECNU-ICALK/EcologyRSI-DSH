@@ -63,6 +63,43 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
     tearDown = runtime_test_helpers.RuntimeIntegrationTests.tearDown
     request = runtime_test_helpers.RuntimeIntegrationTests.request
 
+    def test_guided_capacity_counts_both_pair_arms_and_only_once_for_screening_reuse(self):
+        trial = OptimizationSchedule.for_evidence_guided_run()
+        with (patch.object(self.server.datasets, "selection_view", return_value=dataset_fixture(2000)),
+              patch.object(self.server.datasets, "partition_summary", return_value={})):
+            status, report = self.request("/evolution-capacity", "POST", {
+                "dataset_id": "agc_cucumber_2018", "episode_id": None,
+                "optimization_schedule": trial.to_dict(), "planned_generations": 4,
+            })
+        self.assertEqual(status, 200, report)
+        self.assertTrue(report["sufficient"], report)
+        self.assertEqual(report["required_unique_origins"], 340)
+        self.assertEqual(report["candidate_origin_executions_per_generation"], 200)
+        self.assertEqual(report["candidate_origin_executions_for_run"], 800)
+        self.assertEqual(report["scoring_cells_for_run"], 7200)
+        self.assertEqual(report["holdout_inference_replicas"], 1)
+        self.assertEqual(report["execution_plan"], trial.execution_plan(4, cells_per_origin=9, native=True))
+
+    def test_opt_in_protocol_selects_a_fixed_schedule_and_rejects_conflicting_schedule(self):
+        body = {
+            "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
+            "strategy_id": "parameter_sweep@1", "evaluator_id": "toy_time_forward@1",
+            "policy_model_id": "host_parameter_generator@1", "judge_model_id": "rule_judge@1",
+            "optimization_protocol": "evidence_guided_epoch@1",
+            "budget": {"max_generations": 1, "max_candidates": 4, "candidates_per_generation": 4},
+            "auto_advance": 0, "idempotency_key": "guided-protocol-selection",
+        }
+        status, created = self.request("/runs", "POST", body)
+        self.assertEqual(status, 201, created)
+        metadata = self.server.director.state(created["projection"]["run_id"]).task_manifest.metadata
+        self.assertEqual(metadata["optimization_protocol"], "evidence_guided_epoch@1")
+        self.assertEqual(metadata["optimization_schedule"], OptimizationSchedule.for_evidence_guided_run().to_dict())
+        body.update(optimization_schedule=OptimizationSchedule.for_new_run().to_dict(),
+                    idempotency_key="guided-protocol-conflict")
+        status, rejected = self.request("/runs", "POST", body)
+        self.assertEqual(status, 400, rejected)
+        self.assertIn("differs from the frozen schedule", rejected["error"])
+
     def test_capacity_preview_enforces_the_same_day_blocks_and_counts_inference_replicas(self):
         from ecologyrsi_dsh.evaluators.epoch_cohorts import estimate_epoch_capacity
         data = dataset_fixture(2000)
@@ -120,7 +157,7 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
                          "live_agent_service_ready": True, "first_call_verified": False}
                         for preset in ("ecology-coordinator-v6", "ecology-researcher-v15",
                                        "ecology-candidate-proposer-v6", "ecology-sample-planner-v12",
-                                       "ecology-sample-critic-v6", "ecology-generation-judge-v9")],
+                                       "ecology-sample-critic-v6", "ecology-generation-judge-v10")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }
         description = {"descriptor": {"runnable": True, "display_name_zh": "测试温室序列",
@@ -190,7 +227,7 @@ class GuardedCohortAPIAdmissionTests(unittest.TestCase):
                          "live_agent_service_ready": True, "first_call_verified": False}
                         for preset in ("ecology-coordinator-v6", "ecology-researcher-v15",
                                        "ecology-candidate-proposer-v6", "ecology-sample-planner-v12",
-                                       "ecology-sample-critic-v6", "ecology-generation-judge-v9")],
+                                       "ecology-sample-critic-v6", "ecology-generation-judge-v10")],
             "live_agent_service_ready": True, "first_call_verified": False,
         }
         self.server.dsh_native_runtime = native

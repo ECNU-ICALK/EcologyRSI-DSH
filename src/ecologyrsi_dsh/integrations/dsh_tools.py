@@ -308,7 +308,7 @@ class DshToolService:
     @contextmanager
     def bind_prediction_tool(self, *, run_id, stage_attempt, idempotency_key,
                              wave_digest, sample_ids, catalog, executor,
-                             prediction_tool_call_budget=None, origin_timestamp=None):
+                             prediction_tool_call_budget=None, origin_timestamp=None, mean_blend_required=False):
         """Bind a bounded model/tool catalog to one authenticated Agent wave."""
         if not run_id or not idempotency_key or not sample_ids or len(set(sample_ids)) != len(sample_ids):
             raise ValueError("invalid prediction wave identity")
@@ -319,6 +319,7 @@ class DshToolService:
             run_id=run_id, stage_attempt=stage_attempt, idempotency_key=idempotency_key,
             wave_digest=wave_digest, sample_ids=sample_ids, catalog=catalog, executor=executor,
             budget=prediction_tool_call_budget, origin_timestamp=origin_timestamp,
+            mean_blend_required=mean_blend_required,
         )
         with self._prediction_lock:
             if key in self._prediction_bindings:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .local_edit_events import local_edit_key, validate_local_edit_event
+from .local_edit_events import local_edit_key, validate_local_edit_event, validate_local_effect_event
 
 from ..evolution.diversity import preregister_candidate
 
@@ -101,6 +101,7 @@ from .models import (
     canonical_json,
     digest,
 )
+from .training_race import validate_race_selection, validate_race_diagnostic_reuse, race_bindings, validate_race_plan, race_screening_revision
 from .protocols import is_strict_origin_protocol, supports_two_stage_screening
 from .sample_budget import complete_origin_count
 from .screening import (
@@ -1319,6 +1320,7 @@ class EvolutionDirector:
                             if previous_analysis is not None
                             else None
                         ),
+                        "derived_execution_plan": derive_execution_plan(previous_analysis).to_dict(),
                         "knowledge_snapshot": knowledge_context,
                         "knowledge_snapshot_digest": (
                             generation_batch.knowledge_snapshot_digest
@@ -2086,7 +2088,10 @@ class EvolutionDirector:
         candidate_id = f"candidate:{run_id}:seed-incumbent-control"
         seed_profile = resolve_candidate_agent_profile(seed, current_program_registry())
         seed_policy = build_agent_policy(genome_digest=seed.genome_digest, profile=seed_profile,
-            parameters=seed.scientific_program["parameter_overrides"], previous_analysis=None, generation=0)
+            parameters=seed.scientific_program["parameter_overrides"], previous_analysis=None, generation=0,
+            prediction_formula_policy=("mean-referenced-tools@1"
+                if state.task_manifest.metadata.get("optimization_protocol") == "evidence_guided_epoch@1"
+                else None))
         proposal = Proposal(
             proposal_id=proposal_id,
             run_id=run_id,
@@ -2327,15 +2332,22 @@ class EvolutionDirector:
         prediction_cell_count: int,
         cohort_digest: str | None,
         sample_results: Mapping[str, Any] | None = None,
+        metrics: Mapping[str, Any] | None = None,
+        candidate_revision_id: str | None = None,
     ) -> Event:
         """Persist the concise restart boundary for one screening evaluation."""
 
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
         candidate = state.candidate(candidate_id)
-        if candidate.generation != generation:
+        planned = state.generation_cohort_for(generation)
+        bound_revision = race_screening_revision(planned, candidate_id)
+        race = bound_revision is not None
+        if race and (candidate_revision_id != bound_revision or not isinstance(metrics, Mapping)):
+            raise ValueError("race screening must bind the frozen revision and metrics")
+        if candidate.generation != generation and not race:
             raise ValueError("screening generation does not match candidate")
-        if candidate.role is not CandidateRole.SEARCH:
+        if candidate.role is not CandidateRole.SEARCH and not race:
             raise ValueError("incumbent control cannot enter candidate screening")
         if (
             state.task_manifest.metadata.get("optimization_protocol")
@@ -2393,8 +2405,8 @@ class EvolutionDirector:
                 isinstance(cells_per_origin, bool)
                 or not isinstance(cells_per_origin, int)
                 or cells_per_origin < 1
-                or origin_count != 64
-                or complete_origin_count(prediction_cell_count, cells_per_origin) != 64
+                or origin_count != (planned.screening.origin_count if race else 64)
+                or complete_origin_count(prediction_cell_count, cells_per_origin) != (planned.screening.origin_count if race else 64)
             ):
                 raise ValueError("strict-v4 screening evidence is incomplete")
         payload = {
@@ -2408,14 +2420,17 @@ class EvolutionDirector:
             "prediction_cell_count": prediction_cell_count,
             "cohort_digest": cohort_digest,
         }
+        if race:
+            payload.update(schema_version="ecologyrsi-dsh.candidate-screening/3",
+                           candidate_revision_id=bound_revision, metrics=dict(metrics))
         payload["record_digest"] = screening_record_digest(payload)
         existing = state.screening_for(generation, candidate_id)
-        if existing is None and candidate.status is not CandidateStatus.SPAWNED:
+        if existing is None and candidate.status is not CandidateStatus.SPAWNED and not race:
             raise ValueError("only a new candidate can be screened")
         event_id = f"{run_id}:generation:{generation}:screening:{candidate_id}"
         completion_entry = None
         if sample_results is not None:
-            revision = state.initial_revision_for(candidate_id)
+            revision = state.revision(bound_revision) if race else state.initial_revision_for(candidate_id)
             if revision is None:
                 raise ValueError("screening sample results require initial revision R0")
             completion_entry = self._scoped_sample_results_completion_entry(
@@ -2481,7 +2496,7 @@ class EvolutionDirector:
             or planned.origin_count != schedule.formal_origin_count_per_finalist
             or len(planned.batches) != schedule.batch_count
             or any(
-                batch.origin_count != schedule.local_batch_origin_count
+                batch.origin_count != schedule.batch_origin_count(batch.batch_index)
                 for batch in planned.batches
             )
         ):
@@ -2514,6 +2529,8 @@ class EvolutionDirector:
         schedule = OptimizationSchedule.from_dict(
             state.task_manifest.metadata["optimization_schedule"]
         )
+        if not schedule.race and (planned.adaptation is not None or planned.revision_bindings is not None):
+            raise ValueError("generation race extensions require the evidence-guided protocol")
         generation_candidates = [
             item
             for item in state.candidates
@@ -2529,38 +2546,47 @@ class EvolutionDirector:
             for event in state.candidate_screening_events
         ):
             raise ValueError("generation cohorts must be frozen before screening")
-        if (
-            planned.dataset_id != adaptation.dataset_id
-            or planned.episode_id != adaptation.episode_id
-            or planned.seed != state.task_manifest.seed
-            or planned.adaptation_digest != adaptation.adaptation_digest
-            or planned.adaptation_batch_digests != adaptation.batch_digests
-            or planned.screening.origin_count != schedule.screening_origin_count
-            or planned.screening.shared_candidate_count != 4
-            or planned.holdout.origin_count
-            != schedule.selection_holdout_origin_count
-            or planned.holdout.shared_arm_count != schedule.finalist_count + 1
-            or set(planned.screening.origin_occurrence_keys)
-            & set(adaptation.origin_occurrence_keys)
-            or set(planned.holdout.origin_occurrence_keys)
-            & set(adaptation.origin_occurrence_keys)
-        ):
-            raise ValueError("planned generation cohorts differ from frozen task")
-        prior_origins = {
-            origin_id
-            for item in state.generation_selection_cohorts
-            for origin_id in (
-                *item.screening.origin_occurrence_keys,
-                *item.holdout.origin_occurrence_keys,
-            )
-        }
-        if prior_origins & set(
-            (
-                *planned.screening.origin_occurrence_keys,
-                *planned.holdout.origin_occurrence_keys,
-            )
-        ):
-            raise ValueError("generation selection origins cannot be reused")
+        if schedule.race:
+            if (planned.dataset_id != adaptation.dataset_id or planned.episode_id != adaptation.episode_id
+                    or planned.seed != state.task_manifest.seed or dict(planned.revision_bindings or {}) != race_bindings(state, planned.generation)):
+                raise ValueError("race plan identity differs from frozen run")
+            validate_race_plan(planned, schedule, candidates={c.candidate_id: c for c in state.candidates},
+                revisions={r.revision_id: r for r in state.candidate_revisions},
+                prior_revision_id=state.effective_revision_for(planned.generation - 1),
+                previous=state.generation_selection_cohorts)
+        else:
+            if (
+                planned.dataset_id != adaptation.dataset_id
+                or planned.episode_id != adaptation.episode_id
+                or planned.seed != state.task_manifest.seed
+                or planned.adaptation_digest != adaptation.adaptation_digest
+                or planned.adaptation_batch_digests != adaptation.batch_digests
+                or planned.screening.origin_count != schedule.screening_origin_count
+                or planned.screening.shared_candidate_count != 4
+                or planned.holdout.origin_count
+                != schedule.selection_holdout_origin_count
+                or planned.holdout.shared_arm_count != schedule.finalist_count + 1
+                or set(planned.screening.origin_occurrence_keys)
+                & set(adaptation.origin_occurrence_keys)
+                or set(planned.holdout.origin_occurrence_keys)
+                & set(adaptation.origin_occurrence_keys)
+            ):
+                raise ValueError("planned generation cohorts differ from frozen task")
+            prior_origins = {
+                origin_id
+                for item in state.generation_selection_cohorts
+                for origin_id in (
+                    *item.screening.origin_occurrence_keys,
+                    *item.holdout.origin_occurrence_keys,
+                )
+            }
+            if prior_origins & set(
+                (
+                    *planned.screening.origin_occurrence_keys,
+                    *planned.holdout.origin_occurrence_keys,
+                )
+            ):
+                raise ValueError("generation selection origins cannot be reused")
         self.ledger.append(
             run_id,
             "GenerationCohortsFrozen",
@@ -2586,7 +2612,7 @@ class EvolutionDirector:
         schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
         if len(selected) != schedule.finalist_count or len(selected) != len(set(selected)):
             raise ValueError("formal selection cohort must contain exactly 2 candidates")
-        if schedule.quick:
+        if schedule.quick and not schedule.race:
             first = preregister_candidate((c for c in state.candidates if c.generation == generation and c.role is CandidateRole.SEARCH), state.proposal, state.task_manifest.metadata, generation)
             if selected != (first.candidate_id,):
                 raise ValueError("quick trajectory must preregister the frozen policy's proposal")
@@ -2599,7 +2625,9 @@ class EvolutionDirector:
             for event in state.candidate_screening_events
             if event.payload["generation"] == generation
         ]
-        if not schedule.quick and any(
+        if schedule.race:
+            validate_race_selection(state.generation_cohort_for(generation), screening_records, selected, state.candidates)
+        if (not schedule.quick or schedule.race) and any(
             state.screening_for(generation, candidate_id) is None
             for candidate_id in selected
         ):
@@ -2844,7 +2872,7 @@ class EvolutionDirector:
     ) -> FormalBatch:
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
-        adaptation = state.run_adaptation_cohort
+        adaptation = state.adaptation_for_generation(state.candidate(candidate_id).generation)
         if adaptation is None:
             raise ValueError("formal batch requires frozen adaptation cohorts")
         if (
@@ -2924,6 +2952,8 @@ class EvolutionDirector:
                 raise ValueError("paired formal batch evaluation requires an arm")
         elif arm is not None:
             raise ValueError("prequential formal evaluation cannot have an arm")
+        if schedule.race and key_index == 0:
+            validate_race_diagnostic_reuse(evaluation, state.screening_for(evaluation.scope.generation, key_candidate))
         existing = state.batch_evaluation_for(key_candidate, key_index, arm)
         if existing is not None:
             if existing.to_dict() != evaluation.to_dict():
@@ -3160,7 +3190,7 @@ class EvolutionDirector:
             "outcome",
             "active_revision_id",
         }
-        if set(payload) not in (fields, fields | {"reason"}):
+        if not fields.issubset(payload) or set(payload) - fields - {"reason", "effect_contract", "effect_resolution"}:
             raise ValueError("local edit decision payload is invalid")
         last_conflict: ConcurrentRunMutationError | None = None
         for _ in range(_STATE_TRANSITION_RETRY_LIMIT):
@@ -3285,6 +3315,13 @@ class EvolutionDirector:
                 raise ValueError(
                     "local edit decision reason must be non-empty text"
                 )
+            validate_local_effect_event(
+                payload, revision=revision, proposal=proposal,
+                parent_revision=state.revision(revision.parent_revision_id) if revision.parent_revision_id else None,
+                allowed_effect_cells=tuple(f"{target}@{horizon}h"
+                    for target in state.task_manifest.metadata.get("fitness_profile", {}).get("expected_targets", ())
+                    for horizon in state.task_manifest.metadata.get("fitness_profile", {}).get("expected_horizons", ())),
+            )
             try:
                 return self.ledger.append(
                     run_id,
@@ -3792,6 +3829,8 @@ class EvolutionDirector:
                 {item.candidate_id: item for item in state.evaluations}
                 if comparison.gate_results.get("finalist_review_qualification") is not None else None
             ),
+            persisted_screening_events=getattr(state, "candidate_screening_events", ()),
+            persisted_batch_evaluations=getattr(state, "formal_batch_evaluations", ()),
         )
         self.ledger.append(
             run_id,
@@ -3881,7 +3920,8 @@ class EvolutionDirector:
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
         candidate = state.candidate(candidate_id)
-        quick = OptimizationSchedule.from_dict(state.task_manifest.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict())).quick
+        selection_schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
+        quick = selection_schedule.quick and not selection_schedule.race
         payload = {
             "schema_version": SCREENED_OUT_SCHEMA_V1,
             "candidate_id": candidate_id,
@@ -4313,12 +4353,13 @@ class EvolutionDirector:
         generation_matches = start_generation == candidate.generation or (
             isinstance(start_generation, int)
             and not isinstance(start_generation, bool)
-            and self._sample_checkpoint_matches_frozen_holdout(
+            and (self._sample_checkpoint_matches_frozen_holdout(
                 state,
                 candidate,
                 checkpoint if isinstance(checkpoint, Mapping) else None,
                 generation=start_generation,
-            )
+            ) or self._sample_checkpoint_matches_frozen_race(
+                state, candidate, checkpoint, generation=start_generation))
         )
         if (
             start.payload.get("run_id") != state.run.run_id
@@ -5177,6 +5218,16 @@ class EvolutionDirector:
             raise ValueError("model usage checkpoint is already completed")
 
     @staticmethod
+    def _sample_checkpoint_matches_frozen_race(state, candidate, checkpoint, *, generation):
+        if not isinstance(checkpoint, Mapping) or checkpoint.get("evaluation_phase") != EvaluationPhase.SCREENING.value:
+            return False
+        planned = state.generation_cohort_for(generation)
+        bound = race_screening_revision(planned, candidate.candidate_id)
+        return bool(bound and checkpoint.get("candidate_revision_id") == bound
+                    and checkpoint.get("cohort_digest") == planned.screening.cohort_digest
+                    and checkpoint.get("schema_version") == _SCOPED_SAMPLE_CHECKPOINT_SCHEMA_VERSION)
+
+    @staticmethod
     def _sample_checkpoint_candidate_status_allowed(
         state: RunState,
         candidate: Candidate,
@@ -5186,6 +5237,8 @@ class EvolutionDirector:
     ) -> bool:
         """Permit only the exact frozen holdout arm for a settled candidate."""
 
+        if EvolutionDirector._sample_checkpoint_matches_frozen_race(state, candidate, checkpoint, generation=generation):
+            return True
         if candidate.status is CandidateStatus.SPAWNED:
             return candidate.generation == generation
         if not (
@@ -5254,6 +5307,9 @@ class EvolutionDirector:
         """Allow a frozen holdout to replay the prior generation incumbent."""
 
         if candidate.generation == generation:
+            return True
+        if (scope is not None and scope.phase is EvaluationPhase.SCREENING and scope.generation == generation
+                and EvolutionDirector._sample_checkpoint_matches_frozen_race(state, candidate, checkpoint, generation=generation)):
             return True
         return bool(
             isinstance(checkpoint, Mapping)
@@ -5762,6 +5818,7 @@ class EvolutionDirector:
             or (
                 scope.phase is not EvaluationPhase.HOLDOUT
                 and scope.generation != candidate.generation
+                and not (scope.phase is EvaluationPhase.SCREENING and race_screening_revision(state.generation_cohort_for(scope.generation), candidate.candidate_id) == scope.candidate_revision_id)
             )
         ):
             raise ValueError("evaluation scope does not match candidate")
@@ -5770,7 +5827,10 @@ class EvolutionDirector:
             raise ValueError("evaluation scope revision belongs to another candidate")
         if scope.phase is EvaluationPhase.SCREENING:
             initial = state.initial_revision_for(candidate.candidate_id)
-            planned = state.generation_cohort_for(candidate.generation)
+            planned = state.generation_cohort_for(scope.generation)
+            bound_revision = race_screening_revision(planned, candidate.candidate_id)
+            if bound_revision is not None:
+                initial = state.revision(bound_revision)
             if (
                 initial is None
                 or initial.revision_id != scope.candidate_revision_id

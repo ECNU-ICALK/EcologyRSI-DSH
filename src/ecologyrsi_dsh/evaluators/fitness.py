@@ -244,6 +244,8 @@ class FormalFitnessAssessment:
     formal_score_lcb: float | None
     paired_interval_score_delta_ucb: float | None
     frozen_baseline_uq_artifact_digest: str | None
+    certification_scope: str = "point_and_interval"
+    uq_status: str = "required"
 
     def to_dict(self) -> dict[str, Any]:
         return {name: getattr(self, name) for name in self.__dataclass_fields__}
@@ -536,6 +538,7 @@ def build_formal_fitness_assessment(
     evaluation: Any,
     frozen_baseline_uq_artifact: Mapping[str, Any],
     profile: FitnessProfile,
+    *, claim_scope: str = "point_and_interval",
 ) -> FormalFitnessAssessment:
     """Apply non-compensatory formal point and interval gates.
 
@@ -546,6 +549,11 @@ def build_formal_fitness_assessment(
 
     if not isinstance(profile, FitnessProfile):
         raise TypeError("profile must be a FitnessProfile")
+    if claim_scope not in {"point_prediction", "point_and_interval"}:
+        raise ValueError("unsupported formal certification scope")
+    if profile.require_predictive_intervals and claim_scope == "point_prediction":
+        raise ValueError("interval certification cannot downgrade to a point-only claim")
+    interval_required = claim_scope == "point_and_interval"
     if not isinstance(frozen_baseline_uq_artifact, Mapping):
         raise TypeError("frozen baseline UQ artifact must be an object")
     metrics = getattr(evaluation, "metrics", {})
@@ -557,9 +565,10 @@ def build_formal_fitness_assessment(
         "formal_score",
         "formal_score_lcb",
         "formal_valid_three_day_start_count",
+    ) + ((
         "formal_baseline_uq_artifact_digest",
         "paired_interval_score_delta_ucb",
-    )
+    ) if interval_required else ())
     missing = [name for name in required if metrics.get(name) is None]
     if missing:
         return FormalFitnessAssessment(
@@ -576,6 +585,8 @@ def build_formal_fitness_assessment(
             frozen_baseline_uq_artifact_digest=(
                 str(baseline_digest) if isinstance(baseline_digest, str) else None
             ),
+            certification_scope=claim_scope,
+            uq_status="missing" if interval_required else "not_requested",
         )
 
     failures: list[str] = []
@@ -584,7 +595,7 @@ def build_formal_fitness_assessment(
     interval_delta_ucb = _finite(
         metrics["paired_interval_score_delta_ucb"],
         "paired_interval_score_delta_ucb",
-    )
+    ) if interval_required else None
     if formal_score <= 0.0:
         failures.append("formal_score_nonpositive")
     if formal_score_lcb <= 0.0:
@@ -600,7 +611,7 @@ def build_formal_fitness_assessment(
         or float(overall_coverage) < 0.95
     ):
         failures.append("formal_overall_coverage_insufficient")
-    if (
+    if interval_required and (
         frozen_baseline_uq_artifact.get("policy_id")
         != "cellwise_time_block_calibrated_residual@1"
         or frozen_baseline_uq_artifact.get("alpha") != 0.1
@@ -644,14 +655,14 @@ def build_formal_fitness_assessment(
             or float(coverage) < 0.95
         ):
             failures.append("formal_cell_coverage_insufficient" + suffix)
-        if (
+        if interval_required and (
             isinstance(interval_lcb, bool)
             or not isinstance(interval_lcb, (int, float))
             or not math.isfinite(float(interval_lcb))
             or float(interval_lcb) < 0.85
         ):
             failures.append("formal_interval_coverage_lcb_insufficient" + suffix)
-    if interval_delta_ucb > 0.05:
+    if interval_required and interval_delta_ucb > 0.05:
         failures.append("formal_interval_score_noninferiority_failed")
 
     point_failures = tuple(
@@ -667,8 +678,8 @@ def build_formal_fitness_assessment(
         or item == "formal_baseline_uq_binding_mismatch"
     )
     point_pass = not point_failures
-    uq_pass = not uq_failures
-    passed = point_pass and uq_pass and not failures
+    uq_pass = interval_required and not uq_failures
+    passed = point_pass and (uq_pass or not interval_required) and not failures
     return FormalFitnessAssessment(
         candidate_id=candidate_id,
         evidence_class=FORMAL_EVIDENCE_CLASS,
@@ -680,7 +691,9 @@ def build_formal_fitness_assessment(
         formal_score=formal_score,
         formal_score_lcb=formal_score_lcb,
         paired_interval_score_delta_ucb=interval_delta_ucb,
-        frozen_baseline_uq_artifact_digest=str(baseline_digest),
+        frozen_baseline_uq_artifact_digest=str(baseline_digest) if baseline_digest else None,
+        certification_scope=claim_scope,
+        uq_status=("passed" if uq_pass else "failed") if interval_required else "not_requested",
     )
 
 

@@ -21,7 +21,9 @@ ISOLATED_SCHEDULE_SCHEMA_VERSION = "ecologyrsi-dsh.top2-adaptive-epoch-schedule/
 TRAINING_SCHEDULE_SCHEMA_VERSION = "ecologyrsi-dsh.top2-adaptive-epoch-schedule/4"
 OPTIMIZATION_PROTOCOL = "top2_adaptive_epoch@1"
 QUICK_OPTIMIZATION_PROTOCOL = "quick_adaptive_epoch@1"
-ADAPTIVE_PROTOCOLS = (OPTIMIZATION_PROTOCOL, QUICK_OPTIMIZATION_PROTOCOL)
+EVIDENCE_GUIDED_PROTOCOL = "evidence_guided_epoch@1"
+EVIDENCE_GUIDED_SCHEDULE_SCHEMA = "ecologyrsi-dsh.evidence-guided-epoch-schedule/1"
+ADAPTIVE_PROTOCOLS = (OPTIMIZATION_PROTOCOL, QUICK_OPTIMIZATION_PROTOCOL, EVIDENCE_GUIDED_PROTOCOL)
 QUICK_SCHEDULE_SCHEMA_VERSION = "ecologyrsi-dsh.quick-adaptive-epoch-schedule/1"
 PREQUENTIAL_LOCAL_EVALUATION_MODE = "prequential"
 PAIRED_LOCAL_EVALUATION_MODE = "paired_champion_challenger"
@@ -32,6 +34,7 @@ _SCHEDULE_MODES = {
     ISOLATED_SCHEDULE_SCHEMA_VERSION: PAIRED_LOCAL_EVALUATION_MODE,
     TRAINING_SCHEDULE_SCHEMA_VERSION: PAIRED_LOCAL_EVALUATION_MODE,
     QUICK_SCHEDULE_SCHEMA_VERSION: PREQUENTIAL_LOCAL_EVALUATION_MODE,
+    EVIDENCE_GUIDED_SCHEDULE_SCHEMA: PAIRED_LOCAL_EVALUATION_MODE,
 }
 
 _FIELDS = frozenset(
@@ -76,7 +79,7 @@ class OptimizationSchedule:
                 "schema_version must be one of "
                 f"{tuple(_SCHEDULE_MODES)!r}"
             )
-        if type(self.screening_origin_count) is not int or self.screening_origin_count != (0 if self.quick else 64):
+        if type(self.screening_origin_count) is not int or self.screening_origin_count != (10 if self.race else 0 if self.quick else 64):
             raise ValueError("screening_origin_count differs from protocol")
         if type(self.finalist_count) is not int or self.finalist_count != (1 if self.quick else 2):
             raise ValueError("finalist_count differs from protocol")
@@ -102,7 +105,9 @@ class OptimizationSchedule:
         )
         if self.schema_version in {ISOLATED_SCHEDULE_SCHEMA_VERSION, TRAINING_SCHEDULE_SCHEMA_VERSION, QUICK_SCHEDULE_SCHEMA_VERSION} and batch < 2:
             raise ValueError("isolated adaptation batches require at least two origins")
-        if formal % batch:
+        if self.race and (formal, batch, edits, holdout) != (35, 25, 1, 50):
+            raise ValueError("evidence-guided pilot freezes 10/25/50 origins and one local edit")
+        if not self.race and formal % batch:
             raise ValueError(
                 "local_batch_origin_count must divide "
                 "formal_origin_count_per_finalist"
@@ -137,9 +142,21 @@ class OptimizationSchedule:
                        local_batch_origin_count=PARAMETER_RULES["local_batch_origin_count"]["default"],
                        selection_holdout_origin_count=PARAMETER_RULES["selection_holdout_origin_count"]["default"])
 
+    @classmethod
+    def for_evidence_guided_run(cls) -> "OptimizationSchedule":
+        return cls(EVIDENCE_GUIDED_SCHEDULE_SCHEMA, 10, 1, 35, 25, 1, 50,
+                   PAIRED_LOCAL_EVALUATION_MODE)
+
+    @property
+    def race(self) -> bool:
+        return self.schema_version == EVIDENCE_GUIDED_SCHEDULE_SCHEMA
+
+    def batch_origin_count(self, index: int) -> int:
+        return self.screening_origin_count if self.race and index == 0 else self.local_batch_origin_count
+
     @property
     def quick(self) -> bool:
-        return self.schema_version == QUICK_SCHEDULE_SCHEMA_VERSION
+        return self.schema_version in {QUICK_SCHEDULE_SCHEMA_VERSION, EVIDENCE_GUIDED_SCHEDULE_SCHEMA}
 
     @classmethod
     def for_comparison_run(cls) -> "OptimizationSchedule":
@@ -159,7 +176,9 @@ class OptimizationSchedule:
             "generation_budget": self.generation_execution_budget(cells_per_origin=cells_per_origin, holdout_inference_replicas=replicas),
             "run_budget": self.run_execution_budget(generations, cells_per_origin=cells_per_origin, holdout_inference_replicas=replicas),
             "required_unique_origins": self.required_unique_origins(generations),
-            "training_replay": True,
+            "training_replay": not self.race,
+            "screening_includes_incumbent": self.race,
+            "screening_reused_as_diagnosis": self.race,
             "fresh_epoch_holdout": self.quick,
             "qualification": "exploratory_only" if self.quick else "comparison_requires_certification_gates",
             "comparison_evidence": "complete_pair_practical_delta_cell_nonregression" if self.quick else "paired_time_blocks_and_inference_replicas",
@@ -178,7 +197,7 @@ class OptimizationSchedule:
 
     @property
     def protocol(self) -> str:
-        return QUICK_OPTIMIZATION_PROTOCOL if self.quick else OPTIMIZATION_PROTOCOL
+        return EVIDENCE_GUIDED_PROTOCOL if self.race else QUICK_OPTIMIZATION_PROTOCOL if self.quick else OPTIMIZATION_PROTOCOL
 
     @property
     def exploratory_local_comparison(self) -> bool:
@@ -221,7 +240,7 @@ class OptimizationSchedule:
 
     @property
     def batch_count(self) -> int:
-        return self.formal_origin_count_per_finalist // self.local_batch_origin_count
+        return 2 if self.race else self.formal_origin_count_per_finalist // self.local_batch_origin_count
 
     @property
     def max_local_edits_per_finalist(self) -> int:
@@ -243,7 +262,7 @@ class OptimizationSchedule:
         replicas = _positive_integer(holdout_inference_replicas, "holdout_inference_replicas")
         if self.quick:
             replicas = 1
-        screening = self.screening_origin_count * 4
+        screening = self.screening_origin_count * (5 if self.race else 4)
         if self.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
             formal_per_finalist = self.local_batch_origin_count + (
                 2
@@ -253,6 +272,10 @@ class OptimizationSchedule:
             formal = formal_per_finalist * self.finalist_count
         else:
             formal = self.formal_origin_count_per_finalist * self.finalist_count
+        if self.race:
+            # Batch zero references the selected screening receipt; it is not
+            # another prediction or an independent inference replica.
+            formal = 2 * self.local_batch_origin_count
         holdout = replicas * self.selection_holdout_origin_count * (
             self.finalist_count + 1
         )
@@ -288,6 +311,8 @@ class OptimizationSchedule:
         generations = _positive_integer(
             planned_generations, "planned_generations"
         )
+        if self.race:
+            return generations * (self.formal_origin_count_per_finalist + self.selection_holdout_origin_count)
         if self.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
             return self.formal_origin_count_per_finalist + self.screening_origin_count + self.selection_holdout_origin_count
         return self.formal_origin_count_per_finalist + generations * (
@@ -296,6 +321,8 @@ class OptimizationSchedule:
 
     def planned_origin_occurrences(self, planned_generations: int) -> int:
         """Count training uses separately from distinct source observations."""
+        if self.race:
+            return self.required_unique_origins(planned_generations)
         if self.quick:
             return self.required_unique_origins(planned_generations) + (planned_generations - 1) * self.formal_origin_count_per_finalist
         if self.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:

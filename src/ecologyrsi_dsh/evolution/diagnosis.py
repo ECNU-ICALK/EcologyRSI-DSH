@@ -11,6 +11,20 @@ from collections.abc import Mapping
 from ..core.research import DiagnosticReport, HypothesisProposal, content_id
 
 
+def failure_category(code: str) -> str:
+    """Classify recorded reasons without treating absent evidence as poor fit."""
+    code = str(code)
+    if any(part in code for part in ("insufficient", "incomplete", "probation", "requires_independent", "not_established")):
+        return "insufficient_evidence"
+    if any(part in code for part in ("structured_", "timeout", "execution_failed", "judge_unavailable", "transport", "aborted")):
+        return "operational"
+    if any(part in code for part in ("invalid", "contract_mismatch", "incompatible_comparison", "safety_gate", "constraint_violations")):
+        return "invalid_change"
+    if any(part in code for part in ("regression", "no_positive", "below_practical", "negative_skill")):
+        return "performance"
+    return "unclassified"
+
+
 def diagnose_generation(state, knowledge) -> DiagnosticReport:
     generation = state.run.generation
     previous = state.analysis_for(generation - 1) if generation else None
@@ -24,6 +38,7 @@ def diagnose_evidence(task, previous, comparison, knowledge) -> DiagnosticReport
     weaknesses: list[str] = []
     failures: list[str] = []
     questions: list[str] = []
+    paired_diagnostics = getattr(task, "metadata", {}).get("optimization_protocol") == "evidence_guided_epoch@1"
     if previous is not None:
         references.append("analysis:" + previous.analysis_digest)
         for row in (*previous.target_weaknesses, *previous.horizon_weaknesses):
@@ -43,7 +58,18 @@ def diagnose_evidence(task, previous, comparison, knowledge) -> DiagnosticReport
             questions.append("当前比较样本不足，先增加同条件证据；不能据此禁止该科学程序。")
     else:
         questions.append("尚无已完成的基线实验，先建立可比较的参考结果。")
-    operational = any(name in {"execution_failed", "judge_unavailable"} for name in failures)
+    if paired_diagnostics and comparison is not None:
+        references.append("comparison:" + comparison.comparison_id)
+        gates = comparison.gate_results.get("arms", {})
+        for arm, gate in gates.items():
+            if arm == "incumbent" or not isinstance(gate, Mapping):
+                continue
+            for cell, value in gate.get("cell_deltas", {}).items():
+                if type(value) in (int, float) and math.isfinite(value) and value < 0 and cell not in weaknesses:
+                    weaknesses.append(cell)
+            failures.extend(str(code) for code in gate.get("search_failures", ()))
+        questions.append("逐单元负差值参考同组 incumbent；批次基线技能分不能当作局部修改增益。")
+    operational = any(failure_category(name) == "operational" for name in failures) if paired_diagnostics else any(name in {"execution_failed", "judge_unavailable"} for name in failures)
     causes = []
     if operational:
         causes.append("可能存在执行或评审服务问题；这不是科学模型失效的证据。")
@@ -51,6 +77,8 @@ def diagnose_evidence(task, previous, comparison, knowledge) -> DiagnosticReport
     if weaknesses:
         causes.append("误差可能与历史特征、参数或模型结构有关，尚未确定原因。")
         questions.append("先核对时间可见性、单位和缺失处理，再进行有界改动的配对实验。")
+    if paired_diagnostics and "independent_review_not_accepted" in failures:
+        questions.append("分开核验探索选择与独立认证的评审要求；评审拒绝本身不能证明预测性能退化。")
     return DiagnosticReport(
         task_id=task.task_id,
         program_id=(previous.search_parent_candidate_id or previous.incumbent_after_candidate_id or "seed:" + task.digest) if previous else "seed:" + task.digest,

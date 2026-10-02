@@ -9,7 +9,7 @@ const presetCatalog = [
   "ecology-candidate-proposer-v6",
   "ecology-sample-planner-v12",
   "ecology-sample-critic-v6",
-  "ecology-generation-judge-v9",
+  "ecology-generation-judge-v10",
 ].map((preset_id) => ({
   preset_id,
   tool_profile: "dynamic-retrieval-v1",

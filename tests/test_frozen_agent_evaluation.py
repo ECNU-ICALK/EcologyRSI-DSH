@@ -50,6 +50,16 @@ class FrozenAgentEvaluationTests(unittest.TestCase):
         for key in ("agent_policy", "training_data_digest"):
             self.assertEqual(verified.artifact.learned_parameters[key], trained.artifact.learned_parameters[key])
         self.assertEqual(verified.evaluation.metrics["prediction_owner"], "sample_agent")
+        from ecologyrsi_dsh.evaluators.fitness import FitnessProfile
+        from ecologyrsi_dsh.evaluators.formal_evidence import assess_independent_replica, certification_policy
+        profile = FitnessProfile.from_task(task)
+        certification = assess_independent_replica(verified.evaluation, profile,
+            policy=certification_policy(profile),
+            baseline_profile_digest=trained.evaluation.metrics["baseline_profile_digest"])
+        self.assertEqual(certification["outcome"], "inconclusive")
+        self.assertIn("point_evidence", certification)
+        self.assertEqual(certification["point_evidence"]["source_evidence_digest"],
+                         verified.evaluation.metrics["promotion_block_evidence"]["evidence_digest"])
         self.assertEqual(len([r for r in runtime.requests if r["stage"] == "sample.plan"]), 2)
         self.assertFalse(any(r["stage"] == "sample.reflect" for r in runtime.requests))
         for request in runtime.requests:

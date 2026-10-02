@@ -8,7 +8,7 @@ const ids = [
   "ecology-candidate-proposer-v6",
   "ecology-sample-planner-v12",
   "ecology-sample-critic-v6",
-  "ecology-generation-judge-v9",
+  "ecology-generation-judge-v10",
 ];
 
 test("six legal role presets expose only the narrow agent plane", async () => {
@@ -39,13 +39,13 @@ test("no retained role mounts the unused Workflow worker service", async () => {
 test("generation judge preset separates candidate review from batch reflection", async () => {
   const composition = await readFile(
     new URL(
-      "../presets/ecology-generation-judge-v9/agent.cordis.yml",
+      "../presets/ecology-generation-judge-v10/agent.cordis.yml",
       import.meta.url,
     ),
     "utf8",
   );
   const skillsRoot = new URL(
-    "../presets/ecology-generation-judge-v9/skills/",
+    "../presets/ecology-generation-judge-v10/skills/",
     import.meta.url,
   );
   const candidateReview = await readFile(

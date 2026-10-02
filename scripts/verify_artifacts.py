@@ -46,7 +46,7 @@ CURRENT_DSH_PRESET_IDS = frozenset(
         "ecology-candidate-proposer-v6",
         "ecology-sample-planner-v12",
         "ecology-sample-critic-v6",
-        "ecology-generation-judge-v9",
+        "ecology-generation-judge-v10",
     }
 )
 _MANAGED_DSH_PRESET_ID = re.compile(
@@ -594,9 +594,9 @@ def verify_npm_plugin(plugin: Path, version: str, source_root: Path) -> None:
             "package/lib/runtime/stage-runner.js",
             "package/schemas/genome-mutation.schema.json",
             "package/presets/ecology-coordinator-v6/preset.yml",
-            "package/presets/ecology-generation-judge-v9/agent.cordis.yml",
-            "package/presets/ecology-generation-judge-v9/skills/batch-scientific-reflection/SKILL.md",
-            "package/presets/ecology-generation-judge-v9/skills/candidate-scientific-review/SKILL.md",
+            "package/presets/ecology-generation-judge-v10/agent.cordis.yml",
+            "package/presets/ecology-generation-judge-v10/skills/batch-scientific-reflection/SKILL.md",
+            "package/presets/ecology-generation-judge-v10/skills/candidate-scientific-review/SKILL.md",
         }
         missing = sorted(required - names)
         if missing:
