@@ -285,7 +285,7 @@
     var percent = progress.overall_progress_percent;
     var known = percent != null && Number.isFinite(Number(percent));
     var value = known ? Math.max(0, Math.min(100, Number(percent))) : 0;
-    $("#execution-progress-label").textContent = live ? processStageLabel(activity.stage || progress.current_stage) : run ? statusText(run.status) : "尚未开始";
+    $("#execution-progress-label").textContent = live ? processStageLabel(activity.dsh_stage || progress.current_stage) : run ? statusText(run.status) : "尚未开始";
     $("#execution-progress-percent").textContent = known ? formatNumber(value, 1) + "%" : "待核验";
     $("#execution-progress-fill").style.width = value + "%";
     var track = $("#execution-progress-track");
@@ -315,14 +315,21 @@
     var coverage = usage.accounting_coverage || {};
     var pressure = runtime.context_pressure || {};
     var diagnostics = run && run.execution_diagnostics || {};
+    var complete = coverage.complete === true
+      && Number.isSafeInteger(coverage.launched_session_count) && coverage.launched_session_count > 0
+      && coverage.complete_session_count === coverage.launched_session_count
+      && coverage.observed_session_count === coverage.launched_session_count
+      && coverage.settled_session_count === coverage.launched_session_count
+      && coverage.unobserved_session_count === 0;
     $("#execution-token-progress").textContent = usage.available === true
-      ? "供应商已报告 " + processNumber(usage.total_tokens) + " Token · " + (usage.complete === true ? "回执完整" : "已观测下限；缺失用量未知")
+      ? "供应商已报告 " + processNumber(usage.total_tokens) + " Token · " + (complete ? "本运行已启动会话回执完整" : "已观测下限；缺失用量未知")
       : "供应商用量尚未报告；不能据此认定免费";
     var rows = [
       ["实际预测时点执行", processNumber(diagnostics.adaptive_all_settled_origins), "不把复用的初筛记录再次计为执行"],
       ["评分单元", processNumber(diagnostics.adaptive_scored_cells), "完整九格样本另见候选详情"],
       ["完整用量回执／已启动会话", processNumber(coverage.complete_session_count) + " / " + processNumber(coverage.launched_session_count), "子任务成功、用量完整和科学通过分别判断"],
-      ["活跃会话上下文压力", pressure.available === true && pressure.ratio != null ? processNumber(Number(pressure.ratio) * 100, 1) + "%" : "未报告", "仅观测，不自动缩减冻结模型、预算或样本"]
+      ["活跃会话上下文压力", pressure.available === true && Number.isSafeInteger(pressure.maximum_total_tokens)
+        ? processNumber(pressure.maximum_total_tokens) + " Token（活跃会话最大值）" : "未报告", "仅观测；未提供容量分母时不计算百分比，不自动缩减冻结模型、预算或样本"]
     ];
     var stages = usage.by_stage || {};
     Object.keys(stages).sort().forEach(function (key) {

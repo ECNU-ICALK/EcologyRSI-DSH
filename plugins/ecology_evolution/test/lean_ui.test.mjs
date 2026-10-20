@@ -45,12 +45,48 @@ test('current process renders service progress and unavailable evidence without 
 
 test('paused and terminal views retain counters without claiming an active old stage',()=>{
   const {c,node,run}=fixture();
-  run.execution_progress.dsh_activity={stage:'sample.plan',started_at:'2020-01-01T00:00:00Z'};
+  run.execution_progress.dsh_activity={dsh_stage:'sample.plan',started_at:'2020-01-01T00:00:00Z'};
   for(const status of ['paused','failed','cancelled','completed']){
     run.status=status;c.renderProcess();
     assert.equal(node('#execution-progress-label').textContent,c.statusText(status));
     assert.doesNotMatch(node('#execution-heartbeat').textContent,/本次阶段耗时/);
     assert.match(node('#execution-progress-detail').textContent,/保留停点证据/);
+  }
+});
+
+test('canonical runtime projection shows the actual child stage and measured context tokens',()=>{
+  const {c,node,run}=fixture();
+  run.execution_progress.dsh_activity={dsh_stage:'sample.plan',role:'sample-planner',
+    started_at:'2026-10-20T03:55:52.639Z',remote_activity:{kind:'waiting',updated_at:'2026-10-20T03:56:32.389Z'}};
+  run.dsh_runtime={provider_usage:{available:true,total_tokens:12345,accounting_coverage:{
+    complete:true,launched_session_count:1,observed_session_count:1,settled_session_count:1,
+    complete_session_count:1,unobserved_session_count:0}},context_pressure:{
+      available:true,scope:'active_sessions',session_count:1,maximum_total_tokens:12406,maximum_surface_tokens:10117}};
+  c.renderProcess();
+  assert.equal(node('#execution-progress-label').textContent,'逐时点预测');
+  assert.match(node('#execution-token-progress').textContent,/本运行已启动会话回执完整/);
+  assert.doesNotMatch(node('#execution-token-progress').textContent,/缺失用量/);
+  assert.match(node('#runtime-evidence').innerHTML,/12,406 Token（活跃会话最大值）/);
+  assert.doesNotMatch(node('#runtime-evidence').innerHTML,/活跃会话上下文压力<\/span><strong>未报告/);
+  run.dsh_runtime.context_pressure={available:false,scope:'active_sessions',session_count:0};
+  c.renderProcess();
+  assert.match(node('#runtime-evidence').innerHTML,/活跃会话上下文压力<\/span><strong>未报告/);
+});
+
+test('one complete child receipt never marks all launched run sessions complete',()=>{
+  const {c,node,run}=fixture();
+  const all={complete:true,launched_session_count:2,observed_session_count:2,
+    settled_session_count:2,complete_session_count:2,unobserved_session_count:0};
+  run.dsh_runtime={provider_usage:{available:true,total_tokens:20000,complete:true,accounting_coverage:all}};
+  for(const partial of [
+    {...all,complete:false}, {...all,complete_session_count:1}, {...all,settled_session_count:1},
+    {...all,observed_session_count:1,unobserved_session_count:1},
+    {complete:true,launched_session_count:0,observed_session_count:0,settled_session_count:0,
+      complete_session_count:0,unobserved_session_count:0}, {}
+  ]){
+    run.dsh_runtime.provider_usage.accounting_coverage=partial;c.renderProcess();
+    assert.match(node('#execution-token-progress').textContent,/已观测下限；缺失用量未知/);
+    assert.doesNotMatch(node('#execution-token-progress').textContent,/会话回执完整/);
   }
 });
 
