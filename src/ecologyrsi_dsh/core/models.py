@@ -111,26 +111,8 @@ class PromotionDecision(str, Enum):
     REJECTED = "rejected"
 
 
-class InterventionKind(str, Enum):
-    GUIDANCE = "guidance"
-    PARAMETER_OVERRIDE = "parameter_override"
-    CONSTRAINT = "constraint"
-    PARENT_SELECTION = "parent_selection"
-    # Advisory-only channel. The other four kinds all try to become a numeric
-    # move inside the task parameter boundary; this one never does. It carries
-    # an expert's domain reasoning into the proposer's search context and is
-    # deliberately never host-enforced, so its receipt always says so.
-    DOMAIN_KNOWLEDGE = "domain_knowledge"
 
 
-class ExpertUncertaintyType(str, Enum):
-    """Bounded reasons for asking an expert without pausing evolution."""
-
-    SCIENTIFIC_ASSUMPTION = "scientific_assumption"
-    DATA_INTERPRETATION = "data_interpretation"
-    MODEL_SELECTION = "model_selection"
-    TRADEOFF = "tradeoff"
-    GOVERNANCE_BOUNDARY = "governance_boundary"
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,8 +120,8 @@ class TaskManifest:
     """Frozen root of a run.
 
     ``budget`` accepts either a simple candidate count or the documented
-    mapping form.  ``candidates_per_generation`` defaults to one for backward
-    compatibility and is capped at eight for the synchronous local runner.
+    mapping form. Current native creation and replay validate the frozen
+    four-candidate, two-arm joint evolution contract.
     When a generation limit is present, the candidate limit is expanded as
     needed to reserve every slot in every generation. Optional token limits and
     per-wave reservations are also normalized here so the immutable manifest
@@ -240,7 +222,7 @@ class TaskManifest:
 
     @property
     def token_reservation_per_wave(self) -> int:
-        """Return the frozen cap for one submitted gateway call."""
+        """Return the frozen token reservation for one submitted native model call."""
 
         return int(self.budget.get("token_reservation_per_wave", 0))
 
@@ -614,225 +596,10 @@ class Evaluation:
         return cls(**dict(value))
 
 
-@dataclass(frozen=True, slots=True)
-class HumanIntervention:
-    """Append-only human guidance that may affect one later proposal."""
-
-    intervention_id: str
-    run_id: str
-    kind: InterventionKind
-    message: str
-    created_by: str
-    parameter_overrides: Mapping[str, Any] = field(default_factory=dict)
-    target_candidate_id: str | None = None
-    applied_proposal_id: str | None = None
-    created_at: str = field(default_factory=utc_now)
-
-    def __post_init__(self) -> None:
-        for name in ("intervention_id", "run_id", "message", "created_by"):
-            object.__setattr__(self, name, _text(getattr(self, name), name))
-        object.__setattr__(self, "kind", _enum(self.kind, InterventionKind, "kind"))
-        object.__setattr__(
-            self,
-            "parameter_overrides",
-            _mapping(self.parameter_overrides, "parameter_overrides"),
-        )
-        for name in ("target_candidate_id", "applied_proposal_id"):
-            value = getattr(self, name)
-            if value is not None:
-                object.__setattr__(self, name, _text(value, name))
-        object.__setattr__(self, "created_at", _text(self.created_at, "created_at"))
-
-    def to_dict(self) -> JsonObject:
-        return {
-            "intervention_id": self.intervention_id,
-            "run_id": self.run_id,
-            "kind": self.kind.value,
-            "message": self.message,
-            "created_by": self.created_by,
-            "parameter_overrides": thaw_json(self.parameter_overrides),
-            "target_candidate_id": self.target_candidate_id,
-            "applied_proposal_id": self.applied_proposal_id,
-            "created_at": self.created_at,
-        }
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "HumanIntervention":
-        return cls(**dict(value))
 
 
-@dataclass(frozen=True, slots=True)
-class ExpertConsultation:
-    """A model-authored, non-blocking question for asynchronous expert review."""
-
-    consultation_id: str
-    run_id: str
-    generation: int
-    uncertainty_type: ExpertUncertaintyType
-    question: str
-    context: str
-    fallback_assumption: str
-    requested_expertise: tuple[str, ...]
-    options: tuple[str, ...]
-    confidence: float
-    requested_by_model_id: str
-    candidate_id: str | None = None
-    non_blocking: bool = True
-    created_at: str = field(default_factory=utc_now)
-
-    def __post_init__(self) -> None:
-        for name, maximum in (
-            ("consultation_id", 500),
-            ("run_id", 500),
-            ("question", 2000),
-            ("context", 4000),
-            ("fallback_assumption", 2000),
-            ("requested_by_model_id", 500),
-            ("created_at", 100),
-        ):
-            value = _text(getattr(self, name), name)
-            if len(value) > maximum:
-                raise ValueError(f"{name} is too long")
-            object.__setattr__(self, name, value)
-        if isinstance(self.generation, bool) or not isinstance(self.generation, int):
-            raise TypeError("generation must be an integer")
-        if self.generation < 0:
-            raise ValueError("generation must be non-negative")
-        object.__setattr__(
-            self,
-            "uncertainty_type",
-            _enum(self.uncertainty_type, ExpertUncertaintyType, "uncertainty_type"),
-        )
-        for name, maximum_items, maximum_length in (
-            ("requested_expertise", 8, 160),
-            ("options", 8, 500),
-        ):
-            raw = getattr(self, name)
-            if not isinstance(raw, (list, tuple)):
-                raise TypeError(f"{name} must be an array")
-            if len(raw) > maximum_items:
-                raise ValueError(f"{name} contains too many items")
-            values: list[str] = []
-            for item in raw:
-                value = _text(item, f"{name} item")
-                if len(value) > maximum_length:
-                    raise ValueError(f"{name} item is too long")
-                if value not in values:
-                    values.append(value)
-            object.__setattr__(self, name, tuple(values))
-        if not self.requested_expertise:
-            raise ValueError("requested_expertise must contain at least one item")
-        if isinstance(self.confidence, bool) or not isinstance(
-            self.confidence, (int, float)
-        ):
-            raise TypeError("confidence must be a number")
-        if not math.isfinite(float(self.confidence)) or not 0 <= float(
-            self.confidence
-        ) <= 1:
-            raise ValueError("confidence must be between 0 and 1")
-        object.__setattr__(self, "confidence", float(self.confidence))
-        if self.candidate_id is not None:
-            candidate_id = _text(self.candidate_id, "candidate_id")
-            if len(candidate_id) > 500:
-                raise ValueError("candidate_id is too long")
-            object.__setattr__(self, "candidate_id", candidate_id)
-        if self.non_blocking is not True:
-            raise ValueError("expert consultations must be non-blocking")
-
-    def to_dict(self) -> JsonObject:
-        return {
-            "consultation_id": self.consultation_id,
-            "run_id": self.run_id,
-            "generation": self.generation,
-            "uncertainty_type": self.uncertainty_type.value,
-            "question": self.question,
-            "context": self.context,
-            "fallback_assumption": self.fallback_assumption,
-            "requested_expertise": list(self.requested_expertise),
-            "options": list(self.options),
-            "confidence": self.confidence,
-            "requested_by_model_id": self.requested_by_model_id,
-            "candidate_id": self.candidate_id,
-            "non_blocking": self.non_blocking,
-            "created_at": self.created_at,
-        }
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "ExpertConsultation":
-        return cls(**dict(value))
 
 
-@dataclass(frozen=True, slots=True)
-class ExpertConsultationAnswer:
-    """An expert answer that may be consumed by one later research iteration."""
-
-    answer_id: str
-    run_id: str
-    consultation_id: str
-    answer: str
-    answered_by: str
-    selected_option: str | None = None
-    effective_generation: int | None = None
-    applied_generation: int | None = None
-    # A one-off answer leaves the model's view the moment a research iteration
-    # consumes it, which is right for "which of these two options do you want?"
-    # and wrong for durable domain knowledge: an expert who explains that night
-    # transpiration lags by two hours wants that to hold for the rest of the
-    # run, not for exactly one generation. A persistent answer keeps being
-    # offered after it is applied; `applied_generation` then records the most
-    # recent generation that read it rather than the one that consumed it.
-    persistent: bool = False
-    created_at: str = field(default_factory=utc_now)
-
-    def __post_init__(self) -> None:
-        for name, maximum in (
-            ("answer_id", 500),
-            ("run_id", 500),
-            ("consultation_id", 500),
-            ("answer", 4000),
-            ("answered_by", 120),
-            ("created_at", 100),
-        ):
-            value = _text(getattr(self, name), name)
-            if len(value) > maximum:
-                raise ValueError(f"{name} is too long")
-            object.__setattr__(self, name, value)
-        if self.selected_option is not None:
-            selected = _text(self.selected_option, "selected_option")
-            if len(selected) > 500:
-                raise ValueError("selected_option is too long")
-            object.__setattr__(self, "selected_option", selected)
-        for name in ("effective_generation", "applied_generation"):
-            value = getattr(self, name)
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-            ):
-                raise ValueError(f"{name} must be a non-negative integer or null")
-        if self.applied_generation is not None:
-            if self.effective_generation is None:
-                raise ValueError("applied answer requires an effective generation")
-            if self.applied_generation < self.effective_generation:
-                raise ValueError("answer cannot be applied before its effective generation")
-        if not isinstance(self.persistent, bool):
-            raise ValueError("persistent must be a boolean")
-
-    def to_dict(self) -> JsonObject:
-        return {
-            "answer_id": self.answer_id,
-            "run_id": self.run_id,
-            "consultation_id": self.consultation_id,
-            "answer": self.answer,
-            "answered_by": self.answered_by,
-            "selected_option": self.selected_option,
-            "effective_generation": self.effective_generation,
-            "applied_generation": self.applied_generation,
-            "persistent": self.persistent,
-            "created_at": self.created_at,
-        }
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "ExpertConsultationAnswer":
-        return cls(**dict(value))
 
 
 @dataclass(frozen=True, slots=True)

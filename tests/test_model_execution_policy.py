@@ -4,21 +4,19 @@ from ecologyrsi_dsh.core.model_execution_policy import (
     RESEARCH_EXECUTION_POLICY, research_execution_policy,
 )
 from ecologyrsi_dsh.core.models import TaskManifest
+from tests.native_fixtures import native_manifest
 
 
 class ModelExecutionPolicyTests(unittest.TestCase):
-    def test_old_report_policy_remains_readable_without_silent_upgrade(self):
-        policy = {**RESEARCH_EXECUTION_POLICY, "synthesis_report_format": "concise@1"}
-        original = self.task({"research_execution_policy": policy})
-        restored = TaskManifest.from_dict(original.to_dict())
-        self.assertEqual(restored.digest, original.digest)
-        self.assertEqual(research_execution_policy(restored.metadata), policy)
-        self.assertEqual(RESEARCH_EXECUTION_POLICY["synthesis_report_format"], "concise@2")
+    def test_old_report_policy_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "research execution policy"):
+            self.task({"research_execution_policy": {
+                **RESEARCH_EXECUTION_POLICY, "synthesis_report_format": "concise@1"}})
 
     def task(self, metadata):
-        return TaskManifest(task_id="policy", objective="bounded research", domain_pack="test", metadata=metadata)
+        return native_manifest(task_id="policy", metadata=metadata)
 
-    def test_policy_is_frozen_in_task_digest_without_upgrading_history(self):
+    def test_policy_is_frozen_in_task_digest_and_serialization(self):
         original = self.task({})
         self.assertIsNone(research_execution_policy(original.metadata))
         supplied = dict(RESEARCH_EXECUTION_POLICY)

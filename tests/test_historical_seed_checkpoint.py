@@ -9,7 +9,7 @@ from ecologyrsi_dsh.core.trajectory import GenerationHoldout, EvaluationScope, E
 from ecologyrsi_dsh.core.sample_results import build_sample_results
 from ecologyrsi_dsh.application.generation_execution import EvaluationSession
 from tests import test_evidence_guided_epoch as race_fixtures
-from tests import test_scoped_sample_execution as scoped_fixtures
+from tests.scoped_checkpoint_fixture import checkpoint as scoped_checkpoint
 
 
 class HistoricalSeedCheckpointTests(unittest.TestCase):
@@ -33,7 +33,7 @@ class HistoricalSeedCheckpointTests(unittest.TestCase):
         scope = EvaluationScope(run_id=self.run_id, generation=1, candidate_id=seed.candidate_id,
             candidate_revision_id=seed_revision, phase=EvaluationPhase.HOLDOUT,
             cohort_digest=holdout.cohort_digest, origin_count=50, holdout_arm=HoldoutArm.INCUMBENT)
-        checkpoint = {**scoped_fixtures.ScopedSampleExecutionTests._checkpoint(scope), 'holdout_arm':'incumbent', 'sample_count':50}
+        checkpoint = {**scoped_checkpoint(scope), 'holdout_arm':'incumbent', 'sample_count':450}
         return seed, scope, checkpoint
 
     def session(self, seed, scope):
@@ -44,15 +44,13 @@ class HistoricalSeedCheckpointTests(unittest.TestCase):
         seed, scope, checkpoint = self.later_fixture()
         session = self.session(seed, scope)
         self.assertFalse(session.prepare_checkpoint(checkpoint)['resumed'])
-        rows = [dict(sample_id=f'sample:{i}',sample_index=i+1,target='air_temperature',
-            horizon_hours=1,origin_timestamp=i,target_timestamp=i+1,observed=2.,predicted=1.5,baseline=1.)
-            for i in range(50)]
+        rows = [dict(sample_id=f'sample:{i}:{t}:{h}',sample_index=i*9+j*3+k+1,target=t,
+            horizon_hours=h,origin_timestamp=i,target_timestamp=i+h,observed=2.,predicted=1.5,baseline=1.)
+            for i in range(50) for j,t in enumerate(('air_temperature','relative_humidity','co2_concentration'))
+            for k,h in enumerate((1,6,24))]
         session.record_results(rows[:9])
-        session.record_model_usage([dict(call_id='call:seed',logical_call_digest='c'*64,
-            role='planner',model_id='test/model',outcome='succeeded',usage_reported=True,
-            http_attempts=1,prompt_tokens=10,completion_tokens=2,total_tokens=12)])
         session.record_progress(dict(role='planner',model_id='test/model',batch_index=1,batch_count=2,
-            batch_size=9,completed_samples=9,total_samples=50,succeeded_samples=9,failed_samples=0,
+            batch_size=1,completed_samples=1,total_samples=50,succeeded_samples=1,failed_samples=0,
             progress_id=1,progress_kind='completed_batch',in_flight_batches=0,queued_batches=0))
         self.director.pause_run(self.run_id)
         resumed = self.session(seed, scope)
@@ -69,7 +67,6 @@ class HistoricalSeedCheckpointTests(unittest.TestCase):
         replayed = self.director.replay(self.run_id)
         self.assertEqual(replayed.candidate(seed.candidate_id).status, CandidateStatus.SPAWNED)
         self.assertEqual(sum(e.kind == 'EvaluationSampleResultsStarted' for e in replayed.events),1)
-        self.assertEqual(sum(e.kind == 'ModelUsageRecorded' for e in replayed.events),1)
         with self.assertRaises(ValueError):
             resumed.record_results(rows[:1])
 

@@ -1,83 +1,12 @@
-"""Minimal, replayable core for the EcologyRSI-DSH evolution mode.
-
-The package intentionally has no runtime dependencies outside the Python
-standard library.  A :class:`EvolutionDirector` owns the small state machine;
-all mutations are persisted as events before a projection is returned.
-"""
-
+"""Native Harness joint evolution for greenhouse forecasting."""
 from .core.director import EvolutionDirector, RunState
 from .core.ledger import Event, EventLedger
-from .core.trajectory import (
-    FormalBatchArm,
-    FormalBatchComparison,
-    FormalBatchComparisonDecision,
-    OriginOccurrence,
-)
-from .core.models import (
-    Candidate,
-    CandidateRole,
-    CandidateStatus,
-    Evaluation,
-    ExpertConsultation,
-    ExpertConsultationAnswer,
-    ExpertUncertaintyType,
-    HumanIntervention,
-    InterventionKind,
-    ModelArtifact,
-    Promotion,
-    PromotionDecision,
-    Proposal,
-    Run,
-    RunStatus,
-    TaskManifest,
-)
-from .data.toy import Observation, ToyCropSoilWater
-from .evolution.strategies import (
-    DSHAdapter,
-    FakeDSHAdapter,
-    StrategyRouterDSHAdapter,
-)
-from .integrations.model_gateway import (
-    GatewayConfigurationError,
-    GatewayResponseError,
-    ModelConnection,
-    ModelGateway,
-)
+from .core.models import Candidate, CandidateRole, CandidateStatus, Evaluation, ModelArtifact, Proposal, Run, RunStatus, TaskManifest
+from .integrations.model_directory import ModelDirectory
 from .version import __version__
 
 __all__ = [
-    "Candidate",
-    "CandidateRole",
-    "CandidateStatus",
-    "DSHAdapter",
-    "Evaluation",
-    "ExpertConsultation",
-    "ExpertConsultationAnswer",
-    "ExpertUncertaintyType",
-    "HumanIntervention",
-    "InterventionKind",
-    "Event",
-    "EventLedger",
-    "EvolutionDirector",
-    "FakeDSHAdapter",
-    "FormalBatchArm",
-    "FormalBatchComparison",
-    "FormalBatchComparisonDecision",
-    "GatewayConfigurationError",
-    "GatewayResponseError",
-    "ModelConnection",
-    "ModelGateway",
-    "ModelArtifact",
-    "Observation",
-    "OriginOccurrence",
-    "Promotion",
-    "PromotionDecision",
-    "Proposal",
-    "Run",
-    "RunState",
-    "RunStatus",
-    "StrategyRouterDSHAdapter",
-    "TaskManifest",
-    "ToyCropSoilWater",
-    "__version__",
+    "Candidate", "CandidateRole", "CandidateStatus", "Evaluation", "Event",
+    "EventLedger", "EvolutionDirector", "ModelArtifact", "ModelDirectory", "Proposal",
+    "Run", "RunState", "RunStatus", "TaskManifest", "__version__",
 ]

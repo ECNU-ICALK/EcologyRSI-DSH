@@ -208,8 +208,8 @@ class EffectContractTests(unittest.TestCase):
         with EventLedger() as ledger:
             director = EvolutionDirector(ledger, adapter)
             task = _native_task()
-            director.create_run(task, run_id="effect-floor")
-            director.start_run("effect-floor")
+            from tests.native_fixtures import start_native_run
+            start_native_run(director,task=task,run_id="effect-floor")
             state = director.state("effect-floor")
             parent = state.materialized_seed_genome()
             proposal = adapter.propose(state.run, task, state.run.session_id, batch_context={

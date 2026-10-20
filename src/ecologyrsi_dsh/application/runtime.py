@@ -9,7 +9,7 @@ from ..core.models import digest
 from ..data.registry import DatasetRegistry
 from ..evaluators.registry import EvaluatorRegistry
 from ..evolution.strategies import StrategyRouterDSHAdapter
-from ..integrations.model_gateway import ModelGateway
+from ..integrations.model_directory import ModelDirectory
 from ..integrations.dsh_native_runtime import DshNativeAgentRuntimeClient, configured_stage_timeout
 from ..integrations.dsh_structured_roles import DshStructuredRoleRuntime
 from ..integrations.dsh_tools import DshToolService
@@ -59,7 +59,7 @@ def initialize_runtime(self: GenerationRuntime, ledger: EventLedger) -> None:
     self.sample_admission = RunSampleAdmission(on_execution_failure=abort_failed_evaluation,
                                                host_activity=self.host_activity)
     self.datasets = DatasetRegistry()
-    self.model_gateway = ModelGateway.from_env(verification_store=self.ledger)
+    self.model_directory = ModelDirectory.from_env()
     runtime_origin = os.environ.get("ECOLOGYRSI_DSH_RUNTIME_URL", "").strip()
     runtime_token = os.environ.get("ECOLOGYRSI_DSH_RUNTIME_TOKEN", "").strip()
     self.dsh_native_runtime = (
@@ -73,7 +73,7 @@ def initialize_runtime(self: GenerationRuntime, ledger: EventLedger) -> None:
     )
     from ..evolution.novelty import build_archive as build_candidate_novelty_archive
     self.strategy_router = StrategyRouterDSHAdapter(
-        self.model_gateway,
+        self.model_directory,
         candidate_novelty_provider=lambda run_id, generation: build_candidate_novelty_archive(
             self.director.state(run_id), generation
         ),
@@ -89,7 +89,6 @@ def initialize_runtime(self: GenerationRuntime, ledger: EventLedger) -> None:
     )
     self.evaluators = EvaluatorRegistry(
         self.datasets,
-        self.model_gateway,
         dsh_runtime_provider=lambda: DshStructuredRoleRuntime(
             self.dsh_native_runtime,
             admission=self.dsh_tools,

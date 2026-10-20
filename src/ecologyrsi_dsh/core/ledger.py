@@ -21,11 +21,10 @@ from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from .models import canonical_json, digest, utc_now
-from .redaction import public_error_summary
 from .immutable import freeze_json
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _RUN_LIFECYCLE_KINDS_SQL = """
     'RunCreated',
@@ -97,9 +96,12 @@ class EventLedger:
             current_version = int(
                 self._connection.execute("PRAGMA user_version").fetchone()[0]
             )
-            if current_version > SCHEMA_VERSION:
+            existing_tables = self._connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+            if current_version != SCHEMA_VERSION and (current_version != 0 or existing_tables):
                 raise RuntimeError(
-                    f"database schema {current_version} is newer than supported {SCHEMA_VERSION}"
+                    f"database schema {current_version} is unsupported; expected {SCHEMA_VERSION} or a new empty database"
                 )
             self._connection.execute(
                 """
@@ -182,36 +184,6 @@ class EventLedger:
                 "CREATE INDEX IF NOT EXISTS idx_http_command_receipts_run "
                 "ON http_command_receipts(run_id, created_at)"
             )
-            receipt_columns = {
-                str(row["name"])
-                for row in self._connection.execute(
-                    "PRAGMA table_info(http_command_receipts)"
-                ).fetchall()
-            }
-            if "start_seq" not in receipt_columns:
-                self._connection.execute(
-                    "ALTER TABLE http_command_receipts "
-                    "ADD COLUMN start_seq INTEGER NOT NULL DEFAULT 0"
-                )
-                # Older receipts predate the durable command cursor.  ISO-8601 UTC
-                # timestamps are sortable, so this reconstructs the last event
-                # that was visible when each legacy receipt was claimed.
-                self._connection.execute(
-                    """
-                    UPDATE http_command_receipts
-                    SET start_seq = COALESCE((
-                        SELECT MAX(e.seq)
-                        FROM evolution_events AS e
-                        WHERE e.created_at <= http_command_receipts.created_at
-                    ), 0)
-                    """
-                )
-            if "resource_run_id" not in receipt_columns:
-                self._connection.execute(
-                    "ALTER TABLE http_command_receipts "
-                    "ADD COLUMN resource_run_id TEXT"
-                )
-            self._backfill_command_resource_run_ids()
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_http_command_receipts_resource_run "
                 "ON http_command_receipts(resource_run_id, created_at)"
@@ -228,8 +200,6 @@ class EventLedger:
                 "CREATE INDEX IF NOT EXISTS idx_run_archives_time "
                 "ON run_archives(archived_at, run_id)"
             )
-            self._ensure_model_verifications_schema()
-            self._sanitize_model_verification_errors()
             self._ensure_scientific_exposure_schema()
             if current_version < SCHEMA_VERSION:
                 self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -273,24 +243,6 @@ class EventLedger:
             )
             """
         )
-        formal_columns = {
-            str(row["name"])
-            for row in self._connection.execute(
-                "PRAGMA table_info(formal_holdout_exposures)"
-            ).fetchall()
-        }
-        for name in (
-            "token_digest",
-            "candidate_id",
-            "artifact_digest",
-            "genome_digest",
-            "partition_digest",
-            "analysis_plan_digest",
-        ):
-            if name not in formal_columns:
-                self._connection.execute(
-                    f"ALTER TABLE formal_holdout_exposures ADD COLUMN {name} TEXT"
-                )
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS formal_analysis_families (
@@ -305,183 +257,9 @@ class EventLedger:
             """
         )
 
-    def _backfill_command_resource_run_ids(self) -> None:
-        """Bind legacy receipts to their concrete run without text matching."""
 
-        self._connection.execute(
-            """
-            UPDATE http_command_receipts
-            SET resource_run_id = run_id
-            WHERE resource_run_id IS NULL AND command_kind <> 'create_run'
-            """
-        )
-        rows = self._connection.execute(
-            """
-            SELECT command_key, run_id, command_kind, request_json, response_json
-            FROM http_command_receipts
-            WHERE resource_run_id IS NULL
-            """
-        ).fetchall()
-        bindings: list[tuple[str, str]] = []
-        for row in rows:
-            resource_run_id = self._receipt_resource_run_id(row)
-            if resource_run_id is None and str(row["command_kind"]) == "create_run":
-                resource_run_id = self._created_run_id_for_receipt(row)
-            if resource_run_id is not None:
-                bindings.append((resource_run_id, str(row["command_key"])))
-        if bindings:
-            self._connection.executemany(
-                """
-                UPDATE http_command_receipts
-                SET resource_run_id = ?
-                WHERE command_key = ? AND resource_run_id IS NULL
-                """,
-                bindings,
-            )
 
-    def _create_model_verifications_table(self) -> None:
-        self._connection.execute(
-            """
-            CREATE TABLE model_verifications (
-                model_id TEXT NOT NULL,
-                configuration_digest TEXT NOT NULL,
-                credential_fingerprint TEXT NOT NULL,
-                verified INTEGER NOT NULL CHECK (verified IN (0, 1)),
-                connection_state TEXT NOT NULL
-                    CHECK (connection_state IN ('configured', 'available', 'error')),
-                last_checked_at TEXT,
-                last_error TEXT,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (
-                    model_id, configuration_digest, credential_fingerprint
-                )
-            )
-            """
-        )
 
-    def _ensure_model_verifications_schema(self) -> None:
-        """Create or transactionally upgrade the credential-bound trust table."""
-
-        rows = self._connection.execute(
-            "PRAGMA table_info(model_verifications)"
-        ).fetchall()
-        if not rows:
-            self._create_model_verifications_table()
-            return
-        columns = {str(row["name"]): row for row in rows}
-        expected_primary_key = {
-            "model_id": 1,
-            "configuration_digest": 2,
-            "credential_fingerprint": 3,
-        }
-        required_columns = {
-            "model_id",
-            "configuration_digest",
-            "credential_fingerprint",
-            "verified",
-            "connection_state",
-            "last_checked_at",
-            "last_error",
-            "updated_at",
-        }
-        primary_key_matches = all(
-            name in columns and int(columns[name]["pk"]) == position
-            for name, position in expected_primary_key.items()
-        ) and all(
-            int(row["pk"]) == 0 or str(row["name"]) in expected_primary_key
-            for row in rows
-        )
-        if required_columns.issubset(columns) and primary_key_matches:
-            return
-
-        # SQLite cannot alter a primary key in place.  The unique temporary
-        # name keeps the migration atomic without risking an unrelated backup
-        # table left by an operator.
-        legacy_name = f"model_verifications_legacy_{uuid4().hex}"
-        self._connection.execute(
-            f'ALTER TABLE model_verifications RENAME TO "{legacy_name}"'
-        )
-        self._create_model_verifications_table()
-
-        # Rows without a credential fingerprint are intentionally not restored:
-        # they cannot prove that the verified credential is still the one in use.
-        identity_columns = {
-            "model_id",
-            "configuration_digest",
-            "credential_fingerprint",
-            "verified",
-        }
-        if identity_columns.issubset(columns):
-            state_expression = (
-                "CASE WHEN connection_state IN ('configured', 'available', 'error') "
-                "THEN connection_state ELSE 'configured' END"
-                if "connection_state" in columns
-                else "'configured'"
-            )
-            checked_expression = (
-                "last_checked_at" if "last_checked_at" in columns else "NULL"
-            )
-            error_expression = "last_error" if "last_error" in columns else "NULL"
-            updated_expression = (
-                "COALESCE(updated_at, CURRENT_TIMESTAMP)"
-                if "updated_at" in columns
-                else "CURRENT_TIMESTAMP"
-            )
-            self._connection.execute(
-                f"""
-                INSERT OR REPLACE INTO model_verifications (
-                    model_id, configuration_digest, credential_fingerprint,
-                    verified, connection_state, last_checked_at, last_error,
-                    updated_at
-                )
-                SELECT
-                    model_id, configuration_digest, credential_fingerprint,
-                    verified, {state_expression}, {checked_expression},
-                    {error_expression}, {updated_expression}
-                FROM "{legacy_name}"
-                WHERE typeof(model_id) = 'text' AND trim(model_id) <> ''
-                    AND typeof(configuration_digest) = 'text'
-                    AND trim(configuration_digest) <> ''
-                    AND typeof(credential_fingerprint) = 'text'
-                    AND trim(credential_fingerprint) <> ''
-                    AND verified IN (0, 1)
-                """
-            )
-        self._connection.execute(f'DROP TABLE "{legacy_name}"')
-
-    def _sanitize_model_verification_errors(self) -> None:
-        """Remove credential-like text from mutable legacy health records."""
-
-        rows = self._connection.execute(
-            """
-            SELECT model_id, configuration_digest, credential_fingerprint, last_error
-            FROM model_verifications
-            WHERE last_error IS NOT NULL
-            """
-        ).fetchall()
-        updates: list[tuple[str | None, str, str, str]] = []
-        for row in rows:
-            raw_error = str(row["last_error"])
-            safe_error = public_error_summary(raw_error)
-            if safe_error != raw_error:
-                updates.append(
-                    (
-                        safe_error,
-                        str(row["model_id"]),
-                        str(row["configuration_digest"]),
-                        str(row["credential_fingerprint"]),
-                    )
-                )
-        if updates:
-            self._connection.executemany(
-                """
-                UPDATE model_verifications
-                SET last_error = ?
-                WHERE model_id = ? AND configuration_digest = ?
-                    AND credential_fingerprint = ?
-                """,
-                updates,
-            )
 
     def append(
         self,
@@ -1160,7 +938,6 @@ class EventLedger:
                     for row in receipt_rows
                     if row["resource_run_id"] == run_id
                     or row["run_id"] == run_id
-                    or self._receipt_resource_run_id(row) == run_id
                     or (
                         creation_key is not None
                         and str(row["command_kind"]) == "create_run"
@@ -1452,123 +1229,7 @@ class EventLedger:
             ).fetchall()
         return tuple(str(row["command_key"]) for row in rows)
 
-    def model_verification(
-        self,
-        model_id: str,
-        configuration_digest: str,
-        credential_fingerprint: str,
-    ) -> dict[str, Any] | None:
-        """Load verification only for the exact callable and credential."""
 
-        model_id = self._required_text(model_id, "model_id")
-        configuration_digest = self._required_text(
-            configuration_digest, "configuration_digest"
-        )
-        credential_fingerprint = self._required_text(
-            credential_fingerprint, "credential_fingerprint"
-        )
-        with self._lock:
-            row = self._connection.execute(
-                """
-                SELECT verified, connection_state, last_checked_at, last_error, updated_at
-                FROM model_verifications
-                WHERE model_id = ? AND configuration_digest = ?
-                    AND credential_fingerprint = ?
-                """,
-                (model_id, configuration_digest, credential_fingerprint),
-            ).fetchone()
-        if row is None:
-            return None
-        return {
-            "verified": bool(row["verified"]),
-            "state": str(row["connection_state"]),
-            "last_checked_at": (
-                str(row["last_checked_at"])
-                if row["last_checked_at"] is not None
-                else None
-            ),
-            "last_error": (
-                public_error_summary(str(row["last_error"]))
-                if row["last_error"] is not None
-                else None
-            ),
-            "updated_at": str(row["updated_at"]),
-        }
-
-    def record_model_verification(
-        self,
-        model_id: str,
-        configuration_digest: str,
-        credential_fingerprint: str,
-        *,
-        verified: bool | None,
-        state: str,
-        last_checked_at: str | None,
-        last_error: str | None,
-    ) -> None:
-        """Persist trust and health without letting stale health revoke trust.
-
-        ``verified=None`` is a connection-health update.  It atomically keeps
-        any existing explicit verification decision made by another process.
-        A boolean is reserved for the result of an explicit verification.
-        """
-
-        model_id = self._required_text(model_id, "model_id")
-        configuration_digest = self._required_text(
-            configuration_digest, "configuration_digest"
-        )
-        credential_fingerprint = self._required_text(
-            credential_fingerprint, "credential_fingerprint"
-        )
-        if verified is not None and not isinstance(verified, bool):
-            raise ValueError("verified must be a boolean or None")
-        if state not in {"configured", "available", "error"}:
-            raise ValueError("state must be configured, available, or error")
-        if last_checked_at is not None:
-            last_checked_at = self._required_text(last_checked_at, "last_checked_at")
-        if last_error is not None:
-            last_error = public_error_summary(
-                self._required_text(last_error, "last_error")
-            )
-        updated_at = utc_now()
-        with self._lock:
-            self._connection.execute("BEGIN IMMEDIATE")
-            try:
-                self._connection.execute(
-                    """
-                    INSERT INTO model_verifications (
-                        model_id, configuration_digest, credential_fingerprint,
-                        verified, connection_state, last_checked_at, last_error,
-                        updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(
-                        model_id, configuration_digest, credential_fingerprint
-                    ) DO UPDATE SET
-                        verified = CASE
-                            WHEN ? THEN excluded.verified
-                            ELSE model_verifications.verified
-                        END,
-                        connection_state = excluded.connection_state,
-                        last_checked_at = excluded.last_checked_at,
-                        last_error = excluded.last_error,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        model_id,
-                        configuration_digest,
-                        credential_fingerprint,
-                        int(bool(verified)),
-                        state,
-                        last_checked_at,
-                        last_error,
-                        updated_at,
-                        int(verified is not None),
-                    ),
-                )
-                self._connection.commit()
-            except Exception:
-                self._connection.rollback()
-                raise
 
     def close(self) -> None:
         with self._lock:
@@ -1605,46 +1266,15 @@ class EventLedger:
         """Read a run ID only from documented response/request object fields."""
 
         candidates: list[Any] = [payload]
-        candidates.extend(
-            payload.get(key) for key in ("projection", "run_projection")
-        )
+        candidates.append(payload.get("projection"))
         for candidate in candidates:
             if not isinstance(candidate, Mapping):
                 continue
-            value = candidate.get("run_id", candidate.get("id"))
+            value = candidate.get("run_id")
             if isinstance(value, str) and value.strip():
                 return value.strip()
         return None
 
-    @classmethod
-    def _receipt_resource_run_id(cls, row: sqlite3.Row) -> str | None:
-        """Resolve old create receipts structurally, never with SQL LIKE."""
-
-        response_json = row["response_json"]
-        if response_json is not None:
-            try:
-                response = json.loads(response_json)
-            except (TypeError, json.JSONDecodeError) as exc:
-                raise ValueError("command response JSON is malformed") from exc
-            if not isinstance(response, dict):
-                raise ValueError("command response must be an object")
-            response_run_id = cls._resource_run_id_from_payload(response)
-            if response_run_id is not None:
-                return response_run_id
-
-        try:
-            request = json.loads(row["request_json"])
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise ValueError("command request JSON is malformed") from exc
-        if not isinstance(request, dict):
-            raise ValueError("command request must be an object")
-        request_run_id = cls._resource_run_id_from_payload(request)
-        if request_run_id is not None:
-            return request_run_id
-        if str(row["command_kind"]) != "create_run":
-            run_id = str(row["run_id"]).strip()
-            return run_id or None
-        return None
 
     @staticmethod
     def _receipt_idempotency_key(row: sqlite3.Row) -> str | None:
@@ -1681,39 +1311,7 @@ class EventLedger:
         value = metadata.get("idempotency_key") if isinstance(metadata, dict) else None
         return value.strip() if isinstance(value, str) and value.strip() else None
 
-    def _created_run_id_for_receipt(self, row: sqlite3.Row) -> str | None:
-        idempotency_key = self._receipt_idempotency_key(row)
-        if idempotency_key is None:
-            return None
-        event_rows = self._connection.execute(
-            """
-            SELECT run_id, payload_json
-            FROM evolution_events
-            WHERE kind = 'RunCreated'
-            ORDER BY seq
-            """
-        ).fetchall()
-        matches = [
-            str(event_row["run_id"])
-            for event_row in event_rows
-            if self._event_creation_idempotency_key(event_row) == idempotency_key
-        ]
-        if len(matches) > 1:
-            raise ValueError("create command idempotency key belongs to multiple runs")
-        return matches[0] if matches else None
 
-    @staticmethod
-    def _event_creation_idempotency_key(row: sqlite3.Row) -> str | None:
-        try:
-            payload = json.loads(row["payload_json"])
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise ValueError("RunCreated payload JSON is malformed") from exc
-        if not isinstance(payload, dict):
-            raise ValueError("RunCreated payload must be an object")
-        manifest = payload.get("task_manifest")
-        metadata = manifest.get("metadata") if isinstance(manifest, dict) else None
-        value = metadata.get("idempotency_key") if isinstance(metadata, dict) else None
-        return value.strip() if isinstance(value, str) and value.strip() else None
 
     @staticmethod
     def _row_to_command_receipt(row: sqlite3.Row) -> CommandReceipt:

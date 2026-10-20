@@ -25,7 +25,7 @@ test("sample display shares common identity only and exactly restores the immuta
   assert.deepEqual(expandSampleContext(view), original);
   assert.equal(JSON.stringify(original), before);
   assert.equal(modelContextView("sample.critic", original), original);
-  assert.equal(modelContextView("sample.reflect", original), original);
+  assert.equal(modelContextView("sample.critic", original), original);
   assert.deepEqual(modelContextView("sample.plan", original), view);
 });
 

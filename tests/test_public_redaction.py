@@ -11,8 +11,6 @@ from ecologyrsi_dsh.core.redaction import (
     public_error_summary,
     public_exception_summary,
 )
-from ecologyrsi_dsh.presentation.training_assets import _training_safe_value
-from ecologyrsi_dsh.presentation.trajectory import _safe_value, _stage_event
 
 
 class PublicRedactionTests(unittest.TestCase):
@@ -75,8 +73,6 @@ class PublicRedactionTests(unittest.TestCase):
 
         for sanitizer in (
             _safe_plan_value,
-            _training_safe_value,
-            _safe_value,
         ):
             with self.subTest(sanitizer=sanitizer.__module__):
                 sanitized = sanitizer(payload)
@@ -163,10 +159,7 @@ class PublicRedactionTests(unittest.TestCase):
         )
         self.assertNotIn("public-event-audit-secret", encoded)
         self.assertNotIn("run-audit-secret", encoded)
-        self.assertEqual(
-            _stage_event([event], "proposal")["public_error"],
-            "GatewayResponseError",
-        )
+
 
     def test_http_and_proposal_text_never_reflect_inline_credentials(self) -> None:
         marker = "http-audit-secret-marker"

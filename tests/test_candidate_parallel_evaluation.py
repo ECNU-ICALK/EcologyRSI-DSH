@@ -4,6 +4,9 @@ import json
 import threading
 import time
 import unittest
+from dataclasses import replace
+from tests.native_fixtures import native_manifest
+from tests.native_candidate_fixture import seed_proposal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -36,11 +39,7 @@ def _load_top2_screening_golden() -> tuple[tuple[SimpleNamespace, ...], dict, li
 class _Director:
     def __init__(self, candidate_concurrency: int | None) -> None:
         self.status = RunStatus.RUNNING
-        metadata = (
-            {}
-            if candidate_concurrency is None
-            else {"candidate_concurrency": candidate_concurrency}
-        )
+        metadata = {**native_manifest().metadata, "candidate_concurrency": candidate_concurrency, "cohort_capacity_enforced": True}
         self.task_manifest = SimpleNamespace(metadata=metadata)
 
     def state(self, _run_id: str) -> SimpleNamespace:
@@ -96,7 +95,7 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
         revision_id = generation_execution._trajectory_holdout_revision_id(
             state,
             trajectory,
-            OptimizationSchedule.default(),
+            OptimizationSchedule.for_new_run(),
         )
 
         self.assertEqual(revision_id, retained_champion_id)
@@ -115,7 +114,7 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
             generation_execution._trajectory_holdout_revision_id(
                 state,
                 mismatched,
-                OptimizationSchedule.default(),
+                OptimizationSchedule.for_new_run(),
             )
         missing_comparison_state = SimpleNamespace(
             batch_comparison_for=lambda _candidate_id, _batch_index: None
@@ -127,7 +126,7 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
             generation_execution._trajectory_holdout_revision_id(
                 missing_comparison_state,
                 trajectory,
-                OptimizationSchedule.default(),
+                OptimizationSchedule.for_new_run(),
             )
 
     def test_hot_control_callbacks_use_constant_size_status_query_only(self) -> None:
@@ -239,18 +238,18 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
         self.assertEqual(recovered.score, evaluation.score)
         self.assertEqual(recovered.metrics, evaluation.metrics)
 
-    def test_top2_screening_selection_is_a_locked_outer_contract(self) -> None:
+    def test_screening_selects_one_current_mainline_from_locked_evidence(self) -> None:
         candidates, records, expected_ids = _load_top2_screening_golden()
 
         selected = generation_execution._select_screening_finalists(
             candidates,
             records,
-            top_k=2,
+            top_k=1,
         )
 
         self.assertEqual(
             [candidate.candidate_id for candidate in selected],
-            expected_ids,
+            expected_ids[:1],
         )
 
     def test_pause_admission_closure_keeps_candidate_evaluation_recoverable(
@@ -267,7 +266,7 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
         self.assertTrue(generation_execution._recoverable_evaluation_error(error))
         self.assertFalse(generation_execution._recoverable_evaluation_error(ValueError("bad prediction")))
 
-    def test_screening_freezes_deterministic_top_two_by_evidence(self) -> None:
+    def test_screening_freezes_one_deterministic_mainline_by_evidence(self) -> None:
         candidates = tuple(
             SimpleNamespace(slot_index=index, candidate_id=f"candidate-{index}")
             for index in range(4)
@@ -286,34 +285,27 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
         selected = generation_execution._select_screening_finalists(
             candidates,
             screening,
-            top_k=2,
+            top_k=1,
         )
 
         self.assertEqual(
             [candidate.candidate_id for candidate in selected],
-            ["candidate-2", "candidate-3"],
+            ["candidate-2"],
         )
 
     def test_candidate_signature_distinguishes_agent_behavior(self) -> None:
-        state = SimpleNamespace(
-            task_manifest=SimpleNamespace(
-                visible_datasets=("dataset",),
-                metadata={
-                    "prediction_model_id": "predictor@1",
-                    "prediction_model_digest": "p" * 64,
-                    "dataset_digest": "d" * 64,
-                    "evaluator_digest": "e" * 64,
-                },
-            )
-        )
-        first = SimpleNamespace(
-            changes={"ridge_alpha": 0.2},
-            metadata={"behavior_digest": "a" * 64},
-        )
-        second = SimpleNamespace(
-            changes={"ridge_alpha": 0.2},
-            metadata={"behavior_digest": "b" * 64},
-        )
+        task = native_manifest()
+        state = SimpleNamespace(task_manifest=task)
+        first = seed_proposal(task)
+        from ecologyrsi_dsh.core.state import persisted_genome_from_proposal
+        from ecologyrsi_dsh.core.models import canonical_json
+        from tests.test_joint_plugin_evolution import mutate
+        genome = mutate(persisted_genome_from_proposal(first), [{
+            "op": "select_instruction_template", "role": "sample-planner",
+            "instruction_template_id": "sample-planner-horizon-aware@1"}])
+        second = replace(first, metadata={**first.metadata,
+            "evolution_genome_canonical_json": canonical_json(genome.to_dict()),
+            "genome_digest": genome.genome_digest, "behavior_digest": genome.behavior_digest})
 
         self.assertNotEqual(
             _candidate_signature(state, first),
@@ -375,7 +367,9 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
             with lock:
                 active -= 1
 
-        with patch.object(generation_execution, "_evaluate_candidate", side_effect=evaluate):
+        with patch.object(generation_execution, "_prepare_formal_finalists", return_value=candidates), patch(
+            "ecologyrsi_dsh.application.formal_trajectory.execute_formal_trajectory", side_effect=evaluate
+        ):
             generation_execution._evaluate_generation_candidates(
                 (endpoint).server,
                 "run-1",
@@ -407,7 +401,9 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
             else:
                 self.fail("queued candidate started after the run paused")
 
-        with patch.object(generation_execution, "_evaluate_candidate", side_effect=evaluate):
+        with patch.object(generation_execution, "_prepare_formal_finalists", return_value=candidates), patch(
+            "ecologyrsi_dsh.application.formal_trajectory.execute_formal_trajectory", side_effect=evaluate
+        ):
             generation_execution._evaluate_generation_candidates(
                 (endpoint).server,
                 "run-1",
@@ -416,52 +412,13 @@ class CandidateParallelEvaluationTests(unittest.TestCase):
 
         self.assertEqual(set(started), {"candidate-0", "candidate-1"})
 
-    def test_manifest_without_candidate_concurrency_remains_serial(self) -> None:
-        director = _Director(candidate_concurrency=None)
-        endpoint = SimpleNamespace(server=SimpleNamespace(director=director))
-        candidates = tuple(
-            SimpleNamespace(slot_index=index, candidate_id=f"candidate-{index}")
-            for index in range(2)
-        )
-        caller = threading.get_ident()
-        observed_threads: list[int] = []
-
-        with patch.object(
-            generation_execution,
-            "_evaluate_candidate",
-            side_effect=lambda *_args: observed_threads.append(threading.get_ident()),
-        ):
+    def test_current_native_rejects_a_retired_non_joint_execution_path(self):
+        director = _Director(candidate_concurrency=2)
+        director.task_manifest.metadata.clear()
+        with self.assertRaisesRegex(RuntimeError, "joint_plugin_epoch@2"):
             generation_execution._evaluate_generation_candidates(
-                (endpoint).server,
-                "run-1",
-                candidates,
-            )
-
-        self.assertEqual(observed_threads, [caller, caller])
-
-    def test_legacy_manifest_with_null_candidate_concurrency_remains_serial(self) -> None:
-        director = _Director(candidate_concurrency=None)
-        director.task_manifest.metadata["candidate_concurrency"] = None
-        endpoint = SimpleNamespace(server=SimpleNamespace(director=director))
-        candidates = tuple(
-            SimpleNamespace(slot_index=index, candidate_id=f"candidate-{index}")
-            for index in range(2)
-        )
-        caller = threading.get_ident()
-        observed_threads: list[int] = []
-
-        with patch.object(
-            generation_execution,
-            "_evaluate_candidate",
-            side_effect=lambda *_args: observed_threads.append(threading.get_ident()),
-        ):
-            generation_execution._evaluate_generation_candidates(
-                (endpoint).server,
-                "run-1",
-                candidates,
-            )
-
-        self.assertEqual(observed_threads, [caller, caller])
+                SimpleNamespace(director=director), "run-1",
+                (SimpleNamespace(slot_index=0, candidate_id="candidate:one"),))
 
 
 if __name__ == "__main__":

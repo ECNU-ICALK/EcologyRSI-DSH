@@ -11,7 +11,6 @@ from typing import Any
 
 from ..core.models import TaskManifest, digest
 from ..core.redaction import REDACTED, public_error_summary
-from ..evaluators.catalog import TOY_DATASET_ID
 
 
 def public_fields(source, fields: str):
@@ -64,7 +63,6 @@ _EVENT_TYPE_ALIASES = {
     "EvolutionStageRecorded": "stage.recorded",
     "GatewayRetryScheduled": "gateway.retry_scheduled",
     "DshChildExecutionFailed": "dsh.child_execution_failed",
-    "ModelUsageRecorded": "model.usage_recorded",
     "HostExecutionInterrupted": "host.execution_interrupted",
 }
 
@@ -74,16 +72,13 @@ _PLUGIN_FILES = {
     "app.js": "text/javascript; charset=utf-8",
     "assets/js/host.js": "text/javascript; charset=utf-8",
     "assets/js/core.js": "text/javascript; charset=utf-8",
-    "assets/js/demo.js": "text/javascript; charset=utf-8",
     "assets/js/catalog.js": "text/javascript; charset=utf-8",
     "assets/js/data.js": "text/javascript; charset=utf-8",
     "assets/js/commands.js": "text/javascript; charset=utf-8",
     "assets/js/render_shell.js": "text/javascript; charset=utf-8",
     "assets/js/render_training.js": "text/javascript; charset=utf-8",
-    "assets/js/render_training_trace.js": "text/javascript; charset=utf-8",
     "assets/js/render_process.js": "text/javascript; charset=utf-8",
     "assets/js/render_candidates.js": "text/javascript; charset=utf-8",
-    "assets/js/render_collaboration.js": "text/javascript; charset=utf-8",
     "plugin.json": "application/json; charset=utf-8",
 }
 
@@ -143,7 +138,7 @@ def _derived_seed(material: Any) -> int:
 
 def _expected_partition(task: TaskManifest) -> str:
     dataset_id = task.dataset
-    return "validation" if dataset_id == TOY_DATASET_ID else "training_feedback"
+    return "training_feedback"
 
 
 def _evaluation_partition(task: TaskManifest, body: dict[str, Any]) -> str:

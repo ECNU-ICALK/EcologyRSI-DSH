@@ -8,6 +8,7 @@ from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.core.finalist_review import (
     FINALIST_REVIEW_QUALIFICATION, finalist_review_evidence,
 )
+from ecologyrsi_dsh.core.training_effect_evidence import finalist_training_effect_evidence
 from ecologyrsi_dsh.core.models import Evaluation, RunStatus, TaskManifest
 from ecologyrsi_dsh.core.state import validate_generation_comparison_binding
 from ecologyrsi_dsh.core.trajectory import GenerationHoldout, HoldoutArm
@@ -21,7 +22,7 @@ MODEL = "provider/reviewer"
 class FinalistReviewTests(unittest.TestCase):
     def setUp(self):
         self.items = tuple(evaluation(arm, skill=.1 if arm is HoldoutArm.INCUMBENT else .2)
-                           for arm in HoldoutArm)
+                           for arm in (HoldoutArm.FINALIST_1, HoldoutArm.INCUMBENT))
         self.task = TaskManifest(task_id="review", objective="review gate", domain_pack="greenhouse_environment@1",
                                  metadata={**GUARD_METADATA, "review_model_id": MODEL})
         self.judgments = {}
@@ -39,7 +40,8 @@ class FinalistReviewTests(unittest.TestCase):
     def compare(self, reviews=True):
         return build_generation_comparison(run_id=self.items[0].scope.run_id, generation=0,
             cohort_digest=self.items[0].scope.cohort_digest, holdout_evaluations=self.items,
-            require_paired_strict_chain=True, positive_delta_search=False,
+            require_paired_strict_chain=True, positive_delta_search=False, experiment_protocol="joint_plugin_epoch@2",
+            training_effect_evidence=finalist_training_effect_evidence(self.items),
             finalist_reviews=finalist_review_evidence(self.items, self.judgments, MODEL) if reviews else None)
 
     def validate(self, comparison, judgments=None):
@@ -54,7 +56,7 @@ class FinalistReviewTests(unittest.TestCase):
 
     def test_positive_scientific_results_cannot_bypass_rejected_or_unavailable_reviews(self):
         accepted = self.compare()
-        self.assertEqual(accepted.gate_results["search_eligible_finalist_count"], 2)
+        self.assertEqual(accepted.gate_results["search_eligible_finalist_count"], 1)
         for cid, item in self.judgments.items():
             self.judgments[cid] = replace(item, passed=False, metrics={**item.metrics,
                 "judge_accepted": False,
@@ -89,21 +91,8 @@ class FinalistReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "durable independent judgments"):
             self.validate(replace(comparison, gate_results=data))
 
-    def test_new_writer_requires_review_but_unmarked_history_replays(self):
-        historical = self.compare(reviews=False)
-        self.validate(historical, {})
-        director = object.__new__(EvolutionDirector)
-        director.ledger = Mock()
-        state = SimpleNamespace(task_manifest=self.task, comparison_for=lambda _: None)
-        director.state = lambda _: state
-        with self.assertRaisesRegex(ValueError, "independent finalist review"):
-            director.record_generation_comparison(historical.run_id, historical)
-        state.comparison_for = lambda _: historical
-        self.assertIs(director.record_generation_comparison(historical.run_id, historical), historical)
-        director.ledger.append.assert_not_called()
-
     def test_final_barrier_invokes_only_missing_review_and_is_resumable(self):
-        cid = "candidate:finalist_2"
+        cid = "candidate:finalist_1"
         completed = self.judgments[cid]
         self.judgments[cid] = replace(completed, metrics={k: v for k, v in completed.metrics.items()
                                                        if not k.startswith("judge_")})

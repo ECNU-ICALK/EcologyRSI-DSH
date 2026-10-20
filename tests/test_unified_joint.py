@@ -34,11 +34,6 @@ class UnifiedJointTests(unittest.TestCase):
         self.assertEqual(plan['required_unique_origins'], 255)
         self.assertEqual(plan['maximum_rechecks_per_generation'], 1)
         self.assertEqual(OptimizationSchedule.from_dict(schedule.to_dict()), schedule)
-        for legacy in (OptimizationSchedule.for_quick_run(), OptimizationSchedule.for_joint_run(),
-                       OptimizationSchedule.for_evidence_guided_run()):
-            self.assertFalse(legacy.unified)
-            self.assertEqual(legacy.generation_execution_budget(cells_per_origin=9)['total_candidate_origins'], 200)
-            self.assertEqual(OptimizationSchedule.from_dict(legacy.to_dict()), legacy)
 
     def test_clear_consistent_gain_needs_no_repeat_and_is_not_certification(self):
         result = compare(pair(.2))
@@ -99,15 +94,15 @@ class UnifiedJointTests(unittest.TestCase):
         self.assertIn('cell_regression', gate['joint_recheck']['repeated_failures'])
 
     def test_recheck_resumes_its_own_checkpoint_and_seals_once_in_real_ledger(self):
-        from ecologyrsi_dsh import EvolutionDirector, FakeDSHAdapter
+        from ecologyrsi_dsh import EvolutionDirector
+        from tests.native_fixtures import NativeRoleStub
         from ecologyrsi_dsh.application import generation_execution as execution
         from ecologyrsi_dsh.core.sample_results import build_sample_results
         from tests.test_evidence_guided_epoch import EvidenceGuidedRaceTests
 
         fixture = EvidenceGuidedRaceTests()
         self.addCleanup(fixture.doCleanups)
-        with patch.object(OptimizationSchedule, 'for_evidence_guided_run', OptimizationSchedule.for_new_run):
-            fixture.setUp()
+        fixture.setUp()
         fixture.test_five_arms_freeze_and_resume_without_rescoring_warmup()
         state = fixture.director.state(fixture.run_id)
         finalist = fixture.candidates[0]
@@ -130,9 +125,13 @@ class UnifiedJointTests(unittest.TestCase):
         original = originals[1]
         from ecologyrsi_dsh.api.projection import _execution_diagnostics
         before_counts = _execution_diagnostics(fixture.director.state(fixture.run_id))
-        rows = [{'sample_id': f'recheck:{i}', 'sample_index': i + 1, 'target': 'air_temperature',
-                 'horizon_hours': 1, 'origin_timestamp': i, 'target_timestamp': i + 1,
-                 'observed': 2., 'predicted': 1.5, 'baseline': 1.} for i in range(50)]
+        rows = [{'sample_id': f'recheck:{i}:{target}:{horizon}',
+                 'sample_index': i * 9 + j * 3 + k + 1, 'target': target,
+                 'horizon_hours': horizon, 'origin_timestamp': i, 'target_timestamp': i + horizon,
+                 'observed': 2., 'predicted': 1.5, 'baseline': 1.}
+                for i in range(50)
+                for j, target in enumerate(('air_temperature', 'relative_humidity', 'co2_concentration'))
+                for k, horizon in enumerate((1, 6, 24))]
         restored_counts = []
 
         def evaluate(task, candidate, proposal, *, scope, **kwargs):
@@ -142,12 +141,12 @@ class UnifiedJointTests(unittest.TestCase):
                 'formal_batch_index': None, 'holdout_arm': scope.holdout_arm.value,
                 'cohort_digest': scope.cohort_digest, 'execution_scope_digest': scope.scope_key,
                 'inference_replica': 1, 'sample_cohort_digest': 'a' * 64,
-                'execution_context_digest': 'b' * 64, 'sample_count': 50})
+                'execution_context_digest': 'b' * 64, 'sample_count': 450})
             restored_counts.append(len(restored['rows']))
             if not restored['rows']:
-                kwargs['on_sample_results'](rows[:10])
+                kwargs['on_sample_results'](rows[:90])
                 raise RuntimeError('simulated interruption')
-            kwargs['on_sample_results'](rows[10:])
+            kwargs['on_sample_results'](rows[90:])
             return SimpleNamespace(evaluation=original,
                 sample_results=build_sample_results(candidate.candidate_id, rows))
 
@@ -161,10 +160,10 @@ class UnifiedJointTests(unittest.TestCase):
             live = _holdout_arm_live_projection(services.director.state(fixture.run_id))
             self.assertEqual(live['outcome_scope'], 'active_holdout_recheck')
             self.assertEqual(live['completed_origins'], 10)
-            services.director = EvolutionDirector(fixture.ledger, FakeDSHAdapter())
+            services.director = EvolutionDirector(fixture.ledger, NativeRoleStub())
             sealed = execution._execute_joint_holdout_recheck(services, fixture.run_id, original, fixture.cohorts.holdout)
             again = execution._execute_joint_holdout_recheck(services, fixture.run_id, original, fixture.cohorts.holdout)
-        self.assertEqual(restored_counts, [0, 10])
+        self.assertEqual(restored_counts, [0, 90])
         self.assertEqual(sealed, again)
         replayed = services.director.replay(fixture.run_id)
         self.assertEqual(len(replayed.holdout_evaluations), 2)
@@ -172,13 +171,13 @@ class UnifiedJointTests(unittest.TestCase):
         self.assertEqual(sum(event.kind == 'HoldoutRecheckStarted' for event in replayed.events), 1)
         self.assertEqual(replayed.holdout_evaluation_for(0, HoldoutArm.INCUMBENT), original)
         after_counts = _execution_diagnostics(replayed)
-        # This fixture has one score cell per origin. A durable second
+        # Each origin retains its full nine-cell grid. A durable second
         # inference is 50 additional executions, not merely another view of
         # the first result. Resume and exact replay add no third execution.
         self.assertEqual(before_counts["adaptive_all_settled_origins"], 200)
         self.assertEqual(after_counts["adaptive_all_settled_origins"], 250)
-        self.assertEqual(after_counts["adaptive_scored_cells"], 250)
-        self.assertEqual(after_counts["candidate_work_items"], 250)
+        self.assertEqual(after_counts["adaptive_scored_cells"], 2250)
+        self.assertEqual(after_counts["candidate_work_items"], 2250)
         self.assertEqual(after_counts["adaptive_evaluation_count"], 6)
         self.assertEqual(after_counts["adaptive_succeeded_origins"], 200)
         self.assertEqual(after_counts["adaptive_failed_origins"], 0)

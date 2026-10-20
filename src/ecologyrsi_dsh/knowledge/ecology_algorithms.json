@@ -6,17 +6,19 @@
     "source_url": "https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html",
     "source_kind": "官方文档",
     "source_authority": "scikit-learn",
-    "algorithm_tags": ["time_series", "validation", "leakage_control"],
-    "domains": ["all"],
+    "algorithm_tags": [
+      "time_series",
+      "validation",
+      "leakage_control"
+    ],
+    "domains": [
+      "all"
+    ],
     "execution_mapping": {
       "kind": "evaluator",
       "capability_ids": [
-        "toy_time_forward@1",
-        "greenhouse_time_forward@1",
-        "greenhouse_multihorizon_time_forward@1",
-        "greenhouse_multihorizon_time_forward@2",
-        "greenhouse_multihorizon_time_forward@3",
-        "greenhouse_multihorizon_time_forward@4"
+        "greenhouse_multihorizon_time_forward@4",
+        "greenhouse_multihorizon_time_forward@5"
       ],
       "parameter_hints": []
     }
@@ -28,15 +30,22 @@
     "source_url": "https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.Ridge.html",
     "source_kind": "官方文档",
     "source_authority": "scikit-learn",
-    "algorithm_tags": ["ridge", "regularization", "residual_forecast"],
-    "domains": ["greenhouse"],
+    "algorithm_tags": [
+      "ridge",
+      "regularization",
+      "residual_forecast"
+    ],
+    "domains": [
+      "greenhouse"
+    ],
     "execution_mapping": {
       "kind": "predictor",
       "capability_ids": [
         "greenhouse-exogenous-ridge@1",
         "greenhouse-baseline-aligned-ridge@1",
         "greenhouse-targetwise-ridge@1",
-        "greenhouse-horizon-targetwise-ridge@1"
+        "greenhouse-horizon-targetwise-ridge@1",
+        "greenhouse-baseline-aligned-ridge@2"
       ],
       "parameter_hints": [
         "ridge_alpha",
@@ -53,13 +62,13 @@
     "source_url": "https://scikit-learn.org/stable/modules/grid_search.html",
     "source_kind": "官方方法文档",
     "source_authority": "scikit-learn",
-    "algorithm_tags": ["bounded_search", "parameter_sweep"],
-    "domains": ["all"],
-    "execution_mapping": {
-      "kind": "strategy",
-      "capability_id": "parameter_sweep@1",
-      "parameter_hints": ["window", "alpha", "ridge_alpha"]
-    }
+    "algorithm_tags": [
+      "bounded_search",
+      "parameter_sweep"
+    ],
+    "domains": [
+      "all"
+    ]
   },
   {
     "knowledge_id": "host-adaptive-local-search",
@@ -68,13 +77,14 @@
     "source_url": "https://docs.scipy.org/doc/scipy/reference/optimize.html",
     "source_kind": "官方方法目录",
     "source_authority": "SciPy",
-    "algorithm_tags": ["adaptive_search", "local_search", "bounded_optimization"],
-    "domains": ["all"],
-    "execution_mapping": {
-      "kind": "strategy",
-      "capability_id": "adaptive_local@1",
-      "parameter_hints": ["ridge_alpha", "window", "alpha"]
-    }
+    "algorithm_tags": [
+      "adaptive_search",
+      "local_search",
+      "bounded_optimization"
+    ],
+    "domains": [
+      "all"
+    ]
   },
   {
     "knowledge_id": "optuna-tpe",
@@ -83,8 +93,13 @@
     "source_url": "https://optuna.readthedocs.io/en/stable/reference/samplers/generated/optuna.samplers.TPESampler.html",
     "source_kind": "官方文档",
     "source_authority": "Optuna",
-    "algorithm_tags": ["tpe", "bayesian_optimization"],
-    "domains": ["all"]
+    "algorithm_tags": [
+      "tpe",
+      "bayesian_optimization"
+    ],
+    "domains": [
+      "all"
+    ]
   },
   {
     "knowledge_id": "pcse-wofost",
@@ -93,8 +108,15 @@
     "source_url": "https://pcse.readthedocs.io/en/stable/",
     "source_kind": "官方文档",
     "source_authority": "PCSE",
-    "algorithm_tags": ["crop_growth", "soil_water", "process_model"],
-    "domains": ["crop_soil_water", "greenhouse"]
+    "algorithm_tags": [
+      "crop_growth",
+      "soil_water",
+      "process_model"
+    ],
+    "domains": [
+      "crop_soil_water",
+      "greenhouse"
+    ]
   },
   {
     "knowledge_id": "aquacrop-ospy",
@@ -103,8 +125,15 @@
     "source_url": "https://aquacropos.github.io/aquacrop/",
     "source_kind": "官方文档",
     "source_authority": "AquaCrop-OSPy",
-    "algorithm_tags": ["crop_water", "irrigation", "process_model"],
-    "domains": ["crop_soil_water", "greenhouse"]
+    "algorithm_tags": [
+      "crop_water",
+      "irrigation",
+      "process_model"
+    ],
+    "domains": [
+      "crop_soil_water",
+      "greenhouse"
+    ]
   },
   {
     "knowledge_id": "greenlight-model",
@@ -113,7 +142,14 @@
     "source_url": "https://github.com/davkat1/GreenLight",
     "source_kind": "官方代码仓库",
     "source_authority": "GreenLight",
-    "algorithm_tags": ["greenhouse", "crop_growth", "energy", "process_model"],
-    "domains": ["greenhouse"]
+    "algorithm_tags": [
+      "greenhouse",
+      "crop_growth",
+      "energy",
+      "process_model"
+    ],
+    "domains": [
+      "greenhouse"
+    ]
   }
 ]

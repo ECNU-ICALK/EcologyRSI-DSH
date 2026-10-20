@@ -53,7 +53,6 @@ from ..evolution.schedule import (
     OptimizationSchedule,
 )
 from ..integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
-from ..integrations.model_gateway import gateway_error_in_chain
 from ..application.generation_execution import complete_if_budget_exhausted, execute_generation
 
 _AUTO_PROGRESS_METADATA_KEY = "auto_progress"
@@ -69,12 +68,6 @@ _NATIVE_QUIESCENCE_RETRY_BASE_SECONDS = 1.0
 _NATIVE_QUIESCENCE_RETRY_MAX_SECONDS = 30.0
 _SCHEDULER_COOLDOWN_MAINTENANCE_SECONDS = 5.0
 _SCHEDULER_ORPHAN_MAINTENANCE_SECONDS = 30.0
-_RESEARCH_RETRYABLE_RESPONSE_CODES = frozenset(
-    {
-        "gateway_response_error",
-        "research_algorithm_contract_invalid",
-    }
-)
 _TERMINAL_RUN_STATUSES = frozenset(
     {RunStatus.COMPLETED, RunStatus.CANCELLED, RunStatus.FAILED}
 )
@@ -1222,7 +1215,6 @@ class AutoProgressManager:
                     preflight_failed = True
                     failures += 1
                     retryable = _progress_failure_retryable(exc)
-                    gateway_error = gateway_error_in_chain(exc)
                     deferred_error = _retry_later_error(exc)
                     if deferred_error is not None:
                         return self._defer_retry(
@@ -1258,9 +1250,7 @@ class AutoProgressManager:
                     elif not retryable or failures >= self._retry_limit:
                         terminal_failure = True
                         disposition = (
-                            "网关请求已完成内部重试"
-                            if gateway_error is not None
-                            else "不可重试"
+                            "不可重试"
                             if not retryable
                             else f"已尝试 {failures} 次"
                         )
@@ -1409,13 +1399,12 @@ class AutoProgressManager:
                     exc,
                     stage=recovery_stage,
                 )
-                # ModelGateway has already retried the individual request.
+                # The native harness has already retried the individual request.
                 # That budget is intentionally small, because a provider can
                 # remain queued or rate-limited for much longer.  Preserve the
                 # running generation and put it back on the FIFO after a
                 # bounded cooldown; never mark the whole run failed merely
                 # because this one call was temporarily unavailable.
-                gateway_error = gateway_error_in_chain(exc)
                 deferred_error = _retry_later_error(
                     exc,
                     stage=recovery_stage,
@@ -1453,9 +1442,7 @@ class AutoProgressManager:
                     retry_delay = min(300.0, 15.0 * (2 ** (failures - 1)))
                 if terminal_failure:
                     disposition = (
-                        "网关请求已完成内部重试，进化层不再重放整代"
-                        if gateway_error is not None
-                        else "不可重试"
+                        "不可重试"
                         if not retryable
                         else f"已尝试 {failures} 次"
                     )
@@ -1938,14 +1925,9 @@ class AutoProgressManager:
         dsh_error = (
             dsh_native_runtime_error_in_chain(exc) if exc is not None else None
         )
-        gateway_error = (
-            gateway_error_in_chain(exc)
-            if exc is not None and dsh_error is None
-            else None
-        )
         retry_after = (
-            getattr(dsh_error or gateway_error, "retry_after_seconds", None)
-            if dsh_error is not None or gateway_error is not None
+            getattr(dsh_error, "retry_after_seconds", None)
+            if dsh_error is not None
             else None
         )
         if (
@@ -2378,15 +2360,6 @@ def _retry_class_and_error_code(
                 getattr(dsh_error, "error_code", None),
             ),
         )
-    gateway_error = gateway_error_in_chain(exc) if exc is not None else None
-    if gateway_error is not None:
-        return (
-            "model_gateway",
-            gateway_retry_error_code(
-                "model_gateway",
-                getattr(gateway_error, "error_code", None),
-            ),
-        )
     if (
         exc is not None
         and stage == "research"
@@ -2400,7 +2373,7 @@ def _retry_class_and_error_code(
         and _transient_persistence_error_in_chain(exc) is not None
     ):
         return "sample_result_persistence", "sample_result_callback_error"
-    return "model_gateway", "gateway_unavailable"
+    return "dsh_native_runtime", "dsh_native_runtime_unavailable"
 
 
 def _latest_failed_stage(state: Any | None) -> str | None:
@@ -2422,29 +2395,6 @@ def _latest_failed_stage(state: Any | None) -> str | None:
     return None
 
 
-def _research_gateway_failure_retryable_later(
-    gateway_error: BaseException,
-    *,
-    stage: str | None,
-) -> bool:
-    """Classify response failures that merit a new research call after cooldown.
-
-    The gateway has already exhausted its request-local retry budget. A
-    truncated or malformed research response is not evidence that credentials
-    or routing are invalid, so retry it as a fresh stage attempt later. Definite
-    non-retryable HTTP responses remain terminal and cannot enter an endless
-    cooldown loop.
-    """
-
-    if stage != "research":
-        return False
-    status_code = getattr(gateway_error, "status_code", None)
-    if isinstance(status_code, int) and not isinstance(status_code, bool):
-        return status_code in {408, 425, 429} or 500 <= status_code <= 599
-    error_code = str(getattr(gateway_error, "error_code", "") or "")
-    return bool(getattr(gateway_error, "split_eligible", False)) or (
-        error_code in _RESEARCH_RETRYABLE_RESPONSE_CODES
-    )
 
 
 def _progress_failure_retryable(
@@ -2457,18 +2407,6 @@ def _progress_failure_retryable(
     dsh_error = dsh_native_runtime_error_in_chain(exc)
     if dsh_error is not None:
         return dsh_native_runtime_retryable(dsh_error)
-    gateway_error = gateway_error_in_chain(exc)
-    if gateway_error is not None:
-        # ModelGateway owns request-local retries, but a provider can remain
-        # queued/rate-limited after that budget is exhausted.  The caller
-        # handles retryable gateway errors with a delayed generation retry;
-        # non-retryable contract/configuration errors still terminate safely.
-        return bool(gateway_error.retryable) or (
-            _research_gateway_failure_retryable_later(
-                gateway_error,
-                stage=stage,
-            )
-        )
     if _transient_persistence_error_in_chain(exc) is not None:
         # Sample-result writes are part of the durable evaluation boundary.
         # A transient ledger/IPC failure must be retried after a cooldown, not
@@ -2497,15 +2435,6 @@ def _progress_failure_irrecoverable(
             # has not told us whether its quota window is temporary.
             return False
         return not dsh_native_runtime_retryable(dsh_error)
-    gateway_error = gateway_error_in_chain(exc)
-    if gateway_error is not None:
-        return not (
-            bool(gateway_error.retryable)
-            or _research_gateway_failure_retryable_later(
-                gateway_error,
-                stage=stage,
-            )
-        )
     return False
 
 
@@ -2519,14 +2448,6 @@ def _retry_later_error(
     dsh_error = dsh_native_runtime_error_in_chain(exc)
     if dsh_error is not None:
         return dsh_error if dsh_native_runtime_retryable(dsh_error) else None
-    gateway_error = gateway_error_in_chain(exc)
-    if gateway_error is not None:
-        if gateway_error.retryable or _research_gateway_failure_retryable_later(
-            gateway_error,
-            stage=stage,
-        ):
-            return gateway_error
-        return None
     if stage == "research" and find_exception(exc, TimeoutError) is not None:
         return exc
     persistence_error = _transient_persistence_error_in_chain(exc)

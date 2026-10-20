@@ -16,14 +16,12 @@ window.__ModuleLoader__.load({
     const capabilities = [
       "evolution.catalog.read",
       "evolution.run.create",
-      "evolution.run.advance",
       "evolution.projection.read",
       "evaluation.samples.read",
       "training.data.read",
       "run.control",
       "run.archive",
       "run.delete",
-      "intervention.write",
     ];
     let hostPluginContext = null;
 

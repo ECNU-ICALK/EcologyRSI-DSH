@@ -1,26 +1,14 @@
 include README.md CHANGELOG.md LICENSE NOTICE RELEASE-CHECKLIST.md pyproject.toml ruff.toml uv.lock Makefile
 recursive-include src *.py
 recursive-include src/ecologyrsi_dsh/knowledge *.json
-recursive-include examples *.py *.json *.md
 recursive-include datasets *.json
-recursive-include docs/screenshots *.jpg *.md
-recursive-include docs/refactor *.md *.json
-prune docs/superpowers
-exclude docs/项目整体Review与方案B优化报告.md
-# Internal planning/hand-off notes live at the repository root for local
-# collaboration only; never ship them in the public source distribution.
-exclude EcologyRSI-DSH-完整框架与详细实施方案.md
-exclude EcologyRSI-DSH-批次进化闭环实施方案.md
-exclude EcologyRSI-DSH-旧API迁移映射与验收附录.md
-exclude EcologyRSI-DSH-最终交付审查与运行说明.md
-exclude EcologyRSI-DSH-迁移清单模板.yaml
 recursive-include plugins/ecology_evolution *.html *.css *.js *.json *.md *.mjs
 recursive-include integrations/dsh_ecology_plugin *.js *.mjs *.json *.md *.yml *.py
 include integrations/dsh_ecology_plugin/LICENSE integrations/dsh_ecology_plugin/NOTICE
 prune integrations/dsh_ecology_plugin/.runtime
 prune integrations/dsh_ecology_plugin/.dsh
 prune integrations/dsh_ecology_plugin/.ssh
-include integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.10.11.tgz
+include integrations/dsh_ecology_plugin/dist/ecologyrsi-dsh-evolution-plugin-0.11.0.tgz
 recursive-include scripts *.sh *.py *.mjs *.cjs
 recursive-include tests *.py *.json *.mjs
 global-exclude *.py[cod] __pycache__ .DS_Store *.sqlite3
@@ -29,5 +17,5 @@ global-exclude *[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]*.yml
 global-exclude *[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]*.yaml
 global-exclude */.runtime/* */.dsh/* */.ssh/*
 
-include docs/plugin-joint-evolution-2026-10-03.md
 include docs/reasoning-configuration-2026-10-20.md
+include docs/LIGHTWEIGHT.md

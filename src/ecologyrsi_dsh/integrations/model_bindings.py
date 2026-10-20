@@ -79,11 +79,11 @@ def canonical_model_roles(values: Iterable[Any]) -> tuple[str, ...]:
 
 
 def model_supports_role(model: Mapping[str, Any], role: str) -> bool:
-    """Check canonical catalog roles; role-less legacy entries support both."""
+    """Check explicit model authorization; absent roles grant no permission."""
 
     raw_roles = model.get("roles")
     if not isinstance(raw_roles, (list, tuple)) or not raw_roles:
-        return True
+        return False
     try:
         return canonical_model_role(role) in canonical_model_roles(raw_roles)
     except ValueError:

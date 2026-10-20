@@ -11,7 +11,7 @@ from ecologyrsi_dsh.core.models import CandidateStatus, TaskManifest, digest
 from ecologyrsi_dsh.evolution.analysis import GenerationAnalysis
 from ecologyrsi_dsh.evolution.batches import (
     _canonical_candidate_outcomes,
-    _ensure_generation_reflection,
+    _ensure_generation_reflection as _production_ensure_generation_reflection,
     _validate_required_search_replan,
     start_generation_batch,
 )
@@ -33,24 +33,20 @@ from ecologyrsi_dsh.knowledge.autonomous_cycle import (
     validate_research_synthesis,
 )
 from ecologyrsi_dsh.knowledge.retrieval import retrieve_generation_knowledge
+from tests.native_fixtures import canary_receipts
 
 
 def _task(*, online: bool = False) -> TaskManifest:
-    return TaskManifest(
-        task_id="autonomous-search-reflection",
-        objective="predict greenhouse temperature, humidity, and CO2",
-        domain_pack="greenhouse_environment@1",
-        visible_datasets=("agc_cucumber_2018",),
-        budget={"max_candidates": 4, "candidates_per_generation": 2},
-        metadata={
+    from tests.native_fixtures import native_manifest
+    return native_manifest(task_id="autonomous-search-reflection", metadata={
             "execution_protocol": "dsh_native_plugin_evolution@1",
             "autonomous_research_protocol": AUTONOMOUS_RESEARCH_PROTOCOL,
-            "strategy_model_id": "strategy-model",
-            "review_model_id": "review-model",
+            "strategy_model_id": "fixture/strategy",
+            "review_model_id": "fixture/review",
             "strategy_id": "autonomous_model@1",
-            "seed_genome_template_id": "greenhouse-default@1",
+            "seed_genome_template_id": "greenhouse-default@2",
             "prediction_model_id": "greenhouse-horizon-targetwise-ridge@1",
-            "evaluator_id": "greenhouse_multihorizon_time_forward@2",
+            "evaluator_id": "greenhouse_multihorizon_time_forward@4",
             "knowledge_online_enabled": online,
             "dataset_digest": "2" * 64,
             "dataset_snapshot_set_digest": "2" * 64,
@@ -71,10 +67,7 @@ def _task(*, online: bool = False) -> TaskManifest:
             "evaluation_cohort_digest": "f" * 64,
             "dataset_display_name": "Autonomous Greenhouse Challenge cucumber",
             "prediction_cells_per_origin": 9,
-            "samples_per_update": 9,
-            "minimum_selection_samples_per_update": 180,
-            "sample_budget_class": "diagnostic_smoke",
-            "sample_agent_protocol": "dsh-strict-origin-bundle@3",
+            "sample_agent_protocol": "dsh-strict-origin-bundle@4",
             "fitness_profile": {
                 "expected_targets": [
                     "air_temperature",
@@ -83,25 +76,50 @@ def _task(*, online: bool = False) -> TaskManifest:
                 ],
                 "expected_horizons": [1, 6, 24],
             },
-        },
-    )
+        })
 
 
 def _direction(index: int, evidence_refs: list[str]) -> dict:
-    parameter = "ridge_alpha" if index % 2 == 0 else "history_steps"
+    parameter = ("ridge_alpha", "history_steps", "air_temperature_24h_residual_scale", "co2_concentration_24h_residual_scale")[index % 4]
     return {
         "direction_id": f"direction-{index + 1}",
         "title": f"Bounded direction {index + 1}",
-        "hypothesis": f"Changing {parameter} may improve the weakest cells.",
+        "hypothesis": f"Changing {parameter} in direction {index + 1} may improve the weakest cells.",
         "target_weakness": "weak target-horizon skill",
         "capability_focus": "registered greenhouse ridge predictor",
         "mutation_axis": "scientific_parameter",
         "mutation_target": parameter,
-        "mutation_direction": "increase" if index % 2 == 0 else "decrease",
+        "mutation_direction": "decrease" if index % 4 == 1 else "increase",
         "evidence_refs": evidence_refs,
         "expected_tradeoff": "May trade short-horizon fit against long-horizon stability.",
         "success_criterion": "Improve the paired diagnostic score on the frozen origin.",
     }
+
+
+def _ensure_generation_reflection(director, state, batch, analysis):
+    """Supply a frozen synthetic paired result to reflection-only integration tests.
+
+    These tests exercise model feedback and durable reflection identity. The
+    production paired-comparison constructor/gates have their own real-grid tests.
+    """
+    seed = state.materialized_seed_genome()
+    revision = SimpleNamespace(candidate_id="candidate:incumbent", revision_id="revision:incumbent",
+        revision_digest="a" * 64, genome_digest=seed.genome_digest, behavior_digest=seed.behavior_digest)
+    holdout = SimpleNamespace(scope=SimpleNamespace(holdout_arm=SimpleNamespace(value="incumbent"),
+        candidate_id=revision.candidate_id, candidate_revision_id=revision.revision_id), score=0.1)
+    comparison = SimpleNamespace(holdout_evaluations=(holdout,), selected_revision_id=revision.revision_id,
+        selected_candidate_id=revision.candidate_id, comparison_digest="b" * 64,
+        gate_results={"selected_arm": "incumbent", "delta_to_incumbent": 0.0})
+    class ReflectionState:
+        def __getattr__(self, name):
+            return getattr(state, name)
+        def comparison_for(self, generation):
+            assert generation == analysis.generation
+            return comparison
+        def revision(self, revision_id):
+            assert revision_id == revision.revision_id
+            return revision
+    return _production_ensure_generation_reflection(director, ReflectionState(), batch, analysis)
 
 
 class _CycleRuntime:
@@ -154,8 +172,8 @@ class _CycleRuntime:
                 "operations": [
                     {
                         "op": "set_bounded_parameter",
-                        "name": "ridge_alpha" if slot == 0 else "history_steps",
-                        "value": 0.2 if slot == 0 else 5,
+                        "name": _direction(slot, [])["mutation_target"],
+                        "value": (0.2, 5, 0.9, 0.9)[slot],
                     }
                 ],
             }
@@ -470,6 +488,8 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         self.task = _task()
         self.run_id = "run:autonomous-search-reflection"
         self.director.create_run(self.task, run_id=self.run_id)
+        from tests.native_fixtures import canary_receipts
+        self.director.record_model_contract_preflight(self.run_id, canary_receipts(self.task.metadata))
         self.director.start_run(self.run_id)
 
     def test_next_generation_search_preserves_reflected_skill_program(self) -> None:
@@ -522,6 +542,8 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                 "generation.research-synthesis",
                 "candidate.propose",
                 "candidate.propose",
+                "candidate.propose",
+                "candidate.propose",
             ],
         )
         search_plan = state.search_plan_for(0)
@@ -537,7 +559,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         )
         self.assertEqual(
             [item.metadata["candidate_direction_id"] for item in state.proposals],
-            ["direction-1", "direction-2"],
+            ["direction-1", "direction-2", "direction-3", "direction-4"],
         )
         forecast_objective = self.runtime.requests[0]["request"]["context"][
             "forecast_objective"
@@ -584,6 +606,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                 # so the two directions are not interchangeable.
                 "instruction_directive": ["author"],
                 "skill_program": ["author"],
+                "strategy_program": ["author"],
             },
         )
         self.assertEqual(
@@ -595,17 +618,8 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
             synthesis_contract["host_owned_immutable_controls"],
         )
         evidence_contract = synthesis_contract["evaluation_evidence_contract"]
-        self.assertEqual(evidence_contract["sample_budget_class"], "diagnostic_smoke")
-        self.assertEqual(evidence_contract["origin_budget_per_candidate"], 1)
-        self.assertEqual(evidence_contract["effective_prediction_cell_budget"], 9)
-        self.assertEqual(evidence_contract["unused_prediction_cell_budget"], 0)
-        self.assertTrue(evidence_contract["diagnostic_only"])
-        self.assertFalse(evidence_contract["selection_evidence_eligible"])
-        self.assertFalse(evidence_contract["promotion_possible_from_this_run"])
-        self.assertEqual(
-            evidence_contract["required_terminal_outcome"],
-            "diagnostic_smoke_completed_no_promotion",
-        )
+        self.assertEqual(evidence_contract["sample_budget_class"], "selection_eligible")
+        self.assertFalse(evidence_contract["diagnostic_only"])
         proposal_requests = [
             request
             for request in self.runtime.requests
@@ -618,7 +632,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
                 ]
                 for request in proposal_requests
             ],
-            ["ridge_alpha", "history_steps"],
+            [_direction(i, [])["mutation_target"] for i in range(4)],
         )
         for request in proposal_requests:
             context = request["request"]["context"]
@@ -650,6 +664,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         director = EvolutionDirector(self.ledger, adapter)
         run_id = "run:assigned-direction-repair"
         director.create_run(self.task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(director.state(run_id).task_manifest.metadata))
         director.start_run(run_id)
         batch = start_generation_batch(director, run_id)
 
@@ -683,6 +698,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         director = EvolutionDirector(self.ledger, adapter)
         run_id = "run:assigned-direction-sign-repair"
         director.create_run(self.task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(director.state(run_id).task_manifest.metadata))
         director.start_run(run_id)
         batch = start_generation_batch(director, run_id)
 
@@ -706,7 +722,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
     def test_batch_reflection_is_persisted_and_can_seed_next_search(self) -> None:
         batch = start_generation_batch(self.director, self.run_id)
         candidates = []
-        for slot_index in range(batch.batch_size):
+        for slot_index in range(2):
             proposal = self.director.request_proposal(
                 self.run_id,
                 generation_batch=batch,
@@ -774,7 +790,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
             ),
             reflection,
         )
-        self.assertEqual(len(reflection.candidate_directions), 2)
+        self.assertEqual(len(reflection.candidate_directions), 4)
         self.assertEqual(
             self.runtime.requests[-1]["request"]["context"][
                 "generation_analysis"
@@ -1089,34 +1105,6 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fields do not match"):
             GenerationReflection.from_dict(missing_mapping)
 
-        legacy_mapping = dict(missing_mapping)
-        legacy_mapping["candidate_directions"] = [
-            {
-                **{
-                    key: value
-                    for key, value in direction.items()
-                    if key not in {"direction_digest", "mutation_direction"}
-                },
-                "direction_digest": digest(
-                    {
-                        key: value
-                        for key, value in direction.items()
-                        if key not in {"direction_digest", "mutation_direction"}
-                    }
-                ),
-            }
-            for direction in legacy_mapping["candidate_directions"]
-        ]
-        legacy_mapping["reflection_digest"] = digest(
-            {
-                key: value
-                for key, value in legacy_mapping.items()
-                if key != "reflection_digest"
-            }
-        )
-        legacy_replayed = GenerationReflection.from_legacy_dict(legacy_mapping)
-        self.assertEqual(legacy_replayed.to_dict(), legacy_mapping)
-        self.assertEqual(legacy_replayed.canonical_candidate_outcomes, ())
 
     def test_research_synthesis_repairs_once_from_host_validation_detail(self) -> None:
         runtime = _RepairCycleRuntime("generation.research-synthesis")
@@ -1127,11 +1115,12 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         director = EvolutionDirector(self.ledger, adapter)
         run_id = "run:research-synthesis-contract-repair"
         director.create_run(self.task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(director.state(run_id).task_manifest.metadata))
         director.start_run(run_id)
 
         batch = start_generation_batch(director, run_id)
 
-        self.assertEqual(batch.batch_size, 2)
+        self.assertEqual(batch.batch_size, 4)
         requests = [
             item
             for item in runtime.requests
@@ -1162,6 +1151,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         director = EvolutionDirector(self.ledger, adapter)
         run_id = "run:research-direction-realizability-repair"
         director.create_run(self.task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(director.state(run_id).task_manifest.metadata))
         director.start_run(run_id)
 
         start_generation_batch(director, run_id)
@@ -1179,7 +1169,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         preflight = iteration.plan["candidate_direction_preflight"]
         self.assertEqual(
             [item["status"] for item in preflight["checks"]],
-            ["single_operation_feasible", "single_operation_feasible"],
+            ["single_operation_feasible"] * 4,
         )
 
     def test_direction_preflight_rejects_a_deterministic_hard_behavior_replay(
@@ -1312,7 +1302,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         # tests/test_workflow_ir.py.
         self.assertNotIn("feature_recipe", targets)
         self.assertEqual(
-            set(targets), set(CANDIDATE_MUTATION_AXES) - {"feature_recipe", "strategy_program"}
+            set(targets), set(CANDIDATE_MUTATION_AXES) - {"feature_recipe"}
         )
 
     def test_direction_preflight_allows_non_assignment_parameter_mentions(self) -> None:
@@ -1401,6 +1391,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         director = EvolutionDirector(self.ledger, adapter)
         run_id = "run:reflection-exact-assignment-repair"
         director.create_run(self.task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(director.state(run_id).task_manifest.metadata))
         director.start_run(run_id)
         batch = start_generation_batch(director, run_id)
         analysis = GenerationAnalysis(
@@ -1582,11 +1573,12 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         director = EvolutionDirector(self.ledger, adapter)
         run_id = "run:search-plan-contract-repair"
         director.create_run(self.task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(director.state(run_id).task_manifest.metadata))
         director.start_run(run_id)
 
         batch = start_generation_batch(director, run_id)
 
-        self.assertEqual(batch.batch_size, 2)
+        self.assertEqual(batch.batch_size, 4)
         requests = [
             item
             for item in runtime.requests
@@ -1617,6 +1609,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         director = EvolutionDirector(self.ledger, adapter)
         run_id = "run:generation-reflection-contract-repair"
         director.create_run(self.task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(director.state(run_id).task_manifest.metadata))
         director.start_run(run_id)
         batch = start_generation_batch(director, run_id)
         analysis = GenerationAnalysis(
@@ -1665,6 +1658,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         director = EvolutionDirector(self.ledger, adapter)
         run_id = "run:generation-reflection-evidence-refs"
         director.create_run(self.task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(director.state(run_id).task_manifest.metadata))
         director.start_run(run_id)
         batch = start_generation_batch(director, run_id)
         analysis = GenerationAnalysis(
@@ -1720,6 +1714,7 @@ class AutonomousSearchReflectionCycleTests(unittest.TestCase):
         online_director = EvolutionDirector(self.ledger, self.adapter)
         online_run_id = "run:model-query-retrieval"
         online_director.create_run(_task(online=True), run_id=online_run_id)
+        online_director.record_model_contract_preflight(online_run_id, canary_receipts(online_director.state(online_run_id).task_manifest.metadata))
         online_director.start_run(online_run_id)
         state = online_director.state(online_run_id)
         with patch(

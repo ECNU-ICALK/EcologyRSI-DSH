@@ -117,11 +117,18 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const { values } = parseArgs({ options: {
     "dsh-package": { type: "string" }, source: { type: "string" },
     output: { type: "string" }, route: { type: "string", multiple: true },
+    "copy-only": { type: "boolean", default: false },
   } });
-  if (Object.values(values).length !== 4) throw new Error("required: --dsh-package --source --output --route");
+  if (!values["dsh-package"] || !values.source || !values.output
+    || (!values["copy-only"] && !values.route?.length)
+    || (values["copy-only"] && values.route?.length)) {
+    throw new Error("required: --dsh-package --source --output and either --route or --copy-only");
+  }
   const yaml = createRequire(path.resolve(values["dsh-package"]))("yaml");
   const settings = yaml.parse(await readFile(values.source, "utf8"));
-  const configured = withThinkingCapabilitiesForRoutes(settings, values.route);
+  if (!settings?.["llm-pi-ai"]?.providers || typeof settings["llm-pi-ai"].providers !== "object"
+    || Array.isArray(settings["llm-pi-ai"].providers)) throw new Error("source must contain llm-pi-ai.providers");
+  const configured = values["copy-only"] ? settings : withThinkingCapabilitiesForRoutes(settings, values.route);
   const output = path.resolve(values.output);
   await mkdir(output, { recursive: true, mode: 0o700 });
   const settingsPath = path.join(output, "settings.yaml");

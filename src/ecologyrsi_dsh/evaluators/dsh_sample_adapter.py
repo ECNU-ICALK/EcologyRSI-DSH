@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Mapping, Sequence
 from threading import RLock
 from typing import Any
@@ -16,12 +15,12 @@ from ..core.errors import (
     dsh_native_runtime_error_in_chain, dsh_native_runtime_retryable,
 )
 from ..core.model_execution_policy import (
-    LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS,
+    NATIVE_SAMPLE_OPERATION_MAX_TOKENS,
     SAMPLE_OPERATION_MAX_MAX_TOKENS,
     SAMPLE_OPERATION_MIN_MAX_TOKENS,
 )
 from ..core.errors import dsh_native_runtime_evaluation_fatal
-from ..core.agent_prediction import PREDICTION_TOOL_CALL_BUDGET, validate_predictions, validate_agent_review
+from ..core.agent_prediction import validate_predictions, validate_agent_review
 from ..evolution.agent_policy import (
     allowed_prediction_methods as _allowed_prediction_methods,
     frozen_prediction_tool_call_budget,
@@ -34,7 +33,6 @@ from .sample_execution import (
     SampleExecutionAttemptError,
     SampleExecutionControlError,
     SamplePredictionOutcome,
-    forecast_origin_sample_id,
 )
 
 
@@ -148,112 +146,6 @@ class _DshSampleDecisionClient:
             raise SampleExecutionContractError("DSH sample result requires decisions")
         return {"decisions": decisions}
 
-    def sample_reflect(
-        self,
-        model_id: str,
-        *,
-        sample: Mapping[str, Any],
-        outcome: Mapping[str, Any],
-    ) -> Mapping[str, Any]:
-        """Run one post-score reflection in its own auditable DSH child."""
-
-        sample_id = str(sample.get("sample_id") or "").strip()
-        if not sample_id:
-            raise SampleExecutionContractError(
-                "DSH sample reflection requires sample_id"
-            )
-        wave = {
-            "schema_version": "ecologyrsi-dsh.sample-reflection-context/1",
-            "role": "reflector",
-            "model_route_id": model_id,
-            "sample": dict(sample),
-            "outcome": dict(outcome),
-            "candidate_execution_identity": dict(self.identity_digests),
-        }
-        wave_digest = digest(wave)
-        revisions = dict(self.revision_provider(self.run_id))
-        runtime = self.runtime_provider()
-        if not isinstance(runtime, DshStructuredRoleRuntime):
-            runtime = DshStructuredRoleRuntime(runtime)
-        structured = runtime.run(
-            run_id=self.run_id,
-            stage="sample.reflect",
-            role="sample-critic",
-            context={**wave, "wave_digest": wave_digest},
-            output_schema_id="ecology-sample-reflection@1",
-            run_state_revision=int(revisions["run_state_revision"]),
-            stage_attempt=max(1, int(wave_digest[:12], 16)),
-            ledger_expected_revision=int(revisions["ledger_expected_revision"]),
-            idempotency_key=f"{self.run_id}:sample.reflect:{wave_digest}",
-            identity_digests=self.identity_digests,
-        )
-        if structured.get("schema_version") != "ecology-sample-reflection@1":
-            raise SampleExecutionContractError(
-                "DSH sample reflection schema version mismatch"
-            )
-        if structured.get("wave_digest") != wave_digest:
-            raise SampleExecutionContractError(
-                "DSH sample reflection wave digest mismatch"
-            )
-        if structured.get("sample_id") != sample_id:
-            raise SampleExecutionContractError(
-                "DSH sample reflection sample_id mismatch"
-            )
-        outcome_class = structured.get("outcome_class")
-        if outcome_class not in {"improved", "degraded", "neutral", "failed"}:
-            raise SampleExecutionContractError(
-                "DSH sample reflection outcome_class is invalid"
-            )
-        error_source = structured.get("error_source")
-        if error_source not in {
-            "model",
-            "feature",
-            "parameter",
-            "tool",
-            "execution",
-            "unknown",
-        }:
-            raise SampleExecutionContractError(
-                "DSH sample reflection error_source is invalid"
-            )
-        next_action = structured.get("next_action")
-        if next_action not in {
-            "keep",
-            "increase",
-            "decrease",
-            "repair",
-            "inspect",
-            "stop",
-        }:
-            raise SampleExecutionContractError(
-                "DSH sample reflection next_action is invalid"
-            )
-        confidence = structured.get("confidence")
-        if (
-            isinstance(confidence, bool)
-            or not isinstance(confidence, (int, float))
-            or not 0 <= float(confidence) <= 1
-        ):
-            raise SampleExecutionContractError(
-                "DSH sample reflection confidence must be in [0, 1]"
-            )
-        summary = structured.get("summary")
-        if not isinstance(summary, str) or not summary.strip():
-            raise SampleExecutionContractError(
-                "DSH sample reflection summary must be non-empty"
-            )
-        return {
-            "schema_version": "ecology-sample-reflection@1",
-            "sample_id": sample_id,
-            "outcome_class": outcome_class,
-            "error_source": error_source,
-            "next_action": next_action,
-            "confidence": float(confidence),
-            "summary": summary.strip()[:1000],
-            "model_id": model_id,
-            "response_digest": digest(structured),
-            "wave_digest": wave_digest,
-        }
 
 
 class DshSampleCollaborationAdapter:
@@ -286,7 +178,7 @@ class DshSampleCollaborationAdapter:
         admission_snapshot_provider: Callable[[], Mapping[str, int]] | None = None,
         run_control_callback: Callable[[], str] | None = None,
         remote_critic_policy: Mapping[str, Any] | None = None,
-        sample_reflection_policy: str | None = None,
+        sample_reflection_policy: str = "candidate_aggregate_post_score@1",
         sample_planner_prompt_profile: Mapping[str, Any] | None = None,
         operation_max_tokens: Mapping[str, int] | None = None,
     ) -> None:
@@ -309,18 +201,11 @@ class DshSampleCollaborationAdapter:
         self._strict_max_in_flight = sample_concurrency
         self._admission_snapshot_provider = admission_snapshot_provider
         if sample_reflection_policy not in {
-            None,
-            "always_remote_post_score@1",
             "candidate_aggregate_post_score@1",
             "disabled_for_independent_evaluation@1",
         }:
             raise ValueError("unsupported DSH sample reflection policy")
-        # A missing policy belongs to historical manifests and preserves the
-        # original Planner/Critic/Reflector chain on replay.
-        self.sample_reflection_enabled = sample_reflection_policy in {
-            None,
-            "always_remote_post_score@1",
-        }
+        self.sample_reflection_enabled = False
         require_success_critic = bool(
             remote_critic_policy is None
             or (
@@ -355,7 +240,7 @@ class DshSampleCollaborationAdapter:
         self.remote_critic_policy = _normalized_remote_critic_policy(remote_critic_policy)
         self.sample_planner_prompt_profile = normalized_sample_planner_prompt_profile(sample_planner_prompt_profile)
         self.operation_max_tokens = _normalized_operation_max_tokens(
-            LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS if operation_max_tokens is None else operation_max_tokens
+            NATIVE_SAMPLE_OPERATION_MAX_TOKENS if operation_max_tokens is None else operation_max_tokens
         )
         self._decision_client = client
 
@@ -703,128 +588,7 @@ class DshSampleCollaborationAdapter:
         ]
         return plan
 
-    def reflect_sample(
-        self,
-        request: Any,
-        *,
-        observed: float,
-        predicted: float | None,
-        status: str,
-        failure_class: str | None,
-        agent_decisions: Sequence[Mapping[str, Any]],
-        tool_calls: Sequence[Mapping[str, Any]],
-    ) -> Mapping[str, Any]:
-        sample = {
-            "sample_id": request.sample_id,
-            "candidate_id": request.candidate_id,
-            "dataset_digest": request.dataset_digest,
-            "partition": request.partition,
-            "target": request.target,
-            "unit": request.unit,
-            "horizon_hours": request.horizon_hours,
-            "origin_timestamp": request.origin_timestamp,
-            "target_timestamp": request.target_timestamp,
-        }
-        outcome = {
-            "status": status,
-            "observed": float(observed),
-            "predicted": float(predicted) if predicted is not None else None,
-            "baseline": float(request.baseline),
-            "failure_class": failure_class,
-            "agent_decision_digests": [
-                str(item.get("response_digest"))
-                for item in agent_decisions
-                if item.get("response_digest")
-            ],
-            "tool_output_digests": [
-                str(item.get("output_digest"))
-                for item in tool_calls
-                if item.get("output_digest")
-            ],
-        }
-        return self._decision_client.sample_reflect(
-            self.review_model_id or self.strategy_model_id,
-            sample=sample,
-            outcome=outcome,
-        )
 
-    def reflect_origin(
-        self,
-        requests: Sequence[Any],
-        *,
-        scored_cells: Sequence[Mapping[str, Any]],
-    ) -> Mapping[str, Any]:
-        """Reflect once over every target/horizon prediction at one origin."""
-
-        if not requests or len(requests) != len(scored_cells):
-            raise SampleExecutionContractError(
-                "origin reflection requires one scored cell per request"
-            )
-        first = requests[0]
-        if any(
-            request.candidate_id != first.candidate_id
-            or request.dataset_digest != first.dataset_digest
-            or request.partition != first.partition
-            or request.origin_timestamp != first.origin_timestamp
-            for request in requests
-        ):
-            raise SampleExecutionContractError(
-                "origin reflection requests do not share one forecast origin"
-            )
-        sample_ids = [request.sample_id for request in requests]
-        if len(sample_ids) != len(set(sample_ids)):
-            raise SampleExecutionContractError(
-                "origin reflection sample identifiers must be unique"
-            )
-        origin_sample_id = forecast_origin_sample_id(requests)
-        sample = {
-            "sample_id": origin_sample_id,
-            "candidate_id": first.candidate_id,
-            "dataset_digest": first.dataset_digest,
-            "partition": first.partition,
-            "origin_timestamp": first.origin_timestamp,
-            "prediction_unit": "forecast_origin_with_target_horizon_vector",
-            "prediction_cells": [
-                {
-                    "sample_id": request.sample_id,
-                    "target": request.target,
-                    "unit": request.unit,
-                    "horizon_hours": request.horizon_hours,
-                    "target_timestamp": request.target_timestamp,
-                }
-                for request in requests
-            ],
-        }
-        outcome_cells: list[dict[str, Any]] = []
-        for request, raw_cell in zip(requests, scored_cells):
-            cell = dict(raw_cell)
-            if cell.get("sample_id") != request.sample_id:
-                raise SampleExecutionContractError(
-                    "origin reflection scored cell identity mismatch"
-                )
-            outcome_cells.append(cell)
-        outcome = {
-            "status": (
-                "succeeded"
-                if all(cell.get("status") == "succeeded" for cell in outcome_cells)
-                else "failed"
-            ),
-            "prediction_cell_count": len(outcome_cells),
-            "cells": outcome_cells,
-        }
-        reflection = dict(
-            self._decision_client.sample_reflect(
-                self.review_model_id or self.strategy_model_id,
-                sample=sample,
-                outcome=outcome,
-            )
-        )
-        return {
-            **reflection,
-            "schema_version": "ecologyrsi-dsh.sample-origin-reflection/1",
-            "origin_sample_id": origin_sample_id,
-            "cell_sample_ids": sample_ids,
-        }
 
     @staticmethod
     def _joint_tools(plan):

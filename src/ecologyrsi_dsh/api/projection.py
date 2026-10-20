@@ -23,13 +23,12 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 from types import SimpleNamespace
-from ..evaluators.agent_stability import REPLICA_COUNT, SCHEMA as STABILITY_SCHEMA
 
 from ..core.errors import (
     FROZEN_RUNTIME_BINDING_DRIFT_CODE,
     FROZEN_RUNTIME_BINDING_DRIFT_PUBLIC_MESSAGE,
 )
-from ..core.models import Evaluation, HumanIntervention, InterventionKind, digest
+from ..core.models import Evaluation
 from ..core.protocols import supports_two_stage_screening
 from ..core.redaction import (
     public_error_summary,
@@ -38,39 +37,25 @@ from ..core.redaction import (
 )
 from ..core.sample_results import (
     MAX_SAMPLE_RESULTS_RECORDS,
-    SAMPLE_REWARD_DEFINITION_V1,
 )
 from ..core.state import (
     uses_global_incumbent_protocol,
     uses_positive_delta_search_protocol,
 )
-from ..evaluators.registry import (
-    EXOGENOUS_RIDGE_MODEL_ID,
-    GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
-    TOY_EVALUATOR_ID,
-    TOY_PREDICTOR_MODEL_ID,
-)
-from ..evaluators.catalog import TOY_DATASET_ID
 from ..evolution.analysis import (
     evaluation_cohort_comparison,
     evaluation_cohort_digest,
     sample_update_windows_enabled,
 )
 from ..evolution.schedule import (
-    PAIRED_LOCAL_EVALUATION_MODE,
-    SCHEDULE_SCHEMA_VERSION,
-    ISOLATED_SCHEDULE_SCHEMA_VERSION,
-    TRAINING_SCHEDULE_SCHEMA_VERSION,
     OptimizationSchedule,
 )
-from ..integrations.model_bindings import HOST_PARAMETER_GENERATOR_ID, RULE_JUDGE_ID
 from ..presentation.reporting import (
     _EVOLUTION_STAGE_ORDER,
     _candidate_stage_statuses,
     best_observed_evaluation,
     rounds,
     run_completion_outcome,
-    training_assets,
 )
 from .shared import (
     _assert_http_scope,
@@ -141,31 +126,9 @@ def search_probation_projection(state: Any) -> dict[str, Any]:
             "scope": "adaptive_search_review_only_not_independent_validation"}
 
 
-def _paired_optimization_schedule(state: Any) -> OptimizationSchedule | None:
-    """Return a validated paired schedule, including time-purged schema v3.
-
-    Historical projections often contain a partial schedule object or omit the
-    schedule altogether.  Those runs retain the prequential projection rather
-    than being reinterpreted from a coincidental field value.
-    """
-
-    task = getattr(state, "task_manifest", None)
-    metadata = getattr(task, "metadata", None)
-    if not isinstance(metadata, Mapping):
-        return None
-    raw_schedule = metadata.get("optimization_schedule")
-    if not isinstance(raw_schedule, Mapping):
-        return None
-    try:
-        schedule = OptimizationSchedule.from_dict(raw_schedule)
-    except (TypeError, ValueError):
-        return None
-    if (
-        schedule.schema_version not in {SCHEDULE_SCHEMA_VERSION, ISOLATED_SCHEDULE_SCHEMA_VERSION, TRAINING_SCHEDULE_SCHEMA_VERSION, "ecologyrsi-dsh.evidence-guided-epoch-schedule/1", "ecologyrsi-dsh.joint-plugin-epoch-schedule/1", "ecologyrsi-dsh.joint-plugin-epoch-schedule/2"}
-        or schedule.local_evaluation_mode != PAIRED_LOCAL_EVALUATION_MODE
-    ):
-        return None
-    return schedule
+def _paired_optimization_schedule(state: Any) -> OptimizationSchedule:
+    """Read the current schedule already validated by the ledger boundary."""
+    return OptimizationSchedule.from_dict(state.task_manifest.metadata["optimization_schedule"])
 
 # The browser projection is intentionally a compact operational trace.  It is
 # not a model chain-of-thought export: only values already produced by the
@@ -485,106 +448,6 @@ def _host_activity_projection(state: Any) -> dict[str, Any]:
 
 
 
-def _sealed_holdout_execution_multiplier(state: Any, evaluation: Any) -> int | None:
-    """Count legacy replicas only with matching Host-owned result streams.
-
-    A replica summary is not a second execution receipt. Missing old evidence
-    remains unknown; neither planned capacity nor model-authored metrics can
-    turn one sealed prediction into two. Conditional rechecks have their own
-    replay-validated HoldoutEvaluation and do not use this multiplier.
-    """
-    if _holdout_replica_count(state) == 1:
-        return 1
-    evidence = evaluation.metrics.get("agent_inference_stability")
-    if not isinstance(evidence, Mapping):
-        return None
-    evidence = thaw_json(evidence)
-    if (evidence.get("schema_version") != STABILITY_SCHEMA
-        or evidence.get("kind") != "independent_agent_inference"
-        or type(evidence.get("independent_observation_count_multiplier")) is not int
-        or evidence["independent_observation_count_multiplier"] != 1
-        or evidence.get("evidence_digest") != digest({
-            key: value for key, value in evidence.items() if key != "evidence_digest"})):
-        return None
-    rows = evidence.get("replicas")
-    cells = state.task_manifest.metadata.get("prediction_cells_per_origin")
-    if (not isinstance(rows, list) or len(rows) != REPLICA_COUNT
-        or type(cells) is not int or cells <= 0):
-        return None
-    scope = evaluation.scope.to_dict()
-    if scope.get("inference_replica") != 0:
-        return None
-    events = tuple(getattr(state, "events", ()))
-    seals = [event for event in events if event.kind == "HoldoutEvaluationRecorded"
-        and isinstance(event.payload.get("evaluation"), Mapping)
-        and event.payload["evaluation"].get("evaluation_id") == evaluation.evaluation_id
-        and event.payload["evaluation"].get("scope") == scope]
-    if len(seals) != 1:
-        return None
-    indices, revisions = set(), set()
-    expected_cells = evaluation.scope.origin_count * cells
-    for row in rows:
-        if not isinstance(row, Mapping):
-            return None
-        index = row.get("replica_index")
-        if type(index) is not int or not 0 <= index < REPLICA_COUNT or index in indices:
-            return None
-        indices.add(index)
-        scope_digest = digest({**scope, "inference_replica": index})
-        if (row.get("scope_digest") != scope_digest
-            or row.get("cohort_digest") != scope["cohort_digest"]
-            or row.get("candidate_revision_id") != scope["candidate_revision_id"]
-            or type(row.get("origin_count")) is not int
-            or row["origin_count"] != scope["origin_count"]):
-            return None
-        starts = []
-        for event in events:
-            checkpoint = event.payload.get("checkpoint")
-            if (event.kind == "EvaluationSampleResultsStarted" and event.seq < seals[0].seq
-                and event.payload.get("run_id") == scope["run_id"]
-                and type(event.payload.get("generation")) is int
-                and event.payload["generation"] == scope["generation"]
-                and event.payload.get("candidate_id") == scope["candidate_id"]
-                and isinstance(checkpoint, Mapping)
-                and checkpoint.get("execution_scope_digest") == scope_digest
-                and checkpoint.get("evaluation_phase") == "holdout"
-                and checkpoint.get("candidate_revision_id") == scope["candidate_revision_id"]
-                and checkpoint.get("cohort_digest") == scope["cohort_digest"]
-                and checkpoint.get("holdout_arm") == scope["holdout_arm"]
-                and type(checkpoint.get("inference_replica")) is int
-                and checkpoint["inference_replica"] == index
-                and type(checkpoint.get("sample_count")) is int
-                and checkpoint["sample_count"] == expected_cells):
-                starts.append(event)
-        if len(starts) != 1:
-            return None
-        start = starts[0]
-        revision = start.payload.get("revision")
-        if not isinstance(revision, str) or not revision or revision in revisions:
-            return None
-        revisions.add(revision)
-        seen_samples, seen_batches = set(), {}
-        for event in events:
-            payload = event.payload
-            if (event.kind != "EvaluationSampleResultBatchRecorded"
-                or not start.seq < event.seq < seals[0].seq
-                or payload.get("candidate_id") != scope["candidate_id"]
-                or payload.get("revision") != revision):
-                continue
-            sample_ids, count, batch = payload.get("sample_ids"), payload.get("record_count"), payload.get("batch_index")
-            if (type(count) is not int or count <= 0 or type(batch) is not int or batch < 1
-                or not isinstance(sample_ids, (list, tuple)) or len(sample_ids) != count
-                or any(not isinstance(item, str) or not item for item in sample_ids)
-                or len(set(sample_ids)) != count):
-                return None
-            identity = tuple(sample_ids)
-            if batch in seen_batches and seen_batches[batch] != identity:
-                return None
-            seen_batches[batch] = identity
-            seen_samples.update(sample_ids)
-        if len(seen_samples) != expected_cells:
-            return None
-    return REPLICA_COUNT
 
 
 def _execution_diagnostics(state: Any) -> dict[str, Any]:
@@ -933,26 +796,14 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
             and item.metrics["additional_prediction_executions"] == 0
         )
     ] + list(state.holdout_evaluations) + list(getattr(state, "holdout_rechecks", ()))
-    holdout_ids = {id(item) for item in state.holdout_evaluations}
-    multipliers = [(_sealed_holdout_execution_multiplier(state, item)
-        if id(item) in holdout_ids else 1) for item in executed_adaptive_evaluations]
-    adaptive_execution_counts_known = all(item is not None for item in multipliers)
-    adaptive_settled_origins = sum(
-        int(item.scope.origin_count) * (multiplier or 1)
-        for item, multiplier in zip(executed_adaptive_evaluations, multipliers)
-    )
+    adaptive_execution_counts_known = True
+    adaptive_settled_origins = sum(int(item.scope.origin_count) for item in executed_adaptive_evaluations)
     adaptive_succeeded_origins = 0
     adaptive_failed_origins = 0
     adaptive_failed_scoring_cells = 0
     adaptive_outcome_counts_known = True
     adaptive_failed_cells_known = True
-    for evaluation, multiplier in zip(executed_adaptive_evaluations, multipliers):
-        # Legacy replica_summary records scores/coverage but no per-replica
-        # outcome counts. Never copy the first inference's success/failure.
-        if multiplier != 1:
-            adaptive_outcome_counts_known = False
-            adaptive_failed_cells_known = False
-            continue
+    for evaluation in executed_adaptive_evaluations:
         sample = (
             evaluation.metrics.get("sample_execution")
             if isinstance(evaluation.metrics, Mapping)
@@ -1067,14 +918,6 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
         "legacy_workload_estimate_used": legacy_workload_estimate_used,
         "evolution_rounds_completed": int(state.run.generation),
         "evolution_rounds_configured": _max_generations(state.task_manifest),
-        # Backward-compatible aliases.  These are cumulative physical training
-        # rows and evaluation work items, respectively; new clients should use
-        # the explicit fields above.
-        "training_rows": training_partition_rows,
-        "evaluation_rows": evaluation_used_examples,
-        "epochs_completed": max(
-            per_artifact_fit_passes or [0]
-        ),
         "fallback_used": fallback_count > 0,
         "fallback_count": fallback_count,
         "fallback_reasons": fallback_reasons[:8],
@@ -1087,15 +930,6 @@ def _execution_diagnostics(state: Any) -> dict[str, Any]:
     }
 
 
-def _trace_scalar(value: Any, *, limit: int = 120) -> str | int | float | None:
-    """Keep timestamps and labels primitive and bounded for the UI."""
-
-    numeric = _finite_number(value)
-    if numeric is not None:
-        return numeric
-    if isinstance(value, str):
-        return value[:limit]
-    return None
 
 
 def _public_evaluation_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
@@ -1146,220 +980,6 @@ def _public_evaluation_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _public_inference_trace(
-    state: Any,
-    candidate: Any,
-    proposal: Any,
-    evaluation: Any | None,
-    artifact: Any | None,
-) -> dict[str, Any]:
-    """Project a bounded, non-chain-of-thought sample inference trace.
-
-    Evaluators currently persist a ``prediction_preview`` in their metrics.
-    This helper gives the browser one stable shape while retaining backwards
-    compatibility with evaluators that have not produced a preview yet.
-    """
-
-    metrics = dict(evaluation.metrics) if evaluation is not None else {}
-    raw_rows = metrics.get("prediction_preview")
-    if not isinstance(raw_rows, list):
-        raw_rows = metrics.get("inference_trace")
-    if not isinstance(raw_rows, list):
-        raw_rows = []
-
-    sample_execution = metrics.get("sample_execution")
-    if not isinstance(sample_execution, Mapping):
-        sample_execution = {}
-    raw_records = metrics.get("sample_execution_records")
-    records_by_id = {
-        str(item.get("sample_id")): item
-        for item in raw_records
-        if isinstance(item, Mapping) and item.get("sample_id") is not None
-    } if isinstance(raw_records, list) else {}
-    raw_actions = sample_execution.get("action_catalog")
-    actions_by_digest = {
-        str(item.get("action_digest")): item
-        for item in raw_actions
-        if isinstance(item, Mapping) and item.get("action_digest") is not None
-    } if isinstance(raw_actions, list) else {}
-
-    rows: list[dict[str, Any]] = []
-    for index, raw in enumerate(raw_rows[:_INFERENCE_TRACE_LIMIT]):
-        if not isinstance(raw, Mapping):
-            continue
-        observed = _finite_number(raw.get("observed"))
-        predicted = _finite_number(raw.get("predicted"))
-        baseline = _finite_number(raw.get("baseline"))
-        row: dict[str, Any] = {
-            "sample_index": index + 1,
-            "timestamp": _trace_scalar(raw.get("timestamp")),
-            "origin_timestamp": _trace_scalar(raw.get("origin_timestamp")),
-            "target_timestamp": _trace_scalar(
-                raw.get("target_timestamp", raw.get("timestamp"))
-            ),
-            "target": _trace_scalar(raw.get("target")),
-            "unit": _trace_scalar(raw.get("unit")),
-            "horizon_hours": _finite_number(raw.get("horizon_hours")),
-            "observed": observed,
-            "predicted": predicted,
-            "baseline": baseline,
-        }
-        scoring_fallback = _trace_scalar(raw.get("scoring_fallback"))
-        prediction_source = _trace_scalar(raw.get("prediction_source"))
-        if scoring_fallback is not None:
-            row["scoring_fallback"] = scoring_fallback
-            row["prediction_source"] = "failed_no_model_prediction"
-            row["status"] = "failed"
-        elif prediction_source is not None:
-            row["prediction_source"] = prediction_source
-        failure_class = _trace_scalar(raw.get("failure_class"))
-        if failure_class is not None:
-            row["failure_class"] = failure_class
-        sample_id = _trace_scalar(raw.get("sample_id"))
-        if sample_id is not None:
-            row["sample_id"] = sample_id
-            record = records_by_id.get(str(sample_id))
-            evidence = record if isinstance(record, Mapping) else raw
-            if isinstance(evidence, Mapping):
-                evidence_fallback = _trace_scalar(
-                    evidence.get("scoring_fallback")
-                )
-                if evidence_fallback is not None:
-                    scoring_fallback = evidence_fallback
-                    row["scoring_fallback"] = evidence_fallback
-                    row["prediction_source"] = "failed_no_model_prediction"
-                    row["status"] = "failed"
-                evidence_status = _trace_scalar(
-                    evidence.get("status", evidence.get("sample_execution_status"))
-                )
-                if scoring_fallback is None:
-                    row["status"] = evidence_status
-                row["attempts"] = _finite_number(
-                    evidence.get("attempts", evidence.get("sample_execution_attempts"))
-                )
-                row["retry_count"] = _finite_number(
-                    evidence.get(
-                        "retry_count", evidence.get("sample_execution_retry_count")
-                    )
-                )
-                action_digest = _trace_scalar(evidence.get("action_digest"))
-                row["action_digest"] = action_digest
-                failure = evidence.get(
-                    "failure", evidence.get("sample_execution_failure")
-                )
-                if failure is not None:
-                    row["failure"] = _safe_plan_value(failure)
-                    row["failure_action"] = _trace_scalar(
-                        evidence.get("failure_action")
-                    )
-                action = actions_by_digest.get(str(action_digest))
-                if isinstance(action, Mapping):
-                    row["algorithm"] = _safe_plan_value(action.get("algorithm"))
-                    row["agent_decisions"] = _safe_plan_value(
-                        action.get("agent_decisions")
-                    )
-                    row["tool_calls"] = _safe_plan_value(action.get("tool_calls"))
-        failed = (
-            str(row.get("status") or "").strip().casefold() == "failed"
-            or scoring_fallback is not None
-        )
-        if failed:
-            # A finite private gate penalty keeps failures non-competitive and
-            # resumable, but it is never public model output or score evidence.
-            row["status"] = "failed"
-            row["predicted"] = None
-            row["model_prediction_available"] = False
-            row["scoring_penalty_applied"] = scoring_fallback is not None
-            predicted = None
-        else:
-            row["model_prediction_available"] = predicted is not None
-            row["scoring_penalty_applied"] = False
-        if observed is not None and predicted is not None:
-            row["error"] = predicted - observed
-        if observed is not None and baseline is not None:
-            row["baseline_error"] = baseline - observed
-        if observed is not None and predicted is not None and baseline is not None:
-            row["reward"] = abs(baseline - observed) - abs(predicted - observed)
-        rows.append(row)
-
-    failure_preview = sample_execution.get("failure_preview")
-    if isinstance(failure_preview, list):
-        shown_sample_ids = {
-            str(row.get("sample_id"))
-            for row in rows
-            if row.get("sample_id") is not None
-        }
-        for raw in failure_preview[: max(0, _INFERENCE_TRACE_LIMIT - len(rows))]:
-            if not isinstance(raw, Mapping):
-                continue
-            if str(raw.get("sample_id")) in shown_sample_ids:
-                continue
-            rows.append(
-                {
-                    "sample_index": len(rows) + 1,
-                    "sample_id": _trace_scalar(raw.get("sample_id")),
-                    "status": "failed",
-                    "attempts": _finite_number(raw.get("attempts")),
-                    "retry_count": _finite_number(raw.get("retry_count")),
-                    "target": _trace_scalar(raw.get("target")),
-                    "horizon_hours": _finite_number(raw.get("horizon_hours")),
-                    "predicted": None,
-                    "model_prediction_available": False,
-                    "scoring_penalty_applied": False,
-                    "failure_action": _trace_scalar(raw.get("failure_action")),
-                    "failure": _safe_plan_value(raw.get("failure")),
-                }
-            )
-
-    candidate_status = candidate.status.value
-    if evaluation is not None:
-        trace_status = "completed"
-    elif candidate_status == "failed":
-        trace_status = "failed"
-    elif candidate_status == "duplicate":
-        trace_status = "skipped"
-    else:
-        trace_status = "pending"
-    total_samples = _finite_number(sample_execution.get("eligible_examples"))
-    if total_samples is None:
-        total_samples = _finite_number(metrics.get("n"))
-    if total_samples is None:
-        total_samples = len(rows)
-    model_id = artifact.model_id if artifact is not None else None
-    evaluator_id = state.task_manifest.metadata.get("evaluator_id")
-    if evaluator_id is None:
-        evaluator_id = (
-            TOY_EVALUATOR_ID
-            if state.task_manifest.visible_datasets
-            and state.task_manifest.visible_datasets[0] == TOY_DATASET_ID
-            else GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID
-        )
-    return {
-        "schema_version": "ecologyrsi-dsh.inference-trace/1",
-        "status": trace_status,
-        "model_id": model_id,
-        "evaluator_id": str(evaluator_id) if evaluator_id is not None else None,
-        "partition": evaluation.partition if evaluation is not None else None,
-        "reward_definition": metrics.get(
-            "reward_definition", SAMPLE_REWARD_DEFINITION_V1
-        ),
-        "positive_is_better": True,
-        "sample_count": int(total_samples) if float(total_samples).is_integer() else total_samples,
-        "shown_count": len(rows),
-        "truncated": bool(total_samples > len(rows)),
-        # These are host-controlled operational steps, not model private
-        # reasoning.  They make the execution auditable without exposing a
-        # prompt or hidden chain of thought.
-        "method_steps": [
-            "冻结训练拟合分区",
-            "应用候选参数与已登记预测器",
-            "在训练反馈分区逐样本生成预测",
-            "与观测值和冻结评分基线计算误差",
-        ],
-        "parameter_keys": sorted(str(key) for key in proposal.changes),
-        "sample_execution": _safe_plan_value(sample_execution),
-        "rows": rows,
-    }
 
 
 def _evaluation_batch_progress_projection(
@@ -1912,13 +1532,6 @@ def _candidate_execution_projection(
                            if genome is not None else state.task_manifest.metadata.get("prediction_model_id"))
     usage = (prediction_usage(prediction_model_id, genome.scientific_program["parameter_overrides"])
              if genome is not None else None)
-    proposal_metadata = getattr(proposal, "metadata", None)
-    if isinstance(proposal_metadata, Mapping):
-        adoption = proposal_metadata.get("prediction_model_adoption")
-        if isinstance(adoption, Mapping) and adoption.get("status") == "adopted":
-            adopted_id = adoption.get("adopted_id")
-            if isinstance(adopted_id, str) and adopted_id.strip():
-                prediction_model_id = adopted_id.strip()
     compiled = next(
         (
             item
@@ -3166,9 +2779,7 @@ def _formal_batch_live_projection(state: Any) -> dict[str, Any] | None:
 
 
 def _holdout_replica_count(state: Any) -> int:
-    if state.task_manifest.metadata.get("optimization_protocol") in {"quick_adaptive_epoch@1", "evidence_guided_epoch@1", "joint_plugin_epoch@1", "joint_plugin_epoch@2"}:
-        return 1
-    return REPLICA_COUNT if state.task_manifest.metadata.get("sample_agent_mode") == "dsh_native_agent" else 1
+    return 1
 
 
 def _holdout_arm_live_projection(state: Any) -> dict[str, Any] | None:
@@ -3290,32 +2901,13 @@ def _adaptive_progress_projection(
     metadata = state.task_manifest.metadata
     if metadata.get("optimization_protocol") not in ADAPTIVE_PROTOCOLS:
         return None
-    schedule = metadata.get("optimization_schedule")
-    if not isinstance(schedule, Mapping):
-        return None
-    try:
-        if "schema_version" in schedule:
-            execution_budget = OptimizationSchedule.from_dict(schedule).generation_execution_budget(
-                cells_per_origin=1, holdout_inference_replicas=_holdout_replica_count(state))
-        else:
-            # Read-only projection of early, unversioned run manifests. New
-            # creation always validates and freezes the complete schedule.
-            execution_budget = {
-                "screening_candidate_origins": int(schedule["screening_origin_count"]) * 4,
-                "formal_candidate_origins": int(schedule["formal_origin_count_per_finalist"]) * 2,
-                "holdout_candidate_origins": int(schedule["selection_holdout_origin_count"]) * 3 * _holdout_replica_count(state),
-            }
-        screening_origin_count = int(schedule["screening_origin_count"])
-        screening_total = execution_budget["screening_candidate_origins"]
-        formal_total = execution_budget["formal_candidate_origins"]
-        holdout_total = execution_budget["holdout_candidate_origins"] + execution_budget.get("recheck_candidate_origins", 0)
-    except (KeyError, TypeError, ValueError):
-        return None
     paired_schedule = _paired_optimization_schedule(state)
-    if paired_schedule is not None:
-        formal_total = paired_schedule.generation_execution_budget(
-            cells_per_origin=1
-        )["formal_candidate_origins"]
+    schedule = paired_schedule.to_dict()
+    execution_budget = paired_schedule.generation_execution_budget(cells_per_origin=1)
+    screening_origin_count = paired_schedule.screening_origin_count
+    screening_total = execution_budget["screening_candidate_origins"]
+    formal_total = execution_budget["formal_candidate_origins"]
+    holdout_total = execution_budget["holdout_candidate_origins"] + execution_budget["recheck_candidate_origins"]
     generation = state.run.generation
     if generation > 0 and state.run.status.value in {"completed", "cancelled", "failed"}:
         previous_compared = any(
@@ -4741,230 +4333,57 @@ def _last_evidence_candidate_id(state: Any) -> str | None:
 
 
 def _run_execution_progress(
-    state: Any,
-    admission_snapshot: Mapping[str, Any] | None = None,
+    state: Any, admission_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Summarize durable execution evidence for a compact progress bar."""
-
-    task = state.task_manifest
-    total_generations = max(1, _max_generations(task))
-    candidates_per_generation = max(1, task.candidates_per_generation)
-    target_candidates = min(
-        max(1, task.max_candidates), total_generations * candidates_per_generation
-    )
-    total_steps = target_candidates * len(_EVOLUTION_STAGE_ORDER)
-    completed_steps = 0
-    terminal_candidates = 0
-    search_candidates = _search_candidates(state)
-    current_candidates = [
-        item for item in search_candidates if item.generation == state.run.generation
-    ]
-    current_stage_rows: list[tuple[Any, dict[str, str]]] = []
-    for candidate in search_candidates:
-        proposal = state.proposal(candidate.proposal_id)
-        evaluation = state.evaluation_for(candidate.candidate_id)
-        promotion = state.promotion_for(candidate.candidate_id)
-        execution = _candidate_execution_projection(
-            state, candidate, proposal, evaluation, promotion
-        )
-        completed_steps += int(execution["completed_stages"])
-        if candidate.status.value in {
-            "promoted",
-            "rejected",
-            "failed",
-            "duplicate",
-            "screened_out",
-        }:
-            terminal_candidates += 1
-        if candidate.generation == state.run.generation:
-            current_stage_rows.append((candidate, execution["stages"]))
-
-    status = state.run.status.value
-    completed_steps = min(total_steps, completed_steps)
-    progress_percent = round(
-        min(100.0, max(0.0, 100.0 * completed_steps / max(1, total_steps))),
-        1,
-    )
-
-    active_candidate_id: str | None = None
-    current_stage: str | None = None
-    # Prefer the most recent running stage, which is the strongest evidence
-    # that a model call or evaluator is active at the time of polling.
-    for candidate, stages in reversed(current_stage_rows):
-        current_stage = next(
-            (name for name in _EVOLUTION_STAGE_ORDER if stages.get(name) == "running"),
-            None,
-        )
-        if current_stage is not None:
-            active_candidate_id = candidate.candidate_id
-            break
+    """Project the current joint schedule, without synthetic five-stage work units."""
+    task, status = state.task_manifest, state.run.status.value
+    total_generations = _max_generations(task)
+    stage_event = next((event for event in reversed(state.events)
+        if event.kind == "EvolutionStageRecorded"
+        and event.payload.get("generation") == state.run.generation), None)
+    current_stage = None
+    candidate_id = None
+    if stage_event is not None and stage_event.payload.get("status") in {"started", "running", "failed"}:
+        current_stage = stage_event.payload.get("stage")
+        candidate_id = stage_event.payload.get("candidate_id")
     retry_wait = _gateway_retry_projection(state)
+    stage_progress = _adaptive_progress_projection(state, admission_snapshot)
+    epoch_percent = None
+    overall_percent = None
+    if stage_progress is not None:
+        evaluation_phase = stage_progress["evaluation_phase"]
+        current_stage = "evaluation" if evaluation_phase in {"screening", "formal_batch", "holdout"} else evaluation_phase
+        candidate_id = stage_progress.get("current_candidate_id") or candidate_id
+        epoch_percent = stage_progress["epoch_progress_percent"]
+        if epoch_percent is not None:
+            overall_percent = round(min(100., 100. * (
+                min(stage_progress["generation"], total_generations) + epoch_percent / 100.
+            ) / total_generations), 1)
     if retry_wait is not None:
-        # A cooldown is more actionable than a generic queued boundary.  Keep
-        # the last stage/candidate context so the UI can explain what is being
-        # retried without pretending that a generation completed.
         current_stage = "gateway_retry"
-
-    if current_stage is None:
-        for candidate, stages in current_stage_rows:
-            current_stage = next(
-                (name for name in _EVOLUTION_STAGE_ORDER if stages.get(name) == "pending"),
-                None,
-            )
-            if current_stage is not None:
-                active_candidate_id = candidate.candidate_id
-                break
-
-    stage_event = next(
-        (
-            event
-            for event in reversed(state.events)
-            if event.kind == "EvolutionStageRecorded"
-            and event.payload.get("generation") == state.run.generation
-        ),
-        None,
-    )
-    # A retry heartbeat is written after the failed gateway stage and is the
-    # latest durable explanation of why execution is waiting.  Do not let an
-    # older ``started``/``failed`` stage overwrite ``gateway_retry`` here; the
-    # browser needs a stable phase while the provider cooldown is active.
-    if stage_event is not None and retry_wait is None:
-        stage_status = str(stage_event.payload.get("status") or "").lower()
-        if stage_status in {"started", "running", "failed"}:
-            current_stage = str(stage_event.payload.get("stage") or current_stage)
-            active_candidate_id = stage_event.payload.get("candidate_id") or active_candidate_id
-
-    if status in _TERMINAL_RUN_STATUSES:
-        # A terminal run can retain pending or stale started stage evidence,
-        # but it must not be projected as if execution were still active.
-        current_stage = None
-        active_candidate_id = None
-
-    stage_progress = _evaluation_progress_projection(state, active_candidate_id)
-    if stage_progress is None:
-        stage_progress = _screening_progress_projection(state)
-        if stage_progress is not None:
-            # Two-stage screening runs before formal Artifact/Evaluation rows
-            # exist, but durable sample child events prove that evaluation is
-            # active.  Do not mislabel this interval as a scheduler queue.
-            current_stage = "evaluation"
-    superseded_sample_revision = _superseded_sample_revision_projection(
-        state, active_candidate_id
-    )
-    if current_stage == "evaluation" and stage_progress is not None:
-        fraction = min(
-            1.0,
-            float(stage_progress["completed_samples"])
-            / max(1.0, float(stage_progress["total_samples"])),
-        )
-        progress_percent = round(
-            min(
-                100.0,
-                max(
-                    0.0,
-                    100.0 * (completed_steps + fraction) / max(1, total_steps),
-                ),
-            ),
-            1,
-        )
-
-    adaptive_progress = _adaptive_progress_projection(state, admission_snapshot)
-    epoch_progress_percent: float | None = None
-    if adaptive_progress is not None:
-        stage_progress = adaptive_progress
-        current_stage = (
-            "evaluation"
-            if adaptive_progress["evaluation_phase"]
-            in {"screening", "formal_batch", "holdout"}
-            else adaptive_progress["evaluation_phase"]
-        )
-        active_candidate_id = (
-            adaptive_progress.get("current_candidate_id") or active_candidate_id
-        )
-        epoch_progress_percent = float(adaptive_progress["epoch_progress_percent"])
-        progress_percent = round(
-            min(
-                100.0,
-                100.0
-                * (
-                    min(adaptive_progress["generation"], total_generations)
-                    + epoch_progress_percent / 100.0
-                )
-                / total_generations,
-            ),
-            1,
-        )
-
-    last_evidence_candidate_id = _last_evidence_candidate_id(state)
-
     if status in {"completed", "cancelled", "failed"}:
-        current_stage = None
-        active_candidate_id = None
-        phase = status
+        phase, current_stage, candidate_id = status, None, None
     elif status == "paused":
-        # Preserve ``current_stage`` as historical context for the pause while
-        # making the effective phase unambiguously non-running.
         phase = "paused"
-    elif current_stage is None:
-        if status == "completed":
-            phase = "completed"
-        elif status in {"failed", "cancelled"}:
-            phase = status
-        elif status == "paused":
-            phase = "paused"
-        elif state.run.generation >= total_generations:
-            phase = "finalizing"
-        elif state.task_manifest.metadata.get("auto_progress") is True:
-            # A continuous run is expected to cross generation boundaries on
-            # its own.  Distinguish this queued boundary from the legacy
-            # manual ``waiting`` state so the UI never asks the user to click
-            # an advance button for an autonomous run.
-            phase = "queued"
-        else:
-            phase = "waiting"
     else:
-        phase = current_stage
-
-    dsh_activity = _dsh_activity_projection(
-        state,
-        current_stage=current_stage,
-        run_status=status,
-    )
-
+        phase = current_stage or ("finalizing" if state.run.generation >= total_generations else "queued")
     return {
         "schema_version": "ecologyrsi-dsh.execution-progress/2",
-        "status": status,
-        "phase": phase,
-        "progress_percent": progress_percent,
-        "overall_progress_percent": progress_percent,
-        "epoch_progress_percent": epoch_progress_percent,
-        "completed_steps": completed_steps,
-        "total_steps": total_steps,
-        "completed_candidates": terminal_candidates,
-        "total_candidates": target_candidates,
+        "status": status, "phase": phase,
+        "overall_progress_percent": overall_percent,
+        "epoch_progress_percent": epoch_percent,
         "completed_generations": min(state.run.generation, total_generations),
         "total_generations": total_generations,
         "current_generation": min(state.run.generation + 1, total_generations),
-        "current_candidate_id": active_candidate_id,
-        "last_evidence_candidate_id": last_evidence_candidate_id,
-        "current_stage": current_stage,
-        "stage_progress": stage_progress,
-        "superseded_sample_revision": superseded_sample_revision,
+        "current_candidate_id": candidate_id,
+        "last_evidence_candidate_id": _last_evidence_candidate_id(state),
+        "current_stage": current_stage, "stage_progress": stage_progress,
+        "superseded_sample_revision": _superseded_sample_revision_projection(state, candidate_id),
         "retry_wait": retry_wait,
-        "dsh_activity": dsh_activity,
-        "current_generation_candidate_count": len(current_candidates),
-        "candidates_per_generation": candidates_per_generation,
-        "auto_progress": state.task_manifest.metadata.get("auto_progress") is True,
-        "auto_progress_policy": state.task_manifest.metadata.get(
-            "auto_progress_policy"
-        ),
+        "dsh_activity": _dsh_activity_projection(state, current_stage=current_stage, run_status=status),
+        "auto_progress": task.metadata.get("auto_progress") is True,
         "last_event_seq": state.events[-1].seq if state.events else 0,
         "last_event_at": state.events[-1].created_at if state.events else state.run.created_at,
-        "evidence": (
-            "append_only_stage_and_progress_events"
-            if stage_progress is not None
-            else "append_only_stage_events"
-        ),
     }
 
 
@@ -4984,7 +4403,6 @@ def _token_budget_scope(task: Any, metadata: Mapping[str, Any]) -> str | None:
 def _run_wide_token_usage(
     task: Any,
     metadata: Mapping[str, Any],
-    model_usage: Mapping[str, Any],
     dsh_runtime: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Select the frozen accounting source used by the public run budget."""
@@ -4994,25 +4412,16 @@ def _run_wide_token_usage(
     provider_available = (
         isinstance(provider, Mapping) and provider.get("available") is True
     )
-    if provider_available:
-        available = True
-        used = int(provider.get("total_tokens", 0)) if available else 0
-        source = "dsh_provider_reported_sessions"
-    else:
-        available = model_usage.get("available") is True
-        used = int(
-            model_usage.get(
-                "budget_accounted_tokens", model_usage.get("total_tokens", 0)
-            )
-        )
-        source = "model_usage_receipts"
-    ratio = (used / limit) if limit > 0 else None
+    available = provider_available
+    used = int(provider.get("total_tokens", 0)) if available else None
+    ratio = (used / limit) if limit > 0 and used is not None else None
+    source = "dsh_provider_reported_sessions"
     return {
         "available": available,
         "source": source,
         "tokens_used": used,
         "token_limit": limit,
-        "remaining_tokens": max(0, limit - used) if limit > 0 else None,
+        "remaining_tokens": max(0, limit - used) if limit > 0 and used is not None else None,
         "utilization_ratio": round(ratio, 6) if ratio is not None else None,
         "warning": (
             "exhausted"
@@ -5026,175 +4435,6 @@ def _run_wide_token_usage(
     }
 
 
-def _model_usage_summary(state: Any) -> dict[str, Any]:
-    """Aggregate reported usage and conservative hard-budget accounting."""
-
-    totals = {
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
-        "request_count": 0,
-    }
-    by_role: dict[str, dict[str, int]] = {}
-    event_count = 0
-    reported_call_count = 0
-    reported_total_tokens = 0
-    has_v2_receipt = False
-    physical_call_count = 0
-    logical_call_digests: set[str] = set()
-    outcome_counts: dict[str, int] = {}
-    scope_candidate_ids: set[str] = set()
-    scope_revisions: set[str] = set()
-    scope_complete = True
-    for event in state.events:
-        if event.kind != "ModelUsageRecorded":
-            continue
-        payload = event.payload
-        role = payload.get("role")
-        if not isinstance(role, str):
-            # Replay validates all current events.  Retaining this guard keeps
-            # standalone diagnostic projections bounded for legacy fixtures.
-            continue
-        event_count += 1
-        candidate_id = payload.get("candidate_id")
-        revision = payload.get("revision")
-        if isinstance(candidate_id, str) and candidate_id.strip():
-            scope_candidate_ids.add(candidate_id)
-        else:
-            scope_complete = False
-        if isinstance(revision, str) and revision.strip():
-            scope_revisions.add(revision)
-        else:
-            scope_complete = False
-        is_v2_receipt = (
-            payload.get("schema_version") == "ecologyrsi-dsh.model-usage/2"
-        )
-        usage_reported = (
-            payload.get("usage_reported") is True
-            if is_v2_receipt
-            else True
-        )
-        has_v2_receipt = has_v2_receipt or is_v2_receipt
-        if is_v2_receipt:
-            physical_call_count += 1
-            logical_call_digest = payload.get("logical_call_digest")
-            if isinstance(logical_call_digest, str) and logical_call_digest:
-                logical_call_digests.add(logical_call_digest)
-            outcome = payload.get("outcome")
-            if isinstance(outcome, str) and outcome:
-                outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
-        if usage_reported:
-            reported_call_count += 1
-            reported_total = payload.get("total_tokens")
-            if (
-                isinstance(reported_total, int)
-                and not isinstance(reported_total, bool)
-                and reported_total >= 0
-            ):
-                reported_total_tokens += reported_total
-        role_totals = by_role.setdefault(
-            role,
-            {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-                "request_count": 0,
-                "call_count": 0,
-                "reported_call_count": 0,
-                "missing_call_count": 0,
-            },
-        )
-        role_totals["call_count"] += 1
-        if usage_reported:
-            role_totals["reported_call_count"] += 1
-        else:
-            role_totals["missing_call_count"] += 1
-        request_count = payload.get(
-            "http_attempts", payload.get("gateway_request_count", 0)
-        )
-        if isinstance(request_count, int) and not isinstance(request_count, bool):
-            totals["request_count"] += request_count
-            role_totals["request_count"] += request_count
-        for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            value = payload.get(name)
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                totals[name] += value
-                role_totals[name] += value
-    if not has_v2_receipt:
-        legacy_roles = {
-            role: {
-                "prompt_tokens": values["prompt_tokens"],
-                "completion_tokens": values["completion_tokens"],
-                "total_tokens": values["total_tokens"],
-                "gateway_request_count": values["request_count"],
-                "call_count": values["call_count"],
-            }
-            for role, values in sorted(by_role.items())
-        }
-        return {
-            "schema_version": "ecologyrsi-dsh.model-usage-summary/1",
-            "available": event_count > 0,
-            "call_count": event_count,
-            "prompt_tokens": totals["prompt_tokens"],
-            "completion_tokens": totals["completion_tokens"],
-            "total_tokens": totals["total_tokens"],
-            "gateway_request_count": totals["request_count"],
-            "by_role": legacy_roles,
-        }
-    missing_call_count = event_count - reported_call_count
-    task_manifest = getattr(state, "task_manifest", None)
-    missing_call_reservation = int(
-        getattr(task_manifest, "token_reservation_per_wave", 0) or 0
-    )
-    # Keep the raw counters visible for diagnostics, but mirror hard-budget
-    # admission here: reported totals charge reported calls, while an
-    # unreported call charges its frozen reservation instead of any
-    # placeholder estimate. This is budget accounting, not actual consumption.
-    budget_accounted_tokens = (
-        reported_total_tokens + missing_call_count * missing_call_reservation
-    )
-    summary = {
-        "schema_version": "ecologyrsi-dsh.model-usage-summary/2",
-        # Receipts are durable usage evidence even when a provider omits its
-        # token counters. ``complete`` / ``missing_call_count`` distinguish a
-        # complete raw total from conservative reservation-based accounting.
-        "available": event_count > 0,
-        "call_count": event_count,
-        # These four fields deliberately cover v2 physical receipts only.
-        # Legacy v1 events remain in call_count and token totals but cannot be
-        # assigned a stable logical-call identity after the fact.
-        "physical_call_count": physical_call_count,
-        "logical_call_count": len(logical_call_digests),
-        "replayed_call_count": max(
-            0, physical_call_count - len(logical_call_digests)
-        ),
-        "outcome_counts": {
-            outcome: outcome_counts[outcome] for outcome in sorted(outcome_counts)
-        },
-        "reported_call_count": reported_call_count,
-        "missing_call_count": missing_call_count,
-        "complete": missing_call_count == 0,
-        "usage_coverage": (
-            round(reported_call_count / event_count, 4) if event_count else 0.0
-        ),
-        "budget_accounted_tokens": budget_accounted_tokens,
-        "missing_call_reservation": missing_call_reservation,
-        **totals,
-        # Compatibility alias for earlier public clients.
-        "gateway_request_count": totals["request_count"],
-        "by_role": {role: by_role[role] for role in sorted(by_role)},
-    }
-    # A linear live-stage estimate is defensible only when every counter in
-    # this run-wide summary belongs to one known candidate revision. Omit the
-    # scope otherwise so clients cannot accidentally combine unrelated work.
-    if (
-        scope_complete
-        and len(scope_candidate_ids) == 1
-        and len(scope_revisions) == 1
-    ):
-        summary["scope_candidate_id"] = next(iter(scope_candidate_ids))
-        summary["scope_revision"] = next(iter(scope_revisions))
-    return summary
 
 
 _MUTATION_EXPLANATION_OPERATION_LIMIT = 8
@@ -5532,144 +4772,7 @@ def _candidate_projection(state: Any, candidate: Any, *, summary_only: bool = Fa
         ),
     }
     task_manifest = getattr(state, "task_manifest", None)
-    if (
-        task_manifest is not None
-        and uses_positive_delta_search_protocol(task_manifest)
-    ):
-        comparison = (
-            state.comparison_for(candidate.generation)
-            if callable(getattr(state, "comparison_for", None))
-            else None
-        )
-        gate_results = (
-            comparison.gate_results
-            if comparison is not None
-            and isinstance(comparison.gate_results, Mapping)
-            else {}
-        )
-        gates = gate_results.get("arms")
-        if not isinstance(gates, Mapping):
-            gates = {}
-        candidate_holdout = next(
-            (
-                item
-                for item in getattr(comparison, "holdout_evaluations", ())
-                if item.scope.candidate_id == candidate.candidate_id
-            ),
-            None,
-        )
-        candidate_arm = (
-            candidate_holdout.scope.holdout_arm.value
-            if candidate_holdout is not None
-            and candidate_holdout.scope.holdout_arm is not None
-            else None
-        )
-        candidate_gate = (
-            gates.get(candidate_arm)
-            if isinstance(candidate_arm, str)
-            and isinstance(gates.get(candidate_arm), Mapping)
-            else {}
-        )
-        effective_revision = (
-            state.effective_revision_for(candidate.generation)
-            if comparison is not None
-            and callable(getattr(state, "effective_revision_for", None))
-            else None
-        )
-        generation_committed = bool(
-            comparison is not None
-            and effective_revision == comparison.selected_revision_id
-        )
-        generation_search_selected = bool(
-            generation_committed
-            and comparison.selected_candidate_id == candidate.candidate_id
-            and candidate_arm in {"finalist_1", "finalist_2"}
-        )
-        generation_certification_selected = bool(
-            generation_committed
-            and candidate_arm == gate_results.get("certification_selected_arm")
-            and candidate_gate.get("certification_eligible") is True
-        )
-        committed_comparisons = [
-            item
-            for item in getattr(state, "generation_comparisons", ())
-            if callable(getattr(state, "effective_revision_for", None))
-            and state.effective_revision_for(item.generation)
-            == item.selected_revision_id
-        ]
-        latest_search = (
-            max(committed_comparisons, key=lambda item: item.generation)
-            if committed_comparisons
-            else None
-        )
-        certified_comparisons = [
-            item
-            for item in committed_comparisons
-            if isinstance(item.gate_results, Mapping)
-            and isinstance(
-                item.gate_results.get("certification_selected_arm"),
-                str,
-            )
-        ]
-        latest_certification = (
-            max(certified_comparisons, key=lambda item: item.generation)
-            if certified_comparisons
-            else None
-        )
-        latest_certification_candidate_id = None
-        if latest_certification is not None:
-            certification_arm = latest_certification.gate_results.get(
-                "certification_selected_arm"
-            )
-            latest_certification_evaluation = next(
-                (
-                    item
-                    for item in latest_certification.holdout_evaluations
-                    if item.scope.holdout_arm is not None
-                    and item.scope.holdout_arm.value == certification_arm
-                ),
-                None,
-            )
-            latest_certification_candidate_id = (
-                latest_certification_evaluation.scope.candidate_id
-                if latest_certification_evaluation is not None
-                else None
-            )
-        search_version_selected = bool(
-            latest_search is not None
-            and latest_search.selected_candidate_id == candidate.candidate_id
-        )
-        certification_selected = bool(
-            latest_certification is not None
-            and latest_certification_candidate_id == candidate.candidate_id
-        )
-        certification_eligible = bool(
-            candidate_gate.get("certification_eligible") is True
-        )
-        result.update(
-            {
-                "search_version_selected": search_version_selected,
-                "generation_search_selected": generation_search_selected,
-                "certification_eligible": certification_eligible,
-                "certification_selected": certification_selected,
-                "generation_certification_selected": (
-                    generation_certification_selected
-                ),
-                "certification_status": (
-                    "strictly_certified"
-                    if certification_selected
-                    else "search_version_not_certified"
-                    if search_version_selected
-                    else "historical_certified_version"
-                    if generation_certification_selected
-                    else "historical_search_version"
-                    if generation_search_selected
-                    else "eligible_not_selected"
-                    if certification_eligible
-                    else "not_certified"
-                ),
-            }
-        )
+    pass
     result["execution"] = _candidate_execution_projection(
         state, candidate, proposal, evaluation, promotion
     )
@@ -5677,9 +4780,7 @@ def _candidate_projection(state: Any, candidate: Any, *, summary_only: bool = Fa
     if not summary_only:
         artifact = state.artifact_for(candidate.candidate_id)
         result["algorithm_execution"] = _algorithm_execution_projection(state, candidate)
-        result["inference_trace"] = _public_inference_trace(
-            state, candidate, proposal, evaluation, artifact
-        )
+
         try:
             genome = state.persisted_genome_for(candidate.candidate_id)
         except (KeyError, TypeError, ValueError):
@@ -6030,191 +5131,6 @@ def _dsh_runtime_projection(state: Any) -> dict[str, Any]:
     }
 
 
-_INTERVENTION_RECEIPT_DETAIL_FIELDS = (
-    "parameter",
-    "direction",
-    "step",
-    "previous_value",
-    "result_value",
-    "parameters",
-    "previous_values",
-    "result_values",
-    "operator",
-    "bound",
-    "target_candidate_id",
-    # Written by `advisory_only_receipts`: the Host did not move a parameter,
-    # but the expert's sentence did reach the proposer's context. Without these
-    # two the web UI could only show "仅记录", which reads as "ignored".
-    "model_context_delivered",
-    "host_did_not_enforce",
-)
-
-
-def _public_intervention_receipt(
-    payload: Any,
-    *,
-    kind: str,
-) -> dict[str, Any]:
-    """Normalize new and legacy application receipts for browser projection."""
-
-    source = payload if isinstance(payload, dict) else {}
-    status = source.get("application_status")
-    if status not in {"recorded", "applied", "enforced"}:
-        status = (
-            "enforced"
-            if kind in {
-                InterventionKind.PARAMETER_OVERRIDE.value,
-                InterventionKind.PARENT_SELECTION.value,
-            }
-            else "recorded"
-        )
-        legacy_reason = (
-            "旧版事件未保存执行明细；根据干预类型推断为宿主强制执行"
-            if status == "enforced"
-            else "旧版事件未保存执行收据；仅确认意见已被本轮提案消费"
-        )
-    else:
-        legacy_reason = {
-            "recorded": "意见已记录，但未执行",
-            "applied": "意见已应用到本轮提案",
-            "enforced": "意见已由宿主边界强制执行",
-        }[status]
-    reason = public_error_summary(source.get("reason") or legacy_reason) or legacy_reason
-    receipt: dict[str, Any] = {
-        "recorded": True,
-        "applied": status in {"applied", "enforced"},
-        "enforced": status == "enforced",
-        "application_status": status,
-        "reason": reason,
-    }
-    for name in _INTERVENTION_RECEIPT_DETAIL_FIELDS:
-        if name in source:
-            receipt[name] = source[name]
-    return receipt
-
-
-def _intervention_projection(state: Any, item: HumanIntervention) -> dict[str, Any]:
-    effective_generation = state.run.generation + 1
-    receipt: dict[str, Any]
-    if item.applied_proposal_id is None:
-        receipt = {
-            "recorded": True,
-            "applied": False,
-            "enforced": False,
-            "application_status": "recorded",
-            "reason": "意见已记录，等待下一轮提案处理",
-        }
-        status_text = "等待下一轮"
-    else:
-        proposal = state.proposal(item.applied_proposal_id)
-        effective_generation = proposal.generation + 1
-        application_event = next(
-            (
-                event
-                for event in reversed(state.events)
-                if event.kind == "HumanInterventionApplied"
-                and event.payload.get("intervention_id") == item.intervention_id
-                and event.payload.get("proposal_id") == item.applied_proposal_id
-            ),
-            None,
-        )
-        receipt = _public_intervention_receipt(
-            application_event.payload if application_event is not None else {},
-            kind=item.kind.value,
-        )
-        status_text = {
-            "recorded": "仅记录（未执行）",
-            "applied": "已应用",
-            "enforced": "已强制执行",
-        }[receipt["application_status"]]
-        if (
-            receipt["application_status"] == "recorded"
-            and receipt.get("model_context_delivered") is True
-        ):
-            status_text = "模型已读取（未强制执行）"
-    return {
-        **item.to_dict(),
-        "id": item.intervention_id,
-        "effective_generation": effective_generation,
-        **receipt,
-        "status": status_text,
-    }
-
-
-def _expert_consultation_projection(state: Any, item: Any) -> dict[str, Any]:
-    """Return the bounded, flat collaboration contract used by the browser."""
-
-    answer = state.answer_for_consultation(item.consultation_id)
-
-    def public_text(value: Any, *, limit: int) -> str | None:
-        if value is None:
-            return None
-        projected = sanitize_public_value(str(value), text_limit=limit)
-        return projected if isinstance(projected, str) else None
-
-    def display_generation(value: Any) -> int | None:
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            return None
-        return value + 1
-
-    return {
-        "id": item.consultation_id,
-        "consultation_id": item.consultation_id,
-        "status": "answered" if answer is not None else "pending",
-        "question": public_text(item.question, limit=4000),
-        "context": public_text(item.context, limit=4000),
-        "fallback_assumption": public_text(
-            item.fallback_assumption,
-            limit=4000,
-        ),
-        "options": [
-            public_text(option, limit=500)
-            for option in item.options
-        ],
-        "requested_expertise": [
-            public_text(expertise, limit=500)
-            for expertise in item.requested_expertise
-        ],
-        "uncertainty_type": public_text(
-            getattr(item.uncertainty_type, "value", item.uncertainty_type),
-            limit=200,
-        ),
-        "confidence": sanitize_public_value(item.confidence),
-        "source_generation": display_generation(item.generation),
-        "candidate_id": item.candidate_id,
-        "model_id": public_text(item.requested_by_model_id, limit=500),
-        "non_blocking": item.non_blocking is True,
-        "created_at": item.created_at,
-        "answer_id": answer.answer_id if answer is not None else None,
-        "answer": (
-            public_text(answer.answer, limit=4000)
-            if answer is not None
-            else None
-        ),
-        "answered_by": (
-            public_text(answer.answered_by, limit=120)
-            if answer is not None
-            else None
-        ),
-        "answered_at": answer.created_at if answer is not None else None,
-        "selected_option": (
-            public_text(answer.selected_option, limit=500)
-            if answer is not None
-            else None
-        ),
-        "effective_generation": (
-            display_generation(answer.effective_generation)
-            if answer is not None
-            else None
-        ),
-        "applied_generation": (
-            display_generation(answer.applied_generation)
-            if answer is not None
-            else None
-        ),
-        "persistent": answer is not None and answer.persistent is True,
-    }
-
 
 def _projection_json(
     state: Any,
@@ -6363,14 +5279,13 @@ def _projection_json(
     configuration = build_configuration(task, state, profile="full")
     execution_progress = _run_execution_progress(state, admission_snapshot)
     execution_diagnostics = _execution_diagnostics(state)
-    model_usage = _model_usage_summary(state)
     dsh_runtime = _dsh_runtime_projection(state)
+    model_usage = dsh_runtime["provider_usage"]
     run_wide_usage = _run_wide_token_usage(
-        task, metadata, model_usage, dsh_runtime
+        task, metadata, dsh_runtime
     )
     pause_reason, pause_code, retry_circuit = _run_pause_projection(state)
     result = {
-        "id": run.run_id,
         "run_id": run.run_id,
         "status": run.status.value,
         "outcome": outcome,
@@ -6416,7 +5331,7 @@ def _projection_json(
         "seed": task.seed,
         "seed_policy": task.seed_policy,
         "policy_version": task.policy_version,
-        "scientific_scope": metadata.get("scientific_scope", "prediction_demo_non_causal"),
+        "scientific_scope": metadata.get("scientific_scope", "historical_replay_prediction_non_causal"),
         "selection_scope": "iterative_training_feedback_only",
         "formal_validation_status": "not_run",
         "best_candidate_scope": (
@@ -6509,10 +5424,7 @@ def _projection_json(
             "knowledge_snapshots": [item.to_dict() for item in state.knowledge_snapshots],
             "knowledge_assessments": [item.to_dict() for item in state.knowledge_assessments],
             "algorithm_attempts": [item.to_dict() for item in state.algorithm_attempts],
-            "training_assets": training_assets(state),
             "artifacts": [_artifact_projection(state, item) for item in reversed(state.artifacts)],
-            "interventions": [_intervention_projection(state, item) for item in reversed(state.interventions)],
-            "expert_consultations": [_expert_consultation_projection(state, item) for item in reversed(state.expert_consultations)],
             "candidates": [_candidate_projection(state, item) for item in reversed(search_candidates)],
         })
     return result
@@ -6531,7 +5443,7 @@ def _run_summary_projection(facts: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError('run index contains an evaluation outside HTTP scope')
     return {
         'schema_version': 'ecologyrsi-dsh.browser-run-summary/2',
-        'id': facts['run_id'], 'run_id': facts['run_id'],
+        'run_id': facts['run_id'],
         'status': _RUN_STATUS_BY_LIFECYCLE_EVENT[facts['lifecycle_kind']].value,
         'created_at': facts['created_at'], 'updated_at': facts['updated_at'],
         'projection_revision': facts['projection_revision'],
@@ -6585,7 +5497,7 @@ def _state_payload(
     _assert_http_scope(state)
     return {
         "schema_version": "ecologyrsi-dsh.browser-run/3",
-        "projection": _projection_json(state, admission_snapshot),
+        "projection": _projection_json(state, admission_snapshot, overview_only=True),
     }
 
 
@@ -6594,7 +5506,7 @@ def _workspace_revisions(state: Any) -> dict[str, int]:
     # Unknown/new event kinds invalidate conservatively instead of hiding data.
     revision = next((event.seq for event in reversed(state.events)
                      if event.kind != "DshSessionUsageRecorded"), 0)
-    return {view: revision for view in ("process", "candidates", "candidate", "training", "asset", "collaboration")}
+    return {view: revision for view in ("process", "candidates", "candidate")}
 
 
 def _monitor_payload(
@@ -6609,17 +5521,16 @@ def _monitor_payload(
     outcome, termination_reason = run_completion_outcome(state)
     failure_reason, failed_stage = _run_failure_projection(state)
     pause_reason, pause_code, retry_circuit = _run_pause_projection(state)
-    model_usage = _model_usage_summary(state)
     dsh_runtime = _dsh_runtime_projection(state)
+    model_usage = dsh_runtime["provider_usage"]
     run_wide_usage = _run_wide_token_usage(
-        task, metadata, model_usage, dsh_runtime
+        task, metadata, dsh_runtime
     )
     latest_at = state.events[-1].created_at if state.events else state.run.created_at
     search_candidates = _search_candidates(state)
     return {
         "schema_version": "ecologyrsi-dsh.browser-run-monitor/1",
         "projection": {
-            "id": state.run.run_id,
             "run_id": state.run.run_id,
             "frozen_feature_policies": build_frozen_feature_policies(task),
             "status": state.run.status.value,

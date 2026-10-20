@@ -1,309 +1,145 @@
-"""Guard admission uses selected day identities before launching model work."""
+"""Current joint capacity gates are value-blind and precede model work."""
 from dataclasses import replace
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from ecologyrsi_dsh.core.models import digest
-from ecologyrsi_dsh.data.splits import IndexRange
-from ecologyrsi_dsh.evaluators.greenhouse_prediction import (
-    BASELINE_ALIGNED_RIDGE_MODEL_ID, COHORT_HISTORY_HOURS,
-)
+from ecologyrsi_dsh.evaluators.epoch_cohorts import estimate_epoch_capacity, CohortCapacityError
+from ecologyrsi_dsh.evaluators.greenhouse_prediction import COHORT_HISTORY_HOURS
 from ecologyrsi_dsh.evolution.evidence_capacity import (
-    guarded_cohort_evidence_capacity, require_guarded_cohort_evidence_capacity,
+    _cohort_evidence, require_guarded_cohort_evidence_capacity,
 )
 from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
-from ecologyrsi_dsh.integrations.dsh_native_runtime import DSH_NATIVE_EXECUTION_PROTOCOL
 from tests.test_epoch_cohort_planning import dataset_fixture
-from tests import test_runtime_integration as runtime_test_helpers
-
-
-def schedule(batch):
-    return replace(OptimizationSchedule.default(),
-                   schema_version="ecologyrsi-dsh.top2-adaptive-epoch-schedule/3",
-                   formal_origin_count_per_finalist=batch * 2, local_batch_origin_count=batch)
+from tests.native_http_fixture import NativeBindingFixture
 
 
 class GuardedCohortCapacityTests(unittest.TestCase):
-    def test_small_batches_are_rejected_even_with_sufficient_total_origins(self):
-        data = dataset_fixture(2000)
-        report = guarded_cohort_evidence_capacity(data, schedule=schedule(10), planned_generations=1, seed=7)
-        self.assertEqual([row["day_block_count"] for row in report["formal_batches"]], [2, 2])
-        self.assertFalse(report["sufficient"])
-        with self.assertRaisesRegex(ValueError, "实际 cohort 仅覆盖 2 个日块.*请增大局部批次"):
-            require_guarded_cohort_evidence_capacity(dataset=data, schedule=schedule(10), planned_generations=1, seed=7)
+    def test_fixed_schedule_cannot_shrink_scientific_blocks(self):
+        schedule = OptimizationSchedule.for_new_run()
+        for field, value in (("local_batch_origin_count", 10),
+                             ("formal_origin_count_per_finalist", 20),
+                             ("selection_holdout_origin_count", 10)):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                replace(schedule, **{field: value})
 
-    def test_report_is_value_blind_digest_bound_and_all_generations_are_checked(self):
+    def test_report_is_value_blind_digest_bound_and_checks_each_generation(self):
+        arguments = dict(schedule=OptimizationSchedule.for_new_run(), planned_generations=3,
+                         seed=7, history_steps=COHORT_HISTORY_HOURS)
         first = require_guarded_cohort_evidence_capacity(
-            dataset=dataset_fixture(2000, timestamp_gap_at=450), schedule=schedule(72), planned_generations=3, seed=7)
+            dataset=dataset_fixture(2000, timestamp_gap_at=450), **arguments)
         changed = require_guarded_cohort_evidence_capacity(
-            dataset=dataset_fixture(2000, timestamp_gap_at=450, changed_labels=True),
-            schedule=schedule(72), planned_generations=3, seed=7)
+            dataset=dataset_fixture(2000, timestamp_gap_at=450, changed_labels=True), **arguments)
         self.assertEqual(first, changed)
         self.assertEqual(len(first["selection_holdouts"]), 3)
-        self.assertTrue(all(row["day_block_count"] >= 3 for row in first["formal_batches"]))
-        self.assertTrue(all(row["day_block_count"] >= 8 for row in first["selection_holdouts"]))
-        self.assertEqual(first["report_digest"], digest({key: value for key, value in first.items() if key != "report_digest"}))
+        self.assertEqual({row["generation"] for row in first["formal_batches"]}, {0, 1, 2})
+        self.assertTrue(all(row["day_block_count"] >= row["minimum_day_blocks"]
+                            for row in first["formal_batches"] + first["selection_holdouts"]))
+        self.assertEqual(first["report_digest"], digest({k: v for k, v in first.items() if k != "report_digest"}))
 
-    def test_repeated_origins_cannot_inflate_holdout_day_evidence(self):
-        legacy_schedule = replace(OptimizationSchedule.default(),
-                                  formal_origin_count_per_finalist=144, local_batch_origin_count=72)
-        # The historical cycling planner can repeat 169 origin occurrences
-        # from a four-day source; only distinct real day buckets count.
-        data = dataset_fixture(100)
-        report = guarded_cohort_evidence_capacity(data, schedule=legacy_schedule, planned_generations=1, seed=7)
-        self.assertEqual(report["selection_holdouts"][0]["origin_count"], 169)
-        self.assertEqual(report["selection_holdouts"][0]["day_block_count"], 4)
-        with self.assertRaisesRegex(ValueError, "选择留出 cohort 仅覆盖 4 个日块.*至少需要 8"):
-            require_guarded_cohort_evidence_capacity(dataset=data, schedule=legacy_schedule, planned_generations=1, seed=7)
+    def test_repeated_origin_occurrences_cannot_inflate_day_evidence(self):
+        cohort = SimpleNamespace(cohort_digest="a" * 64, origin_count=50,
+            origins=[SimpleNamespace(origin_timestamp=24)] * 50)
+        evidence = _cohort_evidence(cohort, minimum=3)
+        self.assertEqual(evidence["day_block_count"], 1)
+        self.assertFalse(evidence["sufficient"])
+        with self.assertRaises(CohortCapacityError):
+            require_guarded_cohort_evidence_capacity(dataset=dataset_fixture(100),
+                schedule=OptimizationSchedule.for_new_run(), planned_generations=1, seed=7,
+                history_steps=COHORT_HISTORY_HOURS)
 
 
-class GuardedCohortAPIAdmissionTests(unittest.TestCase):
-    setUp = runtime_test_helpers.RuntimeIntegrationTests.setUp
-    tearDown = runtime_test_helpers.RuntimeIntegrationTests.tearDown
-    request = runtime_test_helpers.RuntimeIntegrationTests.request
-
-    def test_guided_capacity_counts_both_pair_arms_and_only_once_for_screening_reuse(self):
-        trial = OptimizationSchedule.for_evidence_guided_run()
-        with (patch.object(self.server.datasets, "selection_view", return_value=dataset_fixture(2000)),
-              patch.object(self.server.datasets, "partition_summary", return_value={})):
-            status, report = self.request("/evolution-capacity", "POST", {
-                "dataset_id": "agc_cucumber_2018", "episode_id": None,
-                "optimization_schedule": trial.to_dict(), "planned_generations": 4,
+class GuardedCohortAPIAdmissionTests(NativeBindingFixture):
+    def test_joint_capacity_counts_base_and_conditional_pairs_without_duplicate_screening(self):
+        schedule = OptimizationSchedule.for_new_run()
+        with patch.object(self.server.datasets, "selection_view", return_value=dataset_fixture(2000)), \
+             patch.object(self.server.datasets, "partition_summary", return_value={}):
+            status, report = self._post_path("/evolution-capacity", {
+                "dataset_id": "agc_cucumber_2018", "episode_id": "agc_cucumber_2018:TeamA",
+                "optimization_schedule": schedule.to_dict(),
+                "planned_generations": 4,
             })
         self.assertEqual(status, 200, report)
         self.assertTrue(report["sufficient"], report)
         self.assertEqual(report["required_unique_origins"], 340)
-        self.assertEqual(report["candidate_origin_executions_per_generation"], 200)
-        self.assertEqual(report["candidate_origin_executions_for_run"], 800)
-        self.assertEqual(report["scoring_cells_for_run"], 7200)
+        self.assertEqual(report["candidate_origin_executions_per_generation"], 300)
+        self.assertEqual(report["candidate_origin_executions_for_run"], 1200)
+        self.assertEqual(report["scoring_cells_for_run"], 10800)
+        self.assertEqual(report["execution_plan"], schedule.execution_plan(4, cells_per_origin=9))
+        self.assertEqual(report["execution_plan"]["run_budget"]["base_candidate_origins"], 800)
+        self.assertEqual(report["execution_plan"]["run_budget"]["recheck_candidate_origins"], 400)
         self.assertEqual(report["holdout_inference_replicas"], 1)
-        self.assertEqual(report["execution_plan"], trial.execution_plan(4, cells_per_origin=9, native=True))
 
-    def test_unified_protocol_selects_a_fixed_schedule_and_rejects_legacy_schedule(self):
-        body = {
-            "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
-            "strategy_id": "parameter_sweep@1", "evaluator_id": "toy_time_forward@1",
-            "policy_model_id": "host_parameter_generator@1", "judge_model_id": "rule_judge@1",
-            "optimization_protocol": "joint_plugin_epoch@2",
-            "budget": {"max_generations": 1, "max_candidates": 4, "candidates_per_generation": 4},
-            "auto_advance": 0, "idempotency_key": "guided-protocol-selection",
-        }
-        status, created = self.request("/runs", "POST", body)
-        self.assertEqual(status, 201, created)
-        metadata = self.server.director.state(created["projection"]["run_id"]).task_manifest.metadata
-        self.assertEqual(metadata["optimization_protocol"], "joint_plugin_epoch@2")
-        self.assertEqual(metadata["optimization_schedule"], OptimizationSchedule.for_new_run().to_dict())
-        body.update(optimization_schedule=OptimizationSchedule.for_quick_run().to_dict(),
-                    idempotency_key="guided-protocol-conflict")
-        status, rejected = self.request("/runs", "POST", body)
-        self.assertEqual(status, 400, rejected)
-        self.assertIn("legacy schedules are replay-only", rejected["error"])
-
-    def test_joint_api_freezes_its_own_schedule_and_mutation_policy(self):
-        body = {
-            "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
-            "strategy_id": "parameter_sweep@1", "evaluator_id": "toy_time_forward@1",
-            "policy_model_id": "host_parameter_generator@1", "judge_model_id": "rule_judge@1",
-            "optimization_protocol": "joint_plugin_epoch@2",
-            "budget": {"max_generations": 1, "max_candidates": 4, "candidates_per_generation": 4},
-            "auto_advance": 0, "idempotency_key": "joint-protocol-selection",
-        }
-        status, created = self.request("/runs", "POST", body)
-        self.assertEqual(status, 201, created)
-        metadata = self.server.director.state(created["projection"]["run_id"]).task_manifest.metadata
+    def test_joint_api_freezes_schedule_mutation_bounds_and_rejects_retired_shapes(self):
+        state, _ = self.create("joint-fixed-schedule")
+        metadata = state.task_manifest.metadata
         self.assertEqual(metadata["optimization_schedule"], OptimizationSchedule.for_new_run().to_dict())
         self.assertEqual(metadata["mutation_policy"]["candidate_maximum_operations"], 4)
         self.assertEqual(metadata["mutation_policy"]["local_maximum_operations"], 2)
         self.assertEqual(metadata["mutation_policy"]["mutation_operator_id"], "joint-plugin-mutation@1")
-        with (patch.object(self.server.datasets, "selection_view", return_value=dataset_fixture(2000)),
-              patch.object(self.server.datasets, "partition_summary", return_value={})):
-            status, report = self.request("/evolution-capacity", "POST", {
-                "dataset_id": "agc_cucumber_2018", "episode_id": None,
-                "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(), "planned_generations": 4,
-            })
-        self.assertEqual(status, 200, report)
-        self.assertEqual(report["candidate_origin_executions_for_run"], 1200)
-        self.assertEqual(report["required_unique_origins"], 340)
-
-    def test_capacity_preview_enforces_the_same_day_blocks_and_counts_inference_replicas(self):
-        from ecologyrsi_dsh.evaluators.epoch_cohorts import estimate_epoch_capacity
-        data = dataset_fixture(2000)
-        with patch.object(self.server.datasets, "selection_view", return_value=data), patch.object(
-            self.server.datasets, "partition_summary", return_value={}
-        ):
-            status, rejected = self.request("/evolution-capacity", "POST", {
-                "dataset_id": "agc_cucumber_2018", "episode_id": None,
-                "optimization_schedule": schedule(10).to_dict(), "planned_generations": 1,
-            })
-            self.assertEqual(status, 200)
-            self.assertFalse(rejected["sufficient"])
-            self.assertIn("请增大局部批次", rejected["rejection_reason"])
-            valid = schedule(72)
-            status, report = self.request("/evolution-capacity", "POST", {
-                "dataset_id": "agc_cucumber_2018", "episode_id": None,
-                "optimization_schedule": valid.to_dict(), "planned_generations": 1,
-            })
-        self.assertEqual(status, 200)
-        self.assertTrue(report["sufficient"])
-        self.assertTrue(report["guarded_evidence"]["sufficient"])
-        original = estimate_epoch_capacity(data, schedule=valid, planned_generations=1, seed=0,
-                                          history_steps=COHORT_HISTORY_HOURS)
-        self.assertEqual(report["required_unique_origins"], original.required_unique_origins)
-        self.assertEqual(report["holdout_inference_replicas"], 2)
-        self.assertEqual(report["candidate_origin_executions_per_generation"],
-                         original.candidate_origin_executions_per_generation + 3 * 169)
-        self.assertEqual(report["scoring_cells_for_run"],
-                         report["candidate_origin_executions_for_run"] * 9)
-        self.assertEqual(report["planner_digest"], digest({key: report[key] for key in original.identity_dict()}))
+        for schema in ("ecologyrsi-dsh.top2-adaptive-epoch-schedule/3",
+                       "ecologyrsi-dsh.quick-adaptive-epoch-schedule/1",
+                       "ecologyrsi-dsh.evidence-guided-epoch-schedule/1"):
+            invalid = {**OptimizationSchedule.for_new_run().to_dict(), "schema_version": schema}
+            with patch("ecologyrsi_dsh.api.handler.run_preflight") as paid:
+                for route in ("/model-preflight", "/runs"):
+                    status, result = self._post_path(route, self.body(schema, optimization_schedule=invalid))
+                    self.assertEqual(status, 400, result)
+                paid.assert_not_called()
+        for index, budget in enumerate((
+            {"max_generations": 51, "max_candidates": 204, "candidates_per_generation": 4},
+            {"max_generations": 1, "max_candidates": 4, "candidates_per_generation": 3},
+            {"max_generations": 1, "max_candidates": 257, "candidates_per_generation": 4},
+        )):
+            with patch("ecologyrsi_dsh.api.handler.run_preflight") as paid:
+                for route in ("/model-preflight", "/runs"):
+                    status, result = self._post_path(route, self.body(f"bad-budget-{index}", budget=budget))
+                    self.assertEqual(status, 400, result)
+                paid.assert_not_called()
+        self.assertEqual(len(self.native.created), 1)
 
     def test_preview_and_preflight_agree_at_native_history_capacity_boundary(self):
-        from ecologyrsi_dsh.evaluators.epoch_cohorts import estimate_epoch_capacity
-        # The legacy 12-hour preview admits five rounds, while native 48-hour
-        # prediction needs the same purged timeline that admits only four.
         fixture = dataset_fixture(1056)
-        view = SimpleNamespace(**{
-            **vars(fixture), "dataset_id": "agc_cucumber_2018",
-            "episode_id": "agc_cucumber_2018:test", "data_protocol_digest": "c" * 64,
-            "selection_view_digest": "e" * 64,
-        })
-        valid = OptimizationSchedule.for_new_run()
-        legacy = estimate_epoch_capacity(view, schedule=valid, planned_generations=5, seed=0)
-        self.assertTrue(legacy.sufficient)
-        expected = estimate_epoch_capacity(view, schedule=valid, planned_generations=5, seed=0,
+        base = self.server.datasets.selection_view("agc_cucumber_2018", "agc_cucumber_2018:TeamA")
+        view = replace(base, timestamps=fixture.timestamps, partitions=fixture.partitions,
+                       values={name: tuple(values[:1056]) for name, values in base.values.items()})
+        schedule = OptimizationSchedule.for_new_run()
+        expected = estimate_epoch_capacity(view, schedule=schedule, planned_generations=5, seed=0,
                                           history_steps=COHORT_HISTORY_HOURS)
         self.assertFalse(expected.sufficient)
         self.assertEqual(expected.max_feasible_generations, 4)
-        self.server.dsh_native_runtime = Mock()
-        self.server.dsh_native_runtime.capabilities.return_value = {
-            "schema_version": "ecology-agent-runtime-capabilities/1", "ready": True,
-            "root_services": {"required": ["agents"], "missing": [], "declared": True},
-            "presets": [{"preset_id": preset, "declared": True, "preset_mountable": True,
-                         "tool_surface_verified": True, "route_resolvable": True,
-                         "live_agent_service_ready": True, "first_call_verified": False}
-                        for preset in ("ecology-coordinator-v6", "ecology-researcher-v17",
-                                       "ecology-candidate-proposer-v9", "ecology-sample-planner-v14",
-                                       "ecology-sample-critic-v6", "ecology-generation-judge-v10")],
-            "live_agent_service_ready": True, "first_call_verified": False,
-        }
-        description = {"descriptor": {"runnable": True, "display_name_zh": "测试温室序列",
-                                      "domain_id": "greenhouse_test", "adapter_id": "greenhouse_test"},
-                       "readiness": {"ready": True}}
-        series = SimpleNamespace(digest="d" * 64, split_manifest_digest_sha256="b" * 64,
-                                 episode_id=view.episode_id)
         preview = {"dataset_id": view.dataset_id, "episode_id": view.episode_id,
-                   "optimization_schedule": valid.to_dict(), "planned_generations": 5}
-        body = {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
-                "domain_pack_id": "greenhouse_environment@1", "dataset_id": view.dataset_id,
-                "strategy_model_id": "stub/strategy", "review_model_id": "stub/review",
-                "autonomous_mode": True, "prediction_model_id": BASELINE_ALIGNED_RIDGE_MODEL_ID,
-                "budget": {"max_generations": 5, "max_candidates": 20, "candidates_per_generation": 4},
-                "optimization_schedule": valid.to_dict(), "auto_advance": 0,
-                "idempotency_key": "native-history-capacity-boundary"}
-        with (patch.object(self.server.datasets, "selection_view", return_value=view),
-              patch.object(self.server.datasets, "partition_summary", return_value={}),
-              patch.object(self.server.datasets, "describe", return_value=description),
-              patch.object(self.server.datasets, "series", return_value=series),
-              patch("ecologyrsi_dsh.api.handler.run_preflight") as paid_preflight):
-            status, report = self.request("/evolution-capacity", "POST", preview)
-            self.assertEqual(status, 200)
+                   "optimization_schedule": schedule.to_dict(), "planned_generations": 5}
+        body = self.body("history-capacity-boundary", seed=0,
+                         budget={"max_generations": 5, "max_candidates": 20, "candidates_per_generation": 4})
+        with patch.object(self.server.datasets, "selection_view", return_value=view), \
+             patch.object(self.server.datasets, "partition_summary", return_value={}), \
+             patch("ecologyrsi_dsh.api.handler.run_preflight") as paid:
+            status, report = self._post_path("/evolution-capacity", preview)
+            self.assertEqual(status, 200, report)
             self.assertFalse(report["sufficient"])
             self.assertEqual(report["origin_history_alignment_hours"], COHORT_HISTORY_HOURS)
             self.assertEqual(report["available_eligible_origins"], expected.available_eligible_origins)
             self.assertEqual(report["max_feasible_generations"], 4)
             for route in ("/model-preflight", "/runs"):
-                status, rejected = self.request(route, "POST", body)
+                status, rejected = self._post_path(route, body)
                 self.assertEqual(status, 400, rejected)
                 self.assertEqual(rejected["error_code"], "insufficient_cohort_capacity", rejected)
-                self.assertIn("max_generations=4", rejected["error"])
-            paid_preflight.assert_not_called()
-            preview["planned_generations"] = 4
-            status, report = self.request("/evolution-capacity", "POST", preview)
-            self.assertEqual(status, 200)
+            paid.assert_not_called()
+            status, report = self._post_path("/evolution-capacity", {**preview, "planned_generations": 4})
+            self.assertEqual(status, 200, report)
             self.assertTrue(report["sufficient"])
             evidence = require_guarded_cohort_evidence_capacity(
-                dataset=view, schedule=valid, planned_generations=4, seed=0,
-                profile=self.server.evaluators.fitness_profile("greenhouse_multihorizon_time_forward@3", view.dataset_id),
+                dataset=view, schedule=schedule, planned_generations=4, seed=0,
+                profile=self.server.evaluators.fitness_profile("greenhouse_multihorizon_time_forward@4", view.dataset_id),
                 history_steps=COHORT_HISTORY_HOURS)
             self.assertEqual(report["guarded_evidence"], evidence)
-            body.update(check_only=True, budget={
-                "max_generations": 4, "max_candidates": 16, "candidates_per_generation": 4,
-            })
-            status, checked = self.request("/model-preflight", "POST", body)
+            status, checked = self._post_path("/model-preflight", {**body, "check_only": True,
+                "budget": {"max_generations": 4, "max_candidates": 16, "candidates_per_generation": 4}})
             self.assertEqual(status, 200, checked)
-            self.assertEqual(checked, {"passed": False, "pending": False})
-            paid_preflight.assert_not_called()
-        self.server.dsh_native_runtime.run_stage.assert_not_called()
-
-    def test_legacy_creation_rejected_before_model_stage_and_unified_is_accepted(self):
-        description = {"descriptor": {"runnable": True, "display_name_zh": "测试温室序列",
-                                      "domain_id": "greenhouse_test", "adapter_id": "greenhouse_test"},
-                       "readiness": {"ready": True}}
-        series = SimpleNamespace(digest="d" * 64, split_manifest_digest_sha256="b" * 64,
-                                 episode_id="agc_cucumber_2018:test")
-        view = SimpleNamespace(dataset_id="agc_cucumber_2018", episode_id=series.episode_id,
-                               timestamps=tuple(range(2000)), partitions={"model_selection": IndexRange(0, 2000)},
-                               data_protocol_digest="c" * 64, selection_view_digest="e" * 64)
-        native = Mock()
-        native.capabilities.return_value = {
-            "schema_version": "ecology-agent-runtime-capabilities/1", "ready": True,
-            "root_services": {"required": ["agents"], "missing": [], "declared": True},
-            "presets": [{"preset_id": preset, "declared": True, "preset_mountable": True,
-                         "tool_surface_verified": True, "route_resolvable": True,
-                         "live_agent_service_ready": True, "first_call_verified": False}
-                        for preset in ("ecology-coordinator-v6", "ecology-researcher-v17",
-                                       "ecology-candidate-proposer-v9", "ecology-sample-planner-v14",
-                                       "ecology-sample-critic-v6", "ecology-generation-judge-v10")],
-            "live_agent_service_ready": True, "first_call_verified": False,
-        }
-        self.server.dsh_native_runtime = native
-        body = {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
-                "domain_pack_id": "greenhouse_environment@1", "dataset_id": "agc_cucumber_2018",
-                "strategy_model_id": "stub/strategy", "review_model_id": "stub/review",
-                "autonomous_mode": True, "prediction_model_id": BASELINE_ALIGNED_RIDGE_MODEL_ID,
-                "budget": {"max_generations": 1, "max_candidates": 4, "candidates_per_generation": 4},
-                "optimization_schedule": schedule(10).to_dict(),
-                "auto_advance": 0, "idempotency_key": "guard-small-blocks"}
-        with (patch.object(self.server.datasets, "describe", return_value=description),
-              patch.object(self.server.datasets, "series", return_value=series),
-              patch.object(self.server.datasets, "selection_view", return_value=view)):
-            with patch("ecologyrsi_dsh.api.handler.run_preflight") as paid_preflight:
-                status, rejected = self.request("/model-preflight", "POST", body)
-                self.assertEqual(status, 400, rejected)
-                self.assertIn("legacy schedules are replay-only", rejected["error"])
-                paid_preflight.assert_not_called()
-            status, rejected = self.request("/runs", "POST", body)
-            self.assertEqual(status, 400, rejected)
-            self.assertIn("legacy schedules are replay-only", rejected["error"])
-            native.run_stage.assert_not_called()
-            body.update(prediction_model_id="greenhouse-exogenous-ridge@1", idempotency_key="legacy-small-blocks")
-            status, created = self.request("/runs", "POST", body)
-            self.assertEqual(status, 400, created)
-            self.assertIn("legacy schedules are replay-only", created["error"])
-            body.update(prediction_model_id=BASELINE_ALIGNED_RIDGE_MODEL_ID,
-                        optimization_schedule=OptimizationSchedule.for_new_run().to_dict(), idempotency_key="guard-valid-blocks")
-            status, created = self.request("/runs", "POST", body)
-            self.assertEqual(status, 201, created)
-            state = self.server.director.state(created["projection"]["run_id"])
-            report = state.task_manifest.metadata["guarded_cohort_evidence_capacity"]
-            self.assertTrue(report["sufficient"])
-            self.assertTrue(all(row["day_block_count"] >= 2 for row in report["formal_batches"] if row["batch_index"] == 1))
-            self.assertTrue(all(row["day_block_count"] >= 3 for row in report["selection_holdouts"]))
-            self.assertEqual(state.task_manifest.metadata["sample_budget_class"], "selection_eligible")
-            self.assertEqual(state.task_manifest.metadata["minimum_selection_origin_samples_per_update"], 40)
-            self.assertEqual(state.task_manifest.metadata["optimization_schedule"], OptimizationSchedule.for_new_run().to_dict())
-            # Explicit budgets must survive normalization and receive the same
-            # rejection before preflight as before actual run creation.
-            invalid_budgets = (
-                {"max_generations": 51, "max_candidates": 204, "candidates_per_generation": 4},
-                {"max_generations": 1, "max_candidates": 4, "candidates_per_generation": 3},
-                {"max_generations": 1, "max_candidates": 257, "candidates_per_generation": 4},
-            )
-            for index, invalid in enumerate(invalid_budgets):
-                body.update(budget=invalid, idempotency_key=f"invalid-new-budget-{index}")
-                with patch("ecologyrsi_dsh.api.handler.run_preflight") as preflight:
-                    for route in ("/model-preflight", "/runs"):
-                        status, rejected = self.request(route, "POST", body)
-                        self.assertEqual(status, 400, rejected)
-                    preflight.assert_not_called()
-        native.run_stage.assert_not_called()
+            self.assertTrue(checked["passed"], checked)
+            self.assertFalse(checked["pending"], checked)
+            self.assertEqual(len(checked["receipts"]), 4)
+            paid.assert_not_called()
+        self.assertEqual(self.native.created, [])

@@ -28,7 +28,7 @@ function roleHarness({ replay, search, complete }) {
       bindingFor: async (_exec, expected) => ({
         role: expected.role,
         run_id: "run-1",
-        stage: "generation.research",
+        stage: "candidate.propose",
       }),
       sidecar: {
         request: async (path, options) => {

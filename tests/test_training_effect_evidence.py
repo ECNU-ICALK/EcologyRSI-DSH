@@ -18,12 +18,13 @@ class TrainingEffectEvidenceTests(unittest.TestCase):
         self.candidate = small_holdout(HoldoutArm.FINALIST_1, .2)
         self.incumbent = small_holdout(HoldoutArm.INCUMBENT, .1)
         self.items = (self.candidate, self.incumbent)
-        self.schedule = OptimizationSchedule.for_evidence_guided_run()
+        self.schedule = OptimizationSchedule.for_new_run()
         self.task = TaskManifest(task_id="task:effects", objective="frozen training effect constraints",
             domain_pack="greenhouse_environment@1", metadata={
                 "execution_protocol": "dsh_native_plugin_evolution@1",
                 "host_runtime_build": {"evolution_runtime_schema": "ecologyrsi-dsh.evolution-runtime/3"},
-                "optimization_schedule": self.schedule.to_dict()})
+                "optimization_schedule": self.schedule.to_dict(), "optimization_protocol": self.schedule.protocol,
+                "search_guard_policy": "practical_delta_cell_noninferiority_paired_blocks@1", "paired_execution_qualification": "paired_strict_agent_chain@1"})
 
     def receipt(self, *, failed=True):
         row = {"schema_version": "ecologyrsi-dsh.edit-effect-receipt/1", "scope_digest": "a" * 64,
@@ -51,7 +52,7 @@ class TrainingEffectEvidenceTests(unittest.TestCase):
     def compare(self, screenings=(), batches=()):
         return build_generation_comparison(run_id=self.candidate.scope.run_id, generation=0,
             cohort_digest=self.candidate.scope.cohort_digest, holdout_evaluations=self.items,
-            quick_experiment=True, experiment_protocol=self.schedule.protocol,
+            require_paired_strict_chain=True, quick_experiment=True, experiment_protocol=self.schedule.protocol,
             training_effect_evidence=finalist_training_effect_evidence(self.items,
                 screening_events=screenings, batch_evaluations=batches))
 
@@ -97,7 +98,7 @@ class TrainingEffectEvidenceTests(unittest.TestCase):
         self.assertEqual(blocked.selected_candidate_id, self.incumbent.scope.candidate_id)
         self.validate(blocked, batches=(parent_failure,))
 
-    def test_legacy_without_receipts_is_byte_identical_and_replayable(self):
+    def test_no_training_effect_receipt_does_not_create_false_failure(self):
         legacy = self.compare()
         with_old_training = self.compare((self.screening(receipt=False),))
         self.assertEqual(legacy.identity_dict(), with_old_training.identity_dict())

@@ -134,7 +134,8 @@ try {
   const { researchOutputTransport } = await import(pathToFileURL(path.join(pkg, "lib/runtime/research-contract.js")));
   const { dshCompatibleSchema, skillInvocationEvidence } = await import(pathToFileURL(path.join(pkg, "lib/runtime/stage-runner.js")));
   const { sessionEventLog } = await import(pathToFileURL(path.join(pkg, "lib/runtime/session-events.js")));
-  const synthesisSchema = JSON.parse(await readFile(path.join(pkg, "schemas/research-synthesis.schema.json"), "utf8"));
+  const { expandSharedSchema } = await import(pathToFileURL(path.join(pkg, "lib/runtime/schema.js")));
+  const synthesisSchema = expandSharedSchema(JSON.parse(await readFile(path.join(pkg, "schemas/research-synthesis.schema.json"), "utf8")));
   const expectedDomain = fixture(synthesisSchema);
   expectedFixture = { ...expectedDomain };
   delete expectedFixture.schema_version;

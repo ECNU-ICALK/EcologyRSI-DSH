@@ -16,7 +16,6 @@ from ..integrations.model_canary import (
     SCOPE, required_canary_identities, validate_canary_receipt,
 )
 
-LEGACY_AUDIT_SCHEMA = "ecologyrsi-dsh.model-contract-preflight-recorded/1"
 AUDIT_SCHEMA = "ecologyrsi-dsh.model-contract-preflight-recorded/2"
 AUDIT_METADATA_KEY = "model_contract_preflight_audit_schema"
 AUDIT_EVENT = "ModelContractPreflightRecorded"
@@ -40,7 +39,7 @@ def preflight_audit_required(metadata: Mapping[str, Any]) -> bool:
     schema = metadata.get(AUDIT_METADATA_KEY)
     if schema is None:
         return False
-    if (schema not in {LEGACY_AUDIT_SCHEMA, AUDIT_SCHEMA}
+    if (schema != AUDIT_SCHEMA
             or metadata.get("require_model_contract_preflight") is not True
             or metadata.get("execution_protocol") != "dsh_native_plugin_evolution@1"):
         raise ValueError("invalid model contract preflight audit policy")
@@ -48,10 +47,7 @@ def preflight_audit_required(metadata: Mapping[str, Any]) -> bool:
 
 
 def _audit_identities(metadata: Mapping[str, Any], *, recorded: bool = False) -> tuple[dict[str, str], ...]:
-    identities = required_canary_identities(metadata, recorded=recorded)
-    # Historical receipts prove only the roles checked at creation. Never
-    # silently add critic evidence while replaying an immutable run.
-    return identities[:2] if metadata.get(AUDIT_METADATA_KEY) == LEGACY_AUDIT_SCHEMA else identities
+    return required_canary_identities(metadata, recorded=recorded)
 
 
 def _time(value: Any) -> datetime:

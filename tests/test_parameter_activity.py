@@ -35,7 +35,7 @@ from tests.test_local_edits import _context
 def aligned_seed():
     registry = current_program_registry()
     return materialize_seed_genome(
-        registry.seed_template("greenhouse-baseline-aligned-default@1"), _initialization()
+        registry.seed_template("greenhouse-baseline-aligned-default@2"), _initialization()
     )
 
 
@@ -51,8 +51,8 @@ class ParameterActivityTests(unittest.TestCase):
     def setUp(self):
         self.parent = aligned_seed()
         self.task = TaskManifest(task_id="aligned", objective="test", domain_pack="greenhouse_environment@1",
-                                 metadata={"prediction_model_id": BASELINE_ALIGNED_RIDGE_MODEL_ID,
-                                           "evaluator_id": "greenhouse_multihorizon_time_forward@3"})
+                                 metadata={"search_guard_policy":"practical_delta_cell_noninferiority_paired_blocks@1","prediction_model_id": BASELINE_ALIGNED_RIDGE_MODEL_ID,
+                                           "evaluator_id": "greenhouse_multihorizon_time_forward@4"})
 
     def test_zero_scale_hyperparameters_have_identical_fixed_cohort_predictions(self):
         series = periodic_series()

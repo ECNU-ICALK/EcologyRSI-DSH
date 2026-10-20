@@ -20,47 +20,39 @@ from tests.test_generation_comparison import _evaluation, TARGETS, HORIZONS
 
 
 class ParameterConsistencyTests(unittest.TestCase):
-    def test_defaults_construct_both_protocols_and_cover_candidate_budget(self):
+    def test_defaults_construct_current_protocol_and_cover_candidate_budget(self):
         defaults = {name: rule['default'] for name, rule in run_parameter_contract()['parameters'].items()}
-        self.assertEqual(defaults['formal_origin_count'] % defaults['local_batch_origin_count'], 0)
+        self.assertEqual(defaults['formal_origin_count'], 10 + defaults['local_batch_origin_count'])
         self.assertGreaterEqual(defaults['max_candidates'], defaults['rounds'] * defaults['candidates_per_generation'])
-        self.assertIsNotNone(OptimizationSchedule.for_quick_run())
-        self.assertIsNotNone(OptimizationSchedule.for_comparison_run())
+        self.assertEqual(OptimizationSchedule.for_new_run().protocol, 'joint_plugin_epoch@2')
 
     def test_browser_bootstrap_matches_the_published_contract(self):
         source = (Path(__file__).resolve().parents[1] / 'plugins/ecology_evolution/assets/js/commands.js').read_text()
         raw = re.search(r'var bootstrapRunParameters = (.*);', source).group(1)
         self.assertEqual(json.loads(raw), run_parameter_contract())
         for name, value in [('rounds', 5.5), ('rounds', 51), ('max_candidates', 257),
-                            ('candidates_per_generation', 3), ('local_batch_origin_count', True)]:
+                            ('candidates_per_generation', 3), ('local_batch_origin_count', True), ('local_batch_origin_count', 10), ('formal_origin_count', 100), ('selection_holdout_origin_count', 169)]:
             with self.subTest(name=name), self.assertRaises(ValueError):
                 validate_run_parameter(name, value)
 
-    def test_training_rules_do_not_change_at_49_or_169_samples(self):
-        profile = FitnessProfile()
-        default = OptimizationSchedule.for_comparison_run()
-        for count in (10, 48, 49, 50, 72):
-            schedule = replace(default, formal_origin_count_per_finalist=count * 2, local_batch_origin_count=count)
-            self.assertTrue(schedule.exploratory_local_comparison)
-        for count in (40, 50, 168, 169, 200):
-            self.assertEqual(profile.minimum_origins_for_schedule(replace(default, selection_holdout_origin_count=count)), 40)
-        custom = profile.with_overrides(selection_minimum_cell_samples=60)
-        self.assertEqual(run_parameter_contract(custom)['parameters']['selection_holdout_origin_count']['minimum'], 60)
-        with self.assertRaisesRegex(ValueError, '60'):
-            validate_run_parameter('selection_holdout_origin_count', 50, profile=custom)
-        with self.assertRaisesRegex(ValueError, '60 个不同起点'):
-            require_guarded_cohort_evidence_capacity(dataset=dataset_fixture(1000), schedule=default,
-                                                     planned_generations=1, seed=0, profile=custom)
 
-    def test_eight_disconnected_days_cannot_supply_moving_block_evidence(self):
-        holdout = SimpleNamespace(cohort_digest='c' * 64, origin_count=50,
-            origin_ids=tuple(f'o:{i}' for i in range(50)),
-            origins=tuple(SimpleNamespace(origin_timestamp=(i * 8 // 50) * 48 + i % 6) for i in range(50)))
-        with patch('ecologyrsi_dsh.evolution.evidence_capacity.plan_generation_selection_cohorts',
-                   return_value=SimpleNamespace(holdout=holdout)):
-            with self.assertRaisesRegex(ValueError, '连续 3 日窗口.*0 个窗口'):
-                require_guarded_cohort_evidence_capacity(dataset=dataset_fixture(1000),
-                    schedule=OptimizationSchedule.for_comparison_run(), planned_generations=1, seed=0)
+    def test_current_temporal_capacity_uses_unique_origins_and_frozen_day_blocks(self):
+        from ecologyrsi_dsh.evolution.evidence_capacity import guarded_cohort_evidence_capacity
+        report=guarded_cohort_evidence_capacity(dataset_fixture(3000),
+            schedule=OptimizationSchedule.for_new_run(),planned_generations=2,seed=0)
+        self.assertTrue(report['sufficient'])
+        for holdout in report['selection_holdouts']:
+            self.assertEqual(holdout['unique_origin_count'],50)
+            self.assertEqual(holdout['minimum_day_blocks'],3)
+            self.assertGreaterEqual(holdout['day_block_count'],3)
+        self.assertEqual(FitnessProfile().minimum_origins_for_schedule(OptimizationSchedule.for_new_run()),40)
+        profile=FitnessProfile().with_overrides(selection_minimum_cell_samples=60)
+        self.assertEqual(profile.minimum_origins_for_schedule(OptimizationSchedule.for_new_run()),60)
+        with self.assertRaisesRegex(ValueError,'below the fitness sample minimum'):
+            run_parameter_contract(profile)
+        with self.assertRaisesRegex(ValueError,'60 个不同起点'):
+            require_guarded_cohort_evidence_capacity(dataset=dataset_fixture(3000),
+                schedule=OptimizationSchedule.for_new_run(),planned_generations=1,seed=0,profile=profile)
 
 
 def small_holdout(arm, gain, *, second_gain=None):
@@ -83,25 +75,3 @@ def small_holdout(arm, gain, *, second_gain=None):
     metrics['agent_inference_stability'] = stability_evidence([
         replica_summary(scope, result), replica_summary(replace(scope, inference_replica=1), second)])
     return replace(result, metrics=metrics)
-
-
-class SmallEpochDecisionTests(unittest.TestCase):
-    def compare(self, second_gain):
-        a = small_holdout(HoldoutArm.FINALIST_1, .2, second_gain=second_gain)
-        b = small_holdout(HoldoutArm.FINALIST_2, 0.)
-        incumbent = small_holdout(HoldoutArm.INCUMBENT, 0.)
-        return build_generation_comparison(run_id=a.scope.run_id, generation=0,
-            cohort_digest=a.scope.cohort_digest, holdout_evaluations=(a, b, incumbent),
-            fitness_profile=FitnessProfile(), require_paired_strict_chain=True)
-
-    def test_fifty_real_scored_origins_can_select_the_next_epoch_parent(self):
-        comparison = self.compare(.2)
-        self.assertEqual(comparison.selected_candidate_id, 'candidate:finalist_1')
-
-    def test_a_failed_second_inference_cannot_supply_the_next_epoch_parent(self):
-        comparison = self.compare(-.01)
-        self.assertEqual(comparison.selected_candidate_id, 'candidate:incumbent')
-        gate = comparison.gate_results['arms']['finalist_1']
-        self.assertFalse(gate['eligible'])
-        self.assertFalse(gate['certification_eligible'])
-        self.assertIn('gain_not_stable_across_agent_inference', gate['failures'])

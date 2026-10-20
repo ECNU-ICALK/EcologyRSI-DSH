@@ -12,13 +12,6 @@ from typing import Any
 
 from ..core.models import CandidateRole, digest
 from ..evolution.context import safe_aggregate_feedback
-from ..integrations.model_bindings import (
-    HOST_PARAMETER_GENERATOR_ID,
-    RULE_JUDGE_ID,
-    builtin_model_configuration_digest,
-)
-from ..version import __version__
-from .training_assets import _applied_interventions, training_assets
 
 
 _EVOLUTION_STAGE_ORDER = (
@@ -267,424 +260,97 @@ def _nonnegative_metric(metrics: Any, key: str) -> int | None:
 
 
 def _round_execution_diagnostics(state: Any, candidates: list[Any]) -> dict[str, Any]:
-    """Summarize actual work for one generation, separate from run totals."""
-
-    totals = {
-        "training_partition_rows": 0,
-        "training_eligible_examples": 0,
-        "training_used_examples": 0,
-        "training_skipped_examples": 0,
-        "evaluation_partition_rows": 0,
-        "evaluation_eligible_examples": 0,
-        "evaluation_used_examples": 0,
-        "evaluation_skipped_examples": 0,
-        "fit_passes_completed": 0,
-    }
-    source_counts: dict[str, int] = {}
-    iterative_flags: list[bool] = []
-    legacy_estimate = False
-    artifact_count = 0
-    evaluation_count = 0
-    fallback_count = 0
-    remote_calls = 0
-    remote_successes = 0
+    """Sum explicit native measurements; absent measurements remain unknown."""
+    training_keys = ("training_partition_rows", "training_eligible_examples",
+                     "training_used_examples", "training_skipped_examples", "fit_passes_completed")
+    evaluation_keys = ("evaluation_partition_rows", "evaluation_eligible_examples",
+                       "evaluation_used_examples", "evaluation_skipped_examples")
+    artifacts = [a for c in candidates if (a := state.artifact_for(c.candidate_id)) is not None]
+    evaluations = [e for c in candidates if (e := state.evaluation_for(c.candidate_id)) is not None]
+    totals = {}
+    for records, keys in ((artifacts, training_keys), (evaluations, evaluation_keys)):
+        for key in keys:
+            values = [_nonnegative_metric(record.metrics, key) for record in records]
+            totals[key] = sum(values) if values and all(v is not None for v in values) else None
+    sources = {}
     for candidate in candidates:
-        proposal = state.proposal(candidate.proposal_id)
-        metadata = proposal.metadata if isinstance(proposal.metadata, Mapping) else {}
-        fallback = metadata.get("host_fallback")
-        source = metadata.get("proposal_source")
-        if not isinstance(source, str):
-            source = "legacy_unknown"
-        if isinstance(fallback, Mapping) and fallback.get("applied") is True:
-            source = "host_fallback"
-            fallback_count += 1
-        source_counts[source] = source_counts.get(source, 0) + 1
-        remote_calls += int(
-            metadata.get("remote_strategy_called") is True
-            or source in {"remote_model", "dsh_native_agent", "host_fallback"}
-        )
-        remote_successes += int(
-            metadata.get("remote_strategy_succeeded") is True
-            or source in {"remote_model", "dsh_native_agent"}
-        )
-
-        artifact = state.artifact_for(candidate.candidate_id)
-        if artifact is not None:
-            artifact_count += 1
-            metrics = artifact.metrics
-            partition_rows = _nonnegative_metric(metrics, "training_partition_rows")
-            if partition_rows is None:
-                partition_rows = max(0, int(artifact.training_rows))
-                legacy_estimate = True
-            used = _nonnegative_metric(metrics, "training_used_examples")
-            if used is None:
-                legacy_counts = [
-                    _nonnegative_metric(metrics, key)
-                    for key in metrics
-                    if isinstance(key, str)
-                    and key.endswith("_n")
-                    and not key.startswith("evaluation_")
-                ]
-                legacy_counts = [item for item in legacy_counts if item is not None]
-                used = sum(legacy_counts) if legacy_counts else partition_rows
-                legacy_estimate = True
-            skipped = _nonnegative_metric(metrics, "training_skipped_examples")
-            skipped = 0 if skipped is None else skipped
-            eligible = _nonnegative_metric(metrics, "training_eligible_examples")
-            eligible = used + skipped if eligible is None else eligible
-            passes = _nonnegative_metric(metrics, "fit_passes_completed")
-            if passes is None:
-                passes = _nonnegative_metric(metrics, "epochs_completed")
-                passes = 1 if passes is None else passes
-                legacy_estimate = True
-            totals["training_partition_rows"] += partition_rows
-            totals["training_eligible_examples"] += eligible
-            totals["training_used_examples"] += used
-            totals["training_skipped_examples"] += skipped
-            totals["fit_passes_completed"] += passes
-            iterative = metrics.get("iterative_epoch_training")
-            if isinstance(iterative, bool):
-                iterative_flags.append(iterative)
-
-        evaluation = state.evaluation_for(candidate.candidate_id)
-        if evaluation is not None:
-            evaluation_count += 1
-            metrics = evaluation.metrics
-            used = _nonnegative_metric(metrics, "evaluation_used_examples")
-            used = _nonnegative_metric(metrics, "n") if used is None else used
-            used = 0 if used is None else used
-            skipped = _nonnegative_metric(metrics, "evaluation_skipped_examples")
-            if skipped is None:
-                skipped = _nonnegative_metric(metrics, "missing_or_nonfinite_rows")
-            skipped = 0 if skipped is None else skipped
-            eligible = _nonnegative_metric(metrics, "evaluation_eligible_examples")
-            eligible = used + skipped if eligible is None else eligible
-            partition_rows = _nonnegative_metric(metrics, "evaluation_partition_rows")
-            if partition_rows is None:
-                partition_rows = used
-                legacy_estimate = True
-            totals["evaluation_partition_rows"] += partition_rows
-            totals["evaluation_eligible_examples"] += eligible
-            totals["evaluation_used_examples"] += used
-            totals["evaluation_skipped_examples"] += skipped
-
+        source = state.proposal(candidate.proposal_id).metadata.get("proposal_source", "unknown")
+        sources[source] = sources.get(source, 0) + 1
+    used = [totals["training_used_examples"], totals["evaluation_used_examples"]]
     return {
         "proposal_attempts": len(candidates),
-        "unique_candidates": sum(
-            item.status.value != "duplicate" for item in candidates
-        ),
-        "failed_candidates": sum(item.status.value == "failed" for item in candidates),
-        "duplicate_candidates": sum(
-            item.status.value == "duplicate" for item in candidates
-        ),
-        "candidate_artifacts_count": artifact_count,
-        "candidate_evaluations_count": evaluation_count,
+        "unique_candidates": sum(c.status.value != "duplicate" for c in candidates),
+        "failed_candidates": sum(c.status.value == "failed" for c in candidates),
+        "duplicate_candidates": sum(c.status.value == "duplicate" for c in candidates),
+        "candidate_artifacts_count": len(artifacts),
+        "candidate_evaluations_count": len(evaluations),
         **totals,
-        "candidate_work_items": (
-            totals["training_used_examples"] + totals["evaluation_used_examples"]
-        ),
-        "iterative_epoch_training": any(iterative_flags),
-        "legacy_workload_estimate_used": legacy_estimate,
-        "proposal_sources": source_counts,
-        "remote_strategy_calls": remote_calls,
-        "remote_strategy_successes": remote_successes,
-        "fallback_count": fallback_count,
+        "candidate_work_items": sum(used) if all(v is not None for v in used) else None,
+        "iterative_epoch_training": any(a.metrics.get("iterative_epoch_training") is True for a in artifacts),
+        "proposal_sources": sources,
+        "remote_strategy_calls": sources.get("dsh_native_agent", 0),
+        "remote_strategy_successes": sources.get("dsh_native_agent", 0),
     }
 
 
 def _research_iteration_summary(iteration: Any | None) -> dict[str, Any] | None:
-    """Project the per-generation research decision without raw prompt content."""
-
+    """Expose only the native research contract's bounded public fields."""
     if iteration is None:
         return None
-    plan = dict(iteration.plan)
-    adoption = dict(iteration.prediction_model_adoption)
-    raw_historical_provenance = getattr(
-        iteration,
-        "historical_provenance",
-        None,
-    )
-    historical_provenance = None
-    if isinstance(raw_historical_provenance, Mapping):
-        historical_provenance = {
-            field_name: raw_historical_provenance[field_name]
-            for field_name in (
-                "source_digest",
-                "scanned_run_count",
-                "compatible_source_run_count",
-                "included_source_run_count",
-                "available_generation_count",
-                "included_generation_count",
-                "omitted_generation_summaries",
-                "omitted_detail_count",
-                "history_cutoff_seq",
-            )
-            if field_name in raw_historical_provenance
-        }
-    algorithm: dict[str, Any] = {}
-    section_fields = {
-        "algorithm_blueprint": (
-            "schema_version",
-            "pipeline_id",
-            "operator_ids",
-            "parameter_names",
-            "evidence_refs",
-        ),
-        "algorithm_synthesis": (
-            "schema_version",
-            "pipeline_id",
-            "evidence_refs",
-            "parameter_focus",
-            "rationale",
-        ),
-        "algorithm_synthesis_degradation": (
-            "schema_version",
-            "reason_code",
-            "rationale",
-        ),
-    }
-    for section_name, allowed_fields in section_fields.items():
-        raw_section = plan.get(section_name)
-        if not isinstance(raw_section, Mapping):
+    plan = iteration.plan
+    def fields(value, names):
+        return {name: value.get(name) for name in names.split()} if isinstance(value, Mapping) else {}
+    summary = plan.get("dsh_research_summary")
+    summary = summary.strip()[:2000] if isinstance(summary, str) and summary.strip() else None
+    findings, references = [], []
+    for value in plan.get("dsh_research_evidence", ())[:8]:
+        if not isinstance(value, Mapping) or not isinstance(value.get("finding"), str):
             continue
-        section: dict[str, Any] = {}
-        for field_name in allowed_fields:
-            value = raw_section.get(field_name)
-            if isinstance(value, str):
-                section[field_name] = value[:1000]
-            elif isinstance(value, (list, tuple)):
-                section[field_name] = [
-                    str(item)[:500]
-                    for item in value[:32]
-                    if isinstance(item, str) and item.strip()
-                ]
-        algorithm[section_name] = section
-
-    synthesis = algorithm.get("algorithm_synthesis")
-    degradation = algorithm.get("algorithm_synthesis_degradation")
-    blueprint = algorithm.get("algorithm_blueprint")
-    raw_research = plan.get("research")
-    native_summary = plan.get("dsh_research_summary")
-    if not isinstance(native_summary, str) or not native_summary.strip():
-        native_summary = None
-    else:
-        native_summary = native_summary.strip()[:2000]
-    raw_native_evidence = plan.get("dsh_research_evidence")
-    key_findings: list[dict[str, str]] = []
-    evidence_refs: list[str] = []
-    research_sources = []
-    if isinstance(raw_research, (list, tuple)):
-        research_sources.extend(raw_research)
-    if isinstance(raw_native_evidence, (list, tuple)):
-        research_sources.extend(raw_native_evidence)
-    for raw_item in research_sources[:8]:
-        if not isinstance(raw_item, Mapping):
-            continue
-        finding = raw_item.get("finding")
-        if not isinstance(finding, str) or not finding.strip():
-            continue
-        item = {"finding": finding.strip()[:1000]}
-        for field_name in (
-            "title",
-            "source",
-            "relevance",
-            "knowledge_id",
-            "evidence_digest",
-        ):
-            value = raw_item.get(field_name)
-            if isinstance(value, str) and value.strip():
-                item[field_name] = value.strip()[:500]
-        for reference_name in ("evidence_ref", "knowledge_id", "evidence_digest"):
-            reference = raw_item.get(reference_name)
-            if (
-                isinstance(reference, str)
-                and reference.strip()
-                and reference.strip() not in evidence_refs
-            ):
-                evidence_refs.append(reference.strip()[:500])
-        key_findings.append(item)
-
-    analysis_source = (
-        synthesis if isinstance(synthesis, Mapping) else degradation
-        if isinstance(degradation, Mapping) else None
-    )
-    native_completed = native_summary is not None
-    analysis_summary = {
-        "schema_version": "ecologyrsi-dsh.literature-analysis-summary/1",
-        "status": (
-            "completed"
-            if isinstance(synthesis, Mapping)
-            or native_completed
-            else "degraded"
-            if isinstance(degradation, Mapping)
-            else "pending"
-        ),
-        "summary": (
-            str(analysis_source.get("rationale"))[:2000]
-            if isinstance(analysis_source, Mapping)
-            and isinstance(analysis_source.get("rationale"), str)
-            else native_summary
-            if native_completed
-            else None
-        ),
-        "evidence_refs": (
-            list(analysis_source.get("evidence_refs", []))[:16]
-            if isinstance(analysis_source, Mapping)
-            and isinstance(analysis_source.get("evidence_refs"), list)
-            else evidence_refs[:16]
-        ),
-        "key_findings": key_findings,
-        "source": (
-            "model_research_plan"
-            if isinstance(analysis_source, Mapping)
-            else "dsh_native_research"
-            if native_completed
-            else "model_research_plan"
-        ),
-    }
-    final_plan = {
-        "schema_version": "ecologyrsi-dsh.final-implementation-plan/1",
-        "status": (
-            "ready_for_host_compilation"
-            if isinstance(blueprint, Mapping) and isinstance(synthesis, Mapping)
-            or native_completed
-            else "research_only"
-            if isinstance(degradation, Mapping)
-            else "pending"
-        ),
-        "predictor_id": adoption.get("adopted_id"),
-        "pipeline_id": (
-            blueprint.get("pipeline_id")
-            if isinstance(blueprint, Mapping)
-            else adoption.get("adopted_id")
-            if native_completed
-            else None
-        ),
-        "operator_ids": (
-            list(blueprint.get("operator_ids", []))[:32]
-            if isinstance(blueprint, Mapping)
-            and isinstance(blueprint.get("operator_ids"), list)
-            else []
-        ),
-        "parameter_names": (
-            list(blueprint.get("parameter_names", []))[:32]
-            if isinstance(blueprint, Mapping)
-            and isinstance(blueprint.get("parameter_names"), list)
-            else []
-        ),
-        "parameter_focus": (
-            list(synthesis.get("parameter_focus", []))[:32]
-            if isinstance(synthesis, Mapping)
-            and isinstance(synthesis.get("parameter_focus"), list)
-            else []
-        ),
-        "rationale": analysis_summary["summary"],
-        "implementation_mode": "registered_host_components_only",
-        "validation_sequence": [
-            "compile_registered_ir",
-            "training_fit_smoke_test",
-            "training_feedback_evaluation",
-            "independent_model_review",
-        ],
-    }
-    reflection_summary = None
-    raw_reflection = plan.get("dsh_evolution_reflection")
-    if isinstance(raw_reflection, Mapping):
-        safe_reflection = safe_aggregate_feedback(
-            raw_reflection,
-            name="DSH evolution reflection reporting projection",
-        )
-        if safe_reflection is not None:
-            raw_avoid = safe_reflection.get("avoid_behaviors")
-            avoid_rows = raw_avoid if isinstance(raw_avoid, list) else []
-            raw_active = safe_reflection.get("active_unresolved")
-            active_rows = raw_active if isinstance(raw_active, list) else []
-            reflection_summary = {
-                "schema_version": safe_reflection.get(
-                    "schema_version",
-                    "ecologyrsi-dsh.evolution-reflection/2",
-                ),
-                "avoid_behavior_count": len(avoid_rows),
-                "review_behaviors": [
-                    {key: item.get(key) for key in ("behavior_digest", "reason", "source_run_id", "source_generation")}
-                    for item in safe_reflection.get("review_behaviors", [])[:8]
-                    if isinstance(item, Mapping)
-                ],
-                "avoid_behaviors": [
-                    {
-                        "behavior_digest": item.get("behavior_digest"),
-                        "prediction_model_id": item.get("prediction_model_id"),
-                        "parameters_digest": item.get("parameters_digest"),
-                        "reason": item.get("reason"),
-                        "source_run_id": item.get("source_run_id"),
-                        "source_generation": item.get("source_generation"),
-                    }
-                    for item in avoid_rows[:8]
-                    if isinstance(item, Mapping)
-                ],
-                "active_unresolved": [
-                    dict(item)
-                    for item in active_rows[:8]
-                    if isinstance(item, Mapping)
-                ],
-                "policy": (
-                    dict(safe_reflection["policy"])
-                    if isinstance(safe_reflection.get("policy"), Mapping)
-                    else {}
-                ),
-            }
+        item = {key: value[key].strip()[:1000 if key == "finding" else 500]
+                for key in ("finding", "title", "source", "relevance", "knowledge_id", "evidence_digest")
+                if isinstance(value.get(key), str) and value[key].strip()}
+        findings.append(item)
+        for key in ("evidence_ref", "knowledge_id", "evidence_digest"):
+            reference = value.get(key)
+            if isinstance(reference, str) and reference.strip() and reference not in references:
+                references.append(reference.strip()[:500])
     result = {
         "schema_version": "ecologyrsi-dsh.research-iteration-summary/2",
-        "status": iteration.status,
+        **fields(iteration.to_dict(), "status iteration_digest knowledge_snapshot_digest source_analysis_digest source_assessment_digest model_id"),
         "iteration_digest": iteration.iteration_digest,
-        "plan_digest": adoption.get("plan_digest") or digest(plan),
-        "knowledge_snapshot_digest": iteration.knowledge_snapshot_digest,
-        "source_analysis_digest": iteration.source_analysis_digest,
-        "source_assessment_digest": iteration.source_assessment_digest,
-        "model_id": iteration.model_id,
-        "predictor_adoption": {
-            field_name: adoption.get(field_name)
-            for field_name in (
-                "status",
-                "requested_id",
-                "adopted_id",
-                "reason",
-                "adoption_digest",
-                "parameter_schema_digest",
-            )
+        "plan_digest": digest(plan),
+        "analysis_summary": {
+            "schema_version": "ecologyrsi-dsh.literature-analysis-summary/1",
+            "status": "completed" if summary is not None else "pending",
+            "summary": summary, "evidence_refs": references[:16], "key_findings": findings,
+            "source": "dsh_native_research",
         },
-        "analysis_summary": analysis_summary,
-        "final_plan": final_plan,
-        "candidate_directions": [
-            {
-                field_name: item.get(field_name)
-                for field_name in (
-                    "direction_id",
-                    "direction_digest",
-                    "title",
-                    "hypothesis",
-                    "target_weakness",
-                    "capability_focus",
-                    "mutation_axis",
-                    "mutation_target",
-                    "evidence_refs",
-                    "expected_tradeoff",
-                    "success_criterion",
-                )
-            }
-            for item in (
-                plan.get("candidate_directions", [])
-                if isinstance(plan.get("candidate_directions"), list)
-                else []
-            )[:8]
-            if isinstance(item, Mapping)
-        ],
-        **algorithm,
+        "final_plan": {
+            "schema_version": "ecologyrsi-dsh.final-implementation-plan/1",
+            "status": "ready_for_host_compilation" if summary is not None else "pending",
+            "predictor_id": None, "pipeline_id": None,
+            "operator_ids": [], "parameter_names": [], "parameter_focus": [], "rationale": summary,
+            "implementation_mode": "registered_host_components_only",
+            "validation_sequence": ["compile_registered_ir", "training_fit_smoke_test", "training_feedback_evaluation", "independent_model_review"],
+        },
+        "candidate_directions": [fields(item, "direction_id direction_digest title hypothesis target_weakness capability_focus mutation_axis mutation_target evidence_refs expected_tradeoff success_criterion")
+            for item in plan.get("candidate_directions", ())[:8] if isinstance(item, Mapping)],
     }
-    if reflection_summary is not None:
-        result["evolution_reflection"] = reflection_summary
-    if historical_provenance is not None:
-        result["historical_provenance"] = historical_provenance
+    provenance = getattr(iteration, "historical_provenance", None)
+    if isinstance(provenance, Mapping):
+        result["historical_provenance"] = fields(provenance, "source_digest scanned_run_count compatible_source_run_count included_source_run_count available_generation_count included_generation_count omitted_generation_summaries omitted_detail_count history_cutoff_seq")
+    reflection = plan.get("dsh_evolution_reflection")
+    if isinstance(reflection, Mapping):
+        reflection = safe_aggregate_feedback(reflection, name="DSH evolution reflection reporting projection")
+        if reflection is not None:
+            result["evolution_reflection"] = {
+                "schema_version": reflection.get("schema_version"),
+                "avoid_behavior_count": len(reflection.get("avoid_behaviors", ())),
+                "review_behaviors": [fields(item, "behavior_digest reason source_run_id source_generation") for item in reflection.get("review_behaviors", ())[:8]],
+                "avoid_behaviors": [fields(item, "behavior_digest prediction_model_id parameters_digest reason source_run_id source_generation") for item in reflection.get("avoid_behaviors", ())[:8]],
+                "active_unresolved": list(reflection.get("active_unresolved", ()))[:8],
+                "policy": dict(reflection.get("policy", {})),
+            }
     if getattr(iteration, "diagnostic_report", None) is not None:
         from ..core.research import DiagnosticReport
         diagnostic = DiagnosticReport(**dict(iteration.diagnostic_report))
@@ -726,7 +392,6 @@ def rounds(state: Any) -> list[dict[str, Any]]:
             key=lambda item: item.slot_index,
         )
         candidate_rows = []
-        intervention_ids: set[str] = set()
         for candidate in candidates:
             proposal = state.proposal(candidate.proposal_id)
             artifact = state.artifact_for(candidate.candidate_id)
@@ -734,8 +399,6 @@ def rounds(state: Any) -> list[dict[str, Any]]:
             promotion = state.promotion_for(candidate.candidate_id)
             failed = candidate.status.value == "failed"
             duplicate = candidate.status.value == "duplicate"
-            interventions = _applied_interventions(state, proposal.proposal_id)
-            intervention_ids.update(item["intervention_id"] for item in interventions)
             stage_statuses = _candidate_stage_statuses(
                 state,
                 candidate,
@@ -917,8 +580,6 @@ def rounds(state: Any) -> list[dict[str, Any]]:
                 "execution_diagnostics": _round_execution_diagnostics(
                     state, candidates
                 ),
-                "applied_intervention_count": len(intervention_ids),
-                "applied_intervention_ids": sorted(intervention_ids),
                 "timing": _round_timing(state, generation),
             }
         )
@@ -936,7 +597,6 @@ def state_snapshot(state: Any) -> dict[str, Any]:
         "artifacts": [item.to_dict() for item in state.artifacts],
         "evaluations": [item.to_dict() for item in state.evaluations],
         "promotions": [item.to_dict() for item in state.promotions],
-        "interventions": [item.to_dict() for item in state.interventions],
         "generation_batches": [item.to_dict() for item in state.generation_batches],
         "generation_analyses": [item.to_dict() for item in state.generation_analyses],
         "knowledge_snapshots": [item.to_dict() for item in state.knowledge_snapshots],
@@ -1038,16 +698,10 @@ def run_summary(state: Any) -> dict[str, Any]:
         1 for item in search_candidates if item.status.value == "failed"
     )
     partitions = sorted({item.partition for item in evaluations})
-    policy_model_id = metadata.get(
-        "policy_model_id", HOST_PARAMETER_GENERATOR_ID
-    )
-    judge_model_id = metadata.get("judge_model_id", RULE_JUDGE_ID)
-    policy_model_digest = metadata.get("policy_model_digest") or (
-        builtin_model_configuration_digest(str(policy_model_id))
-    )
-    judge_model_digest = metadata.get("judge_model_digest") or (
-        builtin_model_configuration_digest(str(judge_model_id))
-    )
+    policy_model_id = metadata.get("strategy_model_id")
+    judge_model_id = metadata.get("review_model_id")
+    policy_model_digest = metadata.get("policy_model_digest")
+    judge_model_digest = metadata.get("judge_model_digest")
 
     acceptable_evaluation = None
     if state.run.best_candidate_id:
@@ -1095,8 +749,6 @@ def run_summary(state: Any) -> dict[str, Any]:
         "knowledge_assessment_count": len(state.knowledge_assessments),
         "artifact_count": len(state.artifacts),
         "evaluation_count": len(evaluations),
-        "intervention_count": len(state.interventions),
-        "training_asset_count": len(search_candidates),
         "round_count": len(rounds(state)),
         "approved_count": approved,
         "rejected_count": rejected,
@@ -1134,79 +786,8 @@ def run_summary(state: Any) -> dict[str, Any]:
     return summary
 
 
-def run_export(state: Any) -> dict[str, Any]:
-    """Return a self-contained JSON export with a content digest."""
-
-    payload: dict[str, Any] = {
-        "format": "ecologyrsi-dsh.run-export",
-        "format_version": 1,
-        "package_version": __version__,
-        "redaction": "projection-only",
-        "summary": run_summary(state),
-        "training_assets": training_assets(state),
-        "rounds": rounds(state),
-        "state": state_snapshot(state),
-        "events": [
-            _event_snapshot(item)
-            for item in state.events
-            if item.kind not in _PRIVATE_SAMPLE_EVENT_KINDS
-        ],
-    }
-    payload["export_digest"] = digest(payload)
-    return payload
 
 
-def export_errors(payload: Mapping[str, Any]) -> list[str]:
-    """Return structural or digest errors in an exported run bundle."""
-
-    errors: list[str] = []
-    if payload.get("format") != "ecologyrsi-dsh.run-export":
-        errors.append("unsupported export format")
-    if payload.get("format_version") != 1:
-        errors.append("unsupported export format version")
-    if payload.get("redaction") != "projection-only":
-        errors.append("export redaction marker is missing or unsupported")
-    stored = payload.get("export_digest")
-    unsigned = dict(payload)
-    unsigned.pop("export_digest", None)
-    try:
-        computed = digest(unsigned)
-    except (TypeError, ValueError) as exc:
-        errors.append(f"export is not canonical JSON: {exc}")
-    else:
-        if not isinstance(stored, str) or stored != computed:
-            errors.append("export digest mismatch")
-
-    summary = payload.get("summary")
-    if not isinstance(summary, Mapping) or not isinstance(summary.get("run_id"), str):
-        errors.append("export summary is missing run_id")
-        summary_run_id = None
-    else:
-        summary_run_id = str(summary["run_id"])
-    events = payload.get("events")
-    if not isinstance(events, list) or not events:
-        errors.append("export events must be a non-empty list")
-        events = []
-    previous_seq: int | None = None
-    for index, event in enumerate(events):
-        if not isinstance(event, Mapping):
-            errors.append(f"event {index} is not an object")
-            continue
-        for field_name in ("event_id", "run_id", "kind", "created_at"):
-            if not isinstance(event.get(field_name), str) or not str(event[field_name]).strip():
-                errors.append(f"event {index} has invalid {field_name}")
-        if not isinstance(event.get("payload"), Mapping):
-            errors.append(f"event {index} payload is not an object")
-        if summary_run_id is not None and event.get("run_id") != summary_run_id:
-            errors.append(f"event {index} belongs to a different run")
-        seq = event.get("seq")
-        if isinstance(seq, bool) or not isinstance(seq, int) or seq < 1:
-            errors.append(f"event {index} has invalid seq")
-        elif previous_seq is not None and seq <= previous_seq:
-            errors.append(f"event {index} sequence is not strictly increasing")
-        else:
-            previous_seq = seq
-    return errors
 
 
 def write_json_atomic(

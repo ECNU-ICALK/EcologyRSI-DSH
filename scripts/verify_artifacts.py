@@ -252,7 +252,6 @@ def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
                 "ecologyrsi_dsh/integrations/dsh_tools.py",
                 "ecologyrsi_dsh/core/sample_results.py",
                 "ecologyrsi_dsh/core/state.py",
-                "ecologyrsi_dsh/evaluators/gateway_sample_adapter.py",
                 "ecologyrsi_dsh/evaluators/sample_execution.py",
                 "ecologyrsi_dsh/evaluators/dsh_sample_adapter.py",
                 "ecologyrsi_dsh/evaluators/fitness.py",
@@ -280,7 +279,6 @@ def verify_wheel(wheel: Path, version: str, source_root: Path) -> None:
                 "share/ecologyrsi-dsh/plugins/ecology_evolution/assets/js/data.js",
                 "share/ecologyrsi-dsh/plugins/ecology_evolution/assets/js/render_candidates.js",
                 "share/ecologyrsi-dsh/plugins/ecology_evolution/assets/js/render_process.js",
-                "share/ecologyrsi-dsh/plugins/ecology_evolution/assets/js/render_training_trace.js",
                 "share/ecologyrsi-dsh/plugins/ecology_evolution/plugin.json",
                 "share/ecologyrsi-dsh/plugins/ecology_evolution/styles.css",
                 "share/ecologyrsi-dsh/integrations/dsh_ecology_plugin/package.json",
@@ -438,19 +436,11 @@ def verify_sdist(sdist: Path, source_root: Path, version: str) -> None:
         names,
         (
             "/README.md",
-            "/docs/screenshots/01-run-settings.jpg",
-            "/docs/screenshots/02-parameter-design.jpg",
-            "/docs/screenshots/03-training-data.jpg",
-            "/docs/screenshots/04-evolution-process.jpg",
-            "/docs/screenshots/05-candidate-evaluation.jpg",
-            "/docs/screenshots/06-human-governance.jpg",
             "/CHANGELOG.md",
             "/LICENSE",
             "/NOTICE",
             "/RELEASE-CHECKLIST.md",
             "/MANIFEST.in",
-            "/examples/minimal_run.py",
-            "/examples/local-config.json",
             "/datasets/autonomous_greenhouse.json",
             "/plugins/ecology_evolution/index.html",
             "/plugins/ecology_evolution/app.js",
@@ -547,15 +537,8 @@ def verify_delivery_archive(
             names,
             (
                 "/README.md",
-                "/docs/screenshots/01-run-settings.jpg",
-                "/docs/screenshots/02-parameter-design.jpg",
-                "/docs/screenshots/03-training-data.jpg",
-                "/docs/screenshots/04-evolution-process.jpg",
-                "/docs/screenshots/05-candidate-evaluation.jpg",
-                "/docs/screenshots/06-human-governance.jpg",
                 "/LICENSE",
                 "/NOTICE",
-                "/examples/minimal_run.py",
                 "/datasets/autonomous_greenhouse.json",
                 "/plugins/ecology_evolution/index.html",
                 "/plugins/ecology_evolution/assets/js/core.js",
@@ -852,60 +835,12 @@ def installed_smoke(wheel: Path, version: str) -> None:
             if not patch.is_file() or "@ecologyrsi/dsh-evolution-plugin" not in patch.read_text(encoding="utf-8"):
                 raise RuntimeError("installed wheel did not install the managed Host patch")
 
-        output = subprocess.check_output(
-            [
-                str(command),
-                "demo",
-                "--db",
-                str(root / "demo.sqlite3"),
-                "--run-id",
-                "run:wheel-verification",
-                "--candidates",
-                "2",
-            ],
-            text=True,
-            env=clean_environment,
+        checked = subprocess.run(
+            [str(command), "doctor", "--db", str(root / "fresh.sqlite3")],
+            check=False, capture_output=True, text=True, env=clean_environment,
         )
-        payload = json.loads(output)
-        if payload["run"]["status"] != "completed" or payload["event_count"] < 8:
-            raise RuntimeError("installed CLI demo did not complete")
-        bundle = root / "wheel-export.json"
-        subprocess.run(
-            [
-                str(command),
-                "export",
-                "run:wheel-verification",
-                "--db",
-                str(root / "demo.sqlite3"),
-                "--output",
-                str(bundle),
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=clean_environment,
-        )
-        verified = subprocess.run(
-            [str(command), "verify", str(bundle)],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=clean_environment,
-        )
-        if verified.returncode != 0 or not json.loads(verified.stdout).get("valid"):
-            raise RuntimeError("installed CLI export verification failed")
-        imported = subprocess.run(
-            [str(command), "import", str(bundle), "--db", str(root / "replayed.sqlite3")],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=clean_environment,
-        )
-        if imported.returncode != 0 or json.loads(imported.stdout).get("status") != "completed":
-            raise RuntimeError("installed CLI export import failed")
+        if checked.returncode or not json.loads(checked.stdout).get("ok"):
+            raise RuntimeError("installed CLI cannot initialize and inspect a fresh ledger")
 
         port = free_port()
         process = subprocess.Popen(

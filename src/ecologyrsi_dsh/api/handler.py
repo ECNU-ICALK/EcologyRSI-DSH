@@ -45,7 +45,6 @@ from urllib.parse import urlparse
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
-from ..application.config import bind_toy_dataset
 from ..core.director import EvolutionDirector
 from ..core.errors import (
     DshNativeRuntimeUnavailableError,
@@ -58,9 +57,6 @@ from ..core.ledger import (
     EventLedger,
 )
 from ..core.models import (
-    ExpertConsultationAnswer,
-    HumanIntervention,
-    InterventionKind,
     Run,
     TaskManifest,
     digest,
@@ -70,7 +66,6 @@ from ..core.protocols import is_strict_origin_protocol
 from ..core.redaction import safe_error_code
 from ..core.sample_results import MAX_SAMPLE_RESULTS_UNCOMPRESSED_BYTES
 from ..core.state import (
-    EVOLUTION_RUNTIME_SCHEMA_V2,
     EVOLUTION_RUNTIME_SCHEMA_V3,
     validate_identity_binding,
 )
@@ -81,12 +76,8 @@ from ..evaluators.greenhouse_prediction import (
     MAX_EXOGENOUS_RIDGE_HISTORY_STEPS,
 )
 from ..evaluators.registry import (
-    GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
-    GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID,
-    GREENHOUSE_RECIPE_EVALUATOR_ID,
     EvaluatorRegistry,
 )
-from ..evaluators.catalog import TOY_DATASET_ID
 from ..evolution.schedule import (
     OPTIMIZATION_PROTOCOL,
     TRAINING_SCHEDULE_SCHEMA_VERSION,
@@ -101,7 +92,7 @@ from ..evolution.parameters import (
     validate_run_parameter,
 )
 from ..evolution.strategies import StrategyRouterDSHAdapter
-from ..core.search_policy import SEARCH_GUARD_POLICY
+from ..core.search_policy import SEARCH_GUARD_POLICY, PAIRED_EXECUTION_QUALIFICATION
 from ..integrations.model_canary import run_preflight, require_model_preflight
 from ..evaluators.agent_stability import REPLICA_COUNT, capacity_with_inference_replicas
 from ..core.model_preflight import (
@@ -116,12 +107,6 @@ from ..integrations.dsh_native_runtime import (
     configured_stage_timeout,
 )
 from ..integrations.dsh_structured_roles import DshStructuredRoleRuntime
-from ..integrations.model_bindings import (
-    HOST_PARAMETER_GENERATOR_ID,
-    RULE_JUDGE_ID,
-    builtin_model_configuration_digest,
-)
-from ..integrations.model_gateway import ModelGateway
 from ..knowledge.autonomous_cycle import AUTONOMOUS_RESEARCH_PROTOCOL
 from ..knowledge.program_registry import current_program_registry
 from ..version import __version__
@@ -135,10 +120,8 @@ from ..execution.sample_admission import (
     validate_sample_concurrency,
 )
 from .shared import (
-    AUTO_ADVANCE_CONTINUOUS,
     _assert_http_scope,
     _assert_manifest_http_scope,
-    _auto_advance_steps,
     _derived_seed,
     _is_loopback_host,
     _public_http_error,
@@ -256,13 +239,11 @@ _DSH_NATIVE_STABLE_PRESET_FIELDS = (
     "content_digest",
 )
 _DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR = {
-    "greenhouse-rolling-residual@1": "greenhouse-rolling-default@2",
     "greenhouse-exogenous-ridge@1": "greenhouse-exogenous-default@2",
     "greenhouse-baseline-aligned-ridge@1": "greenhouse-baseline-aligned-default@2",
     "greenhouse-baseline-aligned-ridge@2": "greenhouse-baseline-aligned-cellwise-default@2",
     "greenhouse-targetwise-ridge@1": "greenhouse-targetwise-default@2",
     "greenhouse-horizon-targetwise-ridge@1": "greenhouse-default@2",
-    "toy-rolling-water@1": "toy-default@2",
 }
 
 
@@ -287,6 +268,19 @@ def _dsh_native_stable_preset_catalog(
         for preset_id in _DSH_NATIVE_PRESET_IDS
     ]
 
+_CREATE_REQUIRED_FIELDS = ('dataset_id', 'execution_protocol', 'strategy_model_id', 'review_model_id',)
+_CREATE_OPTIONAL_FIELDS = (
+    'episode_id', 'optimization_protocol', 'optimization_schedule', 'autonomous_mode',
+    'rounds', 'budget', 'candidates_per_generation', 'max_candidates',
+    'model_workflow', 'knowledge_online_enabled', 'candidate_concurrency', 'sample_concurrency',
+    'sample_agent_batch_size', 'seed_policy', 'seed', 'requested_mode',
+    'auto_advance', 'auto_progress', 'start', 'idempotency_key',
+    'run_id', 'task_id', 'objective', 'prediction_selection_policy',
+    'targeted_search_policy', 'prediction_model_id', 'evaluator_id', 'seed_genome_template_id',
+    'search_guard_policy', 'require_model_contract_preflight', 'allow_host_fallback', 'research_domain',
+    CANDIDATE_NOVELTY_POLICY_KEY,
+)
+
 PLUGIN_MANIFEST = {
     "id": "ecology_evolution",
     "plugin_id": "ecologyrsi.evolution",
@@ -296,27 +290,9 @@ PLUGIN_MANIFEST = {
     "mode": "evolution",
     "workflow": "research_compile_evolve@1",
     "request_schema": {
-        "required": ["dataset_id", "strategy_model_id", "review_model_id"],
-        "optional": [
-            "domain_pack_id",
-            "domain",
-            "dataset",
-            "episode_id",
-            "rounds",
-            "candidates_per_generation",
-            "max_candidates",
-            "model_workflow",
-            "research_domain",
-            "knowledge_online_enabled",
-            "auto_progress",
-            "allow_host_fallback",
-            "optimization_protocol",
-            "optimization_schedule",
-            "candidate_concurrency",
-            "sample_concurrency",
-            "sample_agent_batch_size",
-        ],
-        "internal_components": "由策略模型在运行中调研并由宿主注册表编译；旧字段仅作兼容输入",
+        "required": list(_CREATE_REQUIRED_FIELDS),
+        "optional": list(_CREATE_OPTIONAL_FIELDS),
+        "internal_components": "仅接受当前原生联合进化合同；组件由模型提出并由宿主注册表编译",
     },
     "api_prefix": "/api",
     "recommended_dsh_proxy_base": "/api/ecology-evolution",
@@ -325,20 +301,14 @@ PLUGIN_MANIFEST = {
         "start_run",
         "read_projection",
         "control_run",
-        "advance_run",
         "read_events",
         "read_sample_results",
         "read_training_data",
-        "write_intervention",
         "select_configured_model",
         "run.archive",
         "run.delete",
     ],
-    "advance": "/runs/{run_id}/advance",
     "samples": "/runs/{run_id}/samples?candidate_id={candidate_id}&offset={offset}&limit={limit}",
-    "expert_consultation_answer": (
-        "/runs/{run_id}/expert-consultations/{consultation_id}/answer"
-    ),
 }
 
 
@@ -367,22 +337,8 @@ def _host_runtime_build() -> dict[str, str]:
 
 
 def _runtime_build_compatible(value: Any) -> bool:
-    """Allow package rebuilds only when every persisted protocol stays compatible."""
-
-    if not isinstance(value, Mapping):
-        return False
-    if value.get("evolution_runtime_schema") not in {
-        EVOLUTION_RUNTIME_SCHEMA_V2,
-        EVOLUTION_RUNTIME_SCHEMA_V3,
-    }:
-        return False
-    return all(
-        value.get(field) == expected
-        for field, expected in _HOST_RUNTIME_COMPATIBILITY.items()
-        if field != "evolution_runtime_schema"
-    ) and isinstance(value.get("package_version"), str) and bool(
-        value["package_version"].strip()
-    )
+    """Only the exact package/runtime identity may resume this release's ledger."""
+    return isinstance(value, Mapping) and dict(value) == _host_runtime_build()
 
 
 def _mark_auto_progress_task(
@@ -515,14 +471,14 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
                 "api_version": "v0.2",
                 "plugin_version": PLUGIN_MANIFEST["version"],
                 "schema_version": self.ledger.schema_version,
-                "evaluation_partition": "visible/validation/demo",
-                "scientific_scope": "prediction_demo_non_causal",
+                "evaluation_partition": "training_feedback",
+                "scientific_scope": "historical_replay_prediction_non_causal",
                 "supported_evaluation_partitions": [
-                    "validation",
                     "training_feedback",
+                    "validation",
+                    "test",
                 ],
                 "scientific_scopes": [
-                    "prediction_demo_non_causal",
                     "historical_replay_prediction_non_causal",
                 ],
             }
@@ -616,9 +572,6 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
         """
 
         proof_kinds = {
-            "advance": {"RunCompleted", "RunFailed"},
-            "control:advance": {"RunCompleted", "RunFailed"},
-            "control:step": {"RunCompleted", "RunFailed"},
             "control:cancel": {"RunCancelled"},
             "control:complete": {"RunCompleted"},
         }
@@ -669,20 +622,7 @@ class EvolutionHTTPServer(ThreadingHTTPServer):
         if state.task_manifest.metadata.get("auto_progress") is True:
             return True
 
-        try:
-            target_steps = _auto_advance_steps(receipt.request.get("auto_advance", 1))
-        except (TypeError, ValueError):
-            return False
-        if target_steps == AUTO_ADVANCE_CONTINUOUS or target_steps <= 0:
-            return True
-        completed_steps = sum(
-            event.kind == "GenerationAdvanced"
-            for event in self.ledger.events(
-                state.run.run_id,
-                after_seq=receipt.start_seq,
-            )
-        )
-        return completed_steps >= target_steps
+        return state.task_manifest.metadata.get("auto_progress") is True
 
     def validate_frozen_runtime_bindings(
         self,
@@ -977,7 +917,7 @@ class EvolutionRequestHandler(
     protocol_version = "HTTP/1.1"
 
     def log_message(self, _format: str, *_args: Any) -> None:
-        # Keep the demo quiet unless a caller overrides the handler logger.
+        # Keep HTTP access logging quiet unless a caller overrides the logger.
         return
 
     def do_GET(self) -> None:  # noqa: N802
@@ -1166,11 +1106,6 @@ class EvolutionRequestHandler(
         self._active_command: dict[str, Any] | None = None
         try:
             body = self._body()
-            long_running_advance = (
-                len(path) == 3
-                and path[0] == "runs"
-                and path[2] in ("advance", "step")
-            )
             control_request = (
                 len(path) == 3
                 and path[0] == "runs"
@@ -1179,7 +1114,7 @@ class EvolutionRequestHandler(
             draining_control = control_request and str(
                 body.get("action", body.get("command", ""))
             ).strip().lower() in {"pause", "cancel"}
-            if long_running_advance or path in (["model-preflight"], ["evolution-capacity"]):
+            if path in (["model-preflight"], ["evolution-capacity"]):
                 # Generation execution owns a per-run lease and already uses
                 # thread-safe ledger writes.  Keeping the global mutation lock
                 # across remote model waits would block pause/cancel and every
@@ -1256,43 +1191,14 @@ class EvolutionRequestHandler(
         if path == ["runs"]:
             self._create_run(body)
             return
+        if len(path) == 3 and path[0] == "runs" and path[2] == "control":
+            self._action(path[1], body)
+            return
         if len(path) == 3 and path[0] == "runs" and path[2] == "archive":
             self._archive_run(path[1], body)
             return
         if len(path) == 3 and path[0] == "runs" and path[2] == "restore":
             self._restore_run(path[1], body)
-            return
-        if len(path) == 3 and path[0] == "runs" and path[2] in ("advance", "step"):
-            run_id = path[1]
-            cache_key = self._command_key(run_id, body)
-            if self._serve_existing_command(cache_key, run_id, "advance", body):
-                return
-            self._validate_advance_request(run_id, body)
-            cached = self._claim_command(cache_key, run_id, "advance", body)
-            if cached is not None:
-                self._send(HTTPStatus.OK, cached)
-                return
-            state = self._advance_run(run_id, body)
-            payload = _state_payload(state)
-            self._complete_command(cache_key, payload)
-            # Keep a continuous run moving even when a user or recovery tool
-            # manually consumes one generation while the worker is idle.
-            self._schedule_auto_progress(state)
-            self._send(HTTPStatus.OK, payload)
-            return
-        if len(path) == 3 and path[0] == "runs" and path[2] in ("action", "control"):
-            self._action(path[1], body)
-            return
-        if len(path) == 3 and path[0] == "runs" and path[2] == "interventions":
-            self._record_intervention(path[1], body)
-            return
-        if (
-            len(path) == 5
-            and path[0] == "runs"
-            and path[2] == "expert-consultations"
-            and path[4] == "answer"
-        ):
-            self._answer_expert_consultation(path[1], path[3], body)
             return
         self._send(HTTPStatus.NOT_FOUND, public_error_payload(
             FileNotFoundError("not found"), status=HTTPStatus.NOT_FOUND
@@ -1322,50 +1228,42 @@ class EvolutionRequestHandler(
         planned_generations = _request_integer(
             body["planned_generations"], "planned_generations", minimum=1
         )
-        if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION or schedule.quick:
-            validate_run_parameter("rounds", planned_generations)
-        if dataset_id == TOY_DATASET_ID:
-            dataset = self.server.datasets.series(dataset_id, episode_id)
-        else:
-            dataset = self.server.datasets.selection_view(dataset_id, episode_id)
+        validate_run_parameter("rounds", planned_generations)
+        dataset = self.server.datasets.selection_view(dataset_id, episode_id)
         # The browser previews native runs. Use the same history envelope as
         # _task_from_request, including the day-block evidence check below.
-        history_steps = (MAX_EXOGENOUS_RIDGE_HISTORY_STEPS if dataset_id == TOY_DATASET_ID
-                         else COHORT_HISTORY_HOURS)
+        history_steps = COHORT_HISTORY_HOURS
         report = estimate_epoch_capacity(
             dataset,
             schedule=schedule,
             planned_generations=planned_generations,
             seed=0,
             history_steps=history_steps,
-            scoring_cells_per_origin=(1 if dataset_id == TOY_DATASET_ID
-                                      else dataset_adapter(dataset_id).contract()["prediction_cells_per_origin"]),
+            scoring_cells_per_origin=dataset_adapter(dataset_id).contract()["prediction_cells_per_origin"],
         )
         payload = report.to_dict()
-        if dataset_id != TOY_DATASET_ID:
-            from ..evolution.evidence_capacity import require_guarded_cohort_evidence_capacity
-            profile = self.server.evaluators.fitness_profile(dataset_adapter(dataset_id).evaluator_id, dataset_id)
-            payload = capacity_with_inference_replicas(report, schedule)
-            if report.sufficient:
-                try:
-                    payload["guarded_evidence"] = require_guarded_cohort_evidence_capacity(
-                        dataset=dataset, schedule=schedule,
-                        planned_generations=planned_generations, seed=0,
-                        profile=profile,
-                        history_steps=history_steps,
-                    )
-                except ValueError as exc:
-                    payload = capacity_with_inference_replicas(replace(report, sufficient=False), schedule)
-                    payload["rejection_reason"] = str(exc)
-            payload["run_parameters"] = run_parameter_contract(profile)
-        if dataset_id != TOY_DATASET_ID:
-            payload["data_partition_summary"] = self.server.datasets.partition_summary(dataset_id, episode_id)
+        from ..evolution.evidence_capacity import require_guarded_cohort_evidence_capacity
+        profile = self.server.evaluators.fitness_profile(dataset_adapter(dataset_id).evaluator_id, dataset_id)
+        payload = capacity_with_inference_replicas(report, schedule)
+        if report.sufficient:
+            try:
+                payload["guarded_evidence"] = require_guarded_cohort_evidence_capacity(
+                    dataset=dataset, schedule=schedule,
+                    planned_generations=planned_generations, seed=0,
+                    profile=profile,
+                    history_steps=history_steps,
+                )
+            except ValueError as exc:
+                payload = capacity_with_inference_replicas(replace(report, sufficient=False), schedule)
+                payload["rejection_reason"] = str(exc)
+        payload["run_parameters"] = run_parameter_contract(profile)
+        payload["data_partition_summary"] = self.server.datasets.partition_summary(dataset_id, episode_id)
         payload["capacity_enforced_for_run_creation"] = (
-            dataset_id != TOY_DATASET_ID
+            True
         )
         payload["execution_plan"] = schedule.execution_plan(planned_generations,
-            cells_per_origin=1 if dataset_id == TOY_DATASET_ID else dataset_adapter(dataset_id).contract()["prediction_cells_per_origin"],
-            native=dataset_id != TOY_DATASET_ID)
+            cells_per_origin=dataset_adapter(dataset_id).contract()["prediction_cells_per_origin"],
+            native=True)
         self._send(HTTPStatus.OK, payload)
 
     def _archive_run(self, run_id: str, body: dict[str, Any]) -> None:
@@ -1488,7 +1386,10 @@ class EvolutionRequestHandler(
         if runtime is None:
             raise DshNativeRuntimeUnavailableError()
         self._dsh_native_capabilities = runtime.capabilities()
-        task = self._task_from_request(body, defer_remote_plan=True)
+        task = self._task_from_request(
+            {key: value for key, value in body.items() if key != "check_only"},
+            defer_remote_plan=True,
+        )
         if not self.server.model_preflight_lock.acquire(blocking=False):
             self._send(HTTPStatus.ACCEPTED, {"passed": False, "pending": True})
             return
@@ -1524,29 +1425,14 @@ class EvolutionRequestHandler(
         if not isinstance(start_value, bool):
             raise TypeError("start must be a bool")
         start = start_value
-        requested_auto_advance = _auto_advance_steps(body.get("auto_advance", 1))
-        requested_auto_progress = body.get("auto_progress", False)
-        if not isinstance(requested_auto_progress, bool):
-            requested_auto_progress = _request_boolean(
-                requested_auto_progress, "auto_progress"
-            )
-        requested_allow_host_fallback = body.get("allow_host_fallback", False)
-        if requested_allow_host_fallback is None:
-            allow_host_fallback = False
-        elif isinstance(requested_allow_host_fallback, bool):
-            allow_host_fallback = requested_allow_host_fallback
-        else:
-            allow_host_fallback = _request_boolean(
-                requested_allow_host_fallback, "allow_host_fallback"
-            )
-        auto_advance = requested_auto_advance if start else 0
-        # Preserve a continuous opt-in even when the caller creates a paused
-        # run with ``start=false``; the later start/resume control transition
-        # will schedule it from the frozen manifest.
-        continuous_auto_progress = (
-            requested_auto_advance == AUTO_ADVANCE_CONTINUOUS
-            or requested_auto_progress
-        )
+        if body.get("auto_advance", "continuous") not in (0, "continuous"):
+            raise ValueError("only continuous automatic execution is supported")
+        if body.get("auto_progress", True) is not True:
+            raise ValueError("auto_progress must be true; use start=false for an inactive run")
+        if body.get("allow_host_fallback", False) is not False:
+            raise ValueError("native execution does not allow host fallback")
+        allow_host_fallback = False
+        continuous_auto_progress = True
         # A durable command owns its frozen run even if live capability flags
         # or cached canary TTL changed after the first request. Validate the
         # identical HTTP body before recovering that resource, without
@@ -1558,7 +1444,7 @@ class EvolutionRequestHandler(
         if existing_command is not None and existing_command.resource_run_id:
             state = self.server.director.state(existing_command.resource_run_id)
             _assert_http_scope(state)
-            state = self._resume_created_run(state, start=start, auto_advance=auto_advance)
+            state = self._resume_created_run(state, start=start)
             payload = _state_payload(state)
             self._complete_command(cache_key, payload)
             self._schedule_auto_progress(state)
@@ -1592,13 +1478,6 @@ class EvolutionRequestHandler(
         task_workflow = task.metadata.get("model_workflow")
         if task_workflow is not None and task_workflow != "research_compile_evolve@1":
             raise ValueError("仅支持 research_compile_evolve@1；旧版组件搜索流程已移除")
-        autonomous_mode = task.metadata.get("autonomous_mode") is True
-        if autonomous_mode and requested_auto_advance != 0:
-            # Preserve explicit paused creation (auto_advance=0), while making
-            # every started autonomous run asynchronous even for legacy
-            # callers that still send the old one-step integer value.
-            continuous_auto_progress = True
-            auto_advance = AUTO_ADVANCE_CONTINUOUS if start else 0
         # Validate the immutable manifest before claiming an idempotency
         # receipt or appending RunCreated.  Invalid scope requests must not
         # leave a durable pending command or a partially-created Run.
@@ -1610,7 +1489,6 @@ class EvolutionRequestHandler(
             task = _mark_auto_progress_task(
                 task, allow_host_fallback=allow_host_fallback
             )
-            self._validate_continuous_remote_bindings(task)
         idempotency_key = task.metadata.get("idempotency_key")
         cache_key = self._command_key("create", body)
         run_id = body.get("run_id")
@@ -1634,7 +1512,7 @@ class EvolutionRequestHandler(
                     if cache_key is not None:
                         self.server.ledger.bind_command_resource_run(cache_key, run_id)
                     state = self._resume_created_run(
-                        existing_idempotent_state, start=start, auto_advance=auto_advance
+                        existing_idempotent_state, start=start
                     )
                     payload = _state_payload(state)
                     self._complete_command(cache_key, payload)
@@ -1654,7 +1532,7 @@ class EvolutionRequestHandler(
                     cache_key, existing_idempotent_run
                 )
             state = self._resume_created_run(
-                existing_idempotent_state, start=start, auto_advance=auto_advance
+                existing_idempotent_state, start=start
             )
             payload = _state_payload(state)
             self._complete_command(cache_key, payload)
@@ -1778,12 +1656,6 @@ class EvolutionRequestHandler(
         # Continuous runs return their durable generation-zero state and let
         # the worker execute every generation.  Numeric values retain the old
         # bounded synchronous behavior.
-        if start and not continuous_auto_progress and auto_advance > 0:
-            state = self._advance_run(
-                run.run_id,
-                {"steps": auto_advance},
-                target_steps=auto_advance,
-            )
         payload = _state_payload(state)
         self._complete_command(cache_key, payload)
         self._schedule_auto_progress(state)
@@ -1796,52 +1668,12 @@ class EvolutionRequestHandler(
             return
         self.server.auto_progress.schedule_if_enabled(state.run.run_id)
 
-    def _validate_continuous_remote_bindings(self, task: TaskManifest) -> None:
-        """Validate callable role bindings without treating old health as truth.
-
-        Connection health is observational and can be stale after a queued or
-        timed-out request.  Creation therefore validates only the durable
-        prerequisites; the background model call owns timeout and retry policy.
-        """
-
-        metadata = task.metadata
-        if metadata.get("execution_protocol") == DSH_NATIVE_EXECUTION_PROTOCOL:
-            return
-        remote_models = {
-            str(item.get("model_id") or ""): item
-            for item in self.server.model_gateway.catalog()
-        }
-        for field, label, role in (
-            ("strategy_model_id", "策略模型", "propose"),
-            ("judge_model_id", "独立评审模型", "judge"),
-        ):
-            model_id = str(metadata.get(field) or "").strip()
-            if not model_id or builtin_model_configuration_digest(model_id) is not None:
-                continue
-            remote_model = remote_models.get(model_id)
-            if remote_model is None:
-                raise ValueError(
-                    f"连续进化的{label}未配置：{model_id}"
-                )
-            if role not in remote_model.get("roles", []):
-                raise ValueError(
-                    f"连续进化的{label}缺少 {role} 权限：{model_id}"
-                )
-            if not remote_model.get("credential_configured"):
-                raise ValueError(
-                    f"连续进化的{label}尚未配置认证凭据：{model_id}"
-                )
-            if not self._remote_model_execution_configured(remote_model):
-                raise ValueError(
-                    f"连续进化的{label}后端调用配置不可执行：{model_id}"
-                )
 
     def _resume_created_run(
         self,
         state: Any,
         *,
         start: bool,
-        auto_advance: int,
     ) -> Any:
         """Finish a create command from its durable run projection."""
 
@@ -1858,20 +1690,6 @@ class EvolutionRequestHandler(
                 })
             self.server.director.start_run(run_id)
             state = self.server.director.state(run_id)
-        continuous = auto_advance == AUTO_ADVANCE_CONTINUOUS or bool(
-            state.task_manifest.metadata.get("auto_progress") is True
-        )
-        if (
-            start
-            and not continuous
-            and auto_advance > 0
-            and state.run.status.value == "running"
-        ):
-            state = self._advance_run(
-                run_id,
-                {"steps": auto_advance},
-                target_steps=auto_advance,
-            )
         return state
 
     def _ensure_recorded_model_preflight(self, state: Any) -> Any:
@@ -1920,572 +1738,88 @@ class EvolutionRequestHandler(
             return existing_run_id
         return None
 
-    def _task_from_request(
-        self,
-        body: dict[str, Any],
-        *,
-        strict_remote_plan: bool = False,
-        defer_remote_plan: bool = False,
-    ) -> TaskManifest:
-        """Accept a full manifest or the compact Chinese workbench payload."""
+    def _task_from_request(self, body: dict[str, Any], *, strict_remote_plan: bool = False,
+                           defer_remote_plan: bool = True) -> TaskManifest:
+        """Bind the single public native joint contract; reject historical aliases."""
+        allowed = {*_CREATE_REQUIRED_FIELDS, *_CREATE_OPTIONAL_FIELDS}
+        unknown = set(body) - allowed
+        if unknown:
+            raise ValueError("unsupported create fields: " + ", ".join(sorted(unknown)))
+        if body.get("execution_protocol") != DSH_NATIVE_EXECUTION_PROTOCOL:
+            raise ValueError("new runs require dsh_native_plugin_evolution@1")
+        if body.get("optimization_protocol", joint_policy.UNIFIED_PROTOCOL) != joint_policy.UNIFIED_PROTOCOL:
+            raise ValueError("new runs require joint_plugin_epoch@2")
+        if body.get("autonomous_mode", True) is not True:
+            raise ValueError("native joint runs require autonomous_mode=true")
+        if body.get("allow_host_fallback", False) is not False:
+            raise ValueError("native joint runs do not permit host fallback")
+        if body.get("require_model_contract_preflight", True) is not True:
+            raise ValueError("native joint runs require four-role model preflight")
+        if body.get("search_guard_policy", SEARCH_GUARD_POLICY) != SEARCH_GUARD_POLICY:
+            raise ValueError("native joint runs require the frozen search guard")
+        if body.get("model_workflow", "research_compile_evolve@1") != "research_compile_evolve@1":
+            raise ValueError("unsupported model workflow")
+        dataset_id = body.get("dataset_id")
+        if not isinstance(dataset_id, str) or not dataset_id.strip() or dataset_id == "toy-crop-water@1":
+            raise ValueError("dataset_id must identify a runnable greenhouse dataset")
+        role_models = {}
+        for key in ("strategy_model_id", "review_model_id"):
+            value = body.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{key} must be non-empty")
+            role_models[key] = value.strip()
+        raw_budget = body.get("budget", {})
+        if not isinstance(raw_budget, dict) or set(raw_budget) - {"max_generations", "candidates_per_generation", "max_candidates"}:
+            raise ValueError("budget only accepts generation and candidate limits")
+        rounds = body.get("rounds", raw_budget.get("max_generations", PARAMETER_RULES["rounds"]["default"]))
+        rounds = validate_run_parameter("rounds", rounds)
+        if "rounds" in body and "max_generations" in raw_budget and body["rounds"] != raw_budget["max_generations"]:
+            raise ValueError("rounds differs from budget.max_generations")
+        candidates = body.get("candidates_per_generation", raw_budget.get("candidates_per_generation", 4))
+        if type(candidates) is not int or candidates != 4:
+            raise ValueError("joint_plugin_epoch@2 requires four candidates per generation")
+        maximum = body.get("max_candidates", raw_budget.get("max_candidates", rounds * 4))
+        maximum = validate_run_parameter("max_candidates", maximum)
+        if maximum < rounds * 4:
+            raise ValueError("candidate budget cannot cover the frozen generations")
+        for key in ("candidates_per_generation", "max_candidates"):
+            if key in body and key in raw_budget and body[key] != raw_budget[key]:
+                raise ValueError(f"{key} differs from budget.{key}")
+        seed_policy = body.get("seed_policy", "fixed")
+        if seed_policy not in {"fixed", "generated_and_recorded"}:
+            raise ValueError("unsupported seed_policy")
+        seed = (_request_integer(body["seed"], "seed") if "seed" in body else
+                _derived_seed(body.get("idempotency_key") or body) if seed_policy == "generated_and_recorded" else 0)
+        metadata = {key: body[key] for key in (
+            "episode_id", "idempotency_key", "optimization_schedule", "prediction_selection_policy",
+            "targeted_search_policy", "prediction_model_id", "evaluator_id", "seed_genome_template_id",
+            "candidate_concurrency", "sample_concurrency", "sample_agent_batch_size", CANDIDATE_NOVELTY_POLICY_KEY,
+        ) if key in body and body[key] is not None}
+        metadata.update(role_models)
+        metadata.update({
+            "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+            "optimization_protocol": joint_policy.UNIFIED_PROTOCOL,
+            "search_guard_policy": SEARCH_GUARD_POLICY,
+            "paired_execution_qualification": PAIRED_EXECUTION_QUALIFICATION,
+            "require_model_contract_preflight": True,
+            "strategy_id": "autonomous_model@1", "autonomous_mode": True,
+            "model_workflow": "research_compile_evolve@1", "requested_rounds": rounds,
+            "recorded_seed": seed, "research_domain": body.get("research_domain", "greenhouse_environment@1"),
+            "knowledge_online_enabled": _request_boolean(body.get("knowledge_online_enabled", True), "knowledge_online_enabled"),
+        })
+        task = TaskManifest(
+            task_id=str(body.get("task_id") or f"plugin:{body.get('idempotency_key') or uuid4()}"),
+            objective=str(body.get("objective") or "greenhouse multihorizon prediction"),
+            domain_pack="greenhouse_environment@1", visible_datasets=(dataset_id.strip(),),
+            budget={"max_generations": rounds, "candidates_per_generation": 4, "max_candidates": maximum},
+            seed=seed, seed_policy=seed_policy, metadata=metadata,
+        )
+        return self._bind_runtime_task(task, defer_remote_plan=True)
 
-        if "samples_per_update" in body:
-            raise ValueError(
-                "samples_per_update is not supported; use optimization_schedule "
-                "with complete forecast-origin counts"
-            )
-        supplied_manifest = body.get("task_manifest")
-        if isinstance(supplied_manifest, dict):
-            supplied_metadata = supplied_manifest.get("metadata")
-            if isinstance(supplied_metadata, dict) and "samples_per_update" in supplied_metadata:
-                raise ValueError(
-                    "samples_per_update is not supported; use optimization_schedule "
-                    "with complete forecast-origin counts"
-                )
-        native_protocol = (
-            self._request_binding(body, "execution_protocol") == DSH_NATIVE_EXECUTION_PROTOCOL
-        )
 
-        if isinstance(body.get("task_manifest"), dict):
-            raw = dict(body["task_manifest"])
-            metadata = dict(raw.get("metadata", {}))
-            for name in ("execution_protocol", "prediction_selection_policy", "targeted_search_policy", "prediction_model_id",
-                         "evaluator_id", "seed_genome_template_id", CANDIDATE_NOVELTY_POLICY_KEY):
-                value = self._request_binding(body, name)
-                if name in body or name in metadata:
-                    metadata[name] = value
-            raw["metadata"] = metadata
-            if "domain_pack" not in raw:
-                supplied_domain = body.get(
-                    "domain_pack",
-                    body.get(
-                        "domain_pack_id",
-                        body.get(
-                            "domain",
-                            body.get(
-                                "domain_id",
-                                raw.get(
-                                    "domain_pack_id",
-                                    raw.get("domain", raw.get("domain_id")),
-                                ),
-                            ),
-                        ),
-                    ),
-                )
-                if supplied_domain is not None:
-                    raw["domain_pack"] = str(supplied_domain)
-            if body.get("idempotency_key") or body.get("episode_id") or any(
-                key in body
-                for key in (
-                    "strategy_model_id",
-                    "review_model_id",
-                    "reviewer_model_id",
-                    "autonomous_mode",
-                    "rounds",
-                    "model_workflow",
-                    "workflow",
-                    "research_domain",
-                    "research_domain_id",
-                    "research_scope",
-                    "research_area",
-                    "candidates_per_generation",
-                    "candidates_per_round",
-                    "variants_per_round",
-                    "max_candidates",
-                    "optimization_protocol",
-                    "optimization_schedule",
-                    "search_guard_policy",
-                    "require_model_contract_preflight",
-                    "candidate_concurrency",
-                    "sample_concurrency",
-                    "sample_agent_batch_size",
-                    "execution_protocol",
-                )
-            ):
-                metadata = dict(raw.get("metadata", {}))
-                if body.get("idempotency_key"):
-                    metadata["idempotency_key"] = str(body["idempotency_key"])
-                if body.get("episode_id"):
-                    metadata["episode_id"] = str(body["episode_id"])
-                strategy_model_id = body.get("strategy_model_id")
-                review_model_id = body.get(
-                    "review_model_id",
-                    body.get("reviewer_model_id"),
-                )
-                if strategy_model_id is not None:
-                    metadata["strategy_model_id"] = str(strategy_model_id)
-                    metadata.setdefault("policy_model_id", str(strategy_model_id))
-                if review_model_id is not None:
-                    metadata["review_model_id"] = str(review_model_id)
-                    metadata.setdefault("judge_model_id", str(review_model_id))
-                if "autonomous_mode" in body:
-                    metadata["autonomous_mode"] = _request_boolean(
-                        body["autonomous_mode"], "autonomous_mode"
-                    )
-                if "execution_protocol" in body:
-                    metadata["execution_protocol"] = str(body["execution_protocol"])
-                if "optimization_protocol" in body:
-                    protocol = str(body["optimization_protocol"])
-                    if protocol not in ADAPTIVE_PROTOCOLS:
-                        raise ValueError(
-                            f"optimization_protocol must be {OPTIMIZATION_PROTOCOL}"
-                        )
-                    metadata["optimization_protocol"] = protocol
-                if "search_guard_policy" in body:
-                    metadata["search_guard_policy"] = body["search_guard_policy"]
-                if "require_model_contract_preflight" in body:
-                    metadata["require_model_contract_preflight"] = _request_boolean(body["require_model_contract_preflight"], "require_model_contract_preflight")
-                if "optimization_schedule" in body:
-                    metadata["optimization_schedule"] = (
-                        OptimizationSchedule.from_dict(
-                            body["optimization_schedule"]
-                        ).to_dict()
-                    )
-                if "model_workflow" in body or "workflow" in body:
-                    metadata["model_workflow"] = str(
-                        body.get("model_workflow", body.get("workflow"))
-                    ).strip()
-                if any(key in body for key in ("research_domain", "research_domain_id", "research_scope", "research_area")):
-                    metadata["research_domain"] = str(
-                        body.get(
-                            "research_domain",
-                            body.get(
-                                "research_domain_id",
-                                body.get("research_scope", body.get("research_area")),
-                            ),
-                        )
-                    ).strip()
-                if "rounds" in body:
-                    metadata["requested_rounds"] = _request_integer(
-                        body["rounds"], "rounds", minimum=1
-                    )
-                if "sample_concurrency" in body:
-                    metadata["sample_concurrency"] = validate_sample_concurrency(
-                        body["sample_concurrency"]
-                    )
-                # Older/plugin-generated requests may include the optional
-                # field as JSON null.  Treat null exactly like omission; real
-                # autonomous runs receive the frozen default during binding.
-                if body.get("candidate_concurrency") is not None:
-                    candidate_concurrency = _request_integer(
-                        body["candidate_concurrency"],
-                        "candidate_concurrency",
-                        minimum=1,
-                    )
-                    if candidate_concurrency > _MAX_REAL_CANDIDATE_CONCURRENCY:
-                        raise ValueError(
-                            "candidate_concurrency must be between 1 and "
-                            f"{_MAX_REAL_CANDIDATE_CONCURRENCY}"
-                        )
-                    metadata["candidate_concurrency"] = candidate_concurrency
-                if "sample_agent_batch_size" in body:
-                    sample_agent_batch_size = _request_integer(
-                        body["sample_agent_batch_size"],
-                        "sample_agent_batch_size",
-                        minimum=1,
-                    )
-                    metadata["sample_agent_batch_size"] = sample_agent_batch_size
-                raw["metadata"] = metadata
-            raw_dataset = raw.get("visible_datasets")
-            supplied_dataset = body.get(
-                "dataset",
-                body.get(
-                    "dataset_id",
-                    raw.get("dataset", raw.get("dataset_id")),
-                ),
-            )
-            if raw_dataset and supplied_dataset is not None:
-                raw_dataset_id = self._single_dataset_id(raw_dataset)
-                supplied_dataset_id = self._single_dataset_id(supplied_dataset)
-                if raw_dataset_id != supplied_dataset_id:
-                    raise ValueError(
-                        "task_manifest.visible_datasets 与 dataset_id 不一致"
-                    )
-            if not raw_dataset:
-                if supplied_dataset is not None:
-                    raw["visible_datasets"] = [
-                        self._single_dataset_id(supplied_dataset)
-                    ]
-                else:
-                    domain = raw.get("domain_pack", raw.get("domain"))
-                    if domain is None:
-                        raise ValueError(
-                            "dataset_id（或 domain_pack_id/domain）至少需要提供一项"
-                        )
-                    raw["visible_datasets"] = [
-                        self._default_dataset_for_domain(str(domain))
-                    ]
-            else:
-                raw["visible_datasets"] = [self._single_dataset_id(raw_dataset)]
-            # Dataset aliases are request conveniences, not TaskManifest
-            # fields; keep the immutable manifest schema canonical.
-            raw.pop("dataset", None)
-            raw.pop("dataset_id", None)
-            raw.pop("domain_pack_id", None)
-            raw.pop("domain_id", None)
-            inferred_domain = self._domain_pack_for_dataset(
-                raw["visible_datasets"]
-            )
-            supplied_domain = raw.get("domain_pack", raw.get("domain"))
-            if supplied_domain is None:
-                raw["domain_pack"] = inferred_domain
-            else:
-                self._validate_dataset_domain(
-                    str(supplied_domain), inferred_domain, raw["visible_datasets"]
-                )
-                raw["domain_pack"] = self._canonical_domain_pack(
-                    str(supplied_domain)
-                )
-            raw.pop("domain", None)
-            if "rounds" in body:
-                rounds = _request_integer(body["rounds"], "rounds", minimum=1)
-                budget = raw.get("budget", 1)
-                if isinstance(budget, dict):
-                    budget = dict(budget)
-                    budget["max_generations"] = rounds
-                else:
-                    budget = {"max_generations": rounds}
-                raw["budget"] = budget
-            if isinstance(raw.get("budget"), dict):
-                budget = dict(raw["budget"])
-                compact_candidates = body.get(
-                    "candidates_per_generation",
-                    body.get("candidates_per_round", body.get("variants_per_round")),
-                )
-                if compact_candidates is not None:
-                    budget["candidates_per_generation"] = _request_integer(
-                        compact_candidates, "candidates_per_generation", minimum=1
-                    )
-                if body.get("max_candidates") is not None:
-                    budget["max_candidates"] = _request_integer(
-                        body["max_candidates"], "max_candidates", minimum=1
-                    )
-                raw["budget"] = budget
-            seed_policy = str(raw.get("seed_policy", "fixed"))
-            if "seed" not in raw and seed_policy == "generated_and_recorded":
-                raw["seed"] = _derived_seed(
-                    body.get("idempotency_key") or {"task_manifest": raw}
-                )
-            return self._bind_runtime_task(
-                TaskManifest.from_dict(raw),
-                strict_remote_plan=strict_remote_plan,
-                defer_remote_plan=defer_remote_plan,
-            )
 
-        domain_pack = body.get(
-            "domain_pack",
-            body.get(
-                "domain_pack_id",
-                body.get(
-                    "domain",
-                    body.get("domain_id", body.get("research_domain_id")),
-                ),
-            ),
-        )
-        dataset = body.get("dataset", body.get("dataset_id"))
-        if domain_pack is None and dataset is None:
-            raise ValueError(
-                "dataset_id（或 domain_pack_id/domain）至少需要提供一项"
-            )
-        if dataset is None:
-            dataset = self._default_dataset_for_domain(str(domain_pack))
-        inferred_domain = self._domain_pack_for_dataset(dataset)
-        if domain_pack is None:
-            domain_pack = inferred_domain
-        else:
-            self._validate_dataset_domain(
-                str(domain_pack), inferred_domain, dataset
-            )
-            domain_pack = self._canonical_domain_pack(str(domain_pack))
-        datasets = tuple(dataset) if isinstance(dataset, (list, tuple)) else (str(dataset),)
-        rounds_value = body.get(
-            "rounds",
-            body.get(
-                "generations",
-                body.get("max_rounds", body.get("max_generations", body.get("num_rounds"))),
-            ),
-        )
-        if rounds_value is not None:
-            rounds = _request_integer(rounds_value, "rounds", minimum=1)
-        else:
-            rounds = None
-        budget_value = body.get("budget")
-        if budget_value is None:
-            budget_value = {"max_generations": rounds} if rounds is not None else 3
-        if isinstance(budget_value, dict):
-            budget = dict(budget_value)
-        else:
-            budget = {"max_candidates": _request_integer(budget_value, "budget", minimum=1)}
-        if rounds is not None:
-            budget["max_generations"] = rounds
-        candidates_value = body.get(
-            "candidates_per_generation",
-            body.get("candidates_per_round", body.get("variants_per_round")),
-        )
-        if candidates_value is not None:
-            budget["candidates_per_generation"] = _request_integer(
-                candidates_value,
-                "candidates_per_generation",
-                minimum=1,
-            )
-        if body.get("max_candidates") is not None:
-            budget["max_candidates"] = _request_integer(
-                body["max_candidates"], "max_candidates", minimum=1
-            )
-        # ``slot`` is a UI slot name in the plugin.  Numeric slots are also a
-        # convenient candidate budget for a local demo.
-        slot = body.get("slot")
-        if isinstance(slot, int) and not isinstance(slot, bool):
-            budget["max_candidates"] = slot
-        strategy_model_id = body.get("strategy_model_id")
-        # Keep canonical role fields separate from legacy policy/judge aliases
-        # while deciding which workflow was requested.  A legacy request that
-        # only names ``judge_model_id`` must remain on the compatibility path.
-        review_model_id = body.get(
-            "review_model_id", body.get("reviewer_model_id")
-        )
-        explicit_autonomous_mode = _request_boolean(
-            body.get("autonomous_mode", False), "autonomous_mode"
-        )
-        role_model_requested = (
-            strategy_model_id is not None or review_model_id is not None
-        )
-        autonomous_requested = explicit_autonomous_mode or role_model_requested or bool(
-            str(body.get("requested_mode", "")).casefold()
-            in {"autonomous", "self_evolution", "model_driven", "自主进化"}
-        )
-        explicit_budget_controls = any(
-            body.get(name) is not None
-            for name in (
-                "budget",
-                "rounds",
-                "generations",
-                "max_rounds",
-                "max_generations",
-                "num_rounds",
-                "candidates_per_generation",
-                "candidates_per_round",
-                "variants_per_round",
-                "max_candidates",
-            )
-        ) or (isinstance(slot, int) and not isinstance(slot, bool))
-        autonomous_default_budget = autonomous_requested and not explicit_budget_controls
-        if autonomous_default_budget:
-            budget = {
-                "max_generations": PARAMETER_RULES["rounds"]["default"],
-                "candidates_per_generation": PARAMETER_RULES["candidates_per_generation"]["default"],
-                "max_candidates": PARAMETER_RULES["max_candidates"]["default"],
-            }
-        if native_protocol and candidates_value is None:
-            budget.setdefault("candidates_per_generation", 4)
-        if autonomous_requested and strategy_model_id is None:
-            # ``policy_model_id`` is retained as a migration alias, but a new
-            # request is expected to name it as the strategy model.
-            strategy_model_id = body.get("policy_model_id")
-        if autonomous_requested and review_model_id is None:
-            review_model_id = body.get("judge_model_id")
-        if autonomous_requested and strategy_model_id is None:
-            raise ValueError("自主进化必须同时提供 strategy_model_id（策略模型 API）")
-        if autonomous_requested and review_model_id is None:
-            raise ValueError("自主进化必须同时提供 review_model_id（独立评审模型 API）")
-        # In the compact contract the role-specific names are canonical.  Keep
-        # the older policy/judge aliases only as fallbacks so a request that
-        # carries both generations cannot bind the UI selection to one model
-        # while executing another.
-        legacy_policy_model_id = body.get("policy_model_id")
-        legacy_judge_model_id = body.get("judge_model_id")
-        canonical_policy_model_id = (
-            strategy_model_id if autonomous_requested else legacy_policy_model_id
-        )
-        canonical_judge_model_id = (
-            review_model_id if autonomous_requested else legacy_judge_model_id
-        )
-        metadata = {
-            "slot": slot,
-            "requested_mode": body.get("requested_mode", "evolution"),
-            "idempotency_key": body.get("idempotency_key"),
-            "strategy_id": body.get(
-                "strategy_id",
-                "autonomous_model@1" if autonomous_requested else "parameter_sweep@1",
-            ),
-            "prediction_selection_policy": body.get("prediction_selection_policy"),
-            **({"targeted_search_policy": body["targeted_search_policy"]} if body.get("targeted_search_policy") else {}),
-            **({CANDIDATE_NOVELTY_POLICY_KEY: body[CANDIDATE_NOVELTY_POLICY_KEY]}
-               if CANDIDATE_NOVELTY_POLICY_KEY in body else {}),
-            "prediction_model_id": body.get("prediction_model_id"),
-            "evaluator_id": body.get("evaluator_id"),
-            "seed_genome_template_id": body.get("seed_genome_template_id"),
-            "policy_model_id": (
-                canonical_policy_model_id
-                if canonical_policy_model_id is not None
-                else HOST_PARAMETER_GENERATOR_ID
-            ),
-            "judge_model_id": (
-                canonical_judge_model_id
-                if canonical_judge_model_id is not None
-                else RULE_JUDGE_ID
-            ),
-            "strategy_model_id": strategy_model_id,
-            "review_model_id": review_model_id,
-            "autonomous_mode": autonomous_requested,
-            "model_selection_policy": (
-                "model_research_and_runtime_compile@1"
-                if autonomous_requested
-                else None
-            ),
-            "model_workflow": body.get(
-                "model_workflow",
-                body.get(
-                    "workflow",
-                    "research_compile_evolve@1"
-                    if autonomous_requested
-                    else "research_compile_evolve@1",
-                ),
-            ),
-            "research_domain": body.get(
-                "research_domain",
-                body.get(
-                    "research_domain_id",
-                    body.get("research_scope", body.get("research_area", domain_pack)),
-                ),
-            ),
-            "requested_rounds": rounds,
-            "budget_profile": (
-                "autonomous_default_5x4"
-                if autonomous_default_budget
-                else "request_defined_or_legacy_default"
-            ),
-            "knowledge_online_enabled": _request_boolean(
-                body.get("knowledge_online_enabled", autonomous_requested),
-                "knowledge_online_enabled",
-            ),
-            "episode_id": (
-                str(body.get("episode_id")).strip()
-                if body.get("episode_id")
-                else None
-            ),
-            "sample_concurrency": body.get("sample_concurrency"),
-            "candidate_concurrency": body.get("candidate_concurrency"),
-            "sample_agent_batch_size": body.get("sample_agent_batch_size"),
-            "execution_protocol": body.get("execution_protocol"),
-            "optimization_protocol": body.get("optimization_protocol"),
-            "optimization_schedule": body.get("optimization_schedule"),
-            "search_guard_policy": body.get("search_guard_policy"),
-            "require_model_contract_preflight": (_request_boolean(body["require_model_contract_preflight"], "require_model_contract_preflight") if "require_model_contract_preflight" in body else None),
-        }
-        metadata = {key: value for key, value in metadata.items() if value is not None}
-        seed_policy = str(body.get("seed_policy", "fixed"))
-        if "seed" in body:
-            seed = _request_integer(body["seed"], "seed")
-        elif seed_policy == "generated_and_recorded":
-            seed = _derived_seed(body.get("idempotency_key") or body)
-        else:
-            seed = 0
-        metadata["recorded_seed"] = seed
-        return self._bind_runtime_task(
-            TaskManifest(
-                task_id=str(
-                    body.get("task_id")
-                    or f"plugin:{body.get('idempotency_key') or uuid4()}"
-                ),
-                objective=str(
-                    body.get("objective")
-                    or f"evolution:{body.get('requested_mode', 'default')}"
-                ),
-                domain_pack=str(domain_pack),
-                visible_datasets=datasets,
-                budget=budget,
-                seed=seed,
-                seed_policy=seed_policy,
-                policy_version=str(body.get("policy_version", "policy@1")),
-                metadata=metadata,
-            ),
-            strict_remote_plan=strict_remote_plan,
-            defer_remote_plan=defer_remote_plan,
-        )
 
-    @staticmethod
-    def _single_dataset_id(value: Any) -> str:
-        if isinstance(value, (list, tuple)):
-            if len(value) != 1:
-                raise ValueError("本地运行必须且只能选择一个 dataset_id")
-            value = value[0]
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError("dataset_id 必须是非空字符串")
-        return value.strip()
 
-    @staticmethod
-    def _canonical_domain_pack(value: str) -> str:
-        normalized = value.strip().casefold().replace("_", "-")
-        if normalized in {
-            "crop-soil-water",
-            "crop-soil-water@toy",
-            "toy",
-        }:
-            return "crop_soil_water"
-        if normalized == "greenhouse" or normalized.startswith("greenhouse-"):
-            return "greenhouse_environment@1"
-        return value.strip()
-
-    def _domain_pack_for_dataset(self, dataset: Any) -> str:
-        """Derive the executable domain pack from one registered dataset."""
-
-        dataset_id = self._single_dataset_id(dataset)
-        if dataset_id in {TOY_DATASET_ID, "toy-dataset@1"}:
-            return "crop_soil_water"
-        try:
-            descriptor = self.server.datasets.describe(dataset_id)["descriptor"]
-        except KeyError:
-            raise ValueError(
-                f"未知数据集：{dataset_id}；当前本地运行支持 {TOY_DATASET_ID}"
-            ) from None
-        domain_id = str(descriptor.get("domain_id", "")).strip()
-        adapter_id = str(descriptor.get("adapter_id", "")).strip()
-        canonical = self._canonical_domain_pack(domain_id)
-        if adapter_id == "toy_crop_soil_water" or canonical == "crop_soil_water":
-            return "crop_soil_water"
-        if adapter_id.startswith("greenhouse") or canonical == "greenhouse_environment@1":
-            return "greenhouse_environment@1"
-        raise ValueError(
-            f"数据集尚未映射到可执行领域模型包：{dataset_id}（{domain_id or '未知领域'}）"
-        )
-
-    def _validate_dataset_domain(
-        self,
-        supplied_domain: str,
-        inferred_domain: str,
-        dataset: Any,
-    ) -> None:
-        canonical = self._canonical_domain_pack(supplied_domain)
-        if canonical != inferred_domain:
-            dataset_id = self._single_dataset_id(dataset)
-            raise ValueError(
-                f"领域与数据集不一致：{dataset_id} 属于 {inferred_domain}，"
-                f"请求提供了 {supplied_domain}"
-            )
-
-    def _default_dataset_for_domain(self, domain: str) -> str:
-        """Choose the first ready dataset when autonomous mode omits one."""
-
-        normalized = domain.casefold().replace("_", "-")
-        if "greenhouse" not in normalized and "温室" not in normalized:
-            return TOY_DATASET_ID
-        catalog = self.server.datasets.catalog().get("datasets", [])
-        candidates = [
-            item
-            for item in catalog
-            if isinstance(item, dict)
-            and item.get("runnable")
-            and isinstance(item.get("readiness"), dict)
-            and item["readiness"].get("ready")
-            and (
-                "greenhouse" in str(item.get("domain_id", "")).casefold()
-                or "greenhouse" in str(item.get("dataset_id", "")).casefold()
-            )
-        ]
-        if candidates:
-            return str(sorted(candidates, key=lambda item: str(item.get("dataset_id")))[0]["dataset_id"])
-        raise ValueError("当前领域没有可运行的温室数据集，请先准备数据集")
 
     def _bind_runtime_task(
         self,
@@ -2494,6 +1828,10 @@ class EvolutionRequestHandler(
         strict_remote_plan: bool = False,
         defer_remote_plan: bool = False,
     ) -> TaskManifest:
+        if manifest.metadata.get("execution_protocol") != DSH_NATIVE_EXECUTION_PROTOCOL or manifest.metadata.get("optimization_protocol") != "joint_plugin_epoch@2":
+            raise ValueError("only native joint_plugin_epoch@2 manifests are supported")
+        if manifest.domain_pack != "greenhouse_environment@1":
+            raise ValueError("only the greenhouse_environment@1 domain is supported")
         if len(manifest.visible_datasets) != 1:
             raise ValueError("本地运行必须且只能冻结一个数据集")
         dataset_id = manifest.visible_datasets[0]
@@ -2502,89 +1840,63 @@ class EvolutionRequestHandler(
             == DSH_NATIVE_EXECUTION_PROTOCOL
         )
         selection_view = None
-        normalized_domain_pack = manifest.domain_pack.casefold().replace("_", "-")
-        toy_domain = normalized_domain_pack in {
-            "crop-soil-water@toy",
-            "crop-soil-water",
-        }
-        expected_partition = "validation" if toy_domain else "training_feedback"
+        expected_partition = "training_feedback"
         requested_partition = manifest.metadata.get("evaluation_partition", expected_partition)
         if requested_partition != expected_partition:
             raise ValueError(
                 f"运行只允许 {expected_partition} 分区；任务清单请求了：{requested_partition}"
             )
-        if toy_domain:
-            bound = bind_toy_dataset(manifest, required=True)
-            dataset_id = TOY_DATASET_ID
-            metadata = dict(bound.metadata)
-            series = self.server.datasets.series(dataset_id, metadata.get("episode_id"))
-            supplied_split_digest = metadata.get("split_manifest_digest")
-            if (
-                supplied_split_digest is not None
-                and supplied_split_digest != series.split_manifest_digest_sha256
-            ):
-                raise ValueError("任务清单中的时间分区校验值与当前快照不一致")
-            metadata["domain"] = "toy"
-            metadata["dataset_digest"] = series.digest
-            metadata["split_manifest_digest"] = series.split_manifest_digest_sha256
-            metadata["episode_id"] = series.episode_id
-            metadata["dataset_display_name"] = "作物—土壤—水分合成演示序列"
-            metadata["scientific_scope"] = "prediction_demo_non_causal"
-            metadata["evaluation_partition"] = "validation"
-            manifest = bound
-        else:
-            description = self.server.datasets.describe(dataset_id)
-            descriptor = description["descriptor"]
-            readiness = description["readiness"]
-            if not descriptor["runnable"] or not readiness["ready"]:
-                raise ValueError(f"数据集当前不可运行：{dataset_id}")
-            if "greenhouse" not in manifest.domain_pack.casefold():
-                raise ValueError("真实温室数据集必须绑定 greenhouse_environment@1 领域模型包")
-            metadata = dict(manifest.metadata)
-            adapter = dataset_adapter(dataset_id)
-            contract = adapter.contract()
-            supplied_contract = metadata.get("dataset_task")
-            if supplied_contract is not None and supplied_contract != contract:
-                raise ValueError("任务清单中的数据集任务与服务端适配器不一致")
-            if metadata.get("dataset_task_digest", contract["contract_digest"]) != contract["contract_digest"]:
-                raise ValueError("dataset_task_digest must match the dataset adapter")
-            metadata["dataset_task"] = contract
-            metadata["dataset_task_digest"] = contract["contract_digest"]
-            for key, value in (("objective_targets", list(adapter.target_names)),
-                               ("objective_horizons", list(adapter.horizons_hours))):
-                if key in metadata and metadata[key] != value:
-                    raise ValueError(f"{key} must match the dataset adapter")
-                metadata[key] = value
-            requested_episode = metadata.get("episode_id")
-            series = self.server.datasets.series(
-                dataset_id,
-                str(requested_episode) if requested_episode is not None else None,
-            )
-            existing_digest = metadata.get("dataset_digest")
-            if existing_digest is not None and existing_digest != series.digest:
-                raise ValueError("任务清单中的数据集校验值与当前快照不一致")
-            existing_split_digest = metadata.get("split_manifest_digest")
-            if (
-                existing_split_digest is not None
-                and existing_split_digest != series.split_manifest_digest_sha256
-            ):
-                raise ValueError("任务清单中的时间分区校验值与当前快照不一致")
-            metadata["domain"] = "greenhouse"
-            metadata["dataset_digest"] = series.digest
-            metadata["split_manifest_digest"] = series.split_manifest_digest_sha256
-            metadata["episode_id"] = series.episode_id
-            metadata["dataset_display_name"] = descriptor["display_name_zh"]
-            metadata["scientific_scope"] = "historical_replay_prediction_non_causal"
-            metadata["evaluation_partition"] = "training_feedback"
-            if native_protocol:
-                selection_view = self.server.datasets.selection_view(
-                    dataset_id,
-                    series.episode_id,
-                    expected_dataset_digest=series.digest,
-                    expected_split_manifest_digest=series.split_manifest_digest_sha256,
-                )
-                metadata["data_protocol_digest"] = selection_view.data_protocol_digest
-                metadata["selection_view_digest"] = selection_view.selection_view_digest
+        description = self.server.datasets.describe(dataset_id)
+        descriptor = description["descriptor"]
+        readiness = description["readiness"]
+        if not descriptor["runnable"] or not readiness["ready"]:
+            raise ValueError(f"数据集当前不可运行：{dataset_id}")
+        if "greenhouse" not in manifest.domain_pack.casefold():
+            raise ValueError("真实温室数据集必须绑定 greenhouse_environment@1 领域模型包")
+        metadata = dict(manifest.metadata)
+        adapter = dataset_adapter(dataset_id)
+        contract = adapter.contract()
+        supplied_contract = metadata.get("dataset_task")
+        if supplied_contract is not None and supplied_contract != contract:
+            raise ValueError("任务清单中的数据集任务与服务端适配器不一致")
+        if metadata.get("dataset_task_digest", contract["contract_digest"]) != contract["contract_digest"]:
+            raise ValueError("dataset_task_digest must match the dataset adapter")
+        metadata["dataset_task"] = contract
+        metadata["dataset_task_digest"] = contract["contract_digest"]
+        for key, value in (("objective_targets", list(adapter.target_names)),
+                           ("objective_horizons", list(adapter.horizons_hours))):
+            if key in metadata and metadata[key] != value:
+                raise ValueError(f"{key} must match the dataset adapter")
+            metadata[key] = value
+        requested_episode = metadata.get("episode_id")
+        series = self.server.datasets.selection_view(
+            dataset_id,
+            str(requested_episode) if requested_episode is not None else None,
+        )
+        existing_digest = metadata.get("dataset_digest")
+        if existing_digest is not None and existing_digest != series.digest:
+            raise ValueError("任务清单中的数据集校验值与当前快照不一致")
+        existing_split_digest = metadata.get("split_manifest_digest")
+        if (
+            existing_split_digest is not None
+            and existing_split_digest != series.split_manifest_digest_sha256
+        ):
+            raise ValueError("任务清单中的时间分区校验值与当前快照不一致")
+        metadata["domain"] = "greenhouse"
+        metadata["dataset_digest"] = series.digest
+        metadata["split_manifest_digest"] = series.split_manifest_digest_sha256
+        metadata["episode_id"] = series.episode_id
+        metadata["dataset_display_name"] = descriptor["display_name_zh"]
+        metadata["scientific_scope"] = "historical_replay_prediction_non_causal"
+        metadata["evaluation_partition"] = "training_feedback"
+        selection_view = self.server.datasets.selection_view(
+            dataset_id,
+            series.episode_id,
+            expected_dataset_digest=series.digest,
+            expected_split_manifest_digest=series.split_manifest_digest_sha256,
+        )
+        metadata["data_protocol_digest"] = selection_view.data_protocol_digest
+        metadata["selection_view_digest"] = selection_view.selection_view_digest
 
         autonomous_mode = _request_boolean(
             metadata.get("autonomous_mode", False), "autonomous_mode"
@@ -2599,39 +1911,31 @@ class EvolutionRequestHandler(
         metadata.setdefault("research_domain", manifest.domain_pack)
         strategy_id = str(
             metadata.get("strategy_id")
-            or ("autonomous_model@1" if autonomous_mode else "parameter_sweep@1")
+            or ("autonomous_model@1")
         )
         novelty_policy = metadata.get(CANDIDATE_NOVELTY_POLICY_KEY)
         from ..evolution.program_preflight import POLICY_KEY as executable_key, POLICY as executable_policy, enabled as executable_enabled
         executable_enabled(metadata)
-        if native_protocol and autonomous_mode and dataset_id != TOY_DATASET_ID:
-            metadata[executable_key] = executable_policy
-        elif metadata.get(executable_key) is not None:
-            raise ValueError("candidate executability preflight requires a native autonomous greenhouse run")
+        metadata[executable_key] = executable_policy
         if novelty_policy not in (None, CANDIDATE_NOVELTY_POLICY):
             raise ValueError("unsupported candidate_novelty_policy")
-        if native_protocol and autonomous_mode and dataset_id != TOY_DATASET_ID:
-            # This binder only handles creation. Existing manifests are replayed
-            # verbatim, so adding a default never changes a frozen experiment.
-            metadata[CANDIDATE_NOVELTY_POLICY_KEY] = CANDIDATE_NOVELTY_POLICY
-        elif novelty_policy is not None:
-            raise ValueError("candidate novelty requires a native autonomous greenhouse run")
+        metadata[CANDIDATE_NOVELTY_POLICY_KEY] = CANDIDATE_NOVELTY_POLICY
         targeted_policy = metadata.get("targeted_search_policy")
         if targeted_policy not in (None, TARGETED_SEARCH_POLICY):
             raise ValueError("unsupported targeted_search_policy")
         if targeted_policy:
-            if not native_protocol or not autonomous_mode or dataset_id == TOY_DATASET_ID:
+            if not native_protocol or not autonomous_mode or dataset_id == "toy-crop-water@1":
                 raise ValueError("targeted search requires a native autonomous greenhouse run")
             metadata["behavior_diagnostics_policy"] = CONTRIBUTION_POLICY
         selection_policy = metadata.get("prediction_selection_policy")
         if selection_policy not in (None, RUNTIME_PREDICTION_POLICY):
             raise ValueError("unsupported prediction_selection_policy")
         runtime_choice = selection_policy == RUNTIME_PREDICTION_POLICY or (
-            native_protocol and autonomous_mode and dataset_id != TOY_DATASET_ID and not metadata.get("prediction_model_id")
+            native_protocol and autonomous_mode and True and not metadata.get("prediction_model_id")
             and not metadata.get("evaluator_id")
         )
         if runtime_choice:
-            if not native_protocol or not autonomous_mode or dataset_id == TOY_DATASET_ID:
+            if not native_protocol or not autonomous_mode or dataset_id == "toy-crop-water@1":
                 raise ValueError("runtime predictor selection requires a native autonomous greenhouse run")
             if any(metadata.get(key) for key in ("prediction_model_id", "evaluator_id", "seed_genome_template_id")):
                 raise ValueError("runtime predictor selection does not accept a preselected predictor, evaluator or seed template")
@@ -2646,14 +1950,12 @@ class EvolutionRequestHandler(
         evaluator_id = str(
             metadata.get("evaluator_id")
             or (CELLWISE_EVALUATOR_ID if prediction_model_id == "greenhouse-baseline-aligned-ridge@2"
-                else GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID
-                if prediction_model_id == "greenhouse-baseline-aligned-ridge@1"
                 else self.server.evaluators.default_evaluator(dataset_id))
         )
         if (
             native_protocol
-            and dataset_id != TOY_DATASET_ID
-            and evaluator_id not in {GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID, GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID, RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID, GREENHOUSE_RECIPE_EVALUATOR_ID}
+            and True
+            and evaluator_id not in {RUNTIME_EVALUATOR_ID, CELLWISE_EVALUATOR_ID}
         ):
             raise ValueError(
                 "DSH-native greenhouse runs require "
@@ -2663,30 +1965,18 @@ class EvolutionRequestHandler(
             raise ValueError("targeted search requires the versioned cellwise evaluator")
         strategy_model_id = str(
             metadata.get("strategy_model_id")
-            or metadata.get("policy_model_id")
-            or HOST_PARAMETER_GENERATOR_ID
+            or ""
         )
-        policy_model_id = str(
-            # Autonomous runs use the canonical strategy role as the actual
-            # proposal binding.  ``policy_model_id`` remains a read/restore
-            # alias for legacy manifests, but must not override a new role
-            # selection when both fields are present.
-            strategy_model_id
-            if autonomous_mode
-            else metadata.get("policy_model_id")
-            or HOST_PARAMETER_GENERATOR_ID
-        )
+        policy_model_id = strategy_model_id
         judge_model_id = str(
             metadata.get("review_model_id")
-            or metadata.get("judge_model_id")
-            or RULE_JUDGE_ID
+            or ""
         )
-        if autonomous_mode:
-            strategy_id = "autonomous_model@1"
-            if strategy_model_id == HOST_PARAMETER_GENERATOR_ID:
-                raise ValueError("自主进化必须选择已接入的策略模型")
-            if judge_model_id == RULE_JUDGE_ID:
-                raise ValueError("自主进化必须选择已接入的独立评审模型")
+        strategy_id = "autonomous_model@1"
+        if not strategy_model_id:
+            raise ValueError("自主进化必须选择已接入的策略模型")
+        if not judge_model_id:
+            raise ValueError("自主进化必须选择已接入的独立评审模型")
         if strategy_id not in StrategyRouterDSHAdapter.SUPPORTED_STRATEGIES:
             raise ValueError(f"未知进化策略：{strategy_id}")
         self.server.evaluators.validate_binding(
@@ -2698,10 +1988,9 @@ class EvolutionRequestHandler(
         )
         objective_profile = self.server.evaluators.objective_profile(evaluator_id, dataset_id)
         fitness_profile = self.server.evaluators.fitness_profile(evaluator_id, dataset_id)
-        if native_protocol and dataset_id != TOY_DATASET_ID:
-            adapter = dataset_adapter(dataset_id)
-            if fitness_profile.expected_targets != adapter.target_names or fitness_profile.expected_horizons != adapter.horizons_hours:
-                raise ValueError("native evaluator grid must match the dataset adapter")
+        adapter = dataset_adapter(dataset_id)
+        if fitness_profile.expected_targets != adapter.target_names or fitness_profile.expected_horizons != adapter.horizons_hours:
+            raise ValueError("native evaluator grid must match the dataset adapter")
         fitness_profile_data = fitness_profile.to_dict()
         supplied_fitness_profile = metadata.get("fitness_profile")
         if (
@@ -2726,137 +2015,98 @@ class EvolutionRequestHandler(
             supplied = metadata.get(field)
             if supplied is not None and supplied != computed:
                 raise ValueError(f"任务清单中的{label}校验值与服务端实现不一致")
-        remote_models = (
-            {}
-            if native_protocol
-            else {
-                str(item["model_id"]): item
-                for item in self.server.model_gateway.catalog()
+        if not policy_model_id or not judge_model_id:
+            raise ValueError("DSH-native roles require frozen strategy and review routes")
+        capabilities = getattr(self, "_dsh_native_capabilities", None)
+        if not isinstance(capabilities, dict):
+            raise DshNativeRuntimeUnavailableError()
+        preset_catalog = _dsh_native_stable_preset_catalog(capabilities)
+        preset_catalog_digest = digest(preset_catalog)
+        metadata["dsh_preset_ids"] = list(_DSH_NATIVE_PRESET_IDS)
+        metadata["dsh_preset_catalog_digest"] = preset_catalog_digest
+        metadata["dsh_runtime_capabilities_digest"] = digest(capabilities)
+        metadata["dsh_first_call_verified"] = False
+        metadata["dsh_live_agent_service_ready"] = True
+        policy_model_digest = digest(
+            {
+                "protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                "role": "strategy",
+                "model": policy_model_id,
+                "preset_catalog_digest": preset_catalog_digest,
             }
         )
-        if not native_protocol and policy_model_id != HOST_PARAMETER_GENERATOR_ID:
-            model = remote_models.get(policy_model_id)
-            if model is None or "propose" not in model.get("roles", []):
-                raise ValueError(f"候选生成模型不可用或缺少 propose 权限：{policy_model_id}")
-        if native_protocol:
-            if not policy_model_id or not judge_model_id:
-                raise ValueError("DSH-native roles require frozen strategy and review routes")
-        elif strategy_id in {"dsh_authenticated@1", "autonomous_model@1"}:
-            if policy_model_id == HOST_PARAMETER_GENERATOR_ID:
-                raise ValueError("DSH 模型策略必须选择已配置的候选生成模型")
-            policy_model = remote_models[policy_model_id]
-            if not policy_model.get("credential_configured"):
-                raise ValueError("所选 DSH 候选生成模型尚未配置认证凭据")
-            if not self._remote_model_execution_configured(policy_model):
-                raise ValueError("所选 DSH 候选生成模型的后端调用配置不可执行")
-        elif policy_model_id != HOST_PARAMETER_GENERATOR_ID:
-            raise ValueError("本地参数策略必须使用内置有界参数生成器")
-        if not native_protocol and judge_model_id != RULE_JUDGE_ID:
-            judge = remote_models.get(judge_model_id)
-            if judge is None or "judge" not in judge.get("roles", []):
-                raise ValueError(f"独立评审模型不可用或缺少 judge 权限：{judge_model_id}")
-            if not judge.get("credential_configured"):
-                raise ValueError("所选 DSH 独立评审模型尚未配置认证凭据")
-            if not self._remote_model_execution_configured(judge):
-                raise ValueError("所选 DSH 独立评审模型的后端调用配置不可执行")
-        if native_protocol:
-            capabilities = getattr(self, "_dsh_native_capabilities", None)
-            if not isinstance(capabilities, dict):
-                raise DshNativeRuntimeUnavailableError()
-            preset_catalog = _dsh_native_stable_preset_catalog(capabilities)
-            preset_catalog_digest = digest(preset_catalog)
-            metadata["dsh_preset_ids"] = list(_DSH_NATIVE_PRESET_IDS)
-            metadata["dsh_preset_catalog_digest"] = preset_catalog_digest
-            metadata["dsh_runtime_capabilities_digest"] = digest(capabilities)
-            metadata["dsh_first_call_verified"] = False
-            metadata["dsh_live_agent_service_ready"] = True
-            policy_model_digest = digest(
+        judge_model_digest = digest(
+            {
+                "protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
+                "role": "review",
+                "model": judge_model_id,
+                "preset_catalog_digest": preset_catalog_digest,
+            }
+        )
+        policy_binding_source = "dsh_native_frozen_route"
+        judge_binding_source = "dsh_native_frozen_route"
+        metadata.setdefault(
+            "dataset_snapshot_set_digest",
+            digest(
                 {
-                    "protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
-                    "role": "strategy",
-                    "model": policy_model_id,
+                    "dataset_id": dataset_id,
+                    "episode_id": metadata.get("episode_id"),
+                    "dataset_digest": metadata.get("dataset_digest"),
+                }
+            ),
+        )
+        metadata.setdefault(
+            "data_protocol_digest",
+            digest(
+                {
+                    "protocol": "toy-validation-compat@1",
+                    "dataset_digest": metadata.get("dataset_digest"),
+                    "split_manifest_digest": metadata.get("split_manifest_digest"),
+                }
+            ),
+        )
+        metadata.setdefault(
+            "stage_policy_digest",
+            digest({"policy": "dsh-native-search-reflect-evolution@2"}),
+        )
+        metadata.setdefault(
+            "security_kernel_digest",
+            digest(
+                {
+                    "policy": "dsh-standing-role-tools-fail-closed@1",
                     "preset_catalog_digest": preset_catalog_digest,
                 }
-            )
-            judge_model_digest = digest(
+            ),
+        )
+        metadata.setdefault(
+            "selection_reviewer_program_digest",
+            digest({"program": "selection-reviewer@1"}),
+        )
+        metadata["required_capability_digest"] = digest(capabilities)
+        metadata["resolved_policy_route_digest"] = policy_model_digest
+        metadata["resolved_review_route_digest"] = judge_model_digest
+        metadata["resolved_policy_route_config_digest"] = policy_model_digest
+        metadata["resolved_review_route_config_digest"] = judge_model_digest
+        metadata["preset_content_digest"] = preset_catalog_digest
+        metadata["standing_tool_surface_digest"] = digest(
+            [
                 {
-                    "protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
-                    "role": "review",
-                    "model": judge_model_id,
-                    "preset_catalog_digest": preset_catalog_digest,
+                    "preset_id": item.get("preset_id"),
+                    "tool_surface_verified": item.get("tool_surface_verified"),
                 }
-            )
-            policy_binding_source = "dsh_native_frozen_route"
-            judge_binding_source = "dsh_native_frozen_route"
-            metadata.setdefault(
-                "dataset_snapshot_set_digest",
-                digest(
-                    {
-                        "dataset_id": dataset_id,
-                        "episode_id": metadata.get("episode_id"),
-                        "dataset_digest": metadata.get("dataset_digest"),
-                    }
-                ),
-            )
-            metadata.setdefault(
-                "data_protocol_digest",
-                digest(
-                    {
-                        "protocol": "toy-validation-compat@1",
-                        "dataset_digest": metadata.get("dataset_digest"),
-                        "split_manifest_digest": metadata.get("split_manifest_digest"),
-                    }
-                ),
-            )
-            metadata.setdefault(
-                "stage_policy_digest",
-                digest({"policy": "dsh-native-search-reflect-evolution@2"}),
-            )
-            metadata.setdefault(
-                "security_kernel_digest",
-                digest(
-                    {
-                        "policy": "dsh-standing-role-tools-fail-closed@1",
-                        "preset_catalog_digest": preset_catalog_digest,
-                    }
-                ),
-            )
-            metadata.setdefault(
-                "selection_reviewer_program_digest",
-                digest({"program": "selection-reviewer@1"}),
-            )
-            metadata["required_capability_digest"] = digest(capabilities)
-            metadata["resolved_policy_route_digest"] = policy_model_digest
-            metadata["resolved_review_route_digest"] = judge_model_digest
-            metadata["resolved_policy_route_config_digest"] = policy_model_digest
-            metadata["resolved_review_route_config_digest"] = judge_model_digest
-            metadata["preset_content_digest"] = preset_catalog_digest
-            metadata["standing_tool_surface_digest"] = digest(
-                [
-                    {
-                        "preset_id": item.get("preset_id"),
-                        "tool_surface_verified": item.get("tool_surface_verified"),
-                    }
-                    for item in preset_catalog
-                ]
-            )
-            metadata.setdefault(
-                "evaluation_cohort_digest",
-                digest(
-                    {
-                        "dataset": metadata.get("dataset_digest"),
-                        "protocol": metadata.get("data_protocol_digest"),
-                        "stage": "model_selection",
-                    }
-                ),
-            )
-        else:
-            policy_model_digest, policy_binding_source = self._current_model_binding(
-                policy_model_id
-            )
-            judge_model_digest, judge_binding_source = self._current_model_binding(
-                judge_model_id
-            )
+                for item in preset_catalog
+            ]
+        )
+        metadata.setdefault(
+            "evaluation_cohort_digest",
+            digest(
+                {
+                    "dataset": metadata.get("dataset_digest"),
+                    "protocol": metadata.get("data_protocol_digest"),
+                    "stage": "model_selection",
+                }
+            ),
+        )
         for field, computed, label in (
             ("policy_model_digest", policy_model_digest, "候选生成模型"),
             ("judge_model_digest", judge_model_digest, "独立评审模型"),
@@ -2866,13 +2116,12 @@ class EvolutionRequestHandler(
                 raise ValueError(f"任务清单中的{label}校验值与服务端配置不一致")
         if prediction_model_id in ("greenhouse-baseline-aligned-ridge@1", "greenhouse-baseline-aligned-ridge@2"):
             metadata.setdefault("search_guard_policy", SEARCH_GUARD_POLICY)
-        if native_protocol:
-            from ..core.model_execution_policy import (
-                RESEARCH_EXECUTION_POLICY, RESEARCH_EXECUTION_POLICY_KEY,
-                research_execution_policy,
-            )
-            metadata.setdefault(RESEARCH_EXECUTION_POLICY_KEY, dict(RESEARCH_EXECUTION_POLICY))
-            research_execution_policy(metadata)
+        from ..core.model_execution_policy import (
+            RESEARCH_EXECUTION_POLICY, RESEARCH_EXECUTION_POLICY_KEY,
+            research_execution_policy,
+        )
+        metadata.setdefault(RESEARCH_EXECUTION_POLICY_KEY, dict(RESEARCH_EXECUTION_POLICY))
+        research_execution_policy(metadata)
         autonomous_plan: dict[str, Any] = {}
         evaluator_catalog = [
             dict(item)
@@ -2931,109 +2180,43 @@ class EvolutionRequestHandler(
                 "can_optimize_parameters": True,
                 "evaluation_rules_frozen": True,
             }
-        if autonomous_mode and not defer_remote_plan:
-            planning_metadata = {
-                **metadata,
-                "strategy_id": strategy_id,
-                "strategy_digest": strategy_digest,
-                "mutation_policy": mutation_policy_contract(metadata),
-                "local_edit_context_policy": LOCAL_EDIT_CONTEXT_POLICY,
-                "mutation_policy_digest": digest(mutation_policy_contract(metadata)),
-                "evaluator_id": evaluator_id,
-                "evaluator_digest": evaluator_digest,
-                "objective_profile": objective_profile,
-                "prediction_model_id": prediction_model_id,
-                "prediction_model_digest": prediction_model_digest,
-                "runtime_component_catalog": runtime_component_catalog,
-            }
-            planning_data = manifest.to_dict()
-            planning_data["visible_datasets"] = [dataset_id]
-            planning_data["metadata"] = planning_metadata
-            planning_manifest = TaskManifest.from_dict(planning_data)
-            autonomous_plan = self._autonomous_plan_for_task(
-                planning_manifest,
-                strategy_model_id,
-                strict_remote_plan=strict_remote_plan,
+        metadata["autonomous_plan_execution"] = "deferred_to_first_generation"
+        seed_template_id = metadata.get("seed_genome_template_id")
+        if seed_template_id is None:
+            seed_template_id = _DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR.get(
+                prediction_model_id
             )
-            selected_predictor = autonomous_plan.get("prediction_model")
-            selected_predictor_id = (
-                selected_predictor.get("id")
-                if isinstance(selected_predictor, dict)
-                else None
+        if not isinstance(seed_template_id, str) or not seed_template_id.strip():
+            raise ValueError(
+                "DSH-native prediction model has no registered seed genome template"
             )
-            if isinstance(selected_predictor_id, str) and selected_predictor_id:
-                try:
-                    self.server.evaluators.validate_binding(
-                        dataset_id, evaluator_id, selected_predictor_id
-                    )
-                except (TypeError, ValueError):
-                    autonomous_plan["prediction_model_adoption"] = {
-                        "status": "research_only",
-                        "requested_id": selected_predictor_id,
-                        "adopted_id": prediction_model_id,
-                        "reason": "模型提出的预测模型未在当前数据集评测注册表中登记",
-                    }
-                else:
-                    prediction_model_id = selected_predictor_id
-                    prediction_model_digest = (
-                        self.server.evaluators.predictor_configuration_digest(
-                            prediction_model_id
-                        )
-                    )
-                    autonomous_plan["prediction_model_adoption"] = {
-                        "status": "adopted",
-                        "requested_id": selected_predictor_id,
-                        "adopted_id": selected_predictor_id,
-                    }
-            else:
-                autonomous_plan.setdefault(
-                    "prediction_model_adoption",
-                    {
-                        "status": "host_default",
-                        "adopted_id": prediction_model_id,
-                    },
-                )
-        if autonomous_mode and defer_remote_plan:
-            metadata["autonomous_plan_execution"] = "deferred_to_first_generation"
-        if native_protocol:
-            seed_template_id = metadata.get("seed_genome_template_id")
-            if seed_template_id is None:
-                seed_template_id = _DSH_NATIVE_SEED_TEMPLATE_BY_PREDICTOR.get(
-                    prediction_model_id
-                )
-            if not isinstance(seed_template_id, str) or not seed_template_id.strip():
-                raise ValueError(
-                    "DSH-native prediction model has no registered seed genome template"
-                )
-            seed_template_id = seed_template_id.strip()
-            seed_template = current_program_registry().seed_template(
-                seed_template_id
+        seed_template_id = seed_template_id.strip()
+        seed_template = current_program_registry().seed_template(
+            seed_template_id
+        )
+        seed_predictor_id = str(
+            seed_template.to_dict()["scientific_program"]["predictor_ref"]["id"]
+        )
+        if seed_predictor_id != prediction_model_id:
+            raise ValueError(
+                "DSH-native seed genome predictor does not match the frozen "
+                "prediction_model_id"
             )
-            seed_predictor_id = str(
-                seed_template.to_dict()["scientific_program"]["predictor_ref"]["id"]
-            )
-            if seed_predictor_id != prediction_model_id:
-                raise ValueError(
-                    "DSH-native seed genome predictor does not match the frozen "
-                    "prediction_model_id"
-                )
-            metadata["seed_genome_template_id"] = seed_template_id
+        metadata["seed_genome_template_id"] = seed_template_id
         schedule: OptimizationSchedule | None = None
         requested_optimization_protocol = metadata.get("optimization_protocol")
         requested_schedule = metadata.get("optimization_schedule")
-        if native_protocol or requested_optimization_protocol is not None or requested_schedule is not None:
-            if requested_optimization_protocol not in (None, joint_policy.UNIFIED_PROTOCOL):
-                raise ValueError("New experiments require joint_plugin_epoch@2; legacy protocols are replay-only")
-            schedule = (OptimizationSchedule.for_new_run() if requested_schedule is None
-                        else OptimizationSchedule.from_dict(requested_schedule))
-            if not schedule.unified:
-                raise ValueError("New experiments require the unified joint schedule; legacy schedules are replay-only")
-            if requested_optimization_protocol is not None and requested_optimization_protocol != schedule.protocol:
-                raise ValueError("optimization_protocol differs from the frozen schedule")
-            if manifest.candidates_per_generation != 4:
-                raise ValueError(
-                    "joint_plugin_epoch@2 requires candidates_per_generation == 4"
-                )
+        if requested_optimization_protocol not in (None, joint_policy.UNIFIED_PROTOCOL):
+            raise ValueError("New experiments require joint_plugin_epoch@2; legacy protocols are replay-only")
+        schedule = (OptimizationSchedule.for_new_run() if requested_schedule is None
+                    else OptimizationSchedule.from_dict(requested_schedule))
+        pass
+        if requested_optimization_protocol is not None and requested_optimization_protocol != schedule.protocol:
+            raise ValueError("optimization_protocol differs from the frozen schedule")
+        if manifest.candidates_per_generation != 4:
+            raise ValueError(
+                "joint_plugin_epoch@2 requires candidates_per_generation == 4"
+            )
 
         sample_concurrency = metadata.get("sample_concurrency")
         candidate_concurrency = metadata.get("candidate_concurrency")
@@ -3041,11 +2224,10 @@ class EvolutionRequestHandler(
         selection_fitness_profile = self.server.evaluators.fitness_profile(
             evaluator_id, dataset_id
         )
-        if schedule is not None and (schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION or schedule.quick):
-            validate_run_parameter("rounds", manifest.max_generations)
-            validate_run_parameter("max_candidates", manifest.max_candidates)
-            validate_run_parameter("selection_holdout_origin_count", schedule.selection_holdout_origin_count,
-                                   profile=selection_fitness_profile)
+        validate_run_parameter("rounds", manifest.max_generations)
+        validate_run_parameter("max_candidates", manifest.max_candidates)
+        validate_run_parameter("selection_holdout_origin_count", schedule.selection_holdout_origin_count,
+                               profile=selection_fitness_profile)
         minimum_selection_origin_samples_per_update = (
             selection_fitness_profile.minimum_origins_for_schedule(schedule)
         )
@@ -3063,117 +2245,79 @@ class EvolutionRequestHandler(
         # historical 12 so its origin set, and therefore its score, is unmoved.
         origin_history_alignment = (
             COHORT_HISTORY_HOURS
-            if native_protocol and not toy_domain
-            else MAX_EXOGENOUS_RIDGE_HISTORY_STEPS
         )
         cohort_capacity_report = None
-        if schedule is not None:
-            if not toy_domain:
-                if selection_view is None:
-                    selection_view = self.server.datasets.selection_view(
-                        dataset_id,
-                        metadata.get("episode_id"),
-                        expected_dataset_digest=metadata.get("dataset_digest"),
-                        expected_split_manifest_digest=metadata.get(
-                            "split_manifest_digest"
-                        ),
-                        expected_data_protocol_digest=metadata.get(
-                            "data_protocol_digest"
-                        ),
-                    )
-                cohort_capacity_report = estimate_epoch_capacity(
-                    selection_view,
-                    schedule=schedule,
-                    planned_generations=manifest.max_generations,
-                    seed=manifest.seed,
-                    scoring_cells_per_origin=prediction_cells_per_origin,
-                    history_steps=origin_history_alignment,
-                )
-                if not cohort_capacity_report.sufficient:
-                    raise CohortCapacityError(
-                        required=cohort_capacity_report.required_unique_origins,
-                        available=cohort_capacity_report.available_eligible_origins,
-                        max_generations=cohort_capacity_report.max_feasible_generations,
-                    )
-                if (metadata.get("search_guard_policy") == SEARCH_GUARD_POLICY
-                        or schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION or schedule.quick):
-                    # Count the actual planned day identities before launching
-                    # paid stages. Origin count alone cannot establish paired
-                    # evidence capacity for sparse or small local batches.
-                    from ..evolution.evidence_capacity import (
-                        require_guarded_cohort_evidence_capacity,
-                    )
-                    metadata["guarded_cohort_evidence_capacity"] = require_guarded_cohort_evidence_capacity(
-                        dataset=selection_view,
-                        schedule=schedule,
-                        planned_generations=manifest.max_generations,
-                        seed=manifest.seed,
-                        profile=selection_fitness_profile,
-                        history_steps=origin_history_alignment,
-                    )
-            else:
-                cohort_capacity_report = estimate_epoch_capacity(
-                    series,
-                    schedule=schedule,
-                    planned_generations=manifest.max_generations,
-                    seed=manifest.seed,
-                    scoring_cells_per_origin=prediction_cells_per_origin,
-                    history_steps=origin_history_alignment,
-                )
+        pass
+        cohort_capacity_report = estimate_epoch_capacity(
+            selection_view,
+            schedule=schedule,
+            planned_generations=manifest.max_generations,
+            seed=manifest.seed,
+            scoring_cells_per_origin=prediction_cells_per_origin,
+            history_steps=origin_history_alignment,
+        )
+        if not cohort_capacity_report.sufficient:
+            raise CohortCapacityError(
+                required=cohort_capacity_report.required_unique_origins,
+                available=cohort_capacity_report.available_eligible_origins,
+                max_generations=cohort_capacity_report.max_feasible_generations,
+            )
+        from ..evolution.evidence_capacity import (
+            require_guarded_cohort_evidence_capacity,
+        )
+        metadata["guarded_cohort_evidence_capacity"] = require_guarded_cohort_evidence_capacity(
+            dataset=selection_view,
+            schedule=schedule,
+            planned_generations=manifest.max_generations,
+            seed=manifest.seed,
+            profile=selection_fitness_profile,
+            history_steps=origin_history_alignment,
+        )
         sample_budget_class = None
         # DSH-native sample execution needs the same frozen scheduling values
         # for every dataset.  The synthetic fixture is small, but it still
         # runs planner/critic child sessions; clearing these fields leaves the
         # adapter with an explicit ``None`` concurrency and makes evaluation
         # fail before the first sample checkpoint.
-        if autonomous_mode and (not toy_domain or native_protocol):
-            if candidate_concurrency is None:
-                candidate_concurrency = _DEFAULT_REAL_CANDIDATE_CONCURRENCY
-            if (
-                isinstance(candidate_concurrency, bool)
-                or not isinstance(candidate_concurrency, int)
-                or not (
-                    1
-                    <= candidate_concurrency
-                    <= _MAX_REAL_CANDIDATE_CONCURRENCY
-                )
-            ):
-                raise ValueError(
-                    "candidate_concurrency must be an integer between 1 and "
-                    f"{_MAX_REAL_CANDIDATE_CONCURRENCY}"
-                )
-            if sample_concurrency is None:
-                sample_concurrency = DEFAULT_SAMPLE_CONCURRENCY
-            sample_concurrency = validate_sample_concurrency(sample_concurrency)
-            if sample_agent_batch_size is not None and (
-                isinstance(sample_agent_batch_size, bool)
-                or not isinstance(sample_agent_batch_size, int)
-                or sample_agent_batch_size != prediction_cells_per_origin
-            ):
-                raise ValueError(
-                    "sample_agent_batch_size is derived from the frozen fitness "
-                    "profile and must equal prediction_cells_per_origin="
-                    f"{prediction_cells_per_origin}"
-                )
-            sample_agent_batch_size = prediction_cells_per_origin
-            if schedule is not None:
-                sample_budget_class = (
-                    "selection_eligible"
-                    if schedule.selection_holdout_origin_count
-                    >= minimum_selection_origin_samples_per_update
-                    else "insufficient_holdout"
-                )
-        else:
-            candidate_concurrency = None
-            sample_concurrency = None
-            # Preserve the pre-existing host/toy manifest value. It is not
-            # used by the host-only sample state machine.
-            sample_agent_batch_size = 128
+        if candidate_concurrency is None:
+            candidate_concurrency = _DEFAULT_REAL_CANDIDATE_CONCURRENCY
+        if (
+            isinstance(candidate_concurrency, bool)
+            or not isinstance(candidate_concurrency, int)
+            or not (
+                1
+                <= candidate_concurrency
+                <= _MAX_REAL_CANDIDATE_CONCURRENCY
+            )
+        ):
+            raise ValueError(
+                "candidate_concurrency must be an integer between 1 and "
+                f"{_MAX_REAL_CANDIDATE_CONCURRENCY}"
+            )
+        if sample_concurrency is None:
+            sample_concurrency = DEFAULT_SAMPLE_CONCURRENCY
+        sample_concurrency = validate_sample_concurrency(sample_concurrency)
+        if sample_agent_batch_size is not None and (
+            isinstance(sample_agent_batch_size, bool)
+            or not isinstance(sample_agent_batch_size, int)
+            or sample_agent_batch_size != prediction_cells_per_origin
+        ):
+            raise ValueError(
+                "sample_agent_batch_size is derived from the frozen fitness "
+                "profile and must equal prediction_cells_per_origin="
+                f"{prediction_cells_per_origin}"
+            )
+        sample_agent_batch_size = prediction_cells_per_origin
+        sample_budget_class = (
+            "selection_eligible"
+            if schedule.selection_holdout_origin_count
+            >= minimum_selection_origin_samples_per_update
+            else "insufficient_holdout"
+        )
         runtime_component_catalog["selected_prediction_model_id"] = (
             prediction_model_id
         )
-        if schedule is not None:
-            metadata["optimization_protocol"] = schedule.protocol
+        metadata["optimization_protocol"] = schedule.protocol
         supplied_runtime_build = metadata.get("host_runtime_build")
         diversity_enabled(metadata)
         if (
@@ -3186,14 +2330,14 @@ class EvolutionRequestHandler(
         metadata.update(
             {
                 "host_runtime_build": _host_runtime_build(),
-                "evolution_diversity_policy": metadata.get("evolution_diversity_policy", (joint_policy.DIVERSITY_POLICY if schedule is not None and schedule.joint else DIVERSITY_POLICY) if native_protocol else None),
+                "evolution_diversity_policy": metadata.get("evolution_diversity_policy", joint_policy.DIVERSITY_POLICY),
                 "strategy_id": strategy_id,
                 "strategy_digest": strategy_digest,
                 "mutation_policy": mutation_policy_contract(metadata),
                 "local_edit_context_policy": LOCAL_EDIT_CONTEXT_POLICY,
                 "mutation_policy_digest": digest(mutation_policy_contract(metadata)),
                 "prequential_performance_policy": (
-                    PREQUENTIAL_PERFORMANCE_POLICY if schedule is not None and schedule.quick else None
+                    PREQUENTIAL_PERFORMANCE_POLICY
                 ),
                 "evaluator_id": evaluator_id,
                 "evaluator_digest": evaluator_digest,
@@ -3210,31 +2354,27 @@ class EvolutionRequestHandler(
                 "review_model_id": judge_model_id,
                 "autonomous_mode": autonomous_mode,
                 "autonomous_research_protocol": (
-                    AUTONOMOUS_RESEARCH_PROTOCOL if native_protocol else None
+                    AUTONOMOUS_RESEARCH_PROTOCOL
                 ),
                 # DSH-native runs freeze the agent-owned origin-vector protocol
                 # into the task digest. Other execution modes retain their own
                 # explicit sample adapters.
                 "sample_agent_mode": (
                     "dsh_native_agent"
-                    if native_protocol
-                    else "gateway_microbatch"
-                    if autonomous_mode and not toy_domain
-                    else "host_feedback_state_machine"
                 ),
                 # Every DSH-native origin keeps a real model-backed Planner.
                 # Critic is reserved for uncertain/failing routes and the
                 # existing candidate/generation review owns post-score reflection.
                 "sample_agent_protocol": (
-                    _STRICT_SAMPLE_AGENT_PROTOCOL if native_protocol else None
+                    _STRICT_SAMPLE_AGENT_PROTOCOL
                 ),
-                "sample_prompt_batch_size": 1 if native_protocol else None,
+                "sample_prompt_batch_size": 1,
                 "sample_reflection_policy": (
-                    _STRICT_SAMPLE_REFLECTION_POLICY if native_protocol else None
+                    _STRICT_SAMPLE_REFLECTION_POLICY
                 ),
-                "allow_host_route_bypass": False if native_protocol else None,
+                "allow_host_route_bypass": False,
                 "allow_host_prediction_fallback": (
-                    False if native_protocol else None
+                    False
                 ),
                 "sample_agent_batch_size": sample_agent_batch_size,
                 # Causal origin waves are independent schedules. New real
@@ -3248,42 +2388,34 @@ class EvolutionRequestHandler(
                 # this field and therefore remain serial on replay.
                 "candidate_concurrency": candidate_concurrency,
                 "optimization_protocol": (
-                    schedule.protocol if schedule is not None else None
+                    schedule.protocol
                 ),
                 "optimization_schedule": (
-                    schedule.to_dict() if schedule is not None else None
+                    schedule.to_dict()
                 ),
                 "local_comparison_policy": (
-                    run_parameter_contract()["local_comparison_mode"]
-                    if schedule is not None and schedule.exploratory_local_comparison else None
+                    None
                 ),
                 "cohort_capacity_report": (
-                    (capacity_with_inference_replicas(cohort_capacity_report, schedule)
-                     if native_protocol else cohort_capacity_report.to_dict())
-                    if cohort_capacity_report is not None
-                    else None
+                    capacity_with_inference_replicas(cohort_capacity_report, schedule)
                 ),
                 "cohort_capacity_enforced": (
-                    schedule is not None and not toy_domain
+                    True
                 ),
                 "derived_execution_budget": (
                     schedule.generation_execution_budget(
                         cells_per_origin=prediction_cells_per_origin,
-                        holdout_inference_replicas=REPLICA_COUNT if native_protocol else 1,
+                        holdout_inference_replicas=REPLICA_COUNT,
                     )
-                    if schedule is not None
-                    else None
                 ),
                 "execution_plan": schedule.execution_plan(manifest.max_generations,
-                    cells_per_origin=prediction_cells_per_origin, native=native_protocol) if schedule is not None else None,
+                    cells_per_origin=prediction_cells_per_origin, native=native_protocol),
                 "derived_run_execution_budget": (
                     schedule.run_execution_budget(
                         manifest.max_generations,
                         cells_per_origin=prediction_cells_per_origin,
-                        holdout_inference_replicas=REPLICA_COUNT if native_protocol else 1,
+                        holdout_inference_replicas=REPLICA_COUNT,
                     )
-                    if schedule is not None
-                    else None
                 ),
                 "minimum_selection_samples_per_update": (
                     minimum_selection_samples_per_update
@@ -3302,11 +2434,7 @@ class EvolutionRequestHandler(
                 "sample_operation_max_tokens": (
                     dict(
                         NATIVE_SAMPLE_OPERATION_MAX_TOKENS
-                        if native_protocol
-                        else _DEFAULT_SAMPLE_OPERATION_MAX_TOKENS
                     )
-                    if autonomous_mode and (not toy_domain or native_protocol)
-                    else None
                 ),
                 # Sparse remote review preserves Host scoring while avoiding
                 # one advisory model call for every successful origin. Persisting
@@ -3315,28 +2443,18 @@ class EvolutionRequestHandler(
                 "sample_remote_critic_policy": (
                     dict(
                         _STRICT_SAMPLE_REMOTE_CRITIC_POLICY
-                        if native_protocol
-                        else _DEFAULT_SAMPLE_REMOTE_CRITIC_POLICY
                     )
-                    if autonomous_mode and (not toy_domain or native_protocol)
-                    else None
                 ),
                 # Repeated origin-level features are losslessly factored into a
                 # content-addressed context only for newly created real runs.
                 "sample_planner_prompt_profile": (
                     dict(_DEFAULT_SAMPLE_PLANNER_PROMPT_PROFILE)
-                    if autonomous_mode and (not toy_domain or native_protocol)
-                    else None
                 ),
                 "sample_truncation_retry_policy": (
-                    dict(_DEFAULT_SAMPLE_TRUNCATION_RETRY_POLICY)
-                    if autonomous_mode and not toy_domain and not native_protocol
-                    else None
+                    None
                 ),
                 "model_selection_policy": (
                     "model_research_and_runtime_compile@1"
-                    if autonomous_mode
-                    else metadata.get("model_selection_policy")
                 ),
                 "model_workflow": metadata.get(
                     "model_workflow",
@@ -3345,10 +2463,8 @@ class EvolutionRequestHandler(
                 "research_domain": metadata.get(
                     "research_domain", manifest.domain_pack
                 ),
-                "autonomous_plan": autonomous_plan if autonomous_mode else None,
-                "autonomous_plan_digest": digest(autonomous_plan)
-                if autonomous_mode
-                else None,
+                "autonomous_plan": autonomous_plan,
+                "autonomous_plan_digest": digest(autonomous_plan),
                 "runtime_component_catalog": runtime_component_catalog,
                 "policy_model_digest": policy_model_digest,
                 "judge_model_digest": judge_model_digest,
@@ -3359,172 +2475,37 @@ class EvolutionRequestHandler(
         data = manifest.to_dict()
         data["visible_datasets"] = [dataset_id]
         data["metadata"] = metadata
-        if native_protocol:
-            native_budget = dict(data["budget"])
-            native_token_limit = int(native_budget.get("token_limit", 0))
-            if native_token_limit > 0:
-                raise ValueError(
-                    "DSH-native token_limit is unsupported because provider "
-                    "session reports are telemetry, not an atomic reservation ledger"
-                )
-            # DSH-native runs do not receive a hidden static cap: the observed
-            # default 5-epoch plan needs well above the legacy sample-gateway
-            # budget. Session context bounds remain owned by DSH, while the
-            # sidecar exposes provider-reported cumulative usage as telemetry.
-            native_budget.pop("token_limit", None)
-            native_budget.pop("token_reservation_per_wave", None)
-            data["budget"] = native_budget
-            # Native provider usage is telemetry rather than an atomic Host
-            # reservation ledger, but each child still needs a frozen output
-            # cap. Keep sample_operation_max_tokens in the task manifest while
-            # removing only the legacy Host-side accounting policy.
-            for legacy_token_field in (
-                "sample_truncation_retry_policy",
-                "sample_token_budget_policy",
-                "token_budget_scope",
-                "run_wide_accounting_complete",
-                "sample_token_budget_defaulted",
-                "dsh_provider_token_budget_policy",
-            ):
-                metadata.pop(legacy_token_field, None)
-            data["metadata"] = metadata
-        elif autonomous_mode and not toy_domain:
-            budget = dict(data["budget"])
-            token_limit = int(budget.get("token_limit", 0))
-            if token_limit <= 0:
-                token_limit = _DEFAULT_REAL_RUN_TOKEN_LIMIT
-            # The server owns this per-logical-call admission cap. A client
-            # cannot lower it independently of the frozen output limits and
-            # gateway retry policy. Recursive split and critic calls each pass
-            # through a fresh admission check.
-            budget["token_limit"] = token_limit
-            budget["token_reservation_per_wave"] = min(
-                token_limit, _REAL_RUN_TOKEN_RESERVATION_PER_CALL
+        native_budget = dict(data["budget"])
+        native_token_limit = int(native_budget.get("token_limit", 0))
+        if native_token_limit > 0:
+            raise ValueError(
+                "DSH-native token_limit is unsupported because provider "
+                "session reports are telemetry, not an atomic reservation ledger"
             )
-            data["budget"] = budget
-            metadata["sample_token_budget_policy"] = _SAMPLE_TOKEN_BUDGET_POLICY
-            # This hard limit currently governs only sample-agent gateway
-            # calls. Research planning, candidate proposal, and judge calls do
-            # not yet emit receipts into the same admission ledger.
-            metadata["token_budget_scope"] = _SAMPLE_TOKEN_BUDGET_SCOPE
-            metadata["run_wide_accounting_complete"] = False
-            metadata["sample_token_budget_defaulted"] = (
-                int(manifest.budget.get("token_limit", 0)) <= 0
-            )
-            data["metadata"] = metadata
+        # DSH-native runs do not receive a hidden static cap: the observed
+        # default 5-epoch plan needs well above the legacy sample-gateway
+        # budget. Session context bounds remain owned by DSH, while the
+        # sidecar exposes provider-reported cumulative usage as telemetry.
+        native_budget.pop("token_limit", None)
+        native_budget.pop("token_reservation_per_wave", None)
+        data["budget"] = native_budget
+        # Native provider usage is telemetry rather than an atomic Host
+        # reservation ledger, but each child still needs a frozen output
+        # cap. Keep sample_operation_max_tokens in the task manifest while
+        # removing only the legacy Host-side accounting policy.
+        for legacy_token_field in (
+            "sample_truncation_retry_policy",
+            "sample_token_budget_policy",
+            "token_budget_scope",
+            "run_wide_accounting_complete",
+            "sample_token_budget_defaulted",
+            "dsh_provider_token_budget_policy",
+        ):
+            metadata.pop(legacy_token_field, None)
+        data["metadata"] = metadata
         return TaskManifest.from_dict(data)
 
-    def _autonomous_plan_for_task(
-        self,
-        manifest: TaskManifest,
-        strategy_model_id: str,
-        *,
-        strict_remote_plan: bool = False,
-    ) -> dict[str, Any]:
-        """Collect one replayable model research plan at run creation time."""
 
-        run = Run(
-            run_id=f"plan:{manifest.task_id}",
-            task_id=manifest.task_id,
-            task_manifest_digest=manifest.digest,
-        )
-        planner = getattr(self.server.strategy_router, "research_plan", None)
-        if not callable(planner):
-            if strict_remote_plan:
-                raise ValueError(
-                    "连续自动进化无法获取策略模型研究计划：研究计划接口不可用；"
-                    "请修复策略模型 API，或显式设置 allow_host_fallback=true 后重试"
-                )
-            return {
-                "status": "host_fallback",
-                "fallback_diagnostics": {
-                    "stage": "research_plan",
-                    "fallback_applied": True,
-                    "reason": "planner_not_available",
-                },
-                "team": {
-                    "id": "host-validated-team@1",
-                    "name": "宿主验证团队",
-                    "roles": ["预测建模", "科学评测", "进化搜索"],
-                },
-                "strategy": {"id": "autonomous_model@1", "name": "模型自主调研与进化"},
-                "research": [],
-            }
-        schema_resolver = getattr(
-            self.server.strategy_router, "parameter_schemas_for_task", None
-        )
-        parameter_schemas = (
-            schema_resolver(manifest) if callable(schema_resolver) else {}
-        )
-        try:
-            plan = planner(
-                strategy_model_id,
-                run=run,
-                task=manifest,
-                parameter_schemas=parameter_schemas,
-            )
-        except Exception as exc:  # model availability must not corrupt a run
-            if strict_remote_plan:
-                raise ValueError(
-                    "连续自动进化无法获取策略模型研究计划："
-                    f"{strategy_model_id} 调用失败（{type(exc).__name__}）；"
-                    "请修复策略模型 API，或显式设置 allow_host_fallback=true 后重试"
-                ) from exc
-            return {
-                "status": "unavailable",
-                "error_type": type(exc).__name__,
-                "fallback_diagnostics": {
-                    "stage": "research_plan",
-                    "fallback_applied": True,
-                    "reason": "planner_error",
-                    "error_type": type(exc).__name__,
-                },
-                "team": {"name": "待模型确认的自主团队", "roles": []},
-                "strategy": {"id": "autonomous_model@1", "name": "模型自主调研与进化"},
-                "research": [],
-            }
-        if not isinstance(plan, dict):
-            raise TypeError("模型研究计划必须是 JSON 对象")
-        # A creation-time planner uses a temporary ``plan:`` run and therefore
-        # cannot create a durable, answerable consultation. The generation
-        # research path materializes the same optional field atomically with
-        # its real ResearchIteration; never freeze this one-shot side channel
-        # into TaskManifest.autonomous_plan.
-        plan.pop("expert_consultation", None)
-        # Ensure a stable status is present for the UI and audit consumers.
-        plan.setdefault("status", "model_generated")
-        plan_status = str(plan.get("status", "")).casefold()
-        if strict_remote_plan and plan_status in {
-            "host_fallback",
-            "unavailable",
-        }:
-            raise ValueError(
-                "连续自动进化未获得远程研究计划："
-                f"{strategy_model_id} 返回状态 {plan['status']}；"
-                "请修复策略模型 API，或显式设置 allow_host_fallback=true 后重试"
-            )
-        if plan_status in {"host_fallback", "unavailable"}:
-            plan.setdefault(
-                "fallback_diagnostics",
-                {
-                    "stage": "research_plan",
-                    "fallback_applied": True,
-                    "reason": f"planner_status_{plan_status}",
-                },
-            )
-        return plan
-
-    def _current_model_binding(self, model_id: str) -> tuple[str, str]:
-        builtin_digest = builtin_model_configuration_digest(model_id)
-        if builtin_digest is not None:
-            return builtin_digest, "builtin_implementation"
-        try:
-            return (
-                self.server.model_gateway.configuration_digest(model_id),
-                "server_gateway_configuration",
-            )
-        except KeyError:
-            raise ValueError(f"服务端已找不到运行绑定的模型：{model_id}") from None
 
     @staticmethod
     def _validate_frozen_model_aliases(metadata: dict[str, Any]) -> None:
@@ -3552,48 +2533,7 @@ class EvolutionRequestHandler(
                     f"冻结任务中的{label}字段冲突：{canonical} 与 {legacy} 必须指向同一模型"
                 )
 
-    @staticmethod
-    def _remote_model_execution_configured(
-        remote_model: dict[str, Any] | None,
-    ) -> bool:
-        """Return whether a redacted directory item is safe to call at runtime."""
 
-        return bool(
-            remote_model
-            and remote_model.get("configured") is True
-            and remote_model.get("directory_available") is True
-            and remote_model.get("execution_available") is True
-            and remote_model.get("credential_configured") is True
-        )
-
-    @staticmethod
-    def _validate_frozen_remote_model(
-        model_id: str,
-        remote_model: dict[str, Any] | None,
-        *,
-        role: str,
-        label: str,
-        check_credentials: bool = True,
-    ) -> None:
-        """Validate a remote role binding during post-restart recovery."""
-
-        if remote_model is None:
-            raise ValueError(f"{label}已从当前服务模型目录移除，旧运行已拒绝继续：{model_id}")
-        roles = remote_model.get("roles", [])
-        if role not in roles:
-            raise ValueError(f"冻结的{label}缺少 {role} 权限，旧运行已拒绝继续：{model_id}")
-        if (
-            remote_model.get("configured") is not True
-            or remote_model.get("directory_available") is not True
-            or remote_model.get("execution_available") is not True
-        ):
-            raise ValueError(f"冻结的{label}后端调用配置不可执行，旧运行已拒绝继续：{model_id}")
-        if not check_credentials:
-            return
-        if not remote_model.get("credential_configured"):
-            raise ValueError(f"冻结的{label}尚未配置认证凭据，旧运行已拒绝继续：{model_id}")
-        if not EvolutionRequestHandler._remote_model_execution_configured(remote_model):
-            raise ValueError(f"冻结的{label}后端调用配置不可执行，旧运行已拒绝继续：{model_id}")
 
     @classmethod
     def _validate_frozen_runtime_bindings_for_server(
@@ -3617,7 +2557,7 @@ class EvolutionRequestHandler(
             frozen_runtime_build
         ):
             raise FrozenRuntimeBindingDriftError("Host evolution runtime", expected_digest=digest(frozen_runtime_build), current_digest=digest(_host_runtime_build()))
-        if dataset_id != TOY_DATASET_ID:
+        if True:
             contract = dataset_adapter(dataset_id).contract()
             if metadata.get("dataset_task") != contract or metadata.get("dataset_task_digest") != contract["contract_digest"]:
                 raise FrozenRuntimeBindingDriftError("dataset task adapter", expected_digest=digest(metadata.get("dataset_task")), current_digest=digest(contract))
@@ -3628,7 +2568,7 @@ class EvolutionRequestHandler(
         if not isinstance(split_digest, str) or not split_digest.strip():
             raise ValueError("旧运行缺少冻结的时间分区快照校验值，已拒绝继续")
         episode_id = metadata.get("episode_id")
-        series = server.datasets.series(
+        series = server.datasets.selection_view(
             dataset_id,
             str(episode_id) if episode_id is not None else None,
             expected_dataset_digest=dataset_digest,
@@ -3803,53 +2743,6 @@ class EvolutionRequestHandler(
                 )
             return
 
-        remote_models = {
-            str(item["model_id"]): item
-            for item in server.model_gateway.catalog()
-        }
-        cls._validate_frozen_model_aliases(metadata)
-        for id_field, digest_field, label, role in (
-            ("policy_model_id", "policy_model_digest", "候选生成模型", "propose"),
-            ("judge_model_id", "judge_model_digest", "独立评审模型", "judge"),
-        ):
-            model_id = str(metadata.get(id_field) or "")
-            if not model_id:
-                raise ValueError(f"旧运行缺少冻结的{label}标识，已拒绝继续")
-            remote_model = remote_models.get(model_id)
-            if builtin_model_configuration_digest(model_id) is None:
-                cls._validate_frozen_remote_model(
-                    model_id,
-                    remote_model,
-                    role=role,
-                    label=label,
-                    check_credentials=False,
-                )
-            builtin_digest = builtin_model_configuration_digest(model_id)
-            if builtin_digest is not None:
-                current_digest = builtin_digest
-            else:
-                try:
-                    current_digest = server.model_gateway.configuration_digest(model_id)
-                except KeyError as exc:
-                    raise FrozenRuntimeBindingDriftError(f"{label}配置") from exc
-            expected_digest = metadata.get(digest_field)
-            if not isinstance(expected_digest, str) or not expected_digest.strip():
-                if builtin_model_configuration_digest(model_id) is not None:
-                    expected_digest = current_digest
-                else:
-                    raise ValueError(
-                        f"旧运行缺少冻结的{label}配置校验值，远程模型已拒绝继续"
-                    )
-            if expected_digest != current_digest:
-                raise FrozenRuntimeBindingDriftError(f"{label}配置", expected_digest=expected_digest, current_digest=current_digest)
-            if builtin_model_configuration_digest(model_id) is None:
-                cls._validate_frozen_remote_model(
-                    model_id,
-                    remote_model,
-                    role=role,
-                    label=label,
-                )
-
     def _validate_frozen_runtime_bindings(
         self,
         task: TaskManifest,
@@ -3861,9 +2754,9 @@ class EvolutionRequestHandler(
     def _action(self, run_id: str, body: dict[str, Any]) -> None:
         action = str(body.get("action", body.get("command", ""))).strip().lower()
         director = self.server.director
-        valid_actions = {"start", "pause", "resume", "cancel", "complete", "advance", "step"}
+        valid_actions = {"start", "pause", "resume", "cancel", "complete"}
         if action not in valid_actions:
-            raise ValueError("action must be start, pause, resume, cancel, complete, or advance")
+            raise ValueError("action must be start, pause, resume, cancel, or complete")
         # Controls are always durable commands. Generate an idempotency key
         # for callers that omitted one so a fast 202 response remains pollable.
         if action in {"pause", "cancel"} and not body.get("idempotency_key"):
@@ -3921,10 +2814,7 @@ class EvolutionRequestHandler(
             self._send(HTTPStatus.OK, payload)
             return
         if not resumes_durable_native_quiescence:
-            if action in ("advance", "step"):
-                self._validate_advance_request(run_id, body)
-            else:
-                self._validate_control_request(run_id, action)
+            self._validate_control_request(run_id, action)
         cached = self._claim_command(cache_key, run_id, f"control:{action}", body)
         if cached is not None:
             self._send(HTTPStatus.OK, cached)
@@ -4114,13 +3004,6 @@ class EvolutionRequestHandler(
                     )
         elif action == "complete":
             director.complete_run(run_id)
-        elif action in ("advance", "step"):
-            state = self._advance_run(run_id, body)
-            payload = _state_payload(state)
-            self._complete_command(cache_key, payload)
-            self._schedule_auto_progress(state)
-            self._send(HTTPStatus.OK, payload)
-            return
         if native_protocol and action in {"pause", "cancel"}:
             # DSH quiescence covers child Sessions and Workflows. The Host may
             # still be unwinding a completed local training/evaluation call, so
@@ -4250,259 +3133,3 @@ class EvolutionRequestHandler(
             # The Host state boundary is already safe. Leave the receipt
             # pending for startup recovery or an explicit same-key retry.
             return
-
-    def _record_intervention(self, run_id: str, body: dict[str, Any]) -> None:
-        cache_key = self._command_key(run_id, body)
-        if self._serve_existing_command(
-            cache_key, run_id, "record_intervention", body
-        ):
-            return
-        state = self.server.director.state(run_id)
-        _assert_http_scope(state)
-        # Pausing used to be mandatory, which turned every expert note into an
-        # interrupt. `start_generation_batch` freezes the generation's
-        # `intervention_ids`, so a note written while RUNNING joins the *next*
-        # generation and cannot retroactively alter a proposal already produced.
-        if state.run.status.value not in {"paused", "running"}:
-            raise RuntimeError("只有运行中或已暂停的任务可以提交人工意见")
-        allowed_fields = {
-            "kind",
-            "message",
-            "created_by",
-            "parameter_overrides",
-            "target_candidate_id",
-            "idempotency_key",
-        }
-        unknown = set(body) - allowed_fields
-        if unknown:
-            raise ValueError("人工意见包含未知字段：" + ", ".join(sorted(unknown)))
-        try:
-            kind = InterventionKind(str(body.get("kind", "guidance")))
-        except ValueError:
-            raise ValueError("未知人工干预类型") from None
-        message = str(body.get("message", "")).strip()
-        created_by = str(body.get("created_by") or "本地研究员").strip()
-        if not message or len(message) > 2000:
-            raise ValueError("意见说明必须为 1 至 2000 个字符")
-        if not created_by or len(created_by) > 120:
-            raise ValueError("提交人必须为 1 至 120 个字符")
-        overrides = body.get("parameter_overrides", {})
-        if not isinstance(overrides, dict):
-            raise TypeError("parameter_overrides 必须是对象")
-        if kind is not InterventionKind.PARAMETER_OVERRIDE and overrides:
-            raise ValueError("只有参数覆盖类型可以提交参数覆盖值")
-        if kind is InterventionKind.PARAMETER_OVERRIDE:
-            if not overrides:
-                raise ValueError("参数覆盖类型至少需要一个参数")
-            self.server.evaluators.validate_parameter_overrides(
-                state.task_manifest, overrides
-            )
-        target_candidate_id = body.get("target_candidate_id")
-        if target_candidate_id is not None:
-            target_candidate_id = str(target_candidate_id).strip() or None
-        if kind is InterventionKind.PARENT_SELECTION and target_candidate_id is None:
-            raise ValueError("指定父方案时必须选择一个候选方案")
-        if target_candidate_id is not None:
-            state.candidate(target_candidate_id)
-        active = getattr(self, "_active_command", None)
-        if active is not None:
-            receipt: CommandReceipt = active["receipt"]
-            for event in self.server.ledger.events(
-                run_id, after_seq=receipt.start_seq
-            ):
-                if event.kind != "HumanInterventionRecorded":
-                    continue
-                recorded = event.payload.get("intervention", {})
-                if (
-                    recorded.get("kind") == kind.value
-                    and recorded.get("message") == message
-                    and recorded.get("created_by") == created_by
-                    and recorded.get("parameter_overrides", {}) == overrides
-                    and recorded.get("target_candidate_id") == target_candidate_id
-                ):
-                    payload = _state_payload(self.server.director.state(run_id))
-                    self._complete_command(cache_key, payload)
-                    self._send(HTTPStatus.OK, payload)
-                    return
-        cached = self._claim_command(
-            cache_key, run_id, "record_intervention", body
-        )
-        if cached is not None:
-            self._send(HTTPStatus.OK, cached)
-            return
-        intervention = HumanIntervention(
-            intervention_id=(
-                f"intervention:{digest({'command_key': cache_key})[:24]}"
-                if cache_key is not None
-                else f"intervention:{uuid4()}"
-            ),
-            run_id=run_id,
-            kind=kind,
-            message=message,
-            created_by=created_by,
-            parameter_overrides=overrides,
-            target_candidate_id=target_candidate_id,
-        )
-        self.server.director.record_intervention(intervention)
-        payload = _state_payload(self.server.director.state(run_id))
-        self._complete_command(cache_key, payload)
-        self._send(HTTPStatus.CREATED, payload)
-
-    def _answer_expert_consultation(
-        self,
-        run_id: str,
-        consultation_id: str,
-        body: dict[str, Any],
-    ) -> None:
-        """Record a non-blocking expert answer without changing run control."""
-
-        consultation_id = str(consultation_id).strip()
-        if not consultation_id:
-            raise ValueError("consultation_id must be non-empty")
-        allowed_fields = {
-            "answer",
-            "selected_option",
-            "answered_by",
-            "persistent",
-            "idempotency_key",
-        }
-        unknown = set(body) - allowed_fields
-        if unknown:
-            raise ValueError(
-                "专家答复包含未知字段：" + ", ".join(sorted(unknown))
-            )
-        raw_answer = body.get("answer")
-        raw_answered_by = body.get("answered_by")
-        if not isinstance(raw_answer, str):
-            raise TypeError("专家答复必须是字符串")
-        if not isinstance(raw_answered_by, str):
-            raise TypeError("答复人必须是字符串")
-        answer_text = raw_answer.strip()
-        answered_by = raw_answered_by.strip()
-        if not answer_text or len(answer_text) > 4000:
-            raise ValueError("专家答复必须为 1 至 4000 个字符")
-        if not answered_by or len(answered_by) > 120:
-            raise ValueError("答复人必须为 1 至 120 个字符")
-        selected_option = body.get("selected_option")
-        if selected_option is not None:
-            if not isinstance(selected_option, str):
-                raise TypeError("selected_option 必须是字符串或 null")
-            selected_option = selected_option.strip()
-            if not selected_option or len(selected_option) > 500:
-                raise ValueError("所选选项必须为 1 至 500 个字符")
-        # Durable domain knowledge stays in the model's context for the rest of
-        # the run instead of being consumed by one research iteration. Absent
-        # means false, so an existing client keeps the old one-off semantics.
-        persistent = body.get("persistent", False)
-        if not isinstance(persistent, bool):
-            raise TypeError("persistent 必须是布尔值")
-
-        command_body = {**body, "consultation_id": consultation_id}
-        cache_key = self._command_key(run_id, body)
-        if self._serve_existing_command(
-            cache_key,
-            run_id,
-            "answer_expert_consultation",
-            command_body,
-        ):
-            return
-
-        # A pending command may already have appended its answer before the
-        # HTTP response was interrupted. Reconcile that event before treating
-        # the consultation's single-answer invariant as a conflict.
-        active = getattr(self, "_active_command", None)
-        if active is not None:
-            receipt: CommandReceipt = active["receipt"]
-            for event in self.server.ledger.events(
-                run_id, after_seq=receipt.start_seq
-            ):
-                if event.kind != "ExpertConsultationAnswered":
-                    continue
-                recorded = event.payload.get("answer", {})
-                if (
-                    recorded.get("consultation_id") == consultation_id
-                    and recorded.get("answer") == answer_text
-                    and recorded.get("answered_by") == answered_by
-                    and recorded.get("selected_option") == selected_option
-                    and bool(recorded.get("persistent")) is persistent
-                ):
-                    payload = _state_payload(self.server.director.state(run_id))
-                    self._complete_command(cache_key, payload)
-                    self._send(HTTPStatus.OK, payload)
-                    return
-
-        state = self.server.director.state(run_id)
-        _assert_http_scope(state)
-        state.consultation(consultation_id)
-        if state.run.status.value == "created":
-            raise RuntimeError("尚未启动的运行不能接收专家答复")
-        existing_answer = state.answer_for_consultation(consultation_id)
-        if existing_answer is not None:
-            raise RuntimeError("该专家咨询已有答复")
-
-        cached = self._claim_command(
-            cache_key,
-            run_id,
-            "answer_expert_consultation",
-            command_body,
-        )
-        if cached is not None:
-            self._send(HTTPStatus.OK, cached)
-            return
-
-        answer_id = (
-            f"expert-answer:{digest({'command_key': cache_key})[:24]}"
-            if cache_key is not None
-            else f"expert-answer:{uuid4()}"
-        )
-        created_at = utc_now()
-        terminal_statuses = {"completed", "cancelled", "failed"}
-        last_conflict: ConcurrentRunMutationError | None = None
-        for _attempt in range(8):
-            current = self.server.director.state(run_id)
-            _assert_http_scope(current)
-            consultation = current.consultation(consultation_id)
-            existing_answer = current.answer_for_consultation(consultation_id)
-            if existing_answer is not None:
-                if (
-                    existing_answer.answer_id == answer_id
-                    and existing_answer.answer == answer_text
-                    and existing_answer.answered_by == answered_by
-                    and existing_answer.selected_option == selected_option
-                    and existing_answer.persistent is persistent
-                ):
-                    break
-                raise RuntimeError("该专家咨询已有答复")
-            if current.run.status.value == "created":
-                raise RuntimeError("尚未启动的运行不能接收专家答复")
-            if selected_option is not None and selected_option not in consultation.options:
-                raise ValueError("所选选项不在该咨询的可选项中")
-            effective_generation = (
-                None
-                if current.run.status.value in terminal_statuses
-                else max(consultation.generation + 1, current.run.generation + 1)
-            )
-            answer = ExpertConsultationAnswer(
-                answer_id=answer_id,
-                run_id=run_id,
-                consultation_id=consultation_id,
-                answer=answer_text,
-                answered_by=answered_by,
-                selected_option=selected_option,
-                effective_generation=effective_generation,
-                persistent=persistent,
-                created_at=created_at,
-            )
-            try:
-                self.server.director.answer_expert_consultation(answer)
-            except ConcurrentRunMutationError as exc:
-                last_conflict = exc
-                continue
-            break
-        else:
-            assert last_conflict is not None
-            raise last_conflict
-
-        payload = _state_payload(self.server.director.state(run_id))
-        self._complete_command(cache_key, payload)
-        self._send(HTTPStatus.CREATED, payload)

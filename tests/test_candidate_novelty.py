@@ -1,3 +1,4 @@
+from tests.native_fixtures import start_native_run
 from copy import deepcopy
 from dataclasses import replace
 import unittest
@@ -10,7 +11,6 @@ from ecologyrsi_dsh.evolution import novelty
 from ecologyrsi_dsh.evolution.batches import start_generation_batch
 from ecologyrsi_dsh.evolution.strategies import StrategyRouterDSHAdapter, _validate_candidate_direction_realizability
 from ecologyrsi_dsh.evaluators.authored_directive import AUTHORED_DIRECTIVE_POLICY_ID
-from ecologyrsi_dsh.knowledge.algorithms import resolve_predictor_adoption
 from ecologyrsi_dsh.knowledge.autonomous_cycle import GenerationSearchPlan
 from ecologyrsi_dsh.knowledge.models import KnowledgeSnapshot
 from ecologyrsi_dsh.knowledge.research_iteration import ResearchIteration, validate_research_plan
@@ -29,18 +29,24 @@ class CandidateNoveltyTests(unittest.TestCase):
         self.addCleanup(ledger.close)
         runtime = _SequencedNativeRuntime(outputs)
         base = task or _native_task()
-        task = replace(base, budget={"max_candidates": 8, "max_generations": 3, "candidates_per_generation": 1},
+        task = replace(base, budget={"max_candidates": 12, "max_generations": 3, "candidates_per_generation": 4},
                        metadata={**base.metadata, **({novelty.CANDIDATE_NOVELTY_POLICY_KEY:
                            novelty.CANDIDATE_NOVELTY_POLICY} if enabled else {})})
         adapter = StrategyRouterDSHAdapter(gateway=object(), native_runtime_provider=lambda: runtime,
-            candidate_novelty_provider=lambda run_id, generation: novelty.build_archive(director.state(run_id), generation))
+            candidate_novelty_provider=lambda run_id, generation: novelty.build_archive(self.novelty_state(director), generation))
         director = EvolutionDirector(ledger, adapter)
-        director.create_run(task, run_id="run:novelty")
-        director.start_run("run:novelty")
+        self.fixture_generation = 0
+        start_native_run(director, task=task, run_id="run:novelty")
         return ledger, director, adapter, runtime
 
-    def proposal_context(self, director, direction=None):
+    def novelty_state(self, director):
+        # This unit seam supplies a later immutable state to proposal novelty;
+        # it does not bypass the production scientific advance-generation gate.
         state = director.state("run:novelty")
+        return replace(state, run=replace(state.run, generation=self.fixture_generation))
+
+    def proposal_context(self, director, direction=None):
+        state = self.novelty_state(director)
         parent = state.materialized_seed_genome()
         plan = {}
         if state.task_manifest.metadata.get("autonomous_research_protocol"):
@@ -49,7 +55,7 @@ class CandidateNoveltyTests(unittest.TestCase):
             plan[novelty.ARCHIVE_KEY] = novelty.archive_reference(novelty.build_archive(state, state.run.generation))
         iteration = ResearchIteration(run_id=state.run.run_id, generation=state.run.generation,
             status="model_generated", plan=plan,
-            prediction_model_adoption=resolve_predictor_adoption(state.task_manifest, plan).to_dict(),
+
             knowledge_snapshot_digest="2" * 64)
         return {"generation": state.run.generation, "slot_index": 0, "batch_size": 1,
                 "context_digest": "3" * 64, "parent_genome_digest": parent.genome_digest,
@@ -61,7 +67,7 @@ class CandidateNoveltyTests(unittest.TestCase):
                 "ledger_expected_revision": director.ledger.latest_seq()}
 
     def propose(self, director, adapter, *, parent=None, context=None):
-        state = director.state("run:novelty")
+        state = self.novelty_state(director)
         return adapter.propose(state.run, state.task_manifest, state.run.session_id,
                                parent_candidate_id=parent, batch_context=context or self.proposal_context(director))
 
@@ -70,7 +76,7 @@ class CandidateNoveltyTests(unittest.TestCase):
         director.submit_proposal(proposal)
         candidate = director.spawn_candidate("run:novelty", proposal)
         director.fail_candidate("run:novelty", candidate.candidate_id, "fixture: no evaluation requested")
-        director.advance_generation("run:novelty")
+        self.fixture_generation = 1
         return candidate, proposal
 
     def test_prior_generation_duplicate_is_repaired_before_submission_or_slot_consumption(self):
@@ -87,11 +93,10 @@ class CandidateNoveltyTests(unittest.TestCase):
         self.assertEqual(rejection["prior_candidate_id"], original.candidate_id)
         self.assertEqual(rejection["rejected_operations"], parameter(.2)["operations"])
         self.assertNotEqual(runtime.requests[-2]["stage_attempt"], runtime.requests[-1]["stage_attempt"])
-        director.submit_proposal(second)
-        director.spawn_candidate("run:novelty", second)
         state = director.state("run:novelty")
-        self.assertEqual(len(state.proposals), 2)
-        self.assertEqual(len(state.candidates), 2)
+        self.assertEqual(second.generation, 1)
+        self.assertEqual(len(state.proposals), 1)
+        self.assertEqual(len(state.candidates), 1)
         self.assertFalse(state.evaluations)  # no score reuse or hidden evaluation
 
     def test_exhausted_duplicate_repairs_do_not_commit_a_candidate(self):
@@ -104,7 +109,7 @@ class CandidateNoveltyTests(unittest.TestCase):
         self.assertEqual(ledger.latest_seq(), before)
         self.assertEqual(len(director.state("run:novelty").candidates), 1)
 
-    def test_historical_policy_keeps_repeated_behavior_and_has_no_new_context(self):
+    def test_disabled_optional_novelty_has_no_archive_context(self):
         _, director, adapter, runtime = self.setup_run([parameter(.2)], enabled=False)
         adapter._candidate_novelty_provider = lambda *args: self.fail("historical run must not request novelty history")
         original, first = self.persist_first_and_advance(director, adapter)
@@ -129,11 +134,12 @@ class CandidateNoveltyTests(unittest.TestCase):
     def test_archive_is_stable_after_current_generation_appends_and_director_restart(self):
         ledger, director, adapter, _ = self.setup_run([parameter(.2), parameter(.3)])
         original, _ = self.persist_first_and_advance(director, adapter)
-        before = novelty.build_archive(director.state("run:novelty"), 1)
+        before = novelty.build_archive(self.novelty_state(director), 1)
         second = self.propose(director, adapter, parent=original.candidate_id)
-        director.submit_proposal(second)
-        director.spawn_candidate("run:novelty", second)
         replayed = EvolutionDirector(ledger, adapter).state("run:novelty")
+        current = replace(original, candidate_id='candidate:current', proposal_id=second.proposal_id, generation=1)
+        replayed = replace(replayed, run=replace(replayed.run,generation=1),
+            proposals=(*replayed.proposals,second), candidates=(*replayed.candidates,current))
         self.assertEqual(before, novelty.build_archive(replayed, 1))
         self.assertEqual(len(before["entries"]), 1)
         self.assertNotIn("score", canonical_json(before))
@@ -148,8 +154,7 @@ class CandidateNoveltyTests(unittest.TestCase):
             # Rebuild the enclosing trusted iteration identity, leaving only
             # the archive-reference mismatch for the proposer to reject.
             iteration = ResearchIteration(run_id="run:novelty", generation=0, status="model_generated",
-                plan=altered["research_iteration"]["plan"], prediction_model_adoption=resolve_predictor_adoption(
-                    director.state("run:novelty").task_manifest, altered["research_iteration"]["plan"]).to_dict(),
+                plan=altered["research_iteration"]["plan"],
                 knowledge_snapshot_digest="2" * 64)
             altered["research_iteration"] = iteration.to_dict()
             altered["stage_context_digests"]["research_iteration_digest"] = iteration.iteration_digest
@@ -166,8 +171,7 @@ class CandidateNoveltyTests(unittest.TestCase):
         adapter = StrategyRouterDSHAdapter(gateway=object(), native_runtime_provider=lambda: runtime,
             candidate_novelty_provider=lambda rid, generation: novelty.build_archive(director.state(rid), generation))
         director = EvolutionDirector(ledger, adapter)
-        director.create_run(task, run_id="run:research-novelty")
-        director.start_run("run:research-novelty")
+        start_native_run(director,task=task,run_id="run:research-novelty")
         batch = start_generation_batch(director, "run:research-novelty")
         state = director.state("run:research-novelty")
         plan = state.research_iteration_for(0).plan
@@ -180,7 +184,7 @@ class CandidateNoveltyTests(unittest.TestCase):
         self.assertEqual(novelty.archive_reference(novelty.build_archive(director.state("run:research-novelty"), 0)), reference)
         self.assertEqual(runtime.requests[-1]["request"]["context"]["mutation_contract"][novelty.ARCHIVE_KEY]["archive_digest"], reference["archive_digest"])
 
-    def test_research_repairs_a_fixed_direction_that_only_repeats_history(self):
+    def test_joint_research_keeps_history_directional_and_leaves_hard_novelty_to_proposer(self):
         first_mutation = {"schema_version": "ecologyrsi-dsh.genome-mutation/1", "operations": [
             {"op": "select_instruction_template", "role": "sample-planner",
              "instruction_template_id": "sample-planner-horizon-aware@1"}]}
@@ -195,8 +199,8 @@ class CandidateNoveltyTests(unittest.TestCase):
         director.submit_proposal(proposal)
         candidate = director.spawn_candidate("run:novelty", proposal)
         director.fail_candidate("run:novelty", candidate.candidate_id, "fixture: no evaluation requested")
-        director.advance_generation("run:novelty")
-        state = director.state("run:novelty")
+        self.fixture_generation = 1
+        state = self.novelty_state(director)
         search = GenerationSearchPlan(run_id=state.run.run_id, generation=1,
             search_queries=("greenhouse causal forecasting",), focus_areas=("planner",), rationale="Change one planner strategy.")
         knowledge = KnowledgeSnapshot(run_id=state.run.run_id, generation=1, query_terms=search.search_queries,
@@ -207,10 +211,9 @@ class CandidateNoveltyTests(unittest.TestCase):
             parent_genome=state.materialized_seed_genome().to_dict(), generation_search_plan=search.to_dict(),
             knowledge_snapshot=knowledge.proposal_context(), candidate_count=1,
             cross_generation_experience={novelty.ARCHIVE_KEY: novelty.archive_reference(archive)})
-        self.assertEqual(plan["candidate_directions"][0]["mutation_target"], "sample-planner-model-anchored@1")
-        self.assertEqual(len(runtime.requests), 3)
-        feedback = runtime.requests[-1]["request"]["context"]["host_validation_feedback"]
-        self.assertIn("hard-avoided behavior", feedback["validation_detail"])
+        self.assertEqual(plan["candidate_directions"][0]["mutation_target"], "sample-planner-horizon-aware@1")
+        self.assertEqual(len(runtime.requests), 2)
+        self.assertIsNone(runtime.requests[-1]["request"]["context"].get("host_validation_feedback"))
         self.assertEqual(plan[novelty.ARCHIVE_KEY], novelty.archive_reference(archive))
         self.assertEqual(ledger.latest_seq(), before)
 

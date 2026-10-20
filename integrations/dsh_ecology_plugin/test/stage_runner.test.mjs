@@ -268,7 +268,10 @@ function samplePlanBinding({ admissionId = "admission-sample-plan-1" } = {}) {
 }
 
 function directSampleBinding(stage, context) {
-  const reflection = stage === "sample.reflect";
+  // Generic lifecycle fixtures use one critic cell after removing per-origin reflection.
+  if (context.sample && !context.samples) {
+    context = {wave_digest: context.wave_digest, samples: [context.sample]};
+  }
   const planner = stage === "sample.plan";
   return {
     run_id: `run-${stage}`,
@@ -282,9 +285,7 @@ function directSampleBinding(stage, context) {
       role: planner ? "sample-planner" : "sample-critic",
       output_schema_id: planner
         ? "ecology-sample-predictions@2"
-        : reflection
-          ? "ecology-sample-reflection@1"
-          : "ecology-sample-review@2",
+        : "ecology-sample-review@2",
       ...(planner ? { max_tokens: 2048 } : {}),
       context,
       context_canonical_json: canonicalJson(context),
@@ -425,23 +426,6 @@ function directSampleHarness({
   };
 }
 
-test("post-score sample reflection is a registered structured DSH stage", () => {
-  assert.deepEqual(
-    {
-      role: STAGES["sample.reflect"].role,
-      schema: STAGES["sample.reflect"].schema,
-      file: STAGES["sample.reflect"].file,
-    },
-    {
-      role: "sample-critic",
-      schema: "ecology-sample-reflection@1",
-      file: "sample-reflection",
-    },
-  );
-  assert.match(STAGES["sample.reflect"].instruction, /prediction vector is already immutable/i);
-  assert.match(STAGES["sample.reflect"].instruction, /next-generation action/i);
-});
-
 test("candidate local edit must avoid same-revision rejected bundles", () => {
   const localEdit = STAGES["candidate.local_edit"];
 
@@ -495,7 +479,7 @@ test("Skill-first evidence permits optional retrieval before the terminal tool",
       data: { callId: "structured", name: "structured_output", arguments: {} },
     },
   ], {
-    stage: "generation.research",
+    stage: "candidate.propose",
     skillName: "autonomous-ecology-research",
     allowDynamicRetrieval: true,
   });
@@ -646,7 +630,7 @@ test("Skill-first evidence rejects excessive or post-terminal retrieval", () => 
     );
   }
   const options = {
-    stage: "generation.research",
+    stage: "candidate.propose",
     skillName: "autonomous-ecology-research",
     allowDynamicRetrieval: true,
   };
@@ -657,7 +641,7 @@ test("Skill-first evidence rejects excessive or post-terminal retrieval", () => 
       { seq: 4, type: "tool/result", data: { message: { content: [{ type: "tool-result", toolCallId: "search", isError: false }] } } },
       { seq: 5, type: "tool/call", data: { callId: "structured", name: "structured_output", arguments: {} } },
     ], {
-      stage: "generation.research",
+      stage: "candidate.propose",
       skillName: "autonomous-ecology-research",
     }),
     /legacy tool profile/i,
@@ -844,7 +828,7 @@ test("native stage runner reserves before first child tool and durably persists 
         assert.match(prompt.instruction, /zero to three web_search calls/i);
         assert.match(prompt.instruction, /mutation delta/i);
         assert.match(prompt.instruction, /omit every unchanged/i);
-        assert.match(prompt.instruction, /exactly one operation/i);
+        assert.match(prompt.instruction, /mutation_contract.maximum_operations/i);
         assert.match(prompt.instruction, /assigned candidate direction/i);
         assert.match(prompt.instruction, /normalized trust-region step/i);
         assert.match(prompt.instruction, /do not reconstruct/i);
@@ -995,14 +979,14 @@ test("native stage runner rejects a changed context before starting DSH", async 
   await assert.rejects(
     runner.run({
       run_id: "run-1",
-      stage: "generation.research",
+      stage: "candidate.propose",
       run_state_revision: 1,
       stage_attempt: 1,
       ledger_expected_revision: 1,
-      idempotency_key: "research-1",
+      idempotency_key: "proposal-1",
       request: {
-        role: "researcher",
-        output_schema_id: "ecology-research-result@1",
+        role: "candidate-proposer",
+        output_schema_id: "ecology-genome-mutation@1",
         context: { frozen: true },
         context_canonical_json: JSON.stringify({ frozen: true }),
         context_digest: "0".repeat(64),
@@ -1418,81 +1402,10 @@ test("sample critic retries a consumed completed turn with no capture in a fresh
   }
 });
 
-test("sample reflection binds the outer Host identity and retries one missing result", async () => {
-  const waveDigest = "e".repeat(64);
-  const structured = {
-    schema_version: "ecology-sample-reflection@1",
-    wave_digest: waveDigest,
-    sample_id: "origin-reflection",
-    outcome_class: "neutral",
-    error_source: "unknown",
-    next_action: "keep",
-    confidence: 0.8,
-    summary: "Keep the bounded configuration.",
-  };
-  const context = {
-    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
-    wave_digest: waveDigest,
-    sample: {
-      sample_id: "origin-reflection",
-      prediction_cells: [{ sample_id: "prediction-cell-that-must-not-bind" }],
-    },
-    outcome: { cells: [] },
-  };
-  const harness = directSampleHarness({
-    stage: "sample.reflect",
-    results: [
-      { stopReason: "error" },
-      { stopReason: "completed", structured },
-    ],
-    sessionEvents: (attempt) => attempt === 1
-      ? rc6ConsumedEvents("origin-vector-review")
-      : skillFirstEvents("origin-vector-review"),
-  });
-
-  const result = await harness.runner.run(directSampleBinding("sample.reflect", context));
-
-  assert.deepEqual(result.structured, structured);
-  assert.deepEqual(harness.reservations, [
-    { reservation_id: "sample.reflect-reservation-1", launch_attempt: 1 },
-    { reservation_id: "sample.reflect-reservation-2", launch_attempt: 2 },
-  ]);
-  assert.deepEqual(
-    harness.reservationRequests.map((request) => request.sample_member_digests),
-    [
-      [jsonDigest("prediction-cell-that-must-not-bind")],
-      [jsonDigest("prediction-cell-that-must-not-bind")],
-    ],
-  );
-  assert.deepEqual(harness.starts.map(({ id }) => id), [
-    "sample.reflect-child-1",
-    "sample.reflect-child-2",
-  ]);
-  assert.equal(harness.persisted.length, 1);
-  for (const { request } of harness.starts) {
-    assert.deepEqual(request.outputSchema.properties.wave_digest, {
-      type: "string",
-      const: waveDigest,
-    });
-    assert.deepEqual(request.outputSchema.properties.sample_id, {
-      type: "string",
-      const: "origin-reflection",
-    });
-    assert.notEqual(
-      request.outputSchema.properties.sample_id.const,
-      "prediction-cell-that-must-not-bind",
-    );
-    assert.match(
-      JSON.parse(request.prompt[0].text).instruction,
-      /prediction_cells\[\]\.sample_id.*must not|never.*prediction_cells\[\]\.sample_id/i,
-    );
-  }
-});
-
 test("repeated serialized tool text stops after one fresh probe without fabricated execution", async () => {
   for (const stopReason of ["completed", "error"]) {
     const harness = directSampleHarness({
-      stage: "sample.reflect", results: [{ stopReason }, { stopReason }],
+      stage: "sample.critic", results: [{ stopReason }, { stopReason }],
       sessionEvents: () => [
         { seq: 1, type: "turn/start", data: { turn: 1 } },
         { seq: 2, type: "step/start", data: { turn: 1, step: 0 } },
@@ -1502,8 +1415,8 @@ test("repeated serialized tool text stops after one fresh probe without fabricat
         { seq: 4, type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } },
       ],
     });
-    await assert.rejects(harness.runner.run(directSampleBinding("sample.reflect", {
-      schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    await assert.rejects(harness.runner.run(directSampleBinding("sample.critic", {
+      schema_version: "ecologyrsi-dsh.sample-review-context/2",
       wave_digest: "d".repeat(64), sample: { sample_id: "origin-tool-text" }, outcome: { cells: [] },
     })), (error) => error?.code === "structured_child_tool_protocol_error");
     assert.equal(harness.starts.length, 2);
@@ -1515,11 +1428,11 @@ test("repeated serialized tool text stops after one fresh probe without fabricat
 test("output budget exhaustion never repeats the identical capped model call", async () => {
   for (const stopReason of ["error", "max-tokens"]) {
     const harness = directSampleHarness({
-      stage: "sample.reflect", results: [{ stopReason }],
+      stage: "sample.critic", results: [{ stopReason }],
       sessionEvents: () => rc6ConsumedEvents("origin-vector-review", { terminalKind: "max-tokens" }),
     });
-    await assert.rejects(harness.runner.run(directSampleBinding("sample.reflect", {
-      schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    await assert.rejects(harness.runner.run(directSampleBinding("sample.critic", {
+      schema_version: "ecologyrsi-dsh.sample-review-context/2",
       wave_digest: "d".repeat(64), sample: { sample_id: "origin-output-budget" }, outcome: { cells: [] },
     })), (error) => error?.code === "structured_child_output_budget_exhausted");
     assert.equal(harness.starts.length, 1);
@@ -1541,15 +1454,15 @@ test("planner transmits the frozen old or new response ceiling without extra ret
   }
 });
 
-test("sample reflection stops after two missing structured outputs without persistence", async () => {
+test("sample critic stops after two missing structured outputs without persistence", async () => {
   const context = {
-    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    schema_version: "ecologyrsi-dsh.sample-review-context/2",
     wave_digest: "d".repeat(64),
     sample: { sample_id: "origin-two-missing" },
     outcome: { cells: [] },
   };
   const harness = directSampleHarness({
-    stage: "sample.reflect",
+    stage: "sample.critic",
     results: [
       { stopReason: "error" },
       { stopReason: "error" },
@@ -1558,7 +1471,7 @@ test("sample reflection stops after two missing structured outputs without persi
   });
 
   await assert.rejects(
-    harness.runner.run(directSampleBinding("sample.reflect", context)),
+    harness.runner.run(directSampleBinding("sample.critic", context)),
     (error) => error?.code === "structured_result_missing",
   );
   assert.equal(harness.reservations.length, 2);
@@ -1568,13 +1481,13 @@ test("sample reflection stops after two missing structured outputs without persi
 
 test("direct sample exact INVALID_ARGS rejection is a bounded missing-capture retry", async () => {
   const context = {
-    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    schema_version: "ecologyrsi-dsh.sample-review-context/2",
     wave_digest: "a".repeat(64),
     sample: { sample_id: "origin-direct-schema-rejection" },
     outcome: { cells: [] },
   };
   const harness = directSampleHarness({
-    stage: "sample.reflect",
+    stage: "sample.critic",
     results: [
       { stopReason: "error" },
       { stopReason: "error" },
@@ -1588,7 +1501,7 @@ test("direct sample exact INVALID_ARGS rejection is a bounded missing-capture re
   });
 
   await assert.rejects(
-    harness.runner.run(directSampleBinding("sample.reflect", context)),
+    harness.runner.run(directSampleBinding("sample.critic", context)),
     (error) => error?.code === "structured_result_missing",
   );
   assert.equal(harness.reservations.length, 2);
@@ -1598,13 +1511,13 @@ test("direct sample exact INVALID_ARGS rejection is a bounded missing-capture re
 
 test("an unconsumed completed no-op turn cannot hide the prior consumed provider error", async () => {
   const context = {
-    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    schema_version: "ecologyrsi-dsh.sample-review-context/2",
     wave_digest: "5".repeat(64),
     sample: { sample_id: "origin-consumed-terminal" },
     outcome: { cells: [] },
   };
   const harness = directSampleHarness({
-    stage: "sample.reflect",
+    stage: "sample.critic",
     results: [{ stopReason: "error" }],
     sessionEvents: () => {
       const events = rc6ConsumedEvents("origin-vector-review", { terminalKind: "error" });
@@ -1622,7 +1535,7 @@ test("an unconsumed completed no-op turn cannot hide the prior consumed provider
   });
 
   await assert.rejects(
-    harness.runner.run(directSampleBinding("sample.reflect", context)),
+    harness.runner.run(directSampleBinding("sample.critic", context)),
     (error) => error?.code === "structured_child_model_error",
   );
   assert.equal(harness.reservations.length, 1);
@@ -1791,13 +1704,13 @@ test("sample planner prefers structured 429 Retry-After metadata", async () => {
 
 test("completed child events cannot turn a public model_error into missing capture", async () => {
   const context = {
-    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    schema_version: "ecologyrsi-dsh.sample-review-context/2",
     wave_digest: "4".repeat(64),
     sample: { sample_id: "origin-public-model-error" },
     outcome: { cells: [] },
   };
   const harness = directSampleHarness({
-    stage: "sample.reflect",
+    stage: "sample.critic",
     results: [
       { stopReason: "model_error" },
       { stopReason: "model_error" },
@@ -1806,7 +1719,7 @@ test("completed child events cannot turn a public model_error into missing captu
   });
 
   await assert.rejects(
-    harness.runner.run(directSampleBinding("sample.reflect", context)),
+    harness.runner.run(directSampleBinding("sample.critic", context)),
     (error) => error?.code === "structured_child_model_error",
   );
   assert.equal(harness.reservations.length, 2);
@@ -1816,7 +1729,7 @@ test("completed child events cannot turn a public model_error into missing captu
 
 test("direct structured-output authorization, abort, and unknown-tool failures never retry as missing", async () => {
   const context = {
-    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    schema_version: "ecologyrsi-dsh.sample-review-context/2",
     wave_digest: "7".repeat(64),
     sample: { sample_id: "origin-control-rejection" },
     outcome: { cells: [] },
@@ -1829,14 +1742,14 @@ test("direct structured-output authorization, abort, and unknown-tool failures n
 
   for (const error of rejectedErrors) {
     const harness = directSampleHarness({
-      stage: "sample.reflect",
+      stage: "sample.critic",
       results: [{ stopReason: "error" }],
       sessionEvents: () => rc6ConsumedEvents("origin-vector-review", {
         structuredResult: { isError: true, error },
       }),
     });
     await assert.rejects(
-      harness.runner.run(directSampleBinding("sample.reflect", context)),
+      harness.runner.run(directSampleBinding("sample.critic", context)),
       (caught) => caught?.code === "structured_child_model_error",
       error?.code || "authorization",
     );
@@ -1849,19 +1762,19 @@ test("direct structured-output authorization, abort, and unknown-tool failures n
 
 test("direct reused callId and mismatched source cannot authorize a missing retry", async () => {
   const context = {
-    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    schema_version: "ecologyrsi-dsh.sample-review-context/2",
     wave_digest: "6".repeat(64),
     sample: { sample_id: "origin-reused-call" },
     outcome: { cells: [] },
   };
   const harness = directSampleHarness({
-    stage: "sample.reflect",
+    stage: "sample.critic",
     results: [{ stopReason: "error" }],
     sessionEvents: () => rc6ReusedStructuredCallEvents("origin-vector-review"),
   });
 
   await assert.rejects(
-    harness.runner.run(directSampleBinding("sample.reflect", context)),
+    harness.runner.run(directSampleBinding("sample.critic", context)),
     (error) => error?.code === "structured_child_model_error",
   );
   assert.equal(harness.reservations.length, 1);
@@ -1987,45 +1900,7 @@ test("malformed sample Host identities fail locally before child launch or persi
     assert.equal(harness.reservations.length, 1, name);
   }
 
-  const malformedReflection = directSampleHarness({
-    stage: "sample.reflect",
-    results: [{ stopReason: "completed" }],
-  });
-  await assert.rejects(
-    malformedReflection.runner.run(directSampleBinding("sample.reflect", {
-      schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
-      wave_digest: validWave,
-      sample: {
-        prediction_cells: [{ sample_id: "prediction-cell-is-not-the-origin" }],
-      },
-      outcome: { cells: [] },
-    })),
-    (error) => error?.code === "sample_stage_context_invalid",
-  );
-  assert.equal(malformedReflection.starts.length, 0);
-  assert.equal(malformedReflection.persisted.length, 0);
-  assert.equal(malformedReflection.reservations.length, 1);
 
-  const malformedPlan = directSampleHarness({
-    stage: "sample.plan",
-    results: [{ stopReason: "completed" }],
-  });
-  const malformedPlanBinding = samplePlanBinding();
-  const malformedPlanContext = samplePlanContext();
-  malformedPlanContext.samples = [
-    { sample_id: "origin-duplicate" },
-    { sample_id: "origin-duplicate" },
-  ];
-  malformedPlanBinding.request.context = malformedPlanContext;
-  malformedPlanBinding.request.context_canonical_json = canonicalJson(malformedPlanContext);
-  malformedPlanBinding.request.context_digest = jsonDigest(malformedPlanContext);
-  await assert.rejects(
-    malformedPlan.runner.run(malformedPlanBinding),
-    (error) => error?.code === "sample_stage_context_invalid",
-  );
-  assert.equal(malformedPlan.starts.length, 0);
-  assert.equal(malformedPlan.persisted.length, 0);
-  assert.equal(malformedPlan.reservations.length, 1);
 });
 
 test("sample missing-output retry does not broaden to lifecycle or durable-boundary errors", async () => {
@@ -2042,7 +1917,7 @@ test("sample missing-output retry does not broaden to lifecycle or durable-bound
     "dsh_native_runtime_http_error",
   ];
   const context = {
-    schema_version: "ecologyrsi-dsh.sample-reflection-context/1",
+    schema_version: "ecologyrsi-dsh.sample-review-context/2",
     wave_digest: "b".repeat(64),
     sample: { sample_id: "origin-no-retry" },
     outcome: { cells: [] },
@@ -2071,7 +1946,7 @@ test("sample missing-output retry does not broaden to lifecycle or durable-bound
       },
     });
     await assert.rejects(
-      runner.run(directSampleBinding("sample.reflect", context)),
+      runner.run(directSampleBinding("sample.critic", context)),
       (error) => error?.code === code,
       code,
     );
@@ -2613,16 +2488,16 @@ test("sample step exhaustion stops before structured acceptance without identica
 });
 
 test("a real protocol probe recovers after Skill without accepting serialized text", async () => {
-  const context = {schema_version:"ecologyrsi-dsh.sample-reflection-context/1", wave_digest:"d".repeat(64), sample:{sample_id:"origin-probe"},outcome:{cells:[]}};
-  const structured = {schema_version:"ecology-sample-reflection@1",wave_digest:context.wave_digest,sample_id:"origin-probe",outcome_class:"neutral",error_source:"unknown",next_action:"keep",confidence:0.8,summary:"Keep."};
-  const harness = directSampleHarness({stage:"sample.reflect",results:[{stopReason:"completed"},{stopReason:"completed",structured}],
+  const context = {schema_version:"ecologyrsi-dsh.sample-review-context/2", wave_digest:"d".repeat(64), sample:{sample_id:"origin-probe"},outcome:{cells:[]}};
+  const structured = {schema_version:"ecology-sample-review@2",wave_digest:context.wave_digest,sample_id:"origin-probe",outcome_class:"neutral",error_source:"unknown",next_action:"keep",confidence:0.8,summary:"Keep."};
+  const harness = directSampleHarness({stage:"sample.critic",results:[{stopReason:"completed"},{stopReason:"completed",structured}],
     sessionEvents: attempt => attempt === 1 ? [
       {seq:1,type:"turn/start",data:{turn:1}}, {seq:2,type:"step/start",data:{turn:1,step:0}},
       {seq:3,type:"tool/call",data:{turn:1,callId:"skill",name:"skill"}},
       {seq:4,type:"assistant/message",data:{turn:1,message:{content:[{type:"text",text:'<｜DSML｜tool_calls><｜DSML｜invoke name="structured_output"></｜DSML｜invoke></｜DSML｜tool_calls>'}]}}},
       {seq:5,type:"turn/end",data:{turn:1,reason:{kind:"completed"}}}
     ] : skillFirstEvents("origin-vector-review")});
-  const result = await harness.runner.run(directSampleBinding("sample.reflect",context));
+  const result = await harness.runner.run(directSampleBinding("sample.critic",context));
   assert.deepEqual(result.structured,structured);
   assert.equal(harness.starts.length,2); assert.equal(harness.persisted.length,1);
   assert.equal(harness.failures[0].error_code,"structured_child_tool_protocol_error");
@@ -2715,11 +2590,11 @@ test('planner deadline remains absolute across attempts and rejects late results
   assert.equal(harness.persisted.length, 0);
 });
 
-test('planner default uses thirty minutes without extending sample reflection or critic', async () => {
+test('planner default uses thirty minutes without extending critic', async () => {
   for (const [stage, timeout, skillName, context] of [
     ['sample.plan', 1800000, 'origin-vector-forecasting', samplePlanContext()],
     ['sample.critic', 600000, 'origin-vector-review', {schema_version:'ecologyrsi-dsh.sample-review-wave/1',wave_digest:'f'.repeat(64),samples:[{sample_id:'one'}]}],
-    ['sample.reflect', 600000, 'origin-vector-review', {schema_version:'ecologyrsi-dsh.sample-reflection-context/1',wave_digest:'f'.repeat(64),sample:{sample_id:'one'},outcome:{cells:[]}}],
+    ['sample.critic', 600000, 'origin-vector-review', {schema_version:'ecologyrsi-dsh.sample-review-context/2',wave_digest:'f'.repeat(64),sample:{sample_id:'one'},outcome:{cells:[]}}],
   ]) {
     const harness = directSampleHarness({stage, results: [{stopReason:'completed', structured:{}}],
       sessionEvents: () => stage === 'sample.plan' ? correctedOutputEvents() : skillFirstEvents(skillName)});

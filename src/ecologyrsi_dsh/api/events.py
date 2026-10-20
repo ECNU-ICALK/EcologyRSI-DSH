@@ -17,7 +17,6 @@ from ..core.sample_results import (
     decode_sample_result_batch,
     decode_sample_results,
 )
-from .projection import _public_intervention_receipt
 from .shared import _assert_http_scope, _event_type, public_fields
 
 
@@ -104,7 +103,6 @@ _EVENT_FIELDS = {
     'EvaluationSampleResultsStarted': ('', 'generation candidate_id revision'),
     'EvaluationSampleResultBatchRecorded': ('', 'candidate_id revision batch_index record_count result_digest'),
     'EvaluationSampleResultsRecorded': ('', 'candidate_id evaluation_id revision record_count result_digest'),
-    'HumanInterventionRecorded': ('intervention', 'intervention_id kind'),
 }
 
 
@@ -136,7 +134,6 @@ class EventEndpointsMixin:
     def _event_json(
         event: Any,
         *,
-        intervention_kinds: dict[str, str] | None = None,
         duplicate_evaluations: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if event.kind in _PRIVATE_SAMPLE_EVENT_KINDS:
@@ -199,7 +196,6 @@ class EventEndpointsMixin:
                 "DSH 子任务请求失败并已释放预约；"
                 "该请求不计为模型成功，最终失败 origin 由宿主结算记录。"
             ),
-            "ModelUsageRecorded": "模型调用 token 用量已记录。",
             "AlgorithmAttemptRecorded": "候选算法编译或调试证据已记录。",
         }.get(event.kind, "运行记录已更新。")
         public_payload: dict[str, Any] = {"message": message}
@@ -271,7 +267,6 @@ class EventEndpointsMixin:
             )
         elif event.kind == "GenerationResearchIterated":
             iteration = payload.get("research_iteration", {})
-            adoption = iteration.get("prediction_model_adoption", {})
             historical_provenance = iteration.get("historical_provenance", {})
             public_payload.update(
                 {
@@ -281,7 +276,6 @@ class EventEndpointsMixin:
                         if isinstance(historical_provenance, dict)
                         else None
                     ),
-                    "adopted_predictor_id": adoption.get("adopted_id"),
                 }
             )
         elif event.kind == "GenerationAnalyzed":
@@ -529,134 +523,6 @@ class EventEndpointsMixin:
                     ),
                 }
             )
-        elif event.kind == "HumanInterventionApplied":
-            intervention_id = str(payload.get("intervention_id", ""))
-            kind = str(
-                payload.get("kind")
-                or (intervention_kinds or {}).get(intervention_id, "")
-            )
-            receipt = _public_intervention_receipt(payload, kind=kind)
-            public_payload.update(
-                {
-                    "message": (
-                        "人工意见原文已进入本轮提案上下文，宿主未强制执行。"
-                        if receipt["application_status"] == "recorded"
-                        and receipt.get("model_context_delivered") is True
-                        else {
-                            "recorded": "人工意见仅记录到本轮提案，未执行。",
-                            "applied": "人工意见已应用到本轮提案。",
-                            "enforced": "人工意见已由宿主边界强制执行。",
-                        }[receipt["application_status"]]
-                    ),
-                    "intervention_id": intervention_id,
-                    "proposal_id": payload.get("proposal_id"),
-                    "kind": kind or None,
-                    **receipt,
-                }
-            )
-        elif event.kind == "ExpertConsultationRequested":
-            consultation = payload.get("consultation", {})
-            generation = consultation.get("generation")
-            public_payload.update(
-                {
-                    "consultation_id": consultation.get("consultation_id"),
-                    "source_generation": (
-                        generation + 1
-                        if isinstance(generation, int)
-                        and not isinstance(generation, bool)
-                        and generation >= 0
-                        else None
-                    ),
-                    "uncertainty_type": sanitize_public_value(
-                        consultation.get("uncertainty_type"),
-                        text_limit=200,
-                    ),
-                    "question": sanitize_public_value(
-                        consultation.get("question"),
-                        text_limit=4000,
-                    ),
-                    "context": sanitize_public_value(
-                        consultation.get("context"),
-                        text_limit=4000,
-                    ),
-                    "fallback_assumption": sanitize_public_value(
-                        consultation.get("fallback_assumption"),
-                        text_limit=4000,
-                    ),
-                    "requested_expertise": sanitize_public_value(
-                        consultation.get("requested_expertise", []),
-                        text_limit=500,
-                        sequence_limit=16,
-                    ),
-                    "options": sanitize_public_value(
-                        consultation.get("options", []),
-                        text_limit=500,
-                        sequence_limit=16,
-                    ),
-                    "confidence": sanitize_public_value(
-                        consultation.get("confidence")
-                    ),
-                    "candidate_id": consultation.get("candidate_id"),
-                    "model_id": sanitize_public_value(
-                        consultation.get("requested_by_model_id"),
-                        text_limit=500,
-                    ),
-                    "non_blocking": consultation.get("non_blocking") is True,
-                }
-            )
-        elif event.kind == "ExpertConsultationAnswered":
-            answer = payload.get("answer", {})
-            effective_generation = answer.get("effective_generation")
-            public_payload.update(
-                {
-                    "consultation_id": answer.get("consultation_id"),
-                    "answer_id": answer.get("answer_id"),
-                    "answer": sanitize_public_value(
-                        answer.get("answer"),
-                        text_limit=4000,
-                    ),
-                    "answered_by": sanitize_public_value(
-                        answer.get("answered_by"),
-                        text_limit=120,
-                    ),
-                    "selected_option": sanitize_public_value(
-                        answer.get("selected_option"),
-                        text_limit=500,
-                    ),
-                    "effective_generation": (
-                        effective_generation + 1
-                        if isinstance(effective_generation, int)
-                        and not isinstance(effective_generation, bool)
-                        and effective_generation >= 0
-                        else None
-                    ),
-                    "audit_only": effective_generation is None,
-                    "persistent": answer.get("persistent") is True,
-                }
-            )
-        elif event.kind == "ExpertConsultationApplied":
-            application = payload.get("application", payload)
-            applied_generation = application.get(
-                "applied_generation",
-                application.get("generation"),
-            )
-            public_payload.update(
-                {
-                    "consultation_id": application.get("consultation_id"),
-                    "answer_id": application.get("answer_id"),
-                    "research_iteration_digest": application.get(
-                        "research_iteration_digest",
-                        application.get("iteration_digest"),
-                    ),
-                    "applied_generation": (
-                        applied_generation + 1
-                        if isinstance(applied_generation, int)
-                        and not isinstance(applied_generation, bool)
-                        and applied_generation >= 0
-                        else None
-                    ),
-                }
-            )
         elif event.kind == "EvolutionStageRecorded":
             public_payload.update(
                 {
@@ -713,20 +579,6 @@ class EventEndpointsMixin:
                         **public_fields(payload, 'retry_class generation stage breaker_epoch consecutive_failures retry_limit first_failure_at last_failure_at last_error_code suggested_action'),
                     }
                 )
-        elif event.kind == "ModelUsageRecorded":
-            public_payload.update(
-                {
-                    **public_fields(payload, 'schema_version generation candidate_id role model_id prompt_tokens completion_tokens total_tokens'),
-                    "usage_reported": payload.get("usage_reported", True),
-                    "outcome": payload.get("outcome", "succeeded"),
-                    "call_count": 1,
-                    "http_attempts": payload.get(
-                        "http_attempts", payload.get("gateway_request_count")
-                    ),
-                    "revision": payload.get("revision"),
-                    "usage_index": payload.get("usage_index"),
-                }
-            )
         elif event.kind == "AlgorithmAttemptRecorded":
             attempt = payload.get("algorithm_attempt", {})
             public_payload.update(
@@ -788,16 +640,12 @@ class EventEndpointsMixin:
         truncated = tail is not None and len(public_events) > tail
         if tail is not None:
             public_events = public_events[-tail:]
-        intervention_kinds = {
-            item.intervention_id: item.kind.value for item in state.interventions
-        }
         duplicate_evaluations = _duplicate_evaluation_context(state.events)
         return {
             "run_id": run_id,
             "events": [
                 self._event_json(
                     event,
-                    intervention_kinds=intervention_kinds,
                     duplicate_evaluations=duplicate_evaluations,
                 )
                 for event in public_events

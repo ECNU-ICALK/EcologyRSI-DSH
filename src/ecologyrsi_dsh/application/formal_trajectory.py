@@ -9,7 +9,6 @@ from ..evolution.agent_policy import rebind_agent_policy
 
 import math
 from dataclasses import replace
-from statistics import median
 from typing import Any, Mapping
 from .ports import GenerationRuntime
 
@@ -35,8 +34,6 @@ from ..evolution.genome import (
     parameter_trust_region_neighborhood,
 )
 from ..evolution.champion_challenger import (
-    LOCAL_MINIMUM_SCORE_DELTA,
-    POSITIVE_DELTA_MINIMUM_SCORE_DELTA,
     assess_local_challenger,
     local_challenger_safety_reason,
 )
@@ -61,8 +58,6 @@ from ..evolution.strategies import (
 )
 from ..evolution.parameter_activity import parameter_activity_contract
 from ..evolution.schedule import (
-    PREQUENTIAL_PERFORMANCE_POLICY,
-    PAIRED_LOCAL_EVALUATION_MODE,
     OptimizationSchedule,
 )
 from ..evolution.workflow_ir import (
@@ -143,7 +138,7 @@ def _revision_evaluation_inputs(
         metadata=metadata,
     )
     spec = compile_algorithm_spec(
-        task,
+        state.task_manifest,
         proposal,
         state.knowledge_for(candidate.generation),
     )
@@ -357,72 +352,6 @@ def _evaluate_formal_batch_arm(
     )
 
 
-def _execute_next_prequential_formal_batch(
-    services: GenerationRuntime,
-    run_id: str,
-    candidate_id: str,
-) -> bool:
-    state = services.director.state(run_id)
-    trajectory = ensure_formal_trajectory(services, run_id, candidate_id)
-    if trajectory.status is TrajectoryStatus.COMPLETED:
-        return False
-    candidate = state.candidate(candidate_id)
-    adaptation = state.adaptation_for_generation(candidate.generation)
-    cohorts = state.generation_cohort_for(candidate.generation)
-    if adaptation is None or cohorts is None:
-        raise RuntimeError("formal batch requires frozen adaptation and generation cohorts")
-    batch_index = None
-    for index in range(trajectory.batch_count):
-        existing_batch = state.formal_batch_for(candidate_id, index)
-        evaluation = state.batch_evaluation_for(candidate_id, index)
-        if existing_batch is None or evaluation is None:
-            batch_index = index
-            break
-        # A completed batch must be locally decided and activated before the
-        # next revision can be evaluated.  Returning here lets the scheduler
-        # spend its next turn on the pending local-edit/recovery boundary.
-        if (
-            state.local_edit_proposal_for(candidate_id, index) is None
-            or next(
-                (
-                    item
-                    for item in state.local_edit_outcomes
-                    if item.get("candidate_id") == candidate_id
-                    and item.get("batch_index") == index
-                ),
-                None,
-            )
-            is None
-            or state.revision_activation_for(candidate_id, index) is None
-        ):
-            return False
-    if batch_index is None:
-        return False
-    active_revision_id = (
-        trajectory.initial_revision_id
-        if batch_index == 0
-        else state.revision_activation_for(candidate_id, batch_index - 1).to_revision_id
-    )
-    formal_batch = _director_mutation(
-        services,
-        "start_formal_batch",
-        run_id,
-        candidate_id,
-        active_revision_id,
-        batch_index,
-    )
-    state = services.director.state(run_id)
-    if state.batch_evaluation_for(candidate_id, batch_index) is not None:
-        return False
-    _evaluate_formal_batch_arm(
-        services,
-        run_id,
-        candidate_id,
-        active_revision_id,
-        formal_batch,
-        arm=None,
-    )
-    return True
 
 
 def _local_challenger_policy(services: GenerationRuntime, run_id: str) -> dict[str, Any]:
@@ -687,26 +616,8 @@ def _execute_next_paired_formal_batch(
     return False
 
 
-def execute_next_formal_batch(
-    services: GenerationRuntime,
-    run_id: str,
-    candidate_id: str,
-) -> bool:
-    state = services.director.state(run_id)
-    schedule = OptimizationSchedule.from_dict(
-        state.task_manifest.metadata["optimization_schedule"]
-    )
-    if schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
-        return _execute_next_paired_formal_batch(
-            services,
-            run_id,
-            candidate_id,
-        )
-    return _execute_next_prequential_formal_batch(
-        services,
-        run_id,
-        candidate_id,
-    )
+def execute_next_formal_batch(services: GenerationRuntime, run_id: str, candidate_id: str) -> bool:
+    return _execute_next_paired_formal_batch(services, run_id, candidate_id)
 
 
 def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRevision, batch: Any) -> LocalEditContext:
@@ -796,10 +707,9 @@ def _local_edit_context(state: Any, candidate: Candidate, revision: CandidateRev
                 name for name in targets.get("scientific_parameter", ())
                 if name in cell_parameters
             )
-    if schedule.race:
-        role = next(row for row in genome.agent_program["candidate_execution_program"]["role_profiles"]
-                    if row["role"] == "sample-planner")
-        targets["component_reset"] = tuple(key for key in RESETTABLE_ROLE_COMPONENTS if key in role)
+    role = next(row for row in genome.agent_program["candidate_execution_program"]["role_profiles"]
+                if row["role"] == "sample-planner")
+    targets["component_reset"] = tuple(key for key in RESETTABLE_ROLE_COMPONENTS if key in role)
     raw_plan = state.proposal(candidate.proposal_id).metadata.get("derived_execution_plan")
     plan = DerivedExecutionPlan.from_dict(raw_plan) if isinstance(raw_plan, Mapping) else derive_execution_plan(None)
     base_policy = SampleExecutionPolicy.from_mapping(state.task_manifest.metadata.get("sample_execution_policy"))
@@ -842,260 +752,6 @@ def _effect_decision_payload(validated: LocalEditResult | None) -> dict[str, Any
     return {"effect_contract": validated.effect_contract, "effect_resolution": validated.effect_resolution}
 
 
-def _execute_next_prequential_local_edit(
-    services: GenerationRuntime,
-    run_id: str,
-    candidate_id: str,
-) -> bool:
-    state = services.director.state(run_id)
-    candidate = state.candidate(candidate_id)
-    trajectory = state.trajectory_for(candidate_id)
-    if trajectory is None:
-        raise RuntimeError("local edit requires a formal trajectory")
-    # Recover the narrow crash window after ``LocalEditDecided`` but before
-    # ``TrajectoryRevisionAdvanced``.  The outcome contains the exact active
-    # revision and is therefore sufficient to replay the activation without
-    # asking DSH for a second proposal.
-    recovery = next(
-        (
-            (batch, outcome)
-            for batch in state.formal_batches
-            if batch.candidate_id == candidate_id
-            and state.batch_evaluation_for(candidate_id, batch.batch_index) is not None
-            and state.revision_activation_for(candidate_id, batch.batch_index) is None
-            for outcome in state.local_edit_outcomes
-            if outcome.get("candidate_id") == candidate_id
-            and outcome.get("batch_index") == batch.batch_index
-        ),
-        None,
-    )
-    if recovery is not None:
-        pending_batch, outcome = recovery
-        reason = {
-            LocalEditOutcome.KEPT.value: RevisionAdvanceReason.KEPT,
-            LocalEditOutcome.APPLIED.value: RevisionAdvanceReason.LOCAL_EDIT_APPLIED,
-            LocalEditOutcome.REJECTED.value: RevisionAdvanceReason.LOCAL_EDIT_REJECTED,
-            LocalEditOutcome.ROLLED_BACK.value: (
-                RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK
-            ),
-        }[outcome["outcome"]]
-        _director_mutation(
-            services,
-            "advance_trajectory_revision",
-            run_id,
-            candidate_id,
-            pending_batch.batch_index,
-            outcome["active_revision_id"],
-            reason,
-        )
-        if pending_batch.batch_index == trajectory.batch_count - 1:
-            _director_mutation(
-                services,
-                "complete_formal_trajectory",
-                run_id,
-                candidate_id,
-                outcome["active_revision_id"],
-            )
-        return True
-    pending = next(
-        (
-            batch
-            for batch in state.formal_batches
-            if batch.candidate_id == candidate_id
-            and state.batch_evaluation_for(candidate_id, batch.batch_index) is not None
-            and next(
-                (
-                    item
-                    for item in state.local_edit_outcomes
-                    if item.get("candidate_id") == candidate_id
-                    and item.get("batch_index") == batch.batch_index
-                ),
-                None,
-            )
-            is None
-        ),
-        None,
-    )
-    if pending is None:
-        return False
-    revision = state.revision(pending.revision_id)
-    context = _local_edit_context(state, candidate, revision, pending)
-    pending_metrics = state.batch_evaluation_for(
-        candidate_id, pending.batch_index
-    ).metrics
-    recorded = state.local_edit_proposal_for(candidate_id, pending.batch_index)
-    if recorded is None:
-        safety_reason = _prequential_safety_reason(
-            pending_metrics
-        ) or _prequential_regression_reason(
-            state,
-            candidate_id,
-            revision,
-            pending.batch_index,
-        )
-        proposal = (
-            LocalEditProposal(
-                decision="keep",
-                operations=(),
-                evidence_refs=("batch:score",),
-                expected_effect_cells=(),
-                risk_cells=(),
-            )
-            if safety_reason is not None
-            or pending.batch_index == trajectory.batch_count - 1
-            # A child authored after the final batch is never evaluated in this
-            # trajectory, yet completion promotes the last active revision into
-            # the holdout arm.  Keep the measured revision instead, exactly as
-            # the paired mode already requires of its final batch.
-            else _local_edit_proposal(services, state, candidate, pending, context)
-        )
-    else:
-        # A process/ledger failure may have committed the proposal before the
-        # child revision or decision.  Reconstruct the validated, minimal
-        # proposal from the durable event and finish that exact work unit
-        # instead of asking DSH to author a different edit on resume.
-        proposal = LocalEditProposal.from_dict(recorded["proposal"])
-        safety_reason = recorded.get("safety_reason")
-    policy_rejection_reason = (
-        None
-        if safety_reason is not None
-        else _local_edit_policy_rejection_reason(
-            state,
-            candidate_id,
-            pending.batch_index,
-            context.candidate_revision_id,
-            proposal,
-        )
-        or _inactive_axis_rejection_reason(pending_metrics, proposal)
-    )
-    safety_rollback = _safety_requires_rollback(safety_reason)
-    # Commit the complete, schema-validated proposal before deriving a child
-    # revision.  This closes the old crash window where replay only had the
-    # child genome and a lossy operation list, and might ask for a new edit.
-    if recorded is None:
-        _director_mutation(
-            services,
-            "record_local_edit_proposal",
-            run_id,
-            {
-                "proposal_id": f"local-edit:{candidate_id}:{pending.batch_index}",
-                "candidate_id": candidate_id,
-                "batch_index": pending.batch_index,
-                "evidence_scope_digest": context.evidence_scope_digest,
-                "proposal": proposal.to_dict(),
-                **({"safety_reason": safety_reason} if safety_reason is not None else {}),
-            },
-        )
-    if safety_reason is not None:
-        # The just-recorded batch is authoritative: do not mutate a lineage
-        # after a coverage or constraint breach.  The outcome rolls back to
-        # the parent when available and remains explicitly explained on R0.
-        validated = None
-    elif policy_rejection_reason is not None:
-        # Preserve the authored proposal for audit, but never re-apply an
-        # exact bundle that this same immutable parent revision already had
-        # rejected.  This decision is derived only from durable prior batches,
-        # so a crash after proposal persistence replays the same outcome.
-        validated = LocalEditResult(
-            outcome=LocalEditOutcome.REJECTED,
-            operations=tuple(proposal.operations),
-            child=None,
-            proposal_digest=digest(proposal.to_dict()),
-        )
-    else:
-        validated = apply_or_reject_local_edit_bundle(
-            EcologyEvolutionPluginGenome.from_dict(dict(revision.genome)),
-            proposal,
-            context,
-            current_program_registry(),
-            task=state.task_manifest,
-        )
-    validated = _check_behavior_revisit(state, candidate_id, proposal, validated, batch_index=pending.batch_index)
-    active_revision_id = revision.revision_id
-    advance_reason = RevisionAdvanceReason.KEPT
-    if validated is not None and validated.child is not None:
-        child = validated.child
-        child_revision = CandidateRevision(
-            revision_id=f"revision:{candidate_id}:batch:{pending.batch_index + 1}",
-            run_id=run_id,
-            generation=candidate.generation,
-            candidate_id=candidate_id,
-            genome=child.to_dict(),
-            genome_digest=child.genome_digest,
-            behavior_digest=child.behavior_digest,
-            mutation_digest=str(child.lineage["mutation_digest"]),
-            parent_revision_id=revision.revision_id,
-            source_batch_index=pending.batch_index,
-            status=RevisionStatus.ACTIVE,
-        )
-        _director_mutation(services, "create_candidate_revision", run_id, child_revision)
-        active_revision_id = child_revision.revision_id
-        advance_reason = RevisionAdvanceReason.LOCAL_EDIT_APPLIED
-    elif safety_reason is not None:
-        if safety_rollback and revision.parent_revision_id is not None:
-            active_revision_id = revision.parent_revision_id
-            advance_reason = RevisionAdvanceReason.PREQUENTIAL_SAFETY_ROLLBACK
-    elif (
-        validated is not None and validated.outcome is LocalEditOutcome.REJECTED
-    ):
-        advance_reason = RevisionAdvanceReason.LOCAL_EDIT_REJECTED
-    _director_mutation(
-        services,
-        "decide_local_edit",
-        run_id,
-        {
-            "proposal_id": f"local-edit:{candidate_id}:{pending.batch_index}",
-            "candidate_id": candidate_id,
-            "batch_index": pending.batch_index,
-            "outcome": (
-                LocalEditOutcome.ROLLED_BACK.value
-                if safety_rollback and revision.parent_revision_id is not None
-                else LocalEditOutcome.KEPT.value
-                if safety_reason is not None
-                else validated.outcome.value
-            ),
-            "active_revision_id": active_revision_id,
-            **_effect_decision_payload(validated),
-            **(
-                {
-                    "reason": (
-                        safety_reason
-                        or policy_rejection_reason
-                        or (
-                            validated.rejection_reason
-                            if validated is not None
-                            else None
-                        )
-                    )
-                }
-                if safety_reason is not None
-                or policy_rejection_reason is not None
-                or (
-                    validated is not None
-                    and validated.rejection_reason is not None
-                )
-                else {}
-            ),
-        },
-    )
-    _director_mutation(
-        services,
-        "advance_trajectory_revision",
-        run_id,
-        candidate_id,
-        pending.batch_index,
-        active_revision_id,
-        advance_reason,
-    )
-    if pending.batch_index == trajectory.batch_count - 1:
-        _director_mutation(
-            services,
-            "complete_formal_trajectory",
-            run_id,
-            candidate_id,
-            active_revision_id,
-        )
-    return True
 
 
 def _execute_next_paired_local_edit(
@@ -1299,98 +955,13 @@ def _execute_next_paired_local_edit(
     return True
 
 
-def execute_next_local_edit(
-    services: GenerationRuntime,
-    run_id: str,
-    candidate_id: str,
-) -> bool:
-    state = services.director.state(run_id)
-    metadata = getattr(getattr(state, "task_manifest", None), "metadata", {})
-    raw_schedule = metadata.get("optimization_schedule")
-    if (
-        isinstance(raw_schedule, Mapping)
-        and OptimizationSchedule.from_dict(raw_schedule).local_evaluation_mode
-        == PAIRED_LOCAL_EVALUATION_MODE
-    ):
-        return _execute_next_paired_local_edit(
-            services,
-            run_id,
-            candidate_id,
-        )
-    return _execute_next_prequential_local_edit(
-        services,
-        run_id,
-        candidate_id,
-    )
+def execute_next_local_edit(services: GenerationRuntime, run_id: str, candidate_id: str) -> bool:
+    return _execute_next_paired_local_edit(services, run_id, candidate_id)
 
 
 _REGRESSION_GUARDRAIL_REASON = "score_regression_guardrail_failed"
 
 
-def _prequential_safety_reason(metrics: Mapping[str, Any]) -> str | None:
-    """Return a durable reason when a batch is unsafe to adapt from."""
-
-    if not isinstance(metrics, Mapping):
-        return "batch_metrics_invalid"
-    violations = metrics.get("constraint_violations", 0)
-    if isinstance(violations, bool) or not isinstance(violations, (int, float)):
-        return "constraint_guardrail_invalid"
-    if not math.isfinite(float(violations)) or float(violations) < 0:
-        return "constraint_guardrail_invalid"
-    if violations > 0:
-        return "constraint_guardrail_failed"
-    coverage = metrics.get("sample_execution_coverage_pass")
-    sample = metrics.get("sample_execution")
-    sample_coverage = sample.get("coverage_pass") if isinstance(sample, Mapping) else None
-    failures = sample.get("failure_counts") if isinstance(sample, Mapping) else None
-    rejected = (
-        failures.get("constraint_rejected", 0)
-        if isinstance(failures, Mapping)
-        else 0
-    )
-    constraint_rejected = bool(
-        not isinstance(rejected, bool)
-        and isinstance(rejected, (int, float))
-        and math.isfinite(float(rejected))
-        and rejected > 0
-    )
-    if isinstance(sample, Mapping):
-        strict_chain_pass = sample.get("strict_agent_chain_pass")
-        if strict_chain_pass is False:
-            return (
-                "sample_constraint_guardrail_failed"
-                if constraint_rejected
-                else "strict_origin_chain_guardrail_failed"
-            )
-        attempted = sample.get("attempted_origin_samples")
-        succeeded = sample.get("succeeded_origin_samples")
-        minimum = sample.get("minimum_coverage")
-        if (
-            not isinstance(attempted, bool)
-            and isinstance(attempted, (int, float))
-            and math.isfinite(float(attempted))
-            and attempted > 0
-            and not isinstance(succeeded, bool)
-            and isinstance(succeeded, (int, float))
-            and math.isfinite(float(succeeded))
-            and not isinstance(minimum, bool)
-            and isinstance(minimum, (int, float))
-            and math.isfinite(float(minimum))
-            and 0 <= float(minimum) <= 1
-            and float(succeeded) / float(attempted) < float(minimum)
-        ):
-            return (
-                "sample_constraint_guardrail_failed"
-                if constraint_rejected
-                else "origin_coverage_guardrail_failed"
-            )
-    if coverage is False or sample_coverage is False:
-        if constraint_rejected:
-            return "sample_constraint_guardrail_failed"
-        return "coverage_guardrail_failed"
-    if coverage is not True and sample_coverage is not True:
-        return "coverage_guardrail_missing"
-    return None
 
 
 def _cohort_scoped_editor(state: Any) -> bool:
@@ -1554,85 +1125,10 @@ def _trajectory_score_history(
     }
 
 
-def _regression_band_floor(state: Any) -> float:
-    """Never react below the run's own frozen selection tolerance."""
-
-    metadata = getattr(getattr(state, "task_manifest", None), "metadata", None)
-    if not isinstance(metadata, Mapping):
-        return LOCAL_MINIMUM_SCORE_DELTA
-    try:
-        floor = float(local_challenger_policy(metadata)["minimum_score_delta"])
-    except (KeyError, TypeError, ValueError):
-        return LOCAL_MINIMUM_SCORE_DELTA
-    return floor if math.isfinite(floor) and floor > 0 else LOCAL_MINIMUM_SCORE_DELTA
 
 
-def _prequential_regression_reason(
-    state: Any,
-    candidate_id: str,
-    revision: Any,
-    batch_index: int,
-) -> str | None:
-    """Undo the most recent local edit when its own block score clearly fell.
-
-    Prequential batches score different, time-forward blocks, so one drop can
-    be block difficulty rather than the edit.  The band therefore comes from
-    this lane's own realized volatility -- the median absolute consecutive
-    delta over the *earlier* batches, so the drop under test cannot widen the
-    band that judges it -- and never falls below the frozen selection
-    tolerance.  Only the edit authored on the previous batch is undone, and
-    only onto its parent, which is the exact revision a prequential rollback
-    is allowed to reactivate.
-
-    Batches whose objective weight coverage is incomplete are excluded on both
-    sides: their missing-group penalty is not a measurement of the edit, so it
-    may neither trigger a rollback nor widen the band.
-    """
-
-    metadata = getattr(getattr(state, "task_manifest", None), "metadata", {})
-    if metadata.get("prequential_performance_policy") == PREQUENTIAL_PERFORMANCE_POLICY:
-        # The parent was scored on a different window. Keep the new revision
-        # provisional until the paired epoch comparison; physical/execution
-        # guardrails are checked separately and still cause immediate rollback.
-        return None
-    parent_revision_id = getattr(revision, "parent_revision_id", None)
-    if not isinstance(parent_revision_id, str) or not parent_revision_id.strip():
-        # Without a parent there is no revision to return to, so a regression
-        # here is not actionable and the lane keeps exploring.
-        return None
-    source_batch_index = getattr(revision, "source_batch_index", None)
-    if isinstance(source_batch_index, bool) or not isinstance(source_batch_index, int):
-        return None
-    index = int(batch_index)
-    if source_batch_index != index - 1:
-        # The active revision predates the previous batch, so this drop is not
-        # attributable to a single edit and there is nothing to undo.
-        return None
-    scores = _trajectory_batch_scores(
-        state, candidate_id, index, comparable_only=True
-    )
-    current = scores.get(index)
-    parent = scores.get(index - 1)
-    if current is None or parent is None:
-        return None
-    deltas = [
-        abs(scores[position] - scores[position - 1])
-        for position in sorted(scores)
-        if position < index and position - 1 in scores
-    ]
-    if not deltas:
-        # One observed block cannot separate an edit effect from block noise.
-        return None
-    band = max(_regression_band_floor(state), median(deltas))
-    return _REGRESSION_GUARDRAIL_REASON if current < parent - band else None
 
 
-def _safety_requires_rollback(reason: Any) -> bool:
-    return reason in {
-        "constraint_guardrail_failed",
-        "sample_constraint_guardrail_failed",
-        _REGRESSION_GUARDRAIL_REASON,
-    }
 
 
 def _validated_local_edit_response(runtime: DshStructuredRoleRuntime, **request: Any) -> LocalEditProposal:

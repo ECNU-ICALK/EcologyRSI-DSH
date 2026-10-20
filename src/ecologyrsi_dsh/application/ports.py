@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from ..evaluators.registry import EvaluatorRegistry
     from ..integrations.dsh_native_runtime import DshNativeAgentRuntimeClient
     from ..integrations.dsh_tools import DshToolService
-    from ..integrations.model_gateway import ModelGateway
+    from ..integrations.model_directory import ModelDirectory
     from ..execution.sample_admission import RunSampleAdmission
     from ..evolution.strategies import StrategyRouterDSHAdapter
     from .runtime_bindings import ValidatedCandidateIdentityCache
@@ -25,6 +25,6 @@ class GenerationRuntime(Protocol):
     dsh_native_runtime: DshNativeAgentRuntimeClient | None
     dsh_tools: DshToolService
     sample_admission: RunSampleAdmission
-    model_gateway: ModelGateway
+    model_directory: ModelDirectory
     strategy_router: StrategyRouterDSHAdapter
     dsh_identity_cache: ValidatedCandidateIdentityCache

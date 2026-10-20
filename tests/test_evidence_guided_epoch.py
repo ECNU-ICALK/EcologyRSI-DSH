@@ -4,7 +4,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ecologyrsi_dsh import EventLedger, EvolutionDirector, FakeDSHAdapter
+from ecologyrsi_dsh import EventLedger, EvolutionDirector
 from ecologyrsi_dsh.application import generation_execution as execution, formal_trajectory
 from ecologyrsi_dsh.api.projection import _execution_diagnostics
 from ecologyrsi_dsh.core.models import Proposal, canonical_json, digest
@@ -12,25 +12,26 @@ from ecologyrsi_dsh.core.trajectory import CandidateRevision, RevisionStatus
 from ecologyrsi_dsh.core.training_race import race_bindings
 from ecologyrsi_dsh.evolution.genome import apply_genome_mutation, GenomeMutationContextV1, MUTATION_SCHEMA_VERSION
 from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
+from ecologyrsi_dsh.evaluators.fitness import FitnessProfile
 from ecologyrsi_dsh.evolution.workflow_ir import resolve_candidate_agent_profile
 from ecologyrsi_dsh.evaluators.epoch_cohorts import (
     plan_run_adaptation_cohort, plan_generation_selection_cohorts,
     estimate_epoch_capacity, GenerationCohorts,
 )
 from ecologyrsi_dsh.knowledge.program_registry import current_program_registry
-from tests.test_dsh_structured_roles import _native_task
+from tests.native_fixtures import native_manifest, NativeRoleStub, start_native_run
 from tests.test_epoch_cohort_planning import dataset_fixture
 from tests import test_formal_trajectory as fixtures
 
 
 class EvidenceGuidedPlanTests(unittest.TestCase):
     def test_fixed_cost_and_fresh_value_blind_cohorts(self):
-        schedule = OptimizationSchedule.for_evidence_guided_run()
+        schedule = OptimizationSchedule.for_new_run()
         plan = schedule.execution_plan(4, cells_per_origin=9)
         self.assertEqual(plan['generation_budget'], dict(screening_candidate_origins=50,
             formal_candidate_origins=50, holdout_candidate_origins=100,
-            total_candidate_origins=200, total_scoring_cells=1800))
-        self.assertEqual(plan['run_budget']['total_candidate_origins'], 800)
+            base_candidate_origins=200, recheck_candidate_origins=100, total_candidate_origins=300, total_scoring_cells=2700))
+        self.assertEqual(plan['run_budget']['total_candidate_origins'], 1200)
         self.assertEqual(plan['required_unique_origins'], 340)
         self.assertEqual(plan['qualification'], 'exploratory_only')
         plans = []
@@ -68,16 +69,17 @@ class EvidenceGuidedRaceTests(unittest.TestCase):
     def setUp(self):
         self.ledger = EventLedger()
         self.addCleanup(self.ledger.close)
-        self.director = EvolutionDirector(self.ledger, FakeDSHAdapter())
-        self.schedule = OptimizationSchedule.for_evidence_guided_run()
-        base = _native_task()
+        self.director = EvolutionDirector(self.ledger, NativeRoleStub())
+        self.schedule = OptimizationSchedule.for_new_run()
+        base = native_manifest()
         self.task = replace(base, budget={'max_generations': 4, 'candidates_per_generation': 4, 'max_candidates': 16},
             metadata={**base.metadata, 'optimization_protocol': self.schedule.protocol,
-                'optimization_schedule': self.schedule.to_dict(), 'prediction_cells_per_origin': 1,
-                'fitness_profile': {'expected_targets': ['air_temperature'], 'expected_horizons': [1]},
+                'optimization_schedule': self.schedule.to_dict(), 'prediction_cells_per_origin': 9,
+                'fitness_profile': FitnessProfile().to_dict(),
+                'fitness_profile_digest': FitnessProfile().profile_digest,
                 'episode_id': 'episode:race'})
         self.run_id = 'run:evidence-guided'
-        self.director.start_evolution(self.task, run_id=self.run_id)
+        start_native_run(self.director, task=self.task, run_id=self.run_id)
         self.control = self.director.ensure_seed_incumbent_control(self.run_id)
         parent = self.director.state(self.run_id).materialized_seed_genome()
         registry = current_program_registry()
@@ -124,7 +126,7 @@ class EvidenceGuidedRaceTests(unittest.TestCase):
         return self.director.record_candidate_screening(self.run_id,
             candidate_id=candidate.candidate_id, candidate_revision_id=revision, generation=0,
             score=.2, passed=False, constraint_violations=0, origin_count=10,
-            prediction_cell_count=10, cohort_digest=self.cohorts.screening.cohort_digest, metrics=metrics)
+            prediction_cell_count=90, cohort_digest=self.cohorts.screening.cohort_digest, metrics=metrics)
 
     def test_five_arms_freeze_and_resume_without_rescoring_warmup(self):
         # Selection requires all five arms, including the control, to be sealed.
@@ -164,7 +166,7 @@ class EvidenceGuidedRaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'frozen revision'):
             self.director.record_candidate_screening(self.run_id, candidate_id=c.candidate_id,
                 candidate_revision_id='revision:race:1:r0', generation=0, score=.9, passed=True,
-                constraint_violations=0, origin_count=10, prediction_cell_count=10,
+                constraint_violations=0, origin_count=10, prediction_cell_count=90,
                 cohort_digest=self.cohorts.screening.cohort_digest, metrics={})
 
     def test_hard_effect_contradiction_loses_race_and_local_admission(self):
@@ -207,7 +209,7 @@ class EvidenceGuidedRaceTests(unittest.TestCase):
     def test_later_race_only_admits_the_bound_historical_incumbent(self):
         from ecologyrsi_dsh.core.models import CandidateStatus
         from ecologyrsi_dsh.core.trajectory import EvaluationScope, EvaluationPhase
-        from tests.test_scoped_sample_execution import ScopedSampleExecutionTests
+        from tests.scoped_checkpoint_fixture import checkpoint
         state = self.director.state(self.run_id)
         incumbent = replace(self.control, status=CandidateStatus.SCREENED_OUT)
         planned = replace(self.cohorts, generation=1)
@@ -216,7 +218,7 @@ class EvidenceGuidedRaceTests(unittest.TestCase):
         scope = EvaluationScope(run_id=self.run_id, generation=1, candidate_id=incumbent.candidate_id,
             candidate_revision_id=planned.revision_bindings[incumbent.candidate_id], phase=EvaluationPhase.SCREENING,
             cohort_digest=planned.screening.cohort_digest, origin_count=10)
-        checkpoint = {**ScopedSampleExecutionTests._checkpoint(scope), 'sample_count': 10}
+        checkpoint = {**checkpoint(scope), 'sample_count': 10}
         self.director._validate_evaluation_scope(later_state, incumbent, scope)
         self.assertTrue(self.director._sample_checkpoint_generation_allowed(later_state, incumbent, 1, checkpoint, scope))
         self.assertTrue(self.director._sample_checkpoint_candidate_status_allowed(later_state, incumbent, checkpoint, generation=1))
@@ -274,7 +276,7 @@ class EvidenceGuidedRaceTests(unittest.TestCase):
             calls.append((candidate.candidate_id, scope.cohort_digest, scope.origin_count))
             result = self.evaluator.evaluate_scientific(task, candidate, proposal,
                 scope=replace(scope, phase='formal_batch', batch_index=0))
-            result.evaluation.metrics['sample_execution']['prediction_cell_count'] = 10
+            result.evaluation.metrics['sample_execution']['prediction_cell_count'] = 90
             result.evaluation.metrics['feedback_update_cohort_digest'] = scope.cohort_digest
             return result
         evaluator = SimpleNamespace(evaluate_scientific=evaluate)

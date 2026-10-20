@@ -10,10 +10,10 @@ PARAMETER_RULES = {
     "rounds": {"default": 5, "minimum": 1, "maximum": 50},
     "candidates_per_generation": {"default": 4, "minimum": 4, "maximum": 4},
     "max_candidates": {"default": 20, "minimum": 4, "maximum": 256},
-    "formal_origin_count": {"default": 100, "minimum": 2},
-    "local_batch_origin_count": {"default": 10, "minimum": 2},
-    "max_local_edits_per_batch": {"default": 2, "minimum": 0, "maximum": 5},
-    "selection_holdout_origin_count": {"default": 50, "minimum": 40},
+    "formal_origin_count": {"default": 35, "minimum": 35, "maximum": 35},
+    "local_batch_origin_count": {"default": 25, "minimum": 25, "maximum": 25},
+    "max_local_edits_per_batch": {"default": 2, "minimum": 2, "maximum": 2},
+    "selection_holdout_origin_count": {"default": 50, "minimum": 50, "maximum": 50},
     "candidate_concurrency": {"default": 4, "minimum": 1, "maximum": 8},
     "sample_concurrency": {"default": DEFAULT_SAMPLE_CONCURRENCY, "minimum": 1,
                            "maximum": MAX_SAMPLE_CONCURRENCY},
@@ -25,18 +25,18 @@ def run_parameter_contract(profile: Any = None) -> dict[str, Any]:
     # Validate the whole default before publishing it to an API or browser.
     # Individually legal inputs can still describe an impossible experiment.
     defaults = {name: rule["default"] for name, rule in parameters.items()}
-    if defaults["formal_origin_count"] % defaults["local_batch_origin_count"]:
-        raise ValueError("default local_batch_origin_count must divide formal_origin_count")
+    if defaults["formal_origin_count"] != 10 + defaults["local_batch_origin_count"]:
+        raise ValueError("formal budget must contain ten reused screening origins and one fresh paired batch")
     if defaults["max_candidates"] < defaults["rounds"] * defaults["candidates_per_generation"]:
         raise ValueError("default candidate budget must cover all generations")
     result = {"schema_version": "ecologyrsi-dsh.run-parameters/1", "parameters": parameters,
               "local_comparison_mode": "exploratory_paired_point_comparison",
-              "constraints": ["formal_origins_divisible_by_batch", "candidate_budget_covers_epochs",
+              "constraints": ["fixed_joint_epoch_schedule", "candidate_budget_covers_epochs",
                               "target_time_purged", "epoch_temporal_evidence_required"]}
     if profile is not None:
         rule = parameters["selection_holdout_origin_count"]
-        rule["minimum"] = max(rule["minimum"], profile.selection_minimum_cell_samples)
-        rule["default"] = max(rule["default"], rule["minimum"])
+        if profile.selection_minimum_cell_samples > rule["maximum"]:
+            raise ValueError("fixed joint schedule has 50 holdout origins, below the fitness sample minimum")
         cells = profile.prediction_cell_count
         parameters["sample_agent_batch_size"] = {"default": cells, "minimum": cells, "maximum": cells}
         result["selection_evidence"] = {

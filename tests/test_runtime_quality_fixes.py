@@ -5,7 +5,7 @@ from unittest import TestCase
 from unittest.mock import patch
 import time
 
-from ecologyrsi_dsh import EventLedger, TaskManifest
+from ecologyrsi_dsh import EventLedger
 from ecologyrsi_dsh.application.runtime import ApplicationRuntime
 from ecologyrsi_dsh.application.formal_trajectory import (
     _check_behavior_revisit, _local_edit_policy_rejection_reason,
@@ -18,13 +18,14 @@ from ecologyrsi_dsh.api.projection import (
 from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
 from ecologyrsi_dsh.core.model_execution_policy import (
     LOCAL_EDIT_CONTEXT_POLICY, NATIVE_SAMPLE_OPERATION_MAX_TOKENS,
-    LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS,
 )
 from ecologyrsi_dsh.core.trajectory import LocalEditOutcome
 from ecologyrsi_dsh.evolution.local_edits import LocalEditProposal, LocalEditResult
 from ecologyrsi_dsh.execution.host_activity import HostActivityMonitor, validate_host_interruption
 from ecologyrsi_dsh.execution.sample_admission import RunSampleAdmission
 from tests import test_formal_trajectory as trajectory_fixtures
+from tests.native_fixtures import native_manifest, start_native_run
+from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
 from tests.test_local_edits import _parent, _context
 
 
@@ -205,7 +206,7 @@ class HostInterruptionTests(TestCase):
     def test_gap_is_idempotent_replayable_and_does_not_change_run_status(self):
         with EventLedger() as ledger:
             services = ApplicationRuntime(ledger)
-            services.director.start_evolution(TaskManifest(task_id="gap", objective="observe", domain_pack="crop-soil-water@toy"), run_id="r")
+            start_native_run(services.director, task=native_manifest(task_id="gap"), run_id="r")
             clocks = [100., time.time()]
             monitor = HostActivityMonitor(clock=lambda: clocks[0], wall_clock=lambda: clocks[1], on_gap=services.host_activity._on_gap)
             clocks[0] += 120
@@ -226,10 +227,10 @@ class RuntimeProjectionTests(TestCase):
         now = datetime.now(timezone.utc)
         def origin(seq, at):
             return event(seq, "EvaluationSampleResultBatchRecorded", {"generation": 0, "candidate_id": "c", "record_count": 9}, at)
-        state = NS(task_manifest=NS(metadata={"optimization_protocol": "top2_adaptive_epoch@1",
-            "optimization_schedule": {"screening_origin_count": 64, "formal_origin_count_per_finalist": 500,
-                "selection_holdout_origin_count": 169, "local_batch_origin_count": 50},
+        state = NS(task_manifest=NS(metadata={"optimization_protocol": "joint_plugin_epoch@2",
+            "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
             "prediction_cells_per_origin": 9, "sample_agent_protocol": "dsh-strict-origin-bundle@4"}, max_generations=1),
+            generation_cohort_for=lambda generation: NS(revision_bindings={}),
             run=NS(generation=0, status=NS(value="running")), formal_batch_evaluations=(), holdout_evaluations=(), formal_batches=(),
             candidate_screening_events=(event(0, "CandidateScreened", {"generation": 0, "candidate_id": "c", "origin_count": 0}, now - timedelta(hours=6)),), candidates=(NS(candidate_id="c", generation=0),), events=(
                 origin(1, now - timedelta(hours=5)), origin(2, now - timedelta(hours=4)),
@@ -265,8 +266,6 @@ class RuntimeProjectionTests(TestCase):
         self.assertEqual(usage["by_stage"]["sample.plan"], {"session_count": 1, "total_tokens": 120})
         self.assertEqual(sum(r["total_tokens"] for r in usage["by_stage"].values()), usage["total_tokens"])
 
-    def test_new_quality_limits_do_not_rewrite_historical_budgets(self):
+    def test_current_quality_limits_remain_explicit(self):
         self.assertEqual(dict(NATIVE_SAMPLE_OPERATION_MAX_TOKENS), {
             "sample.planner": 32768, "sample.repair": 32768, "sample.critic": 8192})
-        self.assertEqual(dict(LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS), {
-            "sample.planner": 16384, "sample.repair": 16384, "sample.critic": 8192})

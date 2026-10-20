@@ -7,19 +7,19 @@ from unittest.mock import patch
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.dsh_usage import check_usage_binding
 from ecologyrsi_dsh.integrations.dsh_tools import DshToolService
-from tests.test_final_delivery import usage
+from tests.dsh_usage_fixture import usage
 
 
 class ScopedUsageTests(TestCase):
     def launch(self, ledger, reservation, run='r'):
         return ledger.append(run, 'DshChildLaunchReserved', {
             'launch': {'reservation_id': reservation, 'run_id': run,
-                       'stage': 'generation.research', 'idempotency_key': 'key'}})
+                       'stage': 'generation.research-synthesis', 'idempotency_key': 'key'}})
 
     def body(self, reservation='reservation', session='session', total=10):
         result = usage(total)
         result['identity'].update(child_reservation_id=reservation, session_id=session,
-                                  stage='generation.research', idempotency_key='key')
+                                  stage='generation.research-synthesis', idempotency_key='key')
         result['session_metrics']['session_id'] = session
         return result
 

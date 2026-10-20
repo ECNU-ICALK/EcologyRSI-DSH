@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import re
 import unittest
+from dataclasses import replace
+from tests.native_fixtures import native_manifest, canary_receipts
 from types import SimpleNamespace
 
 from ecologyrsi_dsh.integrations.dsh_tools import DshToolService
 from ecologyrsi_dsh.application.generation_execution import _apply_candidate_judge
-from ecologyrsi_dsh.core.director import EvolutionDirector, _task_for_proposal_predictor
+from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import (
     Evaluation,
@@ -24,43 +26,24 @@ from ecologyrsi_dsh.evolution.strategies import (
 from ecologyrsi_dsh.integrations.dsh_structured_roles import DshStructuredRoleRuntime
 from ecologyrsi_dsh.knowledge.algorithms import (
     compile_algorithm_spec,
-    resolve_predictor_adoption,
 )
 from ecologyrsi_dsh.knowledge.research_iteration import ResearchIteration
 
 
 def _native_task() -> TaskManifest:
-    return TaskManifest(
-        task_id="structured-native",
-        objective="predict greenhouse climate",
-        domain_pack="greenhouse_environment@1",
-        visible_datasets=("agc_cucumber_2018",),
-        budget={"max_candidates": 2, "candidates_per_generation": 1},
-        metadata={
-            "execution_protocol": "dsh_native_plugin_evolution@1",
-            "seed_genome_template_id": "greenhouse-default@1",
-            "prediction_model_id": "greenhouse-horizon-targetwise-ridge@1",
-            "evaluator_id": "greenhouse_multihorizon_time_forward@2",
-            "strategy_id": "autonomous_model@1",
-            "dataset_digest": "2" * 64,
-            "dataset_snapshot_set_digest": "2" * 64,
-            "split_manifest_digest": "3" * 64,
-            "data_protocol_digest": "4" * 64,
-            "stage_policy_digest": "5" * 64,
-            "evaluator_digest": "6" * 64,
-            "fitness_profile_digest": "7" * 64,
-            "security_kernel_digest": "8" * 64,
-            "selection_reviewer_program_digest": "9" * 64,
-            "required_capability_digest": "a" * 64,
-            "resolved_policy_route_digest": "b" * 64,
-            "resolved_review_route_digest": "c" * 64,
-            "resolved_policy_route_config_digest": "b" * 64,
-            "resolved_review_route_config_digest": "c" * 64,
-            "preset_content_digest": "d" * 64,
-            "standing_tool_surface_digest": "e" * 64,
-            "evaluation_cohort_digest": "f" * 64,
-        },
-    )
+    return native_manifest(task_id="structured-native", metadata={
+        "prediction_model_id": "greenhouse-horizon-targetwise-ridge@1",
+    })
+
+
+def _research_context(run_id):
+    from ecologyrsi_dsh.knowledge.models import KnowledgeSnapshot
+    from ecologyrsi_dsh.knowledge.autonomous_cycle import GenerationSearchPlan
+    knowledge = KnowledgeSnapshot(run_id=run_id, generation=0, query_terms=("greenhouse climate",),
+        cards=(), online_enabled=False, provider="fixture", retrieval_status="catalog_only")
+    plan = GenerationSearchPlan(run_id=run_id, generation=0, search_queries=("greenhouse climate",),
+        focus_areas=("temperature",), rationale="Bounded synthetic research contract")
+    return {"knowledge_snapshot": knowledge.proposal_context(), "generation_search_plan": plan.to_dict(), "candidate_count": 4}
 
 
 class _NativeRuntime:
@@ -108,10 +91,10 @@ class DshStructuredRoleTests(unittest.TestCase):
         self.assertEqual(
             runtime.run(
                 run_id="run:admission-id",
-                stage="generation.research",
+                stage="generation.search-plan",
                 role="researcher",
                 context={"question": "bounded"},
-                output_schema_id="ecology-research-result@1",
+                output_schema_id="ecology-research-search-plan@1",
                 run_state_revision=3,
                 stage_attempt=1,
                 ledger_expected_revision=ledger.latest_seq(),
@@ -162,6 +145,7 @@ class DshStructuredRoleTests(unittest.TestCase):
         task = _native_task()
         run_id = "run:native-invalid-mutation-retry"
         director.create_run(task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(task.metadata))
         director.start_run(run_id)
         state = director.state(run_id)
         parent = state.materialized_seed_genome()
@@ -221,15 +205,15 @@ class DshStructuredRoleTests(unittest.TestCase):
         )
         self.assertEqual(
             mutation_contract["policy"],
-            "single_axis_reject_out_of_bounds_without_clamping",
+            "bounded_related_joint_edits",
         )
-        self.assertEqual(mutation_contract["maximum_operations"], 1)
+        self.assertEqual(mutation_contract["maximum_operations"], 4)
         self.assertEqual(
             mutation_contract["mutation_operator_id"],
-            "bounded-trust-region-mutation@2",
+            "joint-plugin-mutation@1",
         )
 
-    def test_native_proposer_retries_a_non_compiling_predictor_binding(self) -> None:
+    def test_native_proposer_retries_an_unregistered_predictor_binding(self) -> None:
         incompatible_mutation = {
             "schema_version": "ecologyrsi-dsh.genome-mutation/1",
             "operations": [
@@ -265,6 +249,7 @@ class DshStructuredRoleTests(unittest.TestCase):
         task = _native_task()
         run_id = "run:native-compile-retry"
         director.create_run(task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(task.metadata))
         director.start_run(run_id)
         state = director.state(run_id)
         parent = state.materialized_seed_genome()
@@ -303,10 +288,10 @@ class DshStructuredRoleTests(unittest.TestCase):
         self.assertEqual(
             rejection,
             {
-                "reason": "compiled_behavior_validation_failed",
-                "rejection_code": "predictor_evaluator_incompatible",
+                "reason": "invalid_mutation_contract",
+                "rejection_code": "mutation_validation_failed",
                 "validation_detail": (
-                    "predictor and evaluator bindings are incompatible"
+                    "unregistered predictors program: greenhouse-rolling-residual@1"
                 ),
                 "rejected_operations": incompatible_mutation["operations"],
             },
@@ -360,6 +345,7 @@ class DshStructuredRoleTests(unittest.TestCase):
         task = _native_task()
         run_id = "run:native-sibling-retry"
         director.create_run(task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(task.metadata))
         director.start_run(run_id)
         state = director.state(run_id)
         parent = state.materialized_seed_genome()
@@ -477,6 +463,7 @@ class DshStructuredRoleTests(unittest.TestCase):
             "version": "uncertain_or_failure@1", "min_planner_confidence": 0.5}})
         run_id = "run:native-distinct-agent-behavior"
         director.create_run(task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(task.metadata))
         director.start_run(run_id)
         state = director.state(run_id)
         parent = state.materialized_seed_genome()
@@ -521,7 +508,7 @@ class DshStructuredRoleTests(unittest.TestCase):
             generation=0,
             status="model_generated",
             plan=plan,
-            prediction_model_adoption=resolve_predictor_adoption(task, plan).to_dict(),
+
             knowledge_snapshot_digest="2" * 64,
         )
         second = adapter.propose(
@@ -571,13 +558,9 @@ class DshStructuredRoleTests(unittest.TestCase):
             )
 
     def test_native_research_retains_candidate_failure_as_scoped_advice(self) -> None:
-        runtime = _NativeRuntime(
-            {
-                "schema_version": "ecology-research-result@1",
-                "summary": "Change direction after the prior scientific-gate failure.",
-                "evidence": [],
-            }
-        )
+        from tests.test_autonomous_search_reflection_cycle import _CycleRuntime
+        from ecologyrsi_dsh.knowledge.autonomous_cycle import AUTONOMOUS_RESEARCH_PROTOCOL
+        runtime = _CycleRuntime()
         adapter = StrategyRouterDSHAdapter(
             gateway=object(),
             native_runtime_provider=lambda: runtime,
@@ -587,7 +570,9 @@ class DshStructuredRoleTests(unittest.TestCase):
         director = EvolutionDirector(ledger, adapter)
         run_id = "run:native-cross-run-reflection"
         task = _native_task()
+        task = replace(task, metadata={**task.metadata, "autonomous_research_protocol": AUTONOMOUS_RESEARCH_PROTOCOL})
         director.create_run(task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(task.metadata))
         director.start_run(run_id)
         state = director.state(run_id)
         parent = state.materialized_seed_genome()
@@ -600,7 +585,7 @@ class DshStructuredRoleTests(unittest.TestCase):
             run=state.run,
             task=task,
             previous_generation_analysis=None,
-            knowledge_snapshot=None,
+            **_research_context(run_id),
             previous_knowledge_assessment=None,
             current_plan={},
             cross_generation_experience={
@@ -689,13 +674,9 @@ class DshStructuredRoleTests(unittest.TestCase):
         self.assertEqual(reflection["avoid_behaviors"], [])
 
     def test_native_research_retry_uses_distinct_idempotency_key(self) -> None:
-        runtime = _NativeRuntime(
-            {
-                "schema_version": "ecology-research-result@1",
-                "summary": "Retry after a transient DSH restart.",
-                "evidence": [],
-            }
-        )
+        from tests.test_autonomous_search_reflection_cycle import _CycleRuntime
+        from ecologyrsi_dsh.knowledge.autonomous_cycle import AUTONOMOUS_RESEARCH_PROTOCOL
+        runtime = _CycleRuntime()
         adapter = StrategyRouterDSHAdapter(
             gateway=object(),
             native_runtime_provider=lambda: runtime,
@@ -704,8 +685,10 @@ class DshStructuredRoleTests(unittest.TestCase):
         self.addCleanup(ledger.close)
         director = EvolutionDirector(ledger, adapter)
         task = _native_task()
+        task = replace(task, metadata={**task.metadata, "autonomous_research_protocol": AUTONOMOUS_RESEARCH_PROTOCOL})
         run_id = "run:native-research-retry-key"
         director.create_run(task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(task.metadata))
         director.start_run(run_id)
         state = director.state(run_id)
         parent = state.materialized_seed_genome()
@@ -716,7 +699,7 @@ class DshStructuredRoleTests(unittest.TestCase):
                 run=state.run,
                 task=task,
                 previous_generation_analysis=None,
-                knowledge_snapshot=None,
+                **_research_context(run_id),
                 previous_knowledge_assessment=None,
                 current_plan={},
                 parent_genome=parent.to_dict(),
@@ -729,7 +712,10 @@ class DshStructuredRoleTests(unittest.TestCase):
         self.assertEqual(len(keys), 2)
         self.assertNotEqual(keys[0], keys[1])
         self.assertTrue(keys[0].endswith(":attempt:1"))
-        self.assertTrue(keys[1].endswith(":attempt:2"))
+        # Each activation reserves four bounded synthesis attempt slots;
+        # a resumed activation must not reuse its predecessor's namespace.
+        self.assertTrue(keys[1].endswith(":attempt:5"))
+        self.assertEqual([request["stage_attempt"] for request in runtime.requests], [1, 5])
 
     def test_native_proposer_applies_only_host_registered_mutation(self) -> None:
         runtime = _NativeRuntime(
@@ -754,6 +740,7 @@ class DshStructuredRoleTests(unittest.TestCase):
         run_id = "run:structured-native"
         task = _native_task()
         director.create_run(task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(task.metadata))
         director.start_run(run_id)
         state = director.state(run_id)
         parent = state.materialized_seed_genome()
@@ -813,6 +800,7 @@ class DshStructuredRoleTests(unittest.TestCase):
         run_id = "run:native-reflection"
         task = _native_task()
         director.create_run(task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(task.metadata))
         director.start_run(run_id)
         state = director.state(run_id)
         parent = state.materialized_seed_genome()
@@ -853,10 +841,7 @@ class DshStructuredRoleTests(unittest.TestCase):
             generation=0,
             status="model_generated",
             plan=plan,
-            prediction_model_adoption=resolve_predictor_adoption(
-                task,
-                plan,
-            ).to_dict(),
+
             knowledge_snapshot_digest="2" * 64,
             source_analysis_digest=previous_analysis["analysis_digest"],
             previous_next_action="改变未验证参数，不要重复失败候选。",
@@ -922,6 +907,7 @@ class DshStructuredRoleTests(unittest.TestCase):
         run_id = "run:native-duplicate-reflection"
         task = _native_task()
         director.create_run(task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(task.metadata))
         director.start_run(run_id)
         state = director.state(run_id)
         parent = state.materialized_seed_genome()
@@ -957,7 +943,7 @@ class DshStructuredRoleTests(unittest.TestCase):
             generation=0,
             status="model_generated",
             plan=plan,
-            prediction_model_adoption=resolve_predictor_adoption(task, plan).to_dict(),
+
             knowledge_snapshot_digest="2" * 64,
         )
 
@@ -1015,6 +1001,7 @@ class DshStructuredRoleTests(unittest.TestCase):
         self.addCleanup(ledger.close)
         director = EvolutionDirector(ledger, adapter)
         director.create_run(task, run_id="run:native-genome-boundary")
+        director.record_model_contract_preflight("run:native-genome-boundary", canary_receipts(task.metadata))
         director.start_run("run:native-genome-boundary")
         state = director.state("run:native-genome-boundary")
         parent = state.materialized_seed_genome()
@@ -1039,11 +1026,6 @@ class DshStructuredRoleTests(unittest.TestCase):
             },
         )
 
-        effective = _task_for_proposal_predictor(task, proposal)
-        self.assertEqual(
-            effective.metadata["prediction_model_id"],
-            "greenhouse-horizon-targetwise-ridge@1",
-        )
         compiled = compile_algorithm_spec(task, proposal, None)
         self.assertEqual(
             compiled.adapter_id,
@@ -1073,6 +1055,7 @@ class DshStructuredRoleTests(unittest.TestCase):
         task = _native_task()
         run_id = "run:native-judge"
         director.create_run(task, run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(task.metadata))
         director.start_run(run_id)
         state = director.state(run_id)
         parent = state.materialized_seed_genome()

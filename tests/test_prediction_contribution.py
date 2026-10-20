@@ -192,24 +192,23 @@ class PredictorContributionIntegrationTests(unittest.TestCase):
         from ecologyrsi_dsh.core.models import Candidate, Proposal, TaskManifest
         from ecologyrsi_dsh.core.prediction_policy import CELLWISE_EVALUATOR_ID
         from ecologyrsi_dsh.evaluators.greenhouse_prediction import BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID
-        from ecologyrsi_dsh.evaluators.registry import EvaluatorRegistry
-        from tests.test_evaluation import _DatasetStub
-        registry = EvaluatorRegistry(_DatasetStub(self.series))
+        from tests.test_evaluation import _native_registry, _scope_cohort, _profile_metadata
+        from tests.native_fixtures import native_manifest
+        registry = _native_registry(self.series)
         proposal = Proposal(proposal_id='p:diagnostics', run_id='r:diagnostics', generation=0,
-                            title='diagnostic version isolation', changes=self.config.to_dict())
+                            title='diagnostic version isolation', changes=self.config.to_dict(), metadata=_profile_metadata())
         candidate = Candidate(candidate_id='c:diagnostics', run_id=proposal.run_id,
                               proposal_id=proposal.proposal_id, generation=0)
         bundles=[]
         for policy, version in ((LEGACY_CONTRIBUTION_POLICY, 1), (CONTRIBUTION_POLICY, 2)):
-            task = TaskManifest(task_id='diagnostics', objective='diagnostics only',
-                domain_pack='greenhouse_environment@1', visible_datasets=(self.series.dataset_id,),
-                budget={'max_candidates': 1}, metadata={
+            task = native_manifest(metadata={
                     'episode_id': self.series.episode_id, 'evaluator_id': CELLWISE_EVALUATOR_ID,
                     'prediction_model_id': BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
                     'dataset_digest': self.series.digest,
                     'split_manifest_digest': self.series.split_manifest_digest_sha256,
-                    'behavior_diagnostics_policy': policy})
-            bundle = registry.evaluate_scientific(task, candidate, proposal)
+                    'behavior_diagnostics_policy': policy, 'data_protocol_digest': 'f'*64,
+                    'sample_remote_critic_policy': {'version': 'uncertain_or_failure@1', 'min_planner_confidence': .5}})
+            bundle = registry.evaluate_scientific(task, candidate, proposal, **_scope_cohort(self.series, candidate))
             summary = bundle.evaluation.metrics['sample_execution']['prediction_contribution']
             self.assertEqual(summary['policy'], policy)
             self.assertEqual(summary['schema_version'], f'ecologyrsi-dsh.prediction-contribution/{version}')

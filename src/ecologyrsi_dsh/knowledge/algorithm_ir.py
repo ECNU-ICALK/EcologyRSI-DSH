@@ -17,34 +17,9 @@ from ..core.models import JsonObject, canonical_json, digest
 
 ALGORITHM_IR_VERSION = "ecologyrsi-dsh.algorithm-ir/1"
 ALGORITHM_IR_LOWERING_POLICY = "host-registered-operator-lowering@1"
-ALGORITHM_BLUEPRINT_VERSION = "ecologyrsi-dsh.algorithm-blueprint-request/1"
-ALGORITHM_SYNTHESIS_VERSION = "ecologyrsi-dsh.algorithm-synthesis/1"
 IR_ALLOWED_PARTITIONS = ("training_fit", "training_feedback")
 
 _REGISTERED_PIPELINES: dict[str, dict[str, Any]] = {
-    "toy-rolling-water@1": {
-        "pipeline_version": "toy-water-operator-graph/1",
-        "parameter_names": ("alpha", "window", "water_threshold"),
-        "operators": (
-            ("host.feature.causal-window@1", "feature", ("window",)),
-            (
-                "host.predictor.toy-water-balance@1",
-                "predict",
-                ("alpha", "water_threshold"),
-            ),
-            ("host.postprocess.physical-bounds@1", "postprocess", ()),
-        ),
-    },
-    "greenhouse-rolling-residual@1": {
-        "pipeline_version": "greenhouse-rolling-operator-graph/1",
-        "parameter_names": ("blend", "window", "bias_scale"),
-        "operators": (
-            ("host.feature.causal-rolling-window@1", "feature", ("window",)),
-            ("host.fit.mean-residual-bias@1", "fit", ("bias_scale",)),
-            ("host.predictor.rolling-residual@1", "predict", ("blend",)),
-            ("host.postprocess.physical-bounds@1", "postprocess", ()),
-        ),
-    },
     "greenhouse-exogenous-ridge@1": {
         "pipeline_version": "greenhouse-ridge-operator-graph/1",
         "parameter_names": ("history_steps", "ridge_alpha", "residual_scale"),
@@ -208,188 +183,6 @@ def registered_operator_tool_ids(predictor_id: str) -> tuple[str, ...]:
     return tuple(item["operator_id"] for item in _registered_operators(predictor_id))
 
 
-def registered_algorithm_blueprint(predictor_id: str) -> dict[str, Any]:
-    """Return the model-visible executable blueprint for one host pipeline."""
-
-    try:
-        pipeline = _REGISTERED_PIPELINES[predictor_id]
-    except KeyError:
-        raise ValueError(
-            f"algorithm blueprint pipeline is not registered: {predictor_id}"
-        ) from None
-    return {
-        "schema_version": ALGORITHM_BLUEPRINT_VERSION,
-        "pipeline_id": predictor_id,
-        "operator_ids": list(registered_operator_tool_ids(predictor_id)),
-        "parameter_names": list(pipeline["parameter_names"]),
-    }
-
-
-def registered_algorithm_blueprint_catalog(
-    predictor_ids: Sequence[str] | None = None,
-) -> tuple[dict[str, Any], ...]:
-    """Return immutable blueprints, optionally limited to compatible predictors."""
-
-    selected = tuple(_REGISTERED_PIPELINES) if predictor_ids is None else tuple(predictor_ids)
-    return tuple(registered_algorithm_blueprint(item) for item in selected)
-
-
-def validate_registered_algorithm_blueprint(
-    value: Mapping[str, Any],
-    *,
-    expected_predictor_id: str | None = None,
-) -> dict[str, Any]:
-    """Validate a model request against one exact registered operator graph."""
-
-    if not isinstance(value, Mapping):
-        raise TypeError("algorithm blueprint must be an object")
-    allowed = {
-        "schema_version",
-        "pipeline_id",
-        "operator_ids",
-        "parameter_names",
-        "evidence_refs",
-        "rationale",
-    }
-    unknown = set(value) - allowed
-    if unknown:
-        raise ValueError(
-            "algorithm blueprint has unsupported fields: "
-            + ", ".join(sorted(str(item) for item in unknown))
-        )
-    if value.get("schema_version") != ALGORITHM_BLUEPRINT_VERSION:
-        raise ValueError("unsupported algorithm blueprint version")
-    pipeline_id = _text(value.get("pipeline_id"), "algorithm blueprint pipeline_id")
-    if expected_predictor_id is not None and pipeline_id != expected_predictor_id:
-        raise ValueError("algorithm blueprint does not match the adopted predictor")
-    registered = registered_algorithm_blueprint(pipeline_id)
-    for name in ("operator_ids", "parameter_names"):
-        raw = value.get(name)
-        if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
-            raise TypeError(f"algorithm blueprint {name} must be an array")
-        normalized = [_text(item, f"algorithm blueprint {name} item") for item in raw]
-        if normalized != registered[name]:
-            raise ValueError(
-                f"algorithm blueprint {name} do not match the registered pipeline"
-            )
-
-    raw_refs = value.get("evidence_refs")
-    if isinstance(raw_refs, (str, bytes)) or not isinstance(raw_refs, Sequence):
-        raise TypeError("algorithm blueprint evidence_refs must be an array")
-    if not raw_refs or len(raw_refs) > 16:
-        raise ValueError("algorithm blueprint evidence_refs must contain 1 to 16 items")
-    evidence_refs: list[str] = []
-    for raw_ref in raw_refs:
-        evidence_ref = _text(raw_ref, "algorithm blueprint evidence ref")
-        if len(evidence_ref) > 300:
-            raise ValueError("algorithm blueprint evidence ref is too long")
-        if evidence_ref not in evidence_refs:
-            evidence_refs.append(evidence_ref)
-    result = {
-        **registered,
-        "evidence_refs": evidence_refs,
-    }
-    if value.get("rationale") is not None:
-        result["rationale"] = _text(
-            value.get("rationale"), "algorithm blueprint rationale"
-        )[:4000]
-    canonical_json(result)
-    return result
-
-
-def validate_bounded_algorithm_synthesis(
-    value: Mapping[str, Any],
-    *,
-    algorithm_blueprint: Mapping[str, Any],
-    allowed_evidence_refs: Sequence[str] | None = None,
-) -> dict[str, Any]:
-    """Validate an evidence-backed design over one registered operator graph.
-
-    A synthesis can select which registered parameters deserve exploration, but
-    it cannot add operators, code, dependencies, or parameters.  Its source
-    evidence must belong to the frozen evidence scope supplied by the caller.
-    Compatibility callers that omit that scope retain the stricter historical
-    rule that synthesis evidence must also appear on the executable blueprint.
-    """
-
-    if not isinstance(value, Mapping):
-        raise TypeError("algorithm synthesis must be an object")
-    allowed = {
-        "schema_version",
-        "pipeline_id",
-        "evidence_refs",
-        "parameter_focus",
-        "rationale",
-    }
-    unknown = set(value) - allowed
-    if unknown:
-        raise ValueError(
-            "algorithm synthesis has unsupported fields: "
-            + ", ".join(sorted(str(item) for item in unknown))
-        )
-    missing = allowed - set(value)
-    if missing:
-        raise ValueError(
-            "algorithm synthesis is missing fields: "
-            + ", ".join(sorted(missing))
-        )
-    if value.get("schema_version") != ALGORITHM_SYNTHESIS_VERSION:
-        raise ValueError("unsupported algorithm synthesis version")
-    blueprint = validate_registered_algorithm_blueprint(algorithm_blueprint)
-    pipeline_id = _text(value.get("pipeline_id"), "algorithm synthesis pipeline_id")
-    if pipeline_id != blueprint["pipeline_id"]:
-        raise ValueError("algorithm synthesis does not match the registered blueprint")
-
-    raw_refs = value.get("evidence_refs")
-    if isinstance(raw_refs, (str, bytes)) or not isinstance(raw_refs, Sequence):
-        raise TypeError("algorithm synthesis evidence_refs must be an array")
-    if not raw_refs or len(raw_refs) > 16:
-        raise ValueError("algorithm synthesis evidence_refs must contain 1 to 16 items")
-    evidence_refs = list(
-        dict.fromkeys(
-            _text(item, "algorithm synthesis evidence ref") for item in raw_refs
-        )
-    )
-    if allowed_evidence_refs is None:
-        evidence_scope = set(blueprint["evidence_refs"])
-    else:
-        if isinstance(allowed_evidence_refs, (str, bytes)) or not isinstance(
-            allowed_evidence_refs, Sequence
-        ):
-            raise TypeError("algorithm synthesis evidence scope must be an array")
-        evidence_scope = {
-            _text(item, "algorithm synthesis evidence scope item")
-            for item in allowed_evidence_refs
-        }
-    if not set(evidence_refs).issubset(evidence_scope):
-        raise ValueError(
-            "algorithm synthesis evidence is outside the frozen evidence scope"
-        )
-
-    raw_focus = value.get("parameter_focus")
-    if isinstance(raw_focus, (str, bytes)) or not isinstance(raw_focus, Sequence):
-        raise TypeError("algorithm synthesis parameter_focus must be an array")
-    if not raw_focus or len(raw_focus) > len(blueprint["parameter_names"]):
-        raise ValueError("algorithm synthesis parameter_focus has an invalid size")
-    parameter_focus = list(
-        dict.fromkeys(
-            _text(item, "algorithm synthesis parameter focus") for item in raw_focus
-        )
-    )
-    if not set(parameter_focus).issubset(set(blueprint["parameter_names"])):
-        raise ValueError("algorithm synthesis references an unregistered parameter")
-
-    result = {
-        "schema_version": ALGORITHM_SYNTHESIS_VERSION,
-        "pipeline_id": pipeline_id,
-        "evidence_refs": evidence_refs,
-        "parameter_focus": parameter_focus,
-        "rationale": _text(value.get("rationale"), "algorithm synthesis rationale")[:4000],
-    }
-    canonical_json(result)
-    return result
-
-
 def _validated_parameters(
     predictor_id: str,
     value: Mapping[str, Any],
@@ -449,9 +242,6 @@ class AlgorithmIR:
     allowed_partitions: tuple[str, ...]
     operators: tuple[Mapping[str, Any], ...]
     evidence_mappings: tuple[Mapping[str, Any], ...] = ()
-    source_plan_digest: str | None = None
-    source_blueprint_digest: str | None = None
-    source_synthesis_digest: str | None = None
     knowledge_snapshot_digest: str | None = None
     lowering_policy: str = ALGORITHM_IR_LOWERING_POLICY
     schema_version: str = ALGORITHM_IR_VERSION
@@ -500,9 +290,6 @@ class AlgorithmIR:
             _validated_mappings(self.evidence_mappings),
         )
         for name in (
-            "source_plan_digest",
-            "source_blueprint_digest",
-            "source_synthesis_digest",
             "knowledge_snapshot_digest",
         ):
             value = getattr(self, name)
@@ -525,7 +312,6 @@ class AlgorithmIR:
             "allowed_partitions": list(self.allowed_partitions),
             "operators": [dict(item) for item in self.operators],
             "evidence_mappings": [dict(item) for item in self.evidence_mappings],
-            "source_plan_digest": self.source_plan_digest,
             "knowledge_snapshot_digest": self.knowledge_snapshot_digest,
             "lowering_policy": self.lowering_policy,
             "security_boundary": {
@@ -535,10 +321,6 @@ class AlgorithmIR:
                 "shell_execution": False,
             },
         }
-        if self.source_blueprint_digest is not None:
-            result["source_blueprint_digest"] = self.source_blueprint_digest
-        if self.source_synthesis_digest is not None:
-            result["source_synthesis_digest"] = self.source_synthesis_digest
         return result
 
     def to_dict(self) -> JsonObject:
@@ -569,9 +351,6 @@ def build_registered_algorithm_ir(
     split_manifest_digest: str,
     allowed_partitions: Sequence[str],
     evidence_mappings: Sequence[Mapping[str, Any]] = (),
-    source_plan_digest: str | None = None,
-    algorithm_blueprint: Mapping[str, Any] | None = None,
-    algorithm_synthesis: Mapping[str, Any] | None = None,
     knowledge_snapshot_digest: str | None = None,
 ) -> AlgorithmIR:
     """Lower research evidence to one registered operator pipeline."""
@@ -580,42 +359,6 @@ def build_registered_algorithm_ir(
         pipeline_version = str(_REGISTERED_PIPELINES[predictor_id]["pipeline_version"])
     except KeyError:
         raise ValueError(f"algorithm IR predictor is not registered: {predictor_id}") from None
-    normalized_blueprint = (
-        validate_registered_algorithm_blueprint(
-            algorithm_blueprint,
-            expected_predictor_id=predictor_id,
-        )
-        if algorithm_blueprint is not None
-        else None
-    )
-    if algorithm_synthesis is not None and normalized_blueprint is None:
-        raise ValueError("algorithm synthesis requires a registered blueprint")
-    normalized_synthesis = (
-        validate_bounded_algorithm_synthesis(
-            algorithm_synthesis,
-            algorithm_blueprint=normalized_blueprint,
-            allowed_evidence_refs=tuple(
-                dict.fromkeys(
-                    [
-                        *(
-                            normalized_blueprint.get("evidence_refs", ())
-                            if normalized_blueprint is not None
-                            else ()
-                        ),
-                        *(
-                            str(item.get("knowledge_id"))
-                            for item in evidence_mappings
-                            if isinstance(item, Mapping)
-                            and isinstance(item.get("knowledge_id"), str)
-                            and str(item.get("knowledge_id")).strip()
-                        ),
-                    ]
-                )
-            ),
-        )
-        if algorithm_synthesis is not None and normalized_blueprint is not None
-        else None
-    )
     return AlgorithmIR(
         predictor_id=predictor_id,
         evaluator_id=evaluator_id,
@@ -626,13 +369,6 @@ def build_registered_algorithm_ir(
         allowed_partitions=tuple(allowed_partitions),
         operators=_registered_operators(predictor_id),
         evidence_mappings=tuple(dict(item) for item in evidence_mappings),
-        source_plan_digest=source_plan_digest,
-        source_blueprint_digest=(
-            digest(normalized_blueprint) if normalized_blueprint is not None else None
-        ),
-        source_synthesis_digest=(
-            digest(normalized_synthesis) if normalized_synthesis is not None else None
-        ),
         knowledge_snapshot_digest=knowledge_snapshot_digest,
     )
 
@@ -659,16 +395,10 @@ def algorithm_behavior_projection(value: AlgorithmIR | Mapping[str, Any]) -> Jso
 
 
 __all__ = [
-    "ALGORITHM_BLUEPRINT_VERSION",
     "ALGORITHM_IR_LOWERING_POLICY",
     "ALGORITHM_IR_VERSION",
-    "ALGORITHM_SYNTHESIS_VERSION",
     "AlgorithmIR",
     "algorithm_behavior_projection",
     "build_registered_algorithm_ir",
-    "registered_algorithm_blueprint",
-    "registered_algorithm_blueprint_catalog",
     "registered_operator_tool_ids",
-    "validate_bounded_algorithm_synthesis",
-    "validate_registered_algorithm_blueprint",
 ]

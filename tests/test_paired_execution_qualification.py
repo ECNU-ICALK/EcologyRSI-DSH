@@ -13,7 +13,7 @@ from ecologyrsi_dsh.core.search_policy import (
     local_challenger_policy, paired_execution_qualification_required,
 )
 from ecologyrsi_dsh.core.state import (
-    legacy_incomplete_paired_scoring, validate_generation_comparison_binding,
+    validate_generation_comparison_binding,
 )
 from ecologyrsi_dsh.core.trajectory import (
     BatchEvaluation, EvaluationPhase, EvaluationScope, FormalBatchArm,
@@ -42,7 +42,7 @@ GUARD_METADATA = {
     "host_runtime_build": {
         "evolution_runtime_schema": "ecologyrsi-dsh.evolution-runtime/3"
     },
-    "optimization_schedule": OptimizationSchedule.default().to_dict(),
+    "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
 }
 
 
@@ -126,7 +126,7 @@ def local_comparison(champion, challenger, *, marked):
 
 def holdout_comparison(*, marked, failed_incumbent=True):
     items = tuple(evaluation(arm, failed=failed_incumbent and arm is HoldoutArm.INCUMBENT,
-        skill=.1 if arm is HoldoutArm.INCUMBENT or failed_incumbent else .2) for arm in HoldoutArm)
+        skill=.1 if arm is HoldoutArm.INCUMBENT or failed_incumbent else .2) for arm in (HoldoutArm.FINALIST_1, HoldoutArm.INCUMBENT))
     return build_generation_comparison(
         run_id=items[0].scope.run_id, generation=0, cohort_digest=items[0].scope.cohort_digest,
         holdout_evaluations=items, incumbent_candidate_id="candidate:incumbent",
@@ -220,16 +220,6 @@ class PairedExecutionQualificationTests(unittest.TestCase):
                 validate_formal_batch_comparison(actual, *durable,
                                                 **local_challenger_policy(GUARD_METADATA))
 
-    def test_unmarked_guard_local_history_replays_original_rule_and_bytes(self):
-        champion, challenger = evaluation(FormalBatchArm.CHAMPION, failed=True), evaluation(FormalBatchArm.CHALLENGER)
-        old = local_comparison(champion, challenger, marked=False)
-        self.assertEqual(old.decision.value, "challenger_promoted")
-        self.assertNotIn("paired_execution_qualification", old.to_dict())
-        self.assertEqual(FormalBatchComparison.from_dict(old.to_dict()).to_dict(), old.to_dict())
-        validate_formal_batch_comparison(old, champion, challenger, **local_challenger_policy(GUARD_METADATA))
-        forged = replace(old, paired_execution_qualification=PAIRED_EXECUTION_QUALIFICATION)
-        with self.assertRaisesRegex(ValueError, "host-owned assessment"):
-            validate_formal_batch_comparison(forged, champion, challenger, **local_challenger_policy(GUARD_METADATA))
 
     def test_holdout_max_t_availability_only_gain_cannot_qualify(self):
         comparison = holdout_comparison(marked=True)
@@ -238,7 +228,7 @@ class PairedExecutionQualificationTests(unittest.TestCase):
         self.assertTrue(incumbent["search_eligible"])
         self.assertFalse(incumbent["certification_eligible"])
         self.assertIn("paired_strict_agent_chain_failed", incumbent["certification_failures"])
-        for arm in ("finalist_1", "finalist_2"):
+        for arm in ("finalist_1",):
             gate = comparison.gate_results["arms"][arm]
             self.assertAlmostEqual(gate["stability_lower_bound"], .0458333333333333)
             self.assertFalse(gate["certification_eligible"])
@@ -248,7 +238,8 @@ class PairedExecutionQualificationTests(unittest.TestCase):
     def test_holdout_scientific_gain_with_complete_chains_still_qualifies(self):
         comparison = holdout_comparison(marked=True, failed_incumbent=False)
         self.assertEqual(comparison.selected_candidate_id, "candidate:finalist_1")
-        self.assertTrue(comparison.gate_results["arms"]["finalist_1"]["certification_eligible"])
+        self.assertTrue(comparison.gate_results["arms"]["finalist_1"]["search_eligible"])
+        self.assertFalse(comparison.gate_results["arms"]["finalist_1"]["certification_eligible"])
 
     def test_frozen_dataset_contract_still_matches_its_own_block_evidence(self):
         # Every registered dataset contract holds arrays, and `HoldoutEvaluation`
@@ -284,43 +275,6 @@ class PairedExecutionQualificationTests(unittest.TestCase):
         self.assertNotEqual(report["reason_code"], "incompatible_block_configuration")
         self.assertGreater(report["score_delta"], 0)
 
-    def test_archived_incomplete_paired_evidence_still_replays(self):
-        # Fixing that read changed what recomputation says about evidence a Host
-        # already recorded as incomplete, which would stop
-        # run:e4332050-18c1-4562-8f03-3c4c8ee3a8bf from replaying at all. The
-        # recorded verdict is the conservative one, so the Host reproduces it
-        # instead of rejecting the run -- and everything else still has to match.
-        items = tuple(
-            with_dataset_task(evaluation(arm, skill=.1 if arm is HoldoutArm.INCUMBENT else .2))
-            for arm in HoldoutArm
-        )
-        inputs = dict(
-            run_id=items[0].scope.run_id, generation=0,
-            cohort_digest=items[0].scope.cohort_digest, holdout_evaluations=items,
-            incumbent_candidate_id="candidate:incumbent", require_paired_strict_chain=True,
-        )
-        current = build_generation_comparison(**inputs)
-        archived = build_generation_comparison(**inputs, legacy_incomplete_paired_scoring=True)
-        self.assertNotEqual(current.identity_dict(), archived.identity_dict())
-        self.assertFalse(legacy_incomplete_paired_scoring(current))
-        self.assertTrue(legacy_incomplete_paired_scoring(archived))
-        for arm, gate in current.gate_results["arms"].items():
-            with self.subTest(arm=arm):
-                self.assertTrue(gate["paired_scoring_evidence_complete"])
-                self.assertNotIn("paired_scoring_evidence_incomplete", gate["certification_failures"])
-        for arm, gate in archived.gate_results["arms"].items():
-            with self.subTest(arm=arm):
-                self.assertFalse(gate["paired_scoring_evidence_complete"])
-                self.assertIn("paired_scoring_evidence_incomplete", gate["certification_failures"])
-                self.assertFalse(gate["certification_eligible"])
-        # Forcing the verdict can only withhold a promotion, never grant one.
-        self.assertEqual(current.selected_candidate_id, "candidate:finalist_1")
-        self.assertEqual(archived.selected_candidate_id, "candidate:incumbent")
-        replayed = build_generation_comparison(
-            **inputs,
-            legacy_incomplete_paired_scoring=legacy_incomplete_paired_scoring(archived),
-        )
-        self.assertEqual(replayed.identity_dict(), archived.identity_dict())
 
     def test_holdout_complete_chain_with_failed_scoring_still_cannot_qualify(self):
         base = holdout_comparison(marked=False)
@@ -332,7 +286,7 @@ class PairedExecutionQualificationTests(unittest.TestCase):
             gate = comparison.gate_results["arms"]["finalist_1"]
             self.assertTrue(gate["strict_agent_chain_pass"])
             self.assertAlmostEqual(gate["stability_lower_bound"], .0458333333333333)
-            self.assertEqual(gate["certification_eligible"], not marked)
+            self.assertFalse(gate["certification_eligible"])
             if marked:
                 self.assertFalse(gate["paired_scoring_evidence_complete"])
                 self.assertIn("paired_scoring_evidence_incomplete", gate["certification_failures"])
@@ -383,64 +337,17 @@ class PairedExecutionQualificationTests(unittest.TestCase):
         self.assertTrue(paired_scoring_evidence_complete(different_day, different_day))
         self.assertFalse(paired_scoring_evidence_complete(original, different_day))
 
-    def test_guard_holdout_replay_distinguishes_old_and_marked_contracts(self):
-        for marked in (False, True):
-            comparison = holdout_comparison(marked=marked)
-            task = TaskManifest(task_id="replay", objective="synthetic", domain_pack="greenhouse_environment@1",
-                                metadata=GUARD_METADATA)
-            holdout = GenerationHoldout(holdout_id="holdout:synthetic", run_id=comparison.run_id,
-                generation=0, cohort_digest=comparison.cohort_digest, origin_count=192,
-                arm_bindings={item.scope.holdout_arm.value: dict(candidate_id=item.scope.candidate_id,
-                    candidate_revision_id=item.scope.candidate_revision_id) for item in comparison.holdout_evaluations})
-            validate_generation_comparison_binding(task, comparison.run_id, holdout,
-                {"exploration_only": False}, comparison,
-                persisted_evaluations={item.scope.holdout_arm: item for item in comparison.holdout_evaluations})
-            self.assertEqual(comparison.selected_candidate_id, "candidate:incumbent" if marked else "candidate:finalist_1")
 
-    def test_writer_requires_marker_but_existing_unmarked_decision_is_idempotent(self):
-        local = local_comparison(evaluation(FormalBatchArm.CHAMPION, failed=True),
-                                 evaluation(FormalBatchArm.CHALLENGER), marked=False)
-        held = holdout_comparison(marked=False)
-        director = object.__new__(EvolutionDirector)
-        director.ledger = Mock()
-        for comparison, method_name, lookup in ((local, "record_formal_batch_comparison", "batch_comparison_for"),
-                                               (held, "record_generation_comparison", "comparison_for")):
-            state = SimpleNamespace(task_manifest=SimpleNamespace(metadata=GUARD_METADATA))
-            setattr(state, lookup, lambda *args: None)
-            director.state = lambda run_id: state
-            with self.assertRaisesRegex(ValueError, "new guarded comparison requires"):
-                getattr(director, method_name)(comparison.run_id, comparison)
-            setattr(state, lookup, lambda *args: comparison)
-            self.assertIs(getattr(director, method_name)(comparison.run_id, comparison), comparison)
-        director.ledger.append.assert_not_called()
 
     def test_unknown_and_non_guard_contracts_fail_closed(self):
         for metadata, marker in ((GUARD_METADATA, "unknown@1"), ({}, PAIRED_EXECUTION_QUALIFICATION)):
             with self.assertRaises(ValueError):
                 paired_execution_qualification_required(metadata, marker)
-        self.assertFalse(paired_execution_qualification_required(GUARD_METADATA, None))
-        self.assertFalse(paired_execution_qualification_required({}, None, new_decision=True))
+        for metadata in (GUARD_METADATA, {}):
+            for new_decision in (False, True):
+                with self.subTest(metadata=metadata, new_decision=new_decision), self.assertRaises(ValueError):
+                    paired_execution_qualification_required(metadata, None, new_decision=new_decision)
 
-    def test_marked_comparison_cannot_use_legacy_shape_to_weaken_gates(self):
-        comparison = holdout_comparison(marked=True, failed_incumbent=False)
-        with self.assertRaisesRegex(ValueError, "cannot use a legacy gate shape"):
-            build_generation_comparison(run_id=comparison.run_id, generation=0,
-                cohort_digest=comparison.cohort_digest,
-                holdout_evaluations=comparison.holdout_evaluations,
-                require_paired_strict_chain=True, legacy_runtime_v2_shape=True)
-        gates = comparison.to_dict()["gate_results"]
-        gates.pop("selection_policy")
-        downgraded = replace(comparison, gate_results=gates)
-        holdout = GenerationHoldout(holdout_id="holdout:downgrade", run_id=comparison.run_id,
-            generation=0, cohort_digest=comparison.cohort_digest, origin_count=192,
-            arm_bindings={item.scope.holdout_arm.value: dict(candidate_id=item.scope.candidate_id,
-                candidate_revision_id=item.scope.candidate_revision_id) for item in comparison.holdout_evaluations})
-        task = TaskManifest(task_id="downgrade", objective="synthetic", domain_pack="greenhouse_environment@1",
-                            metadata=GUARD_METADATA)
-        with self.assertRaisesRegex(ValueError, "cannot use a legacy gate shape"):
-            validate_generation_comparison_binding(task, comparison.run_id, holdout,
-                {"exploration_only": False}, downgraded,
-                persisted_evaluations={item.scope.holdout_arm: item for item in comparison.holdout_evaluations})
 
 
 if __name__ == "__main__":

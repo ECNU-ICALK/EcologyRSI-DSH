@@ -12,20 +12,16 @@ import sysconfig
 from typing import Any
 
 from .queries import RunQueries
-from .config import bind_toy_dataset, load_json_object, load_local_config, load_task_manifest
+from .config import load_local_config, load_task_manifest
 from ..data.registry import DatasetRegistry
-from ..evolution.strategies import FakeDSHAdapter
 from ..core.director import EvolutionDirector
 from ..core.ledger import EventLedger, SCHEMA_VERSION
 from ..core.models import TaskManifest, digest
 from ..presentation.reporting import (
-    export_errors,
-    run_export,
     run_summary,
     state_snapshot,
     write_json_atomic,
 )
-from ..data.toy import ToyCropSoilWater
 from ..version import __version__
 
 def _open(path: str | Path) -> EventLedger:
@@ -33,51 +29,8 @@ def _open(path: str | Path) -> EventLedger:
     return EventLedger(":memory:" if value == ":memory:" else Path(value).expanduser())
 
 
-def _demo_manifest(args: argparse.Namespace) -> TaskManifest:
-    manifest_path = getattr(args, "manifest", None)
-    if manifest_path:
-        return load_task_manifest(manifest_path)
-    candidates = getattr(args, "candidates", None)
-    seed = getattr(args, "seed", None)
-    task = TaskManifest(
-        task_id="toy-forecast",
-        objective="predict soil water",
-        domain_pack="crop-soil-water@toy",
-        visible_datasets=("generated-toy-series@1",),
-        budget={"max_candidates": 3 if candidates is None else candidates},
-        seed=7 if seed is None else seed,
-        seed_policy="fixed",
-        metadata={
-            "scientific_scope": "prediction_demo_non_causal",
-            "evaluation_partition": "validation",
-        },
-    )
-    return bind_toy_dataset(task, required=True)
 
 
-def demo(args: argparse.Namespace) -> int:
-    ledger = _open(args.db)
-    try:
-        task = _demo_manifest(args)
-        director = EvolutionDirector(ledger, FakeDSHAdapter(max_proposals=task.max_candidates))
-        state = director.start_evolution(task, run_id=args.run_id)
-        toy = ToyCropSoilWater(seed=task.seed)
-        for _ in range(task.max_candidates):
-            candidate = director.propose_and_spawn(state.run.run_id)
-            current = director.state(state.run.run_id)
-            proposal = current.proposal(candidate.proposal_id)
-            evaluation = toy.evaluate_candidate(
-                state.run.run_id, candidate, proposal, split="validation"
-            )
-            director.evaluate_and_decide(evaluation)
-        director.complete_run(state.run.run_id)
-        final_state = director.state(state.run.run_id)
-        output = state_snapshot(final_state)
-        output["summary"] = run_summary(final_state)
-        print(json.dumps(output, ensure_ascii=False, indent=2))
-    finally:
-        ledger.close()
-    return 0
 
 
 def status(args: argparse.Namespace) -> int:
@@ -100,26 +53,6 @@ def summary(args: argparse.Namespace) -> int:
     return 0
 
 
-def export_run(args: argparse.Namespace) -> int:
-    ledger = _open(args.db)
-    try:
-        state = RunQueries(EvolutionDirector(ledger)).state(args.run_id)
-        payload = run_export(state)
-        target = write_json_atomic(args.output, payload, force=bool(args.force))
-        print(
-            json.dumps(
-                {
-                    "output": str(target),
-                    "run_id": args.run_id,
-                    "export_digest": payload["export_digest"],
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
-    finally:
-        ledger.close()
-    return 0
 
 
 def export_agent_policy(args: argparse.Namespace) -> int:
@@ -138,60 +71,8 @@ def export_agent_policy(args: argparse.Namespace) -> int:
     return 0
 
 
-def verify_export(args: argparse.Namespace) -> int:
-    payload = load_json_object(args.path)
-    stored = payload.get("export_digest")
-    unsigned = dict(payload)
-    unsigned.pop("export_digest", None)
-    try:
-        computed = digest(unsigned)
-    except (TypeError, ValueError):
-        computed = None
-    errors = export_errors(payload)
-    valid = not errors
-    result = {
-        "valid": valid,
-        "path": str(Path(args.path).expanduser().resolve()),
-        "stored_digest": stored,
-        "computed_digest": computed,
-        "format": payload.get("format"),
-        "format_version": payload.get("format_version"),
-        "errors": errors,
-    }
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if valid else 1
 
 
-def import_export(args: argparse.Namespace) -> int:
-    """Import an export bundle into an append-only SQLite ledger."""
-
-    payload = load_json_object(args.path)
-    errors = export_errors(payload)
-    if errors:
-        raise ValueError("invalid export bundle: " + "; ".join(errors))
-    summary = payload["summary"]
-    run_id = str(summary["run_id"])
-    events = payload["events"]
-    ledger = _open(args.db)
-    try:
-        for raw in events:
-            ledger.append(
-                str(raw["run_id"]),
-                str(raw["kind"]),
-                dict(raw["payload"]),
-                event_id=str(raw["event_id"]),
-                created_at=str(raw["created_at"]),
-            )
-        state = EvolutionDirector(ledger).replay(run_id)
-        actual = run_summary(state)
-        if actual["manifest_digest"] != summary.get("manifest_digest"):
-            raise ValueError("imported manifest digest does not match export summary")
-        if len(state.events) != len(events):
-            raise ValueError("imported event count does not match export")
-        print(json.dumps(actual, ensure_ascii=False, indent=2))
-    finally:
-        ledger.close()
-    return 0
 
 
 def doctor(args: argparse.Namespace) -> int:
@@ -382,69 +263,14 @@ def install_dsh_runtime(args: argparse.Namespace) -> int:
     return 0
 
 
-def advance_command(args: argparse.Namespace) -> int:
-    from .generation_execution import execute_generation, complete_if_budget_exhausted
-    from .runtime import ApplicationRuntime
-    from ..execution.ownership import RuntimeOwnerLease
-    from ..core.models import RunStatus
-    if type(args.steps) is not int or not 1 <= args.steps <= 100:
-        raise ValueError("steps must be between 1 and 100")
-    owner = RuntimeOwnerLease(args.db)
-    try:
-        ledger = _open(args.db)
-        services = None
-        try:
-            services = ApplicationRuntime(ledger)
-            services.host_activity.start()
-            state = complete_if_budget_exhausted(services, args.run_id)
-            for _ in range(args.steps):
-                if state.run.status is not RunStatus.RUNNING:
-                    break
-                state = execute_generation(services, args.run_id)
-            print(json.dumps(state_snapshot(state), ensure_ascii=False, indent=2, allow_nan=False))
-        finally:
-            if services is not None:
-                services.host_activity.close()
-            ledger.close()
-    finally:
-        owner.release()
-    return 0
 
 
 
 
 
 
-def diagnose_training_fit_command(args: argparse.Namespace) -> int:
-    from ..science.diagnostics import candidates_from_payload, run_training_fit_diagnostics
-    candidates = candidates_from_payload(json.loads(Path(args.candidates).read_text())) if args.candidates else None
-    view = DatasetRegistry(data_root=args.data_root).selection_view(args.dataset, args.episode)
-    report = run_training_fit_diagnostics(view, candidates=candidates, folds=args.folds,
-        initial_fit_fraction=args.initial_fit_fraction, purge_hours=args.purge_hours)
-    write_json_atomic(Path(args.output), report)
-    print(json.dumps({"output": str(Path(args.output).resolve()), "scope": report["scope"],
-        "common_origins": [fold["common_origin_count"] for fold in report["folds"]], "remote_requests": 0}, ensure_ascii=False))
-    return 0
 
 
-def model_preflight_command(args: argparse.Namespace) -> int:
-    from urllib.request import Request, urlopen
-    from urllib.parse import urlparse
-    endpoint = args.api_base.rstrip("/")
-    parsed = urlparse(endpoint)
-    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"} or parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ValueError("model-preflight requires an HTTP loopback API endpoint")
-    payload = load_json_object(args.request)
-    token = os.environ.get(args.token_env, "")
-    if not token:
-        raise ValueError(f"set {args.token_env} to the local service token")
-    request = Request(endpoint + "/model-preflight", data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + token}, method="POST")
-    with urlopen(request, timeout=250) as response:
-        result = json.load(response)
-    write_json_atomic(Path(args.output), result)
-    print(json.dumps({"output": str(Path(args.output).resolve()), "passed": result.get("passed"), "scope": result.get("scope")}, ensure_ascii=False))
-    return 0 if result.get("passed") else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -452,14 +278,6 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ecologyrsi-dsh", description="Minimal replayable evolution mode"
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    demo_parser = sub.add_parser("demo", help="run the deterministic toy evolution loop")
-    demo_parser.add_argument("--db", default="ecologyrsi-dsh.sqlite3")
-    demo_parser.add_argument("--run-id", default="run:demo")
-    demo_parser.add_argument("--manifest", help="JSON TaskManifest (uses its fixed seed/budget)")
-    demo_parser.add_argument("--candidates", type=int, default=None)
-    demo_parser.add_argument("--seed", type=int, default=None)
-    demo_parser.set_defaults(handler=demo)
-
     status_parser = sub.add_parser("status", help="replay and print a stored run")
     status_parser.add_argument("run_id")
     status_parser.add_argument("--db", default="ecologyrsi-dsh.sqlite3")
@@ -470,13 +288,6 @@ def build_parser() -> argparse.ArgumentParser:
     summary_parser.add_argument("--db", default="ecologyrsi-dsh.sqlite3")
     summary_parser.set_defaults(handler=summary)
 
-    export_parser = sub.add_parser("export", help="export a replayable run bundle")
-    export_parser.add_argument("run_id")
-    export_parser.add_argument("--db", default="ecologyrsi-dsh.sqlite3")
-    export_parser.add_argument("--output", required=True)
-    export_parser.add_argument("--force", action="store_true", help="allow replacing output")
-    export_parser.set_defaults(handler=export_run)
-
     policy_parser = sub.add_parser("export-policy", help="export a deployable Agent prediction policy")
     policy_parser.add_argument("run_id")
     policy_parser.add_argument("candidate_id")
@@ -484,15 +295,6 @@ def build_parser() -> argparse.ArgumentParser:
     policy_parser.add_argument("--output", required=True)
     policy_parser.add_argument("--force", action="store_true")
     policy_parser.set_defaults(handler=export_agent_policy)
-
-    verify_parser = sub.add_parser("verify", help="verify an exported run bundle digest")
-    verify_parser.add_argument("path")
-    verify_parser.set_defaults(handler=verify_export)
-
-    import_parser = sub.add_parser("import", help="import and replay an exported run bundle")
-    import_parser.add_argument("path")
-    import_parser.add_argument("--db", required=True)
-    import_parser.set_defaults(handler=import_export)
 
     doctor_parser = sub.add_parser("doctor", help="check local runtime and replay health")
     doctor_parser.add_argument("--db", default="ecologyrsi-dsh.sqlite3")
@@ -546,27 +348,6 @@ def build_parser() -> argparse.ArgumentParser:
     install_parser.add_argument("--dsh-home")
     install_parser.add_argument("--dsh-bin")
     install_parser.set_defaults(handler=install_dsh_runtime)
-    advance = sub.add_parser("advance", help="advance an existing run through the shared application service")
-    advance.add_argument("--db", required=True)
-    advance.add_argument("--run-id", required=True)
-    advance.add_argument("--steps", type=int, default=1)
-    advance.set_defaults(handler=advance_command)
-    diagnostic = sub.add_parser("diagnose-training-fit", help="仅使用training_fit进行基线/候选前推对照；不调用远程模型")
-    diagnostic.add_argument("--dataset", default="agc_cucumber_2018")
-    diagnostic.add_argument("--episode", required=True)
-    diagnostic.add_argument("--data-root")
-    diagnostic.add_argument("--candidates")
-    diagnostic.add_argument("--folds", type=int, default=3)
-    diagnostic.add_argument("--initial-fit-fraction", type=float, default=.4)
-    diagnostic.add_argument("--purge-hours", type=int, default=24)
-    diagnostic.add_argument("--output", required=True)
-    diagnostic.set_defaults(handler=diagnose_training_fit_command)
-    preflight = sub.add_parser("model-preflight", help="通过本地API执行真实工具与结构化输出预检")
-    preflight.add_argument("--request", required=True, help="JSON compact create-run request; no run will be created")
-    preflight.add_argument("--api-base", default="http://127.0.0.1:8777/api")
-    preflight.add_argument("--token-env", default="ECOLOGYRSI_SERVICE_TOKEN")
-    preflight.add_argument("--output", required=True)
-    preflight.set_defaults(handler=model_preflight_command)
     return parser
 
 

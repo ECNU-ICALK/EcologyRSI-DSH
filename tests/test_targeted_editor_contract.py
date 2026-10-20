@@ -21,7 +21,7 @@ class TargetedEditorContractTests(unittest.TestCase):
         schemas.update(history_steps={"type": "integer", "minimum": 1, "maximum": 12},
                        ridge_alpha={"type": "number", "minimum": .0001, "maximum": 1.})
         metadata = {
-            "optimization_schedule": replace(OptimizationSchedule.default(), max_local_edits_per_batch=budget).to_dict(),
+            "optimization_schedule": replace(OptimizationSchedule.for_new_run(), max_local_edits_per_batch=budget).to_dict(),
             "fitness_profile": {"expected_targets": ["air_temperature", "relative_humidity", "co2_concentration"],
                                 "expected_horizons": [1, 6, 24]},
         }
@@ -57,10 +57,9 @@ class TargetedEditorContractTests(unittest.TestCase):
         self.assertNotIn("ridge_alpha", neighborhoods)
         self.assertNotIn("history_steps", neighborhoods)
 
-    def test_old_mode_and_explicit_zero_budget_are_preserved(self):
+    def test_standard_mode_preserves_registered_targets_and_rejects_old_zero_budget(self):
         context, revision = self.context(targeted=False)
         self.assertEqual(context.maximum_operations, 2)
         self.assertIn("ridge_alpha", _legal_parameter_neighborhoods(revision, context))
         self.assertIn("history_steps", context.allowed_mutation_targets["scientific_parameter"])
-        disabled, _ = self.context(targeted=True, budget=0)
-        self.assertEqual(disabled.maximum_operations, 0)
+        with self.assertRaises(ValueError): self.context(targeted=True, budget=0)

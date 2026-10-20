@@ -12,8 +12,9 @@ import math
 
 from ..core.models import digest
 
+from ..evolution.mutation_specs import SKILL_POLICY_ID as SKILL_POLICY_ID
+
 SKILL_PROGRAM_SCHEMA = "ecologyrsi-dsh.skill-program/1"
-from ..evolution.mutation_specs import SKILL_POLICY_ID
 MAX_SKILL_STEPS = 3
 MAX_GUIDANCE_LENGTH = 360
 SKILL_MODULES = {

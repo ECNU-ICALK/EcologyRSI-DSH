@@ -188,7 +188,8 @@ class IndependentCertificationIntegrationTests(unittest.TestCase):
 
         profile = FitnessProfile()
         task = TaskManifest("independent", "frozen point certification", "greenhouse", ("agc_cucumber_2018",),
-                            metadata={"fitness_profile": profile.to_dict(), "fitness_profile_digest": profile.profile_digest})
+                            metadata={"search_guard_policy": "practical_delta_cell_noninferiority_paired_blocks@1",
+                                      "fitness_profile": profile.to_dict(), "fitness_profile_digest": profile.profile_digest})
         candidate = SimpleNamespace(candidate_id="candidate:fixed", generation=0)
         artifact = SimpleNamespace(digest="a" * 64, candidate_revision_id="revision:fixed", model_id="model:fixed",
                                    learned_parameters={"agent_policy": {"experience": {"rows": []}}})

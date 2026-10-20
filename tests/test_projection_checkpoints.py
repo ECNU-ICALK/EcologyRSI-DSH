@@ -6,6 +6,7 @@ from unittest.mock import patch
 from ecologyrsi_dsh import EventLedger, EvolutionDirector
 from ecologyrsi_dsh.core.state import project_run_state
 from tests.test_core import manifest
+from tests.native_fixtures import NativeRoleStub, canary_receipts
 
 
 class ProjectionCheckpointTests(unittest.TestCase):
@@ -23,9 +24,10 @@ class ProjectionCheckpointTests(unittest.TestCase):
     def test_restart_loads_checkpoint_then_only_new_tail(self):
         with tempfile.TemporaryDirectory() as tmp:
             with EventLedger(Path(tmp)/'state.sqlite') as ledger:
-                writer=EvolutionDirector(ledger)
+                writer=EvolutionDirector(ledger, NativeRoleStub())
                 writer._projection_checkpoints.interval=1
                 writer.create_run(manifest(1),run_id='checkpoint')
+                writer.record_model_contract_preflight('checkpoint', canary_receipts(writer.state('checkpoint').task_manifest.metadata))
                 first=writer.state('checkpoint')
                 self.assertTrue(list((Path(tmp)/'state.sqlite.read-models').glob('*.json')))
                 writer._projection_checkpoints.interval = 10000
@@ -39,7 +41,7 @@ class ProjectionCheckpointTests(unittest.TestCase):
     def test_corrupt_or_unknown_version_cache_falls_back_to_ledger(self):
         with tempfile.TemporaryDirectory() as tmp:
             with EventLedger(Path(tmp)/'state.sqlite') as ledger:
-                writer=EvolutionDirector(ledger);writer._projection_checkpoints.interval=1
+                writer=EvolutionDirector(ledger, NativeRoleStub());writer._projection_checkpoints.interval=1
                 writer.create_run(manifest(1),run_id='checkpoint');writer.state('checkpoint')
                 path=next((Path(tmp)/'state.sqlite.read-models').glob('*.json'))
                 for corruption in ('invalid JSON',json.dumps({'version':'unknown','payload':'{}','sha256':'bad'})):

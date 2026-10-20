@@ -1,7 +1,7 @@
 "use strict";
 
   // Offline/bootstrap copy of the Python contract; catalog rules take precedence.
-  var bootstrapRunParameters = {"schema_version":"ecologyrsi-dsh.run-parameters/1","parameters":{"rounds":{"default":5,"minimum":1,"maximum":50},"candidates_per_generation":{"default":4,"minimum":4,"maximum":4},"max_candidates":{"default":20,"minimum":4,"maximum":256},"formal_origin_count":{"default":100,"minimum":2},"local_batch_origin_count":{"default":10,"minimum":2},"max_local_edits_per_batch":{"default":2,"minimum":0,"maximum":5},"selection_holdout_origin_count":{"default":50,"minimum":40},"candidate_concurrency":{"default":4,"minimum":1,"maximum":8},"sample_concurrency":{"default":64,"minimum":1,"maximum":128}},"local_comparison_mode":"exploratory_paired_point_comparison","constraints":["formal_origins_divisible_by_batch","candidate_budget_covers_epochs","target_time_purged","epoch_temporal_evidence_required"]};
+  var bootstrapRunParameters = {"schema_version":"ecologyrsi-dsh.run-parameters/1","parameters":{"rounds":{"default":5,"minimum":1,"maximum":50},"candidates_per_generation":{"default":4,"minimum":4,"maximum":4},"max_candidates":{"default":20,"minimum":4,"maximum":256},"formal_origin_count":{"default":35,"minimum":35,"maximum":35},"local_batch_origin_count":{"default":25,"minimum":25,"maximum":25},"max_local_edits_per_batch":{"default":2,"minimum":2,"maximum":2},"selection_holdout_origin_count":{"default":50,"minimum":50,"maximum":50},"candidate_concurrency":{"default":4,"minimum":1,"maximum":8},"sample_concurrency":{"default":64,"minimum":1,"maximum":128}},"local_comparison_mode":"exploratory_paired_point_comparison","constraints":["fixed_joint_epoch_schedule","candidate_budget_covers_epochs","target_time_purged","epoch_temporal_evidence_required"]};
   function runParameterContract() {
     var evaluator = typeof selectedCatalogItem === "function" ? selectedCatalogItem("evaluators", "#evaluator-id") : null;
     return evaluator && evaluator.run_parameters || state.catalog.run_parameters || bootstrapRunParameters;
@@ -60,7 +60,7 @@
   function normalizedOptimizationSchedule(values) {
     var input = values || {};
     if (input.experiment_mode && input.experiment_mode !== "joint") {
-      throw new Error("新实验统一使用联合策略进化；历史模式仅支持原运行回放");
+      throw new Error("仅支持当前联合策略进化协议");
     }
     runParameterInteger(50, "selection_holdout_origin_count", "固定轮末比较时点数");
     return {schema_version: "ecologyrsi-dsh.joint-plugin-epoch-schedule/2", screening_origin_count: 10,
@@ -69,10 +69,10 @@
   }
 
   function optimizationProtocolForSchedule(schedule) {
-    return schedule.schema_version === "ecologyrsi-dsh.joint-plugin-epoch-schedule/2" ? "joint_plugin_epoch@2"
-      : schedule.schema_version === "ecologyrsi-dsh.joint-plugin-epoch-schedule/1" ? "joint_plugin_epoch@1"
-      : schedule.schema_version === "ecologyrsi-dsh.evidence-guided-epoch-schedule/1" ? "evidence_guided_epoch@1"
-      : schedule.finalist_count === 1 ? "quick_adaptive_epoch@1" : "top2_adaptive_epoch@1";
+    if (schedule.schema_version !== "ecologyrsi-dsh.joint-plugin-epoch-schedule/2") {
+      throw new Error("仅支持当前联合策略进化协议");
+    }
+    return "joint_plugin_epoch@2";
   }
 
   function optimizationScheduleFromControls() {
@@ -171,7 +171,7 @@
     var envelope = data && typeof data === "object" ? data : {};
     var monitorOnly = envelope.schema_version === "ecologyrsi-dsh.browser-run-monitor/1";
     var run = normalizeRun(data);
-    var hydrate = monitorOnly && !state.usingDemo
+    var hydrate = monitorOnly
       ? request("/runs/" + encodeURIComponent(run.id) + "?view=overview", {timeout: dataRequestTimeout}).then(function (detail) {
         var hydrated = normalizeRun(detail);
         return String(hydrated.id) === String(run.id) ? hydrated : run;
@@ -183,13 +183,12 @@
       state.activeRun = run;
       state.workspaceVersions = {};
       state.workspaceErrors = {};
-      state.trainingAssetDetails = {};
       state.lastSelectedRunId = run.id;
       state.showAllEvents = false;
       state.candidateSelectionPinned = false;
       syncCandidateSelection(run);
-      resetEventStream(run.id, state.usingDemo ? clone(demoEvents) : []);
-      state.loadState = state.usingDemo ? "demo" : "ready";
+      resetEventStream(run.id, []);
+      state.loadState = "ready";
       state.lastUpdated = new Date().toISOString();
       state.workspace = "process";
       if (typeof startRunMonitor === "function") { startRunMonitor(run.id); }
@@ -294,8 +293,6 @@
       if (maximumField && typeof maximumField.focus === "function") { maximumField.focus(); }
       return Promise.resolve(null);
     }
-    var requestedAutoAdvance = payload.auto_advance;
-    var continuousAutoAdvance = requestedAutoAdvance == null || requestedAutoAdvance === true || String(requestedAutoAdvance).toLowerCase() === "continuous";
     var body = {
       dataset_id: payload.dataset_id || payload.datasetId,
       episode_id: payload.episode_id || payload.episodeId,
@@ -317,7 +314,7 @@
         max_candidates: effectiveBudget.max_candidates
       },
       seed_policy: payload.fixed_seed ? "fixed" : "generated_and_recorded",
-      requested_mode: "autonomous", auto_advance: payload.auto_advance === 0 ? 0 : continuousAutoAdvance ? true : 1
+      requested_mode: "autonomous", auto_progress: true, auto_advance: "continuous"
     };
     body.prediction_selection_policy = "model_during_run@1";
     if (payload.targeted_search_policy) { body.targeted_search_policy = payload.targeted_search_policy; }
@@ -344,28 +341,24 @@
     showToast("提交已接收，正在连接实时进度。" );
     var createSubmitted = false;
     var operation;
-    if (state.usingDemo) {
-      operation = Promise.resolve({ projection: clone(demoRun) });
-    } else {
-      var ready = Promise.resolve();
-      if (body.require_model_contract_preflight) {
-        state.createStatus.state = "preflight";
-        state.createStatus.message = "正在检查所选模型的工具调用与结构化输出能力，通过后创建运行。";
-        showToast(state.createStatus.message);
-        renderAll();
-        ready = prepareModelsForCreate(body);
-      }
-      operation = ready.then(function () {
-        state.createStatus = {state: "submitting", runId: null, message: "创建请求正在提交，收到运行编号后会自动连接实时进度。"};
-        renderAll();
-        createSubmitted = true;
-        return request("/runs", { method: "POST", body: body, timeout: evolutionCommandTimeout });
-      });
+    var ready = Promise.resolve();
+    if (body.require_model_contract_preflight) {
+      state.createStatus.state = "preflight";
+      state.createStatus.message = "正在检查所选模型的工具调用与结构化输出能力，通过后创建运行。";
+      showToast(state.createStatus.message);
+      renderAll();
+      ready = prepareModelsForCreate(body);
     }
+    operation = ready.then(function () {
+      state.createStatus = {state: "submitting", runId: null, message: "创建请求正在提交，收到运行编号后会自动连接实时进度。"};
+      renderAll();
+      createSubmitted = true;
+      return request("/runs", { method: "POST", body: body, timeout: evolutionCommandTimeout });
+    });
     return operation.then(function (data) {
       return adoptCreatedRun(data);
     }).catch(function (error) {
-      if (!state.usingDemo && createSubmitted && createRequestMayHaveCommitted(error)) {
+      if (createSubmitted && createRequestMayHaveCommitted(error)) {
         state.commandError = null;
         state.createStatus = {
           state: "verifying",
@@ -442,7 +435,7 @@
 
   function mergeControlResponse(runId, data) {
     var envelope = data && data.response || data;
-    var projection = envelope && (envelope.projection || envelope.run_projection) || envelope || {};
+    var projection = envelope && (envelope.projection) || envelope || {};
     var responseRunId = projection.run_id || projection.id;
     if (!responseRunId) { return null; }
     if (String(responseRunId) !== String(runId)) {
@@ -541,28 +534,22 @@
     state.commandError = null;
     state.controlNotice = null;
     renderAll();
-    var operation = state.usingDemo ? Promise.resolve(null) : request("/runs/" + encodeURIComponent(runId) + "/control", { method: "POST", body: body, timeout: 30000 });
+    var operation = request("/runs/" + encodeURIComponent(runId) + "/control", { method: "POST", body: body, timeout: 30000 });
     return operation.then(function (data) {
-      if (state.usingDemo) {
-        state.activeRun.status = action === "pause" ? "paused" : action === "resume" ? "running" : "cancelled";
-        state.activeRun.projection_revision += 1;
-        state.events.unshift({ id: "演示事件-" + Date.now(), type: "run." + (action === "pause" ? "paused" : action === "resume" ? "resumed" : "cancelled"), occurred_at: new Date().toISOString(), payload: { message: "演示控制命令已应用。" } });
-      } else {
-        if (!mergeControlResponse(runId, data)) {
-          throw new Error("运行控制响应缺少可核验状态。");
-        }
-        var commandStatus = data && (data.command_status || data.status);
-        if (commandStatus === "pending" && data.command_id) {
-          // The Host boundary is already durable; continue observing the
-          // remote DSH drain without keeping the button request open.
-          pollCommand(data.command_id, runId, 60).then(function (completed) {
-            if (!completed) { return; }
-            var refreshed = mergeControlResponse(runId, completed);
-            if (!refreshed) { return; }
-            state.lastUpdated = new Date().toISOString();
-            renderAll();
-          });
-        }
+      if (!mergeControlResponse(runId, data)) {
+        throw new Error("运行控制响应缺少可核验状态。");
+      }
+      var commandStatus = data && (data.command_status || data.status);
+      if (commandStatus === "pending" && data.command_id) {
+        // The Host boundary is already durable; continue observing the
+        // remote DSH drain without keeping the button request open.
+        pollCommand(data.command_id, runId, 60).then(function (completed) {
+          if (!completed) { return; }
+          var refreshed = mergeControlResponse(runId, completed);
+          if (!refreshed) { return; }
+          state.lastUpdated = new Date().toISOString();
+          renderAll();
+        });
       }
       state.commandError = null;
       var confirmed = controlStatusConfirmed(action, state.activeRun);
@@ -571,7 +558,7 @@
         ? controlSuccessMessage(action)
         : setControlNotice(runId, action, "pending"));
     }).catch(function (error) {
-      if (!controlRequestTimedOut(error) || state.usingDemo) { throw error; }
+      if (!controlRequestTimedOut(error)) { throw error; }
       setControlNotice(runId, action, "verifying");
       renderAll();
       return reconcileTimedOutControl(runId, action, body).then(function (result) {
@@ -673,190 +660,9 @@
     });
   }
 
-  function advanceRun(options) {
-    var automatic = Boolean(options && options.automatic === true);
-    if (!state.activeRun || state.busy) { return Promise.resolve(false); }
-    if (runHasRetryCircuitPause(state.activeRun)) {
-      if (!hasCapability("run.control")) { showToast("当前 DSH 会话未授予恢复运行的能力。"); return Promise.resolve(false); }
-      // The resume endpoint re-queues the preserved checkpoint.  Issuing a
-      // second /advance here would race that worker and could duplicate work.
-      return controlRun("resume");
-    }
-    if (!hasCapability("evolution.run.advance")) { showToast("当前 DSH 会话未授予推进进化轮次的能力。"); return Promise.resolve(false); }
-    if (state.activeRun.status === "paused") {
-      if (!hasCapability("run.control")) { showToast("当前 DSH 会话未授予恢复运行的能力。"); return Promise.resolve(false); }
-      var pausedRunId = state.activeRun.id;
-      var serverOwnedAutoProgress = runHasContinuousAutoProgress(state.activeRun);
-      return controlRun("resume").then(function (resumed) {
-        if (!resumed || !state.activeRun || state.activeRun.id !== pausedRunId || state.activeRun.status !== "running") { return false; }
-        // Resuming a durable continuous run re-queues its preserved checkpoint
-        // in the service. A second browser /advance races that worker and
-        // produces a misleading conflict toast even though recovery succeeded.
-        if (serverOwnedAutoProgress) { return true; }
-        return advanceRun(options);
-      });
-    }
-    if (state.activeRun.status !== "running") { showToast("只有运行中或已暂停的任务可以继续推进。"); return Promise.resolve(false); }
-    var runId = state.activeRun.id;
-    var commandContextEpoch = state.contextEpoch;
-    var signature = JSON.stringify({ run_id: runId, steps: 1 });
-    var body = { steps: 1, idempotency_key: commandKey("advance", signature) };
-    state.busy = true;
-    state.pendingAction = automatic ? "auto-advance" : "advance";
-    state.commandError = null;
-    renderAll();
-    var eventPollTimer = null;
-    var progressPollPending = false;
-    if (!state.usingDemo) {
-      eventPollTimer = window.setInterval(function () {
-        if (progressPollPending || commandContextEpoch !== state.contextEpoch) { return; }
-        progressPollPending = true;
-        refreshProgressForRun(runId).finally(function () { progressPollPending = false; });
-      }, 1500);
-      refreshProgressForRun(runId);
-    }
-    var operation = state.usingDemo ? Promise.resolve({ projection: state.activeRun }) : request("/runs/" + encodeURIComponent(runId) + "/advance", { method: "POST", body: body, timeout: evolutionCommandTimeout });
-    return operation.then(function (data) {
-      if (commandContextEpoch !== state.contextEpoch || !state.activeRun || state.activeRun.id !== runId) { return false; }
-      clearCommandKey("advance");
-      if (state.usingDemo) {
-        state.activeRun.generation = Math.min(state.activeRun.total_generations, state.activeRun.generation + 1);
-        state.activeRun.projection_revision += 1;
-        state.events.unshift({ id: "演示轮次-" + Date.now(), type: "generation.advanced", occurred_at: new Date().toISOString(), payload: { message: "演示运行已推进一轮。" } });
-      } else {
-        state.activeRun = normalizeRun(data);
-        state.runs = state.runs.map(function (run) { return run.id === runId ? state.activeRun : run; });
-      }
-      state.lastUpdated = new Date().toISOString();
-      if (!automatic) { showToast("下一轮进化已执行。" ); }
-      return refreshEventsForRun(runId);
-    }).catch(function (error) {
-      if (commandContextEpoch !== state.contextEpoch || !state.activeRun || state.activeRun.id !== runId) { return false; }
-      state.commandError = "推进失败：" + errorMessage(error);
-      showToast(state.commandError);
-      return false;
-    }).finally(function () {
-      if (eventPollTimer) { window.clearInterval(eventPollTimer); }
-      if (commandContextEpoch !== state.contextEpoch || !state.activeRun || state.activeRun.id !== runId) { return; }
-      state.busy = false;
-      if (state.pendingAction === (automatic ? "auto-advance" : "advance")) { state.pendingAction = null; }
-      renderAll();
-    });
-  }
-
-  function parseOverrides(text) {
-    var result = {};
-    String(text || "").split(/\r?\n/).forEach(function (line) {
-      var trimmed = line.trim();
-      if (!trimmed) { return; }
-      var index = trimmed.indexOf("=");
-      if (index < 1) { throw new Error("参数覆盖值必须使用“参数=值”的格式。"); }
-      var key = trimmed.slice(0, index).trim();
-      var raw = trimmed.slice(index + 1).trim();
-      if (!key || !raw) { throw new Error("参数名称和值都不能为空。"); }
-      try { result[key] = JSON.parse(raw); } catch (error) { result[key] = raw; }
-    });
-    return result;
-  }
-
-  function submitIntervention(payload) {
-    if (!state.activeRun || ["paused", "running"].indexOf(state.activeRun.status) < 0) { showToast("只有运行中或已暂停的进化运行可以提交专家意见。"); return Promise.resolve(false); }
-    if (!hasCapability("intervention.write")) { showToast("当前 DSH 会话未授予提交专家意见与答复的能力。"); return Promise.resolve(false); }
-    var runId = state.activeRun.id;
-    var signature = JSON.stringify(payload);
-    var body = Object.assign({}, payload, { idempotency_key: commandKey("intervention", signature) });
-    state.busy = true;
-    state.pendingAction = "intervention";
-    state.commandError = null;
-    renderAll();
-    var operation = state.usingDemo ? Promise.resolve(null) : request("/runs/" + encodeURIComponent(runId) + "/interventions", { method: "POST", body: body });
-    return operation.then(function (data) {
-      clearCommandKey("intervention");
-      if (state.usingDemo) {
-        state.activeRun.interventions.unshift({ id: "意见-" + Date.now(), kind: payload.kind, message: payload.message, parameter_overrides: payload.parameter_overrides, target_candidate_id: payload.target_candidate_id, created_by: payload.created_by, created_at: new Date().toISOString(), effective_generation: state.activeRun.generation + 1, recorded: true, applied: false, enforced: false, application_status: "recorded" });
-        state.activeRun.projection_revision += 1;
-      } else if (data) {
-        state.activeRun = normalizeRun(data);
-        state.runs = state.runs.map(function (run) { return run.id === runId ? state.activeRun : run; });
-      }
-      state.lastUpdated = new Date().toISOString();
-      $("#intervention-form").reset();
-      updateInterventionFields();
-      showToast("专家主动意见已记录；恢复运行后将在下一轮处理。" );
-      return refreshEventsForRun(runId);
-    }).catch(function (error) {
-      state.commandError = "专家主动意见提交失败：" + errorMessage(error);
-      showToast(state.commandError);
-      return false;
-    }).finally(function () { state.busy = false; state.pendingAction = null; renderAll(); });
-  }
-
-  function answerExpertConsultation(consultationId, payload) {
-    var run = state.activeRun;
-    var id = String(consultationId || "");
-    if (!run || !id) { showToast("当前没有可答复的专家咨询。" ); return Promise.resolve(false); }
-    if (state.busy) { return Promise.resolve(false); }
-    if (!hasCapability("intervention.write")) { showToast("当前 DSH 会话未授予提交专家意见与答复的能力。" ); return Promise.resolve(false); }
-    var consultation = (run.expert_consultations || []).find(function (item) { return expertConsultationId(item) === id; });
-    if (!consultation || consultation.status !== "pending") { showToast("该咨询已答复或不再存在，请刷新后重试。" ); return Promise.resolve(false); }
-    var answer = String(payload && payload.answer || "").trim();
-    var answeredBy = String(payload && payload.answered_by || "").trim();
-    var selectedOption = String(payload && payload.selected_option || "").trim();
-    // Durable domain knowledge keeps reaching the model every round instead of
-    // being consumed by the first research iteration that reads it.
-    var persistent = payload && payload.persistent === true;
-    if (!answer) { showToast("请填写专家答复。" ); return Promise.resolve(false); }
-    if (!answeredBy) { showToast("请填写答复人。" ); return Promise.resolve(false); }
-    var runId = run.id;
-    var auditOnly = expertConsultationRunIsTerminal(run);
-    var signature = JSON.stringify({ run_id: runId, consultation_id: id, answer: answer, selected_option: selectedOption, answered_by: answeredBy, persistent: persistent });
-    var body = { answer: answer, answered_by: answeredBy, idempotency_key: commandKey("expert-consultation-answer", signature) };
-    if (selectedOption) { body.selected_option = selectedOption; }
-    if (persistent) { body.persistent = true; }
-    state.busy = true;
-    state.pendingAction = "expert-consultation:" + id;
-    state.commandError = null;
-    renderAll();
-    var operation = state.usingDemo ? Promise.resolve(null) : request("/runs/" + encodeURIComponent(runId) + "/expert-consultations/" + encodeURIComponent(id) + "/answer", { method: "POST", body: body });
-    return operation.then(function (data) {
-      clearCommandKey("expert-consultation-answer");
-      if (state.usingDemo) {
-        var answeredAt = new Date().toISOString();
-        state.activeRun.expert_consultations = state.activeRun.expert_consultations.map(function (item) {
-          if (expertConsultationId(item) !== id) { return item; }
-          return Object.assign({}, item, { status: "answered", answer: answer, selected_option: selectedOption || null, answered_by: answeredBy, answered_at: answeredAt, effective_generation: auditOnly ? null : state.activeRun.generation + 1, applied_generation: null, persistent: persistent });
-        });
-        state.activeRun.projection_revision += 1;
-        state.events.unshift({ id: "演示咨询事件-" + Date.now(), type: "expert_consultation.answered", occurred_at: answeredAt, payload: { consultation_id: id, audit_only: auditOnly, message: auditOnly ? "迟到专家答复已归档，不会改写运行结果。" : "专家答复已记录，将在后续轮次使用。" } });
-      } else {
-        var projection = data && (data.projection || data.run_projection) || data;
-        if (projection && (projection.run_id || projection.id === runId || Array.isArray(projection.expert_consultations))) {
-          state.activeRun = normalizeRun(projection);
-        } else {
-          state.activeRun.expert_consultations = state.activeRun.expert_consultations.map(function (item) {
-            return expertConsultationId(item) === id ? Object.assign({}, item, { status: "answered", answer: answer, selected_option: selectedOption || null, answered_by: answeredBy, answered_at: new Date().toISOString(), effective_generation: auditOnly ? null : state.activeRun.generation + 1, applied_generation: null, persistent: persistent }) : item;
-          });
-        }
-        state.runs = state.runs.map(function (item) { return item.id === runId ? state.activeRun : item; });
-      }
-      clearExpertConsultationDraft(runId, id);
-      state.lastUpdated = new Date().toISOString();
-      showToast(auditOnly ? "迟到专家答复已归档；不会改写已完成的进化结果。" : "专家答复已记录；不会改写历史候选，将从后续轮次开始使用。" );
-      return refreshEventsForRun(runId);
-    }).catch(function (error) {
-      state.commandError = "专家答复提交失败：" + errorMessage(error);
-      showToast(state.commandError + " 已保留当前草稿，可稍后重试。");
-      return false;
-    }).finally(function () { state.busy = false; state.pendingAction = null; renderAll(); });
-  }
-
   function refreshAll(options) {
     var refreshDataset = Boolean(options && options.refreshDataset);
     if (typeof cachedReads !== "undefined") { cachedReads.clear(); }
-    if (state.usingDemo) {
-      if (refreshDataset) { state.datasetContext = activeRunDatasetContext() || selectedDatasetContext(); state.datasetPage = demoDatasetPage(state.pageOffset, state.datasetPartition); state.datasetError = null; }
-      state.lastUpdated = new Date().toISOString(); renderAll(); return Promise.resolve(true);
-    }
     if (state.refreshing) { return Promise.resolve(false); }
     if (!state.activeRun) { return connectAndLoad(); }
     var runId = state.activeRun.id;
@@ -913,7 +719,7 @@
   }
 
   function refreshRunOverview() {
-    if (state.usingDemo || state.refreshing || state.busy || state.loadingOlderRuns) { return Promise.resolve(false); }
+    if (state.refreshing || state.busy || state.loadingOlderRuns) { return Promise.resolve(false); }
     var epoch = state.viewEpoch;
     var includeArchived = state.showArchivedRuns;
     state.refreshing = true;
@@ -969,7 +775,7 @@
     var requestId = ++independentEvaluationRequest;
     $("#independent-validation-start").disabled = true;
     $("#independent-final-test-start").disabled = true;
-    if (!runId || state.usingDemo) { $("#independent-evaluation-status").textContent = "请先完成一个真实数据集的进化运行。"; return Promise.resolve(); }
+    if (!runId) { $("#independent-evaluation-status").textContent = "请先完成一个真实数据集的进化运行。"; return Promise.resolve(); }
     return request("/runs/" + encodeURIComponent(runId) + "/independent-evaluation").then(function (report) {
       if (independentEvaluationRequest !== requestId || !state.activeRun || state.activeRun.id !== runId) { return; }
       $("#independent-evaluation-status").innerHTML = report.stages.map(function (stage) {

@@ -16,6 +16,7 @@ import { RESEARCH_EXECUTION_POLICY } from "../lib/runtime/research-execution-pol
 async function installedNativeValidator() {
   const roots = [
     import.meta.url,
+    pathToFileURL(path.join(os.homedir(), ".local", "share", "ecologyrsi-dsh-harness-0.2.0-rc.2", "package.json")).href,
     pathToFileURL(path.resolve(path.dirname(process.execPath), "..", "lib", "node_modules", "@deepseek-ai", "dsh", "package.json")).href,
     pathToFileURL(path.join(os.homedir(), ".local", "share", "ecologyrsi-dsh-dsh-cli", "node_modules", "@deepseek-ai", "dsh", "package.json")).href,
   ];

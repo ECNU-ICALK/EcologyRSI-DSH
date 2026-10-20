@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, Sequence
 
 from ..core.models import digest
 from ..core.trajectory import OriginOccurrence
 from ..data.splits import IndexRange
 from ..data.adapters import DATASET_ADAPTERS
-from ..evolution.schedule import OptimizationSchedule, ISOLATED_SCHEDULE_SCHEMA_VERSION, TRAINING_SCHEDULE_SCHEMA_VERSION
+from ..evolution.schedule import OptimizationSchedule
 from .greenhouse_prediction import MAX_EXOGENOUS_RIDGE_HISTORY_STEPS
 
 
@@ -702,50 +702,8 @@ def _eligible_origins(
     return tuple(origins), gaps
 
 
-def _capacity_error(
-    *, required: int, available: int, schedule: OptimizationSchedule
-) -> CohortCapacityError:
-    remaining = max(0, available - schedule.formal_origin_count_per_finalist)
-    per_generation = (
-        schedule.screening_origin_count + schedule.selection_holdout_origin_count
-    )
-    return CohortCapacityError(
-        required=required,
-        available=available,
-        max_generations=remaining // per_generation,
-    )
 
 
-def _cycled_origins(
-    eligible: Sequence[PlannedOrigin], *, start: int, count: int
-) -> tuple[PlannedOrigin, ...]:
-    """Return a deterministic contiguous window, wrapping after exhaustion.
-
-    The source origin identity remains unchanged when it is reused, while the
-    occurrence index records the cycle. This keeps every repeated forecast
-    vector independently addressable in checkpoints and audit events.
-    """
-
-    if not eligible:
-        raise CohortCapacityError(
-            required=max(1, count), available=0, max_generations=0
-        )
-    if isinstance(start, bool) or not isinstance(start, int) or start < 0:
-        raise ValueError("origin window start must be a non-negative integer")
-    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-        raise ValueError("origin window count must be a positive integer")
-    population = len(eligible)
-    selected: list[PlannedOrigin] = []
-    for offset in range(count):
-        absolute = start + offset
-        source = eligible[absolute % population]
-        cycle = absolute // population
-        selected.append(
-            source
-            if cycle == source.reuse_index
-            else replace(source, reuse_index=cycle)
-        )
-    return tuple(selected)
 
 
 def plan_run_adaptation_cohort(
@@ -757,47 +715,8 @@ def plan_run_adaptation_cohort(
 ) -> RunAdaptationCohort:
     if not isinstance(schedule, OptimizationSchedule):
         raise TypeError("schedule must be OptimizationSchedule")
-    if schedule.race:
-        from .evidence_cohorts import plan_adaptation
-        return plan_adaptation(dataset, schedule=schedule, seed=seed, history_steps=history_steps)
-    if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
-        from .training_cohorts import plan_adaptation
-        return plan_adaptation(dataset, schedule=schedule, seed=seed, history_steps=history_steps)
-    if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION or schedule.quick:
-        from .isolated_cohorts import plan_adaptation
-        return plan_adaptation(dataset, schedule=schedule, seed=seed, history_steps=history_steps)
-    _strict_integer(seed, "seed")
-    eligible, _gaps = _eligible_origins(dataset, history_steps=history_steps)
-    required = schedule.formal_origin_count_per_finalist
-    selected = _cycled_origins(eligible, start=0, count=required)
-    cohort = PlannedCohort(
-        role="adaptation",
-        origins=selected,
-        maximum_horizon=max(_dataset_horizons(dataset)),
-        shared_candidate_count=schedule.finalist_count,
-    )
-    batches = tuple(
-        PlannedBatch(
-            batch_index=index,
-            cohort=PlannedCohort(
-                role="adaptation_batch",
-                origins=selected[
-                    index * schedule.local_batch_origin_count :
-                    (index + 1) * schedule.local_batch_origin_count
-                ],
-                maximum_horizon=max(_dataset_horizons(dataset)),
-                shared_candidate_count=schedule.finalist_count,
-            ),
-        )
-        for index in range(schedule.batch_count)
-    )
-    return RunAdaptationCohort(
-        dataset_id=cohort.origins[0].dataset_id,
-        episode_id=cohort.origins[0].episode_id,
-        seed=seed,
-        cohort=cohort,
-        batches=batches,
-    )
+    from .evidence_cohorts import plan_adaptation
+    return plan_adaptation(dataset, schedule=schedule, seed=seed, history_steps=history_steps)
 
 
 def plan_generation_selection_cohorts(
@@ -811,63 +730,8 @@ def plan_generation_selection_cohorts(
 ) -> GenerationCohorts:
     if not isinstance(schedule, OptimizationSchedule):
         raise TypeError("schedule must be OptimizationSchedule")
-    if schedule.race:
-        from .evidence_cohorts import plan_selection
-        return plan_selection(dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed, history_steps=history_steps)
-    if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
-        from .training_cohorts import plan_selection
-        return plan_selection(dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed, history_steps=history_steps)
-    if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION or schedule.quick:
-        from .isolated_cohorts import plan_selection
-        return plan_selection(dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed, history_steps=history_steps)
-    if not isinstance(adaptation, RunAdaptationCohort):
-        raise TypeError("adaptation must be RunAdaptationCohort")
-    _strict_integer(generation, "generation")
-    _strict_integer(seed, "seed")
-    # The identity check below re-derives the adaptation cohort, and every
-    # ``origin_id`` carries its own history depth, so passing a different
-    # ``history_steps`` than the run froze rejects the run's own cohort.
-    eligible, _gaps = _eligible_origins(dataset, history_steps=history_steps)
-    if not eligible:
-        raise _capacity_error(required=1, available=0, schedule=schedule)
-    expected_adaptation = _cycled_origins(
-        eligible, start=0, count=adaptation.origin_count
-    )
-    if (
-        adaptation.dataset_id != eligible[0].dataset_id
-        or adaptation.episode_id != eligible[0].episode_id
-        or adaptation.origin_occurrence_keys
-        != tuple((item.origin_id, item.reuse_index) for item in expected_adaptation)
-    ):
-        raise ValueError("adaptation cohort does not match dataset identity plan")
-    per_generation = (
-        schedule.screening_origin_count + schedule.selection_holdout_origin_count
-    )
-    start = adaptation.origin_count + generation * per_generation
-    selected = _cycled_origins(eligible, start=start, count=per_generation)
-    screening_end = schedule.screening_origin_count
-    screening = PlannedCohort(
-        role="screening",
-        origins=selected[:screening_end],
-        maximum_horizon=max(_dataset_horizons(dataset)),
-        shared_candidate_count=4,
-    )
-    holdout = PlannedCohort(
-        role="holdout",
-        origins=selected[screening_end:],
-        maximum_horizon=max(_dataset_horizons(dataset)),
-        shared_arm_count=3,
-    )
-    return GenerationCohorts(
-        dataset_id=adaptation.dataset_id,
-        episode_id=adaptation.episode_id,
-        generation=generation,
-        seed=seed,
-        adaptation_digest=adaptation.adaptation_digest,
-        adaptation_batch_digests=adaptation.batch_digests,
-        screening=screening,
-        holdout=holdout,
-    )
+    from .evidence_cohorts import plan_selection
+    return plan_selection(dataset, schedule=schedule, generation=generation, adaptation=adaptation, seed=seed, history_steps=history_steps)
 
 
 def estimate_epoch_capacity(
@@ -885,58 +749,8 @@ def estimate_epoch_capacity(
         adapter = DATASET_ADAPTERS.get(dataset.dataset_id)
         scoring_cells_per_origin = (len(adapter.targets) * len(adapter.horizons_hours)
                                     if adapter else DEFAULT_SCORING_CELLS_PER_ORIGIN)
-    if schedule.race:
-        from .evidence_cohorts import estimate_capacity
-        return estimate_capacity(dataset, schedule=schedule, planned_generations=planned_generations, seed=seed, scoring_cells_per_origin=scoring_cells_per_origin, history_steps=history_steps)
-    if schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION:
-        from .training_cohorts import estimate_capacity
-        return estimate_capacity(dataset, schedule=schedule, planned_generations=planned_generations, seed=seed, scoring_cells_per_origin=scoring_cells_per_origin, history_steps=history_steps)
-    if schedule.schema_version == ISOLATED_SCHEDULE_SCHEMA_VERSION or schedule.quick:
-        from .isolated_cohorts import estimate_capacity
-        return estimate_capacity(dataset, schedule=schedule, planned_generations=planned_generations, seed=seed, scoring_cells_per_origin=scoring_cells_per_origin, history_steps=history_steps)
-    _strict_integer(planned_generations, "planned_generations", minimum=1)
-    _strict_integer(seed, "seed")
-    _strict_integer(
-        scoring_cells_per_origin, "scoring_cells_per_origin", minimum=1
-    )
-    dataset_id, episode_id, _timestamps = _dataset_identity(dataset)
-    eligible, gaps = _eligible_origins(dataset, history_steps=history_steps)
-    selected = _selection_partition(dataset)
-    required = schedule.required_unique_origins(planned_generations)
-    # A non-empty eligible population can service any requested number of
-    # rounds. The planner consumes each source origin once, then wraps with a
-    # deterministic reuse index. Keep the requested budget as the executable
-    # maximum and expose the reuse count for operator/audit visibility.
-    max_generations = planned_generations if eligible else 0
-    candidate_origins = schedule.generation_execution_budget(
-        cells_per_origin=scoring_cells_per_origin
-    )["total_candidate_origins"]
-    return CohortCapacityReport(
-        dataset_id=dataset_id,
-        episode_id=episode_id,
-        planned_generations=planned_generations,
-        available_partition_origins=selected.size,
-        available_eligible_origins=len(eligible),
-        origin_history_alignment_hours=history_steps,
-        required_unique_origins=required,
-        max_feasible_generations=max_generations,
-        sufficient=bool(eligible),
-        maturity_gaps=gaps,
-        candidate_origin_executions_per_generation=candidate_origins,
-        scoring_cells_per_generation=(
-            candidate_origins * scoring_cells_per_origin
-        ),
-        candidate_origin_executions_for_run=(
-            candidate_origins * planned_generations
-        ),
-        scoring_cells_for_run=(
-            candidate_origins * planned_generations * scoring_cells_per_origin
-        ),
-        schedule_digest=digest(schedule.to_dict()),
-        seed=seed,
-        cohort_reuse_policy=COHORT_REUSE_POLICY,
-        reused_origin_occurrences=max(0, required - len(eligible)),
-    )
+    from .evidence_cohorts import estimate_capacity
+    return estimate_capacity(dataset, schedule=schedule, planned_generations=planned_generations, seed=seed, scoring_cells_per_origin=scoring_cells_per_origin, history_steps=history_steps)
 
 
 __all__ = [

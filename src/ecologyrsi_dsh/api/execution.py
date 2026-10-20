@@ -83,81 +83,8 @@ class ExecutionEndpointsMixin:
                     pass
         return payload
 
-    def _advance_run(
-        self,
-        run_id: str,
-        body: dict[str, Any],
-        *,
-        target_steps: int | None = None,
-    ) -> Any:
-        """Run bounded whole-generation steps and resume from durable events."""
 
-        generation_lease = self.server.acquire_generation_lease(
-            run_id, blocking=False
-        )
-        if generation_lease is None:
-            raise CommandInProgressError(
-                "run is already being advanced; wait for the active generation "
-                "or pause it before retrying"
-            )
-        try:
-            return self._advance_run_locked(
-                run_id, body, target_steps=target_steps
-            )
-        finally:
-            generation_lease.release()
 
-    def _advance_run_locked(
-        self,
-        run_id: str,
-        body: dict[str, Any],
-        *,
-        target_steps: int | None = None,
-    ) -> Any:
-        state, requested_steps, _split = self._validate_advance_request(run_id, body)
-        if target_steps is not None:
-            if (
-                isinstance(target_steps, bool)
-                or not isinstance(target_steps, int)
-                or not 0 <= target_steps <= 32
-            ):
-                raise ValueError("target_steps must be an integer between 0 and 32")
-            requested_steps = target_steps
-        # A process may have committed GenerationAdvanced and then exited
-        # before RunCompleted.  Repair that durable gap before counting the
-        # command's completed generation steps; otherwise a retry with the same
-        # idempotency key would be treated as a no-op forever.
-        state = complete_if_budget_exhausted(self.server, run_id, state)
-        if state.run.status.value == "completed":
-            return state
-        completed_steps = self._completed_command_steps(run_id)
-        for _ in range(max(0, requested_steps - completed_steps)):
-            state = execute_generation(self.server, run_id)
-            if state.run.status.value != "running":
-                break
-        return self.server.director.state(run_id)
-
-    def _validate_advance_request(
-        self, run_id: str, body: dict[str, Any]
-    ) -> tuple[Any, int, str]:
-        state = self.server.director.state(run_id)
-        _assert_http_scope(state)
-        active = getattr(self, "_active_command", None)
-        if state.run.status.value == "completed" and active is not None:
-            return (
-                state,
-                _parse_steps(body),
-                _evaluation_partition(state.task_manifest, body),
-            )
-        if state.run.status.value != "running":
-            raise RuntimeError("run must be running to advance")
-        steps = _parse_steps(body)
-        split = _evaluation_partition(state.task_manifest, body)
-        self._validate_frozen_runtime_bindings(
-            state.task_manifest,
-            run_id=state.run.run_id,
-        )
-        return state, steps, split
 
     def _validate_control_request(self, run_id: str, action: str) -> Any:
         state = self.server.director.state(run_id)
@@ -269,18 +196,6 @@ class ExecutionEndpointsMixin:
         if active is not None and active["key"] == key:
             self._active_command = None
 
-    def _completed_command_steps(self, run_id: str) -> int:
-        active = getattr(self, "_active_command", None)
-        if active is None:
-            return 0
-        receipt: CommandReceipt = active["receipt"]
-        return sum(
-            1
-            for event in self.server.ledger.events(
-                run_id, after_seq=receipt.start_seq
-            )
-            if event.kind == "GenerationAdvanced"
-        )
 
     def _active_command_has_progress(
         self, active: dict[str, Any]
@@ -324,11 +239,6 @@ class ExecutionEndpointsMixin:
         if run_id is None:
             return None
         events = self.server.ledger.events(run_id, after_seq=receipt.start_seq)
-        if command_kind in {"advance", "control:advance", "control:step"}:
-            # Any same-run write may be a resumable partial generation. The
-            # generation lease prevents an explicit command from running a
-            # second generation concurrently on this run.
-            return bool(events)
         expected_event = {
             "create_run": "RunCreated",
             "control:start": "RunStarted",

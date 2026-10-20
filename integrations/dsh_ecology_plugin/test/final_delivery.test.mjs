@@ -1,10 +1,11 @@
+import { expandSharedSchema } from "../lib/runtime/schema.js";
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { specializeResearchOutputSchema } from '../lib/runtime/research-contract.js';
 import { observeSessionUsage } from '../lib/runtime/session-usage.js';
 
-const base = JSON.parse(readFileSync(new URL('../schemas/research-synthesis.schema.json', import.meta.url)));
+const base = expandSharedSchema(JSON.parse(readFileSync(new URL('../schemas/research-synthesis.schema.json', import.meta.url))));
 function context(ref) {
   return { knowledge_snapshot: { evidence_catalog: [{ knowledge_id: ref, capability_ids: ['cap-a'] }] },
     synthesis_contract: { mutation_directions_by_axis: { scientific_parameter: ["increase", "decrease"], registered_predictor: ["select"], instruction_profile: ["select"] }, allowed_mutation_targets: {

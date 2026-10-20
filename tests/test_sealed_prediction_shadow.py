@@ -119,7 +119,7 @@ class SealedPredictionShadowTests(unittest.TestCase):
     def test_wrong_revision_or_stale_outer_artifact_genome_binding_is_rejected(self):
         _, _, _, _, artifact, _ = self.fixture()
         registry = current_program_registry()
-        genome = materialize_seed_genome(registry.seed_template("greenhouse-exogenous-default@1"), _initialization())
+        genome = materialize_seed_genome(registry.seed_template("greenhouse-exogenous-default@2"), _initialization())
         revision = CandidateRevision(revision_id="revision:shadow", run_id=artifact.run_id, generation=0,
             candidate_id=artifact.candidate_id, genome=genome.to_dict(), genome_digest=genome.genome_digest,
             behavior_digest=genome.behavior_digest, mutation_digest="c" * 64)
@@ -128,20 +128,25 @@ class SealedPredictionShadowTests(unittest.TestCase):
             origin_count=1, holdout_arm="finalist_1")
         artifact = replace(artifact, evaluation_scope_digest=scope.scope_key)
         original = {"genome_digest": genome.genome_digest}
+        envelope = {"schema_version": "ecologyrsi-dsh.artifact-recorded/2",
+                    "proposal_identity_binding": original,
+                    "artifact_revision_binding": build_artifact_revision_binding(artifact, revision, scope)}
         validate_revision_binding(artifact, revision.to_dict(), scope, run_id=artifact.run_id,
-                                  event_payload={"identity_binding": original}, original_proposal_binding=original)
-        for wrong_scope, wrong_binding in (
-            (replace(scope, candidate_revision_id="revision:wrong"), {"genome_digest": genome.genome_digest}),
-            (scope, {"genome_digest": "f" * 64}),
-        ):
-            with self.assertRaisesRegex(ValueError, "do not identify the same candidate"):
-                validate_revision_binding(artifact, revision.to_dict(), wrong_scope, run_id=artifact.run_id,
-                                          event_payload={"identity_binding": wrong_binding}, original_proposal_binding=original)
+                                  event_payload=envelope, original_proposal_binding=original)
+        with self.assertRaisesRegex(ValueError, "do not identify the same candidate"):
+            validate_revision_binding(artifact, revision.to_dict(),
+                replace(scope, candidate_revision_id="revision:wrong"), run_id=artifact.run_id,
+                event_payload=envelope, original_proposal_binding=original)
+        wrong = deepcopy(envelope)
+        wrong["artifact_revision_binding"]["genome_digest"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "artifact revision binding"):
+            validate_revision_binding(artifact, revision.to_dict(), scope, run_id=artifact.run_id,
+                                      event_payload=wrong, original_proposal_binding=original)
 
     def test_v2_effective_revision_is_verified_separately_from_original_proposal(self):
         _, _, _, _, artifact, _ = self.fixture(alpha=.2)
         registry = current_program_registry()
-        parent = materialize_seed_genome(registry.seed_template("greenhouse-exogenous-default@1"), _initialization())
+        parent = materialize_seed_genome(registry.seed_template("greenhouse-exogenous-default@2"), _initialization())
         child = apply_genome_mutation(parent, {
             "schema_version": "ecologyrsi-dsh.genome-mutation/1",
             "operations": [{"op": "set_bounded_parameter", "name": "ridge_alpha", "value": .2}],

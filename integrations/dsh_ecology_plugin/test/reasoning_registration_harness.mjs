@@ -57,6 +57,19 @@ try {
     models: models.map(id => ({ id, contextWindow: 8192, maxTokens: 2048 })),
   } } } };
   await writeFile(inputPath, yaml.stringify(input), { mode: 0o600 });
+  const copiedOutput = path.join(home, "copied-config");
+  await promisify(execFile)(process.execPath, [generatorPath,
+    "--dsh-package", packageJson, "--source", inputPath, "--output", copiedOutput, "--copy-only"]);
+  const copiedSettings = yaml.parse(await readFile(path.join(copiedOutput, "settings.yaml"), "utf8"));
+  const copiedPatch = yaml.parse(await readFile(path.join(copiedOutput, "settings.patch.yml"), "utf8"));
+  assert.deepEqual(copiedSettings, input, "copy-only must preserve model capabilities and authentication references");
+  assert.deepEqual(copiedPatch, [{ id: "llm-pi-ai", config: input["llm-pi-ai"] }]);
+  for (const name of ["settings.yaml", "settings.patch.yml"]) {
+    assert.equal((await stat(path.join(copiedOutput, name))).mode & 0o777, 0o600);
+  }
+  await assert.rejects(promisify(execFile)(process.execPath, [generatorPath,
+    "--dsh-package", packageJson, "--source", inputPath, "--output", path.join(home, "ambiguous"),
+    "--copy-only", "--route", `${providerId}/${models[0]}`]), /either --route or --copy-only/);
   const cli = await promisify(execFile)(process.execPath, [generatorPath,
     "--dsh-package", packageJson, "--source", inputPath, "--output", output,
     ...models.flatMap(model => ["--route", `${providerId}/${model}`])]);

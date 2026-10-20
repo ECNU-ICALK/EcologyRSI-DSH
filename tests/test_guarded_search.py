@@ -1,4 +1,4 @@
-"""Guarded search is opt-in, reconstructible, and rejects weak paired evidence."""
+"""Current guarded search is mandatory, reconstructible, and rejects weak paired evidence."""
 from dataclasses import replace
 import unittest
 
@@ -37,41 +37,28 @@ def evaluation(arm, gain, blocks=3):
 
 
 class GuardedSearchTests(unittest.TestCase):
-    def test_small_training_batch_can_explore_but_cannot_certify_improvement(self):
-        from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
-        policy = local_challenger_policy({"search_guard_policy": SEARCH_GUARD_POLICY,
-            "local_comparison_policy": "exploratory_paired_point_comparison",
-            "optimization_schedule": OptimizationSchedule.for_comparison_run().to_dict()})
-        champion = evaluation(FormalBatchArm.CHAMPION, 0, blocks=2)
-        challenger = evaluation(FormalBatchArm.CHALLENGER, .02, blocks=2)
-        local = assess_local_challenger(champion, challenger,
-                                       challenger_safety_gate_passed=True, **policy)
-        self.assertEqual(local.champion_after_revision_id, "rev:challenger")
-        confirmation = assess_promotion_improvement(challenger, champion)
-        self.assertFalse(confirmation["improved"])
-        self.assertEqual(confirmation["reason_code"], "insufficient_evidence")
-        incomplete = challenger.to_dict()["metrics"]
-        incomplete["sample_execution"]["succeeded_origin_samples"] = 1
-        rejected = assess_local_challenger(champion, replace(challenger, metrics=incomplete),
-                                          challenger_safety_gate_passed=True, **policy)
-        self.assertEqual(rejected.champion_after_revision_id, "rev:champion")
+    def test_exploratory_policy_cannot_bypass_current_paired_gate(self):
+        with self.assertRaisesRegex(ValueError, "paired scientific comparison"):
+            local_challenger_policy({"search_guard_policy": SEARCH_GUARD_POLICY,
+                "local_comparison_policy": "exploratory_paired_point_comparison"})
 
     def assess(self, gain=.02, blocks=3):
         return assess_local_challenger(evaluation(FormalBatchArm.CHAMPION,0,blocks),
             evaluation(FormalBatchArm.CHALLENGER,gain,blocks),challenger_safety_gate_passed=True,
             **local_challenger_policy({"search_guard_policy": SEARCH_GUARD_POLICY}))
 
-    def test_old_frozen_v3_decisions_and_new_guard_are_distinct(self):
-        old=TaskManifest(task_id="t",objective="o",domain_pack="g",metadata={
-            "execution_protocol":"dsh_native_plugin_evolution@1",
-            "host_runtime_build":{"evolution_runtime_schema":"ecologyrsi-dsh.evolution-runtime/3"}})
-        new=replace(old,metadata={**old.metadata,"search_guard_policy":SEARCH_GUARD_POLICY})
-        self.assertTrue(uses_positive_delta_search_protocol(old))
-        self.assertFalse(uses_positive_delta_search_protocol(new))
-        self.assertEqual(local_challenger_policy(old.metadata)["minimum_score_delta"],1e-12)
-        self.assertEqual(TaskManifest.from_dict(new.to_dict()).digest,new.digest)
-        self.assertNotEqual(old.digest,new.digest)
-        with self.assertRaises(ValueError): replace(old,metadata={"search_guard_policy":"unknown"})
+    def test_current_guard_is_frozen_and_legacy_contracts_are_rejected(self):
+        from tests.native_fixtures import native_manifest
+        task = native_manifest()
+        self.assertFalse(uses_positive_delta_search_protocol(task))
+        self.assertEqual(TaskManifest.from_dict(task.to_dict()).digest, task.digest)
+        self.assertEqual(local_challenger_policy(task.metadata)["minimum_score_delta"], .005)
+        for policy in (None, "unknown"):
+            metadata = {**task.metadata, "search_guard_policy": policy}
+            with self.assertRaises(ValueError):
+                replace(task, metadata=metadata)
+            with self.assertRaises(ValueError):
+                local_challenger_policy(metadata)
 
     def test_tiny_positive_enters_probation_without_replacing_champion(self):
         result=self.assess(.00135548)

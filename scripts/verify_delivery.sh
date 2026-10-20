@@ -48,10 +48,6 @@ RELEASE-CHECKLIST.md
 MANIFEST.in
 Makefile
 pyproject.toml
-examples/minimal_run.py
-examples/task-manifest.json
-examples/local-config.json
-scripts/real_api_agent_tool_acceptance.py
 scripts/dsh_native_e2e_acceptance.py
 scripts/install_dsh_ecology_runtime.mjs
 datasets/autonomous_greenhouse.json
@@ -63,12 +59,6 @@ plugins/ecology_evolution/assets/js/core.js
 plugins/ecology_evolution/assets/js/commands.js
 plugins/ecology_evolution/plugin.json
 plugins/ecology_evolution/test/smoke.mjs
-docs/screenshots/01-run-settings.jpg
-docs/screenshots/02-parameter-design.jpg
-docs/screenshots/03-training-data.jpg
-docs/screenshots/04-evolution-process.jpg
-docs/screenshots/05-candidate-evaluation.jpg
-docs/screenshots/06-human-governance.jpg
 integrations/dsh_ecology_plugin/package.json
 integrations/dsh_ecology_plugin/lib/index.js
 integrations/dsh_ecology_plugin/lib/client.js
@@ -206,14 +196,6 @@ for path in (
     + sorted((root / "scripts").glob("*.py"))
 ):
     compile(path.read_text(encoding="utf-8"), str(path), "exec")
-manifest = json.loads((root / "examples/task-manifest.json").read_text(encoding="utf-8"))
-sys.path.insert(0, str(root / "src"))
-from ecologyrsi_dsh import ToyCropSoilWater
-expected_digest = ToyCropSoilWater(seed=0).dataset_digest
-if manifest.get("metadata", {}).get("dataset_digest") != expected_digest:
-    raise SystemExit("example dataset digest does not match the fixed seed-0 snapshot")
-if manifest.get("metadata", {}).get("dataset_seed") != 0:
-    raise SystemExit("example must distinguish dataset_seed from search seed")
 print(f"source metadata and syntax: ok ({project_version})")
 PY
 
@@ -231,30 +213,7 @@ verify_npm_plugin(packed_plugin(root, version), version, root)
 print(f"source nested DSH plugin: ok ({version})")
 ' "$ROOT_DIR"
 
-TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ecologyrsi-dsh-source-verify.XXXXXX")"
-trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
-
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT_DIR/src" \
-  "$PYTHON_BIN" examples/minimal_run.py \
-  --db "$TMP_ROOT/example.sqlite3" \
-  --run-id "run:source-verification" > "$TMP_ROOT/example.json"
-
-"$PYTHON_BIN" - "$TMP_ROOT/example.json" <<'PY'
-import json
-from pathlib import Path
-import sys
-
-payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-manifest = json.loads(Path("examples/task-manifest.json").read_text(encoding="utf-8"))
-expected_candidates = int(manifest["budget"]["max_candidates"])
-assert payload["status"] == "completed", payload
-assert payload["candidate_count"] == payload["evaluation_count"] == expected_candidates, payload
-assert payload["event_count"] >= 10, payload
-assert payload["best_candidate_id"], payload
-print("source evolution and replay example: ok")
-PY
-
-DATA_ROOT="${ECOLOGYRSI_DATA_ROOT:-$ROOT_DIR/../EcologyRSI/data/greenhouse}"
+DATA_ROOT="${ECOLOGYRSI_DATA_ROOT:-$HOME/.ecologyrsi-dsh/data/greenhouse}"
 REAL_DATA_TESTS=0
 if ECOLOGYRSI_DATA_ROOT="$DATA_ROOT" PYTHONPATH="$ROOT_DIR/src" \
   "$PYTHON_BIN" - <<'PY'

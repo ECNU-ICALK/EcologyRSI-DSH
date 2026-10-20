@@ -193,13 +193,8 @@ class KnowledgeCard:
             "publication_year": self.publication_year,
             "cited_by_count": self.cited_by_count,
         }
-        # Keep the legacy card shape stable so historical snapshot digests replay.
-        if self.abstract_summary is not None:
-            result["abstract_summary"] = self.abstract_summary
-        if self.content_digest is not None:
-            result["content_digest"] = self.content_digest
-        if self.capability_ids:
-            result["capability_ids"] = list(self.capability_ids)
+        result.update(abstract_summary=self.abstract_summary, content_digest=self.content_digest,
+                      capability_ids=list(self.capability_ids))
         return result
 
     @classmethod

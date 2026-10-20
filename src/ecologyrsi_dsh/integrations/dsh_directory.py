@@ -4,7 +4,7 @@ The DSH web host can display a richer model directory than the standalone
 EcologyRSI service.  This adapter mirrors the provider/model entries that are
 configured in ``~/.dsh/settings.yaml`` and resolves their credentials from
 the DSH credential file or the current process environment.  Only the server
-uses the resulting tokens; callers receive ordinary ``ModelGateway`` entries
+uses the resulting tokens; callers receive entries for the read-only model directory
 which are redacted before reaching the browser.
 
 The parser deliberately supports the small YAML subset emitted by DSH and
@@ -27,7 +27,6 @@ from ..core.models import digest
 
 
 _FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
-_UNSAFE_HTTP_VALUES = {"1", "true", "yes", "on", "enabled"}
 _KEY_VALUE = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)\s*:\s*(?P<value>.*)$")
 
 
@@ -79,14 +78,8 @@ def insecure_http_allowed_for_provider(
 
     The provider list is deliberately comma-delimited and exact-match only:
     no prefix, case folding, or wildcard expansion can widen an authorization.
-    The legacy all-provider switch remains supported for existing deployments.
     """
 
-    legacy_allow_all = str(
-        environ.get("ECOLOGYRSI_DSH_ALLOW_INSECURE_HTTP", "")
-    ).strip().casefold() in _UNSAFE_HTTP_VALUES
-    if legacy_allow_all:
-        return True
     allowed_providers = {
         item.strip()
         for item in str(
@@ -252,14 +245,11 @@ def _directory_roles(
         text = raw_roles.strip().strip("[]")
         raw_roles = [item.strip().strip("'\"") for item in text.split(",")]
     if not isinstance(raw_roles, (list, tuple)):
-        return ["propose", "judge"]
+        return []
     try:
         return list(canonical_model_roles(raw_roles))
     except ValueError:
-        # DSH role metadata is descriptive and older hosts used unrelated
-        # names.  Preserve the historical shared-directory behavior instead
-        # of silently dropping the model from both EcologyRSI selectors.
-        return ["propose", "judge"]
+        return []
 
 
 def _provider_unavailable_reason(
@@ -290,10 +280,7 @@ def discover_model_entries(
 
     Unsafe non-loopback HTTP endpoints remain visible as unavailable directory
     entries unless the operator adds the exact provider ID to
-    ``ECOLOGYRSI_DSH_ALLOW_INSECURE_HTTP_PROVIDERS``.  The legacy global switch
-    remains compatible but is broader than the recommended provider allowlist.
-    This keeps the gateway transport invariant while explaining why a
-    DSH-registered model cannot be executed.
+    ``ECOLOGYRSI_DSH_ALLOW_INSECURE_HTTP_PROVIDERS``.  This keeps provider authorization explicit and explains unavailable routes.
     """
 
     env = os.environ if environ is None else environ
@@ -378,6 +365,9 @@ def discover_model_entries(
                 "directory_available": unavailable_reason is None,
                 "native_configuration_digest": execution_digests.get(provider),
             }
+            if not entry["roles"]:
+                entry["directory_available"] = False
+                entry["unavailable_reason"] = {"code": "invalid_model_roles", "message": "Configure valid model roles."}
             if unavailable_reason is None:
                 entry["gateway_url"] = url_assessment.url
                 entry["allow_insecure_http"] = (

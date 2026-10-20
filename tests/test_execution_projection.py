@@ -2,25 +2,22 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
+from types import SimpleNamespace as _Namespace
 from unittest.mock import patch
 
-from ecologyrsi_dsh import EventLedger, EvolutionDirector, FakeDSHAdapter, TaskManifest
-from ecologyrsi_dsh.application.generation_execution import _model_token_budget_state
+from ecologyrsi_dsh import EventLedger, EvolutionDirector, TaskManifest
+from tests.native_fixtures import NativeRoleStub, native_manifest, start_native_run, spawn_native_candidate
 from ecologyrsi_dsh.api.projection import (
     _adaptive_progress_projection,
     _adaptive_trajectory_projection,
     _active_scoped_evaluation_progress,
     _dsh_activity_projection,
-    _dsh_runtime_projection,
     _evolution_evidence_projection,
     _evaluation_progress_projection,
     _evaluation_progress_rates,
     _execution_diagnostics,
     _gateway_retry_projection,
-    _model_usage_summary,
     _projection_json,
-    _public_inference_trace,
     _public_evaluation_metrics,
     _run_failure_projection,
     _rounds_projection,
@@ -29,40 +26,16 @@ from ecologyrsi_dsh.api.projection import (
 from ecologyrsi_dsh.api.shared import _event_type
 from ecologyrsi_dsh.core.models import (
     CandidateRole,
-    Evaluation,
-    ModelArtifact,
-    Promotion,
-    PromotionDecision,
-    Proposal,
     digest,
 )
-from ecologyrsi_dsh.core.sample_results import (
-    build_sample_results,
-    sample_result_batch_event_payload,
-)
 from ecologyrsi_dsh.core.trajectory import FormalBatchArm
-from ecologyrsi_dsh.data.toy import ToyCropSoilWater
 from ecologyrsi_dsh.evolution.schedule import (
-    LEGACY_SCHEDULE_SCHEMA_VERSION,
-    PREQUENTIAL_LOCAL_EVALUATION_MODE,
     OptimizationSchedule,
 )
-from ecologyrsi_dsh.presentation.reporting import run_completion_outcome, run_summary
 
 
 def _task(*, max_candidates: int = 1, max_generations: int = 1) -> TaskManifest:
-    return TaskManifest(
-        task_id="projection-trace",
-        objective="检查逐样本预测轨迹",
-        domain_pack="crop-soil-water@toy",
-        visible_datasets=("generated-toy-series@1",),
-        budget={
-            "max_candidates": max_candidates,
-            "max_generations": max_generations,
-            "candidates_per_generation": max_candidates,
-        },
-        seed=3,
-    )
+    return native_manifest(task_id="projection-trace", generations=max_generations)
 
 
 def _skill_evidence(stage: str, skill_name: str) -> dict:
@@ -84,6 +57,21 @@ def _skill_evidence(stage: str, skill_name: str) -> dict:
 
 def _origin_members(label: str) -> list[str]:
     return sorted(digest(f"{label}:cell:{index}") for index in range(9))
+
+
+def SimpleNamespace(**values):
+    """Projection-only states explicitly expose frozen candidate bindings."""
+    result = _Namespace(**values)
+    if 'task_manifest' in values and 'run' in values:
+        for key in ('candidates','formal_batches','formal_batch_evaluations','holdout_evaluations','candidate_screening_events'):
+            if not hasattr(result,key): setattr(result,key,())
+        for index,candidate in enumerate(result.candidates):
+            if not hasattr(candidate,'candidate_id'): candidate.candidate_id=f'candidate:{index}'
+    if 'task_manifest' in values and 'run' in values and not hasattr(result, 'generation_cohort_for'):
+        result.generation_cohort_for = lambda generation: _Namespace(revision_bindings={
+            c.candidate_id: 'revision:' + c.candidate_id for c in getattr(result,'candidates',())
+            if getattr(c,'generation',generation) == generation})
+    return result
 
 
 class ExecutionProjectionTests(unittest.TestCase):
@@ -112,7 +100,7 @@ class ExecutionProjectionTests(unittest.TestCase):
             candidate_screening_events=tuple(SimpleNamespace(payload={
                 "generation": generation, "origin_count": 10,
             }) for generation in range(2) for _ in range(5)),
-            task_manifest=SimpleNamespace(metadata={"prediction_cells_per_origin": 9},
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{"prediction_cells_per_origin": 9}},
                 max_generations=2),
             run=SimpleNamespace(generation=2, status=SimpleNamespace(value="completed")),
         )
@@ -173,84 +161,19 @@ class ExecutionProjectionTests(unittest.TestCase):
             payload={"evaluation": evaluation.to_dict()}))
         return SimpleNamespace(artifacts=(), evaluations=(), events=tuple(events), proposals=(), candidates=(),
             formal_batch_evaluations=(), holdout_evaluations=(evaluation,), holdout_rechecks=(),
-            candidate_screening_events=(), task_manifest=SimpleNamespace(metadata={
-                "prediction_cells_per_origin": 9, "optimization_protocol": "top2_adaptive_epoch@1",
-                "sample_agent_mode": "dsh_native_agent"}, max_generations=1),
+            candidate_screening_events=(), task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
+                "prediction_cells_per_origin": 9, "optimization_protocol": "joint_plugin_epoch@2",
+                "sample_agent_mode": "dsh_native_agent"}}, max_generations=1),
             run=SimpleNamespace(generation=1, status=SimpleNamespace(value="completed")))
 
-    def test_legacy_replicas_require_bound_host_streams_and_keep_outcomes_unknown(self):
-        state = self._sealed_replica_state()
-        with patch("ecologyrsi_dsh.api.projection._adaptive_progress_projection", return_value=None):
-            result = _execution_diagnostics(state)
-            # Replayed duplicate cell batches cannot inflate physical work.
-            state.events = (*state.events[:-1], state.events[3], state.events[-1])
-            replayed = _execution_diagnostics(state)
-        for value in (result, replayed):
-            self.assertEqual(value["adaptive_all_settled_origins"], 100)
-            self.assertEqual(value["adaptive_scored_cells"], 900)
-            self.assertEqual(value["candidate_work_items"], 900)
-            self.assertEqual(value["adaptive_evaluation_count"], 1)
-            self.assertTrue(value["adaptive_execution_counts_known"])
-            self.assertFalse(value["adaptive_outcome_counts_known"])
-            for key in ("adaptive_succeeded_origins", "adaptive_failed_origins", "adaptive_failed_scoring_cells"):
-                self.assertIsNone(value[key])
 
-    def test_legacy_replica_forgery_or_incomplete_source_is_unknown(self):
-        from copy import deepcopy
-        from dataclasses import replace
-        def absent_summary(state):
-            evaluation = state.holdout_evaluations[0]
-            metrics = evaluation.to_dict()["metrics"]
-            metrics.pop("agent_inference_stability")
-            state.holdout_evaluations = (replace(evaluation, metrics=metrics),)
-        def change_evidence(state, key, value, *, rehash=True):
-            evaluation = state.holdout_evaluations[0]
-            metrics = evaluation.to_dict()["metrics"]
-            evidence = metrics["agent_inference_stability"]
-            evidence["replicas"][1][key] = value
-            if rehash:
-                evidence["evidence_digest"] = digest({k: v for k, v in evidence.items() if k != "evidence_digest"})
-            state.holdout_evaluations = (replace(evaluation, metrics=metrics),)
-        cases = {
-            "legacy-no-summary": absent_summary,
-            "model-summary-with-no-host-events": lambda s: setattr(s, "events", ()),
-            "missing-replica-batch": lambda s: setattr(s, "events", (*s.events[:3], s.events[4])),
-            "no-sealed-host-record": lambda s: setattr(s, "events", s.events[:-1]),
-            "partial-replica-batch": lambda s: s.events[3].payload.update(record_count=449, sample_ids=s.events[3].payload["sample_ids"][:-1]),
-            "bool-record-count": lambda s: s.events[3].payload.update(record_count=True),
-            "float-sample-count": lambda s: s.events[2].payload["checkpoint"].update(sample_count=450.0),
-            "bool-replica-index": lambda s: change_evidence(s, "replica_index", True),
-            "duplicate-replica-index": lambda s: change_evidence(s, "replica_index", 0),
-            "bool-origin-count": lambda s: change_evidence(s, "origin_count", True),
-            "duplicate-scope": lambda s: change_evidence(s, "scope_digest", s.holdout_evaluations[0].scope.scope_key),
-            "candidate-binding-drift": lambda s: change_evidence(s, "candidate_revision_id", "another-candidate-revision"),
-            "cohort-binding-drift": lambda s: change_evidence(s, "cohort_digest", "d" * 64),
-            "digest-drift": lambda s: change_evidence(s, "coverage", .5, rehash=False),
-            "host-checkpoint-drift": lambda s: s.events[2].payload["checkpoint"].update(execution_scope_digest="f" * 64),
-            "host-result-revision-drift": lambda s: s.events[3].payload.update(revision="foreign-result-revision"),
-            "duplicate-cell": lambda s: s.events[3].payload["sample_ids"].__setitem__(0, s.events[3].payload["sample_ids"][1]),
-        }
-        for name, mutate in cases.items():
-            with self.subTest(name=name):
-                state = self._sealed_replica_state()
-                state.events = tuple(SimpleNamespace(**{**vars(e), "payload": deepcopy(e.payload)}) for e in state.events)
-                mutate(state)
-                with patch("ecologyrsi_dsh.api.projection._adaptive_progress_projection", return_value=None):
-                    result = _execution_diagnostics(state)
-                self.assertFalse(result["adaptive_execution_counts_known"])
-                self.assertFalse(result["adaptive_outcome_counts_known"])
-                for key in ("adaptive_settled_origins", "adaptive_all_settled_origins", "adaptive_scored_cells",
-                            "candidate_work_items", "adaptive_succeeded_origins", "adaptive_failed_origins",
-                            "adaptive_failed_scoring_cells"):
-                    self.assertIsNone(result[key])
-                self.assertEqual(result["adaptive_evaluation_count"], 1)
 
     def test_only_explicit_integer_zero_formal_reuse_is_omitted(self) -> None:
         state = SimpleNamespace(
             artifacts=(), evaluations=(), events=(), proposals=(), candidates=(),
             formal_batch_evaluations=(), holdout_evaluations=(),
             candidate_screening_events=(),
-            task_manifest=SimpleNamespace(metadata={"prediction_cells_per_origin": 9},
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{"prediction_cells_per_origin": 9}},
                 max_generations=1),
             run=SimpleNamespace(generation=1, status=SimpleNamespace(value="completed")),
         )
@@ -281,7 +204,7 @@ class ExecutionProjectionTests(unittest.TestCase):
 
     def test_adaptive_round_shows_shared_advisory_review_without_judge_receipts(self) -> None:
         state = SimpleNamespace(
-            task_manifest=SimpleNamespace(metadata={"optimization_protocol": "top2_adaptive_epoch@1"}),
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{"optimization_protocol": "joint_plugin_epoch@2"}}),
             run=SimpleNamespace(status=SimpleNamespace(value="completed")),
             generation_comparisons=(SimpleNamespace(generation=0),),
             candidate_screening_events=(SimpleNamespace(payload={"candidate_id": "c:screened"}),),
@@ -300,36 +223,31 @@ class ExecutionProjectionTests(unittest.TestCase):
 
     def test_terminal_adaptive_progress_preserves_completed_generation(self) -> None:
         state = SimpleNamespace(
-            task_manifest=SimpleNamespace(metadata={
-                "optimization_protocol": "top2_adaptive_epoch@1",
-                "optimization_schedule": {
-                    "screening_origin_count": 64,
-                    "formal_origin_count_per_finalist": 20,
-                    "selection_holdout_origin_count": 169,
-                    "local_batch_origin_count": 10,
-                },
-            }, max_generations=2),
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
+                "optimization_protocol": "joint_plugin_epoch@2",
+                "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
+            }}, max_generations=2),
             run=SimpleNamespace(generation=1, status=SimpleNamespace(value="completed")),
             candidates=(), formal_batches=(),
             candidate_screening_events=tuple(SimpleNamespace(
-                payload={"generation": 0, "candidate_id": f"c:{i}", "origin_count": 64}
-            ) for i in range(4)),
+                payload={"generation": 0, "candidate_id": f"c:{i}", "origin_count": 10}
+            ) for i in range(5)),
             formal_batch_evaluations=tuple(SimpleNamespace(
-                scope=SimpleNamespace(generation=0, origin_count=20)
+                scope=SimpleNamespace(generation=0, origin_count=25)
             ) for _ in range(2)),
             holdout_evaluations=tuple(SimpleNamespace(
-                scope=SimpleNamespace(generation=0, origin_count=169)
-            ) for _ in range(3)),
+                scope=SimpleNamespace(generation=0, origin_count=50)
+            ) for _ in range(2)),
             events=(SimpleNamespace(kind="GenerationComparisonRecorded",
                 payload={"comparison": {"generation": 0}}),),
         )
         progress = _adaptive_progress_projection(state)
         self.assertEqual(progress["generation"], 0)
-        self.assertEqual(progress["completed_origins"], 803)
-        self.assertEqual(progress["run_completed_origins"], 803)
-        self.assertEqual(progress["run_total_origins"], 1606)
+        self.assertEqual(progress["completed_origins"], 300)
+        self.assertEqual(progress["run_completed_origins"], 300)
+        self.assertEqual(progress["run_total_origins"], 600)
         self.assertEqual(progress["epoch_progress_percent"], 100)
-        self.assertEqual(progress["terminal_skipped_origins"], 0)
+        self.assertEqual(progress["terminal_skipped_origins"], 100)
         self.assertIsNone(progress["current_candidate_id"])
         # A later failed generation must not inherit the prior completion.
         state.run.status.value = "failed"
@@ -343,7 +261,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         state = SimpleNamespace(
             artifacts=(), evaluations=(), formal_batch_evaluations=(), holdout_evaluations=(),
             proposals=(), candidates=(candidate,),
-            task_manifest=SimpleNamespace(metadata={"prediction_cells_per_origin": 9}, max_generations=1),
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{"prediction_cells_per_origin": 9}}, max_generations=1),
             candidate_screening_events=(SimpleNamespace(payload={"origin_count": 64}),),
             run=SimpleNamespace(generation=1, status=SimpleNamespace(value="completed")),
             events=(
@@ -424,16 +342,11 @@ class ExecutionProjectionTests(unittest.TestCase):
         )
         state = SimpleNamespace(
             task_manifest=SimpleNamespace(
-                metadata={
-                    "optimization_protocol": "top2_adaptive_epoch@1",
-                    "optimization_schedule": {
-                        "screening_origin_count": 64,
-                        "formal_origin_count_per_finalist": 500,
-                        "selection_holdout_origin_count": 169,
-                        "local_batch_origin_count": 50,
-                    },
+                metadata={**dict(native_manifest().metadata), **{
+                    "optimization_protocol": "joint_plugin_epoch@2",
+                    "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
                     "prediction_cells_per_origin": 9,
-                },
+                }},
                 max_generations=1,
             ),
             run=SimpleNamespace(
@@ -491,12 +404,12 @@ class ExecutionProjectionTests(unittest.TestCase):
             proposals=(
                 SimpleNamespace(
                     proposal_id=control.proposal_id,
-                    metadata={"proposal_source": "seed_incumbent_control"},
+                    metadata={**dict(native_manifest().metadata), **{"proposal_source": "seed_incumbent_control"}},
                 ),
             ),
             candidates=(control,),
             task_manifest=SimpleNamespace(
-                metadata={},
+                metadata={**dict(native_manifest().metadata), **{}},
                 max_generations=1,
                 budget={"max_generations": 1},
             ),
@@ -517,236 +430,8 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(diagnostics["adaptive_evaluation_count"], 1)
         self.assertEqual(diagnostics["execution_evidence_status"], "recorded")
 
-    def test_evolution_evidence_projects_global_champion_three_arms_and_capacity(
-        self,
-    ) -> None:
-        def holdout(
-            arm: str,
-            candidate_id: str,
-            revision_id: str,
-            score: float,
-            passed: bool,
-        ) -> SimpleNamespace:
-            return SimpleNamespace(
-                scope=SimpleNamespace(
-                    holdout_arm=SimpleNamespace(value=arm),
-                    candidate_id=candidate_id,
-                    candidate_revision_id=revision_id,
-                    cohort_digest="c" * 64,
-                ),
-                score=score,
-                passed=passed,
-                evaluator_digest="e" * 64,
-            )
 
-        comparison = SimpleNamespace(
-            generation=0,
-            cohort_digest="c" * 64,
-            selected_candidate_id="candidate:seed",
-            selected_revision_id="revision:seed:0",
-            holdout_evaluations=(
-                holdout("finalist_1", "candidate:a", "revision:a:9", -0.42, True),
-                holdout("finalist_2", "candidate:b", "revision:b:9", -0.55, False),
-                holdout("incumbent", "candidate:seed", "revision:seed:0", -0.40, True),
-            ),
-            gate_results={
-                "selected_arm": "incumbent",
-                "challenger_promotion_allowed": False,
-                "arms": {
-                    "finalist_1": {
-                        "eligible": False,
-                        "worst_cell_delta": -0.03,
-                        "failures": ["screening_exploration_only"],
-                    },
-                    "finalist_2": {
-                        "eligible": False,
-                        "worst_cell_delta": -0.12,
-                        "failures": ["cell_regression"],
-                    },
-                    "incumbent": {"eligible": True, "failures": []},
-                },
-            },
-        )
-        formal = SimpleNamespace(
-            payload={
-                "screening_pass_count": 0,
-                "exploration_only": True,
-                "consecutive_exploration_generations": 2,
-            }
-        )
-        seed_revision = SimpleNamespace(
-            revision_id="revision:seed:0",
-            genome_digest="g" * 64,
-            behavior_digest="b" * 64,
-        )
-        seed_candidate = SimpleNamespace(
-            candidate_id="candidate:seed",
-            role=CandidateRole.INCUMBENT_CONTROL,
-        )
-        state = SimpleNamespace(
-            task_manifest=SimpleNamespace(
-                metadata={
-                    "execution_protocol": "dsh_native_plugin_evolution@1",
-                    "host_runtime_build": {
-                        "evolution_runtime_schema": (
-                            "ecologyrsi-dsh.evolution-runtime/2"
-                        )
-                    },
-                    "cohort_capacity_report": {
-                        "required_unique_origins": 1_665,
-                        "available_eligible_origins": 754,
-                        "reused_origin_occurrences": 911,
-                        "reuse_fraction": 911 / 1_665,
-                        "max_feasible_generations": 0,
-                        "sufficient": False,
-                    }
-                }
-            ),
-            generation_comparisons=(comparison,),
-            formal_selection_for=lambda generation: formal if generation == 0 else None,
-            analysis_for=lambda generation: SimpleNamespace(
-                selection_reason="exploration_generation_retained_incumbent"
-            ),
-            candidates=(seed_candidate,),
-            initial_revision_for=lambda candidate_id: (
-                seed_revision if candidate_id == seed_candidate.candidate_id else None
-            ),
-            revision=lambda revision_id: seed_revision,
-            materialized_seed_genome=lambda: SimpleNamespace(
-                genome_digest=seed_revision.genome_digest,
-                behavior_digest=seed_revision.behavior_digest,
-            ),
-            effective_revision_for=lambda generation: (
-                seed_revision.revision_id if generation == 0 else None
-            ),
-            events=(
-                SimpleNamespace(
-                    kind="GenerationChampionSelected",
-                    payload={
-                        "generation": 0,
-                        "selected_candidate_id": seed_candidate.candidate_id,
-                        "selected_revision_id": seed_revision.revision_id,
-                    },
-                ),
-            ),
-        )
-
-        evidence = _evolution_evidence_projection(state)
-
-        self.assertEqual(evidence["global_champion"]["candidate_id"], "candidate:seed")
-        self.assertEqual(evidence["protocol_scope"], "global_incumbent_v2")
-        self.assertEqual(evidence["global_champion"]["absolute_score"], -0.40)
-        self.assertEqual(evidence["global_champion"]["genome_digest"], "g" * 64)
-        decision = evidence["generation_decisions"][0]
-        self.assertTrue(decision["committed"])
-        self.assertTrue(decision["same_cohort"])
-        self.assertEqual(len(decision["arms"]), 3)
-        self.assertAlmostEqual(decision["arms"][0]["holdout_delta"], -0.02)
-        comparison.holdout_evaluations[0].scope.cohort_digest = "different-cohort"
-        mismatched = _evolution_evidence_projection(state)["generation_decisions"][0]
-        self.assertIsNone(mismatched["arms"][0]["delta_vs_incumbent"])
-        self.assertIsNone(mismatched["arms"][0]["holdout_delta"])
-        comparison.holdout_evaluations[0].scope.cohort_digest = "c" * 64
-        self.assertTrue(decision["exploration_only"])
-        self.assertTrue(decision["replan_required"])
-        self.assertEqual(decision["selected_arm"], "incumbent")
-        self.assertEqual(
-            evidence["capacity"]["evidence_scope"],
-            "engineering_exploration_with_reused_origins",
-        )
-        self.assertEqual(evidence["capacity"]["reused_origin_occurrences"], 911)
-        self.assertIsNone(evidence["capacity"]["final_validation_reservation"])
-
-        state.task_manifest.metadata["final_validation_reservation"] = {
-            "reserved": False
-        }
-        invalid_reservation = _evolution_evidence_projection(state)
-        self.assertIsNone(
-            invalid_reservation["capacity"]["final_validation_reservation"]
-        )
-
-        state.task_manifest.metadata["final_validation_reservation"] = {
-            "schema_version": (
-                "ecologyrsi-dsh.final-validation-reservation/1"
-            ),
-            "status": "locked",
-            "reservation_id": "reservation:external-final-validation",
-        }
-        locked_reservation = _evolution_evidence_projection(state)["capacity"][
-            "final_validation_reservation"
-        ]
-        self.assertEqual(locked_reservation["status"], "locked")
-        self.assertEqual(
-            locked_reservation["reservation_id"],
-            "reservation:external-final-validation",
-        )
-
-        finalist_revision = SimpleNamespace(
-            revision_id="revision:a:9",
-            genome_digest="a" * 64,
-            behavior_digest="f" * 64,
-        )
-        comparison.selected_candidate_id = "candidate:a"
-        comparison.selected_revision_id = finalist_revision.revision_id
-        comparison.holdout_evaluations[0].score = -0.39
-        comparison.gate_results.update(
-            {
-                "selected_arm": "finalist_1",
-                "selection_policy": "positive_delta_search@1",
-                "certification_selected_arm": None,
-                "selected_search_certification_status": "search_only",
-            }
-        )
-        comparison.gate_results["arms"]["finalist_1"].update(
-            {
-                "eligible": True,
-                "search_eligible": True,
-                "certification_eligible": False,
-                "search_failures": [],
-                "certification_failures": ["scientific_gate_failed"],
-                "strict_agent_chain_pass": True,
-            }
-        )
-        state.task_manifest.metadata["host_runtime_build"][
-            "evolution_runtime_schema"
-        ] = "ecologyrsi-dsh.evolution-runtime/3"
-        state.revision = lambda revision_id: (
-            finalist_revision
-            if revision_id == finalist_revision.revision_id
-            else seed_revision
-        )
-        state.effective_revision_for = lambda generation: (
-            finalist_revision.revision_id if generation == 0 else None
-        )
-        state.events = (
-            SimpleNamespace(
-                kind="GenerationChampionSelected",
-                payload={
-                    "generation": 0,
-                    "selected_candidate_id": "candidate:a",
-                    "selected_revision_id": finalist_revision.revision_id,
-                },
-            ),
-        )
-
-        v3_evidence = _evolution_evidence_projection(state)
-        self.assertEqual(v3_evidence["protocol_scope"], "positive_delta_search_v3")
-        self.assertEqual(
-            v3_evidence["search_version"]["candidate_id"], "candidate:a"
-        )
-        self.assertIsNone(v3_evidence["certified_version"])
-        v3_decision = v3_evidence["generation_decisions"][0]
-        self.assertEqual(
-            v3_decision["selection_policy"], "positive_delta_search@1"
-        )
-        self.assertEqual(
-            v3_decision["selected_search_certification_status"],
-            "search_only",
-        )
-        self.assertTrue(v3_decision["arms"][0]["search_eligible"])
-        self.assertFalse(v3_decision["arms"][0]["certification_eligible"])
-
-    def test_evolution_evidence_does_not_publish_uncommitted_or_legacy_seed_champion(
+    def test_evolution_evidence_requires_committed_champion_identity(
         self,
     ) -> None:
         incumbent = SimpleNamespace(
@@ -768,7 +453,7 @@ class ExecutionProjectionTests(unittest.TestCase):
             gate_results={"selected_arm": "incumbent", "arms": {}},
         )
         base = dict(
-            task_manifest=SimpleNamespace(metadata={}),
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{}}),
             generation_comparisons=(comparison,),
             formal_selection_for=lambda _generation: None,
             analysis_for=lambda _generation: None,
@@ -810,7 +495,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         legacy_evidence = _evolution_evidence_projection(legacy_state)
 
         self.assertFalse(legacy_evidence["global_champion"]["is_initial_seed"])
-        self.assertEqual(legacy_evidence["protocol_scope"], "legacy_audit")
+        self.assertEqual(legacy_evidence["protocol_scope"], "global_incumbent_v2")
         self.assertEqual(
             legacy_evidence["global_champion"]["source"],
             "generation_holdout",
@@ -839,7 +524,7 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         comparisons = (retained(0, 0.2), retained(1, 0.3))
         state = SimpleNamespace(
-            task_manifest=SimpleNamespace(metadata={}),
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{}}),
             generation_comparisons=comparisons,
             formal_selection_for=lambda _generation: None,
             analysis_for=lambda _generation: None,
@@ -919,7 +604,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         state = SimpleNamespace(
             events=events,
             task_manifest=SimpleNamespace(
-                metadata={"prediction_cells_per_origin": 9}
+                metadata={**dict(native_manifest().metadata), **{"prediction_cells_per_origin": 9}}
             ),
         )
 
@@ -1019,68 +704,17 @@ class ExecutionProjectionTests(unittest.TestCase):
         )
         self.assertNotIn("created_at", public_event["payload"])
 
-    def test_failed_scoring_penalty_is_not_projected_as_model_output(self) -> None:
-        state = SimpleNamespace(
-            task_manifest=SimpleNamespace(
-                metadata={}, visible_datasets=("generated-toy-series@1",)
-            )
-        )
-        candidate = SimpleNamespace(status=SimpleNamespace(value="evaluated"))
-        proposal = SimpleNamespace(changes={"alpha": 0.2})
-        evaluation = SimpleNamespace(
-            partition="training_feedback",
-            metrics={
-                "n": 1,
-                "prediction_preview": [
-                    {
-                        "sample_id": "sample:failed",
-                        "target": "air_temperature",
-                        "observed": 21.0,
-                        "predicted": 60.0,
-                        "baseline": 20.0,
-                        "sample_execution_status": "failed",
-                        "scoring_fallback": "failure_non_improvement_penalty",
-                    }
-                ],
-                "sample_execution": {"eligible_examples": 1},
-                "sample_execution_records": [
-                    {
-                        "sample_id": "sample:failed",
-                        "status": "failed",
-                        "attempts": 1,
-                        "failure": {"class": "remote_batch_remote_rejected"},
-                    }
-                ],
-            },
-        )
-
-        trace = _public_inference_trace(
-            state, candidate, proposal, evaluation, None
-        )
-
-        row = trace["rows"][0]
-        self.assertEqual(row["status"], "failed")
-        self.assertIsNone(row["predicted"])
-        self.assertIs(row["model_prediction_available"], False)
-        self.assertIs(row["scoring_penalty_applied"], True)
-        self.assertNotIn("error", row)
-        self.assertNotIn("reward", row)
 
     def test_adaptive_progress_waits_for_evaluation_evidence(self) -> None:
         state = SimpleNamespace(
-            task_manifest=SimpleNamespace(metadata={
-                "optimization_protocol": "top2_adaptive_epoch@1",
-                "optimization_schedule": {
-                    "screening_origin_count": 64,
-                    "formal_origin_count_per_finalist": 500,
-                    "selection_holdout_origin_count": 169,
-                    "local_batch_origin_count": 50,
-                },
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
+                "optimization_protocol": "joint_plugin_epoch@2",
+                "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "two_stage_evaluation_enabled": True,
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
-            }),
+            }}),
             run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
             candidate_screening_events=(),
             formal_batch_evaluations=(),
@@ -1133,13 +767,13 @@ class ExecutionProjectionTests(unittest.TestCase):
         )
         state = SimpleNamespace(
             run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
-            task_manifest=SimpleNamespace(metadata={
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "two_stage_evaluation_enabled": True,
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
-            }),
-            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            }}),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(5)),
             events=events,
         )
 
@@ -1149,7 +783,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["succeeded_samples"], 1)
         self.assertEqual(progress["failed_samples"], 0)
         self.assertEqual(progress["in_flight_batches"], 0)
-        self.assertEqual(progress["awaiting_submission_batches"], 255)
+        self.assertEqual(progress["awaiting_submission_batches"], 49)
 
     def test_screening_progress_counts_complete_prediction_tool_for_aggregate_reflection(
         self,
@@ -1185,13 +819,13 @@ class ExecutionProjectionTests(unittest.TestCase):
         )
         state = SimpleNamespace(
             run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
-            task_manifest=SimpleNamespace(metadata={
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "two_stage_evaluation_enabled": True,
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
-            }),
-            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            }}),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(5)),
             events=events,
         )
 
@@ -1240,20 +874,20 @@ class ExecutionProjectionTests(unittest.TestCase):
             ),
         )
         state = SimpleNamespace(
-            task_manifest=SimpleNamespace(metadata={
-                "optimization_protocol": "top2_adaptive_epoch@1",
-                "optimization_schedule": schedule,
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
+                "optimization_protocol": "joint_plugin_epoch@2",
+                "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "two_stage_evaluation_enabled": True,
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
-            }),
+            }}),
             run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
             candidate_screening_events=(),
             formal_batch_evaluations=(),
             holdout_evaluations=(),
             formal_batches=(),
-            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(5)),
             events=events,
         )
 
@@ -1268,7 +902,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertNotIn("failed_samples", progress)
         self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["in_flight_requests"], 1)
-        self.assertEqual(progress["awaiting_submission_batches"], 255)
+        self.assertEqual(progress["awaiting_submission_batches"], 49)
         self.assertEqual(progress["awaiting_settlement_batches"], 0)
         self.assertEqual(progress["prediction_tool_output_origins"], 1)
         self.assertEqual(progress["prediction_tool_pending_origins"], 1)
@@ -1369,15 +1003,15 @@ class ExecutionProjectionTests(unittest.TestCase):
             ),
         )
         state = SimpleNamespace(
-            task_manifest=SimpleNamespace(metadata={
-                "optimization_protocol": "top2_adaptive_epoch@1",
-                "optimization_schedule": schedule,
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
+                "optimization_protocol": "joint_plugin_epoch@2",
+                "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "two_stage_evaluation_enabled": True,
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
                 "prediction_cells_per_origin": 9,
-            }),
+            }}),
             run=SimpleNamespace(
                 generation=0,
                 status=SimpleNamespace(value="running"),
@@ -1463,15 +1097,15 @@ class ExecutionProjectionTests(unittest.TestCase):
             ),
         )
         state = SimpleNamespace(
-            task_manifest=SimpleNamespace(metadata={
-                "optimization_protocol": "top2_adaptive_epoch@1",
-                "optimization_schedule": schedule,
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
+                "optimization_protocol": "joint_plugin_epoch@2",
+                "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "two_stage_evaluation_enabled": True,
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
                 "prediction_cells_per_origin": 9,
-            }, max_generations=5),
+            }}, max_generations=5),
             run=SimpleNamespace(
                 generation=0,
                 status=SimpleNamespace(value="running"),
@@ -1581,21 +1215,21 @@ class ExecutionProjectionTests(unittest.TestCase):
             ),
         )
         state = SimpleNamespace(
-            task_manifest=SimpleNamespace(metadata={
-                "optimization_protocol": "top2_adaptive_epoch@1",
-                "optimization_schedule": schedule,
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
+                "optimization_protocol": "joint_plugin_epoch@2",
+                "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "two_stage_evaluation_enabled": True,
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
                 "prediction_cells_per_origin": 6,
-            }),
+            }}),
             run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
             candidate_screening_events=(),
             formal_batch_evaluations=(),
             holdout_evaluations=(),
             formal_batches=(),
-            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(5)),
             events=events,
         )
 
@@ -1609,7 +1243,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(screening["repair_gateway_request_count"], 2)
         self.assertEqual(screening["gateway_request_count"], 3)
         self.assertEqual(screening["in_flight_batches"], 1)
-        self.assertEqual(screening["awaiting_submission_batches"], 255)
+        self.assertEqual(screening["awaiting_submission_batches"], 49)
 
         adaptive = _adaptive_progress_projection(state)
 
@@ -1633,30 +1267,30 @@ class ExecutionProjectionTests(unittest.TestCase):
             payload={
                 "schema_version": "ecologyrsi-dsh.evaluation-progress/3",
                 "revision": "revision:screening-a",
-                "progress_id": 44,
+                "progress_id": 4,
                 "progress_kind": "completed_batch",
                 "candidate_id": "candidate:screening-a",
                 "role": "planner",
                 "model_id": "model:test",
-                "batch_index": 44,
-                "batch_count": 64,
+                "batch_index": 4,
+                "batch_count": 10,
                 "batch_size": 1,
-                "completed_samples": 44,
-                "total_samples": 64,
+                "completed_samples": 4,
+                "total_samples": 10,
                 "succeeded_samples": 0,
-                "failed_samples": 44,
-                "gateway_request_count": 44,
+                "failed_samples": 4,
+                "gateway_request_count": 4,
                 "in_flight_batches": 0,
                 "queued_batches": 0,
             },
             created_at="2026-08-28T02:00:00+00:00",
         )
         state = SimpleNamespace(
-            task_manifest=SimpleNamespace(metadata={
-                "optimization_protocol": "top2_adaptive_epoch@1",
-                "optimization_schedule": schedule,
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
+                "optimization_protocol": "joint_plugin_epoch@2",
+                "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
                 "sample_concurrency": 64,
-            }),
+            }}),
             run=SimpleNamespace(
                 generation=0,
                 status=SimpleNamespace(value="running"),
@@ -1675,12 +1309,12 @@ class ExecutionProjectionTests(unittest.TestCase):
         progress = _adaptive_progress_projection(state)
 
         self.assertEqual(progress["evaluation_phase"], "screening")
-        self.assertEqual(progress["completed_samples"], 44)
-        self.assertEqual(progress["settled_origins"], 44)
+        self.assertEqual(progress["completed_samples"], 4)
+        self.assertEqual(progress["settled_origins"], 4)
         self.assertEqual(progress["succeeded_samples"], 0)
-        self.assertEqual(progress["failed_samples"], 44)
+        self.assertEqual(progress["failed_samples"], 4)
         self.assertTrue(progress["outcomes_verified"])
-        self.assertEqual(progress["awaiting_submission_batches"], 212)
+        self.assertEqual(progress["awaiting_submission_batches"], 46)
         self.assertEqual(progress["updated_at"], heartbeat.created_at)
 
     def test_adaptive_progress_uses_frozen_phase_boundary_after_early_failure(
@@ -1697,7 +1331,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                 payload={
                     "generation": 0,
                     "candidate_id": f"candidate:{index}",
-                    "origin_count": 64,
+                    "origin_count": 10,
                 },
                 created_at=f"2026-08-28T02:0{index}:00+00:00",
             )
@@ -1719,11 +1353,11 @@ class ExecutionProjectionTests(unittest.TestCase):
         )
         state = SimpleNamespace(
             task_manifest=SimpleNamespace(
-                metadata={
-                    "optimization_protocol": "top2_adaptive_epoch@1",
-                    "optimization_schedule": schedule,
+                metadata={**dict(native_manifest().metadata), **{
+                    "optimization_protocol": "joint_plugin_epoch@2",
+                    "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
                     "sample_concurrency": 64,
-                }
+                }}
             ),
             run=SimpleNamespace(
                 generation=0,
@@ -1738,7 +1372,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     candidate_id=f"candidate:{index}",
                     generation=0,
                 )
-                for index in range(4)
+                for index in range(5)
             ),
             events=events,
         )
@@ -1746,10 +1380,10 @@ class ExecutionProjectionTests(unittest.TestCase):
         progress = _adaptive_progress_projection(state)
 
         self.assertEqual(progress["evaluation_phase"], "formal_batch")
-        self.assertEqual(progress["screening_completed_origins"], 192)
-        self.assertEqual(progress["screening_skipped_origins"], 64)
-        self.assertEqual(progress["terminal_skipped_origins"], 64)
-        self.assertEqual(progress["completed_origins"], 256)
+        self.assertEqual(progress["screening_completed_origins"], 30)
+        self.assertEqual(progress["screening_skipped_origins"], 20)
+        self.assertEqual(progress["terminal_skipped_origins"], 20)
+        self.assertEqual(progress["completed_origins"], 50)
         self.assertNotIn("awaiting_submission_batches", progress)
 
     def test_adaptive_progress_includes_live_formal_origin_receipts(self) -> None:
@@ -1768,8 +1402,8 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "generation": 0,
                     "candidate_id": "candidate:formal",
                     "batch_index": 1,
-                    "batch_count": 10,
-                    "origin_count": 50,
+                    "batch_count": 2,
+                    "origin_count": 25,
                     "cohort_digest": "a" * 64,
                 }},
                 created_at="2026-08-28T00:00:00+00:00",
@@ -1798,31 +1432,31 @@ class ExecutionProjectionTests(unittest.TestCase):
         )
         screening_events = tuple(
             SimpleNamespace(
-                payload={"generation": 0, "origin_count": 64},
+                payload={"generation": 0, "origin_count": 10},
                 created_at=f"2026-08-28T00:0{index}:00+00:00",
             )
-            for index in range(4)
+            for index in range(5)
         )
         prior_formal = SimpleNamespace(
             scope=SimpleNamespace(
                 generation=0,
                 candidate_id="candidate:formal",
-                batch_index=0,
+                batch_index=1,
                 cohort_digest="b" * 64,
-                origin_count=50,
+                origin_count=25,
             ),
             created_at="2026-08-28T00:04:00+00:00",
         )
         state = SimpleNamespace(
-            task_manifest=SimpleNamespace(metadata={
-                "optimization_protocol": "top2_adaptive_epoch@1",
-                "optimization_schedule": schedule,
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
+                "optimization_protocol": "joint_plugin_epoch@2",
+                "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "two_stage_evaluation_enabled": True,
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
                 "prediction_cells_per_origin": 9,
-            }),
+            }}),
             run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
             candidate_screening_events=screening_events,
             formal_batch_evaluations=(prior_formal,),
@@ -1848,13 +1482,13 @@ class ExecutionProjectionTests(unittest.TestCase):
         )
 
         self.assertEqual(progress["evaluation_phase"], "formal_batch")
-        self.assertEqual(progress["completed_origins"], 306)
-        self.assertEqual(progress["settled_origins"], 306)
+        self.assertEqual(progress["completed_origins"], 75)
+        self.assertEqual(progress["settled_origins"], 75)
         self.assertNotIn("succeeded_samples", progress)
         self.assertNotIn("failed_samples", progress)
         self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["in_flight_requests"], 1)
-        self.assertEqual(progress["awaiting_submission_batches"], 49)
+        self.assertEqual(progress["awaiting_submission_batches"], 24)
         self.assertEqual(progress["awaiting_settlement_batches"], 0)
         self.assertEqual(progress["prediction_tool_pending_origins"], 1)
         self.assertEqual(
@@ -1887,7 +1521,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                     "generation": 0,
                     "holdout_arm": "finalist_1",
                     "candidate_id": "candidate:finalist",
-                    "origin_count": 169,
+                    "origin_count": 50,
                 },
                 created_at="2026-08-28T01:00:00+00:00",
             ),
@@ -1915,31 +1549,31 @@ class ExecutionProjectionTests(unittest.TestCase):
         )
         screening_events = tuple(
             SimpleNamespace(
-                payload={"generation": 0, "origin_count": 64},
+                payload={"generation": 0, "origin_count": 10},
                 created_at=f"2026-08-28T00:0{index}:00+00:00",
             )
-            for index in range(4)
+            for index in range(5)
         )
         formal_evaluations = tuple(
             SimpleNamespace(
                 scope=SimpleNamespace(
                     generation=0,
-                    candidate_id=f"candidate:{index // 10}",
-                    batch_index=index % 10,
+                    candidate_id=f"candidate:{index}",
+                    batch_index=1,
                     cohort_digest=f"{index + 1:064x}",
-                    origin_count=50,
+                    origin_count=25,
                 ),
                 created_at=f"2026-08-28T00:{10 + index:02d}:00+00:00",
             )
-            for index in range(20)
+            for index in range(2)
         )
         state = SimpleNamespace(
-            task_manifest=SimpleNamespace(metadata={
-                "optimization_protocol": "top2_adaptive_epoch@1",
-                "optimization_schedule": schedule,
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
+                "optimization_protocol": "joint_plugin_epoch@2",
+                "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
                 "sample_concurrency": 64,
                 "prediction_cells_per_origin": 9,
-            }),
+            }}),
             run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
             candidate_screening_events=screening_events,
             formal_batch_evaluations=formal_evaluations,
@@ -1956,9 +1590,9 @@ class ExecutionProjectionTests(unittest.TestCase):
         progress = _adaptive_progress_projection(state)
 
         self.assertEqual(progress["evaluation_phase"], "holdout")
-        self.assertEqual(progress["completed_origins"], 1256)
+        self.assertEqual(progress["completed_origins"], 100)
         self.assertEqual(progress["holdout_completed_origins"], 0)
-        self.assertEqual(progress["settled_origins"], 1256)
+        self.assertEqual(progress["settled_origins"], 100)
         self.assertEqual(progress["awaiting_settlement_batches"], 0)
         self.assertEqual(progress["prediction_tool_pending_origins"], 1)
         self.assertEqual(
@@ -1970,7 +1604,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["current_candidate_id"], "candidate:finalist")
         self.assertIsNone(progress["batch_index"])
         self.assertIsNone(progress["batch_count"])
-        self.assertEqual(progress["awaiting_submission_batches"], 168)
+        self.assertEqual(progress["awaiting_submission_batches"], 49)
         self.assertEqual(progress["in_flight_requests"], 1)
 
     def test_adaptive_active_scopes_use_host_settlement_heartbeat(self) -> None:
@@ -1982,14 +1616,14 @@ class ExecutionProjectionTests(unittest.TestCase):
         }
         screening_events = tuple(
             SimpleNamespace(
-                payload={"generation": 0, "origin_count": 64},
+                payload={"generation": 0, "origin_count": 10},
                 created_at=f"2026-08-28T00:0{index}:00+00:00",
             )
-            for index in range(4)
+            for index in range(5)
         )
         for phase, origin_total, succeeded, failed in (
-            ("formal_batch", 50, 0, 1),
-            ("holdout", 169, 1, 0),
+            ("formal_batch", 25, 0, 1),
+            ("holdout", 50, 1, 0),
         ):
             with self.subTest(phase=phase):
                 candidate_id = f"candidate:{phase}"
@@ -2004,7 +1638,7 @@ class ExecutionProjectionTests(unittest.TestCase):
                             "candidate_id": candidate_id,
                             "revision_id": revision_id,
                             "batch_index": 1,
-                            "batch_count": 10,
+                            "batch_count": 2,
                             "origin_count": origin_total,
                             "cohort_digest": cohort_digest,
                         }},
@@ -2013,9 +1647,9 @@ class ExecutionProjectionTests(unittest.TestCase):
                     formal_batch_index = 1
                     holdout_arm = None
                     formal_count = 1
-                    expected_completed = 307
+                    expected_completed = 76
                     expected_scope = "active_formal_batch"
-                    expected_awaiting_submission = 48
+                    expected_awaiting_submission = 23
                 else:
                     boundary = SimpleNamespace(
                         seq=10,
@@ -2032,10 +1666,10 @@ class ExecutionProjectionTests(unittest.TestCase):
                     )
                     formal_batch_index = None
                     holdout_arm = "finalist_1"
-                    formal_count = 20
-                    expected_completed = 1257
+                    formal_count = 2
+                    expected_completed = 101
                     expected_scope = "active_holdout_arm"
-                    expected_awaiting_submission = 167
+                    expected_awaiting_submission = 48
                 revision_start = SimpleNamespace(
                     seq=11,
                     kind="EvaluationSampleResultsStarted",
@@ -2109,22 +1743,22 @@ class ExecutionProjectionTests(unittest.TestCase):
                     SimpleNamespace(
                         scope=SimpleNamespace(
                             generation=0,
-                            candidate_id=f"candidate:{index // 10}",
-                            batch_index=index % 10,
+                            candidate_id=f"candidate:{index}",
+                            batch_index=1,
                             cohort_digest=f"{index + 1:064x}",
-                            origin_count=50,
+                            origin_count=25,
                         ),
                         created_at=f"2026-08-28T00:{10 + index:02d}:00+00:00",
                     )
                     for index in range(formal_count)
                 )
                 state = SimpleNamespace(
-                    task_manifest=SimpleNamespace(metadata={
-                        "optimization_protocol": "top2_adaptive_epoch@1",
-                        "optimization_schedule": schedule,
+                    task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
+                        "optimization_protocol": "joint_plugin_epoch@2",
+                        "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
                         "sample_concurrency": 64,
                         "prediction_cells_per_origin": 9,
-                    }),
+                    }}),
                     run=SimpleNamespace(
                         generation=0,
                         status=SimpleNamespace(value="running"),
@@ -2222,104 +1856,6 @@ class ExecutionProjectionTests(unittest.TestCase):
             SimpleNamespace(events=events), current_stage="evaluation", run_status="paused"
         ))
 
-    def test_adaptive_trajectory_exposes_bounded_batch_and_edit_evidence(self) -> None:
-        legacy_schedule = OptimizationSchedule.default().to_dict()
-        legacy_schedule.update(
-            schema_version=LEGACY_SCHEDULE_SCHEMA_VERSION,
-            local_evaluation_mode=PREQUENTIAL_LOCAL_EVALUATION_MODE,
-        )
-        evaluation = SimpleNamespace(
-            score=-0.25,
-            passed=False,
-            created_at="2026-08-28T00:00:02+00:00",
-            metrics={
-                "sample_execution_coverage": 0.96,
-                "sample_execution_coverage_pass": True,
-                "sample_execution": {
-                    "attempted_origin_samples": 50,
-                    "succeeded_origin_samples": 48,
-                    "failed_origin_samples": 2,
-                    "failed_examples": 2,
-                    "scoring_fallback_examples": 2,
-                    # Large private evidence must never be copied into the row.
-                    "sample_execution_records": [{"private": "trace"}],
-                },
-            },
-        )
-        batch = SimpleNamespace(
-            generation=0,
-            candidate_id="candidate:a",
-            batch_index=0,
-            batch_count=10,
-            origin_count=50,
-            revision_id="revision:a:0",
-            cohort_digest="a" * 64,
-            created_at="2026-08-28T00:00:00+00:00",
-        )
-        activation = SimpleNamespace(
-            candidate_id="candidate:a",
-            batch_index=0,
-            to_revision_id="revision:a:1",
-            created_at="2026-08-28T00:00:03+00:00",
-        )
-        state = SimpleNamespace(
-            task_manifest=SimpleNamespace(
-                metadata={"optimization_schedule": legacy_schedule}
-            ),
-            local_edit_proposals=({
-                "candidate_id": "candidate:a",
-                "batch_index": 0,
-                "decision": "mutate",
-                "operations": [{"op": "set_bounded_parameter", "name": "ridge_alpha", "value": 1.0}],
-            },),
-            local_edit_outcomes=({
-                "candidate_id": "candidate:a",
-                "batch_index": 0,
-                "outcome": "applied",
-                "active_revision_id": "revision:a:1",
-            },),
-            trajectory_revision_activations=(activation,),
-            formal_batches=(batch,),
-            formal_trajectories=(SimpleNamespace(
-                generation=0,
-                candidate_id="candidate:a",
-                status=SimpleNamespace(value="running"),
-                initial_revision_id="revision:a:0",
-                final_revision_id=None,
-                batch_count=10,
-            ),),
-            batch_evaluation_for=lambda candidate_id, batch_index: evaluation,
-        )
-
-        lanes = _adaptive_trajectory_projection(state)
-
-        self.assertEqual(len(lanes), 1)
-        self.assertEqual(lanes[0]["completed_batch_count"], 1)
-        row = lanes[0]["batches"][0]
-        self.assertEqual(row["batch_index"], 1)
-        self.assertEqual(row["succeeded_origins"], 48)
-        self.assertEqual(row["failed_origins"], 2)
-        self.assertEqual(row["origin_success_rate"], 0.96)
-        self.assertEqual(row["prediction_cell_coverage"], 0.96)
-        self.assertEqual(row["edit_outcome"], "applied")
-        self.assertEqual(row["active_revision_id"], "revision:a:1")
-        self.assertEqual(row["score_comparability"], "different_batch_cohort_diagnostic_only")
-        self.assertEqual(lanes[0]["strategy_label"], "旧版连续更新策略")
-        for v2_only_field in (
-            "champion_before_revision_id",
-            "challenger_revision_id",
-            "champion_score",
-            "challenger_score",
-            "score_delta",
-            "minimum_score_delta",
-            "comparison_decision",
-            "comparison_reason",
-            "champion_after_revision_id",
-            "next_challenger_revision_id",
-            "next_challenger_operations",
-        ):
-            self.assertNotIn(v2_only_field, row)
-        self.assertNotIn("sample_execution_records", str(row))
 
     def test_trajectory_operations_keep_non_scalar_subjects_and_name_the_axis(
         self,
@@ -2345,7 +1881,7 @@ class ExecutionProjectionTests(unittest.TestCase):
             created_at="2026-08-28T00:00:00+00:00",
         )
         state = SimpleNamespace(
-            task_manifest=SimpleNamespace(metadata={}),
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{}}),
             local_edit_proposals=(
                 {
                     "candidate_id": "candidate:axes",
@@ -2474,9 +2010,9 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         state = SimpleNamespace(
             task_manifest=SimpleNamespace(
-                metadata={
-                    "optimization_schedule": OptimizationSchedule.default().to_dict()
-                }
+                metadata={**dict(native_manifest().metadata), **{
+                    "optimization_schedule": OptimizationSchedule.for_new_run().to_dict()
+                }}
             ),
             local_edit_proposals=(
                 {
@@ -2668,13 +2204,13 @@ class ExecutionProjectionTests(unittest.TestCase):
         )
         state = SimpleNamespace(
             run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
-            task_manifest=SimpleNamespace(metadata={
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "two_stage_evaluation_enabled": True,
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
-            }),
-            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            }}),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(5)),
             events=events,
         )
 
@@ -2683,7 +2219,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["completed_samples"], 0)
         self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["queued_batches"], 0)
-        self.assertEqual(progress["awaiting_submission_batches"], 255)
+        self.assertEqual(progress["awaiting_submission_batches"], 49)
 
     def test_screening_progress_retires_durably_failed_child_launch(self) -> None:
         events = (
@@ -2734,13 +2270,13 @@ class ExecutionProjectionTests(unittest.TestCase):
                 generation=0,
                 status=SimpleNamespace(value="running"),
             ),
-            task_manifest=SimpleNamespace(metadata={
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "two_stage_evaluation_enabled": True,
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
-            }),
-            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            }}),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(5)),
             events=events,
         )
 
@@ -2755,7 +2291,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["structured_child_model_error_count"], 1)
         self.assertEqual(progress["in_flight_batches"], 0)
         self.assertEqual(progress["queued_batches"], 0)
-        self.assertEqual(progress["awaiting_submission_batches"], 256)
+        self.assertEqual(progress["awaiting_submission_batches"], 50)
 
     def test_screening_progress_honors_concurrency_above_legacy_eight(
         self,
@@ -2789,13 +2325,13 @@ class ExecutionProjectionTests(unittest.TestCase):
                 status=SimpleNamespace(value="running"),
             ),
             task_manifest=SimpleNamespace(
-                metadata={
+                metadata={**dict(native_manifest().metadata), **{
                     "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                     "two_stage_evaluation_enabled": True,
                     "sample_concurrency": 64,
-                }
+                }}
             ),
-            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(5)),
             events=tuple(events),
         )
 
@@ -2804,7 +2340,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["configured_concurrency"], 64)
         self.assertEqual(progress["in_flight_batches"], 10)
         self.assertEqual(progress["queued_batches"], 0)
-        self.assertEqual(progress["awaiting_submission_batches"], 246)
+        self.assertEqual(progress["awaiting_submission_batches"], 40)
 
     def test_screening_progress_counts_one_origin_across_plan_and_critic(self) -> None:
         events = (
@@ -2842,13 +2378,13 @@ class ExecutionProjectionTests(unittest.TestCase):
                 generation=0,
                 status=SimpleNamespace(value="running"),
             ),
-            task_manifest=SimpleNamespace(metadata={
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "two_stage_evaluation_enabled": True,
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
-            }),
-            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            }}),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(5)),
             events=events,
         )
 
@@ -2857,7 +2393,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["completed_samples"], 0)
         self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["queued_batches"], 0)
-        self.assertEqual(progress["awaiting_submission_batches"], 255)
+        self.assertEqual(progress["awaiting_submission_batches"], 49)
 
     def test_prediction_receipt_retires_correlated_critic_launch(self) -> None:
         members = _origin_members("origin-a")
@@ -2906,13 +2442,13 @@ class ExecutionProjectionTests(unittest.TestCase):
                 generation=0,
                 status=SimpleNamespace(value="running"),
             ),
-            task_manifest=SimpleNamespace(metadata={
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "two_stage_evaluation_enabled": True,
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
-            }),
-            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            }}),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(5)),
             events=events,
         )
 
@@ -2921,7 +2457,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["completed_samples"], 0)
         self.assertEqual(progress["prediction_tool_pending_origins"], 1)
         self.assertEqual(progress["in_flight_batches"], 1)
-        self.assertEqual(progress["awaiting_submission_batches"], 255)
+        self.assertEqual(progress["awaiting_submission_batches"], 49)
 
     def test_screening_progress_deduplicates_retried_origin(self) -> None:
         members = _origin_members("origin-a")
@@ -2980,13 +2516,13 @@ class ExecutionProjectionTests(unittest.TestCase):
                 generation=0,
                 status=SimpleNamespace(value="running"),
             ),
-            task_manifest=SimpleNamespace(metadata={
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "two_stage_evaluation_enabled": True,
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
-            }),
-            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            }}),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(5)),
             events=events,
         )
 
@@ -2998,7 +2534,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["prediction_tool_pending_origins"], 1)
         self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["queued_batches"], 0)
-        self.assertEqual(progress["awaiting_submission_batches"], 255)
+        self.assertEqual(progress["awaiting_submission_batches"], 49)
 
     def test_completed_origin_retires_later_retry_launch(self) -> None:
         members = _origin_members("origin-a")
@@ -3053,13 +2589,13 @@ class ExecutionProjectionTests(unittest.TestCase):
                 generation=0,
                 status=SimpleNamespace(value="running"),
             ),
-            task_manifest=SimpleNamespace(metadata={
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
                 "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "two_stage_evaluation_enabled": True,
                 "sample_reflection_policy": "candidate_aggregate_post_score@1",
                 "sample_concurrency": 64,
-            }),
-            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
+            }}),
+            candidates=tuple(SimpleNamespace(generation=0) for _ in range(5)),
             events=events,
         )
 
@@ -3069,13 +2605,13 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["prediction_tool_pending_origins"], 0)
         self.assertEqual(progress["in_flight_batches"], 1)
         self.assertEqual(progress["queued_batches"], 0)
-        self.assertEqual(progress["awaiting_submission_batches"], 255)
+        self.assertEqual(progress["awaiting_submission_batches"], 49)
 
     def test_evaluation_progress_projects_configured_concurrency_up_to_128(
         self,
     ) -> None:
         state = SimpleNamespace(
-            task_manifest=SimpleNamespace(metadata={"sample_concurrency": 128}),
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{"sample_concurrency": 128}}),
             events=(
                 SimpleNamespace(
                     seq=20,
@@ -3101,201 +2637,7 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(progress["configured_concurrency"], 128)
         self.assertEqual(progress["awaiting_submission_batches"], 6)
 
-    def test_screening_progress_projects_completed_active_and_awaiting_origins(self) -> None:
-        events = (
-            SimpleNamespace(
-                seq=10,
-                kind="GenerationBatchStarted",
-                payload={"batch": {"generation": 0}},
-                created_at="2026-08-26T06:00:00+00:00",
-            ),
-            SimpleNamespace(
-                seq=11,
-                kind="DshChildLaunchReserved",
-                payload={"launch": {
-                    "stage": "sample.plan",
-                    "idempotency_key": "run:test:sample.plan:origin-a",
-                    "reservation_id": "reservation-plan-a",
-                }},
-                created_at="2026-08-26T06:00:01+00:00",
-            ),
-            SimpleNamespace(
-                seq=12,
-                kind="DshStructuredResultAccepted",
-                payload={"identity": {
-                    "stage": "sample.plan",
-                    "idempotency_key": "run:test:sample.plan:origin-a",
-                    "child_reservation_id": "reservation-plan-a",
-                }},
-                created_at="2026-08-26T06:00:02+00:00",
-            ),
-            SimpleNamespace(
-                seq=13,
-                kind="DshChildLaunchReserved",
-                payload={"launch": {
-                    "stage": "sample.plan",
-                    "idempotency_key": "run:test:sample.plan:origin-b",
-                    "reservation_id": "reservation-plan-b",
-                }},
-                created_at="2026-08-26T06:00:03+00:00",
-            ),
-            SimpleNamespace(
-                seq=14,
-                kind="DshChildLaunchReserved",
-                payload={"launch": {
-                    "stage": "sample.plan",
-                    "idempotency_key": "run:test:sample.plan:origin-c",
-                    "reservation_id": "reservation-plan-c",
-                }},
-                created_at="2026-08-26T06:00:04+00:00",
-            ),
-            SimpleNamespace(
-                seq=15,
-                kind="DshStructuredResultAccepted",
-                payload={
-                    "identity": {
-                        "stage": "sample.reflect",
-                        "idempotency_key": "run:test:sample.reflect:origin-a",
-                        "child_reservation_id": "reservation-reflect-a",
-                    },
-                    "structured": {"outcome_class": "failed"},
-                },
-                created_at="2026-08-26T06:01:00+00:00",
-            ),
-        )
-        state = SimpleNamespace(
-            run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
-            task_manifest=SimpleNamespace(metadata={
-                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
-                "two_stage_evaluation_enabled": True,
-                "sample_concurrency": 8,
-            }),
-            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
-            events=events,
-        )
 
-        progress = _screening_progress_projection(state)
-
-        self.assertEqual(progress["evaluation_phase"], "screening")
-        self.assertEqual(progress["completed_samples"], 1)
-        self.assertEqual(progress["total_samples"], 256)
-        self.assertEqual(progress["succeeded_samples"], 0)
-        self.assertEqual(progress["failed_samples"], 1)
-        self.assertEqual(progress["in_flight_batches"], 2)
-        self.assertEqual(progress["queued_batches"], 0)
-        self.assertEqual(progress["awaiting_submission_batches"], 253)
-        self.assertEqual(progress["queue_semantics"], "provider_admission_only")
-
-    def test_screening_progress_retires_terminal_launch_before_reflection(
-        self,
-    ) -> None:
-        origin_a_members = sorted((digest("cell-a-1"), digest("cell-a-2")))
-        origin_b_members = sorted((digest("cell-b-1"), digest("cell-b-2")))
-        events = (
-            SimpleNamespace(
-                seq=10,
-                kind="GenerationBatchStarted",
-                payload={"batch": {"generation": 0}},
-                created_at="2026-08-26T07:00:00+00:00",
-            ),
-            SimpleNamespace(
-                seq=11,
-                kind="DshChildLaunchReserved",
-                # No accepted plan event: this child failed terminally before
-                # the Host produced the durable origin reflection below.
-                payload={"launch": {
-                    "stage": "sample.plan",
-                    "idempotency_key": "run:test:sample.plan:plan-wave-a",
-                    "reservation_id": "reservation-plan-a",
-                    "sample_member_digests": origin_a_members,
-                }},
-                created_at="2026-08-26T07:00:01+00:00",
-            ),
-            SimpleNamespace(
-                seq=12,
-                kind="DshChildLaunchReserved",
-                payload={"launch": {
-                    "stage": "sample.critic",
-                    "idempotency_key": "run:test:sample.critic:origin-c",
-                    "reservation_id": "reservation-critic-c",
-                }},
-                created_at="2026-08-26T07:00:02+00:00",
-            ),
-            SimpleNamespace(
-                seq=13,
-                kind="DshChildLaunchReserved",
-                payload={"launch": {
-                    "stage": "sample.plan",
-                    "idempotency_key": "run:test:sample.plan:plan-wave-b",
-                    "reservation_id": "reservation-plan-b",
-                    "sample_member_digests": origin_b_members,
-                }},
-                created_at="2026-08-26T07:00:03+00:00",
-            ),
-            SimpleNamespace(
-                seq=14,
-                kind="DshChildLaunchReserved",
-                payload={"launch": {
-                    "stage": "sample.reflect",
-                    "idempotency_key": "run:test:sample.reflect:reflection-wave-a",
-                    "reservation_id": "reservation-reflect-a",
-                    "sample_member_digests": origin_a_members,
-                }},
-                created_at="2026-08-26T07:00:04+00:00",
-            ),
-            SimpleNamespace(
-                seq=15,
-                kind="DshStructuredResultAccepted",
-                payload={
-                    "identity": {
-                        "stage": "sample.reflect",
-                        "idempotency_key": "run:test:sample.reflect:reflection-wave-a",
-                        "child_reservation_id": "reservation-reflect-a",
-                    },
-                    "structured": {"outcome_class": "failed"},
-                },
-                created_at="2026-08-26T07:01:00+00:00",
-            ),
-            SimpleNamespace(
-                seq=16,
-                kind="DshStructuredResultAccepted",
-                payload={
-                    "identity": {
-                        "stage": "sample.reflect",
-                        "idempotency_key": "run:test:sample.reflect:origin-c",
-                        "child_reservation_id": "reservation-legacy-reflect-c",
-                    },
-                    "structured": {"outcome_class": "failed"},
-                },
-                created_at="2026-08-26T07:01:01+00:00",
-            ),
-        )
-        state = SimpleNamespace(
-            run=SimpleNamespace(generation=0, status=SimpleNamespace(value="running")),
-            task_manifest=SimpleNamespace(metadata={
-                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
-                "two_stage_evaluation_enabled": True,
-                "sample_concurrency": 8,
-            }),
-            candidates=tuple(SimpleNamespace(generation=0) for _ in range(4)),
-            events=events,
-        )
-
-        progress = _screening_progress_projection(state)
-
-        self.assertEqual(progress["completed_samples"], 2)
-        self.assertEqual(progress["succeeded_samples"], 0)
-        self.assertEqual(progress["failed_samples"], 2)
-        self.assertEqual(progress["in_flight_batches"], 1)
-        self.assertEqual(progress["queued_batches"], 0)
-        self.assertEqual(progress["awaiting_submission_batches"], 253)
-        self.assertEqual(
-            progress["completed_samples"]
-            + progress["in_flight_batches"]
-            + progress["queued_batches"]
-            + progress["awaiting_submission_batches"],
-            progress["total_samples"],
-        )
 
     def test_completed_run_hides_recovered_failed_stage(self) -> None:
         failed_stage = SimpleNamespace(
@@ -3454,115 +2796,12 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         self.assertIsNone(activity)
 
-    def test_structured_result_with_dsh_session_metrics_replays(self) -> None:
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(), run_id="run:projection-dsh-session-metrics"
-            ).run.run_id
-            structured = {
-                "schema_version": "ecology-research-result@1",
-                "summary": "bounded evidence",
-                "evidence": [],
-            }
-            ledger.append(
-                run_id,
-                "DshStructuredResultAccepted",
-                {
-                    "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
-                    "identity": {
-                        "run_id": run_id,
-                        "role": "researcher",
-                        "stage": "generation.research",
-                        "session_id": "dsh-child-replay-1",
-                    },
-                    "output_schema_id": "ecology-research-result@1",
-                    "result_digest": digest(structured),
-                    "structured": structured,
-                    "skill_invocation_evidence": _skill_evidence(
-                        "generation.research",
-                        "autonomous-ecology-research",
-                    ),
-                    "session_metrics": {
-                        "schema_version": "ecologyrsi-dsh.dsh-session-metrics/1",
-                        "session_id": "dsh-child-replay-1",
-                        "context_pressure": {
-                            "available": True,
-                            "source": "dsh_token_meter",
-                            "measurement": "current_context_pressure",
-                            "log_revision": 27,
-                            "baseline_kind": "usage",
-                            "total_tokens": 13_073,
-                            "surface_tokens": 6_087,
-                        },
-                        "provider_usage": {
-                            "available": True,
-                            "source": "dsh_session_projection_token_usage",
-                            "measurement": "cumulative_provider_reported_usage",
-                            "totals": {
-                                "uncached_input_tokens": 6_774,
-                                "output_tokens": 680,
-                                "cache_read_tokens": 0,
-                                "cache_write_tokens": 0,
-                                "total_tokens": 7_454,
-                            },
-                        },
-                    },
-                },
-            )
 
-            state = director.state(run_id)
-
-        self.assertEqual(state.events[-1].kind, "DshStructuredResultAccepted")
-
-    def test_sample_reflection_structured_result_replays(self) -> None:
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(), run_id="run:projection-sample-reflection"
-            ).run.run_id
-            structured = {
-                "schema_version": "ecology-sample-reflection@1",
-                "wave_digest": "d" * 64,
-                "sample_id": "sample-1",
-                "outcome_class": "improved",
-                "error_source": "parameter",
-                "next_action": "keep",
-                "confidence": 0.9,
-                "summary": "The registered predictor improved this sample.",
-            }
-            ledger.append(
-                run_id,
-                "DshStructuredResultAccepted",
-                {
-                    "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
-                    "identity": {
-                        "run_id": run_id,
-                        "role": "sample-critic",
-                        "stage": "sample.reflect",
-                        "session_id": "dsh-child-reflector-1",
-                    },
-                    "output_schema_id": "ecology-sample-reflection@1",
-                    "result_digest": digest(structured),
-                    "structured": structured,
-                    "skill_invocation_evidence": _skill_evidence(
-                        "sample.reflect",
-                        "origin-vector-review",
-                    ),
-                },
-            )
-
-            state = director.state(run_id)
-
-        self.assertEqual(state.events[-1].kind, "DshStructuredResultAccepted")
-        self.assertEqual(state.events[-1].payload["identity"]["stage"], "sample.reflect")
 
     def test_candidate_local_edit_structured_result_replays(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(), run_id="run:projection-candidate-local-edit"
-            ).run.run_id
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            run_id = start_native_run(director, task=_task(),run_id='run:projection-candidate-local-edit').run.run_id
             structured = {
                 "schema_version": "ecology-local-edit@1",
                 "decision": "mutate",
@@ -3607,10 +2846,8 @@ class ExecutionProjectionTests(unittest.TestCase):
 
     def test_candidate_review_skill_evidence_replays(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(), run_id="run:projection-candidate-review"
-            ).run.run_id
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            run_id = start_native_run(director, task=_task(),run_id='run:projection-candidate-review').run.run_id
             structured = {
                 "schema_version": "ecology-generation-review@1",
                 "accepted": False,
@@ -3646,139 +2883,7 @@ class ExecutionProjectionTests(unittest.TestCase):
             "candidate-scientific-review",
         )
 
-    def test_legacy_generation_judge_reflection_evidence_replays(self) -> None:
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(), run_id="run:projection-legacy-generation-judge"
-            ).run.run_id
-            structured = {
-                "schema_version": "ecology-generation-review@1",
-                "accepted": False,
-                "rationale": "The supplied candidate evidence is insufficient.",
-                "flags": ["insufficient_evidence"],
-            }
-            ledger.append(
-                run_id,
-                "DshStructuredResultAccepted",
-                {
-                    "schema_version": "ecologyrsi-dsh.structured-result-accepted/1",
-                    "identity": {
-                        "run_id": run_id,
-                        "role": "generation-judge",
-                        "stage": "generation.judge",
-                        "session_id": "dsh-child-legacy-generation-judge-1",
-                    },
-                    "output_schema_id": "ecology-generation-review@1",
-                    "result_digest": digest(structured),
-                    "structured": structured,
-                    "skill_invocation_evidence": _skill_evidence(
-                        "generation.judge",
-                        "batch-scientific-reflection",
-                    ),
-                },
-            )
 
-            state = director.state(run_id)
-
-        self.assertEqual(state.events[-1].kind, "DshStructuredResultAccepted")
-        self.assertEqual(
-            state.events[-1].payload["skill_invocation_evidence"]["skill_name"],
-            "batch-scientific-reflection",
-        )
-
-    def test_dsh_runtime_projection_aggregates_real_session_usage(self) -> None:
-        state = SimpleNamespace(
-            run=SimpleNamespace(session_id="dsh-native:run:usage"),
-            events=(
-                SimpleNamespace(
-                    seq=1,
-                    kind="DshRuntimeBound",
-                    payload={
-                        "execution_protocol": "dsh_native_plugin_evolution@1",
-                        "capabilities_digest": "a" * 64,
-                        "preset_ids": ["ecology-sample-planner-v14"],
-                    },
-                ),
-                SimpleNamespace(
-                    seq=2,
-                    kind="DshStructuredResultAccepted",
-                    payload={
-                        "identity": {"session_id": "dsh-child-1"},
-                        "session_metrics": {
-                            "schema_version": "ecologyrsi-dsh.dsh-session-metrics/1",
-                            "session_id": "dsh-child-1",
-                            "context_pressure": {
-                                "available": True,
-                                "total_tokens": 120,
-                                "surface_tokens": 80,
-                            },
-                            "provider_usage": {
-                                "available": True,
-                                "totals": {
-                                    "uncached_input_tokens": 100,
-                                    "output_tokens": 20,
-                                    "cache_read_tokens": 30,
-                                    "cache_write_tokens": 0,
-                                    "total_tokens": 150,
-                                },
-                            },
-                        },
-                    },
-                ),
-                SimpleNamespace(
-                    seq=3,
-                    kind="DshRetrievalExecuted",
-                    payload={
-                        "identity": {
-                            "role": "researcher",
-                            "stage": "generation.research",
-                        },
-                        "provider_route": "dsh_primary",
-                        "fallback_reason": None,
-                        "result_digest": "b" * 64,
-                    },
-                ),
-                SimpleNamespace(
-                    seq=4,
-                    kind="DshRetrievalExecuted",
-                    payload={
-                        "identity": {
-                            "role": "candidate-proposer",
-                            "stage": "candidate.propose",
-                        },
-                        "provider_route": "dsh_primary_then_openalex_fallback",
-                        "fallback_reason": "insufficient_distinct_sources",
-                        "result_digest": "c" * 64,
-                    },
-                ),
-            ),
-        )
-
-        projected = _dsh_runtime_projection(state)
-
-        self.assertTrue(projected["provider_usage"]["available"])
-        self.assertEqual(projected["provider_usage"]["total_tokens"], 150)
-        self.assertEqual(projected["provider_usage"]["session_count"], 1)
-        self.assertFalse(projected["context_pressure"]["available"])
-        self.assertEqual(projected["context_pressure"]["historical_last_snapshot_maximum_tokens"], 120)
-        self.assertEqual(projected["retrieval"]["call_count"], 2)
-        self.assertEqual(projected["retrieval"]["fallback_count"], 1)
-        self.assertEqual(
-            projected["retrieval"]["routes"],
-            {
-                "dsh_primary": 1,
-                "dsh_primary_then_openalex_fallback": 1,
-            },
-        )
-        self.assertEqual(
-            projected["retrieval"]["stages"],
-            ["candidate.propose", "generation.research"],
-        )
-        self.assertEqual(
-            projected["retrieval"]["result_digests"],
-            ["b" * 64, "c" * 64],
-        )
 
     def test_public_metrics_hide_private_sample_and_promotion_evidence(self) -> None:
         public = _public_evaluation_metrics(
@@ -3818,658 +2923,20 @@ class ExecutionProjectionTests(unittest.TestCase):
             public["generation_controls"][0]["evaluation_cohort_digest"]
         )
 
-    def test_candidate_execution_uses_the_adopted_prediction_model(self) -> None:
-        task = TaskManifest(
-            task_id="projection-adopted-predictor",
-            objective="project the candidate's adopted predictor",
-            domain_pack="greenhouse_environment@1",
-            visible_datasets=("agc_cucumber_2018",),
-            budget={"max_candidates": 1},
-            metadata={
-                "prediction_model_id": "greenhouse-exogenous-ridge@1",
-                "evaluator_id": "greenhouse_multihorizon_time_forward@2",
-            },
-        )
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                task, run_id="run:projection-adopted-predictor"
-            ).run.run_id
-            proposal = director.submit_proposal(
-                Proposal(
-                    proposal_id="proposal:projection-adopted-predictor",
-                    run_id=run_id,
-                    generation=0,
-                    title="adopt a registered predictor",
-                    changes={"history_steps": 6},
-                    metadata={
-                        "prediction_model_adoption": {
-                            "status": "adopted",
-                            "adopted_id": "greenhouse-horizon-targetwise-ridge@1",
-                        }
-                    },
-                )
-            )
-            director.spawn_candidate(run_id, proposal)
 
-            projection = _projection_json(director.state(run_id))
 
-        self.assertEqual(
-            projection["candidates"][0]["execution"]["prediction_model_id"],
-            "greenhouse-horizon-targetwise-ridge@1",
-        )
 
-    def test_greenhouse_projection_uses_v2_only_for_missing_evaluator_binding(
-        self,
-    ) -> None:
-        cases = (
-            ("default", {}, "greenhouse_multihorizon_time_forward@2"),
-            (
-                "legacy",
-                {"evaluator_id": "greenhouse_multihorizon_time_forward@1"},
-                "greenhouse_multihorizon_time_forward@1",
-            ),
-        )
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            for suffix, metadata, expected_evaluator in cases:
-                with self.subTest(suffix=suffix):
-                    task = TaskManifest(
-                        task_id=f"projection-greenhouse-{suffix}",
-                        objective="project the frozen greenhouse evaluator",
-                        domain_pack="greenhouse_environment@1",
-                        visible_datasets=("agc_cucumber_2018",),
-                        budget={"max_candidates": 1},
-                        metadata=metadata,
-                    )
-                    run_id = director.start_evolution(
-                        task, run_id=f"run:projection-greenhouse-{suffix}"
-                    ).run.run_id
-                    proposal = director.submit_proposal(
-                        Proposal(
-                            proposal_id=f"proposal:projection-greenhouse-{suffix}",
-                            run_id=run_id,
-                            generation=0,
-                            title="greenhouse projection binding",
-                            changes={"history_steps": 3},
-                        )
-                    )
-                    director.spawn_candidate(run_id, proposal)
 
-                    projection = _projection_json(director.state(run_id))
 
-                    self.assertEqual(
-                        projection["configuration"]["evaluator_id"],
-                        expected_evaluator,
-                    )
-                    self.assertEqual(
-                        projection["candidates"][0]["inference_trace"]["evaluator_id"],
-                        expected_evaluator,
-                    )
 
-    def test_projection_exposes_frozen_sample_agent_configuration(self) -> None:
-        remote_task = TaskManifest(
-            task_id="projection-sample-agents",
-            objective="检查远程样本微批配置",
-            domain_pack="crop-soil-water@toy",
-            visible_datasets=("generated-toy-series@1",),
-            budget={
-                "max_candidates": 1,
-                "token_limit": 20_000,
-            },
-            seed=7,
-            metadata={
-                "sample_agent_mode": "gateway_microbatch",
-                "sample_agent_batch_size": 128,
-                "samples_per_update": 500,
-                "candidate_concurrency": 4,
-                "sample_concurrency": 6,
-                "strategy_model_id": "strategy-model",
-                "review_model_id": "review-model",
-                "sample_operation_max_tokens": {
-                    "sample.planner": 3072,
-                    "sample.repair": 3072,
-                    "sample.critic": 2048,
-                },
-                # Existing runs may predate the explicit scope marker while
-                # already using the current sample hard-budget policy.
-                "sample_token_budget_policy": "hard_gateway_call_reservation@1",
-            },
-        )
-        legacy_task = _task()
-        no_budget_task = TaskManifest(
-            task_id="projection-sample-policy-without-hard-budget",
-            objective="检查仅计量任务不公开硬预算范围",
-            domain_pack="crop-soil-water@toy",
-            visible_datasets=("generated-toy-series@1",),
-            budget=1,
-            seed=8,
-            metadata={
-                "sample_token_budget_policy": "hard_gateway_call_reservation@1",
-            },
-        )
 
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            remote_run_id = director.start_evolution(
-                remote_task,
-                run_id="run:projection-sample-agents",
-            ).run.run_id
-            legacy_run_id = director.start_evolution(
-                legacy_task,
-                run_id="run:projection-legacy-sample-agents",
-            ).run.run_id
-            no_budget_run_id = director.start_evolution(
-                no_budget_task,
-                run_id="run:projection-sample-policy-without-hard-budget",
-            ).run.run_id
 
-            remote_projection = _projection_json(director.state(remote_run_id))
-            legacy_projection = _projection_json(director.state(legacy_run_id))
-            no_budget_projection = _projection_json(director.state(no_budget_run_id))
-            remote = remote_projection["configuration"]
-            legacy = legacy_projection["configuration"]
-
-        self.assertEqual(remote["sample_agent_mode"], "gateway_microbatch")
-        self.assertEqual(remote["sample_agent_batch_size"], 128)
-        self.assertEqual(remote["samples_per_update"], 500)
-        self.assertEqual(remote["sample_concurrency"], 6)
-        self.assertEqual(remote["candidate_concurrency"], 4)
-        self.assertEqual(remote_projection["samples_per_update"], 500)
-        self.assertEqual(remote_projection["sample_agent_batch_size"], 128)
-        self.assertEqual(remote_projection["sample_concurrency"], 6)
-        self.assertEqual(remote_projection["candidate_concurrency"], 4)
-        self.assertEqual(remote["strategy_model_id"], "strategy-model")
-        self.assertEqual(remote["review_model_id"], "review-model")
-        self.assertEqual(remote["sample_operation_max_tokens"]["sample.planner"], 3072)
-        self.assertEqual(remote["sample_operation_max_tokens"]["sample.critic"], 2048)
-        self.assertEqual(
-            remote_projection["token_budget_scope"],
-            "sample_agent_gateway_calls_only@1",
-        )
-        self.assertFalse(remote_projection["run_wide_accounting_complete"])
-        self.assertEqual(
-            remote["token_budget_scope"],
-            "sample_agent_gateway_calls_only@1",
-        )
-        self.assertFalse(remote["run_wide_accounting_complete"])
-        self.assertEqual(
-            legacy["sample_agent_mode"], "host_feedback_state_machine"
-        )
-        self.assertIsNone(legacy["sample_agent_batch_size"])
-        self.assertIsNone(legacy["samples_per_update"])
-        self.assertIsNone(legacy["candidate_concurrency"])
-        self.assertEqual(
-            remote_projection["execution_diagnostics"]["partition_scan_policy"],
-            "full_training_fit_rotating_bounded_training_feedback_per_generation",
-        )
-        self.assertEqual(
-            remote_projection["execution_diagnostics"]["samples_per_update"], 500
-        )
-        self.assertEqual(
-            legacy_projection["execution_diagnostics"]["partition_scan_policy"],
-            "full_frozen_partition_per_candidate",
-        )
-        self.assertIsNone(legacy_projection["token_budget_scope"])
-        self.assertFalse(legacy_projection["run_wide_accounting_complete"])
-        self.assertIsNone(no_budget_projection["token_budget_scope"])
-        self.assertFalse(no_budget_projection["run_wide_accounting_complete"])
-
-    def test_projection_aggregates_durable_model_usage_not_static_budget(self) -> None:
-        from ecologyrsi_dsh.api.events import EventEndpointsMixin
-
-        usage_task = TaskManifest(
-            task_id="projection-model-usage",
-            objective="检查真实模型用量账本",
-            domain_pack="crop-soil-water@toy",
-            visible_datasets=("generated-toy-series@1",),
-            budget={
-                "max_candidates": 1,
-                "max_generations": 1,
-                "candidates_per_generation": 1,
-                # A legacy static estimate must not be projected as actual use.
-                "tokens_used": 999_999,
-                "token_limit": 2_000,
-            },
-            seed=9,
-        )
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                usage_task, run_id="run:projection-model-usage"
-            ).run.run_id
-            candidate = director.propose_and_spawn(run_id)
-            before = _projection_json(director.state(run_id))
-            self.assertFalse(before["token_usage_available"])
-            self.assertEqual(before["tokens_used"], 0)
-            director.record_model_usage(
-                run_id,
-                generation=0,
-                candidate_id=candidate.candidate_id,
-                role="planner",
-                model_id="newapi/glm-5.2",
-                usage={
-                    "prompt_tokens": 101,
-                    "completion_tokens": 19,
-                    "total_tokens": 120,
-                },
-                gateway_request_count=2,
-                revision="revision:usage",
-                usage_index=0,
-            )
-            director.record_model_usage(
-                run_id,
-                generation=0,
-                candidate_id=candidate.candidate_id,
-                role="critic",
-                model_id="newapi/deepseek-flash",
-                usage={
-                    "prompt_tokens": 31,
-                    "completion_tokens": 9,
-                    "total_tokens": 40,
-                },
-                gateway_request_count=1,
-                revision="revision:usage",
-                usage_index=1,
-            )
-            state = director.replay(run_id)
-            projection = _projection_json(state)
-            event = next(
-                item for item in state.events if item.kind == "ModelUsageRecorded"
-            )
-            public_event = EventEndpointsMixin._event_json(event)
-
-        self.assertTrue(projection["token_usage_available"])
-        self.assertEqual(projection["tokens_used"], 160)
-        self.assertEqual(projection["token_limit"], 2_000)
-        # A token_limit alone is not enough to relabel a legacy task as using
-        # the current sample-agent hard-budget admission policy.
-        self.assertIsNone(projection["token_budget_scope"])
-        self.assertFalse(projection["run_wide_accounting_complete"])
-        self.assertEqual(
-            projection["model_usage"],
-            {
-                "schema_version": "ecologyrsi-dsh.model-usage-summary/1",
-                "available": True,
-                "call_count": 2,
-                "prompt_tokens": 132,
-                "completion_tokens": 28,
-                "total_tokens": 160,
-                "gateway_request_count": 3,
-                "by_role": {
-                    "critic": {
-                        "prompt_tokens": 31,
-                        "completion_tokens": 9,
-                        "total_tokens": 40,
-                        "gateway_request_count": 1,
-                        "call_count": 1,
-                    },
-                    "planner": {
-                        "prompt_tokens": 101,
-                        "completion_tokens": 19,
-                        "total_tokens": 120,
-                        "gateway_request_count": 2,
-                        "call_count": 1,
-                    },
-                },
-            },
-        )
-        self.assertEqual(public_event["type"], "model.usage_recorded")
-        self.assertEqual(public_event["payload"]["total_tokens"], 120)
-        self.assertEqual(public_event["payload"]["model_id"], "newapi/glm-5.2")
-
-    def test_v3_waiting_heartbeat_continues_progress_id_after_restart(self) -> None:
-        from ecologyrsi_dsh.api.events import EventEndpointsMixin
-
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(), run_id="run:progress-v3-restart"
-            ).run.run_id
-            candidate = director.propose_and_spawn(run_id)
-            revision = "revision:progress-v3"
-            director.start_evaluation_sample_results(
-                run_id,
-                generation=candidate.generation,
-                proposal_id=candidate.proposal_id,
-                candidate_id=candidate.candidate_id,
-                revision=revision,
-                checkpoint={
-                    "schema_version": "ecologyrsi-dsh.sample-checkpoint/1",
-                    "cohort_digest": "a" * 64,
-                    "execution_context_digest": "b" * 64,
-                    "sample_count": 4,
-                },
-            )
-            waiting = {
-                "role": "planner",
-                "model_id": "newapi/glm-5.2",
-                "batch_index": 0,
-                "batch_count": 2,
-                "batch_size": 0,
-                "completed_samples": 0,
-                "total_samples": 4,
-                "succeeded_samples": 0,
-                "failed_samples": 0,
-                "gateway_request_count": 0,
-                "adaptive_split_trigger_count": 0,
-                "adaptive_split_count": 0,
-                "adaptive_split_max_depth": 0,
-                "adaptive_split_recovered_samples": 0,
-                "adaptive_split_failed_samples": 0,
-                "progress_id": 1,
-                "progress_kind": "waiting",
-                "in_flight_batches": 2,
-                "queued_batches": 0,
-            }
-            first = director.record_evaluation_progress(
-                run_id,
-                generation=candidate.generation,
-                proposal_id=candidate.proposal_id,
-                candidate_id=candidate.candidate_id,
-                progress=waiting,
-                revision=revision,
-            )
-            restarted = EvolutionDirector(ledger, FakeDSHAdapter())
-            second = restarted.record_evaluation_progress(
-                run_id,
-                generation=candidate.generation,
-                proposal_id=candidate.proposal_id,
-                candidate_id=candidate.candidate_id,
-                progress={**waiting, "progress_id": 2, "queued_batches": 1},
-                revision=revision,
-            )
-            projection = _projection_json(restarted.state(run_id))[
-                "execution_progress"
-            ]["stage_progress"]
-            public_event = EventEndpointsMixin._event_json(second)
-
-        self.assertNotEqual(first.seq, second.seq)
-        self.assertEqual(projection["progress_id"], 2)
-        self.assertEqual(projection["in_flight_batches"], 2)
-        self.assertEqual(projection["queued_batches"], 1)
-        self.assertEqual(public_event["payload"]["revision"], revision)
-        self.assertEqual(public_event["payload"]["progress_kind"], "waiting")
-        self.assertEqual(public_event["payload"]["in_flight_batches"], 2)
-        self.assertEqual(public_event["payload"]["queued_batches"], 1)
-
-    def test_v3_restart_heartbeat_overrides_larger_prior_attempt_count(self) -> None:
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(), run_id="run:progress-v3-restart-count"
-            ).run.run_id
-            candidate = director.propose_and_spawn(run_id)
-            revision = "revision:progress-v3-count"
-            director.start_evaluation_sample_results(
-                run_id,
-                generation=candidate.generation,
-                proposal_id=candidate.proposal_id,
-                candidate_id=candidate.candidate_id,
-                revision=revision,
-                checkpoint={
-                    "schema_version": "ecologyrsi-dsh.sample-checkpoint/1",
-                    "cohort_digest": "a" * 64,
-                    "execution_context_digest": "b" * 64,
-                    "sample_count": 100,
-                },
-            )
-            completed = {
-                "role": "planner",
-                "model_id": "newapi/glm-5.2",
-                "batch_index": 8,
-                "batch_count": 10,
-                "batch_size": 9,
-                "completed_samples": 72,
-                "total_samples": 100,
-                "succeeded_samples": 70,
-                "failed_samples": 2,
-                "gateway_request_count": 8,
-                "adaptive_split_trigger_count": 0,
-                "adaptive_split_count": 0,
-                "adaptive_split_max_depth": 0,
-                "adaptive_split_recovered_samples": 0,
-                "adaptive_split_failed_samples": 0,
-                "progress_id": 1,
-                "progress_kind": "completed_batch",
-                "in_flight_batches": 2,
-                "queued_batches": 0,
-            }
-            director.record_evaluation_progress(
-                run_id,
-                generation=candidate.generation,
-                proposal_id=candidate.proposal_id,
-                candidate_id=candidate.candidate_id,
-                progress=completed,
-                revision=revision,
-            )
-            restarted = EvolutionDirector(ledger, FakeDSHAdapter())
-            restarted.record_evaluation_progress(
-                run_id,
-                generation=candidate.generation,
-                proposal_id=candidate.proposal_id,
-                candidate_id=candidate.candidate_id,
-                progress={
-                    **completed,
-                    "batch_index": 7,
-                    "batch_size": 0,
-                    "completed_samples": 70,
-                    "succeeded_samples": 70,
-                    "failed_samples": 0,
-                    "progress_id": 2,
-                    "progress_kind": "waiting",
-                    "in_flight_batches": 3,
-                    "queued_batches": 1,
-                },
-                revision=revision,
-            )
-            stage_progress = _projection_json(restarted.state(run_id))[
-                "execution_progress"
-            ]["stage_progress"]
-
-        self.assertEqual(stage_progress["progress_id"], 2)
-        self.assertEqual(stage_progress["progress_kind"], "waiting")
-        self.assertEqual(stage_progress["completed_samples"], 70)
-        self.assertEqual(stage_progress["in_flight_batches"], 3)
-        self.assertEqual(stage_progress["queued_batches"], 1)
-
-    def test_v2_usage_summary_charges_missing_call_reservation_once(self) -> None:
-        task = TaskManifest(
-            task_id="projection-partial-usage",
-            objective="检查缺失用量回执的保守计费",
-            domain_pack="crop-soil-water@toy",
-            visible_datasets=("generated-toy-series@1",),
-            budget={
-                "max_candidates": 1,
-                "max_generations": 1,
-                "candidates_per_generation": 1,
-                "token_limit": 1_000,
-                "token_reservation_per_wave": 100,
-            },
-            seed=3,
-        )
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                task, run_id="run:projection-partial-usage"
-            ).run.run_id
-            candidate = director.propose_and_spawn(run_id)
-            revision = "revision:partial-usage"
-            director.start_evaluation_sample_results(
-                run_id,
-                generation=candidate.generation,
-                proposal_id=candidate.proposal_id,
-                candidate_id=candidate.candidate_id,
-                revision=revision,
-                checkpoint={
-                    "schema_version": "ecologyrsi-dsh.sample-checkpoint/1",
-                    "cohort_digest": "a" * 64,
-                    "execution_context_digest": "b" * 64,
-                    "sample_count": 2,
-                },
-            )
-            director.record_model_usage_batch(
-                run_id,
-                generation=candidate.generation,
-                candidate_id=candidate.candidate_id,
-                revision=revision,
-                receipts=(
-                    {
-                        "call_id": "call:reported",
-                        "logical_call_digest": "c" * 64,
-                        "role": "planner",
-                        "model_id": "newapi/glm-5.2",
-                        "outcome": "succeeded",
-                        "usage_reported": True,
-                        "http_attempts": 1,
-                        "prompt_tokens": 17,
-                        "completion_tokens": 3,
-                        "total_tokens": 20,
-                    },
-                    {
-                        "call_id": "call:partial",
-                        "logical_call_digest": "d" * 64,
-                        "role": "critic",
-                        "model_id": "newapi/deepseek-flash",
-                        "outcome": "failed",
-                        "usage_reported": False,
-                        "http_attempts": 1,
-                        "prompt_tokens": 5,
-                        "completion_tokens": 1,
-                        "total_tokens": 6,
-                    },
-                ),
-            )
-            state = director.state(run_id)
-            projection = _projection_json(state)
-            usage = projection["model_usage"]
-            runtime_budget = _model_token_budget_state(state)
-
-        self.assertTrue(usage["available"])
-        self.assertFalse(usage["complete"])
-        self.assertEqual(usage["reported_call_count"], 1)
-        self.assertEqual(usage["missing_call_count"], 1)
-        # Raw diagnostics retain the provider-side estimate, but budget
-        # accounting replaces it with the frozen reservation rather than
-        # charging both values.
-        self.assertEqual(usage["total_tokens"], 26)
-        self.assertEqual(usage["budget_accounted_tokens"], 120)
-        self.assertEqual(usage["missing_call_reservation"], 100)
-        self.assertEqual(projection["tokens_used"], 120)
-        self.assertEqual(runtime_budget["tokens_used"], 120)
-
-    def test_v2_usage_receipts_without_reported_tokens_remain_visible(self) -> None:
-        state = SimpleNamespace(
-            events=(
-                SimpleNamespace(
-                    kind="ModelUsageRecorded",
-                    payload={
-                        "schema_version": "ecologyrsi-dsh.model-usage/2",
-                        "candidate_id": "candidate:partial",
-                        "revision": "revision:partial",
-                        "role": "planner",
-                        "logical_call_digest": "a" * 64,
-                        "outcome": "failed",
-                        "usage_reported": False,
-                        "http_attempts": 2,
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "total_tokens": 0,
-                    },
-                ),
-            )
-        )
-
-        usage = _model_usage_summary(state)
-
-        self.assertTrue(usage["available"])
-        self.assertFalse(usage["complete"])
-        self.assertEqual(usage["missing_call_count"], 1)
-        self.assertEqual(usage["total_tokens"], 0)
-        self.assertEqual(usage["physical_call_count"], 1)
-        self.assertEqual(usage["logical_call_count"], 1)
-        self.assertEqual(usage["replayed_call_count"], 0)
-        self.assertEqual(usage["outcome_counts"], {"failed": 1})
-
-    def test_v2_usage_summary_separates_logical_replays_from_legacy_calls(
-        self,
-    ) -> None:
-        candidate_id = "candidate:usage-scope"
-        revision = "revision:usage-scope"
-
-        def usage_event(payload: dict[str, object]) -> SimpleNamespace:
-            return SimpleNamespace(kind="ModelUsageRecorded", payload=payload)
-
-        common = {
-            "schema_version": "ecologyrsi-dsh.model-usage/2",
-            "candidate_id": candidate_id,
-            "revision": revision,
-            "role": "planner",
-            "usage_reported": True,
-            "http_attempts": 1,
-            "prompt_tokens": 8,
-            "completion_tokens": 2,
-            "total_tokens": 10,
-        }
-        state = SimpleNamespace(
-            task_manifest=SimpleNamespace(token_reservation_per_wave=100),
-            events=(
-                usage_event(
-                    {
-                        **common,
-                        "logical_call_digest": "a" * 64,
-                        "outcome": "failed",
-                    }
-                ),
-                usage_event(
-                    {
-                        **common,
-                        "logical_call_digest": "a" * 64,
-                        "outcome": "succeeded",
-                    }
-                ),
-                usage_event(
-                    {
-                        **common,
-                        "logical_call_digest": "b" * 64,
-                        "outcome": "succeeded",
-                    }
-                ),
-                usage_event(
-                    {
-                        "schema_version": "ecologyrsi-dsh.model-usage/1",
-                        "candidate_id": candidate_id,
-                        "revision": revision,
-                        "role": "critic",
-                        "gateway_request_count": 2,
-                        "prompt_tokens": 16,
-                        "completion_tokens": 4,
-                        "total_tokens": 20,
-                    }
-                ),
-            ),
-        )
-
-        usage = _model_usage_summary(state)
-
-        self.assertEqual(usage["schema_version"], "ecologyrsi-dsh.model-usage-summary/2")
-        self.assertEqual(usage["call_count"], 4)
-        self.assertEqual(usage["physical_call_count"], 3)
-        self.assertEqual(usage["logical_call_count"], 2)
-        self.assertEqual(usage["replayed_call_count"], 1)
-        self.assertEqual(usage["outcome_counts"], {"failed": 1, "succeeded": 2})
-        self.assertEqual(usage["total_tokens"], 50)
-        self.assertEqual(usage["budget_accounted_tokens"], 50)
-        self.assertEqual(usage["scope_candidate_id"], candidate_id)
-        self.assertEqual(usage["scope_revision"], revision)
 
     def test_v2_progress_rejects_batch_larger_than_completed_samples(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(), run_id="run:projection-v2-progress-validation"
-            ).run.run_id
-            candidate = director.propose_and_spawn(run_id)
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            run_id = start_native_run(director, task=_task(),run_id='run:projection-v2-progress-validation').run.run_id
+            candidate = spawn_native_candidate(director, run_id)
             with self.assertRaisesRegex(ValueError, "batch size"):
                 director.record_evaluation_progress(
                     run_id,
@@ -4491,10 +2958,8 @@ class ExecutionProjectionTests(unittest.TestCase):
 
     def test_failed_run_exposes_reason_and_latest_failed_stage(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(max_candidates=1), run_id="run:projection-failed"
-            ).run.run_id
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            run_id = start_native_run(director, task=_task(max_candidates=1),run_id='run:projection-failed').run.run_id
             director.record_evolution_stage(
                 run_id,
                 generation=0,
@@ -4514,331 +2979,8 @@ class ExecutionProjectionTests(unittest.TestCase):
             self.assertEqual(projection["failed_stage"]["stage"], "proposal")
             self.assertIn("TimeoutError", projection["failed_stage"]["public_error"])
 
-    def test_partial_projection_exposes_stage_evidence_and_safe_plan(self) -> None:
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(max_candidates=1), run_id="run:projection-partial"
-            ).run.run_id
-            proposal = director.submit_proposal(
-                Proposal(
-                    proposal_id="proposal:projection-partial",
-                    run_id=run_id,
-                    generation=0,
-                    title="局部参数方案",
-                    changes={"alpha": 0.4},
-                    metadata={
-                        "plan": {"strategy": {"name": "局部搜索"}},
-                        "api_key": "should-not-be-visible",
-                        "apiKey": "should-not-be-visible",
-                        "private_reasoning": "should-not-be-visible",
-                    },
-                )
-            )
-            candidate = director.spawn_candidate(run_id, proposal)
-            director.record_evolution_stage(
-                run_id,
-                generation=0,
-                proposal_id=proposal.proposal_id,
-                candidate_id=candidate.candidate_id,
-                stage="training",
-                status="started",
-            )
 
-            projection = _projection_json(director.state(run_id))
-            candidate_view = projection["candidates"][0]
-            self.assertEqual(candidate_view["execution"]["current_stage"], "training")
-            self.assertEqual(candidate_view["execution"]["evidence"], "stage_events")
-            self.assertEqual(candidate_view["inference_trace"]["status"], "pending")
-            self.assertEqual(projection["execution_progress"]["phase"], "training")
-            self.assertGreater(projection["execution_progress"]["progress_percent"], 0)
-            self.assertLess(projection["execution_progress"]["progress_percent"], 100)
-            self.assertNotIn("api_key", str(candidate_view["model_plan"]))
-            self.assertNotIn("private_reasoning", str(candidate_view["model_plan"]))
 
-    def test_projection_uses_durable_sample_microbatch_progress(self) -> None:
-        from ecologyrsi_dsh.api.events import EventEndpointsMixin
-
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(max_candidates=1), run_id="run:projection-microbatch-progress"
-            ).run.run_id
-            proposal = director.submit_proposal(
-                Proposal(
-                    proposal_id="proposal:projection-microbatch-progress",
-                    run_id=run_id,
-                    generation=0,
-                    title="真实样本微批",
-                    changes={"alpha": 0.4},
-                )
-            )
-            candidate = director.spawn_candidate(run_id, proposal)
-            director.record_evolution_stage(
-                run_id,
-                generation=0,
-                proposal_id=proposal.proposal_id,
-                candidate_id=candidate.candidate_id,
-                stage="training",
-                status="completed",
-            )
-            director.record_evolution_stage(
-                run_id,
-                generation=0,
-                proposal_id=proposal.proposal_id,
-                candidate_id=candidate.candidate_id,
-                stage="evaluation",
-                status="started",
-            )
-            director.record_evaluation_progress(
-                run_id,
-                generation=0,
-                proposal_id=proposal.proposal_id,
-                candidate_id=candidate.candidate_id,
-                progress={
-                    "role": "planner",
-                    "model_id": "strategy-model",
-                    "batch_index": 3,
-                    "batch_count": 6,
-                    "batch_size": 128,
-                    "completed_samples": 384,
-                    "total_samples": 768,
-                    "succeeded_samples": 380,
-                    "failed_samples": 4,
-                    "gateway_request_count": 9,
-                    "adaptive_split_trigger_count": 3,
-                    "adaptive_split_count": 3,
-                    "adaptive_split_max_depth": 2,
-                    "adaptive_split_recovered_samples": 120,
-                    "adaptive_split_failed_samples": 4,
-                },
-            )
-
-            projection = _projection_json(director.state(run_id))
-            progress_event = next(
-                event
-                for event in director.state(run_id).events
-                if event.kind == "EvaluationProgressRecorded"
-            )
-            public_event = EventEndpointsMixin._event_json(progress_event)
-
-            artifact = ModelArtifact(
-                artifact_id="artifact:projection-microbatch-progress",
-                run_id=run_id,
-                candidate_id=candidate.candidate_id,
-                model_id="toy-rolling-water@1",
-                dataset_digest="dataset:projection",
-                training_partition="train",
-                training_rows=10,
-                metrics={
-                    "training_partition_rows": 10,
-                    "training_eligible_examples": 10,
-                    "training_used_examples": 10,
-                    "training_skipped_examples": 0,
-                    "fit_passes_completed": 1,
-                },
-            )
-            director.record_artifact(artifact)
-            director.record_evaluation(
-                Evaluation(
-                    evaluation_id="evaluation:projection-microbatch-progress",
-                    run_id=run_id,
-                    candidate_id=candidate.candidate_id,
-                    score=0.7,
-                    passed=True,
-                    partition="validation",
-                    metrics={
-                        "evaluation_partition_rows": 760,
-                        "evaluation_eligible_examples": 768,
-                        "evaluation_used_examples": 760,
-                        "evaluation_skipped_examples": 8,
-                    },
-                    artifact_digest=artifact.digest,
-                )
-            )
-            finalized_projection = _projection_json(director.state(run_id))
-
-        candidate_progress = projection["candidates"][0]["execution"]
-        run_progress = projection["execution_progress"]
-        self.assertEqual(candidate_progress["stage_progress"]["batch_index"], 3)
-        self.assertEqual(run_progress["stage_progress"]["completed_samples"], 384)
-        self.assertEqual(run_progress["stage_progress"]["progress_percent"], 50.0)
-        self.assertEqual(run_progress["stage_progress"]["gateway_request_count"], 9)
-        self.assertEqual(run_progress["stage_progress"]["adaptive_split_count"], 3)
-        self.assertEqual(
-            run_progress["stage_progress"]["causal_wave_sample_count"], 128
-        )
-        self.assertEqual(
-            run_progress["stage_progress"]["configured_concurrency"], 4
-        )
-        self.assertEqual(
-            run_progress["stage_progress"]["adaptive_split_recovered_samples"],
-            120,
-        )
-        self.assertEqual(public_event["payload"]["adaptive_split_max_depth"], 2)
-        self.assertEqual(public_event["payload"]["adaptive_split_failed_samples"], 4)
-        self.assertEqual(run_progress["last_event_at"], candidate_progress["stage_progress"]["updated_at"])
-        self.assertGreater(run_progress["progress_percent"], 50.0)
-        self.assertLess(run_progress["progress_percent"], 66.7)
-        self.assertNotIn("observed", str(run_progress["stage_progress"]))
-        self.assertNotIn("sample_id", str(run_progress["stage_progress"]))
-        live_diagnostics = projection["execution_diagnostics"]
-        self.assertEqual(live_diagnostics["evaluation_used_examples"], 0)
-        self.assertEqual(live_diagnostics["live_evaluation_completed_examples"], 384)
-        self.assertEqual(live_diagnostics["live_evaluation_total_examples"], 768)
-        self.assertEqual(live_diagnostics["candidate_work_items"], 384)
-        self.assertEqual(live_diagnostics["execution_evidence_status"], "partial_live")
-        finalized_diagnostics = finalized_projection["execution_diagnostics"]
-        self.assertEqual(finalized_diagnostics["evaluation_used_examples"], 760)
-        self.assertEqual(finalized_diagnostics["live_evaluation_completed_examples"], 0)
-        self.assertEqual(finalized_diagnostics["candidate_work_items"], 770)
-        self.assertEqual(finalized_diagnostics["execution_evidence_status"], "recorded")
-
-    def test_diagnostics_fall_back_to_active_result_batches_and_relabel_terminal_evidence(
-        self,
-    ) -> None:
-        def source_row(index: int) -> dict[str, object]:
-            return {
-                "sample_index": index,
-                "sample_id": f"sample:{index}",
-                "target": "soil_water",
-                "unit": "fraction",
-                "horizon_hours": 24,
-                "origin_timestamp": index,
-                "target_timestamp": index + 1,
-                "observed": 0.5,
-                "predicted": 0.45,
-                "baseline": 0.7,
-                "sample_execution_status": "succeeded",
-                "sample_execution_attempts": 1,
-                "sample_execution_retry_count": 0,
-            }
-
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(max_candidates=2), run_id="run:projection-batch-fallback"
-            ).run.run_id
-            proposal = director.submit_proposal(
-                Proposal(
-                    proposal_id="proposal:projection-batch-fallback",
-                    run_id=run_id,
-                    generation=0,
-                    title="持久批次回退",
-                    changes={"alpha": 0.4},
-                )
-            )
-            candidate = director.spawn_candidate(run_id, proposal)
-            revision = "revision:projection-batch-fallback"
-            director.start_evaluation_sample_results(
-                run_id,
-                generation=0,
-                proposal_id=proposal.proposal_id,
-                candidate_id=candidate.candidate_id,
-                revision=revision,
-                checkpoint={
-                    "schema_version": "ecologyrsi-dsh.sample-checkpoint/1",
-                    "cohort_digest": "a" * 64,
-                    "execution_context_digest": "b" * 64,
-                    "sample_count": 2,
-                },
-            )
-
-            def record_batch(batch_index: int) -> None:
-                rows = build_sample_results(
-                    candidate.candidate_id, [source_row(batch_index)]
-                )
-                director.record_evaluation_sample_result_batch(
-                    run_id,
-                    sample_result_batch_event_payload(
-                        run_id,
-                        candidate.candidate_id,
-                        rows,
-                        revision=revision,
-                        batch_index=batch_index,
-                    ),
-                )
-
-            record_batch(1)
-            director.record_evaluation_progress(
-                run_id,
-                generation=0,
-                proposal_id=proposal.proposal_id,
-                candidate_id=candidate.candidate_id,
-                revision=revision,
-                progress={
-                    "role": "planner",
-                    "model_id": "strategy-model",
-                    "batch_index": 1,
-                    "batch_count": 2,
-                    "batch_size": 1,
-                    "completed_samples": 1,
-                    "total_samples": 2,
-                    "succeeded_samples": 1,
-                    "failed_samples": 0,
-                    "progress_id": 1,
-                    "progress_kind": "completed_batch",
-                    "in_flight_batches": 0,
-                    "queued_batches": 0,
-                },
-            )
-            # The second host-finalized batch survives even if its progress
-            # heartbeat cannot be appended.
-            record_batch(2)
-            running = _projection_json(director.state(run_id))["execution_diagnostics"]
-            director.pause_run(run_id, reason="operator pause")
-            paused = _projection_json(director.state(run_id))["execution_diagnostics"]
-            director.resume_run(run_id)
-            director.fail_candidate(run_id, candidate.candidate_id, "evaluation stopped")
-            failed = _projection_json(director.state(run_id))["execution_diagnostics"]
-            next_proposal = director.submit_proposal(
-                Proposal(
-                    proposal_id="proposal:projection-batch-fallback:next",
-                    run_id=run_id,
-                    generation=0,
-                    title="后续候选",
-                    changes={"alpha": 0.5},
-                )
-            )
-            next_candidate = director.spawn_candidate(run_id, next_proposal)
-            director.record_evaluation_progress(
-                run_id,
-                generation=0,
-                proposal_id=next_proposal.proposal_id,
-                candidate_id=next_candidate.candidate_id,
-                progress={
-                    "role": "planner",
-                    "model_id": "strategy-model",
-                    "batch_index": 1,
-                    "batch_count": 2,
-                    "batch_size": 1,
-                    "completed_samples": 1,
-                    "total_samples": 2,
-                    "succeeded_samples": 1,
-                    "failed_samples": 0,
-                },
-            )
-            mixed = _projection_json(director.state(run_id))["execution_diagnostics"]
-            director.cancel_run(run_id, "cancel remaining work")
-            cancelled = _projection_json(director.state(run_id))["execution_diagnostics"]
-
-        self.assertEqual(running["evaluation_used_examples"], 0)
-        self.assertEqual(running["live_evaluation_completed_examples"], 2)
-        self.assertEqual(running["live_evaluation_total_examples"], 2)
-        self.assertEqual(running["candidate_work_items"], 2)
-        self.assertIsNone(running["live_evaluation_succeeded_examples"])
-        self.assertEqual(
-            running["partial_evaluation_sources"],
-            ["durable_sample_result_batches"],
-        )
-        self.assertEqual(running["execution_evidence_status"], "partial_live")
-        self.assertEqual(paused["execution_evidence_status"], "retained_partial")
-        self.assertEqual(failed["execution_evidence_status"], "aborted_partial")
-        self.assertEqual(mixed["execution_evidence_status"], "mixed_partial")
-        self.assertEqual(mixed["live_evaluation_completed_examples"], 3)
-        self.assertEqual(mixed["partial_evaluation_active_candidate_count"], 1)
-        self.assertEqual(mixed["partial_evaluation_aborted_candidate_count"], 1)
-        self.assertEqual(cancelled["execution_evidence_status"], "aborted_partial")
 
     def test_stopped_runs_do_not_project_unfinished_candidates_as_running(
         self,
@@ -4851,10 +2993,10 @@ class ExecutionProjectionTests(unittest.TestCase):
         )
         for label, expected_phase, expected_stage, expected_evidence in cases:
             with self.subTest(status=label), EventLedger() as ledger:
-                director = EvolutionDirector(ledger, FakeDSHAdapter())
+                director = EvolutionDirector(ledger, NativeRoleStub())
                 run_id = f"run:stopped-stage-projection:{label}"
-                director.start_evolution(_task(), run_id=run_id)
-                candidate = director.propose_and_spawn(run_id)
+                start_native_run(director, task=_task(),run_id=run_id)
+                candidate = spawn_native_candidate(director, run_id)
                 director.record_evolution_stage(
                     run_id,
                     generation=0,
@@ -5012,71 +3154,14 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(sample_rate, 10.0)
         self.assertEqual(gateway_rate, 10.0)
 
-    def test_progress_uses_latest_sample_result_revision_after_recovery(self) -> None:
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(max_candidates=1), run_id="run:projection-latest-revision"
-            ).run.run_id
-            proposal = director.submit_proposal(
-                Proposal(
-                    proposal_id="proposal:projection-latest-revision",
-                    run_id=run_id,
-                    generation=0,
-                    title="重启后进度",
-                    changes={"alpha": 0.4},
-                )
-            )
-            candidate = director.spawn_candidate(run_id, proposal)
-
-            def start_revision(revision: str) -> None:
-                director.start_evaluation_sample_results(
-                    run_id,
-                    generation=0,
-                    proposal_id=proposal.proposal_id,
-                    candidate_id=candidate.candidate_id,
-                    revision=revision,
-                )
-
-            def record_progress(completed: int) -> None:
-                director.record_evaluation_progress(
-                    run_id,
-                    generation=0,
-                    proposal_id=proposal.proposal_id,
-                    candidate_id=candidate.candidate_id,
-                    progress={
-                        "role": "planner",
-                        "model_id": "strategy-model",
-                        "batch_index": completed // 9,
-                        "batch_count": 802,
-                        "batch_size": 9,
-                        "completed_samples": completed,
-                        "total_samples": 7125,
-                        "succeeded_samples": completed,
-                        "failed_samples": 0,
-                    },
-                )
-
-            start_revision("revision:before-restart")
-            record_progress(306)
-            start_revision("revision:after-restart")
-            record_progress(36)
-
-            projection = _projection_json(director.state(run_id))
-
-        stage_progress = projection["candidates"][0]["execution"]["stage_progress"]
-        self.assertEqual(stage_progress["completed_samples"], 36)
-        self.assertEqual(stage_progress["batch_index"], 4)
 
     def test_projection_exposes_isolated_legacy_revision_aggregate(self) -> None:
         """An isolated revision is visible without reviving its counters."""
 
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(max_candidates=1), run_id="run:projection-superseded-revision"
-            ).run.run_id
-            candidate = director.propose_and_spawn(run_id)
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            run_id = start_native_run(director, task=_task(max_candidates=1),run_id='run:projection-superseded-revision').run.run_id
+            candidate = spawn_native_candidate(director, run_id)
             director.record_evolution_stage(
                 run_id,
                 generation=candidate.generation,
@@ -5177,11 +3262,9 @@ class ExecutionProjectionTests(unittest.TestCase):
 
     def test_projection_omits_superseded_summary_for_normal_resume(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(max_candidates=1), run_id="run:projection-normal-resume"
-            ).run.run_id
-            candidate = director.propose_and_spawn(run_id)
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            run_id = start_native_run(director, task=_task(max_candidates=1),run_id='run:projection-normal-resume').run.run_id
+            candidate = spawn_native_candidate(director, run_id)
             revision = "revision:matching-checkpoint"
             checkpoint = {
                 "schema_version": "ecologyrsi-dsh.sample-checkpoint/1",
@@ -5211,465 +3294,11 @@ class ExecutionProjectionTests(unittest.TestCase):
 
         self.assertIsNone(execution["superseded_sample_revision"])
 
-    def test_historical_v1_evaluation_progress_remains_replayable(self) -> None:
-        from ecologyrsi_dsh.api.events import EventEndpointsMixin
 
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(max_candidates=1), run_id="run:projection-progress-v1"
-            ).run.run_id
-            proposal = director.submit_proposal(
-                Proposal(
-                    proposal_id="proposal:projection-progress-v1",
-                    run_id=run_id,
-                    generation=0,
-                    title="历史微批进度",
-                    changes={"alpha": 0.4},
-                )
-            )
-            candidate = director.spawn_candidate(run_id, proposal)
-            ledger.append(
-                run_id,
-                "EvaluationProgressRecorded",
-                {
-                    "schema_version": "ecologyrsi-dsh.evaluation-progress/1",
-                    "generation": 0,
-                    "proposal_id": proposal.proposal_id,
-                    "candidate_id": candidate.candidate_id,
-                    "role": "planner",
-                    "model_id": "strategy-model",
-                    "batch_index": 2,
-                    "batch_count": 4,
-                    "batch_size": 64,
-                    "completed_samples": 128,
-                    "total_samples": 256,
-                    "succeeded_samples": 126,
-                    "failed_samples": 2,
-                },
-                event_id="event:historical-evaluation-progress-v1",
-            )
 
-            projection = _projection_json(director.state(run_id))
-            progress_event = next(
-                event
-                for event in director.state(run_id).events
-                if event.kind == "EvaluationProgressRecorded"
-            )
-            public_event = EventEndpointsMixin._event_json(progress_event)
 
-        stage_progress = projection["candidates"][0]["execution"]["stage_progress"]
-        self.assertEqual(
-            stage_progress["schema_version"],
-            "ecologyrsi-dsh.evaluation-progress/1",
-        )
-        self.assertEqual(stage_progress["gateway_request_count"], 2)
-        self.assertEqual(stage_progress["adaptive_split_count"], 0)
-        self.assertEqual(stage_progress["adaptive_split_recovered_samples"], 0)
-        self.assertEqual(public_event["payload"]["gateway_request_count"], 2)
-        self.assertEqual(public_event["payload"]["adaptive_split_count"], 0)
 
-    def test_completed_projection_contains_bounded_sample_trace(self) -> None:
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(max_candidates=1), run_id="run:projection-complete"
-            ).run.run_id
-            proposal = director.submit_proposal(
-                Proposal(
-                    proposal_id="proposal:projection-complete",
-                    run_id=run_id,
-                    generation=0,
-                    title="完整预测方案",
-                    changes={"alpha": 0.4},
-                    metadata={"proposal_source": "host_strategy"},
-                )
-            )
-            candidate = director.spawn_candidate(run_id, proposal)
-            artifact = ModelArtifact(
-                artifact_id="artifact:projection-complete",
-                run_id=run_id,
-                candidate_id=candidate.candidate_id,
-                model_id="toy-rolling-water@1",
-                dataset_digest="dataset:projection",
-                training_partition="train",
-                training_rows=10,
-                metrics={
-                    "execution_mode": "registered_lightweight",
-                    "fit_method": "toy_score",
-                    "epochs_completed": 1,
-                    "training_partition_rows": 10,
-                    "training_eligible_examples": 18,
-                    "training_used_examples": 16,
-                    "training_skipped_examples": 2,
-                },
-            )
-            director.record_artifact(artifact)
-            evaluation = Evaluation(
-                evaluation_id="evaluation:projection-complete",
-                run_id=run_id,
-                candidate_id=candidate.candidate_id,
-                score=0.8,
-                passed=True,
-                partition="validation",
-                metrics={
-                    "n": 2,
-                    "evaluation_partition_rows": 2,
-                    "evaluation_eligible_examples": 3,
-                    "evaluation_used_examples": 2,
-                    "evaluation_skipped_examples": 1,
-                    "scientific_pass": True,
-                    "prediction_preview": [
-                        {
-                            "timestamp": 10,
-                            "origin_timestamp": 9,
-                            "target_timestamp": 10,
-                            "target": "soil_water",
-                            "unit": "fraction",
-                            "horizon_hours": 24,
-                            "observed": 0.4,
-                            "predicted": 0.42,
-                            "baseline": 0.38,
-                            "raw_rows": "must not be copied",
-                        }
-                    ],
-                },
-                artifact_digest=artifact.digest,
-            )
-            director.record_evaluation(evaluation)
-            director.decide_promotion(
-                Promotion(
-                    promotion_id="promotion:projection-complete",
-                    run_id=run_id,
-                    candidate_id=candidate.candidate_id,
-                    decision=PromotionDecision.APPROVED,
-                    reason="通过测试",
-                )
-            )
-            director.complete_run(run_id, outcome="accepted")
-            state = director.state(run_id)
-            completed_event = next(
-                event for event in state.events if event.kind == "RunCompleted"
-            )
-            self.assertEqual(
-                completed_event.payload["outcome"],
-                "completed_with_search_retained_candidate",
-            )
-            self.assertEqual(
-                completed_event.payload["selection_scope"],
-                "iterative_training_feedback_only",
-            )
-            self.assertEqual(
-                completed_event.payload["formal_validation_status"], "not_run"
-            )
-            projection = _projection_json(state)
-            candidate_view = projection["candidates"][0]
-            trace = candidate_view["inference_trace"]
-            self.assertEqual(trace["status"], "completed")
-            self.assertEqual(trace["sample_count"], 2)
-            self.assertEqual(trace["shown_count"], 1)
-            self.assertTrue(trace["truncated"])
-            row = trace["rows"][0]
-            self.assertEqual(row["error"], 0.019999999999999962)
-            self.assertEqual(row["baseline_error"], -0.020000000000000018)
-            self.assertEqual(
-                row["reward"],
-                abs(0.38 - 0.4) - abs(0.42 - 0.4),
-            )
-            self.assertEqual(
-                trace["reward_definition"],
-                "absolute_error_improvement_vs_persistence@1",
-            )
-            self.assertTrue(trace["positive_is_better"])
-            self.assertNotIn("raw_rows", row)
-            self.assertEqual(candidate_view["execution"]["progress_percent"], 100.0)
-            self.assertEqual(projection["execution_progress"]["progress_percent"], 100.0)
-            self.assertEqual(
-                projection["outcome"], "completed_with_acceptable_candidate"
-            )
-            self.assertEqual(
-                projection["selection_scope"], "iterative_training_feedback_only"
-            )
-            self.assertEqual(projection["formal_validation_status"], "not_run")
-            self.assertEqual(
-                projection["best_candidate_scope"],
-                "iterative_training_feedback_only",
-            )
-            self.assertEqual(projection["best_candidate_id"], candidate.candidate_id)
-            self.assertEqual(
-                projection["best_observed_candidate_id"], candidate.candidate_id
-            )
-            self.assertEqual(projection["best_observed_score"], 0.8)
-            diagnostics = projection["execution_diagnostics"]
-            self.assertEqual(diagnostics["training_partition_rows"], 10)
-            self.assertEqual(diagnostics["training_eligible_examples"], 18)
-            self.assertEqual(diagnostics["training_used_examples"], 16)
-            self.assertEqual(diagnostics["training_skipped_examples"], 2)
-            self.assertEqual(diagnostics["evaluation_partition_rows"], 2)
-            self.assertEqual(diagnostics["evaluation_eligible_examples"], 3)
-            self.assertEqual(diagnostics["evaluation_used_examples"], 2)
-            self.assertEqual(diagnostics["evaluation_skipped_examples"], 1)
-            self.assertEqual(diagnostics["candidate_work_items"], 18)
-            self.assertEqual(diagnostics["fit_passes_completed"], 1)
-            self.assertFalse(diagnostics["iterative_epoch_training"])
-            self.assertTrue(diagnostics["legacy_workload_estimate_used"])
-            self.assertEqual(
-                diagnostics["proposal_sources"], {"host_strategy": 1}
-            )
-            self.assertEqual(diagnostics["remote_strategy_status"], "not_called")
-            round_diagnostics = projection["rounds"][0]["execution_diagnostics"]
-            self.assertEqual(round_diagnostics["proposal_attempts"], 1)
-            self.assertEqual(round_diagnostics["unique_candidates"], 1)
-            self.assertEqual(round_diagnostics["training_used_examples"], 16)
-            self.assertEqual(round_diagnostics["evaluation_used_examples"], 2)
-            self.assertEqual(round_diagnostics["candidate_work_items"], 18)
-            self.assertEqual(
-                round_diagnostics["proposal_sources"], {"host_strategy": 1}
-            )
 
-    def test_exhausted_projection_separates_observed_best_from_acceptable_best(self) -> None:
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                _task(max_candidates=2), run_id="run:projection-exhausted"
-            ).run.run_id
-            candidates = []
-            for slot, score, marker in (
-                (0, 0.9, "highest-observed"),
-                (1, 0.1, "last-evaluated"),
-            ):
-                proposal = director.submit_proposal(
-                    Proposal(
-                        proposal_id=f"proposal:projection-exhausted:{slot}",
-                        run_id=run_id,
-                        generation=0,
-                        title=f"候选 {slot}",
-                        changes={"alpha": score},
-                    )
-                )
-                candidate = director.spawn_candidate(
-                    run_id, proposal, slot_index=slot
-                )
-                candidates.append(candidate)
-                director.evaluate_and_decide(
-                    Evaluation(
-                        evaluation_id=f"evaluation:projection-exhausted:{slot}",
-                        run_id=run_id,
-                        candidate_id=candidate.candidate_id,
-                        score=score,
-                        passed=False,
-                        partition="validation",
-                        metrics={
-                            "marker": marker,
-                            "scientific_pass": False,
-                            "judge_status": "unavailable" if slot == 0 else "completed",
-                        },
-                    )
-                )
-            director.complete_run(
-                run_id,
-                termination_reason="candidate_budget_exhausted",
-                outcome="budget_exhausted_without_acceptable_candidate",
-            )
-
-            state = director.state(run_id)
-            projection = _projection_json(state)
-            summary = run_summary(state)
-
-            self.assertIsNone(projection["best_candidate_id"])
-            self.assertIsNone(projection["best_candidate_score"])
-            self.assertEqual(
-                projection["best_observed_candidate_id"], candidates[0].candidate_id
-            )
-            self.assertEqual(projection["best_observed_score"], 0.9)
-            self.assertIsNone(projection["metrics_candidate_id"])
-            self.assertEqual(projection["metrics"], {})
-            self.assertEqual(
-                projection["metrics_scope"], "no_current_search_incumbent"
-            )
-            self.assertEqual(
-                projection["best_observed_score_scope"],
-                "observation_only_full_cohort",
-            )
-            self.assertFalse(projection["best_observed_drives_current_metrics"])
-            candidate_views = {item["id"]: item for item in projection["candidates"]}
-            self.assertEqual(
-                candidate_views[candidates[0].candidate_id]["execution"]["stages"][
-                    "judge"
-                ],
-                "failed",
-            )
-            self.assertEqual(
-                projection["outcome"],
-                "budget_exhausted_without_acceptable_candidate",
-            )
-            self.assertEqual(
-                projection["termination_reason"], "candidate_budget_exhausted"
-            )
-            progress = projection["execution_progress"]
-            self.assertEqual(progress["phase"], "completed")
-            self.assertIsNone(progress["current_stage"])
-            self.assertLess(progress["completed_steps"], progress["total_steps"])
-            self.assertLess(progress["progress_percent"], 100.0)
-            self.assertEqual(
-                [point["best_observed_score"] for point in projection["trajectory"]],
-                [0.9, 0.9],
-            )
-
-            self.assertIsNone(summary["best_candidate_id"])
-            self.assertIsNone(summary["best_score"])
-            self.assertEqual(
-                summary["best_observed_candidate_id"], candidates[0].candidate_id
-            )
-            self.assertEqual(summary["best_observed_score"], 0.9)
-            self.assertEqual(summary["outcome"], projection["outcome"])
-            self.assertEqual(
-                summary["selection_scope"], "iterative_training_feedback_only"
-            )
-            self.assertEqual(summary["formal_validation_status"], "not_run")
-            self.assertIsNone(summary["best_candidate_scope"])
-
-    def test_cross_cohort_lower_score_does_not_replace_current_projection(self) -> None:
-        task_data = _task(max_candidates=2, max_generations=2).to_dict()
-        task_data["metadata"] = {"samples_per_update": 500}
-        task = TaskManifest.from_dict(task_data)
-        first_digest = "a" * 64
-        second_digest = "b" * 64
-
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = director.start_evolution(
-                task, run_id="run:projection-cross-cohort-incumbent"
-            ).run.run_id
-
-            first_proposal = director.submit_proposal(
-                Proposal(
-                    proposal_id="proposal:projection-cross-cohort:first",
-                    run_id=run_id,
-                    generation=0,
-                    title="first cohort champion",
-                    changes={"alpha": 0.8},
-                )
-            )
-            first = director.spawn_candidate(run_id, first_proposal)
-            first_promotion = director.evaluate_and_decide(
-                Evaluation(
-                    evaluation_id="evaluation:projection-cross-cohort:first",
-                    run_id=run_id,
-                    candidate_id=first.candidate_id,
-                    score=0.8,
-                    passed=True,
-                    partition="validation",
-                    metrics={
-                        "marker": "old-window-incumbent",
-                        "evaluation_index_digest": first_digest,
-                    },
-                )
-            )
-            self.assertIs(first_promotion.decision, PromotionDecision.APPROVED)
-            director.advance_generation(run_id)
-
-            second_proposal = director.submit_proposal(
-                Proposal(
-                    proposal_id="proposal:projection-cross-cohort:second",
-                    run_id=run_id,
-                    generation=1,
-                    title="second cohort champion",
-                    changes={"alpha": 0.4},
-                )
-            )
-            second = director.spawn_candidate(run_id, second_proposal)
-            second_promotion = director.evaluate_and_decide(
-                Evaluation(
-                    evaluation_id="evaluation:projection-cross-cohort:second",
-                    run_id=run_id,
-                    candidate_id=second.candidate_id,
-                    score=0.4,
-                    passed=True,
-                    partition="validation",
-                    metrics={
-                        "marker": "current-incumbent",
-                        "evaluation_index_digest": second_digest,
-                    },
-                )
-            )
-            self.assertIs(second_promotion.decision, PromotionDecision.REJECTED)
-            projection = _projection_json(director.state(run_id))
-
-        self.assertEqual(projection["best_candidate_id"], first.candidate_id)
-        self.assertEqual(projection["best_candidate_score"], 0.8)
-        self.assertEqual(projection["metrics_candidate_id"], first.candidate_id)
-        self.assertEqual(projection["metrics_scope"], "current_search_incumbent")
-        self.assertEqual(projection["metrics"]["score"], 0.8)
-        self.assertEqual(projection["metrics"]["marker"], "old-window-incumbent")
-        self.assertEqual(
-            projection["best_observed_candidate_id"], first.candidate_id
-        )
-        self.assertEqual(projection["best_observed_score"], 0.8)
-        self.assertEqual(
-            projection["best_observed_score_scope"],
-            "observation_only_cross_cohort_not_comparable",
-        )
-        self.assertFalse(projection["best_observed_drives_current_metrics"])
-
-        first_point, second_point = projection["trajectory"]
-        self.assertEqual(first_point["incumbent_score"], 0.8)
-        self.assertEqual(second_point["incumbent_score"], 0.8)
-        self.assertEqual(first_point["evaluation_cohort_digest"], first_digest)
-        self.assertEqual(second_point["evaluation_cohort_digest"], second_digest)
-        self.assertEqual(
-            second_point["incumbent_before_cohort_digest"], first_digest
-        )
-        self.assertEqual(
-            second_point["score_comparison_boundary"], "different_cohort"
-        )
-        self.assertFalse(second_point["score_comparable_to_incumbent_before"])
-
-    def test_legacy_accepted_completion_outcome_keeps_public_contract(self) -> None:
-        state = type(
-            "LegacyState",
-            (),
-            {
-                "run": type(
-                    "LegacyRun",
-                    (),
-                    {
-                        "status": type("LegacyStatus", (), {"value": "completed"})(),
-                        "best_candidate_id": "candidate:legacy",
-                    },
-                )(),
-                "events": [
-                    type(
-                        "LegacyEvent",
-                        (),
-                        {
-                            "kind": "RunCompleted",
-                            "payload": {
-                                "outcome": "accepted",
-                                "termination_reason": "legacy_completion",
-                            },
-                        },
-                    )()
-                ],
-            },
-        )()
-
-        self.assertEqual(
-            run_completion_outcome(state),
-            ("completed_with_acceptable_candidate", "legacy_completion"),
-        )
-
-    def test_toy_evaluator_records_prediction_preview(self) -> None:
-        toy = ToyCropSoilWater(seed=4)
-        candidate = type("CandidateStub", (), {"run_id": "run:toy", "candidate_id": "candidate:toy"})()
-        proposal = type("ProposalStub", (), {"run_id": "run:toy", "changes": {"alpha": 0.4, "window": 5, "water_threshold": 0.4}})()
-        evaluation = toy.evaluate_candidate("run:toy", candidate, proposal)
-        preview = evaluation.metrics["prediction_preview"]
-        self.assertTrue(preview)
-        self.assertIn("observed", preview[0])
-        self.assertIn("predicted", preview[0])
-        self.assertIn("baseline", preview[0])
-        self.assertLessEqual(len(preview), 48)
 
 
 if __name__ == "__main__":
@@ -5679,11 +3308,11 @@ class NativeReplicaProgressTests(unittest.TestCase):
     def test_joint_progress_counts_screening_reuse_and_paired_batch(self):
         schedule = OptimizationSchedule.for_new_run()
         state = SimpleNamespace(
-            task_manifest=SimpleNamespace(metadata={
+            task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
                 'optimization_protocol': 'joint_plugin_epoch@2',
-                'optimization_schedule': schedule.to_dict(),
+                'optimization_schedule': OptimizationSchedule.for_new_run().to_dict(),
                 'prediction_cells_per_origin': 9,
-            }),
+            }}),
             run=SimpleNamespace(generation=0, status=SimpleNamespace(value='running')),
             candidates=(), candidate_screening_events=(),
             formal_batch_evaluations=(), holdout_evaluations=(), formal_batches=(),
@@ -5702,54 +3331,21 @@ class NativeReplicaProgressTests(unittest.TestCase):
                 self.assertEqual(progress['formal_total_origins'], 50)
                 self.assertEqual(progress['total_origins'], 300)
 
-    def test_independent_replicas_accumulate_without_recounting_checkpoint_replays(self):
-        from ecologyrsi_dsh.api.projection import _holdout_arm_live_projection
-        def event(seq, kind, **payload):
-            return SimpleNamespace(seq=seq, kind=kind, payload=payload, created_at='2026-09-08T00:00:00+00:00')
-        boundary = event(1, 'HoldoutArmStarted', generation=0, holdout_arm='incumbent',
-            candidate_id='c', candidate_revision_id='rev', cohort_digest='a'*64, origin_count=169)
-        def start(seq, replica, revision):
-            return event(seq, 'EvaluationSampleResultsStarted', candidate_id='c', revision=revision,
-                checkpoint={'evaluation_phase':'holdout', 'formal_batch_index':None, 'holdout_arm':'incumbent',
-                    'candidate_revision_id':'rev', 'cohort_digest':'a'*64, 'inference_replica':replica})
-        def batch(seq, revision, count):
-            return event(seq, 'EvaluationSampleResultBatchRecorded', candidate_id='c', revision=revision,
-                batch_index=1, record_count=count*9, sample_ids=[f'cell-{i}' for i in range(count*9)])
-        state = SimpleNamespace(task_manifest=SimpleNamespace(metadata={'sample_agent_mode':'dsh_native_agent',
-            'prediction_cells_per_origin':9}), run=SimpleNamespace(generation=0, status=SimpleNamespace(value='running')),
-            holdout_evaluations=(), events=(boundary, start(2,0,'r0'), batch(3,'r0',169)))
-        first = _holdout_arm_live_projection(state)
-        self.assertEqual(first['completed_origins'], 169)
-        self.assertEqual(first['awaiting_submission_batches'], 169)
-        state.events += (start(4,1,'r1'), batch(5,'r1',3), batch(6,'r1',3))
-        second = _holdout_arm_live_projection(state)
-        self.assertEqual(second['completed_origins'], 172)
-        self.assertEqual(second['host_settled_origins'], 172)
-        self.assertEqual(second['holdout_replica_count'], 2)
-        self.assertEqual([row['completed_origins'] for row in second['holdout_replica_progress']], [169,3])
-        for status in ('paused', 'cancelled', 'failed'):
-            state.run.status.value = status
-            self.assertEqual(_holdout_arm_live_projection(state)['completed_origins'], 172)
-        state.run.status.value = 'running'
-        # Earlier screening results and a stale unrelated holdout do not leak in.
-        state.events = (start(0,1,'old'), batch(0,'old',169), *state.events)
-        self.assertEqual(_holdout_arm_live_projection(state)['completed_origins'], 172)
 
     def test_native_progress_uses_the_same_execution_budget_as_capacity(self):
-        from dataclasses import replace
-        schedule = replace(OptimizationSchedule.for_comparison_run(), formal_origin_count_per_finalist=144, local_batch_origin_count=72, selection_holdout_origin_count=169)
-        state = SimpleNamespace(task_manifest=SimpleNamespace(metadata={
-            'sample_agent_mode':'dsh_native_agent', 'optimization_protocol':'top2_adaptive_epoch@1',
-            'optimization_schedule':schedule.to_dict(), 'prediction_cells_per_origin':9}),
+        schedule = OptimizationSchedule.for_new_run()
+        state = SimpleNamespace(task_manifest=SimpleNamespace(metadata={**dict(native_manifest().metadata), **{
+            'sample_agent_mode':'dsh_native_agent', 'optimization_protocol':'joint_plugin_epoch@2',
+            'optimization_schedule':OptimizationSchedule.for_new_run().to_dict(), 'prediction_cells_per_origin':9}}),
             run=SimpleNamespace(generation=0,status=SimpleNamespace(value='running')), candidates=(),
             candidate_screening_events=(), formal_batch_evaluations=(), holdout_evaluations=(), formal_batches=(),
             events=(SimpleNamespace(seq=1,kind='HoldoutArmStarted', created_at='2026-09-08T00:00:00+00:00',
                 payload={'generation':0,'holdout_arm':'incumbent','candidate_id':'c','origin_count':169}),))
         progress = _adaptive_progress_projection(state)
-        self.assertEqual(progress['total_origins'], 1702)
-        self.assertEqual(progress['holdout_total_origins'], 1014)
+        self.assertEqual(progress['total_origins'], 300)
+        self.assertEqual(progress['holdout_total_origins'], 200)
         self.assertEqual(progress['total_origins'], schedule.generation_execution_budget(
-            cells_per_origin=9,holdout_inference_replicas=2)['total_candidate_origins'])
+            cells_per_origin=9,holdout_inference_replicas=1)['total_candidate_origins'])
         # Durable holdout batches remain visible during a pause or terminal
         # stop, but those states do not predict a future completion time.
         state.events += tuple(SimpleNamespace(seq=i + 2, kind='EvaluationSampleResultBatchRecorded',

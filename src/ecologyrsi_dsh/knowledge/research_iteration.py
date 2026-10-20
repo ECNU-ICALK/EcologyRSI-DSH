@@ -9,7 +9,6 @@ from types import MappingProxyType
 from typing import Any
 
 from ..core.models import JsonObject, canonical_json, digest, utc_now
-from .algorithms import PredictorAdoption
 from ..core.research import DiagnosticReport
 from ..core.immutable import freeze_json, thaw_json
 
@@ -169,51 +168,6 @@ def validate_research_plan(value: Any) -> dict[str, Any]:
     return result
 
 
-def build_deterministic_research_fallback_plan(
-    *,
-    current_plan: Mapping[str, Any],
-    validation_detail: str,
-    source_analysis_digest: str | None = None,
-    source_reflection_digest: str | None = None,
-    search_plan_digest: str | None = None,
-) -> dict[str, Any]:
-    """Build a small Host-owned plan from durable identifiers only."""
-
-    plan: dict[str, Any] = {
-        "fallback_diagnostics": {
-            "reason_code": "research_response_contract_invalid",
-            "validation_detail": " ".join(str(validation_detail).split())[:500]
-            or "host contract validation failed",
-            "policy": "durable_evidence_host_fallback@1",
-            "model_request_repeated": False,
-        },
-        "search_policy": {
-            "registered_host_capabilities_only": True,
-            "preserve_bounded_mutation_catalog": True,
-            "continue_from_durable_search_version": True,
-        },
-    }
-    prediction_model = current_plan.get("prediction_model")
-    if isinstance(prediction_model, Mapping):
-        predictor_id = prediction_model.get("id")
-        if isinstance(predictor_id, str) and predictor_id.strip():
-            plan["prediction_model"] = {"id": predictor_id.strip()[:500]}
-    evidence = {
-        name: value
-        for name, value in (
-            ("source_analysis_digest", source_analysis_digest),
-            ("source_reflection_digest", source_reflection_digest),
-            ("search_plan_digest", search_plan_digest),
-        )
-        if isinstance(value, str) and value.strip()
-    }
-    if evidence:
-        plan["durable_evidence"] = evidence
-    if isinstance(search_plan_digest, str) and search_plan_digest.strip():
-        plan["generation_search_plan"] = {
-            "search_plan_digest": search_plan_digest.strip()
-        }
-    return validate_research_plan(plan)
 
 
 def _historical_provenance(value: Any) -> dict[str, Any] | None:
@@ -284,15 +238,12 @@ class ResearchIteration:
     generation: int
     status: str
     plan: Mapping[str, Any]
-    prediction_model_adoption: Mapping[str, Any]
     knowledge_snapshot_digest: str
     source_analysis_digest: str | None = None
     historical_provenance: Mapping[str, Any] | None = None
     source_assessment_digest: str | None = None
     previous_next_action: str | None = None
     model_id: str | None = None
-    pending_consultation_ids: tuple[str, ...] = ()
-    expert_answer_ids: tuple[str, ...] = ()
     created_at: str = field(default_factory=utc_now)
     schema_version: str = RESEARCH_ITERATION_VERSION
     iteration_digest: str = ""
@@ -319,14 +270,6 @@ class ResearchIteration:
             raise ValueError("unsupported research iteration version")
         plan = validate_research_plan(self.plan)
         object.__setattr__(self, "plan", freeze_json(plan))
-        adoption = PredictorAdoption.from_dict(self.prediction_model_adoption)
-        if adoption.plan_digest != digest(plan):
-            raise ValueError("research iteration adoption does not match its plan")
-        object.__setattr__(
-            self,
-            "prediction_model_adoption",
-            freeze_json(adoption.to_dict()),
-        )
         object.__setattr__(
             self,
             "knowledge_snapshot_digest",
@@ -361,20 +304,6 @@ class ResearchIteration:
             "model_id",
             _optional_text(self.model_id, "model_id", maximum=500),
         )
-        for name in ("pending_consultation_ids", "expert_answer_ids"):
-            raw = getattr(self, name)
-            if not isinstance(raw, (list, tuple)):
-                raise TypeError(f"{name} must be an array")
-            if len(raw) > 16:
-                raise ValueError(f"{name} contains too many items")
-            values = tuple(
-                _text(item, f"{name} item", maximum=500) for item in raw
-            )
-            if len(set(values)) != len(values):
-                raise ValueError(f"{name} contains duplicate items")
-            object.__setattr__(self, name, values)
-        if self.status in {"host_fallback", "unavailable"} and self.expert_answer_ids:
-            raise ValueError("fallback research iterations cannot consume expert answers")
         object.__setattr__(
             self,
             "created_at",
@@ -392,7 +321,6 @@ class ResearchIteration:
             "generation": self.generation,
             "status": self.status,
             "plan": thaw_json(self.plan),
-            "prediction_model_adoption": thaw_json(self.prediction_model_adoption),
             "knowledge_snapshot_digest": self.knowledge_snapshot_digest,
             "source_analysis_digest": self.source_analysis_digest,
             "source_assessment_digest": self.source_assessment_digest,
@@ -403,12 +331,6 @@ class ResearchIteration:
         }
         # Keep old /1 event digests stable: legacy iterations did not include
         # either field, so empty values remain omitted during replay.
-        if self.pending_consultation_ids:
-            result["pending_consultation_ids"] = list(
-                self.pending_consultation_ids
-            )
-        if self.expert_answer_ids:
-            result["expert_answer_ids"] = list(self.expert_answer_ids)
         if self.historical_provenance is not None:
             result["historical_provenance"] = thaw_json(self.historical_provenance)
         if self.diagnostic_report is not None:
@@ -432,6 +354,5 @@ class ResearchIteration:
 __all__ = [
     "RESEARCH_ITERATION_VERSION",
     "ResearchIteration",
-    "build_deterministic_research_fallback_plan",
     "validate_research_plan",
 ]

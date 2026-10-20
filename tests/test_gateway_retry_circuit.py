@@ -11,7 +11,7 @@ from unittest.mock import patch
 from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import TaskManifest, digest
-from ecologyrsi_dsh.evolution.strategies import FakeDSHAdapter
+from tests.native_fixtures import NativeRoleStub, native_manifest, start_native_run
 from ecologyrsi_dsh.api.events import EventEndpointsMixin
 from ecologyrsi_dsh.api.projection import _projection_json
 
@@ -31,19 +31,10 @@ class GatewayRetryCircuitTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.ledger = EventLedger(Path(self.directory.name) / "events.sqlite3")
-        self.director = EvolutionDirector(self.ledger, FakeDSHAdapter())
-        self.task = TaskManifest(
-            task_id="gateway-retry-circuit",
-            objective="bound orchestration-level model gateway retries",
-            domain_pack="crop-soil-water@toy",
-            visible_datasets=("generated-toy-series@1",),
-            budget={"max_candidates": 1, "max_generations": 1},
-            metadata={"strategy_id": "parameter_sweep@1"},
-        )
-        self.run_id = self.director.start_evolution(
-            self.task,
-            run_id="run:gateway-retry-circuit",
-        ).run.run_id
+        self.director = EvolutionDirector(self.ledger, NativeRoleStub())
+        self.task = native_manifest(task_id="retry-circuit")
+        self.run_id = start_native_run(self.director, task=self.task,
+            run_id="run:gateway-retry-circuit").run.run_id
 
     def tearDown(self) -> None:
         self.ledger.close()
@@ -55,20 +46,20 @@ class GatewayRetryCircuitTests(unittest.TestCase):
             "run_incarnation": state.events[0].seq,
             "generation": state.run.generation,
             "stage": "research",
-            "retry_class": "model_gateway",
+            "retry_class": "research_timeout",
             "failure_id": digest(
                 {
                     "run_id": self.run_id,
                     "generation": state.run.generation,
                     "stage": "research",
-                    "retry_class": "model_gateway",
+                    "retry_class": "research_timeout",
                     "failure_epoch": failure_epoch,
                     "attempt": attempt,
                 }
             ),
             "attempt_anchor_seq": state.events[-1].seq,
             "delay_seconds": 0.0,
-            "last_error_code": "gateway_unavailable",
+            "last_error_code": "timeout",
         }
 
     def _report_failure(self, attempt: int, *, failure_epoch: int = 1):
@@ -79,7 +70,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
 
     def _record_dsh_success(self, *, generation: int = 0):
         structured = {
-            "schema_version": "ecology-sample-reflection@1",
+            "schema_version": "ecology-sample-review@2",
             "summary": "The DSH runtime returned a valid structured result.",
         }
         return self.ledger.append(
@@ -91,15 +82,15 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                     "run_id": self.run_id,
                     "generation": generation,
                     "role": "sample-critic",
-                    "stage": "sample.reflect",
+                    "stage": "sample.critic",
                     "session_id": "dsh-child-retry-recovery",
                 },
-                "output_schema_id": "ecology-sample-reflection@1",
+                "output_schema_id": "ecology-sample-review@2",
                 "result_digest": digest(structured),
                 "structured": structured,
                 "skill_invocation_evidence": {
                     "schema_version": "ecologyrsi-dsh.skill-invocation-evidence/1",
-                    "stage": "sample.reflect",
+                    "stage": "sample.critic",
                     "skill_name": "origin-vector-review",
                     "call_count": 1,
                     "successful_call_count": 1,
@@ -147,7 +138,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                 release_append.set()
             return future.result(timeout=3)
 
-    def test_sixth_model_gateway_failure_opens_checkpoint_preserving_pause(
+    def test_sixth_research_timeout_failure_opens_checkpoint_preserving_pause(
         self,
     ) -> None:
         for attempt in range(1, 6):
@@ -169,8 +160,8 @@ class GatewayRetryCircuitTests(unittest.TestCase):
         self.assertEqual(
             decision.event.payload,
             {
-                "code": "gateway_retry_circuit_open",
-                "retry_class": "model_gateway",
+                "code": "research_timeout_retry_circuit_open",
+                "retry_class": "research_timeout",
                 "generation": 0,
                 "stage": "research",
                 "breaker_epoch": 1,
@@ -178,7 +169,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                 "retry_limit": 6,
                 "first_failure_at": decision.event.payload["first_failure_at"],
                 "last_failure_at": decision.event.payload["last_failure_at"],
-                "last_error_code": "gateway_unavailable",
+                "last_error_code": "timeout",
                 "suggested_action": "check_gateway_then_resume",
                 "pause_trigger": "failure_limit",
                 "epoch_seconds": 30 * 60,
@@ -444,44 +435,6 @@ class GatewayRetryCircuitTests(unittest.TestCase):
         )
         self.assertEqual(recovered_then_failed.event.payload["breaker_epoch"], 2)
 
-    def test_legacy_v2_native_retry_after_structured_success_still_replays(self) -> None:
-        """0.3.27 did not treat unrelated DSH success as an epoch reset."""
-
-        state = self.director.state(self.run_id)
-        attempt_anchor_seq = state.events[-1].seq
-        self._record_dsh_success()
-        timestamp = datetime(2026, 8, 26, 4, 0, tzinfo=timezone.utc).isoformat()
-        legacy_payload = {
-            "schema_version": "ecologyrsi-dsh.gateway-retry-scheduled/2",
-            "run_incarnation": state.events[0].seq,
-            "generation": 0,
-            "stage": "generation",
-            "retry_class": "dsh_native_runtime",
-            "breaker_epoch": 1,
-            "failure_id": digest("legacy-native-retry-after-dsh-success"),
-            "attempt_anchor_seq": attempt_anchor_seq,
-            "consecutive_failures": 1,
-            "retry_limit": 6,
-            "first_failure_at": timestamp,
-            "last_failure_at": timestamp,
-            "last_error_code": "dsh_native_runtime_unavailable",
-            "retry_at": timestamp,
-            "delay_seconds": 0.0,
-            "attempt": 1,
-            "error_code": "dsh_native_runtime_unavailable",
-            "reason": "DSH 智能体运行时暂时不可用，已安排有界延迟重试。",
-        }
-        self.ledger.append(
-            self.run_id,
-            "GatewayRetryScheduled",
-            legacy_payload,
-            event_id=f"{self.run_id}:legacy-native-retry-after-success",
-        )
-
-        replayed = self.director.state(self.run_id)
-
-        self.assertEqual(replayed.run.status.value, "running")
-        self.assertEqual(replayed.events[-1].payload, legacy_payload)
 
     def test_threshold_cas_loses_cleanly_to_cancellation(self) -> None:
         for attempt in range(1, 6):
@@ -547,20 +500,13 @@ class GatewayRetryCircuitTests(unittest.TestCase):
             1,
         )
 
-    def test_retry_cas_loses_cleanly_to_generation_advance(self) -> None:
-        failure = self._failure_kwargs(1)
-
-        decision = self._race_failure_against(
-            failure,
-            lambda: self.director.advance_generation(self.run_id),
-        )
-
-        self.assertEqual(decision.outcome, "superseded")
-        state = self.director.state(self.run_id)
-        self.assertEqual(state.run.generation, 1)
-        self.assertFalse(
-            any(event.kind == "GatewayRetryScheduled" for event in state.events)
-        )
+    def test_uncommitted_generation_cannot_advance_to_escape_retry_scope(self):
+        self._report_failure(1)
+        before = self.ledger.latest_run_seq(self.run_id)
+        with self.assertRaisesRegex(RuntimeError, "global incumbent decision"):
+            self.director.advance_generation(self.run_id)
+        self.assertEqual(self.ledger.latest_run_seq(self.run_id), before)
+        self.assertEqual(self.director.state(self.run_id).run.generation, 0)
 
     def test_old_worker_report_after_resume_cannot_pollute_new_epoch(self) -> None:
         for attempt in range(1, 6):
@@ -600,10 +546,10 @@ class GatewayRetryCircuitTests(unittest.TestCase):
         self.assertEqual(
             resumed.payload,
             {
-                "resume_origin": "gateway_retry_circuit_open",
+                "resume_origin": "research_timeout_retry_circuit_open",
                 "origin_pause_event_id": decision.event.event_id,
                 "origin_breaker_epoch": 1,
-                "retry_class": "model_gateway",
+                "retry_class": "research_timeout",
                 "generation": 0,
                 "stage": "research",
                 "breaker_epoch": 2,
@@ -637,7 +583,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
 
     def test_manual_pause_keeps_legacy_start_transition_compatibility(self) -> None:
         manual_run_id = "run:manual-pause-start"
-        self.director.start_evolution(self.task, run_id=manual_run_id)
+        start_native_run(self.director, task=self.task, run_id=manual_run_id)
         self.director.pause_run(manual_run_id, code="operator_backpressure")
 
         restarted = self.director.start_run(manual_run_id)
@@ -653,7 +599,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
             self.assertEqual(decision.outcome, "scheduled")
             self.assertEqual(decision.event.payload["retry_limit"], 12)
             self.assertEqual(decision.event.payload["last_error_code"], "structured_child_model_error")
-        self.director = EvolutionDirector(self.ledger, FakeDSHAdapter())
+        self.director = EvolutionDirector(self.ledger, NativeRoleStub())
         self.assertEqual(self.director.state(self.run_id).run.status.value, "running")
         self._record_dsh_success()
         kwargs = self._failure_kwargs(7)
@@ -664,7 +610,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
 
     def test_native_recovery_keeps_the_thirty_minute_deadline(self):
         clock = MutableClock(datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc))
-        self.director = EvolutionDirector(self.ledger, FakeDSHAdapter(), clock=clock)
+        self.director = EvolutionDirector(self.ledger, NativeRoleStub(), clock=clock)
         for attempt in (1, 2):
             kwargs = self._failure_kwargs(attempt)
             kwargs.update(retry_class="dsh_native_runtime", last_error_code="structured_child_model_error")
@@ -680,7 +626,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
         clock = MutableClock(datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc))
         self.director = EvolutionDirector(
             self.ledger,
-            FakeDSHAdapter(),
+            NativeRoleStub(),
             clock=clock,
         )
         first = self._report_failure(1)
@@ -753,8 +699,8 @@ class GatewayRetryCircuitTests(unittest.TestCase):
             self.run_id,
             "RunPaused",
             {
-                "code": "gateway_retry_circuit_open",
-                "retry_class": "model_gateway",
+                "code": "research_timeout_retry_circuit_open",
+                "retry_class": "research_timeout",
                 "generation": 0,
                 "stage": "research",
                 "breaker_epoch": first.payload["breaker_epoch"],
@@ -762,7 +708,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                 "retry_limit": 6,
                 "first_failure_at": first.payload["first_failure_at"],
                 "last_failure_at": first.payload["last_failure_at"],
-                "last_error_code": "gateway_unavailable",
+                "last_error_code": "timeout",
                 "suggested_action": "check_gateway_then_resume",
             },
             event_id=f"{self.run_id}:forged-count-two-pause",
@@ -778,8 +724,8 @@ class GatewayRetryCircuitTests(unittest.TestCase):
             self.run_id,
             "RunPaused",
             {
-                "code": "gateway_retry_circuit_open",
-                "retry_class": "model_gateway",
+                "code": "research_timeout_retry_circuit_open",
+                "retry_class": "research_timeout",
                 "generation": 0,
                 "stage": "research",
                 "breaker_epoch": first.payload["breaker_epoch"],
@@ -787,7 +733,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                 "retry_limit": 6,
                 "first_failure_at": first.payload["first_failure_at"],
                 "last_failure_at": first.payload["last_failure_at"],
-                "last_error_code": "gateway_unavailable",
+                "last_error_code": "timeout",
                 "suggested_action": "check_gateway_then_resume",
                 "pause_trigger": "epoch_elapsed",
                 "epoch_seconds": 30 * 60,
@@ -811,8 +757,8 @@ class GatewayRetryCircuitTests(unittest.TestCase):
             self.run_id,
             "RunPaused",
             {
-                "code": "gateway_retry_circuit_open",
-                "retry_class": "model_gateway",
+                "code": "research_timeout_retry_circuit_open",
+                "retry_class": "research_timeout",
                 "generation": 0,
                 "stage": "research",
                 "breaker_epoch": first.payload["breaker_epoch"],
@@ -820,7 +766,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                 "retry_limit": 6,
                 "first_failure_at": first_created_at.isoformat(),
                 "last_failure_at": forged_payload_last.isoformat(),
-                "last_error_code": "gateway_unavailable",
+                "last_error_code": "timeout",
                 "suggested_action": "check_gateway_then_resume",
                 "pause_trigger": "epoch_elapsed",
                 "epoch_seconds": 30 * 60,
@@ -844,8 +790,8 @@ class GatewayRetryCircuitTests(unittest.TestCase):
             self.run_id,
             "RunPaused",
             {
-                "code": "gateway_retry_circuit_open",
-                "retry_class": "model_gateway",
+                "code": "research_timeout_retry_circuit_open",
+                "retry_class": "research_timeout",
                 "generation": 0,
                 "stage": "research",
                 "breaker_epoch": first.payload["breaker_epoch"],
@@ -853,7 +799,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                 "retry_limit": 6,
                 "first_failure_at": first_created_at.isoformat(),
                 "last_failure_at": pause_created_at.isoformat(),
-                "last_error_code": "gateway_unavailable",
+                "last_error_code": "timeout",
                 "suggested_action": "check_gateway_then_resume",
                 "pause_trigger": "retry_deadline_reaches_epoch",
                 "epoch_seconds": 30 * 60,
@@ -875,8 +821,8 @@ class GatewayRetryCircuitTests(unittest.TestCase):
             self.run_id,
             "RunPaused",
             {
-                "code": "gateway_retry_circuit_open",
-                "retry_class": "model_gateway",
+                "code": "research_timeout_retry_circuit_open",
+                "retry_class": "research_timeout",
                 "generation": 0,
                 "stage": "research",
                 "breaker_epoch": first.payload["breaker_epoch"],
@@ -884,7 +830,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                 "retry_limit": 6,
                 "first_failure_at": first_created_at.isoformat(),
                 "last_failure_at": first_created_at.isoformat(),
-                "last_error_code": "gateway_unavailable",
+                "last_error_code": "timeout",
                 "suggested_action": "check_gateway_then_resume",
                 "pause_trigger": "retry_deadline_reaches_epoch",
                 "epoch_seconds": 30 * 60,
@@ -906,7 +852,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
     def test_director_maps_untrusted_error_codes_per_retry_class(self) -> None:
         secret = "sk_live_abc123credential"
         expected_codes = {
-            "model_gateway": "gateway_response_error",
+            "research_timeout": "gateway_response_error",
             "dsh_native_runtime": "dsh_native_runtime_unavailable",
             "research_timeout": "timeout",
             "sample_result_persistence": "sample_result_callback_error",
@@ -972,8 +918,8 @@ class GatewayRetryCircuitTests(unittest.TestCase):
 
     def test_replay_rejects_malformed_circuit_pause_payload(self) -> None:
         malformed = {
-            "code": "gateway_retry_circuit_open",
-            "retry_class": "model_gateway",
+            "code": "research_timeout_retry_circuit_open",
+            "retry_class": "research_timeout",
             "generation": 0,
             "stage": "research",
             "breaker_epoch": 1,
@@ -981,7 +927,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
             "retry_limit": 6,
             "first_failure_at": "2026-08-26T08:00:00+00:00",
             "last_failure_at": "2026-08-26T08:05:00+00:00",
-            "last_error_code": "gateway_unavailable",
+            "last_error_code": "timeout",
             "raw_error": "credential=production-secret",
         }
         self.ledger.append(
@@ -1004,8 +950,8 @@ class GatewayRetryCircuitTests(unittest.TestCase):
             created_run_id,
             "RunPaused",
             {
-                "code": "gateway_retry_circuit_open",
-                "retry_class": "model_gateway",
+                "code": "research_timeout_retry_circuit_open",
+                "retry_class": "research_timeout",
                 "generation": 0,
                 "stage": "research",
                 "breaker_epoch": 1,
@@ -1013,7 +959,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                 "retry_limit": 6,
                 "first_failure_at": "2026-08-26T08:00:00+00:00",
                 "last_failure_at": "2026-08-26T08:05:00+00:00",
-                "last_error_code": "gateway_unavailable",
+                "last_error_code": "timeout",
                 "suggested_action": "check_gateway_then_resume",
                 "pause_trigger": "failure_limit",
                 "epoch_seconds": 30 * 60,
@@ -1171,8 +1117,8 @@ class GatewayRetryCircuitTests(unittest.TestCase):
             self.run_id,
             "RunPaused",
             {
-                "code": "gateway_retry_circuit_open",
-                "retry_class": "model_gateway",
+                "code": "research_timeout_retry_circuit_open",
+                "retry_class": "research_timeout",
                 "generation": 0,
                 "stage": "research",
                 "breaker_epoch": first.payload["breaker_epoch"],
@@ -1180,7 +1126,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                 "retry_limit": 6,
                 "first_failure_at": first.payload["first_failure_at"],
                 "last_failure_at": first.payload["last_failure_at"],
-                "last_error_code": "gateway_unavailable",
+                "last_error_code": "timeout",
                 "suggested_action": "check_gateway_then_resume",
                 "pause_trigger": "failure_limit",
                 "epoch_seconds": 30 * 60,
@@ -1198,36 +1144,6 @@ class GatewayRetryCircuitTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "retry chain"):
             self.director.state(self.run_id)
 
-    def test_legacy_retry_heartbeat_replays_but_does_not_inflate_new_epoch(self) -> None:
-        legacy_run_id = "run:legacy-gateway-retry"
-        self.director.start_evolution(self.task, run_id=legacy_run_id)
-        self.ledger.append(
-            legacy_run_id,
-            "GatewayRetryScheduled",
-            {
-                "generation": 0,
-                "retry_at": "2026-08-26T08:05:00+00:00",
-                "attempt": 2_147_483_647,
-            },
-            event_id=f"{legacy_run_id}:legacy-retry",
-        )
-        state = self.director.state(legacy_run_id)
-
-        decision = self.director.schedule_gateway_retry_or_pause(
-            legacy_run_id,
-            run_incarnation=state.events[0].seq,
-            generation=0,
-            stage="research",
-            retry_class="model_gateway",
-            failure_id=digest("first-v2-failure-after-legacy"),
-            attempt_anchor_seq=state.events[-1].seq,
-            delay_seconds=0.0,
-            last_error_code="gateway_unavailable",
-        )
-
-        self.assertEqual(decision.outcome, "scheduled")
-        self.assertEqual(decision.event.payload["consecutive_failures"], 1)
-        self.assertEqual(decision.event.payload["breaker_epoch"], 1)
 
     def test_running_projection_clears_retry_details_after_stage_start(
         self,
@@ -1252,14 +1168,14 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                 )
             },
             {
-                "retry_class": "model_gateway",
+                "retry_class": "research_timeout",
                 "stage": "research",
                 "breaker_epoch": 1,
                 "consecutive_failures": 1,
                 "retry_limit": 6,
                 "first_failure_at": retry.payload["first_failure_at"],
                 "last_failure_at": retry.payload["last_failure_at"],
-                "last_error_code": "gateway_unavailable",
+                "last_error_code": "timeout",
                 "suggested_action": "wait_for_scheduled_retry",
             },
         )
@@ -1288,14 +1204,14 @@ class GatewayRetryCircuitTests(unittest.TestCase):
             decision = self._report_failure(attempt)
 
         projected = _projection_json(self.director.state(self.run_id))
-        self.assertEqual(projected["pause_code"], "gateway_retry_circuit_open")
+        self.assertEqual(projected["pause_code"], "research_timeout_retry_circuit_open")
         self.assertIn("检查模型网关", projected["pause_reason"])
         self.assertEqual(
             projected["retry_circuit"],
             {
                 "open": True,
-                "code": "gateway_retry_circuit_open",
-                "retry_class": "model_gateway",
+                "code": "research_timeout_retry_circuit_open",
+                "retry_class": "research_timeout",
                 "generation": 0,
                 "stage": "research",
                 "breaker_epoch": 1,
@@ -1303,7 +1219,7 @@ class GatewayRetryCircuitTests(unittest.TestCase):
                 "retry_limit": 6,
                 "first_failure_at": decision.event.payload["first_failure_at"],
                 "last_failure_at": decision.event.payload["last_failure_at"],
-                "last_error_code": "gateway_unavailable",
+                "last_error_code": "timeout",
                 "suggested_action": "check_gateway_then_resume",
                 "pause_event_id": decision.event.event_id,
                 "updated_at": decision.event.created_at,

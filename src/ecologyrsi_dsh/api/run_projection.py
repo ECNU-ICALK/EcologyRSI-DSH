@@ -6,12 +6,7 @@ from typing import Any
 
 from ..evaluators.registry import (
     EXOGENOUS_RIDGE_MODEL_ID,
-    GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
-    TOY_EVALUATOR_ID,
-    TOY_PREDICTOR_MODEL_ID,
 )
-from ..evaluators.catalog import TOY_DATASET_ID
-from ..integrations.model_bindings import HOST_PARAMETER_GENERATOR_ID, RULE_JUDGE_ID
 
 
 def build_frozen_feature_policies(task: Any) -> dict[str, object]:
@@ -62,18 +57,18 @@ def build_configuration(task: Any, state: Any, profile: str = "full") -> dict[st
         "episode_id": metadata.get("episode_id"),
         "strategy_id": metadata.get("strategy_id", "parameter_sweep@1"),
         "strategy_digest": metadata.get("strategy_digest"),
-        "prediction_model_id": metadata.get("prediction_model_id", TOY_PREDICTOR_MODEL_ID if dataset_id == TOY_DATASET_ID else EXOGENOUS_RIDGE_MODEL_ID),
+        "prediction_model_id": metadata.get("prediction_model_id"),
         "prediction_model_digest": metadata.get("prediction_model_digest"),
         "prediction_selection": metadata.get("prediction_selection"),
-        "evaluator_id": metadata.get("evaluator_id", TOY_EVALUATOR_ID if dataset_id == TOY_DATASET_ID else GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID),
+        "evaluator_id": metadata.get("evaluator_id"),
         "evaluator_digest": metadata.get("evaluator_digest"),
         "objective_profile": metadata.get("objective_profile"),
         "fitness_profile": metadata.get("fitness_profile"),
         "fitness_profile_digest": metadata.get("fitness_profile_digest"),
-        "policy_model_id": metadata.get("policy_model_id", HOST_PARAMETER_GENERATOR_ID),
-        "judge_model_id": metadata.get("judge_model_id", RULE_JUDGE_ID),
-        "strategy_model_id": metadata.get("strategy_model_id", metadata.get("policy_model_id", HOST_PARAMETER_GENERATOR_ID)),
-        "review_model_id": metadata.get("review_model_id", metadata.get("judge_model_id", RULE_JUDGE_ID)),
+        "policy_model_id": metadata.get("strategy_model_id"),
+        "judge_model_id": metadata.get("review_model_id"),
+        "strategy_model_id": metadata.get("strategy_model_id"),
+        "review_model_id": metadata.get("review_model_id"),
         "sample_agent_mode": metadata.get("sample_agent_mode", "host_feedback_state_machine"),
         "sample_agent_batch_size": metadata.get("sample_agent_batch_size"),
         "samples_per_update": metadata.get("samples_per_update"),

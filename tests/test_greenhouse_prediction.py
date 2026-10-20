@@ -46,7 +46,7 @@ def _series(
             "development": IndexRange(feedback[1], feedback[1]),
         },
         features={name: _feature(name, role) for name, role in roles.items()},
-        split_manifest_digest_sha256="s" * 64,
+        split_manifest_digest_sha256="f" * 64,
     )
 
 

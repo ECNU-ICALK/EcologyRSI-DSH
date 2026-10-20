@@ -32,7 +32,8 @@ from ecologyrsi_dsh.integrations.dsh_native_runtime import (
 )
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 from ecologyrsi_dsh.presentation.reporting import run_summary
-from ecologyrsi_dsh.presentation.training_assets import training_assets
+from tests.greenhouse_fixture import greenhouse_registry
+from tests.native_fixtures import canary_receipts
 from ecologyrsi_dsh.version import __version__
 
 
@@ -510,6 +511,13 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.server = EvolutionHTTPServer(
             ("127.0.0.1", 0), Path(self.directory.name) / "events.sqlite3"
         )
+        self.server.datasets = greenhouse_registry(Path(self.directory.name) / "data")
+        canary_patch = patch("ecologyrsi_dsh.api.handler.require_model_preflight", side_effect=canary_receipts)
+        canary_patch.start()
+        self.addCleanup(canary_patch.stop)
+        schedule_patch = patch.object(self.server.auto_progress, "schedule_if_enabled", return_value=False)
+        schedule_patch.start()
+        self.addCleanup(schedule_patch.stop)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}/api"
@@ -521,6 +529,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.directory.cleanup()
 
     def _post(self, body: dict) -> tuple[int, dict]:
+        body = {"budget": {"max_generations": 1}, "knowledge_online_enabled": False, **body}
         return self._post_path("/runs", body)
 
     def _post_path(self, path: str, body: dict) -> tuple[int, dict]:
@@ -563,8 +572,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                 "optimization_protocol": "joint_plugin_epoch@2",
                 "optimization_schedule": schedule,
                 "run_id": "run:native-adaptive-schedule",
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "candidate_concurrency": 4,
@@ -602,7 +611,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                 "base_candidate_origins": 200,
                 "recheck_candidate_origins": 100,
                 "total_candidate_origins": 300,
-                "total_scoring_cells": 300,
+                "total_scoring_cells": 2700,
             },
         )
         self.assertNotIn("samples_per_update", metadata)
@@ -613,18 +622,17 @@ class DshNativeHTTPGateTests(unittest.TestCase):
     def test_native_setup_precedes_run_created_without_hidden_provider_budget(self) -> None:
         runtime = _FakeNativeRuntime()
         self.server.dsh_native_runtime = runtime
-        self.server.model_gateway.catalog = lambda: (_ for _ in ()).throw(AssertionError("legacy gateway used"))  # type: ignore[method-assign]
         status, payload = self._post(
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": "run:native-test",
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "candidate_concurrency": 1,
                 "sample_concurrency": 2,
-                "sample_agent_batch_size": 1,
+                "sample_agent_batch_size": 9,
                 "start": False,
                 "auto_advance": 0,
                 "idempotency_key": "native-create-1",
@@ -649,7 +657,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertEqual(state.task_manifest.metadata["candidate_concurrency"], 1)
         self.assertEqual(state.task_manifest.metadata["sample_concurrency"], 2)
         self.assertNotIn("samples_per_update", state.task_manifest.metadata)
-        self.assertEqual(state.task_manifest.metadata["sample_agent_batch_size"], 1)
+        self.assertEqual(state.task_manifest.metadata["sample_agent_batch_size"], 9)
         self.assertEqual(
             state.task_manifest.metadata["sample_budget_class"],
             "selection_eligible",
@@ -684,7 +692,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         )
         self.assertEqual(
             state.task_manifest.metadata["minimum_selection_samples_per_update"],
-            40,
+            360,
         )
         self.assertEqual(
             state.task_manifest.metadata["host_runtime_build"],
@@ -705,9 +713,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         runtime_v2_data["metadata"]["host_runtime_build"][
             "evolution_runtime_schema"
         ] = "ecologyrsi-dsh.evolution-runtime/2"
-        self.server.validate_frozen_runtime_bindings(
-            TaskManifest.from_dict(runtime_v2_data)
-        )
+        with self.assertRaises(FrozenRuntimeBindingDriftError):
+            self.server.validate_frozen_runtime_bindings(TaskManifest.from_dict(runtime_v2_data))
 
         tampered_data = state.task_manifest.to_dict()
         tampered_data["metadata"]["fitness_profile_digest"] = "0" * 64
@@ -732,8 +739,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": "run:native-token-limit",
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "start": False,
@@ -743,7 +750,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             }
         )
         self.assertEqual(status, 400, payload)
-        self.assertIn("telemetry", payload["error"])
+        self.assertIn("budget", payload["error"])
         self.assertEqual(runtime.created, [])
 
     def test_native_schedule_replaces_diagnostic_sample_count(self) -> None:
@@ -754,13 +761,13 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": "run:native-diagnostic",
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "candidate_concurrency": 1,
                 "sample_concurrency": 1,
-                "sample_agent_batch_size": 1,
+                "sample_agent_batch_size": 9,
                 "start": False,
                 "auto_advance": 0,
                 "idempotency_key": "native-diagnostic-1",
@@ -789,8 +796,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": run_id,
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "start": False,
@@ -801,7 +808,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertEqual(status, 201, created)
 
         status, started = self._post_path(
-            f"/runs/{run_id}/action",
+            f"/runs/{run_id}/control",
             {"action": "start", "idempotency_key": "native-explicit-start-action"},
         )
 
@@ -820,8 +827,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": run_id,
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "start": True,
@@ -930,13 +937,10 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertEqual(status, 200, projected)
         projection = projected["projection"]
         self.assertEqual(projection["candidates_count"], 0)
-        self.assertEqual(projection["candidates"], [])
-        self.assertEqual(projection["rounds"][0]["candidate_count"], 0)
-        self.assertEqual(projection["rounds"][0]["candidates"], [])
-        self.assertEqual(training_assets(state), [])
+        self.assertNotIn("candidates", projection)
         summary = run_summary(state)
         self.assertEqual(summary["candidate_count"], 0)
-        self.assertEqual(summary["training_asset_count"], 0)
+        self.assertNotIn("training_asset_count", summary)
 
         with self.assertRaisesRegex(
             RuntimeError,
@@ -963,8 +967,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": run_id,
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "start": True,
@@ -974,7 +978,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         )
         self.assertEqual(status, 201, created)
         status, paused = self._post_path(
-            f"/runs/{run_id}/action",
+            f"/runs/{run_id}/control",
             {
                 "action": "pause",
                 "idempotency_key": "native-start-from-paused-pause",
@@ -984,7 +988,7 @@ class DshNativeHTTPGateTests(unittest.TestCase):
         self.assertEqual(paused["projection"]["status"], "paused")
 
         status, started = self._post_path(
-            f"/runs/{run_id}/action",
+            f"/runs/{run_id}/control",
             {
                 "action": "start",
                 "idempotency_key": "native-start-from-paused-start",
@@ -1004,8 +1008,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": "run:native-restart",
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "start": False,
@@ -1052,8 +1056,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": run_id,
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "start": True,
@@ -1106,8 +1110,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                 {
                     "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                     "run_id": run_id,
-                    "domain_pack_id": "crop_soil_water",
-                    "dataset_id": "generated-toy-series@1",
+
+                    "dataset_id": "agc_cucumber_2018",
                     "strategy_model_id": "dsh/strategy",
                     "review_model_id": "dsh/review",
                     "start": True,
@@ -1190,8 +1194,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
                 {
                     "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                     "run_id": run_id,
-                    "domain_pack_id": "crop_soil_water",
-                    "dataset_id": "generated-toy-series@1",
+
+                    "dataset_id": "agc_cucumber_2018",
                     "strategy_model_id": "dsh/strategy",
                     "review_model_id": "dsh/review",
                     "start": True,
@@ -1225,8 +1229,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": "run:native-running",
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "start": True,
@@ -1247,8 +1251,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": run_id,
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "start": True,
@@ -1285,8 +1289,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": run_id,
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "start": True,
@@ -1327,8 +1331,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": run_id,
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "start": True,
@@ -1381,8 +1385,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": run_id,
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "start": True,
@@ -1503,8 +1507,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": run_id,
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "start": True,
@@ -1572,8 +1576,8 @@ class DshNativeHTTPGateTests(unittest.TestCase):
             {
                 "execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL,
                 "run_id": "run:no-runtime",
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
+
+                "dataset_id": "agc_cucumber_2018",
                 "strategy_model_id": "dsh/strategy",
                 "review_model_id": "dsh/review",
                 "start": False,

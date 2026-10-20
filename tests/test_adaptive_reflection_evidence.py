@@ -1,919 +1,102 @@
-from __future__ import annotations
-
-import unittest
+"""Current joint reflection preserves measured revisions and excludes raw data."""
 from dataclasses import replace
-from types import SimpleNamespace
+from types import SimpleNamespace as NS
+import unittest
 
-from ecologyrsi_dsh.application.generation_execution import (
-    _build_adaptive_analysis,
-    _local_edit_trajectory_evidence,
-)
-from ecologyrsi_dsh.core.models import (
-    CandidateRole,
-    CandidateStatus,
-    canonical_json,
-    digest,
-)
-from ecologyrsi_dsh.core.trajectory import (
-    CandidateRevision,
-    EvaluationPhase,
-    EvaluationScope,
-    FormalBatchComparisonDecision,
-    GenerationComparison,
-    HoldoutArm,
-    HoldoutEvaluation,
-    RevisionAdvanceReason,
-    RevisionStatus,
-)
-from ecologyrsi_dsh.evolution.batches import (
-    _adaptive_reflection_analysis,
-    _canonical_candidate_outcomes,
-)
+from ecologyrsi_dsh.application.generation_execution import _build_adaptive_analysis, _local_edit_trajectory_evidence
+from ecologyrsi_dsh.core.models import CandidateStatus, CandidateRole, canonical_json, digest
+from ecologyrsi_dsh.core.trajectory import CandidateRevision, RevisionStatus, HoldoutArm, FormalBatchComparisonDecision, RevisionAdvanceReason
+from ecologyrsi_dsh.evolution.batches import _adaptive_reflection_analysis, _canonical_candidate_outcomes
 from ecologyrsi_dsh.evolution.context import safe_aggregate_feedback
-from ecologyrsi_dsh.evolution.schedule import (
-    LEGACY_SCHEDULE_SCHEMA_VERSION,
-    OPTIMIZATION_PROTOCOL,
-    PREQUENTIAL_LOCAL_EVALUATION_MODE,
-    OptimizationSchedule,
-)
+from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
+from ecologyrsi_dsh.evaluators.generation_comparison import build_generation_comparison
+from tests.native_fixtures import native_manifest
+from tests.test_run_parameter_consistency import small_holdout
 
 
 class AdaptiveReflectionEvidenceTests(unittest.TestCase):
-    maxDiff = None
+    def fixture(self, *, retain=False):
+        pair=(small_holdout(HoldoutArm.FINALIST_1,.09 if retain else .2),small_holdout(HoldoutArm.INCUMBENT,.1))
+        comparison=build_generation_comparison(run_id=pair[0].scope.run_id,generation=0,
+            cohort_digest=pair[0].scope.cohort_digest,holdout_evaluations=pair,require_paired_strict_chain=True)
+        finalist=pair[0].scope.candidate_id
+        r0='revision:initial'
+        final=pair[0].scope.candidate_revision_id
+        revisions={}
+        for item in pair:
+            scope=item.scope;genome={'test_fixture':scope.candidate_revision_id}
+            revisions[scope.candidate_revision_id]=CandidateRevision(revision_id=scope.candidate_revision_id,
+                run_id=scope.run_id,generation=0,candidate_id=scope.candidate_id,genome=genome,
+                genome_digest=digest(genome),behavior_digest=digest({'behavior':genome}),
+                mutation_digest=digest({'mutation':genome}),status=RevisionStatus.FINAL)
+        candidates=tuple(NS(candidate_id=finalist if i==0 else f'candidate:{i}',
+            proposal_id=f'proposal:{i}',generation=0,slot_index=i,role=CandidateRole.SEARCH,
+            status=CandidateStatus.EVALUATED if i==0 else CandidateStatus.SCREENED_OUT) for i in range(4))
+        proposals={c.proposal_id:NS(metadata={'candidate_direction_id':f'direction:{i}',
+            'candidate_direction_digest':digest({'direction':i}),
+            'mutation_operations':[{'op':'set_bounded_parameter','name':'ridge_alpha','value':.2}],
+            'behavior_digest':digest({'behavior':i})}) for i,c in enumerate(candidates)}
+        comparisons=tuple(NS(candidate_id=finalist,batch_index=i,
+            champion_before_revision_id=r0,challenger_revision_id=r0 if i==0 else final,
+            champion_after_revision_id=r0 if i==0 else final,
+            decision=FormalBatchComparisonDecision.INITIAL_CHAMPION if i==0 else FormalBatchComparisonDecision.CHALLENGER_PROMOTED,
+            reason='initial_champion' if i==0 else 'challenger_improved',score_delta=0 if i==0 else .02,
+            minimum_score_delta=.005,safety_gate_passed=True,cell_regression_gate_passed=True,
+            raw_predictions=[123],labels=[456],rationale='private-model-prose',created_at='private-time') for i in range(2))
+        state=NS(run=NS(run_id=pair[0].scope.run_id),task_manifest=native_manifest(),candidates=candidates,
+            formal_batches=tuple(NS(candidate_id=finalist,batch_index=i,revision_id=r0 if i==0 else final) for i in range(2)),
+            formal_batch_comparisons=comparisons,
+            local_edit_proposals=({'candidate_id':finalist,'batch_index':0,'proposal':{'decision':'mutate',
+                'operations':[{'op':'set_bounded_parameter','name':'history_steps','value':'private-mutation-value'}]}},),
+            local_edit_outcomes=({'candidate_id':finalist,'batch_index':0,'outcome':'applied','active_revision_id':final},),
+            trajectory_revision_activations=(NS(candidate_id=finalist,batch_index=0,from_revision_id=r0,
+                to_revision_id=final,reason=RevisionAdvanceReason.LOCAL_EDIT_APPLIED),),
+            proposal=lambda pid:proposals[pid],revision=lambda rid:revisions[rid],
+            trajectory_for=lambda cid:NS(initial_revision_id=r0,final_revision_id=final,batch_count=2) if cid==finalist else None,
+            comparison_for=lambda gen:comparison if gen==0 else None,
+            screening_for=lambda gen,cid:NS(payload={'score':.08,'passed':False,'constraint_violations':0}) if cid!=finalist else None)
+        return state,comparison,candidates,pair
 
-    def test_legacy_prequential_reflection_shape_is_unchanged(self) -> None:
-        candidate_id = "candidate:legacy"
-        final_revision_id = "revision:legacy:r1"
-        schedule = OptimizationSchedule.default().to_dict()
-        schedule.update(
-            schema_version=LEGACY_SCHEDULE_SCHEMA_VERSION,
-            local_evaluation_mode=PREQUENTIAL_LOCAL_EVALUATION_MODE,
-        )
-        state = SimpleNamespace(
-            task_manifest=SimpleNamespace(
-                metadata={"optimization_schedule": schedule}
-            ),
-            formal_batches=(
-                SimpleNamespace(
-                    candidate_id=candidate_id,
-                    batch_index=0,
-                    revision_id="revision:legacy:r0",
-                ),
-            ),
-            local_edit_proposals=(
-                {
-                    "candidate_id": candidate_id,
-                    "batch_index": 0,
-                    "proposal": {
-                        "decision": "mutate",
-                        "operations": [
-                            {
-                                "op": "set_bounded_parameter",
-                                "name": "ridge_alpha",
-                                "value": 0.2,
-                            }
-                        ],
-                    },
-                },
-            ),
-            local_edit_outcomes=(
-                {
-                    "candidate_id": candidate_id,
-                    "batch_index": 0,
-                    "outcome": "applied",
-                    "active_revision_id": final_revision_id,
-                },
-            ),
-            trajectory_revision_activations=(
-                SimpleNamespace(
-                    candidate_id=candidate_id,
-                    batch_index=0,
-                    from_revision_id="revision:legacy:r0",
-                    to_revision_id=final_revision_id,
-                    reason=RevisionAdvanceReason.LOCAL_EDIT_APPLIED,
-                ),
-            ),
-            trajectory_for=lambda requested_id: (
-                SimpleNamespace(
-                    initial_revision_id="revision:legacy:r0",
-                    final_revision_id=final_revision_id,
-                    batch_count=1,
-                )
-                if requested_id == candidate_id
-                else None
-            ),
-        )
+    def test_current_analysis_and_reflection_preserve_gate_revision_and_redaction(self):
+        for retain in (False,True):
+            with self.subTest(retain=retain):
+                state,comparison,candidates,pair=self.fixture(retain=retain)
+                analysis=_build_adaptive_analysis(state,0,comparison,(candidates[0],),pair[1].scope.candidate_id)
+                self.assertEqual(analysis.eligible_count,0 if retain else 1)
+                self.assertEqual(analysis.selected_candidate_id,None if retain else candidates[0].candidate_id)
+                if retain: self.assertIn('1 个 finalist',analysis.next_generation_focus)
+                self.assertNotIn('Top-2',analysis.selection_reason+analysis.next_generation_focus)
+                self.assertNotIn('3 臂',analysis.selection_reason)
+                self.assertEqual(len(analysis.ranking),4)
+                finalist=next(r for r in analysis.ranking if r['candidate_id']==candidates[0].candidate_id)
+                self.assertEqual(finalist['final_revision_id'],pair[0].scope.candidate_revision_id)
+                self.assertEqual(len(finalist['comparison_gate']['cell_deltas']),9)
+                local=finalist['local_edit_evidence']
+                self.assertEqual(local['comparison_count'],2)
+                self.assertEqual(local['included_batch_count'],1)
+                self.assertEqual(len(local['revision_chain']),3)
+                outcomes=_canonical_candidate_outcomes(state,generation=0,analysis=analysis)
+                self.assertEqual(len(outcomes),4)
+                reflection=_adaptive_reflection_analysis(state,analysis)
+                self.assertEqual(reflection,_adaptive_reflection_analysis(state,analysis))
+                evidence=reflection['adaptive_epoch_evidence']
+                self.assertEqual(evidence['selected']['revision_id'],comparison.selected_revision_id)
+                self.assertEqual(evidence['incumbent']['revision_id'],pair[1].scope.candidate_revision_id)
+                self.assertEqual(len(evidence['candidate_results']),4)
+                serialized=canonical_json(reflection)
+                for forbidden in ('raw_predictions','labels','created_at','rationale','private-model-prose','private-mutation-value','private-time'):
+                    self.assertNotIn(forbidden,serialized)
+                safe_aggregate_feedback(reflection,name='current joint reflection')
 
-        evidence = _local_edit_trajectory_evidence(
-            state,
-            candidate_id,
-            final_revision_id,
-        )
-
-        self.assertNotIn("local_evaluation_mode", evidence)
-        self.assertNotIn("recent_comparisons", evidence)
-        self.assertEqual(
-            set(evidence["batches"][0]),
-            {
-                "batch_index",
-                "batch_number",
-                "evaluated_revision_id",
-                "decision",
-                "operation_category",
-                "operation_count",
-                "outcome",
-                "outcome_reason",
-                "from_revision_id",
-                "active_revision_id",
-                "advance_reason",
-            },
-        )
-
-    def _revision(self, candidate_id: str, revision_id: str, marker: str) -> CandidateRevision:
-        genome = {"schema_version": "test@1", "marker": marker}
-        return CandidateRevision(
-            revision_id=revision_id,
-            run_id="run:adaptive-reflection",
-            generation=0,
-            candidate_id=candidate_id,
-            genome=genome,
-            genome_digest=digest(genome),
-            behavior_digest=digest({"behavior": marker}),
-            mutation_digest=digest({"mutation": marker}),
-            status=RevisionStatus.FINAL,
-        )
-
-    def _holdout(
-        self,
-        arm: HoldoutArm,
-        candidate_id: str,
-        revision_id: str,
-        score: float,
-    ) -> HoldoutEvaluation:
-        return HoldoutEvaluation(
-            evaluation_id=f"holdout:{arm.value}",
-            scope=EvaluationScope(
-                run_id="run:adaptive-reflection",
-                generation=0,
-                candidate_id=candidate_id,
-                candidate_revision_id=revision_id,
-                phase=EvaluationPhase.HOLDOUT,
-                cohort_digest="c" * 64,
-                origin_count=169,
-                holdout_arm=arm,
-            ),
-            score=score,
-            passed=True,
-            metrics={"constraint_violations": 0},
-            evaluator_digest="e" * 64,
-        )
-
-    def test_analysis_and_reflection_preserve_gate_and_revision_evidence(self) -> None:
-        candidates = tuple(
-            SimpleNamespace(
-                candidate_id=f"candidate:{index}",
-                proposal_id=f"proposal:{index}",
-                generation=0,
-                slot_index=index,
-                status=(
-                    CandidateStatus.EVALUATED
-                    if index in {0, 3}
-                    else CandidateStatus.SCREENED_OUT
-                ),
-            )
-            for index in range(4)
-        )
-        finalist_ids = (candidates[0].candidate_id, candidates[3].candidate_id)
-        finalist_revisions = {
-            finalist_ids[0]: self._revision(
-                finalist_ids[0], "revision:failed:final", "failed-final"
-            ),
-            finalist_ids[1]: self._revision(
-                finalist_ids[1], "revision:winner:final", "winner-final"
-            ),
-        }
-        incumbent_revision = self._revision(
-            "candidate:incumbent",
-            "revision:incumbent",
-            "incumbent",
-        )
-        revisions = {
-            item.revision_id: item
-            for item in (*finalist_revisions.values(), incumbent_revision)
-        }
-        proposals = {
-            candidate.proposal_id: SimpleNamespace(
-                metadata={
-                    "candidate_direction_id": f"direction-{candidate.slot_index}",
-                    "candidate_direction_digest": digest(
-                        {"direction": candidate.slot_index}
-                    ),
-                    "mutation_operations": [
-                        {
-                            "op": "set_bounded_parameter",
-                            "name": "ridge_alpha",
-                            "value": 0.1 + candidate.slot_index,
-                        }
-                    ],
-                    "behavior_digest": digest(
-                        {"outer_behavior": candidate.slot_index}
-                    ),
-                }
-            )
-            for candidate in candidates
-        }
-        control = SimpleNamespace(
-            candidate_id="candidate:seed-control",
-            proposal_id="proposal:seed-control",
-            generation=0,
-            slot_index=0,
-            status=CandidateStatus.SPAWNED,
-            role=CandidateRole.INCUMBENT_CONTROL,
-        )
-        proposals[control.proposal_id] = SimpleNamespace(metadata={})
-        formal_batches = []
-        local_edit_proposals = []
-        local_edit_outcomes = []
-        activations = []
-        formal_batch_comparisons = []
-        trajectories = {}
-        for candidate_id in finalist_ids:
-            final_revision_id = finalist_revisions[candidate_id].revision_id
-            initial_revision_id = f"revision:{candidate_id}:r0"
-            champion_revision_id = initial_revision_id
-            scheduled_revision_id = initial_revision_id
-            trajectories[candidate_id] = SimpleNamespace(
-                initial_revision_id=initial_revision_id,
-                final_revision_id=final_revision_id,
-                batch_count=10,
-            )
-            for batch_index in range(10):
-                formal_batches.append(
-                    SimpleNamespace(
-                        candidate_id=candidate_id,
-                        batch_index=batch_index,
-                        revision_id=scheduled_revision_id,
-                    )
-                )
-                champion_before_revision_id = champion_revision_id
-                if batch_index == 0:
-                    decision = FormalBatchComparisonDecision.INITIAL_CHAMPION
-                    reason = "initial_champion"
-                    score_delta = 0.0
-                elif batch_index == 2:
-                    decision = FormalBatchComparisonDecision.CHAMPION_RETAINED
-                    reason = "below_practical_delta"
-                    score_delta = -0.01
-                else:
-                    decision = FormalBatchComparisonDecision.CHALLENGER_PROMOTED
-                    reason = "challenger_improved"
-                    score_delta = 0.02
-                    champion_revision_id = scheduled_revision_id
-                formal_batch_comparisons.append(
-                    SimpleNamespace(
-                        candidate_id=candidate_id,
-                        batch_index=batch_index,
-                        champion_before_revision_id=champion_before_revision_id,
-                        challenger_revision_id=scheduled_revision_id,
-                        champion_after_revision_id=champion_revision_id,
-                        decision=decision,
-                        reason=reason,
-                        score_delta=score_delta,
-                        minimum_score_delta=0.005,
-                        safety_gate_passed=True,
-                        cell_regression_gate_passed=True,
-                        # These fields emulate data that must never enter the
-                        # bounded generation-reflection envelope.
-                        raw_predictions=[0.1, 0.2],
-                        labels=[0.0, 1.0],
-                        created_at="2026-08-30T00:00:00Z",
-                        rationale="unbounded model-authored prose",
-                    )
-                )
-                if batch_index == 9:
-                    continue
-                next_revision_id = (
-                    final_revision_id
-                    if batch_index == 8
-                    else f"revision:{candidate_id}:challenger:{batch_index + 1}"
-                )
-                operation_name = "history_steps" if batch_index == 1 else "ridge_alpha"
-                local_edit_proposals.append(
-                    {
-                        "candidate_id": candidate_id,
-                        "batch_index": batch_index,
-                        "proposal": {
-                            "decision": "mutate",
-                            "operations": [
-                                {
-                                    "op": "set_bounded_parameter",
-                                    "name": operation_name,
-                                    "value": (
-                                        "secret-rejected-operation-value"
-                                        if batch_index == 1
-                                        else 0.2 + batch_index / 100
-                                    ),
-                                }
-                            ],
-                        },
-                    }
-                )
-                local_edit_outcomes.append(
-                    {
-                        "candidate_id": candidate_id,
-                        "batch_index": batch_index,
-                        "outcome": "applied",
-                        "active_revision_id": next_revision_id,
-                    }
-                )
-                activations.append(
-                    SimpleNamespace(
-                        candidate_id=candidate_id,
-                        batch_index=batch_index,
-                        from_revision_id=champion_revision_id,
-                        to_revision_id=next_revision_id,
-                        reason=RevisionAdvanceReason.LOCAL_EDIT_APPLIED,
-                    )
-                )
-                scheduled_revision_id = next_revision_id
-
-        failed_holdout = self._holdout(
-            HoldoutArm.FINALIST_1,
-            finalist_ids[0],
-            finalist_revisions[finalist_ids[0]].revision_id,
-            0.54,
-        )
-        winner_holdout = self._holdout(
-            HoldoutArm.FINALIST_2,
-            finalist_ids[1],
-            finalist_revisions[finalist_ids[1]].revision_id,
-            0.62,
-        )
-        incumbent_holdout = self._holdout(
-            HoldoutArm.INCUMBENT,
-            incumbent_revision.candidate_id,
-            incumbent_revision.revision_id,
-            0.50,
-        )
-        cell_deltas = {
-            f"{target}@{horizon}h": 0.02
-            for target in (
-                "air_temperature",
-                "relative_humidity",
-                "co2_concentration",
-            )
-            for horizon in (1, 6, 24)
-        }
-
-        def finalist_gate(*, eligible: bool, no_regression: bool) -> dict:
-            return {
-                "passed": True,
-                "constraint_violations": 0,
-                "overall_coverage": 1.0,
-                "coverage_pass": True,
-                "eligible": eligible,
-                "complete_objective_grid": True,
-                "no_cell_regression": no_regression,
-                "worst_cell_delta": 0.02 if no_regression else -0.08,
-                "cell_deltas": cell_deltas,
-                "promotion_assessment": {
-                    "evidence_class": "selection_eligible",
-                    "status": "selection_only",
-                    "paired_block_count": 169,
-                    "valid_three_day_start_count": 167,
-                    "paired_block_ids_digest": "b" * 64,
-                    "primary_delta": 0.12,
-                    "selection_stability_floor": 0.04,
-                    "primary_selection_gate": True,
-                },
-                "stability_lower_bound": 0.04,
-                "failures": [] if no_regression else ["cell_regression"],
-            }
-
-        gate_results = {
-            "schema_version": "ecologyrsi-dsh.generation-comparison/1",
-            "arms": {
-                HoldoutArm.FINALIST_1.value: finalist_gate(
-                    eligible=False, no_regression=False
-                ),
-                HoldoutArm.FINALIST_2.value: finalist_gate(
-                    eligible=True, no_regression=True
-                ),
-                HoldoutArm.INCUMBENT.value: {
-                    "passed": True,
-                    "constraint_violations": 0,
-                    "overall_coverage": 1.0,
-                    "coverage_pass": True,
-                    "eligible": True,
-                    "score": incumbent_holdout.score,
-                },
-            },
-            "eligible_finalist_count": 1,
-            "selected_arm": HoldoutArm.FINALIST_2.value,
-            "selected_score": winner_holdout.score,
-            "incumbent_score": incumbent_holdout.score,
-            "delta_to_incumbent": winner_holdout.score - incumbent_holdout.score,
-            "incumbent_gate_pass": True,
-        }
-        comparison = GenerationComparison(
-            comparison_id="comparison:adaptive-reflection",
-            run_id="run:adaptive-reflection",
-            generation=0,
-            cohort_digest="c" * 64,
-            holdout_evaluations=(
-                failed_holdout,
-                winner_holdout,
-                incumbent_holdout,
-            ),
-            selected_candidate_id=winner_holdout.scope.candidate_id,
-            selected_revision_id=winner_holdout.scope.candidate_revision_id,
-            gate_results=gate_results,
-        )
-        screenings = {
-            candidates[1].candidate_id: {
-                "score": 0.41,
-                "passed": True,
-                "constraint_violations": 0,
-            },
-            candidates[2].candidate_id: {
-                "score": 0.39,
-                "passed": False,
-                "constraint_violations": 0,
-            },
-        }
-        state = SimpleNamespace(
-            run=SimpleNamespace(run_id="run:adaptive-reflection"),
-            task_manifest=SimpleNamespace(
-                metadata={
-                    "optimization_protocol": OPTIMIZATION_PROTOCOL,
-                    "optimization_schedule": OptimizationSchedule.default().to_dict(),
-                }
-            ),
-            candidates=(*candidates, control),
-            formal_batches=tuple(formal_batches),
-            formal_batch_comparisons=tuple(formal_batch_comparisons),
-            local_edit_proposals=tuple(local_edit_proposals),
-            local_edit_outcomes=tuple(local_edit_outcomes),
-            trajectory_revision_activations=tuple(activations),
-            proposal=lambda proposal_id: proposals[proposal_id],
-            revision=lambda revision_id: revisions[revision_id],
-            trajectory_for=lambda candidate_id: trajectories.get(candidate_id),
-            comparison_for=lambda generation: comparison if generation == 0 else None,
-            screening_for=lambda generation, candidate_id: (
-                SimpleNamespace(payload=screenings[candidate_id])
-                if generation == 0 and candidate_id in screenings
-                else None
-            ),
-        )
-
-        analysis = _build_adaptive_analysis(
-            state,
-            0,
-            comparison,
-            (candidates[0], candidates[3]),
-            incumbent_revision.candidate_id,
-        )
-
-        self.assertEqual(analysis.selected_candidate_id, candidates[3].candidate_id)
-        self.assertEqual(analysis.eligible_count, 1)
-        self.assertIn("3 臂留出比较", analysis.selection_reason)
-        self.assertIn("2 个 finalist", analysis.next_generation_focus)
-        self.assertNotIn("Top-2", analysis.next_generation_focus)
-        self.assertNotIn("训练比较", analysis.selection_reason)
-        self.assertEqual(len(analysis.ranking), 4)
-        winner = analysis.ranking[0]
-        failed = next(
-            row
-            for row in analysis.ranking
-            if row["candidate_id"] == candidates[0].candidate_id
-        )
-        screened = [
-            row
-            for row in analysis.ranking
-            if row["selection_status"] == "screened_out"
-        ]
-        self.assertEqual(winner["rank"], 1)
-        self.assertEqual(winner["selection_reason"], "generation_holdout_winner")
-        self.assertEqual(winner["final_revision_id"], "revision:winner:final")
-        self.assertEqual(
-            winner["final_revision_digest"],
-            finalist_revisions[finalist_ids[1]].revision_digest,
-        )
-        self.assertEqual(len(winner["comparison_gate"]["cell_deltas"]), 9)
-        self.assertEqual(winner["outer_mutation_evidence"]["kind"], "outer_generation_mutation")
-        self.assertEqual(winner["local_edit_evidence"]["kind"], "batch_local_edits")
-        self.assertEqual(winner["local_edit_evidence"]["included_batch_count"], 9)
-        self.assertEqual(len(winner["local_edit_evidence"]["batches"]), 9)
-        self.assertEqual(winner["local_edit_evidence"]["comparison_count"], 10)
-        self.assertEqual(len(winner["local_edit_evidence"]["revision_chain"]), 11)
-        comparison_history = winner["local_edit_evidence"]["recent_comparisons"]
-        self.assertEqual(len(comparison_history), 10)
-        accepted = next(item for item in comparison_history if item["batch_index"] == 1)
-        rejected = next(item for item in comparison_history if item["batch_index"] == 2)
-        self.assertEqual(accepted["decision"], "challenger_promoted")
-        self.assertEqual(accepted["reason"], "challenger_improved")
-        self.assertEqual(rejected["decision"], "champion_retained")
-        self.assertEqual(rejected["reason"], "below_practical_delta")
-        self.assertEqual(rejected["score_delta"], -0.01)
-        self.assertIn("history_steps", rejected["rejected_operation_targets"])
-        self.assertEqual(
-            rejected["champion_before_revision_id"],
-            rejected["champion_after_revision_id"],
-        )
-        self.assertNotEqual(
-            rejected["challenger_revision_id"],
-            rejected["champion_after_revision_id"],
-        )
-        self.assertEqual(
-            rejected["next_mutation_parent_revision_id"],
-            rejected["champion_after_revision_id"],
-        )
-        self.assertEqual(failed["rank"], None)
-        self.assertEqual(failed["score"], 0.54)
-        self.assertFalse(failed["eligible"])
-        self.assertIn("cell_regression", failed["failure_reasons"])
-        self.assertIn("cell_regression", failed["selection_reason"])
-        self.assertEqual([row["score"] for row in screened], [0.41, 0.39])
-        self.assertTrue(all(row["rank"] is None for row in screened))
-        self.assertTrue(screened[0]["scientific_pass"])
-        self.assertEqual(screened[0]["classification"], "screened_out_lower_rank")
-        self.assertFalse(screened[1]["scientific_pass"])
-        self.assertEqual(screened[1]["classification"], "screening_gate_failed")
-
-        outcomes = _canonical_candidate_outcomes(
-            state,
-            generation=0,
-            analysis=analysis,
-        )
-        self.assertEqual(len(outcomes), 4)
-        self.assertEqual(outcomes[0]["candidate_id"], candidates[3].candidate_id)
-        self.assertEqual(outcomes[1]["score"], 0.54)
-        self.assertIsNone(outcomes[1]["rank"])
-        self.assertEqual([item["score"] for item in outcomes[2:]], [0.41, 0.39])
-
-        reflection = _adaptive_reflection_analysis(state, analysis)
-        replayed = _adaptive_reflection_analysis(state, analysis)
-        self.assertEqual(reflection, replayed)
-        evidence = reflection["adaptive_epoch_evidence"]
-        self.assertEqual(evidence["selected"]["revision_id"], "revision:winner:final")
-        self.assertEqual(evidence["incumbent"]["revision_id"], "revision:incumbent")
-        self.assertEqual(len(evidence["candidate_results"]), 4)
-        reflected_lane = next(
-            item
-            for item in evidence["trajectory_comparisons"]
-            if item["candidate_id"] == candidates[3].candidate_id
-        )
-        reflected_rejection = next(
-            item
-            for item in reflected_lane["recent_comparisons"]
-            if item["batch_index"] == 2
-        )
-        self.assertEqual(reflected_rejection["reason"], "below_practical_delta")
-        self.assertEqual(reflected_rejection["score_delta"], -0.01)
-        self.assertIn(
-            "history_steps",
-            reflected_rejection["rejected_operation_targets"],
-        )
-        serialized_reflection = canonical_json(reflection)
-        for forbidden_field in (
-            "raw_predictions",
-            "labels",
-            "created_at",
-            "timestamps",
-            "rationale",
+    def test_incomplete_history_or_unmeasured_final_revision_cannot_feed_reflection(self):
+        state,_,candidates,pair=self.fixture()
+        args=(candidates[0].candidate_id,pair[0].scope.candidate_revision_id)
+        for altered in (
+            NS(**{**vars(state),'formal_batches':state.formal_batches[:1]}),
+            NS(**{**vars(state),'formal_batch_comparisons':state.formal_batch_comparisons[:1]}),
+            NS(**{**vars(state),'local_edit_proposals':()}),
+            NS(**{**vars(state),'local_edit_proposals':(*state.local_edit_proposals,
+                {**state.local_edit_proposals[0],'batch_index':1})}),
         ):
-            self.assertNotIn(f'"{forbidden_field}"', serialized_reflection)
-        self.assertNotIn("secret-rejected-operation-value", serialized_reflection)
-        self.assertNotIn("unbounded model-authored prose", serialized_reflection)
-        self.assertIsNotNone(
-            safe_aggregate_feedback(
-                reflection,
-                name="adaptive reflection test evidence",
-            )
-        )
-        legacy_schedule = OptimizationSchedule.default().to_dict()
-        legacy_schedule.update(
-            schema_version=LEGACY_SCHEDULE_SCHEMA_VERSION,
-            local_evaluation_mode=PREQUENTIAL_LOCAL_EVALUATION_MODE,
-        )
-        legacy_reflection_state = SimpleNamespace(
-            **{
-                **vars(state),
-                "task_manifest": SimpleNamespace(
-                    metadata={
-                        "optimization_protocol": OPTIMIZATION_PROTOCOL,
-                        "optimization_schedule": legacy_schedule,
-                    }
-                ),
-            }
-        )
-        legacy_reflection = _adaptive_reflection_analysis(
-            legacy_reflection_state,
-            analysis,
-        )
-        self.assertIn("created_at", legacy_reflection)
-        self.assertNotIn(
-            "trajectory_comparisons",
-            legacy_reflection["adaptive_epoch_evidence"],
-        )
-
-        search_only_gate = {
-            **gate_results["arms"][HoldoutArm.FINALIST_2.value],
-            "eligible": True,
-            "search_eligible": True,
-            "certification_eligible": False,
-            "search_failures": [],
-            "certification_failures": ["scientific_gate_failed"],
-        }
-        search_only_comparison = GenerationComparison(
-            comparison_id="comparison:adaptive-reflection:search-only",
-            run_id="run:adaptive-reflection",
-            generation=0,
-            cohort_digest="c" * 64,
-            holdout_evaluations=(
-                failed_holdout,
-                winner_holdout,
-                incumbent_holdout,
-            ),
-            selected_candidate_id=winner_holdout.scope.candidate_id,
-            selected_revision_id=winner_holdout.scope.candidate_revision_id,
-            gate_results={
-                **gate_results,
-                "selection_policy": "positive_delta_search@1",
-                "certification_selected_arm": None,
-                "selected_search_certification_status": "search_only",
-                "arms": {
-                    **gate_results["arms"],
-                    HoldoutArm.FINALIST_2.value: search_only_gate,
-                },
-            },
-        )
-        search_only_state = SimpleNamespace(
-            **{
-                **vars(state),
-                "comparison_for": lambda generation: (
-                    search_only_comparison if generation == 0 else None
-                ),
-            }
-        )
-        search_only = _build_adaptive_analysis(
-            search_only_state,
-            0,
-            search_only_comparison,
-            (candidates[0], candidates[3]),
-            incumbent_revision.candidate_id,
-        )
-        self.assertEqual(search_only.outcome, "search_version_advanced")
-        self.assertEqual(
-            search_only.selected_candidate_id,
-            winner_holdout.scope.candidate_id,
-        )
-        self.assertIsNone(search_only.champion_candidate_id)
-        self.assertEqual(
-            search_only.incumbent_after_candidate_id,
-            incumbent_revision.candidate_id,
-        )
-        self.assertEqual(
-            search_only.ranking[0]["selection_reason"],
-            "next_round_search_version",
-        )
-
-        incumbent_gate_results = {
-            **gate_results,
-            "arms": {
-                **gate_results["arms"],
-                HoldoutArm.FINALIST_2.value: finalist_gate(
-                    eligible=False,
-                    no_regression=False,
-                ),
-            },
-            "eligible_finalist_count": 0,
-            "selected_arm": HoldoutArm.INCUMBENT.value,
-            "selected_score": incumbent_holdout.score,
-            "delta_to_incumbent": 0.0,
-        }
-        incumbent_comparison = GenerationComparison(
-            comparison_id="comparison:adaptive-reflection:no-improvement",
-            run_id="run:adaptive-reflection",
-            generation=0,
-            cohort_digest="c" * 64,
-            holdout_evaluations=(
-                failed_holdout,
-                winner_holdout,
-                incumbent_holdout,
-            ),
-            selected_candidate_id=incumbent_holdout.scope.candidate_id,
-            selected_revision_id=incumbent_holdout.scope.candidate_revision_id,
-            gate_results=incumbent_gate_results,
-        )
-        incumbent_state = SimpleNamespace(
-            **{
-                **vars(state),
-                "comparison_for": lambda generation: (
-                    incumbent_comparison if generation == 0 else None
-                ),
-            }
-        )
-        no_improvement = _build_adaptive_analysis(
-            incumbent_state,
-            0,
-            incumbent_comparison,
-            (candidates[0], candidates[3]),
-            incumbent_revision.candidate_id,
-        )
-        self.assertIsNone(no_improvement.selected_candidate_id)
-        self.assertEqual(no_improvement.outcome, "no_improvement")
-        self.assertEqual(
-            no_improvement.search_parent_candidate_id,
-            incumbent_revision.candidate_id,
-        )
-        self.assertEqual(
-            no_improvement.incumbent_after_candidate_id,
-            incumbent_revision.candidate_id,
-        )
-        self.assertIsNone(no_improvement.champion_candidate_id)
-        self.assertEqual(no_improvement.eligible_count, 0)
-        self.assertEqual(
-            no_improvement.selection_reason,
-            "本轮 2 个 finalist 均未通过留出集门禁，保留 incumbent。",
-        )
-        self.assertIn("2 个 finalist", no_improvement.next_generation_focus)
-        self.assertNotIn("Top-2", no_improvement.next_generation_focus)
-        self.assertIn("incumbent", no_improvement.next_search_direction[0])
-        self.assertNotIn("冠军", no_improvement.next_search_direction[0])
-        self.assertTrue(all(row["rank"] is None for row in no_improvement.ranking))
-        finalist_rows = [
-            row
-            for row in no_improvement.ranking
-            if row.get("holdout_arm")
-            in {HoldoutArm.FINALIST_1.value, HoldoutArm.FINALIST_2.value}
-        ]
-        self.assertTrue(
-            all(
-                row["selection_reason"].startswith("holdout_gate_failed:")
-                for row in finalist_rows
-            )
-        )
-        no_improvement_reflection = _adaptive_reflection_analysis(
-            incumbent_state,
-            no_improvement,
-        )
-        self.assertEqual(
-            no_improvement_reflection["adaptive_epoch_evidence"]["selected"][
-                "revision_id"
-            ],
-            incumbent_revision.revision_id,
-        )
-
-        # A one-finalist schedule has two actual holdout arms. Wording must
-        # describe those arms without changing gate eligibility or selection.
-        for selected_finalist in (False, True):
-            with self.subTest(single_finalist_selected=selected_finalist):
-                single_gate = finalist_gate(
-                    eligible=selected_finalist,
-                    no_regression=selected_finalist,
-                )
-                selected_holdout = (
-                    failed_holdout if selected_finalist else incumbent_holdout
-                )
-                single_comparison = replace(
-                    incumbent_comparison,
-                    holdout_evaluations=(failed_holdout, incumbent_holdout),
-                    selected_candidate_id=selected_holdout.scope.candidate_id,
-                    selected_revision_id=selected_holdout.scope.candidate_revision_id,
-                    gate_results={
-                        **incumbent_gate_results,
-                        "arms": {
-                            HoldoutArm.FINALIST_1.value: single_gate,
-                            HoldoutArm.INCUMBENT.value: gate_results["arms"][
-                                HoldoutArm.INCUMBENT.value
-                            ],
-                        },
-                        "eligible_finalist_count": int(selected_finalist),
-                        "selected_arm": selected_holdout.scope.holdout_arm.value,
-                        "selected_score": selected_holdout.score,
-                        "delta_to_incumbent": (
-                            selected_holdout.score - incumbent_holdout.score
-                        ),
-                    },
-                )
-                before = canonical_json(single_comparison.to_dict())
-                single = _build_adaptive_analysis(
-                    state,
-                    0,
-                    single_comparison,
-                    (candidates[0],),
-                    incumbent_revision.candidate_id,
-                )
-                self.assertEqual(single.eligible_count, int(selected_finalist))
-                self.assertEqual(
-                    single.selected_candidate_id,
-                    candidates[0].candidate_id if selected_finalist else None,
-                )
-                self.assertIn("1 个 finalist", single.next_generation_focus)
-                self.assertNotIn("Top-2", single.next_generation_focus)
-                if selected_finalist:
-                    self.assertIn("2 臂留出比较", single.selection_reason)
-                    self.assertNotIn("三臂", single.selection_reason)
-                    self.assertNotIn("训练比较", single.selection_reason)
-                else:
-                    self.assertEqual(
-                        single.selection_reason,
-                        "本轮 1 个 finalist 均未通过留出集门禁，保留 incumbent。",
-                    )
-                self.assertEqual(before, canonical_json(single_comparison.to_dict()))
-
-        exploration_comparison = GenerationComparison(
-            comparison_id="comparison:adaptive-reflection:exploration",
-            run_id="run:adaptive-reflection",
-            generation=0,
-            cohort_digest="c" * 64,
-            holdout_evaluations=(
-                failed_holdout,
-                winner_holdout,
-                incumbent_holdout,
-            ),
-            selected_candidate_id=incumbent_holdout.scope.candidate_id,
-            selected_revision_id=incumbent_holdout.scope.candidate_revision_id,
-            gate_results={
-                **incumbent_gate_results,
-                "challenger_promotion_allowed": False,
-            },
-        )
-        exploration_state = SimpleNamespace(
-            **{
-                **vars(state),
-                "comparison_for": lambda generation: (
-                    exploration_comparison if generation == 0 else None
-                ),
-                "formal_selection_for": lambda generation: (
-                    SimpleNamespace(
-                        payload={
-                            "schema_version": (
-                                "ecologyrsi-dsh.formal-selection-cohort/3"
-                            ),
-                            "exploration_only": True,
-                            "consecutive_exploration_generations": 2,
-                        }
-                    )
-                    if generation == 0
-                    else None
-                ),
-            }
-        )
-        exploration = _build_adaptive_analysis(
-            exploration_state,
-            0,
-            exploration_comparison,
-            (candidates[0], candidates[3]),
-            incumbent_revision.candidate_id,
-        )
-        self.assertEqual(exploration.outcome, "exploration_only")
-        self.assertTrue(exploration.replan_required)
-        self.assertEqual(exploration.consecutive_exploration_generations, 2)
-        self.assertTrue(exploration.to_dict()["replan_required"])
-
-        positive_exploration_comparison = GenerationComparison(
-            comparison_id="comparison:adaptive-reflection:positive-exploration",
-            run_id="run:adaptive-reflection",
-            generation=0,
-            cohort_digest="c" * 64,
-            holdout_evaluations=(
-                failed_holdout,
-                winner_holdout,
-                incumbent_holdout,
-            ),
-            selected_candidate_id=winner_holdout.scope.candidate_id,
-            selected_revision_id=winner_holdout.scope.candidate_revision_id,
-            gate_results={
-                **search_only_comparison.to_dict()["gate_results"],
-                "challenger_promotion_allowed": False,
-            },
-        )
-        positive_exploration_state = SimpleNamespace(
-            **{
-                **vars(exploration_state),
-                "comparison_for": lambda generation: (
-                    positive_exploration_comparison if generation == 0 else None
-                ),
-            }
-        )
-        positive_exploration = _build_adaptive_analysis(
-            positive_exploration_state,
-            0,
-            positive_exploration_comparison,
-            (candidates[0], candidates[3]),
-            incumbent_revision.candidate_id,
-        )
-        self.assertEqual(
-            positive_exploration.search_parent_candidate_id,
-            winner_holdout.scope.candidate_id,
-        )
-        self.assertTrue(positive_exploration.replan_required)
-        self.assertIn("重新生成候选方向", positive_exploration.next_generation_focus)
-        self.assertIn("下一轮搜索版本", positive_exploration.selection_reason)
-        self.assertNotIn("仅保留探索证据", positive_exploration.selection_reason)
-
-
-if __name__ == "__main__":
-    unittest.main()
+            with self.assertRaises(RuntimeError):_local_edit_trajectory_evidence(altered,*args)
+        with self.assertRaises(RuntimeError):_local_edit_trajectory_evidence(state,args[0],'revision:unmeasured')

@@ -800,14 +800,15 @@ class DeliveryScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="ecologyrsi-directory-symlink-") as directory:
             fixture = Path(directory)
             self._write_minimal_source_fixture(fixture, version="0.3.33")
-            screenshots = fixture / "docs/screenshots"
+            screenshots = fixture / "datasets"
+            screenshots.mkdir(exist_ok=True)
             shutil.rmtree(screenshots)
             external = fixture / "external-screenshots"
             external.mkdir()
             (external / "secret.jpg").write_bytes(b"must not be read")
             screenshots.symlink_to(external, target_is_directory=True)
 
-            with self.assertRaisesRegex(RuntimeError, "symlink.*docs/screenshots"):
+            with self.assertRaisesRegex(RuntimeError, "symlink.*datasets"):
                 included_source_files(fixture)
 
     def test_public_source_selection_is_versioned_and_excludes_internal_docs(self) -> None:
@@ -822,7 +823,7 @@ class DeliveryScriptTests(unittest.TestCase):
             f"ecologyrsi-dsh-evolution-plugin-{version}.tgz",
             included,
         )
-        self.assertIn("docs/screenshots/01-run-settings.jpg", included)
+        self.assertIn("docs/LIGHTWEIGHT.md", included)
         self.assertFalse(
             any(name.startswith("docs/superpowers/") for name in included)
         )
@@ -1375,20 +1376,6 @@ class DeliveryScriptTests(unittest.TestCase):
                     violations.add((name, category))
 
         self.assertEqual(sorted(violations), [])
-
-    def test_readme_references_six_repository_screenshots(self) -> None:
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        references = re.findall(r"!\[[^]]*\]\((docs/screenshots/[^)]+)\)", readme)
-        expected = [
-            "docs/screenshots/01-run-settings.jpg",
-            "docs/screenshots/02-parameter-design.jpg",
-            "docs/screenshots/03-training-data.jpg",
-            "docs/screenshots/04-evolution-process.jpg",
-            "docs/screenshots/05-candidate-evaluation.jpg",
-            "docs/screenshots/06-human-governance.jpg",
-        ]
-        self.assertEqual(references, expected)
-        self.assertTrue(all((ROOT / reference).is_file() for reference in references))
 
     def test_git_ignores_common_local_secret_files(self) -> None:
         local_secret_paths = (

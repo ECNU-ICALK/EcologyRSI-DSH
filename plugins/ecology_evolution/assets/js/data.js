@@ -1,7 +1,7 @@
 "use strict";
 
   function loadSelectedDataset(offset) {
-    if (!state.usingDemo && state.workspace !== "training") { return Promise.resolve(false); }
+    if (state.workspace !== "training") { return Promise.resolve(false); }
     var context = trainingDatasetContext();
     if (!context) {
       state.datasetPage = null; state.datasetContext = null; state.datasetError = null; renderTraining(); return Promise.resolve(false);
@@ -29,7 +29,7 @@
     if (context.source === "active_run" && context.dataset_digest) { sampleQuery.set("expected_dataset_digest", context.dataset_digest); }
     if (context.source === "active_run" && context.split_manifest_digest) { sampleQuery.set("expected_split_manifest_digest", context.split_manifest_digest); }
     if (context.data_protocol_digest) { sampleQuery.set("expected_data_protocol_digest", context.data_protocol_digest); }
-    var operation = state.usingDemo ? Promise.resolve(demoDatasetPage(state.pageOffset, partition)) : Promise.all([
+    var operation = Promise.all([
       request("/datasets/" + encodeURIComponent(datasetId), { timeout: dataRequestTimeout }),
       request("/datasets/" + encodeURIComponent(datasetId) + "/samples?" + sampleQuery.toString(), { timeout: dataRequestTimeout })
     ]).then(function (results) {
@@ -70,81 +70,22 @@
     });
   }
 
-  function candidateSampleRowsFrom(value) {
-    if (Array.isArray(value)) { return value; }
-    if (!value || typeof value !== "object") { return []; }
-    if (Array.isArray(value.rows)) { return value.rows; }
-    if (Array.isArray(value.samples)) { return value.samples; }
-    return [];
-  }
-
-  function candidateEmbeddedSampleSource(candidate, run) {
-    var metrics = candidate && candidate.metrics && typeof candidate.metrics === "object" ? candidate.metrics : {};
-    var execution = candidate && candidate.execution && typeof candidate.execution === "object" ? candidate.execution : {};
-    var sources = [
-      execution.inference_trace, execution.prediction_trace,
-      candidate && candidate.inference_trace, candidate && candidate.prediction_trace,
-      metrics.inference_trace, metrics.prediction_preview, metrics.predictions,
-      run && run.inference_trace
-    ];
-    for (var index = 0; index < sources.length; index += 1) {
-      var rows = candidateSampleRowsFrom(sources[index]);
-      if (rows.length) { return {source: sources[index], rows: rows}; }
-    }
-    return {source: null, rows: []};
-  }
-
-  function candidateSampleFirstValue(row, keys) {
-    for (var index = 0; index < keys.length; index += 1) {
-      if (row[keys[index]] != null) { return row[keys[index]]; }
-    }
-    return null;
-  }
-
-  function normalizeCandidateSampleRow(value, index) {
-    var row = value && typeof value === "object" && !Array.isArray(value) ? Object.assign({}, value) : {};
-    var failure = row.failure && typeof row.failure === "object" ? row.failure : {};
-    var sampleStatus = candidateSampleFirstValue(row, ["sample_execution_status", "execution_status", "status"]);
-    var observed = candidateSampleFirstValue(row, ["observed", "actual", "actual_value", "label"]);
-    var predicted = candidateSampleFirstValue(row, ["predicted", "prediction", "predicted_value"]);
-    var baseline = candidateSampleFirstValue(row, ["baseline", "baseline_value", "baseline_prediction"]);
-    var reward = candidateSampleFirstValue(row, ["reward", "sample_reward", "reward_value", "score"]);
-    var attempts = candidateSampleFirstValue(row, ["attempts", "sample_execution_attempts", "attempt_count"]);
-    var retryCount = candidateSampleFirstValue(row, ["retry_count", "sample_execution_retry_count", "retries"]);
-    var predictionSource = candidateSampleFirstValue(row, ["prediction_source", "source"]);
-    var scoringFallback = row.scoring_fallback || (String(predictionSource || "").toLowerCase() === "scoring_fallback" ? "scoring_fallback" : null);
-    var failureMessage = candidateSampleFirstValue(row, ["failure_message", "public_error", "failure_reason"])
-      || failure.message || failure.public_error || failure.failure_code || failure.error_type || null;
-    var failedStatus = ["failed", "error", "rejected", "timeout", "aborted", "cancelled"].indexOf(String(sampleStatus || "").toLowerCase()) >= 0 || Boolean(scoringFallback);
-    if (!failureMessage && failedStatus && typeof row.error === "string" && row.error.trim() && !Number.isFinite(Number(row.error))) {
-      failureMessage = row.error;
-    }
-    if (failedStatus) {
-      predicted = null;
-      reward = null;
-      predictionSource = "failed_no_model_prediction";
-    } else if (reward == null && [observed, predicted, baseline].every(function (item) { return item != null && item !== "" && Number.isFinite(Number(item)); })) {
-      reward = Math.abs(Number(baseline) - Number(observed)) - Math.abs(Number(predicted) - Number(observed));
-    }
-    return Object.assign({}, row, {
-      sample_id: candidateSampleFirstValue(row, ["sample_id", "id"]) || "sample:" + String(index + 1),
-      origin_timestamp: candidateSampleFirstValue(row, ["origin_timestamp", "forecast_timestamp", "input_timestamp"]),
-      target_timestamp: candidateSampleFirstValue(row, ["target_timestamp", "timestamp", "time"]),
-      target: candidateSampleFirstValue(row, ["target", "target_name", "variable"]),
-      horizon_hours: candidateSampleFirstValue(row, ["horizon_hours", "horizon", "lead_hours"]),
-      observed: observed,
-      predicted: predicted,
-      baseline: baseline,
-      reward: reward,
-      attempts: attempts,
-      retry_count: retryCount,
-      prediction_source: predictionSource,
-      scoring_fallback: scoringFallback,
-      scoring_penalty_applied: row.scoring_penalty_applied === true || Boolean(scoringFallback),
-      model_prediction_available: failedStatus ? false : row.model_prediction_available !== false && predicted != null && predicted !== "",
-      sample_status: sampleStatus,
-      failure_message: failureMessage
+  function normalizeCandidateSampleRow(value) {
+    var row = Object.assign({}, value);
+    var failed = row.status === "failed" || Boolean(row.scoring_fallback);
+    return Object.assign(row, {
+      predicted: failed ? null : row.predicted,
+      reward: failed ? null : row.reward,
+      prediction_source: failed ? "failed_no_model_prediction" : row.prediction_source,
+      model_prediction_available: !failed && row.predicted != null,
+      sample_status: row.status,
+      scoring_penalty_applied: row.scoring_penalty_applied === true || Boolean(row.scoring_fallback)
     });
+  }
+
+  function selectedSamplePage(candidate, run) {
+    return run && candidate && candidateSampleSelectionMatches(run.id, candidate.id)
+      ? state.candidateSamplePage : null;
   }
 
   function normalizeCandidateSamplePage(payload, runId, candidateId, requestedOffset, requestedLimit) {
@@ -160,33 +101,6 @@
       throw new Error("逐样本结果分页与请求不一致。");
     }
     return Object.assign({}, payload, {rows: payload.rows.map(normalizeCandidateSampleRow), source: "api", truncated: false});
-  }
-
-  function demoCandidateSamplePage(run, candidate, offset, limit) {
-    var embedded = candidateEmbeddedSampleSource(candidate, run);
-    var source = embedded.source && typeof embedded.source === "object" && !Array.isArray(embedded.source) ? embedded.source : {};
-    var total = Number(source.sample_count != null ? source.sample_count : source.total);
-    if (!Number.isFinite(total) || total < embedded.rows.length) { total = embedded.rows.length; }
-    var start = Math.max(0, Number(offset) || 0);
-    var pageLimit = Math.max(1, Number(limit) || 25);
-    var rows = embedded.rows.slice(start, start + pageLimit).map(normalizeCandidateSampleRow);
-    var candidateStatus = String(candidate && candidate.status || "").toLowerCase();
-    return {
-      schema_version: "ecologyrsi-dsh.demo-sample-page/1",
-      run_id: run && run.id,
-      candidate_id: candidate && (candidate.id || candidate.candidate_id),
-      rows: rows,
-      offset: start,
-      limit: pageLimit,
-      total: total,
-      has_more: start + rows.length < embedded.rows.length,
-      next_offset: start + rows.length < embedded.rows.length ? start + rows.length : null,
-      complete: ["pending", "spawned", "evaluating", "running"].indexOf(candidateStatus) < 0,
-      revision: run && run.projection_revision,
-      updated_at: run && run.updated_at,
-      source: "projection_preview",
-      truncated: source.truncated === true || total > embedded.rows.length
-    };
   }
 
   function invalidateCandidateSampleRequest() {
@@ -333,7 +247,7 @@
   }
 
   function queueRunMonitor(runId, delay) {
-    if (!runId || state.runMonitorRunId !== runId || state.runMonitorContextEpoch !== state.contextEpoch || state.usingDemo) { return false; }
+    if (!runId || state.runMonitorRunId !== runId || state.runMonitorContextEpoch !== state.contextEpoch) { return false; }
     clearRunMonitorTimer();
     state.runMonitorTimer = window.setTimeout(function () {
       state.runMonitorTimer = null;
@@ -345,7 +259,7 @@
   function startRunMonitor(runId) {
     var run = state.activeRun;
     var runStatus = String(run && run.status || "").toLowerCase();
-    if (state.usingDemo || !run || !runId || String(run.id) !== String(runId) || runStatus !== "running" || runIsTerminal(run)) {
+    if (!run || !runId || String(run.id) !== String(runId) || runStatus !== "running" || runIsTerminal(run)) {
       if (!runId || !run || runStatus !== "running" || runIsTerminal(run)) { stopRunMonitor(runId); }
       return false;
     }
@@ -363,7 +277,7 @@
   }
 
   function runMonitorTick(runId) {
-    if (state.runMonitorRunId !== runId || state.runMonitorContextEpoch !== state.contextEpoch || state.usingDemo) { return; }
+    if (state.runMonitorRunId !== runId || state.runMonitorContextEpoch !== state.contextEpoch) { return; }
     var run = state.activeRun;
     if (!run || run.id !== runId || String(run.status || "").toLowerCase() !== "running" || runIsTerminal(run)) {
       stopRunMonitor(runId);
@@ -430,7 +344,7 @@
   }
 
   function loadCandidateSamples(offset, options) {
-    if (!state.usingDemo && ["process", "candidates"].indexOf(state.workspace) < 0) { return Promise.resolve(false); }
+    if (["process", "candidates"].indexOf(state.workspace) < 0) { return Promise.resolve(false); }
     if (createDisplayStatus()) { return Promise.resolve(false); }
     var settings = options || {};
     var run = displayedRun();
@@ -442,7 +356,7 @@
     }
     var candidateId = candidate.id || candidate.candidate_id;
     if (!candidateSampleSelectionMatches(run.id, candidateId)) { resetCandidateSamples(run.id, candidateId); }
-    if (!state.usingDemo && !hasCapability("evaluation.samples.read")) {
+    if (!hasCapability("evaluation.samples.read")) {
       state.candidateSamplePage = null;
       state.candidateSampleUnavailable = true;
       state.candidateSamplePermissionDenied = true;
@@ -464,16 +378,6 @@
     state.candidateSampleLoading = !state.candidateSamplePage;
     state.candidateSampleRefreshing = Boolean(state.candidateSamplePage);
     renderCandidateSampleViews();
-    if (state.usingDemo) {
-      state.candidateSamplePage = demoCandidateSamplePage(run, candidate, pageOffset, pageLimit);
-      state.candidateSampleOffset = state.candidateSamplePage.offset;
-      state.candidateSampleRetryOffset = null;
-      state.candidateSampleUnavailable = true;
-      state.candidateSampleLoading = false;
-      state.candidateSampleRefreshing = false;
-      renderCandidateSampleViews();
-      return Promise.resolve(true);
-    }
     var contextEpoch = state.contextEpoch;
     var query = new URLSearchParams({candidate_id: candidateId, offset: String(pageOffset), limit: String(pageLimit)});
     return request("/runs/" + encodeURIComponent(run.id) + "/samples?" + query.toString(), {timeout: dataRequestTimeout}).then(function (payload) {
@@ -507,7 +411,7 @@
   }
 
   function refreshCandidateSamples(options) {
-    if (!state.usingDemo && ["process", "candidates"].indexOf(state.workspace) < 0) { return Promise.resolve(false); }
+    if (["process", "candidates"].indexOf(state.workspace) < 0) { return Promise.resolve(false); }
     var settings = options || {};
     var run = displayedRun();
     var candidate = selectedCandidateForSamples();
@@ -525,7 +429,6 @@
   }
 
   function refreshEventsForRun(runId) {
-    if (state.usingDemo) { return Promise.resolve(true); }
     var contextEpoch = state.contextEpoch;
     var pendingKey = contextEpoch + "|" + runId;
     if (state.eventReadPending && state.eventReadPending.key === pendingKey) { return state.eventReadPending.promise; }
@@ -548,7 +451,7 @@
 
   function captureProgressUiState() {
     if (!document || typeof document.querySelector !== "function") { return null; }
-    var rootSelectors = ["#candidate-detail", "#training-assets-table", "#round-stage-list", "#pending-consultations", "#answered-consultations"];
+    var rootSelectors = ["#candidate-detail", "#round-stage-list"];
     var roots = rootSelectors.map(function (selector) {
       var root = document.querySelector(selector);
       if (!root || typeof root.querySelectorAll !== "function") { return null; }
@@ -610,8 +513,6 @@
     if (typeof renderContext === "function") { renderContext(); }
     if (state.workspace === "process" && typeof renderProcess === "function") { renderProcess(); }
     if (state.workspace === "candidates" && typeof renderCandidates === "function") { renderCandidates(); }
-    if (state.workspace === "training" && typeof renderTrainingAssets === "function") { renderTrainingAssets(); }
-    if (state.workspace === "collaboration" && typeof renderCollaboration === "function") { renderCollaboration(); }
     var lastUpdated = $("#last-updated");
     if (lastUpdated) { lastUpdated.textContent = state.lastUpdated ? "最近同步：" + formatDate(state.lastUpdated) : "尚未同步"; }
     restoreProgressUiState(uiState);
@@ -634,7 +535,6 @@
   }
 
   function refreshProgressForRun(runId) {
-    if (state.usingDemo) { return Promise.resolve(true); }
     var contextEpoch = state.contextEpoch;
     var requestId = state.runReadRequest + 1;
     state.runReadRequest = requestId;
@@ -648,7 +548,7 @@
       if (requestId !== state.runReadRequest || contextEpoch !== state.contextEpoch) { return false; }
       if (!state.activeRun || state.activeRun.id !== runId) { return false; }
       var previousRun = state.activeRun;
-      var compactProjection = results[0] && (results[0].projection || results[0].run_projection) || results[0] || {};
+      var compactProjection = results[0] && (results[0].projection) || results[0] || {};
       var compactRunId = compactProjection.run_id || compactProjection.id;
       if (compactRunId != null && String(compactRunId) !== String(runId)) {
         throw new Error("运行监视响应返回了其他运行的数据。");

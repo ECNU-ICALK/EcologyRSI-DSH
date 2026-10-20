@@ -18,16 +18,16 @@ from ecologyrsi_dsh.evaluators.greenhouse_prediction import (
 )
 from ecologyrsi_dsh.evaluators.registry import (
     EvaluatorRegistry,
-    GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
-    GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID,
 )
 from ecologyrsi_dsh.knowledge.algorithms import compile_algorithm_spec
 from ecologyrsi_dsh.knowledge.algorithm_smoke import smoke_test_algorithm_spec
 from ecologyrsi_dsh.knowledge.program_registry import current_program_registry
 from tests.test_evaluation import (
     _DatasetStub, _DshOriginRuntimeStub, _dsh_prediction_tool_binder,
+    _native_registry, _scope_cohort, _profile_metadata,
 )
 from tests.test_greenhouse_prediction import _series
+from tests.native_fixtures import native_manifest
 
 
 TARGETS = ("air_temperature", "relative_humidity", "co2_concentration")
@@ -202,34 +202,36 @@ class BaselineAlignedRidgeTests(unittest.TestCase):
         task = TaskManifest(
             task_id="aligned", objective="test aligned forecasting",
             domain_pack="greenhouse_environment@1", visible_datasets=(series.dataset_id,),
-            budget={"max_candidates": 1}, metadata={
+            budget={"max_candidates": 1}, metadata={"search_guard_policy":"practical_delta_cell_noninferiority_paired_blocks@1",
                 "episode_id": series.episode_id, "prediction_model_id": BASELINE_ALIGNED_RIDGE_MODEL_ID,
-                "evaluator_id": GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID,
+                "evaluator_id": "greenhouse_multihorizon_time_forward@4",
                 "dataset_digest": series.digest, "split_manifest_digest": series.split_manifest_digest_sha256,
             })
         proposal = Proposal(proposal_id="proposal:aligned", run_id="run:aligned",
-                            generation=0, title="aligned", changes=params)
+                            generation=0, title="aligned", changes=params, metadata=_profile_metadata())
         candidate = Candidate(candidate_id="candidate:aligned", run_id=proposal.run_id,
                               proposal_id=proposal.proposal_id, generation=0)
-        registry = EvaluatorRegistry(_DatasetStub(series))
-        compiled = compile_algorithm_spec(task, proposal, None)
+        task = native_manifest(metadata={**task.metadata, "data_protocol_digest": "f"*64, "seed_genome_template_id":"greenhouse-baseline-aligned-default@2"})
+        registry = _native_registry(series)
+        from tests.native_candidate_fixture import seed_proposal
+        compiled = compile_algorithm_spec(task, seed_proposal(task), None)
         self.assertEqual(compiled.adapter_id, BASELINE_ALIGNED_RIDGE_MODEL_ID)
         self.assertIn("host.fit.partition-selected-baseline@1",
                       [item["operator_id"] for item in compiled.algorithm_ir["operators"]])
         smoke = smoke_test_algorithm_spec(compiled, task, datasets=_DatasetStub(series))
         self.assertEqual(smoke["status"], "passed")
         self.assertEqual(smoke["source_partition"], "training_fit")
-        bundle = registry.evaluate_scientific(task, candidate, proposal)
+        bundle = registry.evaluate_scientific(task, candidate, proposal, **_scope_cohort(series, candidate))
         self.assertEqual(bundle.artifact.model_id, BASELINE_ALIGNED_RIDGE_MODEL_ID)
         self.assertEqual(bundle.artifact.parameters, params)
         self.assertEqual(len(bundle.evaluation.metrics["targets"]), 9)
         self.assertEqual(bundle.evaluation.score, 0.0)
         self.assertTrue(all(r["rmse"] == r["baseline_rmse"]
                             for r in bundle.evaluation.metrics["targets"]))
-        with self.assertRaisesRegex(ValueError, "incompatible"):
-            registry.validate_binding(series.dataset_id, GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
+        with self.assertRaises((ValueError, KeyError)):
+            registry.validate_binding(series.dataset_id, "greenhouse_multihorizon_time_forward@2",
                                       BASELINE_ALIGNED_RIDGE_MODEL_ID)
-        template = current_program_registry().seed_template("greenhouse-baseline-aligned-default@1")
+        template = current_program_registry().seed_template("greenhouse-baseline-aligned-default@2")
         self.assertEqual(template.to_dict()["scientific_program"]["predictor_ref"]["id"],
                          BASELINE_ALIGNED_RIDGE_MODEL_ID)
 
@@ -239,25 +241,26 @@ class BaselineAlignedRidgeTests(unittest.TestCase):
         task = TaskManifest(
             task_id="aligned-native", objective="test native aligned forecasting",
             domain_pack="greenhouse_environment@1", visible_datasets=(series.dataset_id,),
-            budget={"max_candidates": 1}, metadata={
+            budget={"max_candidates": 1}, metadata={"search_guard_policy":"practical_delta_cell_noninferiority_paired_blocks@1",
                 "episode_id": series.episode_id,
                 "prediction_model_id": BASELINE_ALIGNED_RIDGE_MODEL_ID,
-                "evaluator_id": GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID,
+                "evaluator_id": "greenhouse_multihorizon_time_forward@4",
                 "dataset_digest": series.digest,
                 "split_manifest_digest": series.split_manifest_digest_sha256,
                 "sample_agent_mode": "dsh_native_agent",
-                "sample_agent_protocol": "dsh-strict-origin-bundle@3",
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "sample_agent_batch_size": 9, "sample_concurrency": 1,
                 "prediction_cells_per_origin": 9, "samples_per_update": 9,
                 "strategy_model_id": "dsh/strategy", "review_model_id": "dsh/review",
             })
         proposal = Proposal(proposal_id="proposal:aligned-native", run_id="run:aligned-native",
                             generation=0, title="aligned native",
-                            changes=BaselineAlignedRidgeConfig(6, .1, 0.0).to_dict())
+                            changes=BaselineAlignedRidgeConfig(6, .1, 0.0).to_dict(), metadata=_profile_metadata())
         candidate = Candidate(candidate_id="candidate:aligned-native", run_id=proposal.run_id,
                               proposal_id=proposal.proposal_id, generation=0)
+        task = native_manifest(metadata={**task.metadata, "data_protocol_digest": "f"*64, "seed_genome_template_id":"greenhouse-baseline-aligned-default@2"})
         registry = EvaluatorRegistry(
-            _DatasetStub(series), object(), dsh_runtime_provider=lambda: runtime,
+            _DatasetStub(series), dsh_runtime_provider=lambda: runtime,
             dsh_revision_provider=lambda _: {"run_state_revision": 1, "ledger_expected_revision": 1},
             dsh_identity_provider=lambda *_: {"genome_digest": "a" * 64,
                 "compiled_behavior_digest": "b" * 64, "phenotype_instance_digest": "c" * 64},
@@ -275,7 +278,7 @@ class BaselineAlignedRidgeTests(unittest.TestCase):
                                  for row in build_sample_results(candidate.candidate_id, rows)})
 
         bundle = registry.evaluate_scientific(
-            task, candidate, proposal,
+            task, candidate, proposal, **_scope_cohort(series, candidate),
             on_sample_checkpoint=capture_checkpoint, on_sample_results=capture_rows,
         )
         summary = bundle.evaluation.metrics["sample_execution"]
@@ -284,7 +287,7 @@ class BaselineAlignedRidgeTests(unittest.TestCase):
         self.assertEqual(summary["failed_examples"], 0)
         self.assertEqual(bundle.evaluation.score, 0.0)
         self.assertEqual([r["stage"] for r in runtime.requests],
-                         ["sample.plan", "sample.critic", "sample.reflect"])
+                         ["sample.plan", "sample.critic"])
         self.assertEqual(len(durable_rows), 9)
         runtime.requests.clear()
 
@@ -293,7 +296,7 @@ class BaselineAlignedRidgeTests(unittest.TestCase):
             return {"rows": list(durable_rows.values())}
 
         replay = registry.evaluate_scientific(
-            task, candidate, proposal, on_sample_checkpoint=resume_checkpoint,
+            task, candidate, proposal, **_scope_cohort(series, candidate), on_sample_checkpoint=resume_checkpoint,
         )
         self.assertEqual(runtime.requests, [])
         self.assertEqual(replay.evaluation.score, bundle.evaluation.score)

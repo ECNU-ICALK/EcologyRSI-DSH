@@ -88,24 +88,6 @@ def _confidence_threshold_parameter() -> dict[str, Any]:
 
 _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
     "predictors": {
-        "toy-rolling-water@1": {
-            "version": "toy-water-operator-graph/1",
-            "parameters": {
-                "alpha": _parameter(minimum=0.0, maximum=1.0, default=0.5),
-                "window": _parameter(minimum=1, maximum=168, default=5, integer=True),
-                "water_threshold": _parameter(
-                    minimum=0.0, maximum=1.0, default=0.4
-                ),
-            },
-        },
-        "greenhouse-rolling-residual@1": {
-            "version": "greenhouse-rolling-operator-graph/1",
-            "parameters": {
-                "blend": _parameter(minimum=0.0, maximum=1.0, default=0.5),
-                "window": _parameter(minimum=1, maximum=168, default=6, integer=True),
-                "bias_scale": _parameter(minimum=0.0, maximum=2.0, default=0.5),
-            },
-        },
         "greenhouse-exogenous-ridge@1": {
             "version": "greenhouse-ridge-operator-graph/1",
             "parameters": {
@@ -202,10 +184,6 @@ _CURRENT_PROGRAMS: dict[str, dict[str, dict[str, Any]]] = {
     "feature_policies": {
         "registered_greenhouse_features@1": {
             "version": "registered-greenhouse-causal-features/1",
-            "parameters": {},
-        },
-        "registered_toy_features@1": {
-            "version": "registered-toy-causal-features/1",
             "parameters": {},
         },
         "authored_causal_features@1": {
@@ -631,7 +609,7 @@ def _agent_program(programs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             "role_profiles": [
                 {
                     "role": "sample-planner",
-                    "preset_id": "ecology-sample-planner-v11",
+                    "preset_id": "ecology-sample-planner-v14",
                     "instruction_template_ref": _program_ref(
                         programs,
                         "instruction_templates",
@@ -727,41 +705,35 @@ class ProgramRegistrySnapshot:
             raise TypeError("program registry must be an object")
         thawed = deep_thaw_json(frozen)
         templates = seed_templates or (
-            _seed_template(thawed, template_id="greenhouse-baseline-aligned-cellwise-default@1",
+            _seed_template(thawed, template_id="greenhouse-baseline-aligned-cellwise-default@2",
                 predictor_id="greenhouse-baseline-aligned-ridge@2", feature_policy_id="registered_greenhouse_features@1"),
             _seed_template(
                 thawed,
-                template_id="greenhouse-default@1",
+                template_id="greenhouse-default@2",
                 predictor_id="greenhouse-horizon-targetwise-ridge@1",
                 feature_policy_id="registered_greenhouse_features@1",
             ),
             _seed_template(
                 thawed,
-                template_id="greenhouse-targetwise-default@1",
+                template_id="greenhouse-targetwise-default@2",
                 predictor_id="greenhouse-targetwise-ridge@1",
                 feature_policy_id="registered_greenhouse_features@1",
             ),
             _seed_template(
                 thawed,
-                template_id="greenhouse-exogenous-default@1",
+                template_id="greenhouse-exogenous-default@2",
                 predictor_id="greenhouse-exogenous-ridge@1",
                 feature_policy_id="registered_greenhouse_features@1",
             ),
             _seed_template(
                 thawed,
-                template_id="greenhouse-baseline-aligned-default@1",
+                template_id="greenhouse-baseline-aligned-default@2",
                 predictor_id="greenhouse-baseline-aligned-ridge@1",
                 feature_policy_id="registered_greenhouse_features@1",
             ),
             _seed_template(
                 thawed,
-                template_id="greenhouse-rolling-default@1",
-                predictor_id="greenhouse-rolling-residual@1",
-                feature_policy_id="registered_greenhouse_features@1",
-            ),
-            _seed_template(
-                thawed,
-                template_id="greenhouse-recipe-default@1",
+                template_id="greenhouse-recipe-default@2",
                 predictor_id="greenhouse-recipe-ridge@1",
                 feature_policy_id="authored_causal_features@1",
                 # The information-symmetry seed: seasonal_reference reads the
@@ -774,26 +746,7 @@ class ProgramRegistrySnapshot:
                     exogenous_columns=GREENHOUSE_SEED_EXOGENOUS_COLUMNS,
                 ),
             ),
-            _seed_template(
-                thawed,
-                template_id="toy-default@1",
-                predictor_id="toy-rolling-water@1",
-                feature_policy_id="registered_toy_features@1",
-            ),
         )
-        if seed_templates is None:
-            # Harness 0.2 changes the executable preset identity. Preserve the
-            # archived @1 templates byte for byte; new runs select @2 explicitly.
-            harness_templates = []
-            for template in templates:
-                value = template.to_dict()
-                value.pop("template_digest", None)
-                value["template_id"] = value["template_id"].removesuffix("@1") + "@2"
-                profiles = value["agent_program"]["candidate_execution_program"]["role_profiles"]
-                for profile in profiles:
-                    profile["preset_id"] = "ecology-sample-planner-v14"
-                harness_templates.append(SeedGenomeTemplate.from_dict(value))
-            templates = (*templates, *harness_templates)
         identity = {
             "schema_version": REGISTRY_SCHEMA_VERSION,
             "programs": thawed,

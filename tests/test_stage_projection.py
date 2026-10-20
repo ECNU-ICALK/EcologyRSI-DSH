@@ -3,16 +3,14 @@ from __future__ import annotations
 import unittest
 
 from ecologyrsi_dsh import (
-    Evaluation,
     EventLedger,
     EvolutionDirector,
-    FakeDSHAdapter,
     TaskManifest,
 )
-from ecologyrsi_dsh.knowledge.algorithms import resolve_predictor_adoption
 from ecologyrsi_dsh.knowledge.research_iteration import ResearchIteration
+from tests.native_fixtures import NativeRoleStub, native_manifest, start_native_run, spawn_native_candidate
 from ecologyrsi_dsh.knowledge.retrieval import retrieve_generation_knowledge
-from ecologyrsi_dsh.presentation.reporting import rounds, run_summary, training_assets
+from ecologyrsi_dsh.presentation.reporting import rounds, run_summary
 from ecologyrsi_dsh.api.projection import (
     _candidate_selection_disposition,
     _projection_json,
@@ -20,14 +18,7 @@ from ecologyrsi_dsh.api.projection import (
 
 
 def task() -> TaskManifest:
-    return TaskManifest(
-        task_id="stage-projection-task",
-        objective="predict soil water",
-        domain_pack="crop-soil-water@toy",
-        visible_datasets=("generated-toy-series@1",),
-        budget={"max_candidates": 2, "max_generations": 2},
-        seed=11,
-    )
+    return native_manifest(task_id="stage-projection-task", generations=2)
 
 
 def stage_payload(*, stage: str = "proposal", status: str = "started") -> dict:
@@ -45,10 +36,10 @@ def stage_payload(*, stage: str = "proposal", status: str = "started") -> dict:
 class EvolutionStageProjectionTests(unittest.TestCase):
     def test_candidate_projection_exposes_selection_disposition(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            director = EvolutionDirector(ledger, NativeRoleStub())
             run_id = "run:candidate-selection-disposition"
-            director.start_evolution(task(), run_id=run_id)
-            candidate = director.propose_and_spawn(run_id)
+            start_native_run(director, task=task(), run_id=run_id)
+            candidate = spawn_native_candidate(director, run_id)
             projection = _projection_json(director.state(run_id))
 
         projected = next(
@@ -106,9 +97,9 @@ class EvolutionStageProjectionTests(unittest.TestCase):
         self,
     ) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            director = EvolutionDirector(ledger, NativeRoleStub())
             run_id = "run:native-research-round-summary"
-            director.start_evolution(task(), run_id=run_id)
+            start_native_run(director, task=task(), run_id=run_id)
             state = director.state(run_id)
             snapshot = retrieve_generation_knowledge(state)
             ledger.append(
@@ -118,7 +109,7 @@ class EvolutionStageProjectionTests(unittest.TestCase):
             )
             plan = {
                 "status": "model_generated",
-                "prediction_model": {"id": "toy-rolling-water@1"},
+                "prediction_model": {"id": "greenhouse-horizon-targetwise-ridge@1"},
                 "dsh_research_summary": (
                     "Prioritize the weak 24-hour target while keeping the "
                     "registered predictor boundary."
@@ -135,7 +126,7 @@ class EvolutionStageProjectionTests(unittest.TestCase):
                     "avoid_behaviors": [
                         {
                             "behavior_digest": "b" * 64,
-                            "prediction_model_id": "toy-rolling-water@1",
+                            "prediction_model_id": "greenhouse-horizon-targetwise-ridge@1",
                             "parameters_digest": "c" * 64,
                             "reason": "scientific_gate_failed",
                             "source_run_id": "run:prior",
@@ -154,13 +145,11 @@ class EvolutionStageProjectionTests(unittest.TestCase):
                     },
                 },
             }
-            adoption = resolve_predictor_adoption(state.task_manifest, plan)
             iteration = ResearchIteration(
                 run_id=run_id,
                 generation=0,
                 status="model_generated",
                 plan=plan,
-                prediction_model_adoption=adoption.to_dict(),
                 knowledge_snapshot_digest=snapshot.snapshot_digest,
                 model_id="dsh-researcher",
             )
@@ -214,118 +203,32 @@ class EvolutionStageProjectionTests(unittest.TestCase):
         self.assertEqual(round_view, candidate_view)
         return round_view, candidate_view
 
-    def test_round_projects_bounded_research_iteration_summary(self) -> None:
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            run_id = "run:research-round-summary"
-            director.start_evolution(task(), run_id=run_id)
-            state = director.state(run_id)
-            snapshot = retrieve_generation_knowledge(state)
-            ledger.append(
-                run_id,
-                "GenerationKnowledgeRetrieved",
-                {"knowledge_snapshot": snapshot.to_dict()},
-            )
-            plan = {
-                "prediction_model": {"id": "toy-rolling-water@1"},
-                "algorithm_blueprint": {
-                    "schema_version": "ecologyrsi-dsh.algorithm-blueprint/1",
-                    "pipeline_id": "toy-rolling-water@1",
-                    "operator_ids": ["toy.history_window@1"],
-                    "parameter_names": ["alpha"],
-                    "evidence_refs": ["knowledge:predictor", "knowledge:paper"],
-                    "rationale": "not needed in the compact blueprint projection",
-                },
-                "algorithm_synthesis": {
-                    "schema_version": "ecologyrsi-dsh.algorithm-synthesis/1",
-                    "pipeline_id": "toy-rolling-water@1",
-                    "evidence_refs": ["knowledge:paper"],
-                    "parameter_focus": ["alpha"],
-                    "rationale": "Translate frozen evidence into bounded alpha search.",
-                },
-                "research": [
-                    {
-                        "title": "Bounded smoothing study",
-                        "source": "example journal",
-                        "finding": "Recent observations can improve short-horizon forecasts.",
-                        "relevance": "Supports testing alpha within the registered bounds.",
-                    }
-                ],
-                "private_reasoning": "must not be projected",
-            }
-            adoption = resolve_predictor_adoption(state.task_manifest, plan)
-            iteration = ResearchIteration(
-                run_id=run_id,
-                generation=0,
-                status="model_generated",
-                plan=plan,
-                prediction_model_adoption=adoption.to_dict(),
-                knowledge_snapshot_digest=snapshot.snapshot_digest,
-                model_id="policy-main",
-            )
-            director.record_research_iteration(iteration)
-
-            projected = rounds(director.state(run_id))[0]["research_iteration"]
-
-            self.assertEqual(projected["status"], "model_generated")
-            self.assertEqual(projected["iteration_digest"], iteration.iteration_digest)
-            self.assertEqual(
-                projected["knowledge_snapshot_digest"], snapshot.snapshot_digest
-            )
-            self.assertEqual(projected["model_id"], "policy-main")
-            self.assertEqual(
-                projected["predictor_adoption"]["adopted_id"],
-                "toy-rolling-water@1",
-            )
-            self.assertEqual(
-                projected["algorithm_synthesis"]["evidence_refs"],
-                ["knowledge:paper"],
-            )
-            self.assertEqual(
-                projected["analysis_summary"],
-                {
-                    "schema_version": "ecologyrsi-dsh.literature-analysis-summary/1",
-                    "status": "completed",
-                    "summary": "Translate frozen evidence into bounded alpha search.",
-                    "evidence_refs": ["knowledge:paper"],
-                    "key_findings": [
-                        {
-                            "title": "Bounded smoothing study",
-                            "source": "example journal",
-                            "finding": (
-                                "Recent observations can improve short-horizon forecasts."
-                            ),
-                            "relevance": (
-                                "Supports testing alpha within the registered bounds."
-                            ),
-                        }
-                    ],
-                    "source": "model_research_plan",
-                },
-            )
-            self.assertEqual(
-                projected["final_plan"],
-                {
-                    "schema_version": "ecologyrsi-dsh.final-implementation-plan/1",
-                    "status": "ready_for_host_compilation",
-                    "predictor_id": "toy-rolling-water@1",
-                    "pipeline_id": "toy-rolling-water@1",
-                    "operator_ids": ["toy.history_window@1"],
-                    "parameter_names": ["alpha"],
-                    "parameter_focus": ["alpha"],
-                    "rationale": (
-                        "Translate frozen evidence into bounded alpha search."
-                    ),
-                    "implementation_mode": "registered_host_components_only",
-                    "validation_sequence": [
-                        "compile_registered_ir",
-                        "training_fit_smoke_test",
-                        "training_feedback_evaluation",
-                        "independent_model_review",
-                    ],
-                },
-            )
-            self.assertNotIn("private_reasoning", str(projected))
+    def test_round_projects_only_bounded_native_research_fields(self) -> None:
+        from ecologyrsi_dsh.presentation.reporting import _research_iteration_summary
+        plan = {
+            "dsh_research_summary": "s" * 3000,
+            "dsh_research_evidence": [{"finding": "f" * 1200, "source": "public source",
+                "evidence_digest": "a" * 64, "private_reasoning": "MUST_NOT_PROJECT"}] * 12,
+            "candidate_directions": [{"direction_id": "d1", "title": "bounded direction",
+                "private_reasoning": "MUST_NOT_PROJECT"}] * 12,
+            "private_reasoning": "MUST_NOT_PROJECT",
+        }
+        iteration = ResearchIteration(run_id="run:bounded-summary", generation=0,
+            status="model_generated", plan=plan, knowledge_snapshot_digest="b" * 64,
+            model_id="fixture/strategy")
+        projected = _research_iteration_summary(iteration)
+        self.assertEqual(projected["iteration_digest"], iteration.iteration_digest)
+        self.assertEqual(projected["knowledge_snapshot_digest"], "b" * 64)
+        self.assertEqual(projected["model_id"], "fixture/strategy")
+        self.assertEqual(projected["analysis_summary"]["source"], "dsh_native_research")
+        self.assertEqual(len(projected["analysis_summary"]["summary"]), 2000)
+        self.assertEqual(len(projected["analysis_summary"]["key_findings"]), 8)
+        self.assertEqual(len(projected["analysis_summary"]["key_findings"][0]["finding"]), 1000)
+        self.assertEqual(len(projected["candidate_directions"]), 8)
+        self.assertEqual(projected["final_plan"]["status"], "ready_for_host_compilation")
+        self.assertEqual(projected["final_plan"]["implementation_mode"], "registered_host_components_only")
+        self.assertNotIn("MUST_NOT_PROJECT", str(projected))
+        self.assertNotIn("private_reasoning", str(projected))
 
     def test_replay_rejects_unknown_stage_and_status(self) -> None:
         invalid_cases = (
@@ -335,8 +238,8 @@ class EvolutionStageProjectionTests(unittest.TestCase):
         for payload, expected_error in invalid_cases:
             with self.subTest(payload=payload):
                 with EventLedger() as ledger:
-                    director = EvolutionDirector(ledger, FakeDSHAdapter())
-                    director.start_evolution(task(), run_id="run:invalid-stage")
+                    director = EvolutionDirector(ledger, NativeRoleStub())
+                    start_native_run(director, task=task(), run_id="run:invalid-stage")
                     ledger.append(
                         "run:invalid-stage",
                         "EvolutionStageRecorded",
@@ -347,9 +250,9 @@ class EvolutionStageProjectionTests(unittest.TestCase):
 
     def test_latest_recorded_status_overrides_inference_without_mutating_core(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            director.start_evolution(task(), run_id="run:recorded-stage")
-            candidate = director.propose_and_spawn("run:recorded-stage")
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            start_native_run(director, task=task(), run_id="run:recorded-stage")
+            candidate = spawn_native_candidate(director, "run:recorded-stage")
             proposal = director.state("run:recorded-stage").proposal(
                 candidate.proposal_id
             )
@@ -414,13 +317,12 @@ class EvolutionStageProjectionTests(unittest.TestCase):
                     "decision": "completed",
                 },
             )
-            receipts = training_assets(replayed)[0]["episode"]["event_receipts"]
-            self.assertIn("EvolutionStageRecorded", {item["kind"] for item in receipts})
+            self.assertEqual(sum(event.kind == "EvolutionStageRecorded" for event in replayed.events), 7)
 
     def test_started_stage_is_visible_before_proposal_exists(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            director.start_evolution(task(), run_id="run:stage-only")
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            start_native_run(director, task=task(), run_id="run:stage-only")
             director.record_evolution_stage(
                 "run:stage-only",
                 generation=0,
@@ -440,9 +342,9 @@ class EvolutionStageProjectionTests(unittest.TestCase):
 
     def test_cancelled_run_rejects_late_stage_observations(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            director = EvolutionDirector(ledger, NativeRoleStub())
             run_id = "run:cancelled-stage-fence"
-            director.start_evolution(task(), run_id=run_id)
+            start_native_run(director, task=task(), run_id=run_id)
             director.cancel_run(run_id, "operator cancelled")
             event_count = ledger.count(run_id)
 
@@ -460,44 +362,31 @@ class EvolutionStageProjectionTests(unittest.TestCase):
 
     def test_gateway_retry_heartbeat_is_projected_as_live_wait(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            director = EvolutionDirector(ledger, NativeRoleStub())
             run_id = "run:gateway-retry-heartbeat"
-            director.start_evolution(task(), run_id=run_id)
-            ledger.append(
-                run_id,
-                "GatewayRetryScheduled",
-                {
-                    "generation": 0,
-                    "retry_at": "2026-08-19T12:00:15+00:00",
-                    "delay_seconds": 15.0,
-                    "attempt": 2,
-                    "error_code": "gateway_response_error",
-                    "reason": "网关请求已完成本地重试，等待服务端队列恢复后再次调用",
-                },
-            )
+            start_native_run(director, task=task(), run_id=run_id)
+            state = director.state(run_id)
+            director.schedule_gateway_retry_or_pause(run_id,
+                run_incarnation=state.events[0].seq, generation=0, stage="research",
+                retry_class="dsh_native_runtime", failure_id="a" * 64,
+                attempt_anchor_seq=state.events[-1].seq, delay_seconds=15.,
+                last_error_code="provider_unavailable")
             progress = _projection_json(director.replay(run_id))["execution_progress"]
             self.assertEqual(progress["phase"], "gateway_retry")
             self.assertTrue(progress["retry_wait"]["waiting"])
-            self.assertEqual(progress["retry_wait"]["attempt"], 2)
+            self.assertEqual(progress["retry_wait"]["attempt"], 1)
 
     def test_gateway_retry_wait_clears_when_the_same_stage_restarts(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            director = EvolutionDirector(ledger, NativeRoleStub())
             run_id = "run:gateway-retry-restarted"
-            director.start_evolution(task(), run_id=run_id)
-            ledger.append(
-                run_id,
-                "GatewayRetryScheduled",
-                {
-                    "generation": 0,
-                    "stage": "research",
-                    "retry_at": "2026-08-19T12:00:15+00:00",
-                    "delay_seconds": 15.0,
-                    "attempt": 2,
-                    "error_code": "gateway_response_error",
-                    "reason": "provider cooldown",
-                },
-            )
+            start_native_run(director, task=task(), run_id=run_id)
+            state = director.state(run_id)
+            director.schedule_gateway_retry_or_pause(run_id,
+                run_incarnation=state.events[0].seq, generation=0, stage="research",
+                retry_class="dsh_native_runtime", failure_id="a" * 64,
+                attempt_anchor_seq=state.events[-1].seq, delay_seconds=15.,
+                last_error_code="provider_unavailable")
             director.record_evolution_stage(
                 run_id,
                 generation=0,
@@ -513,9 +402,9 @@ class EvolutionStageProjectionTests(unittest.TestCase):
 
     def test_unscoped_stage_does_not_override_a_completed_candidate_stage(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            director.start_evolution(task(), run_id="run:scoped-stage")
-            candidate = director.propose_and_spawn("run:scoped-stage")
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            start_native_run(director, task=task(), run_id="run:scoped-stage")
+            candidate = spawn_native_candidate(director, "run:scoped-stage")
             director.record_evolution_stage(
                 "run:scoped-stage",
                 generation=0,
@@ -539,13 +428,13 @@ class EvolutionStageProjectionTests(unittest.TestCase):
             )
 
     def test_missing_candidate_id_is_scoped_by_proposal_id(self) -> None:
-        """Legacy proposal-only events must not bleed into sibling rows."""
+        """Proposal-scoped stage events must not bleed into sibling rows."""
 
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            director.start_evolution(task(), run_id="run:proposal-scoped-stage")
-            first = director.propose_and_spawn("run:proposal-scoped-stage")
-            second = director.propose_and_spawn("run:proposal-scoped-stage")
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            start_native_run(director, task=task(), run_id="run:proposal-scoped-stage")
+            first = spawn_native_candidate(director, "run:proposal-scoped-stage")
+            second = spawn_native_candidate(director, "run:proposal-scoped-stage")
             director.record_evolution_stage(
                 "run:proposal-scoped-stage",
                 generation=0,
@@ -554,8 +443,8 @@ class EvolutionStageProjectionTests(unittest.TestCase):
                 stage="proposal",
                 status="completed",
             )
-            # Simulate an old event shape that carried only the second
-            # proposal id.  The first candidate must retain its own status.
+            # A stage can identify its proposal before a candidate is known;
+            # the first candidate must retain its own status.
             director.record_evolution_stage(
                 "run:proposal-scoped-stage",
                 generation=0,
@@ -579,10 +468,10 @@ class EvolutionStageProjectionTests(unittest.TestCase):
 
     def test_failed_candidate_without_stage_event_has_one_stage_projection(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            director = EvolutionDirector(ledger, NativeRoleStub())
             run_id = "run:failed-stage-invariant"
-            director.start_evolution(task(), run_id=run_id)
-            candidate = director.propose_and_spawn(run_id)
+            start_native_run(director, task=task(), run_id=run_id)
+            candidate = spawn_native_candidate(director, run_id)
             director.fail_candidate(run_id, candidate.candidate_id, "训练失败")
 
             stages, _ = self._candidate_stage_views(
@@ -604,10 +493,10 @@ class EvolutionStageProjectionTests(unittest.TestCase):
 
     def test_failed_candidate_preserves_scoped_failed_stage_in_both_views(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            director = EvolutionDirector(ledger, NativeRoleStub())
             run_id = "run:scoped-failed-stage-invariant"
-            director.start_evolution(task(), run_id=run_id)
-            candidate = director.propose_and_spawn(run_id)
+            start_native_run(director, task=task(), run_id=run_id)
+            candidate = spawn_native_candidate(director, run_id)
             director.record_evolution_stage(
                 run_id,
                 generation=0,
@@ -631,11 +520,11 @@ class EvolutionStageProjectionTests(unittest.TestCase):
 
     def test_duplicate_candidate_has_one_skipped_stage_projection(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter(max_proposals=2))
+            director = EvolutionDirector(ledger, NativeRoleStub())
             run_id = "run:duplicate-stage-invariant"
-            director.start_evolution(task(), run_id=run_id)
-            original = director.propose_and_spawn(run_id)
-            duplicate = director.propose_and_spawn(run_id)
+            start_native_run(director, task=task(), run_id=run_id)
+            original = spawn_native_candidate(director, run_id)
+            duplicate = spawn_native_candidate(director, run_id)
             director.mark_candidate_duplicate(
                 run_id,
                 duplicate.candidate_id,
@@ -656,12 +545,12 @@ class EvolutionStageProjectionTests(unittest.TestCase):
             },
         )
 
-    def test_legacy_proposal_only_stage_is_scoped_identically(self) -> None:
+    def test_proposal_scoped_stage_is_identical_in_both_views(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
+            director = EvolutionDirector(ledger, NativeRoleStub())
             run_id = "run:legacy-proposal-stage-invariant"
-            director.start_evolution(task(), run_id=run_id)
-            candidate = director.propose_and_spawn(run_id)
+            start_native_run(director, task=task(), run_id=run_id)
+            candidate = spawn_native_candidate(director, run_id)
             director.record_evolution_stage(
                 run_id,
                 generation=0,
@@ -677,71 +566,39 @@ class EvolutionStageProjectionTests(unittest.TestCase):
         self.assertEqual(stages["training"], "running")
 
     def test_run_summary_exposes_all_frozen_runtime_bindings(self) -> None:
-        configured = TaskManifest(
-            task_id="summary-bindings",
-            objective="audit frozen runtime bindings",
-            domain_pack="crop-soil-water@toy",
-            visible_datasets=("generated-toy-series@1",),
-            budget=1,
-            seed=13,
-            metadata={
-                "strategy_id": "parameter_sweep@1",
-                "strategy_digest": "strategy-digest",
-                "prediction_model_id": "toy-rolling-water@1",
-                "prediction_model_digest": "prediction-digest",
-                "evaluator_id": "toy_time_forward@1",
-                "evaluator_digest": "evaluator-digest",
-                "policy_model_id": "host_parameter_generator@1",
-                "policy_model_digest": "policy-digest",
-                "judge_model_id": "rule_judge@1",
-                "judge_model_digest": "judge-digest",
-                "dataset_digest": "dataset-digest",
-                "split_manifest_digest": "split-digest",
-            },
-        )
+        configured = native_manifest(task_id="summary-bindings", metadata={
+            "strategy_digest": "1" * 64, "prediction_model_digest": "2" * 64,
+            "evaluator_digest": "3" * 64, "policy_model_digest": "4" * 64,
+            "judge_model_digest": "5" * 64, "split_manifest_digest": "6" * 64,
+        })
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            director.start_evolution(configured, run_id="run:summary-bindings")
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            start_native_run(director, task=configured, run_id="run:summary-bindings")
 
             summary = run_summary(director.state("run:summary-bindings"))
 
         for field, expected in (
-            ("strategy_digest", "strategy-digest"),
-            ("prediction_model_digest", "prediction-digest"),
-            ("evaluator_digest", "evaluator-digest"),
-            ("policy_model_digest", "policy-digest"),
-            ("judge_model_digest", "judge-digest"),
-            ("split_manifest_digest", "split-digest"),
+            ("strategy_digest", "1" * 64),
+            ("prediction_model_digest", "2" * 64),
+            ("evaluator_digest", "3" * 64),
+            ("policy_model_digest", "4" * 64),
+            ("judge_model_digest", "5" * 64),
+            ("split_manifest_digest", "6" * 64),
         ):
             self.assertEqual(summary[field], expected)
 
-    def test_legacy_run_without_stage_events_keeps_inferred_statuses(self) -> None:
+    def test_new_candidate_without_worker_events_keeps_evaluation_unknown(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            director.start_evolution(task(), run_id="run:legacy-stage-fallback")
-            candidate = director.propose_and_spawn("run:legacy-stage-fallback")
-            director.evaluate_and_decide(
-                Evaluation(
-                    evaluation_id="evaluation:legacy-stage-fallback",
-                    run_id="run:legacy-stage-fallback",
-                    candidate_id=candidate.candidate_id,
-                    score=0.8,
-                    passed=True,
-                )
-            )
-
-            projected = rounds(director.replay("run:legacy-stage-fallback"))
-            self.assertEqual(
-                projected[0]["stages"],
-                {
-                    "proposal": "completed",
-                    "candidate": "completed",
-                    "training": "pending",
-                    "evaluation": "completed",
-                    "judge": "not_recorded",
-                    "decision": "completed",
-                },
-            )
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            run_id = "run:waiting-worker-events"
+            start_native_run(director, task=task(), run_id=run_id)
+            candidate = spawn_native_candidate(director, run_id)
+            stages, _ = self._candidate_stage_views(director, run_id, candidate.candidate_id)
+            progress = _projection_json(director.state(run_id))["execution_progress"]
+        self.assertEqual(stages["proposal"], "completed")
+        self.assertEqual(stages["candidate"], "completed")
+        self.assertEqual(stages["evaluation"], "pending")
+        self.assertIsNone(progress["overall_progress_percent"])
 
 
 if __name__ == "__main__":

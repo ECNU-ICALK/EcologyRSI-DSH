@@ -9,15 +9,12 @@ from typing import Any
 
 from .catalog import (
     _assert_snapshot_digest,
-    _default_catalog_path,
     _default_data_root,
-    _toy_descriptor,
-    _toy_series,
 )
+from .definitions import default_catalog_path
 from .contracts import (
     _PREPARABLE_DATASET_IDS,
     _RESTRICTED_PARTITIONS,
-    _TOY_DATASET_ID,
     _VISIBLE_PARTITIONS,
     DatasetDescriptor,
     DatasetSeries,
@@ -52,10 +49,9 @@ class DatasetRegistry:
         catalog_path: str | Path | None = None,
         data_root: str | Path | None = None,
     ) -> None:
-        self.catalog_path = _default_catalog_path() if catalog_path is None else Path(catalog_path).expanduser().resolve()
+        self.catalog_path = default_catalog_path() if catalog_path is None else Path(catalog_path).expanduser().resolve()
         self.data_root = _default_data_root() if data_root is None else Path(data_root).expanduser().resolve()
         self._descriptors = self._load_catalog(self.catalog_path)
-        self._descriptors[_TOY_DATASET_ID] = _toy_descriptor()
         self._series_cache: dict[str, CanonicalSeries] = {}
         self._series_locks = {key: threading.Lock() for key in self._descriptors}
         self._split_cache: dict[str, SplitManifest] = {}
@@ -165,15 +161,6 @@ class DatasetRegistry:
         """Return browser-safe optimization episode choices."""
 
         descriptor = self._descriptor(dataset_id)
-        if descriptor.dataset_id == _TOY_DATASET_ID:
-            return [
-                {
-                    "id": "generated-toy-series@1:seed-0",
-                    "episode_id": "generated-toy-series@1:seed-0",
-                    "label": "固定 seed-0 序列",
-                    "row_count": 60,
-                }
-            ]
         if dataset_id in DATASET_ADAPTERS:
             return dataset_adapter(dataset_id).episodes(self._dataset_dir(descriptor))
         canonical = self._load_series(descriptor)
@@ -205,19 +192,14 @@ class DatasetRegistry:
             "restricted_partitions": sorted(_RESTRICTED_PARTITIONS),
         }
 
-    def series(
+    def _source_series(
         self,
         dataset_id: str,
         episode_id: str | None = None,
         *,
         expected_dataset_digest: str | None = None,
         expected_split_manifest_digest: str | None = None,
-        execution_protocol: str | None = None,
     ) -> DatasetSeries:
-        if execution_protocol == "dsh_native_plugin_evolution@1":
-            raise PermissionError(
-                "DSH-native execution must use selection_view; full series is legacy-only"
-            )
         descriptor = self._descriptor(dataset_id)
         canonical = self._load_series(descriptor)
         split_manifest = self._split_manifest(descriptor, canonical)
@@ -272,14 +254,12 @@ class DatasetRegistry:
     ) -> SelectionDatasetView:
         """Return the only raw-row view allowed to a new adaptive evaluator."""
 
-        adapter = dataset_adapter(dataset_id) if dataset_id in DATASET_ADAPTERS else None
-        if adapter is not None:
-            if target_names is not None and target_names != adapter.target_names:
-                raise ValueError("selection targets must match the dataset adapter")
-            if horizons is not None and horizons != adapter.horizons_hours:
-                raise ValueError("selection horizons must match the dataset adapter")
-        target_names = adapter.target_names if adapter else target_names or ("soil_water",)
-        horizons = adapter.horizons_hours if adapter else horizons or (1,)
+        adapter = dataset_adapter(dataset_id)
+        if target_names is not None and target_names != adapter.target_names:
+            raise ValueError("selection targets must match the dataset adapter")
+        if horizons is not None and horizons != adapter.horizons_hours:
+            raise ValueError("selection horizons must match the dataset adapter")
+        target_names, horizons = adapter.target_names, adapter.horizons_hours
         descriptor = self._descriptor(dataset_id)
         canonical = self._load_series(descriptor)
         manifest = self._split_manifest(descriptor, canonical)
@@ -287,7 +267,7 @@ class DatasetRegistry:
         split = manifest.split_for(episode.episode_id)
         if split.role != "optimization":
             raise PermissionError("external holdout episodes are not available")
-        legacy = self.series(
+        source = self._source_series(
             dataset_id,
             episode.episode_id,
             expected_dataset_digest=expected_dataset_digest,
@@ -297,8 +277,8 @@ class DatasetRegistry:
             dataset_id,
             episode,
             split,
-            dataset_digest=legacy.digest,
-            split_manifest_digest=legacy.split_manifest_digest_sha256,
+            dataset_digest=source.digest,
+            split_manifest_digest=source.split_manifest_digest_sha256,
             target_names=target_names,
             horizons=horizons,
             history_steps=history_steps,
@@ -308,7 +288,7 @@ class DatasetRegistry:
             protocol.protocol_digest,
             expected_data_protocol_digest,
         )
-        return SelectionDatasetView.from_series(legacy, protocol)
+        return SelectionDatasetView.from_series(source, protocol)
 
     def data_protocol(self, dataset_id: str, episode_id: str | None = None):
         descriptor = self._descriptor(dataset_id)
@@ -406,15 +386,11 @@ class DatasetRegistry:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise ValueError("limit must be an integer between 1 and 100")
 
-        reader = self.selection_view if expected_data_protocol_digest is not None else self.series
-        protocol_args = ({"expected_data_protocol_digest": expected_data_protocol_digest}
-                         if expected_data_protocol_digest is not None else {})
-        series = reader(
-            dataset_id,
-            episode_id,
+        series = self.selection_view(
+            dataset_id, episode_id,
             expected_dataset_digest=expected_dataset_digest,
             expected_split_manifest_digest=expected_split_manifest_digest,
-            **protocol_args,
+            expected_data_protocol_digest=expected_data_protocol_digest,
         )
         selected = series.partitions[normalized_partition]
         start = min(selected.start + offset, selected.end)
@@ -498,14 +474,6 @@ class DatasetRegistry:
 
     def _readiness(self, descriptor: DatasetDescriptor) -> dict[str, Any]:
         source_integrity = self._source_integrity(descriptor)
-        if descriptor.dataset_id == _TOY_DATASET_ID:
-            return {
-                "status": "ready",
-                "ready": True,
-                "missing_globs": [],
-                "provenance": _provenance_summary(descriptor, source_integrity),
-                "source_integrity": source_integrity,
-            }
         data_dir = self._dataset_dir(descriptor)
         missing = [pattern for pattern in descriptor.required_globs if not any(data_dir.glob(pattern))]
         if not descriptor.runnable:
@@ -573,17 +541,7 @@ class DatasetRegistry:
         )
 
     def _profile(self, descriptor: DatasetDescriptor) -> dict[str, Any]:
-        if descriptor.dataset_id == _TOY_DATASET_ID:
-            profile = {
-                "schema_version": "ecologyrsi-dsh.dataset-profile/1",
-                "adapter_id": "toy_crop_soil_water",
-                "domain_id": descriptor.domain_id,
-                "evaluation_mode": "generated_fixture",
-                "sampling": "daily",
-                "required_features": ["rainfall", "evapotranspiration", "soil_water"],
-                "scientific_limits_zh": ["仅用于工程测试，不代表真实农业观测或因果结论。"],
-            }
-        elif descriptor.dataset_id in DATASET_ADAPTERS:
+        if descriptor.dataset_id in DATASET_ADAPTERS:
             adapter = dataset_adapter(descriptor.dataset_id)
             profile = {
                 **adapter.loader(self._dataset_dir(descriptor)).profile(),
@@ -625,9 +583,7 @@ class DatasetRegistry:
                 raise FileNotFoundError(
                     f"dataset is not ready: {descriptor.dataset_id}; missing {', '.join(readiness['missing_globs'])}"
                 )
-            if descriptor.dataset_id == _TOY_DATASET_ID:
-                loaded = _toy_series()
-            elif descriptor.dataset_id in DATASET_ADAPTERS:
+            if descriptor.dataset_id in DATASET_ADAPTERS:
                 adapter = dataset_adapter(descriptor.dataset_id)
                 loaded = adapter.loader(self._dataset_dir(descriptor)).load()
                 for episode in loaded.episodes:

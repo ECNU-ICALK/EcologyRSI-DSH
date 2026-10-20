@@ -14,8 +14,9 @@ import zipfile
 
 from ecologyrsi_dsh.application.cli import build_parser
 from ecologyrsi_dsh.data.greenhouse import GreenhouseDatasetAdapter
-from ecologyrsi_dsh.data.registry import DatasetRegistry, DatasetSeries
+from ecologyrsi_dsh.data.registry import DatasetRegistry, SelectionDatasetView
 from ecologyrsi_dsh.data.splits import build_split_manifest
+from tests.greenhouse_fixture import DATASET_ID, greenhouse_registry
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -175,26 +176,27 @@ class DatasetRegistryTests(unittest.TestCase):
     def test_concurrent_cold_reads_parse_the_dataset_once(self):
         from concurrent.futures import ThreadPoolExecutor
         from threading import Event
-        from unittest.mock import patch
-        from ecologyrsi_dsh.data.catalog import _toy_series
         entered, duplicate, release = Event(), Event(), Event()
-        def load():
+        original = GreenhouseDatasetAdapter.load
+        def load(adapter):
             if entered.is_set():
                 duplicate.set()
             entered.set()
             if not release.wait(5):
-                raise RuntimeError('test loader was not released')
-            return _toy_series()
-        with patch('ecologyrsi_dsh.data.registry._toy_series', side_effect=load) as loader, ThreadPoolExecutor(2) as pool:
-            first = pool.submit(self.registry.series, 'generated-toy-series@1')
-            self.assertTrue(entered.wait(5))
-            second = pool.submit(self.registry.series, 'generated-toy-series@1')
-            try:
-                self.assertFalse(duplicate.wait(.1))
-            finally:
-                release.set()
-            self.assertEqual(first.result(), second.result())
-            self.assertEqual(loader.call_count, 1)
+                raise RuntimeError("test loader was not released")
+            return original(adapter)
+        with tempfile.TemporaryDirectory() as raw:
+            registry = greenhouse_registry(Path(raw))
+            with patch.object(GreenhouseDatasetAdapter, "load", autospec=True, side_effect=load) as loader, ThreadPoolExecutor(2) as pool:
+                first = pool.submit(registry.selection_view, DATASET_ID)
+                self.assertTrue(entered.wait(5))
+                second = pool.submit(registry.selection_view, DATASET_ID)
+                try:
+                    self.assertFalse(duplicate.wait(.1))
+                finally:
+                    release.set()
+                self.assertEqual(first.result(), second.result())
+                self.assertEqual(loader.call_count, 1)
 
     def setUp(self) -> None:
         self.registry = DatasetRegistry(catalog_path=CATALOG_PATH, data_root=PROJECT_ROOT / "missing-test-data")
@@ -220,7 +222,7 @@ class DatasetRegistryTests(unittest.TestCase):
         lettuce_readiness = by_id["agc_lettuce_online_rgbd_2021"]["readiness"]
         self.assertEqual(lettuce_readiness["status"], "catalog_only")
         self.assertEqual(lettuce_readiness["source_integrity"]["status"], "not_checked")
-        self.assertTrue(by_id["generated-toy-series@1"]["display_name_zh"])
+        self.assertNotIn("generated-toy-series@1", by_id)
 
     def test_source_archive_is_audited_without_changing_extracted_data_readiness(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -371,47 +373,46 @@ class DatasetRegistryTests(unittest.TestCase):
         self.assertEqual(fetch.data_root, "/tmp/agc-data")
         self.assertTrue(fetch.archive_only)
 
-    def test_toy_series_contract_and_feedback_profile(self) -> None:
-        description = self.registry.describe("generated-toy-series@1")
-        series = self.registry.series("generated-toy-series@1")
-        self.assertIsInstance(series, DatasetSeries)
-        self.assertEqual(series.schema, "ecologyrsi-dsh.dataset-series/1")
-        self.assertEqual(series.evaluation_partition, "training_feedback")
-        self.assertEqual(description["profile"]["evaluation_partition"], "training_feedback")
-        self.assertEqual(description["visible_partitions"], ["training_fit", "training_feedback"])
-        self.assertIn("development", description["restricted_partitions"])
-        self.assertEqual(len(series.timestamps), series.partitions["development"].end)
-
-    def test_new_protocol_cannot_call_legacy_full_series(self) -> None:
-        with self.assertRaisesRegex(PermissionError, "selection_view|legacy"):
-            self.registry.series(
-                "generated-toy-series@1",
-                execution_protocol="dsh_native_plugin_evolution@1",
-            )
+    def test_selection_view_excludes_formal_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            registry = greenhouse_registry(Path(raw))
+            series = registry.selection_view(DATASET_ID)
+        self.assertIsInstance(series, SelectionDatasetView)
+        self.assertEqual(set(series.partitions), {"training_fit", "training_feedback", "calibration_fit", "calibration_uq", "model_selection"})
+        self.assertEqual(len(series.timestamps), series.partitions["training_feedback"].end)
+        self.assertFalse(hasattr(registry, "series"))
+        with self.assertRaises(KeyError):
+            registry.describe("generated-toy-series@1")
 
     def test_sample_pagination_and_limit(self) -> None:
-        first = self.registry.sample("generated-toy-series@1", limit=3)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.registry = greenhouse_registry(Path(temporary.name))
+        first = self.registry.sample(DATASET_ID, limit=3)
         second = self.registry.sample(
-            "generated-toy-series@1", offset=first["next_offset"], limit=3
+            DATASET_ID, offset=first["next_offset"], limit=3
         )
         self.assertEqual(len(first["rows"]), 3)
         self.assertEqual(first["rows"][0]["index"], 0)
         self.assertEqual(second["rows"][0]["index"], 3)
-        self.assertIn("降雨", {item["display_name_zh"] for item in first["features"].values()})
+        self.assertIn("室内气温", {item["display_name_zh"] for item in first["features"].values()})
         with self.assertRaisesRegex(ValueError, "between 1 and 100"):
-            self.registry.sample("generated-toy-series@1", limit=101)
+            self.registry.sample(DATASET_ID, limit=101)
 
     def test_series_and_samples_reject_frozen_digest_drift(self) -> None:
-        series = self.registry.series("generated-toy-series@1")
-        replay = self.registry.series(
-            "generated-toy-series@1",
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.registry = greenhouse_registry(Path(temporary.name))
+        series = self.registry.selection_view(DATASET_ID)
+        replay = self.registry.selection_view(
+            DATASET_ID,
             expected_dataset_digest=series.digest,
             expected_split_manifest_digest=series.split_manifest_digest_sha256,
         )
         self.assertEqual(replay.digest, series.digest)
         with self.assertRaisesRegex(ValueError, "数据集快照发生漂移") as raised:
             self.registry.sample(
-                "generated-toy-series@1",
+                DATASET_ID,
                 expected_dataset_digest="0" * 64,
                 expected_split_manifest_digest=series.split_manifest_digest_sha256,
             )
@@ -422,7 +423,7 @@ class DatasetRegistryTests(unittest.TestCase):
         self.assertNotIn(series.digest, str(raised.exception))
         with self.assertRaisesRegex(ValueError, "时间分区快照发生漂移"):
             self.registry.sample(
-                "generated-toy-series@1",
+                DATASET_ID,
                 expected_dataset_digest=series.digest,
                 expected_split_manifest_digest="0" * 64,
             )
@@ -441,7 +442,7 @@ class DatasetRegistryTests(unittest.TestCase):
                     "RHair": 70,
                     "CO2air": 700,
                 }
-                for index in range(100)
+                for index in range(2048)
             ]
             _write_csv(
                 climate,
@@ -452,7 +453,7 @@ class DatasetRegistryTests(unittest.TestCase):
                 catalog_path=CATALOG_PATH,
                 data_root=data_root,
             )
-            frozen = first_registry.series(
+            frozen = first_registry.selection_view(
                 "agc_cucumber_2018", "agc_cucumber_2018:TeamA"
             )
 
@@ -467,7 +468,7 @@ class DatasetRegistryTests(unittest.TestCase):
                 data_root=data_root,
             )
             with self.assertRaisesRegex(ValueError, "数据集快照发生漂移"):
-                restarted_registry.series(
+                restarted_registry.selection_view(
                     "agc_cucumber_2018",
                     "agc_cucumber_2018:TeamA",
                     expected_dataset_digest=frozen.digest,
@@ -480,7 +481,7 @@ class DatasetRegistryTests(unittest.TestCase):
         for partition in ("development", "gate", "external", "external_holdout", "hidden", "test", "final"):
             with self.subTest(partition=partition):
                 with self.assertRaises(PermissionError):
-                    self.registry.sample("generated-toy-series@1", partition=partition)
+                    self.registry.sample(DATASET_ID, partition=partition)
 
     def test_reference_episode_is_rejected_by_registry(self) -> None:
         reference_id = "agc_cucumber_2018:Reference"
@@ -498,7 +499,7 @@ class DatasetRegistryTests(unittest.TestCase):
             )
             registry = DatasetRegistry(catalog_path=CATALOG_PATH, data_root=data_root)
             with self.assertRaises(PermissionError):
-                registry.series("agc_cucumber_2018", reference_id)
+                registry.selection_view("agc_cucumber_2018", reference_id)
 
     @unittest.skipUnless(os.environ.get("ECOLOGYRSI_TEST_REAL_DATA") == "1", "需设置 ECOLOGYRSI_TEST_REAL_DATA=1")
     def test_optional_real_greenhouse_data(self) -> None:
@@ -506,7 +507,7 @@ class DatasetRegistryTests(unittest.TestCase):
         ready = [item for item in registry.catalog()["datasets"] if item["readiness"]["ready"]]
         greenhouse = [item for item in ready if item["training_selectable"]]
         self.assertTrue(greenhouse, "未找到已就绪的真实温室数据")
-        series = registry.series(greenhouse[0]["dataset_id"])
+        series = registry.selection_view(greenhouse[0]["dataset_id"])
         self.assertGreater(len(series.timestamps), 0)
 
 

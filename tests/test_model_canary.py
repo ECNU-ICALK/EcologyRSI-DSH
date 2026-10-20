@@ -141,8 +141,32 @@ class ModelCanaryTests(unittest.TestCase):
 
 
 class ModelPreflightHTTPTests(unittest.TestCase):
-    from tests.test_auto_progress import AutoProgressHTTPTests as _HTTP
-    setUp, tearDown, request = _HTTP.setUp, _HTTP.tearDown, _HTTP.request
+    def setUp(self):
+        import threading
+        from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
+        self.directory = tempfile.TemporaryDirectory()
+        self.server = EvolutionHTTPServer(("127.0.0.1", 0), Path(self.directory.name) / "events.sqlite3")
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}/api"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join(timeout=2)
+        self.server.close()
+        self.directory.cleanup()
+
+    def request(self, path, method, body):
+        import json
+        from urllib.request import Request, urlopen
+        from urllib.error import HTTPError
+        request = Request(self.base + path, method=method, data=json.dumps(body).encode(),
+                          headers={"Content-Type": "application/json"})
+        try:
+            with urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read())
+        except HTTPError as exc:
+            return exc.code, json.loads(exc.read())
 
     def test_timeout_reconciliation_is_read_only_and_requires_all_fresh_receipts(self):
         from types import SimpleNamespace

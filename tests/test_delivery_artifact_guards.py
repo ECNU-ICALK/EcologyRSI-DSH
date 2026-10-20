@@ -46,8 +46,7 @@ class DeliveryArtifactGuardTests(unittest.TestCase):
             "integrations/dsh_ecology_plugin/package.json",
             "integrations/dsh_ecology_plugin/README.md",
             "integrations/dsh_ecology_plugin/test/proxy_security.mjs",
-            "scripts/install_dsh_ecology_runtime.mjs", "docs/screenshots/*.jpg",
-            "examples/minimal_run.py",
+            "scripts/install_dsh_ecology_runtime.mjs",
         )
         sources = {ROOT / relative for relative in ROOT_FILES}
         for pattern in patterns:

@@ -3,7 +3,7 @@
 PROTOCOL = "joint_plugin_epoch@1"
 UNIFIED_PROTOCOL = "joint_plugin_epoch@2"
 UNIFIED_SCHEDULE_SCHEMA = "ecologyrsi-dsh.joint-plugin-epoch-schedule/2"
-PROTOCOLS = (PROTOCOL, UNIFIED_PROTOCOL)
+PROTOCOLS = (UNIFIED_PROTOCOL,)
 SCHEDULE_SCHEMA = "ecologyrsi-dsh.joint-plugin-epoch-schedule/1"
 MUTATION_OPERATOR = "joint-plugin-mutation@1"
 DIVERSITY_POLICY = "joint_behavior_search@1"

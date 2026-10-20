@@ -1,12 +1,11 @@
 """Fresh, value-blind three-stage cohorts for the evidence-guided pilot."""
-from dataclasses import replace
 
 from .epoch_cohorts import (
     CohortCapacityError, CohortCapacityReport, GenerationCohorts, PlannedBatch,
     PlannedCohort, RunAdaptationCohort, DEFAULT_HISTORY_STEPS, _dataset_horizons,
     _eligible_origins, _dataset_identity, _selection_partition, _strict_integer,
 )
-from .isolated_cohorts import _Cursor
+from .cohort_cursor import _Cursor
 from ..core.models import digest
 
 PLANNER_SCHEMA = "ecologyrsi-dsh.evidence-guided-cohort-planner/1"

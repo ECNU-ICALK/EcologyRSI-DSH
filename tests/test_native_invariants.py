@@ -1,18 +1,13 @@
 from dataclasses import replace
-from pathlib import Path
-import sqlite3
-import tempfile
 from types import SimpleNamespace
-from unittest.mock import patch
 import unittest
-from ecologyrsi_dsh.core.models import Proposal, HumanIntervention, InterventionKind
+from ecologyrsi_dsh.core.models import Proposal
 from ecologyrsi_dsh import EventLedger, EvolutionDirector
-from ecologyrsi_dsh.core.ledger import ConcurrentRunMutationError
-from ecologyrsi_dsh.evolution.interventions import apply_bounded_interventions
 from ecologyrsi_dsh.evolution.analysis import GenerationAnalysis
 from ecologyrsi_dsh.evolution.diagnosis import diagnose_generation, hypothesis_for_proposal
 from ecologyrsi_dsh.evolution.strategies import _native_evolution_reflection_from_experience
 from tests.test_core import manifest
+from tests.native_fixtures import native_manifest, NativeRoleStub
 
 
 class ResearchReviewTests(unittest.TestCase):
@@ -46,47 +41,29 @@ class ResearchReviewTests(unittest.TestCase):
 
 class ProposalCommitReviewTests(unittest.TestCase):
     def test_pause_between_provider_response_and_commit_fences_the_proposal(self):
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger)
-            director.start_evolution(manifest(2), run_id='proposal-race')
-            def paused(*args, **kwargs):
-                director.pause_run('proposal-race')
-                return apply_bounded_interventions(*args, **kwargs)
-            with patch('ecologyrsi_dsh.core.director.apply_bounded_interventions', side_effect=paused):
-                with self.assertRaises(ConcurrentRunMutationError):
-                    director.request_proposal('proposal-race')
-            self.assertEqual(director.state('proposal-race').run.status.value, 'paused')
-            self.assertFalse(director.state('proposal-race').proposals)
-
-    def test_intervention_receipt_failure_does_not_leave_a_partial_proposal(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp)/'events.sqlite'
-            with EventLedger(path) as ledger:
-                director = EvolutionDirector(ledger)
-                director.start_evolution(manifest(2), run_id='atomic-proposal')
-                director.pause_run('atomic-proposal')
-                director.record_intervention(HumanIntervention('guidance', 'atomic-proposal', InterventionKind.GUIDANCE, 'try a local change', 'review-test'))
-                director.resume_run('atomic-proposal')
-                with sqlite3.connect(path) as db:
-                    db.execute("CREATE TRIGGER fail_receipt BEFORE INSERT ON evolution_events WHEN NEW.kind='HumanInterventionApplied' BEGIN SELECT RAISE(ABORT,'receipt failure'); END")
-                with self.assertRaises(sqlite3.IntegrityError):
-                    director.request_proposal('atomic-proposal')
-                state = director.state('atomic-proposal')
-                self.assertFalse(state.proposals)
-                self.assertEqual(len(state.pending_interventions), 1)
+        from tests.test_genome_replay import GenomeReplayTests
+        fixture = GenomeReplayTests()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        run_id = fixture._start_new("run:proposal-race")
+        proposal = fixture._proposal(run_id)
+        fixture.director.pause_run(run_id)
+        before = fixture.ledger.count()
+        with self.assertRaises(RuntimeError):
+            fixture.director.submit_proposal(proposal)
+        self.assertEqual(fixture.ledger.count(), before)
+        self.assertFalse(fixture.director.state(run_id).proposals)
 
 
 class FrozenNativeContractReviewTests(unittest.TestCase):
     def test_research_plan_remains_bound_to_its_recorded_identity(self):
-        from ecologyrsi_dsh.knowledge.algorithms import resolve_predictor_adoption
         from ecologyrsi_dsh.knowledge.research_iteration import ResearchIteration
-        from tests.test_research_iteration import _task
 
-        task = _task(candidates_per_generation=1)
-        plan = {"prediction_model": {"id": "toy-rolling-water@1"}, "notes": ["initial"]}
+        task = native_manifest()
+        plan = {"prediction_model": {"id": "greenhouse-horizon-targetwise-ridge@1"}, "notes": ["initial"]}
         iteration = ResearchIteration(
             run_id="frozen-research", generation=0, status="model_generated",
-            plan=plan, prediction_model_adoption=resolve_predictor_adoption(task, plan).to_dict(),
+            plan=plan,
             knowledge_snapshot_digest="a" * 64,
         )
         original = iteration.iteration_digest
@@ -97,13 +74,11 @@ class FrozenNativeContractReviewTests(unittest.TestCase):
         self.assertEqual(ResearchIteration.from_dict(iteration.to_dict()).iteration_digest, original)
         with self.assertRaises(TypeError):
             iteration.plan["prediction_model"]["id"] = "changed@1"
-        with self.assertRaises(TypeError):
-            iteration.prediction_model_adoption.clear()
 
     def test_task_budget_nested_metadata_and_cached_events_are_read_only(self):
-        from ecologyrsi_dsh.core.models import TaskManifest, canonical_json, digest
+        from ecologyrsi_dsh.core.models import canonical_json, digest
         metadata = {'nested': {'values': [1, 2]}}
-        task = TaskManifest('freeze', 'freeze inputs', 'toy@1', budget=2, metadata=metadata)
+        task = native_manifest(task_id='freeze', metadata=metadata)
         original = task.digest
         metadata['nested']['values'].append(3)
         self.assertEqual(task.digest, original)
@@ -112,7 +87,7 @@ class FrozenNativeContractReviewTests(unittest.TestCase):
         self.assertEqual(task.digest, original)
         self.assertEqual(original, digest(task.to_dict()))
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger)
+            director = EvolutionDirector(ledger, NativeRoleStub())
             director.create_run(task, run_id='frozen-root')
             state = director.state('frozen-root')
             operations = [

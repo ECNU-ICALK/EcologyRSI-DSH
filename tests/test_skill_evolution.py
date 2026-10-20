@@ -32,7 +32,6 @@ from tests.test_evolution_genome import _initialization
 from ecologyrsi_dsh.evolution.genome import materialize_seed_genome
 from ecologyrsi_dsh.evolution.strategies import (
     StrategyRouterDSHAdapter,
-    _deterministic_fallback_directions,
 )
 
 
@@ -144,7 +143,7 @@ class SkillNativeExecutionTests(unittest.TestCase):
 
 
 class DiversityPolicyTests(unittest.TestCase):
-    def test_skill_training_revises_skills_and_rejects_parameter_drift(self):
+    def test_joint_local_edit_keeps_registered_axes_and_enforces_parameter_bounds(self):
         from ecologyrsi_dsh.application.formal_trajectory import _local_edit_context
         from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
         from ecologyrsi_dsh.evolution.local_edits import (
@@ -154,14 +153,14 @@ class DiversityPolicyTests(unittest.TestCase):
         _, parent = skill_child()
         task = cycle._task()
         task = replace(task, metadata={**task.metadata, "evolution_diversity_policy": DIVERSITY_POLICY,
-                                      "optimization_schedule": OptimizationSchedule.default().to_dict()})
+                                      "optimization_schedule": OptimizationSchedule.for_new_run().to_dict()})
         revision = NS(revision_id="r0", genome=parent.to_dict(), genome_digest=parent.genome_digest)
         state = NS(run=NS(run_id="run:authored-directive"), task_manifest=task,
             proposal=lambda _: NS(metadata={"candidate_direction": {"mutation_axis": "skill_program"}}),
             batch_evaluation_for=lambda *_: NS(scope=NS(scope_key="a" * 64)))
         candidate = NS(candidate_id="c1", proposal_id="p1", generation=0)
         context = _local_edit_context(state, candidate, revision, NS(batch_index=0))
-        self.assertEqual({axis for axis, targets in context.allowed_mutation_targets.items() if targets}, {"skill_program"})
+        self.assertTrue({"skill_program", "scientific_parameter", "instruction_directive"} <= {axis for axis, targets in context.allowed_mutation_targets.items() if targets})
         def edit(operation):
             proposal = LocalEditProposal(decision="mutate", operations=(operation,), evidence_refs=("batch:score",),
                 expected_effect_cells=("air_temperature@1h",), risk_cells=())
@@ -169,18 +168,18 @@ class DiversityPolicyTests(unittest.TestCase):
         changed = edit({"op": "author_skill_program", "role": "sample-planner", "skill_program": seed_skill_program("trend-check@1")})
         self.assertEqual(changed.outcome.value, "applied")
         self.assertNotEqual(changed.child.behavior_digest, parent.behavior_digest)
-        self.assertEqual(edit({"op": "set_bounded_parameter", "name": "ridge_alpha", "value": .2}).outcome.value, "rejected")
+        self.assertEqual(edit({"op": "set_bounded_parameter", "name": "ridge_alpha", "value": 1000000.}).outcome.value, "rejected")
 
     def test_native_research_to_prompt_and_skill_proposals_replays(self):
         task = cycle._task()
-        task = replace(task, metadata={**task.metadata, "evolution_diversity_policy": DIVERSITY_POLICY})
+        task = replace(task, metadata={**task.metadata, "evolution_diversity_policy": DIVERSITY_POLICY, "prediction_model_id": "greenhouse-baseline-aligned-ridge@1", "seed_genome_template_id": "greenhouse-baseline-aligned-default@2"})
         class Runtime(cycle._CycleRuntime):
             def run_stage(self, request):
                 context = request["request"]["context"]
                 if request["stage"] == "generation.research-synthesis":
                     contract = context["synthesis_contract"]
-                    directions = _deterministic_fallback_directions(contract["allowed_mutation_targets"], 2,
-                        family_schedule=contract["diversity_schedule"])
+                    directions = research.minimal_aligned_synthesis()["candidate_directions"]
+                    directions[1].update(mutation_axis="skill_program", mutation_target=contract["allowed_mutation_targets"]["skill_program"][0], mutation_direction="author")
                     directions[0].update(mutation_axis="instruction_directive",
                         mutation_target=contract["allowed_mutation_targets"]["instruction_directive"][0], mutation_direction="author")
                     structured = {"schema_version": "ecologyrsi-dsh.research-synthesis/1",
@@ -200,9 +199,11 @@ class DiversityPolicyTests(unittest.TestCase):
             adapter = StrategyRouterDSHAdapter(gateway=object(), native_runtime_provider=lambda: runtime)
             director = cycle.EvolutionDirector(ledger, adapter)
             director.create_run(task, run_id="run:diversity-chain")
+            from tests.native_fixtures import canary_receipts
+            director.record_model_contract_preflight("run:diversity-chain", canary_receipts(task.metadata))
             director.start_run("run:diversity-chain")
             batch = cycle.start_generation_batch(director, "run:diversity-chain")
-            for slot in range(batch.batch_size):
+            for slot in range(2):
                 try:
                     director.request_proposal("run:diversity-chain", generation_batch=batch, slot_index=slot)
                 except ValueError as exc:
@@ -211,7 +212,7 @@ class DiversityPolicyTests(unittest.TestCase):
             self.assertEqual([p.metadata["candidate_direction"]["mutation_axis"] for p in state.proposals],
                              ["instruction_directive", "skill_program"])
             self.assertEqual([r["stage"] for r in runtime.requests].count("candidate.propose"), 2)
-            self.assertEqual(state.proposals[1].metadata["diversity_schedule"]["required_family_by_slot"], ["prompt", "skill"])
+            self.assertEqual(state.proposals[1].metadata["diversity_schedule"]["required_family_by_slot"], [])
 
     def test_partial_candidate_batch_uses_the_frozen_primary_family(self):
         targets = {axes[0]: ("registered",) for axes in FAMILY_AXES.values()}
@@ -222,30 +223,27 @@ class DiversityPolicyTests(unittest.TestCase):
         chosen = preregister_candidate(candidates, proposals.__getitem__, {"evolution_diversity_policy": DIVERSITY_POLICY}, 1)
         self.assertEqual(chosen.proposal_id, "skill")
 
-    def test_synthesis_repairs_parameter_only_output_into_executable_families(self):
+    def test_synthesis_repairs_missing_required_field_without_changing_contract(self):
         fixture = research.ResearchContextTests()
         fixture.setUp()
         task = replace(fixture.task, metadata={**fixture.task.metadata, "evolution_diversity_policy": DIVERSITY_POLICY})
-        parent = materialize_seed_genome(current_program_registry().seed_template("greenhouse-baseline-aligned-default@1"),
+        parent = materialize_seed_genome(current_program_registry().seed_template("greenhouse-baseline-aligned-default@2"),
                                         _initialization(task_manifest_digest=task.digest))
         adapter = StrategyRouterDSHAdapter(gateway=object())
         calls = []
         def invoke(**request):
             calls.append(request)
+            output = research.minimal_aligned_synthesis()
             if len(calls) == 1:
-                return research.minimal_aligned_synthesis()
-            contract = request["context"]["synthesis_contract"]
-            directions = _deterministic_fallback_directions(contract["allowed_mutation_targets"], 4,
-                family_schedule=contract["diversity_schedule"], parent=parent)
-            return {"schema_version": "ecologyrsi-dsh.research-synthesis/1", "summary": "Test different executable families.",
-                    "evidence": [], "candidate_directions": directions}
+                del output["candidate_directions"][0]["title"]
+            return output
         with patch.object(adapter, "_native_runtime", return_value=NS(run=invoke)):
             plan = adapter.research_plan("offline", run=fixture.run, task=task, parent_genome=parent.to_dict(),
                 knowledge_snapshot=fixture.knowledge, generation_search_plan=fixture.search.to_dict(), candidate_count=4)
         self.assertEqual(len(calls), 2)
-        self.assertIn("prompt", calls[1]["context"]["host_validation_feedback"]["validation_detail"])
+        self.assertIn("fields do not match", calls[1]["context"]["host_validation_feedback"]["validation_detail"])
         self.assertEqual(len(plan["candidate_direction_preflight"]["checks"]), 4)
-        self.assertEqual(plan["diversity_schedule"]["required_family_by_slot"], list(FAMILY_AXES))
+        self.assertEqual(plan["diversity_schedule"]["required_family_by_slot"], [])
 
     def test_archive_uses_only_prior_complete_training_revisions_and_is_bounded(self):
         _, child = skill_child()
@@ -346,8 +344,8 @@ class DiversityPolicyTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "integrations/dsh_ecology_plugin/schemas"
         for name in ("research-synthesis", "generation-reflection"):
             schema = json.loads((root / f"{name}.schema.json").read_text())
-            self.assertEqual(set(schema["properties"]["candidate_directions"]["items"]["properties"]["mutation_axis"]["enum"]), set(CANDIDATE_MUTATION_AXES))
+            self.assertEqual(set(json.loads((root / "shared.json").read_text())["research_direction"]["properties"]["mutation_axis"]["enum"]), set(CANDIDATE_MUTATION_AXES))
         for name in ("genome-mutation", "local-edit"):
             schema = json.loads((root / f"{name}.schema.json").read_text())
-            operations = {item["properties"]["op"].get("const") for item in schema["properties"]["operations"]["items"]["oneOf"]}
+            operations = {item["properties"]["op"].get("const") for item in json.loads((root / "shared.json").read_text())["mutation_operation"]["oneOf"]}
             self.assertTrue({"author_skill_program", "author_role_directive", "author_feature_recipe"} <= operations)

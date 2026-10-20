@@ -14,12 +14,7 @@ from tests.test_epoch_cohort_planning import dataset_fixture
 
 class JointCapacityAlignmentTests(unittest.TestCase):
     def test_unified_report_uses_retention_requirement_and_legacy_reports_stay_frozen(self):
-        for schedule, expected in (
-            (OptimizationSchedule.for_new_run(), MINIMUM_TIME_BLOCKS),
-            (OptimizationSchedule.for_joint_run(), 2),
-            (OptimizationSchedule.for_evidence_guided_run(), 2),
-            (OptimizationSchedule.for_quick_run(), 2),
-        ):
+        for schedule, expected in ((OptimizationSchedule.for_new_run(), MINIMUM_TIME_BLOCKS),):
             with self.subTest(protocol=schedule.protocol):
                 report = require_guarded_cohort_evidence_capacity(
                     dataset=dataset_fixture(2000), schedule=schedule,
@@ -48,12 +43,6 @@ class JointCapacityAlignmentTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '选择留出 cohort 仅覆盖 2 个日块.*至少需要 3'):
                 require_guarded_cohort_evidence_capacity(dataset=dataset_fixture(2000),
                     schedule=OptimizationSchedule.for_new_run(), planned_generations=1, seed=7)
-            for legacy in (OptimizationSchedule.for_joint_run(), OptimizationSchedule.for_evidence_guided_run()):
-                with self.subTest(legacy=legacy.protocol):
-                    unchanged = require_guarded_cohort_evidence_capacity(dataset=dataset_fixture(2000),
-                        schedule=legacy, planned_generations=1, seed=7)
-                    self.assertTrue(unchanged['sufficient'])
-                    self.assertEqual(unchanged['selection_holdouts'][0]['minimum_day_blocks'], 2)
 
 
 if __name__ == '__main__':

@@ -10,9 +10,8 @@ from ecologyrsi_dsh.application.generation_execution import (
 from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import CandidateStatus, Proposal, TaskManifest, digest
-from ecologyrsi_dsh.data.toy import ToyCropSoilWater
-from ecologyrsi_dsh.evolution.strategies import FakeDSHAdapter
-from ecologyrsi_dsh.evolution.batches import start_generation_batch
+from tests.native_fixtures import NativeRoleStub, native_manifest, start_native_run
+from tests.native_candidate_fixture import seed_proposal
 from ecologyrsi_dsh.knowledge.algorithm_smoke import (
     ALGORITHM_SMOKE_VERSION,
     AlgorithmSmokeError,
@@ -28,58 +27,21 @@ from tests.test_evaluation import (
     SPLIT_DIGEST,
     _DatasetStub,
     _cohort_series,
-    _series,
 )
 
 
-def _toy_task() -> TaskManifest:
-    toy = ToyCropSoilWater(seed=0)
-    return TaskManifest(
-        task_id="algorithm-ir-smoke-toy",
-        objective="smoke a restricted toy predictor",
-        domain_pack="crop-soil-water@toy",
-        visible_datasets=("generated-toy-series@1",),
-        budget={"max_candidates": 1, "max_generations": 1},
-        metadata={
-            "domain": "toy",
-            "dataset_seed": 0,
-            "dataset_digest": toy.dataset_digest,
-            "split_manifest_digest": "s" * 64,
-            "prediction_model_id": "toy-rolling-water@1",
-            "evaluator_id": "toy_time_forward@1",
-        },
-    )
-
-
-def _toy_proposal(*, run_id: str = "run:algorithm-ir-smoke") -> Proposal:
-    return Proposal(
-        proposal_id=f"proposal:{run_id}",
-        run_id=run_id,
-        generation=0,
-        title="restricted toy algorithm",
-        changes={"alpha": 0.4, "window": 5, "water_threshold": 0.4},
-    )
-
-
-def _greenhouse_task(predictor_id: str) -> TaskManifest:
-    return TaskManifest(
-        task_id="algorithm-ir-smoke-greenhouse",
-        objective="smoke a registered greenhouse predictor",
-        domain_pack="greenhouse_cucumber_2018",
-        visible_datasets=(DATASET_ID,),
-        budget={"max_candidates": 1},
-        metadata={
-            "prediction_model_id": predictor_id,
-            "evaluator_id": (
-                "greenhouse_multihorizon_time_forward@2"
-                if predictor_id == "greenhouse-horizon-targetwise-ridge@1"
-                else "greenhouse_time_forward@1"
-            ),
-            "episode_id": f"{DATASET_ID}:TeamA",
-            "dataset_digest": "d" * 64,
-            "split_manifest_digest": SPLIT_DIGEST,
-        },
-    )
+def _greenhouse_task(predictor_id="greenhouse-exogenous-ridge@1") -> TaskManifest:
+    return native_manifest(task_id="algorithm-ir-smoke", metadata={
+        "prediction_model_id": predictor_id,
+        "seed_genome_template_id": {
+            "greenhouse-exogenous-ridge@1": "greenhouse-exogenous-default@2",
+            "greenhouse-targetwise-ridge@1": "greenhouse-targetwise-default@2",
+            "greenhouse-horizon-targetwise-ridge@1": "greenhouse-default@2",
+        }[predictor_id],
+        "evaluator_id": "greenhouse_multihorizon_time_forward@4",
+        "episode_id": f"{DATASET_ID}:TeamA", "dataset_digest": "d" * 64,
+        "split_manifest_digest": SPLIT_DIGEST,
+    })
 
 
 def _passing_smoke_evidence(spec: AlgorithmSpec) -> dict:
@@ -97,8 +59,8 @@ def _passing_smoke_evidence(spec: AlgorithmSpec) -> dict:
 
 class AlgorithmIRSmokeTests(unittest.TestCase):
     def test_compiler_emits_registered_ir_and_rejects_operator_tampering(self) -> None:
-        task = _toy_task()
-        proposal = _toy_proposal()
+        task = _greenhouse_task()
+        proposal = seed_proposal(task)
         spec = compile_algorithm_spec(task, proposal, None)
         self.assertIsNotNone(spec.algorithm_ir)
         assert spec.algorithm_ir is not None
@@ -120,20 +82,8 @@ class AlgorithmIRSmokeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "operator graph is not host registered"):
             AlgorithmSpec.from_dict(tampered)
 
-    def test_synthetic_and_observed_smoke_use_training_fit_only(self) -> None:
-        toy_task = _toy_task()
-        toy_spec = compile_algorithm_spec(toy_task, _toy_proposal(), None)
-        toy_evidence = smoke_test_algorithm_spec(toy_spec, toy_task)
-        self.assertEqual(toy_evidence["dataset_kind"], "synthetic")
-        self.assertEqual(toy_evidence["source_partition"], "training_fit")
-        self.assertFalse(toy_evidence["restricted_partition_access"])
-        self.assertGreater(toy_evidence["usable_predictions"], 0)
-
+    def test_registered_smoke_uses_training_fit_only(self) -> None:
         for predictor_id, changes in (
-            (
-                "greenhouse-rolling-residual@1",
-                {"blend": 0.5, "window": 3, "bias_scale": 0.5},
-            ),
             (
                 "greenhouse-exogenous-ridge@1",
                 {
@@ -171,30 +121,16 @@ class AlgorithmIRSmokeTests(unittest.TestCase):
         ):
             with self.subTest(predictor_id=predictor_id):
                 task = _greenhouse_task(predictor_id)
-                proposal = Proposal(
-                    proposal_id=f"proposal:smoke:{predictor_id}",
-                    run_id=f"run:smoke:{predictor_id}",
-                    generation=0,
-                    title="observed training-fit smoke",
-                    changes=changes,
-                )
+                proposal = seed_proposal(task, run_id=f"run:smoke:{predictor_id}")
                 spec = compile_algorithm_spec(task, proposal, None)
-                if predictor_id == "greenhouse-horizon-targetwise-ridge@1":
-                    ordinary_series = _cohort_series()
-                    feedback = ordinary_series.partitions["training_feedback"]
-                    changed_values = {
-                        name: tuple(
-                            999999.0 if feedback.start <= index < feedback.end else value
-                            for index, value in enumerate(values)
-                        )
-                        for name, values in ordinary_series.values.items()
-                    }
-                    changed_feedback_series = replace(
-                        ordinary_series, values=changed_values
-                    )
-                else:
-                    ordinary_series = _series(tail_marker=0.0)
-                    changed_feedback_series = _series(tail_marker=999999.0)
+                self.assertEqual(spec.adapter_id, predictor_id)
+                ordinary_series = _cohort_series()
+                feedback = ordinary_series.partitions["training_feedback"]
+                changed_values = {name: tuple(
+                    999999.0 if feedback.start <= index < feedback.end else value
+                    for index, value in enumerate(values))
+                    for name, values in ordinary_series.values.items()}
+                changed_feedback_series = replace(ordinary_series, values=changed_values)
                 ordinary = smoke_test_algorithm_spec(
                     spec,
                     task,
@@ -231,16 +167,11 @@ class AlgorithmIRSmokeTests(unittest.TestCase):
             return _passing_smoke_evidence(spec)
 
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            task = _toy_task()
-            director.start_evolution(task, run_id="run:smoke-retry")
-            start_generation_batch(director, "run:smoke-retry")
-            proposal = director.submit_proposal(
-                _toy_proposal(run_id="run:smoke-retry")
-            )
-            candidate = director.spawn_candidate(
-                "run:smoke-retry", proposal, slot_index=0
-            )
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            task = native_manifest()
+            start_native_run(director, task=task, run_id="run:smoke-retry")
+            candidate = director.ensure_seed_incumbent_control("run:smoke-retry")
+            proposal = director.state("run:smoke-retry").proposal(candidate.proposal_id)
             endpoint = SimpleNamespace(
                 server=SimpleNamespace(
                     director=director,
@@ -275,8 +206,8 @@ class AlgorithmIRSmokeTests(unittest.TestCase):
             )
 
     def test_builtin_smoke_binds_only_transient_retry_feedback(self) -> None:
-        task = _toy_task()
-        spec = compile_algorithm_spec(task, _toy_proposal(), None)
+        task = _greenhouse_task()
+        spec = compile_algorithm_spec(task, seed_proposal(task), None)
         feedback = (
             {
                 "attempt": 1,
@@ -290,6 +221,7 @@ class AlgorithmIRSmokeTests(unittest.TestCase):
         evidence = smoke_test_algorithm_spec(
             spec,
             task,
+            _DatasetStub(_cohort_series()),
             attempt=2,
             failure_feedback=feedback,
         )
@@ -312,6 +244,7 @@ class AlgorithmIRSmokeTests(unittest.TestCase):
             smoke_test_algorithm_spec(
                 spec,
                 task,
+                _DatasetStub(_cohort_series()),
                 attempt=2,
                 failure_feedback=invalid_feedback,
             )
@@ -324,16 +257,11 @@ class AlgorithmIRSmokeTests(unittest.TestCase):
             return evidence
 
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            task = _toy_task()
-            director.start_evolution(task, run_id="run:smoke-digest-tampered")
-            start_generation_batch(director, "run:smoke-digest-tampered")
-            proposal = director.submit_proposal(
-                _toy_proposal(run_id="run:smoke-digest-tampered")
-            )
-            candidate = director.spawn_candidate(
-                "run:smoke-digest-tampered", proposal, slot_index=0
-            )
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            task = native_manifest()
+            start_native_run(director, task=task, run_id="run:smoke-digest-tampered")
+            candidate = director.ensure_seed_incumbent_control("run:smoke-digest-tampered")
+            proposal = director.state("run:smoke-digest-tampered").proposal(candidate.proposal_id)
             endpoint = SimpleNamespace(
                 server=SimpleNamespace(
                     director=director,
@@ -361,16 +289,11 @@ class AlgorithmIRSmokeTests(unittest.TestCase):
 
     def test_restart_resumes_after_persisted_smoke_failure(self) -> None:
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            task = _toy_task()
-            director.start_evolution(task, run_id="run:smoke-resume")
-            start_generation_batch(director, "run:smoke-resume")
-            proposal = director.submit_proposal(
-                _toy_proposal(run_id="run:smoke-resume")
-            )
-            candidate = director.spawn_candidate(
-                "run:smoke-resume", proposal, slot_index=0
-            )
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            task = native_manifest()
+            start_native_run(director, task=task, run_id="run:smoke-resume")
+            candidate = director.ensure_seed_incumbent_control("run:smoke-resume")
+            proposal = director.state("run:smoke-resume").proposal(candidate.proposal_id)
             spec = compile_algorithm_spec(task, proposal, None)
             director.record_algorithm_attempt(
                 AlgorithmAttempt(
@@ -425,7 +348,7 @@ class AlgorithmIRSmokeTests(unittest.TestCase):
                 calls.append((attempt, tuple(failure_feedback)))
                 return _passing_smoke_evidence(current_spec)
 
-            restarted = EvolutionDirector(ledger, FakeDSHAdapter())
+            restarted = EvolutionDirector(ledger, NativeRoleStub())
             endpoint = SimpleNamespace(
                 server=SimpleNamespace(
                     director=restarted,
@@ -456,16 +379,11 @@ class AlgorithmIRSmokeTests(unittest.TestCase):
             )
 
         with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, FakeDSHAdapter())
-            task = _toy_task()
-            director.start_evolution(task, run_id="run:smoke-exhausted")
-            start_generation_batch(director, "run:smoke-exhausted")
-            proposal = director.submit_proposal(
-                _toy_proposal(run_id="run:smoke-exhausted")
-            )
-            candidate = director.spawn_candidate(
-                "run:smoke-exhausted", proposal, slot_index=0
-            )
+            director = EvolutionDirector(ledger, NativeRoleStub())
+            task = native_manifest()
+            start_native_run(director, task=task, run_id="run:smoke-exhausted")
+            candidate = director.ensure_seed_incumbent_control("run:smoke-exhausted")
+            proposal = director.state("run:smoke-exhausted").proposal(candidate.proposal_id)
             endpoint = SimpleNamespace(
                 server=SimpleNamespace(
                     director=director,

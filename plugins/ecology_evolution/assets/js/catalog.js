@@ -2,9 +2,7 @@
 
   var workspaceFieldNames = {
     process: ["rounds", "candidate_summaries"],
-    candidates: ["candidates", "artifacts"],
-    training: ["training_assets"],
-    collaboration: ["interventions", "expert_consultations", "intervention_candidates"]
+    candidates: ["candidates", "artifacts"]
   };
   var workspaceLastRead = {};
 
@@ -34,7 +32,7 @@
     if (view === "training" && (!state.datasetPage || !sameDatasetContext(state.datasetContext, trainingDatasetContext()) || settings.force)) {
       loadSelectedDataset(state.pageOffset);
     }
-    if (state.usingDemo || !run || !workspaceFieldNames[view]) { return Promise.resolve(true); }
+    if (!run || !workspaceFieldNames[view]) { return Promise.resolve(true); }
     state.workspaceVersions = state.workspaceVersions || {};
     state.workspaceRequests = state.workspaceRequests || {};
     state.workspaceErrors = state.workspaceErrors || {};
@@ -75,7 +73,7 @@
 
   function loadCandidateDetail(candidateId) {
     var run = state.activeRun, epoch = state.contextEpoch;
-    if (!run || state.usingDemo || state.workspace !== "candidates") { return Promise.resolve(false); }
+    if (!run || state.workspace !== "candidates") { return Promise.resolve(false); }
     var key = workspaceRequestKey(run.id, "candidate:" + candidateId);
     state.candidateDetails = state.candidateDetails || {};
     state.candidateDetailRequests = state.candidateDetailRequests || {};
@@ -106,36 +104,7 @@
     return operation;
   }
 
-  function loadTrainingAsset(candidateId) {
-    var run = state.activeRun;
-    if (!run || state.usingDemo) { return Promise.resolve(false); }
-    state.trainingAssetRequests = state.trainingAssetRequests || {};
-    state.trainingAssetDetails = state.trainingAssetDetails || {};
-    var key = workspaceRequestKey(run.id, "asset:" + candidateId), epoch = state.contextEpoch;
-    if (state.trainingAssetRequests[key]) { return state.trainingAssetRequests[key]; }
-    var operation = request("/runs/" + encodeURIComponent(run.id) + "?view=asset&candidate_id=" + encodeURIComponent(candidateId), {timeout: dataRequestTimeout}).then(function (payload) {
-      if (epoch !== state.contextEpoch || !state.activeRun || state.activeRun.id !== run.id) { return false; }
-      var projection = payload.projection || {}, asset = projection.training_asset;
-      if (projection.run_id !== run.id || !asset || asset.candidate_id !== candidateId) { throw new Error("训练轨迹身份不匹配"); }
-      state.trainingAssetDetails[candidateId] = {revision: workspaceRevision(projection, "asset"), asset: Object.assign({}, asset, {details_loaded: true})};
-      // Bound the retained full traces independently of the lightweight list.
-      var keys = Object.keys(state.trainingAssetDetails);
-      while (keys.length > 4) { delete state.trainingAssetDetails[keys.shift()]; }
-      return true;
-    }).catch(function (error) {
-      if (epoch === state.contextEpoch && state.activeRun && state.activeRun.id === run.id) { showToast("训练轨迹加载失败，请重试：" + errorMessage(error)); }
-      return false;
-    }).finally(function () {
-      if (state.trainingAssetRequests[key] === operation) { delete state.trainingAssetRequests[key]; }
-      if (state.activeRun && state.activeRun.id === run.id && state.workspace === "training") { renderTrainingAssets(); }
-    });
-    state.trainingAssetRequests[key] = operation;
-    renderTrainingAssets();
-    return operation;
-  }
-
   function connectAndLoad() {
-    if (state.allowDemo) { loadDemo(); return Promise.resolve(true); }
     var preferredRunId = state.activeRun && state.activeRun.id || state.lastSelectedRunId;
     var hadRecoverableRunContext = Boolean(state.activeRun || state.runs.length);
     if (state.runMonitorRunId && typeof stopRunMonitor === "function") {
@@ -145,7 +114,6 @@
     state.runReadRequest += 1;
     state.runOverviewLoading = null;
     state.runOverviewError = null;
-    state.usingDemo = false;
     state.loadState = "loading";
     state.lastError = null;
     setConnection("checking", "正在检查服务");
@@ -236,22 +204,6 @@
     var background = Boolean(options && options.background);
     if (!runId) { return Promise.resolve(false); }
     var previousRunId = state.activeRun && state.activeRun.id;
-    if (state.usingDemo) {
-      commitRunSelection(runId, previousRunId);
-      state.activeRun = state.runs.find(function (run) { return run.id === runId; }) || null;
-      resetEventStream(runId, clone(demoEvents));
-      syncSelectedRunAlerts(state.activeRun, state.events);
-      state.showAllEvents = false;
-      syncCandidateSelection(state.activeRun);
-      state.datasetContext = activeRunDatasetContext();
-      state.datasetError = null;
-      state.datasetPage = demoDatasetPage(0, state.datasetPartition);
-      renderAll();
-      loadCandidateSamples(0, {force: true});
-      if (state.activeRun && typeof startRunMonitor === "function") { startRunMonitor(state.activeRun.id); }
-      if (notify) { showToast("已切换进化运行。" ); }
-      return Promise.resolve(true);
-    }
     // A projection monitor that starts after this selection request would
     // increment the shared read token and silently discard the selected run.
     // Stop it before reading the selected run overview; the
@@ -279,7 +231,6 @@
       resetEventStream(runId);
       state.workspaceVersions = {};
       state.workspaceErrors = {};
-      state.trainingAssetDetails = {};
       if (previousRunId !== runId) { state.pageOffset = 0; }
       syncSelectedRunAlerts(state.activeRun, state.events);
       state.showAllEvents = false;
@@ -312,11 +263,6 @@
     var nextValue = visible === true;
     if (state.showArchivedRuns === nextValue) { return Promise.resolve(true); }
     if (state.busy || state.refreshing) { return Promise.resolve(false); }
-    if (state.usingDemo) {
-      state.showArchivedRuns = false;
-      renderAll();
-      return Promise.resolve(false);
-    }
     var previousValue = state.showArchivedRuns;
     state.showArchivedRuns = nextValue;
 
@@ -401,14 +347,14 @@
   function runnableDatasetItems() {
     return (state.catalog.datasets || []).filter(function (item) {
       if (!item || item.available === false || item.runnable === false) { return false; }
-      if (!state.usingDemo && (item.training_selectable !== true || !item.task_adapter || !item.evaluation)) { return false; }
+      if ((item.training_selectable !== true || !item.task_adapter || !item.evaluation)) { return false; }
       return !item.readiness || item.readiness.ready !== false;
     });
   }
   function datasetEpisodes(dataset) {
     var episodes = dataset && normalizeList(dataset.episodes);
     if (episodes && episodes.length) { return episodes; }
-    return dataset && itemId(dataset) === "generated-toy-series@1" ? [{ id: "generated-toy-series@1:seed-0", label: "固定随机种子 0" }] : [];
+    return [];
   }
   function populateEpisodeControl(preferred) {
     var dataset = selectedCatalogItem("datasets", "#dataset-id");
@@ -425,7 +371,7 @@
     // host directory may contain additional entries that the sidecar cannot
     // call; retain them as explicitly disabled diagnostics instead of either
     // hiding backend models or silently dropping host-only models.
-    var items = state.catalog.dsh_models_explicit === true ? (state.catalog.dsh_models || []).slice() : state.catalog.models || [];
+    var items = (state.catalog.dsh_models || []).slice();
     var hostModels = state.hostContextReceived && state.hostContext && Array.isArray(state.hostContext.models) ? state.hostContext.models : [];
     if (hostModels.length) {
       var modelIdentity = function (item) {
@@ -486,9 +432,7 @@
       if (!item || item.local_model === true || String(item.authentication_state || "").toLowerCase() === "local") { return false; }
       return true;
     });
-    // Explicit demo/local fallback keeps the browser demo usable while a
-    // real DSH deployment still prefers authenticated API models exclusively.
-    return remote.length || !state.usingDemo ? remote : items;
+    return remote;
   }
   function populateCatalogControls() {
     populateSelect("#domain-pack", state.catalog.domain_packs, "没有可用的领域模型包");
@@ -553,8 +497,7 @@
       $("#domain-pack").value = domainPackId;
     }
     var datasetId = itemId(dataset);
-    var evaluatorId = datasetId === "generated-toy-series@1" && state.usingDemo
-      ? "toy_time_forward@1" : dataset.task_adapter && dataset.task_adapter.evaluator_id;
+    var evaluatorId = dataset.task_adapter && dataset.task_adapter.evaluator_id;
     var evaluator = state.catalog.evaluators.find(function (item) {
       return itemId(item) === evaluatorId && item.available !== false
         && (!Array.isArray(item.dataset_ids) || item.dataset_ids.indexOf(datasetId) >= 0);
@@ -665,7 +608,7 @@
       && Number.isInteger(sampleAgentBatchSize) && sampleAgentBatchSize === predictionCellsPerOrigin()
       && Number.isInteger(sampleConcurrency) && sampleConcurrency >= 1 && sampleConcurrency <= sampleConcurrencyMaximum;
     var rolesSelected = Boolean($("#policy-model-id").value && $("#judge-model-id").value);
-    var dshReady = (state.connection === "online" || state.usingDemo) && hasCapability("evolution.projection.read");
+    var dshReady = (state.connection === "online") && hasCapability("evolution.projection.read");
     var selectedDataset = selectedCatalogItem("datasets", "#dataset-id");
     var selectedDatasetId = selectedDataset && itemId(selectedDataset);
     var datasetReady = Boolean(selectedDatasetId) && availableDatasets.some(function (item) { return itemId(item) === selectedDatasetId; });
@@ -674,16 +617,16 @@
     var selectedJudge = selectedModelCatalogItem("#judge-model-id");
     var policyApiSelected = Boolean(selectedPolicy && selectedPolicy.local_model !== true && String(selectedPolicy.authentication_state || "").toLowerCase() !== "local");
     var judgeApiSelected = Boolean(selectedJudge && selectedJudge.local_model !== true && String(selectedJudge.authentication_state || "").toLowerCase() !== "local");
-    var strategyRoleCatalogReady = state.usingDemo || dshModelRoleCount("strategy", false) > 0 || Boolean(selectedPolicy && selectedPolicy.local_model === true);
-    var reviewRoleCatalogReady = state.usingDemo || dshModelRoleCount("review", false) > 0 || Boolean(selectedJudge && selectedJudge.local_model === true);
-    var policyConnectionReady = modelSupportsRole(selectedPolicy, "propose") && modelCredentialReady(selectedPolicy) && (state.usingDemo || policyApiSelected);
-    var judgeConnectionReady = modelSupportsRole(selectedJudge, "judge") && modelCredentialReady(selectedJudge) && (state.usingDemo || judgeApiSelected);
+    var strategyRoleCatalogReady = dshModelRoleCount("strategy", false) > 0 || Boolean(selectedPolicy && selectedPolicy.local_model === true);
+    var reviewRoleCatalogReady = dshModelRoleCount("review", false) > 0 || Boolean(selectedJudge && selectedJudge.local_model === true);
+    var policyConnectionReady = modelSupportsRole(selectedPolicy, "propose") && modelCredentialReady(selectedPolicy) && (policyApiSelected);
+    var judgeConnectionReady = modelSupportsRole(selectedJudge, "judge") && modelCredentialReady(selectedJudge) && (judgeApiSelected);
     var autoBindingsReady = predictionBindingsReady();
     var derivedDomain = selectedDataset && (selectedDataset.domain_pack_id || selectedDataset.domain_id || selectedDataset.domain);
     var domainDataMatch = Boolean(derivedDomain) && derivedDomain === $("#domain-pack").value && derivedDomain === $("#research-domain-id").value;
     var budget = candidateBudgetStatus();
     var capacity = state.cohortCapacityReport;
-    var capacityReady = state.usingDemo || Boolean(
+    var capacityReady = Boolean(
       capacity
       && state.cohortCapacitySignature === evolutionCapacityRequest().signature
       && capacity.sufficient === true
@@ -774,7 +717,6 @@
   }
 
   function capacityVerificationPending() {
-    if (state.usingDemo) { return false; }
     var planned = evolutionCapacityRequest();
     var body = planned.body;
     var valid = Boolean(body.dataset_id && body.episode_id && body.optimization_schedule
@@ -813,22 +755,6 @@
       state.cohortCapacityError = null;
       renderEvolutionCapacityState();
       return Promise.resolve(null);
-    }
-    if (state.usingDemo) {
-      state.cohortCapacityReport = {
-        sufficient: true,
-        required_unique_origins: 85 * body.planned_generations,
-        planned_generations: body.planned_generations,
-        available_eligible_origins: 999999,
-        max_feasible_generations: body.planned_generations,
-        cohort_reuse_policy: "training_epochs_fixed_partitions@1",
-        reused_origin_occurrences: 0
-      };
-      state.cohortCapacitySignature = planned.signature;
-      state.cohortCapacityLoading = false;
-      state.cohortCapacityError = null;
-      renderEvolutionCapacityState();
-      return Promise.resolve(state.cohortCapacityReport);
     }
     var requestId = state.cohortCapacityRequest + 1;
     state.cohortCapacityRequest = requestId;
@@ -899,7 +825,7 @@
   }
 
   function loadOlderRuns() {
-    if (!state.runListCursor || state.loadingOlderRuns || state.refreshing || state.busy || state.usingDemo) { return Promise.resolve(false); }
+    if (!state.runListCursor || state.loadingOlderRuns || state.refreshing || state.busy) { return Promise.resolve(false); }
     var epoch = state.viewEpoch;
     var cursor = state.runListCursor;
     var includeArchived = state.showArchivedRuns;

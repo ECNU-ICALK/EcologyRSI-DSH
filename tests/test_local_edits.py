@@ -41,7 +41,7 @@ def _parent():
         compiler_digest="d" * 64,
     )
     return materialize_seed_genome(
-        registry.seed_template("greenhouse-default@1"), initialization
+        registry.seed_template("greenhouse-default@2"), initialization
     )
 
 

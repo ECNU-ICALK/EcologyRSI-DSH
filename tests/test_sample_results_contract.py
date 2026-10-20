@@ -16,6 +16,7 @@ import zlib
 import ecologyrsi_dsh.core.sample_results as sample_results_module
 from ecologyrsi_dsh import (
     Evaluation,
+    ModelArtifact,
     EventLedger,
     EvolutionDirector,
     Proposal,
@@ -28,27 +29,18 @@ from ecologyrsi_dsh.core.sample_results import (
     sample_result_batch_event_payload,
     sample_results_event_payload,
 )
-from ecologyrsi_dsh.evaluators.sample_execution import (
-    CollaborativeSampleExecutor,
-    SampleExecutionPolicy,
-)
-from ecologyrsi_dsh.presentation.reporting import run_export
+from tests.native_candidate_fixture import seed_candidate
+from tests.native_fixtures import native_manifest, NativeRoleStub
 from ecologyrsi_dsh.api.handler import EvolutionHTTPServer
 
 
 RUN_ID = "run:sample-contract"
 CANDIDATE_ID = "candidate:sample-contract"
+_ARTIFACT_DIGESTS = {}
 
 
 def _task(task_id: str = "sample-contract") -> TaskManifest:
-    return TaskManifest(
-        task_id=task_id,
-        objective="test private per-sample result persistence",
-        domain_pack="crop-soil-water@toy",
-        visible_datasets=("generated-toy-series@1",),
-        budget={"max_candidates": 4, "max_generations": 2},
-        seed=17,
-    )
+    return native_manifest(task_id=task_id, generations=2)
 
 
 def _source_row(index: int, *, failed: bool = False) -> dict:
@@ -111,43 +103,20 @@ def _seed_candidate(
     run_id: str,
     candidate_id: str = CANDIDATE_ID,
 ) -> tuple[Proposal, object]:
-    director.start_evolution(_task(run_id), run_id=run_id)
-    proposal = Proposal(
-        proposal_id=f"proposal:{run_id}",
-        run_id=run_id,
-        generation=0,
-        title="sample result contract",
-        changes={"alpha": 0.2},
-    )
-    director.submit_proposal(proposal)
-    candidate = director.spawn_candidate(
-        run_id, proposal, candidate_id=candidate_id
-    )
+    proposal, candidate = seed_candidate(director, run_id, candidate_id, task=_task(run_id))
+    artifact = ModelArtifact(artifact_id=f"artifact:{candidate_id}", run_id=run_id,
+        candidate_id=candidate_id, model_id="greenhouse-exogenous-ridge@1",
+        dataset_digest=director.state(run_id).task_manifest.metadata["dataset_digest"],
+        training_partition="training_fit", training_rows=10, parameters=proposal.changes)
+    director.record_artifact(artifact)
+    _ARTIFACT_DIGESTS[(run_id, candidate_id)] = artifact.digest
     return proposal, candidate
 
 
-class _TwoSampleAdapter:
-    adapter_id = "two-sample-adapter"
-    adapter_version = "1"
+def _evaluation(**kwargs):
+    return Evaluation(**kwargs, artifact_digest=_ARTIFACT_DIGESTS[(kwargs["run_id"], kwargs["candidate_id"])])
 
-    def __init__(self) -> None:
-        self.sample_calls = 0
 
-    def plan_batch(self, context):
-        return {"plan_id": "two-sample@1"}
-
-    def predict_sample(self, request, plan, *, attempt):
-        del plan, attempt
-        self.sample_calls += 1
-        return {
-            "predicted": request.proposed_prediction,
-            "agent_decisions": [
-                {"role": "planner", "decision": "use_registered_tool", "status": "completed"}
-            ],
-            "tool_calls": [
-                {"tool_id": "ridge-tool", "version": "1", "status": "completed"}
-            ],
-        }
 
 
 class SampleResultCodecTests(unittest.TestCase):
@@ -175,7 +144,7 @@ class SampleResultCodecTests(unittest.TestCase):
             candidate_id=CANDIDATE_ID,
             score=0.1,
             passed=True,
-            partition="validation",
+            partition="training_feedback",
         )
         payload = sample_results_event_payload(evaluation, rows, revision="revision:1")
         self.assertEqual(decode_sample_results(payload), rows)
@@ -209,7 +178,7 @@ class SampleResultCodecTests(unittest.TestCase):
             candidate_id=CANDIDATE_ID,
             score=0.1,
             passed=False,
-            partition="validation",
+            partition="training_feedback",
         )
         payload = sample_results_event_payload(evaluation, rows, revision="revision:1")
         self.assertEqual(decode_sample_results(payload), rows)
@@ -227,7 +196,7 @@ class SampleResultCodecTests(unittest.TestCase):
             candidate_id=CANDIDATE_ID,
             score=0.0,
             passed=False,
-            partition="validation",
+            partition="training_feedback",
         )
         payload = sample_results_event_payload(evaluation, rows, revision="revision:clipping")
         self.assertEqual(decode_sample_results(payload), rows)
@@ -244,7 +213,7 @@ class SampleResultCodecTests(unittest.TestCase):
         self.assertEqual(rows[0]["agent_prediction"], source["agent_prediction"])
         evaluation = Evaluation(evaluation_id="evaluation:agent", run_id=RUN_ID,
                                 candidate_id=CANDIDATE_ID, score=.1, passed=True,
-                                partition="validation")
+                                partition="training_feedback")
         payload = sample_results_event_payload(evaluation, rows, revision="revision:agent")
         self.assertEqual(decode_sample_results(payload), rows)
 
@@ -256,7 +225,7 @@ class SampleResultCodecTests(unittest.TestCase):
             candidate_id=CANDIDATE_ID,
             score=0.1,
             passed=True,
-            partition="validation",
+            partition="training_feedback",
         )
         original = sample_results_event_payload(evaluation, rows, revision="revision:1")
 
@@ -289,44 +258,12 @@ class SampleResultCodecTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "decompression limit"):
                 decode_sample_results(bomb)
 
-    def test_executor_assigns_one_global_order_across_two_result_batches(self) -> None:
-        adapter = _TwoSampleAdapter()
-        published: list[tuple[dict, ...]] = []
-
-        def record(rows):
-            published.append(tuple(dict(row) for row in rows))
-            self.assertEqual(adapter.sample_calls, len(published))
-
-        source_rows = []
-        for index in (1, 2):
-            row = _source_row(index)
-            row.pop("sample_index")
-            row.pop("sample_id")
-            row["partition"] = "validation"
-            source_rows.append(row)
-        batch = CollaborativeSampleExecutor(adapter).execute(
-            source_rows,
-            context={
-                "candidate_id": CANDIDATE_ID,
-                "dataset_digest": "dataset:fixed",
-            },
-            target_bounds={
-                "soil_water": {"unit": "fraction", "minimum": 0.0, "maximum": 1.0}
-            },
-            algorithm_id="ridge-as-agent-tool",
-            algorithm_version="1",
-            policy=SampleExecutionPolicy(max_attempts=1, retry_backoff_seconds=0),
-            result_callback=record,
-            result_batch_size=1,
-        )
-        self.assertEqual([[row["sample_index"] for row in item] for item in published], [[1], [2]])
-        self.assertEqual([row["sample_index"] for row in batch.scoring_rows], [1, 2])
 
 
 class SampleResultDirectorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.ledger = EventLedger()
-        self.director = EvolutionDirector(self.ledger)
+        self.director = EvolutionDirector(self.ledger, NativeRoleStub())
         self.proposal, self.candidate = _seed_candidate(self.director, RUN_ID)
 
     def tearDown(self) -> None:
@@ -363,7 +300,7 @@ class SampleResultDirectorTests(unittest.TestCase):
             self.director.record_evaluation_sample_result_batch(RUN_ID, old_payload)
 
         first_rows, first_event = self._batch("new", 1, (1,))
-        restarted = EvolutionDirector(self.ledger)
+        restarted = EvolutionDirector(self.ledger, NativeRoleStub())
         first_payload = sample_result_batch_event_payload(
             RUN_ID, CANDIDATE_ID, first_rows, revision="new", batch_index=1
         )
@@ -397,7 +334,7 @@ class SampleResultDirectorTests(unittest.TestCase):
         self.assertEqual(self.ledger.count(RUN_ID), count)
 
         other_run = "run:sample-contract-other"
-        other_director = EvolutionDirector(self.ledger)
+        other_director = EvolutionDirector(self.ledger, NativeRoleStub())
         other_proposal, _candidate = _seed_candidate(
             other_director, other_run, CANDIDATE_ID
         )
@@ -422,13 +359,13 @@ class SampleResultDirectorTests(unittest.TestCase):
         self._start("revision:complete")
         first, _ = self._batch("revision:complete", 1, (1,))
         second, _ = self._batch("revision:complete", 2, (2,))
-        evaluation = Evaluation(
+        evaluation = _evaluation(
             evaluation_id="evaluation:complete",
             run_id=RUN_ID,
             candidate_id=CANDIDATE_ID,
             score=0.2,
             passed=True,
-            partition="validation",
+            partition="training_feedback",
         )
         payload = sample_results_event_payload(
             evaluation, [*second, *first], revision="revision:complete"
@@ -446,13 +383,13 @@ class SampleResultDirectorTests(unittest.TestCase):
 
     def test_open_revision_cannot_be_silently_completed_without_sample_results(self) -> None:
         self._start("revision:open")
-        evaluation = Evaluation(
+        evaluation = _evaluation(
             evaluation_id="evaluation:open",
             run_id=RUN_ID,
             candidate_id=CANDIDATE_ID,
             score=0.0,
             passed=False,
-            partition="validation",
+            partition="training_feedback",
         )
         with self.assertRaisesRegex(ValueError, "sealed atomically"):
             self.director.record_evaluation(evaluation)
@@ -463,7 +400,7 @@ class SampleResultDirectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "events.sqlite3"
             ledger = EventLedger(path)
-            director = EvolutionDirector(ledger)
+            director = EvolutionDirector(ledger, NativeRoleStub())
             proposal, _candidate = _seed_candidate(
                 director, run_id, candidate_id
             )
@@ -506,7 +443,7 @@ class SampleResultDirectorTests(unittest.TestCase):
 
             restarted_ledger = EventLedger(path)
             try:
-                restarted = EvolutionDirector(restarted_ledger)
+                restarted = EvolutionDirector(restarted_ledger, NativeRoleStub())
                 resumed = restarted.prepare_evaluation_sample_checkpoint(
                     run_id,
                     generation=0,
@@ -538,13 +475,13 @@ class SampleResultDirectorTests(unittest.TestCase):
             checkpoint=_checkpoint(sample_count=2),
         )
         rows, _event = self._batch(prepared["revision"], 1, (1,))
-        evaluation = Evaluation(
+        evaluation = _evaluation(
             evaluation_id="evaluation:checkpoint-incomplete",
             run_id=RUN_ID,
             candidate_id=CANDIDATE_ID,
             score=0.1,
             passed=False,
-            partition="validation",
+            partition="training_feedback",
         )
         payload = sample_results_event_payload(
             evaluation,
@@ -561,9 +498,9 @@ class SampleResultDirectorTests(unittest.TestCase):
             generation=0,
             proposal_id=self.proposal.proposal_id,
             candidate_id=CANDIDATE_ID,
-            checkpoint=_checkpoint(sample_count=2),
+            checkpoint=_checkpoint(sample_count=9),
         )
-        rows, _event = self._batch(prepared["revision"], 1, (1, 2))
+        rows, _event = self._batch(prepared["revision"], 1, tuple(range(1, 10)))
         self.director.record_evaluation_progress(
             RUN_ID,
             generation=0,
@@ -587,13 +524,13 @@ class SampleResultDirectorTests(unittest.TestCase):
             },
             revision=prepared["revision"],
         )
-        evaluation = Evaluation(
+        evaluation = _evaluation(
             evaluation_id="evaluation:checkpoint-progress-mismatch",
             run_id=RUN_ID,
             candidate_id=CANDIDATE_ID,
             score=0.2,
             passed=True,
-            partition="validation",
+            partition="training_feedback",
         )
         payload = sample_results_event_payload(
             evaluation,
@@ -609,28 +546,7 @@ class SampleResultDirectorTests(unittest.TestCase):
     ) -> None:
         run_id = "run:origin-bundle-checkpoint"
         candidate_id = "candidate:origin-bundle-checkpoint"
-        task_data = _task(run_id).to_dict()
-        task_data["metadata"] = {
-            "sample_agent_protocol": "dsh-strict-origin-bundle@3",
-            "prediction_cells_per_origin": 9,
-        }
-        self.director.start_evolution(
-            TaskManifest.from_dict(task_data),
-            run_id=run_id,
-        )
-        proposal = Proposal(
-            proposal_id=f"proposal:{run_id}",
-            run_id=run_id,
-            generation=0,
-            title="origin bundle contract",
-            changes={"alpha": 0.2},
-        )
-        self.director.submit_proposal(proposal)
-        self.director.spawn_candidate(
-            run_id,
-            proposal,
-            candidate_id=candidate_id,
-        )
+        proposal, _candidate = _seed_candidate(self.director, run_id, candidate_id)
         prepared = self.director.prepare_evaluation_sample_checkpoint(
             run_id,
             generation=0,
@@ -678,7 +594,7 @@ class SampleResultDirectorTests(unittest.TestCase):
             },
             revision=prepared["revision"],
         )
-        evaluation = Evaluation(
+        evaluation = _evaluation(
             evaluation_id="evaluation:origin-bundle-checkpoint",
             run_id=run_id,
             candidate_id=candidate_id,
@@ -703,9 +619,9 @@ class SampleResultDirectorTests(unittest.TestCase):
             generation=0,
             proposal_id=self.proposal.proposal_id,
             candidate_id=CANDIDATE_ID,
-            checkpoint=_checkpoint(sample_count=2),
+            checkpoint=_checkpoint(sample_count=9),
         )
-        rows, _event = self._batch(prepared["revision"], 1, (1, 2))
+        rows, _event = self._batch(prepared["revision"], 1, tuple(range(1, 10)))
         self.director.record_evaluation_progress(
             RUN_ID,
             generation=0,
@@ -724,13 +640,13 @@ class SampleResultDirectorTests(unittest.TestCase):
                 "gateway_request_count": 1,
             },
         )
-        evaluation = Evaluation(
+        evaluation = _evaluation(
             evaluation_id="evaluation:checkpoint-legacy-progress",
             run_id=RUN_ID,
             candidate_id=CANDIDATE_ID,
             score=0.2,
             passed=True,
-            partition="validation",
+            partition="training_feedback",
         )
         payload = sample_results_event_payload(
             evaluation,
@@ -936,13 +852,13 @@ class SampleResultHTTPTests(unittest.TestCase):
                     batch_index=batch_index,
                 ),
             )
-        evaluation = Evaluation(
+        evaluation = _evaluation(
             evaluation_id="evaluation:http-completed",
             run_id=completed_run,
             candidate_id=candidate.candidate_id,
             score=0.2,
             passed=True,
-            partition="validation",
+            partition="training_feedback",
         )
         director.record_evaluation(
             evaluation,
@@ -1082,10 +998,6 @@ class SampleResultHTTPTests(unittest.TestCase):
             int(events["next_cursor"]), self.server.ledger.events(run_id)[-1].seq
         )
 
-        exported = run_export(director.state(run_id))
-        serialized_export_events = json.dumps(exported["events"], ensure_ascii=False)
-        self.assertNotIn("EvaluationSampleResult", serialized_export_events)
-        self.assertNotIn("sample:1", serialized_export_events)
 
 
 if __name__ == "__main__":

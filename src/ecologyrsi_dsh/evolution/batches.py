@@ -14,20 +14,14 @@ from typing import Any
 from ..core.models import (
     CandidateRole,
     CandidateStatus,
-    ExpertConsultation,
-    InterventionKind,
-    Promotion,
-    PromotionDecision,
     RunStatus,
     canonical_json,
     digest,
 )
 from ..core.redaction import public_error_summary
 from .workflow_ir import DEFAULT_COMPILER_SEMANTIC_DIGEST
-from ..knowledge.algorithms import AlgorithmCompileError, resolve_predictor_adoption
 from ..knowledge.research_iteration import (
     ResearchIteration,
-    build_deterministic_research_fallback_plan,
 )
 from ..knowledge.autonomous_cycle import (
     AUTONOMOUS_RESEARCH_PROTOCOL,
@@ -35,7 +29,6 @@ from ..knowledge.autonomous_cycle import (
     GenerationSearchPlan,
 )
 from ..knowledge.retrieval import (
-    assess_generation_knowledge,
     generation_query_hints,
     retrieve_generation_knowledge,
 )
@@ -43,24 +36,18 @@ from .analysis import (
     GenerationAnalysis,
     GenerationBatch,
     build_cross_generation_experience,
-    build_generation_analysis,
     evaluation_cohort_digest,
     sample_update_windows_enabled,
 )
 from .genome import EcologyEvolutionPluginGenome, deep_thaw_json
 from .research_recovery import research_checkpoint
 from . import novelty
-from .interventions import expert_directive_context
 from .schedule import (
-    OPTIMIZATION_PROTOCOL,
-    QUICK_OPTIMIZATION_PROTOCOL,
     PAIRED_LOCAL_EVALUATION_MODE,
     OptimizationSchedule,
 )
 
 
-_EXPERT_PENDING_CONTEXT_LIMIT = 16
-_EXPERT_ANSWER_CONTEXT_LIMIT = 8
 _HISTORICAL_EXPERIENCE_SCAN_RUNS = 24
 
 
@@ -82,188 +69,12 @@ class ResearchResponseContractError(ValueError):
         )
 
 
-def _pending_expert_directives(state: Any) -> dict[str, Any] | None:
-    """The bounded advisory view of pending human directives, or nothing.
-
-    Returns `None` rather than an empty block so every caller can make the key
-    conditional: a run where no expert wrote anything must keep the exact stage
-    context digest it had before this channel existed.
-    """
-
-    directives = expert_directive_context(
-        [
-            item.to_dict()
-            for item in state.pending_interventions[:_EXPERT_PENDING_CONTEXT_LIMIT]
-        ]
-    )
-    return directives if directives["directives"] else None
 
 
-def _expert_collaboration_context(
-    state: Any,
-    generation: int,
-) -> tuple[dict[str, Any], tuple[str, ...], tuple[str, ...]]:
-    """Build one bounded advisory snapshot for a remote research call."""
-
-    pending = tuple(
-        sorted(
-            state.pending_expert_consultations,
-            key=lambda item: (item.generation, item.created_at, item.consultation_id),
-        )[:_EXPERT_PENDING_CONTEXT_LIMIT]
-    )
-    answers = state.available_expert_answers(generation)[
-        :_EXPERT_ANSWER_CONTEXT_LIMIT
-    ]
-    pending_rows = [
-        {
-            "consultation_id": item.consultation_id,
-            "requested_generation": item.generation,
-            "uncertainty_type": item.uncertainty_type.value,
-            "question": item.question,
-            "context": item.context,
-            "fallback_assumption": item.fallback_assumption,
-            "requested_expertise": list(item.requested_expertise),
-            "options": list(item.options),
-            "confidence": item.confidence,
-        }
-        for item in pending
-    ]
-    answer_rows: list[dict[str, Any]] = []
-    for answer in answers:
-        consultation = state.consultation(answer.consultation_id)
-        answer_rows.append(
-            {
-                "answer_id": answer.answer_id,
-                "consultation_id": answer.consultation_id,
-                "requested_generation": consultation.generation,
-                "uncertainty_type": consultation.uncertainty_type.value,
-                "question": consultation.question,
-                "context": consultation.context,
-                "fallback_assumption": consultation.fallback_assumption,
-                "answer": answer.answer,
-                "selected_option": answer.selected_option,
-                "effective_generation": answer.effective_generation,
-                # Only marked when true, so an ordinary one-off answer keeps the
-                # exact row shape it had before durable knowledge existed. The
-                # flag tells the planner this is a standing fact about the
-                # domain rather than a one-generation instruction, which is the
-                # difference between "use option B this round" and "night
-                # transpiration lags by two hours here".
-                **({"persistent": True} if answer.persistent else {}),
-            }
-        )
-    directives = _pending_expert_directives(state)
-    context = {
-        "mode": "asynchronous_non_blocking",
-        "pending_consultations": pending_rows,
-        "available_answers": answer_rows,
-        # The research call decides *where to look next*, which is exactly what
-        # an expert's own reasoning should be able to steer. Until this was
-        # added, a pending guidance/constraint/knowledge note only ever reached
-        # the far narrower `candidate.propose` stage, so the planner kept
-        # proposing directions the expert had already argued against. Omitted
-        # entirely -- not set to null -- when nobody wrote anything, so a run
-        # without interventions keeps its exact prior context digest.
-        **(
-            {"expert_directives": directives}
-            if directives is not None
-            else {}
-        ),
-        "policy": {
-            "answers_are_advisory_only": True,
-            "answers_cannot_expand_data_or_tool_permissions": True,
-            "do_not_repeat_pending_questions": True,
-            "continue_with_fallback_when_unanswered": True,
-            "new_questions_must_be_non_blocking": True,
-        },
-    }
-    return (
-        context,
-        tuple(item.consultation_id for item in pending),
-        tuple(item.answer_id for item in answers),
-    )
 
 
-def _expert_consultation_from_result(
-    value: Any,
-    *,
-    run_id: str,
-    generation: int,
-    model_id: str | None,
-) -> ExpertConsultation | None:
-    """Validate and identify an optional model-authored consultation."""
-
-    if not isinstance(value, Mapping) or model_id is None:
-        return None
-    allowed_fields = {
-        "uncertainty_type",
-        "question",
-        "context",
-        "fallback_assumption",
-        "requested_expertise",
-        "options",
-        "confidence",
-        "non_blocking",
-    }
-    if set(value) != allowed_fields:
-        return None
-    try:
-        identity = {
-            "run_id": run_id,
-            "generation": generation,
-            "requested_by_model_id": model_id,
-            "request": dict(value),
-        }
-        consultation_id = "expert-consultation:" + digest(identity)[:32]
-        return ExpertConsultation(
-            consultation_id=consultation_id,
-            run_id=run_id,
-            generation=generation,
-            uncertainty_type=value["uncertainty_type"],
-            question=value["question"],
-            context=value["context"],
-            fallback_assumption=value["fallback_assumption"],
-            requested_expertise=value["requested_expertise"],
-            options=value["options"],
-            confidence=value["confidence"],
-            requested_by_model_id=model_id,
-            non_blocking=value["non_blocking"],
-        )
-    except (KeyError, TypeError, ValueError):
-        return None
 
 
-def _search_parent_from_analysis(state: Any, analysis: GenerationAnalysis) -> str | None:
-    """Resolve the completed candidate used for search, not formal promotion."""
-
-    candidate_ids: list[str] = []
-    if analysis.search_parent_candidate_id is not None:
-        candidate_ids.append(analysis.search_parent_candidate_id)
-    candidate_ids.extend(
-        str(row["candidate_id"])
-        for row in analysis.ranking
-        if row.get("score") is not None
-        and int(row.get("constraint_violations", 0)) == 0
-        and row.get("candidate_id") is not None
-    )
-    candidate_ids.extend(
-        str(row["candidate_id"])
-        for row in analysis.ranking
-        if row.get("score") is not None and row.get("candidate_id") is not None
-    )
-    for candidate_id in dict.fromkeys(candidate_ids):
-        try:
-            candidate = state.candidate(candidate_id)
-        except KeyError:
-            continue
-        if candidate.status not in {
-            CandidateStatus.PROMOTED,
-            CandidateStatus.REJECTED,
-        }:
-            continue
-        if state.evaluation_for(candidate_id) is not None:
-            return candidate_id
-    return None
 
 
 def _autonomous_research_enabled(state: Any) -> bool:
@@ -299,49 +110,18 @@ def _adaptive_effective_parent_revision(state: Any):
 
 
 def _generation_parent_candidate_id(state: Any) -> str | None:
-    generation = state.run.generation
-    parent_candidate_id = state.run.best_candidate_id
-    effective_parent_revision = _adaptive_effective_parent_revision(state)
-    if effective_parent_revision is not None:
-        parent_candidate_id = effective_parent_revision.candidate_id
-    else:
-        previous = state.analysis_for(generation - 1) if generation > 0 else None
-        if previous is not None:
-            parent_candidate_id = (
-                _search_parent_from_analysis(state, previous) or parent_candidate_id
-            )
-    for intervention in state.pending_interventions:
-        if intervention.kind is InterventionKind.PARENT_SELECTION:
-            parent_candidate_id = intervention.target_candidate_id
-    return parent_candidate_id
+    revision = _adaptive_effective_parent_revision(state)
+    return revision.candidate_id if revision is not None else state.run.best_candidate_id
 
 
 def _generation_parent_genome(state: Any, parent_candidate_id: str | None):
-    """Resolve the exact frozen source genome for the current generation."""
-
-    generation = state.run.generation
-    if generation == 0:
+    """Resolve the selected revision, never the last rejected local proposal."""
+    if state.run.generation == 0:
         return state.materialized_seed_genome()
-    if parent_candidate_id is None:
-        raise RuntimeError("generation is missing its parent candidate")
-    effective_parent_revision = _adaptive_effective_parent_revision(state)
-    if effective_parent_revision is not None:
-        if effective_parent_revision.candidate_id == parent_candidate_id:
-            return EcologyEvolutionPluginGenome.from_dict(
-                deep_thaw_json(effective_parent_revision.genome)
-            )
-        # A pending, explicitly validated parent-selection intervention may
-        # deliberately replace the automatic effective-revision parent.
-        overridden_parent_ids = {
-            item.target_candidate_id
-            for item in state.pending_interventions
-            if item.kind is InterventionKind.PARENT_SELECTION
-        }
-        if parent_candidate_id not in overridden_parent_ids:
-            raise RuntimeError(
-                "adaptive parent candidate differs from the frozen effective revision"
-            )
-    return state.persisted_genome_for(parent_candidate_id)
+    revision = _adaptive_effective_parent_revision(state)
+    if revision is None or revision.candidate_id != parent_candidate_id:
+        raise RuntimeError("parent differs from the frozen effective revision")
+    return EcologyEvolutionPluginGenome.from_dict(deep_thaw_json(revision.genome))
 
 
 def _next_stage_attempt(state: Any, stage: str) -> int:
@@ -432,7 +212,6 @@ def _ensure_generation_search_plan(
             run_state_revision=state.events[-1].seq,
             stage_attempt=attempt,
             ledger_expected_revision=director.ledger.latest_seq(),
-            expert_directives=_pending_expert_directives(state),
         )
         if not isinstance(search_plan, GenerationSearchPlan):
             raise TypeError("generation search planner must return GenerationSearchPlan")
@@ -478,47 +257,8 @@ def _latest_research_plan(state: Any, generation: int) -> dict[str, Any]:
     return dict(frozen) if isinstance(frozen, Mapping) else {}
 
 
-def _research_contract_fallback_enabled(state: Any) -> bool:
-    # A native research result must have valid model-authored directions.
-    # The legacy deterministic plan has no such directions and cannot feed
-    # the native proposer. A runtime version alone is never fallback consent.
-    metadata = state.task_manifest.metadata
-    if metadata.get("execution_protocol") == "dsh_native_plugin_evolution@1":
-        return False
-    if metadata.get("allow_host_fallback") is not True:
-        return False
-    runtime = metadata.get("host_runtime_build")
-    return bool(
-        isinstance(runtime, Mapping)
-        and runtime.get("evolution_runtime_schema")
-        == "ecologyrsi-dsh.evolution-runtime/3"
-    )
 
 
-def _research_contract_fallback_allowed(
-    state: Any, validation_error: BaseException | None = None
-) -> bool:
-    """Allow recovery for bounded payload overflow in native quick runs.
-
-    Native runs deliberately reject gateway/model fallback.  A model can still
-    return a syntactically valid but oversized research plan, though; treating
-    that local contract violation as a fatal run pause makes the small-batch
-    experiment unnecessarily brittle.  In the quick protocol we retain the
-    current plan and record a deterministic host fallback, while malformed
-    contracts and all remote failures remain governed by the existing policy.
-    """
-
-    if _research_contract_fallback_enabled(state):
-        return True
-    metadata = state.task_manifest.metadata
-    if metadata.get("execution_protocol") != "dsh_native_plugin_evolution@1":
-        return False
-    if metadata.get("optimization_protocol") != QUICK_OPTIMIZATION_PROTOCOL:
-        return False
-    if validation_error is None:
-        return False
-    detail = str(validation_error).lower()
-    return "exceeds the bounded contract" in detail
 
 
 def _historical_experience_states(director: Any, state: Any) -> tuple[Any, ...]:
@@ -629,38 +369,7 @@ def _ensure_generation_research_iteration(
     diagnostic = diagnose_generation(state, knowledge)
     cross_generation_experience["diagnostic_report"] = diagnostic.to_dict()
     research_attempt: int | None = None
-    visible_pending_ids: tuple[str, ...] = ()
-    consumed_answer_ids: tuple[str, ...] = ()
-    expert_consultation: ExpertConsultation | None = None
 
-    def fallback_result(validation_detail: str) -> dict[str, Any]:
-        nonlocal model_id, visible_pending_ids, consumed_answer_ids
-        nonlocal expert_consultation
-        model_id = None
-        visible_pending_ids = ()
-        consumed_answer_ids = ()
-        expert_consultation = None
-        return {
-            "status": "host_fallback",
-            "model_id": None,
-            "plan": build_deterministic_research_fallback_plan(
-                current_plan=current_plan,
-                validation_detail=validation_detail,
-                source_analysis_digest=(
-                    previous.analysis_digest if previous is not None else None
-                ),
-                source_reflection_digest=(
-                    previous_reflection.reflection_digest
-                    if previous_reflection is not None
-                    else None
-                ),
-                search_plan_digest=(
-                    search_plan.search_plan_digest
-                    if search_plan is not None
-                    else None
-                ),
-            ),
-        }
 
     def record_research_failure(public_error: str) -> None:
         if research_attempt is None:
@@ -693,11 +402,6 @@ def _ensure_generation_research_iteration(
     else:
         planner = getattr(director.dsh, "research_iteration", None)
         if callable(planner):
-            (
-                expert_collaboration,
-                selected_pending_ids,
-                selected_answer_ids,
-            ) = _expert_collaboration_context(state, generation)
             research_attempt = _next_stage_attempt(state, "research")
             director.record_evolution_stage(
                 state.run.run_id,
@@ -719,7 +423,6 @@ def _ensure_generation_research_iteration(
                     ),
                     "current_plan": current_plan,
                     "cross_generation_experience": cross_generation_experience,
-                    "expert_collaboration": expert_collaboration,
                     "candidate_count": candidate_count,
                     "generation_search_plan": (
                         search_plan.to_dict() if search_plan is not None else None
@@ -754,13 +457,10 @@ def _ensure_generation_research_iteration(
                 record_research_failure(
                     "远程研究计划响应未通过宿主契约校验。"
                 )
-                if _research_contract_fallback_allowed(state, exc):
-                    raw_result = fallback_result(str(exc))
-                else:
-                    raise ResearchResponseContractError(
-                        "research response failed host contract validation",
-                        validation_detail=str(exc),
-                    ) from exc
+                raise ResearchResponseContractError(
+                    "research response failed host contract validation",
+                    validation_detail=str(exc),
+                ) from exc
             except Exception:
                 record_research_failure(
                     "远程研究计划请求失败；运行将按既定重试与失败策略处理。"
@@ -777,58 +477,16 @@ def _ensure_generation_research_iteration(
                 raw_model_id = raw_result.get("model_id")
                 if raw_model_id is not None:
                     model_id = str(raw_model_id).strip() or None
-                if status == "model_generated":
-                    visible_pending_ids = selected_pending_ids
-                    consumed_answer_ids = selected_answer_ids
-                    expert_consultation = _expert_consultation_from_result(
-                        raw_result.get("expert_consultation"),
-                        run_id=state.run.run_id,
-                        generation=generation,
-                        model_id=model_id,
-                    )
             except (TypeError, ValueError) as exc:
                 record_research_failure(
                     "远程研究计划响应未通过宿主契约校验。"
                 )
-                if _research_contract_fallback_allowed(state, exc):
-                    fallback = fallback_result(str(exc))
-                    plan = dict(fallback["plan"])
-                    status = "host_fallback"
-                else:
-                    raise ResearchResponseContractError(
-                        "research response failed host contract validation",
-                        validation_detail=str(exc),
-                    ) from exc
+                raise ResearchResponseContractError(
+                    "research response failed host contract validation",
+                    validation_detail=str(exc),
+                ) from exc
         else:
-            plan = current_plan
-            status = "host_fallback"
-
-    try:
-        adoption = resolve_predictor_adoption(state.task_manifest, plan)
-    except AlgorithmCompileError as exc:
-        record_research_failure("宿主冻结的预测器配置未通过校验。")
-        if _research_contract_fallback_allowed(state, exc):
-            fallback = fallback_result(str(exc))
-            plan = dict(fallback["plan"])
-            status = "host_fallback"
-            adoption = resolve_predictor_adoption(state.task_manifest, plan)
-        else:
-            raise
-    except (TypeError, ValueError) as exc:
-        record_research_failure("远程研究计划响应未通过宿主契约校验。")
-        if _research_contract_fallback_allowed(state, exc):
-            fallback = fallback_result(str(exc))
-            plan = dict(fallback["plan"])
-            status = "host_fallback"
-            adoption = resolve_predictor_adoption(state.task_manifest, plan)
-        else:
-            raise ResearchResponseContractError(
-                "research response failed host contract validation",
-                validation_detail=str(exc),
-            ) from exc
-    except Exception:
-        record_research_failure("研究计划的宿主解析过程失败。")
-        raise
+            raise RuntimeError("native research iteration adapter is required")
 
     # Probe only model-authored fields with known-valid host metadata. The
     # actual construction below is outside this conversion so corrupt host
@@ -839,30 +497,15 @@ def _ensure_generation_research_iteration(
             generation=0,
             status=status,
             plan=plan,
-            prediction_model_adoption=adoption.to_dict(),
             knowledge_snapshot_digest="research-response-contract",
             model_id=model_id,
         )
     except (TypeError, ValueError) as exc:
         record_research_failure("远程研究计划响应未通过宿主契约校验。")
-        if not _research_contract_fallback_allowed(state, exc):
-            raise ResearchResponseContractError(
-                "research response failed host contract validation",
-                validation_detail=str(exc),
-            ) from exc
-        fallback = fallback_result(str(exc))
-        plan = dict(fallback["plan"])
-        status = "host_fallback"
-        adoption = resolve_predictor_adoption(state.task_manifest, plan)
-        response_contract = ResearchIteration(
-            run_id="research-response-contract",
-            generation=0,
-            status=status,
-            plan=plan,
-            prediction_model_adoption=adoption.to_dict(),
-            knowledge_snapshot_digest="research-response-contract",
-            model_id=None,
-        )
+        raise ResearchResponseContractError(
+            "research response failed host contract validation",
+            validation_detail=str(exc),
+        ) from exc
 
     try:
         iteration = ResearchIteration(
@@ -870,7 +513,6 @@ def _ensure_generation_research_iteration(
             generation=generation,
             status=response_contract.status,
             plan=response_contract.plan,
-            prediction_model_adoption=adoption.to_dict(),
             knowledge_snapshot_digest=knowledge.snapshot_digest,
             source_analysis_digest=(previous.analysis_digest if previous else None),
             historical_provenance=(
@@ -886,13 +528,10 @@ def _ensure_generation_research_iteration(
             ),
             previous_next_action=(assessment.next_action if assessment else None),
             model_id=response_contract.model_id,
-            pending_consultation_ids=visible_pending_ids,
-            expert_answer_ids=consumed_answer_ids,
             diagnostic_report=diagnostic.to_dict(),
         )
         recorded = director.record_research_iteration(
             iteration,
-            expert_consultation=expert_consultation,
         )
     except Exception:
         record_research_failure("研究结果的宿主状态校验或持久化失败。")
@@ -1067,9 +706,6 @@ def start_generation_batch(director: Any, run_id: str) -> GenerationBatch:
         stage_context_digests=stage_context_digests,
         previous_analysis_digest=(previous.analysis_digest if previous else None),
         knowledge_snapshot_digest=knowledge.snapshot_digest,
-        intervention_ids=tuple(
-            item.intervention_id for item in state.pending_interventions
-        ),
     )
     director.ledger.append(
         run_id,
@@ -1080,75 +716,8 @@ def start_generation_batch(director: Any, run_id: str) -> GenerationBatch:
     return director.state(run_id).batch_for(batch.generation) or batch
 
 
-def _validate_frozen_evidence(state: Any, batch: GenerationBatch) -> None:
-    if batch.task_manifest_digest != state.task_manifest.digest:
-        raise RuntimeError("generation batch task manifest changed")
-    if batch.knowledge_snapshot_digest is not None:
-        snapshot = state.knowledge_for(batch.generation)
-        if snapshot is None or snapshot.snapshot_digest != batch.knowledge_snapshot_digest:
-            raise RuntimeError("generation batch knowledge snapshot changed")
-    evaluations = []
-    for candidate in state.candidates:
-        if (
-            candidate.generation != batch.generation
-            or getattr(candidate, "role", CandidateRole.SEARCH)
-            not in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
-        ):
-            continue
-        evaluation = state.evaluation_for(candidate.candidate_id)
-        if evaluation is not None:
-            evaluations.append(evaluation)
-            artifact = state.artifact_for(candidate.candidate_id)
-            if artifact is None:
-                raise RuntimeError("evaluated candidate is missing its training artifact")
-            expected_dataset = state.task_manifest.metadata.get("dataset_digest")
-            if expected_dataset and artifact.dataset_digest != expected_dataset:
-                raise RuntimeError("generation candidates used different dataset snapshots")
-    if evaluations:
-        partitions = {item.partition for item in evaluations}
-        evaluators = {item.evaluator_digest for item in evaluations}
-        if len(partitions) != 1:
-            raise RuntimeError("generation candidates used different evaluation partitions")
-        if len(evaluators) != 1:
-            raise RuntimeError("generation candidates used different evaluators")
-        if sample_update_windows_enabled(state.task_manifest):
-            cohort_digests = [
-                evaluation_cohort_digest(evaluation) for evaluation in evaluations
-            ]
-            if any(item is None for item in cohort_digests):
-                raise RuntimeError(
-                    "generation candidate is missing its bounded evaluation cohort"
-                )
-            if len(set(cohort_digests)) != 1:
-                raise RuntimeError(
-                    "generation candidates used different bounded evaluation cohorts"
-                )
 
 
-def _decision_reason(analysis: GenerationAnalysis, candidate_id: str) -> str:
-    row = next(
-        (item for item in analysis.ranking if item.get("candidate_id") == candidate_id),
-        None,
-    )
-    if candidate_id == analysis.champion_candidate_id:
-        return analysis.selection_reason
-    if row is None:
-        return "候选未进入本轮稳定排名。"
-    reason = str(row.get("selection_reason") or "not_selected")
-    labels = {
-        "diagnostic_smoke_search_parent_only": "候选仅在诊断样本上排名第一，可供后续搜索参考，但证据不足以晋级。",
-        "generation_best_did_not_improve_incumbent": "本轮排名第一，但未严格优于运行当前最优方案。",
-        "cohort_changed_batch_champion": "本轮固定样本窗口排名第一；因窗口变化，未比较跨窗口原始分数。",
-        "cohort_changed_search_parent_only": "本轮固定样本窗口排名第一；因窗口变化，仅作为后续搜索父方案，未作正式晋升。",
-        "cohort_digest_unavailable": "候选缺少可验证的固定样本窗口摘要，未作正式晋升。",
-        "lower_stable_rank_than_generation_best": "候选通过门禁，但同轮稳定排名低于本轮最佳候选。",
-        "scientific_gate_failed": "候选未通过固定科学评测门槛。",
-        "judge_rejected": "候选通过科学门槛，但未通过独立评审。",
-        "judge_unavailable": "候选完成科学评测，但独立评审不可用，未作正式晋升。",
-        "execution_failed": "候选训练或评测失败。",
-        "duplicate": "候选参数与同轮较早候选重复，未重复评测。",
-    }
-    return labels.get(reason, f"候选未保留：{reason}。")
 
 
 def _canonical_candidate_outcomes(
@@ -1505,106 +1074,6 @@ def _ensure_generation_reflection(
     return recorded
 
 
-def finalize_generation_batch(director: Any, run_id: str) -> GenerationAnalysis:
-    """Analyze all siblings, persist one-champion decisions, and remain resumable."""
-
-    state = director.state(run_id)
-    batch = state.batch_for(state.run.generation)
-    if batch is None:
-        raise RuntimeError("generation batch has not started")
-    _validate_frozen_evidence(state, batch)
-    analysis = state.analysis_for(batch.generation)
-    if analysis is None:
-        analysis = build_generation_analysis(state, batch)
-        director.ledger.append(
-            run_id,
-            "GenerationAnalyzed",
-            {"analysis": analysis.to_dict()},
-            event_id=f"{run_id}:generation:{batch.generation}:analyzed",
-        )
-        state = director.state(run_id)
-        analysis = state.analysis_for(batch.generation) or analysis
-
-    _ensure_generation_reflection(director, state, batch, analysis)
-    state = director.state(run_id)
-
-    if (
-        state.task_manifest.metadata.get("execution_protocol")
-        == "dsh_native_plugin_evolution@1"
-    ):
-        from ..core.exposure_registry import ScientificExposureRegistry
-        from ..evaluators.fitness import FitnessProfile
-
-        ScientificExposureRegistry(director.ledger).record_adaptive_evidence(
-            run_id=run_id,
-            evidence_digest=digest(
-                {
-                    "generation": batch.generation,
-                    "batch_context_digest": batch.context_digest,
-                    "ranking": list(analysis.ranking),
-                }
-            ),
-            fitness_profile_digest=FitnessProfile.from_task(
-                state.task_manifest
-            ).profile_digest,
-        )
-
-    snapshot = state.knowledge_for(batch.generation)
-    if snapshot is not None and state.knowledge_assessment_for(batch.generation) is None:
-        assessment = assess_generation_knowledge(state, analysis, snapshot)
-        director.ledger.append(
-            run_id,
-            "GenerationKnowledgeAssessed",
-            {"knowledge_assessment": assessment.to_dict()},
-            event_id=f"{run_id}:generation:{batch.generation}:knowledge-assessed",
-        )
-        state = director.state(run_id)
-
-    ranked_ids = [str(item["candidate_id"]) for item in analysis.ranking]
-    candidates = [state.candidate(candidate_id) for candidate_id in ranked_ids]
-    candidates.sort(
-        key=lambda item: item.candidate_id == analysis.champion_candidate_id
-    )
-    for candidate in candidates:
-        if state.evaluation_for(candidate.candidate_id) is None:
-            continue
-        if state.promotion_for(candidate.candidate_id) is not None:
-            continue
-        approved = candidate.candidate_id == analysis.champion_candidate_id
-        director.decide_promotion(
-            Promotion(
-                promotion_id=(
-                    f"promotion:{run_id}:{batch.generation}:{candidate.candidate_id}"
-                ),
-                run_id=run_id,
-                candidate_id=candidate.candidate_id,
-                decision=(
-                    PromotionDecision.APPROVED
-                    if approved
-                    else PromotionDecision.REJECTED
-                ),
-                reason=_decision_reason(analysis, candidate.candidate_id),
-            )
-        )
-        state = director.state(run_id)
-
-    director.ledger.append(
-        run_id,
-        "GenerationChampionSelected",
-        {
-            "generation": batch.generation,
-            "analysis_digest": analysis.analysis_digest,
-            "outcome": analysis.outcome,
-            "selected_candidate_id": analysis.selected_candidate_id,
-            "champion_candidate_id": analysis.champion_candidate_id,
-            "incumbent_before_candidate_id": analysis.incumbent_before_candidate_id,
-            "incumbent_after_candidate_id": analysis.incumbent_after_candidate_id,
-            "search_parent_candidate_id": analysis.search_parent_candidate_id,
-            "selection_reason": analysis.selection_reason,
-        },
-        event_id=f"{run_id}:generation:{batch.generation}:champion-selected",
-    )
-    return analysis
 
 
 def candidate_is_terminal(candidate: Any) -> bool:
@@ -1621,6 +1090,5 @@ def candidate_is_terminal(candidate: Any) -> bool:
 __all__ = [
     "ResearchResponseContractError",
     "candidate_is_terminal",
-    "finalize_generation_batch",
     "start_generation_batch",
 ]

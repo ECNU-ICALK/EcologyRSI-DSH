@@ -191,8 +191,9 @@ class FitnessProfile:
         """Count floor; sparse training cohorts also require actual day evidence."""
         from ..evolution.schedule import TRAINING_SCHEDULE_SCHEMA_VERSION
         if schedule is not None and (schedule.schema_version == TRAINING_SCHEDULE_SCHEMA_VERSION or schedule.quick):
-            from ..evolution.parameters import run_parameter_contract
-            return run_parameter_contract(self)["parameters"]["selection_holdout_origin_count"]["minimum"]
+            # The fixed 50-origin execution schedule is not a new scientific
+            # sample-size threshold. Retain the predeclared current count floor.
+            return max(40, self.selection_minimum_cell_samples)
         return self.minimum_balanced_origins_per_update()
 
 

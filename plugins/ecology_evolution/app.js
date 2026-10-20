@@ -11,7 +11,6 @@
     if (state.workspace === "training") { renderTraining(); }
     if (state.workspace === "process") { renderProcess(); }
     if (state.workspace === "candidates") { renderCandidates(); }
-    if (state.workspace === "collaboration") { renderCollaboration(); }
     renderWorkspaceLoadState();
   }
 
@@ -46,6 +45,7 @@
     $("#independent-validation-start").addEventListener("click", function () { startIndependentEvaluation("validation"); });
     $("#independent-final-test-start").addEventListener("click", function () { startIndependentEvaluation("final_test"); });
     var tabs = $$('[data-workspace]');
+    $$('[data-open-candidates]').forEach(function (button) { button.addEventListener("click", function () { activateWorkspace("candidates"); }); });
     var trajectoryRenderFrame = null;
     function scheduleTrajectoryRender() {
       if (state.workspace !== "process" || trajectoryRenderFrame != null) { return; }
@@ -117,13 +117,8 @@
     });
     $("#retry-dataset-button").addEventListener("click", function () { loadSelectedDataset(state.pageOffset); });
     $("#workspace-data-retry").addEventListener("click", function () { ensureWorkspaceData({force: true}); });
-    $("#training-assets-table").addEventListener("click", function (event) {
-      var button = event.target.closest("[data-load-training-asset]");
-      if (button) { loadTrainingAsset(button.dataset.loadTrainingAsset); }
-    });
     $("#toggle-events-button").addEventListener("click", function () { state.showAllEvents = !state.showAllEvents; renderProcess(); });
     $("#refresh-button").addEventListener("click", function () { state.busy = true; state.pendingAction = "refresh"; renderAll(); refreshAll({ refreshDataset: true }).then(function (ok) { showToast(ok ? "数据已刷新。" : "刷新失败，已保留上次状态。" ); }).finally(function () { state.busy = false; state.pendingAction = null; renderAll(); }); });
-    $("#advance-button").addEventListener("click", advanceRun);
     $("#pause-button").addEventListener("click", function () { if (state.activeRun) { controlRun(state.activeRun.status === "paused" ? "resume" : "pause"); } });
     $("#cancel-button").addEventListener("click", function () { if (window.confirm("确定停止当前运行？停止后不能恢复执行，但已有记录会保留。")) { controlRun("cancel"); } });
     $("#archive-button").addEventListener("click", archiveRun);
@@ -159,25 +154,6 @@
     });
     $("#candidate-samples-retry").addEventListener("click", function () {
       loadCandidateSamples(state.candidateSampleRetryOffset == null ? state.candidateSampleOffset : state.candidateSampleRetryOffset, {force: true});
-    });
-    $("#intervention-kind").addEventListener("change", updateInterventionFields);
-    ["input", "change"].forEach(function (eventName) {
-      $("#pending-consultations").addEventListener(eventName, function (event) {
-        var form = event.target && event.target.closest ? event.target.closest("[data-consultation-answer-form]") : null;
-        updateExpertConsultationDraftFromForm(form);
-      });
-    });
-    $("#pending-consultations").addEventListener("submit", function (event) {
-      var form = event.target && event.target.closest ? event.target.closest("[data-consultation-answer-form]") : null;
-      if (!form) { return; }
-      event.preventDefault();
-      var draft = updateExpertConsultationDraftFromForm(form);
-      if (!draft) { showToast("无法读取专家答复，请刷新后重试。" ); return; }
-      answerExpertConsultation(form.dataset.consultationId, {
-        answer: draft.answer,
-        selected_option: draft.selected_option,
-        answered_by: draft.answered_by
-      });
     });
     $("#start-form").addEventListener("submit", function (event) {
       event.preventDefault();
@@ -219,12 +195,6 @@
         fixed_seed: form.get("fixed_seed") === "on", knowledge_online_enabled: form.get("knowledge_online_enabled") === "on"
       });
     });
-    $("#intervention-form").addEventListener("submit", function (event) {
-      event.preventDefault(); var form = new FormData(event.currentTarget); var kind = form.get("kind"); var overrides = {};
-      try { overrides = kind === "parameter_override" ? parseOverrides(form.get("parameter_overrides")) : {}; } catch (error) { showToast(error.message); return; }
-      if (kind === "parameter_override" && !Object.keys(overrides).length) { showToast("参数覆盖至少需要一行“参数=值”。"); $("#parameter-overrides").focus(); return; }
-      submitIntervention({ kind: kind, message: String(form.get("message") || "").trim(), parameter_overrides: overrides, target_candidate_id: kind === "parent_selection" ? form.get("target_candidate_id") || null : null, created_by: String(form.get("created_by") || "").trim() });
-    });
     window.addEventListener("message", function (event) {
       var result = EcologyDSHHost.acceptContextMessage(event);
       if (!result.accepted) { if (!result.ignored) { showToast(result.error); } return; }
@@ -237,16 +207,9 @@
       state.refreshing = false;
       state.pendingAction = null;
       state.commandKeys = {};
-      state.expertConsultationDrafts = {};
       state.apiBase = result.context.apiBase;
       state.hostContext = result.context;
       state.hostContextReceived = true;
-      var identity = result.context.identity;
-      var createdBy = $("#created-by");
-      if (identity && (identity.displayName || identity.subjectId)) {
-        createdBy.value = identity.displayName || identity.subjectId;
-        createdBy.readOnly = true;
-      }
       connectAndLoad();
     });
     window.addEventListener("resize", scheduleTrajectoryRender);
@@ -255,7 +218,7 @@
         if (document.hidden === true) { return; }
         // The slow sweep is suppressed while the tab is hidden, so a restored tab
         // would otherwise keep showing stale run summaries for up to a minute.
-        if (!state.busy && !state.refreshing && state.loadState !== "loading" && !state.usingDemo) { refreshRunOverview(); }
+        if (!state.busy && !state.refreshing && state.loadState !== "loading") { refreshRunOverview(); }
         if (!state.activeRun) { return; }
         var runId = state.activeRun.id;
         if (String(state.activeRun.status || "").toLowerCase() === "running") {
@@ -267,16 +230,15 @@
   }
 
   function publicState() {
-    return clone({ apiBase: state.apiBase, hostContextReceived: state.hostContextReceived, hostContext: state.hostContext, usingDemo: state.usingDemo, connection: state.connection, loadState: state.loadState, workspace: state.workspace, runs: state.runs, showCancelledEmptyRuns: state.showCancelledEmptyRuns, showArchivedRuns: state.showArchivedRuns, archivedRunCount: state.archivedRunCount, activeRun: state.activeRun, events: state.events, datasetPage: state.datasetPage, candidateSamples: state.candidateSamplePage });
+    return clone({ apiBase: state.apiBase, hostContextReceived: state.hostContextReceived, hostContext: state.hostContext, connection: state.connection, loadState: state.loadState, workspace: state.workspace, runs: state.runs, showCancelledEmptyRuns: state.showCancelledEmptyRuns, showArchivedRuns: state.showArchivedRuns, archivedRunCount: state.archivedRunCount, activeRun: state.activeRun, events: state.events, datasetPage: state.datasetPage, candidateSamples: state.candidateSamplePage });
   }
 
     bindEvents();
   syncCandidateBudget();
-  updateInterventionFields();
   EcologyDSHHost.postReady();
   connectAndLoad();
   // The active-run monitor already carries live execution progress.  This
   // slower sweep refreshes run summaries without replaying every
   // large append-only projection six times per minute while the page is idle.
-  window.setInterval(function () { if (!document.hidden && !state.busy && !state.refreshing && state.loadState !== "loading" && !state.usingDemo) { refreshRunOverview(); } }, 60000);
+  window.setInterval(function () { if (!document.hidden && !state.busy && !state.refreshing && state.loadState !== "loading") { refreshRunOverview(); } }, 60000);
   window.EcologyEvolutionPlugin = { getState: publicState, refresh: refreshAll };

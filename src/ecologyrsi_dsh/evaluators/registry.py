@@ -19,7 +19,6 @@ from .catalog import (
     TOY_PREDICTOR_MODEL_ID,
 )
 from .pipeline import (
-    RULE_JUDGE_ID,
     CollaborativeSampleExecutor,
     EvaluationBundle,
     SampleExecutionPolicy,
@@ -43,7 +42,6 @@ __all__ = [
     "GREENHOUSE_ROLLING_PREDICTOR_ID",
     "GREENHOUSE_RECIPE_EVALUATOR_ID",
     "RECIPE_RIDGE_MODEL_ID",
-    "RULE_JUDGE_ID",
     "TOY_EVALUATOR_ID",
     "TOY_PREDICTOR_MODEL_ID",
     "CollaborativeSampleExecutor",

@@ -135,13 +135,14 @@ class ProgramPreflightTests(unittest.TestCase):
         self.assertIsNotNone(accepted.child)
 
     def test_recipe_program_uses_authored_recipe_instead_of_scalar_parameters(self):
-        from tests.test_workflow_ir import _recipe_task, _seed
+        from tests.test_workflow_ir import _seed
         from tests.test_joint_plugin_evolution import mutate
         from ecologyrsi_dsh.evolution.workflow_ir import compile_plugin_behavior
-        base = _recipe_task()
+        base = _native_task()
+        base = replace(base, metadata={**base.metadata, "prediction_model_id": "greenhouse-recipe-ridge@1", "evaluator_id": "greenhouse_multihorizon_time_forward@4"})
         t = replace(base, metadata={**base.metadata, preflight.POLICY_KEY: preflight.POLICY,
                                    'origin_history_alignment_hours':48})
-        genome = mutate(_seed(t, template_id='greenhouse-recipe-default@1'), [program_op(seasonal(1))])
+        genome = mutate(_seed(t, template_id='greenhouse-recipe-default@2'), [program_op(seasonal(1))])
         compiled = compile_plugin_behavior(genome, t, None, current_program_registry())
         receipt = compiled.feature_training_spec['candidate_executability']
         self.assertEqual(receipt['status'], 'input_contract_checked')

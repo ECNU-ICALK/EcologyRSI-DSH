@@ -38,9 +38,9 @@ def _task() -> TaskManifest:
         domain_pack="greenhouse_environment@1",
         visible_datasets=("agc_cucumber_2018",),
         budget={"max_candidates": 2},
-        metadata={
+        metadata={"search_guard_policy":"practical_delta_cell_noninferiority_paired_blocks@1",
             "prediction_model_id": "greenhouse-horizon-targetwise-ridge@1",
-            "evaluator_id": "greenhouse_multihorizon_time_forward@2",
+            "evaluator_id": "greenhouse_multihorizon_time_forward@4",
             "strategy_id": "autonomous_model@1",
             "dataset_digest": "2" * 64,
             "dataset_snapshot_set_digest": "2" * 64,
@@ -65,10 +65,10 @@ def _recipe_task() -> TaskManifest:
         domain_pack=task.domain_pack,
         visible_datasets=task.visible_datasets,
         budget=task.budget,
-        metadata={
+        metadata={"search_guard_policy":"practical_delta_cell_noninferiority_paired_blocks@1",
             **task.metadata,
             "prediction_model_id": "greenhouse-recipe-ridge@1",
-            "evaluator_id": "greenhouse_recipe_multihorizon_forward@1",
+            "evaluator_id": "greenhouse_multihorizon_time_forward@4",
         },
     )
 
@@ -120,7 +120,7 @@ def _initialization(task: TaskManifest) -> FrozenRunInitialization:
 def _seed(
     task: TaskManifest | None = None,
     *,
-    template_id: str = "greenhouse-default@1",
+    template_id: str = "greenhouse-default@2",
 ):
     task = task or _task()
     registry = current_program_registry()
@@ -164,7 +164,7 @@ def _child(task: TaskManifest, *, slot_index: int, slot_seed: int):
 def _recipe_seed():
     """A seed genome on the predictor that actually carries a recipe."""
 
-    return _seed(_recipe_task(), template_id="greenhouse-recipe-default@1")
+    return _seed(_recipe_task(), template_id="greenhouse-recipe-default@2")
 
 
 def _recipe_of(genome) -> dict[str, object]:
@@ -240,7 +240,7 @@ class WorkflowIRTests(unittest.TestCase):
     def test_targetwise_ridge_compiles_with_multihorizon_v2(self) -> None:
         task = _task()
         behavior = compile_plugin_behavior(
-            _seed(task, template_id="greenhouse-targetwise-default@1"),
+            _seed(task, template_id="greenhouse-targetwise-default@2"),
             task,
             None,
             current_program_registry(),
@@ -252,13 +252,13 @@ class WorkflowIRTests(unittest.TestCase):
         )
         self.assertEqual(
             behavior.algorithm_behavior["evaluator_id"],
-            "greenhouse_multihorizon_time_forward@2",
+            "greenhouse_multihorizon_time_forward@4",
         )
 
     def test_recipe_seed_compiles_with_baseline_symmetric_reads(self) -> None:
         task = _recipe_task()
         behavior = compile_plugin_behavior(
-            _seed(task, template_id="greenhouse-recipe-default@1"),
+            _seed(task, template_id="greenhouse-recipe-default@2"),
             task,
             None,
             current_program_registry(),
@@ -520,14 +520,14 @@ class WorkflowIRTests(unittest.TestCase):
         )
         self.assertEqual(profile["directive_policy"]["id"], AUTHORED_DIRECTIVE_POLICY_ID)
 
-    def test_rolling_residual_rejects_multihorizon_evaluator(self) -> None:
+    def test_removed_rolling_predictor_is_not_registered(self) -> None:
         task = _task()
         with self.assertRaisesRegex(
             ValueError,
-            "predictor and evaluator bindings are incompatible",
+            "unregistered seed template",
         ):
             compile_plugin_behavior(
-                _seed(task, template_id="greenhouse-rolling-default@1"),
+                _seed(task, template_id="greenhouse-rolling-default@2"),
                 task,
                 None,
                 current_program_registry(),

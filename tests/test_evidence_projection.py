@@ -25,7 +25,7 @@ def frozen_receipt_batch(run_id="run:receipt", candidate_id="c", *, tampered=Fal
 
 
 def state(**values):
-    return NS(task_manifest=NS(metadata={"optimization_protocol": "quick_adaptive_epoch@1"}),
+    return NS(task_manifest=NS(metadata={"optimization_protocol": "joint_plugin_epoch@2"}),
               candidates=[], events=[], formal_batch_evaluations=[], formal_batch_comparisons=[],
               local_edit_outcomes=[], generation_comparisons=[], **values)
 
@@ -109,19 +109,19 @@ class EvidenceProjectionTests(unittest.TestCase):
             self.assertNotIn("private-", repr(public))
             self.assertNotIn("sample_execution_trace_archive", repr(public))
 
-    def test_legacy_run_with_explicit_null_schedule_has_an_empty_funnel(self):
+    def test_missing_schedule_has_unknown_rates_without_inventing_evidence(self):
         s = state()
         s.task_manifest.metadata["optimization_schedule"] = None
         report = evidence_funnel(s)
         self.assertEqual(report["stages"]["local_pair_completion"]["denominator"], 0)
         self.assertIsNone(report["stages"]["local_acceptance"]["rate"])
 
-    def test_guided_budget_progress_charges_five_screening_arms_but_not_reused_warmup(self):
+    def test_joint_budget_progress_charges_five_screening_arms_but_not_reused_warmup(self):
         from ecologyrsi_dsh.api.projection import _adaptive_progress_projection, _screening_candidates
         from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
         s = state()
-        s.task_manifest = NS(metadata={"optimization_protocol": "evidence_guided_epoch@1",
-            "sample_agent_mode": "dsh_native_agent", "optimization_schedule": OptimizationSchedule.for_evidence_guided_run().to_dict()}, max_generations=4)
+        s.task_manifest = NS(metadata={"optimization_protocol": "joint_plugin_epoch@2",
+            "sample_agent_mode": "dsh_native_agent", "optimization_schedule": OptimizationSchedule.for_new_run().to_dict()}, max_generations=4)
         s.run = NS(generation=1, status=NS(value="completed"))
         s.formal_batches = ()
         s.candidate_screening_events = tuple(NS(payload={"generation": 0, "candidate_id": "c"+str(i), "origin_count": 10}) for i in range(5))
@@ -130,8 +130,12 @@ class EvidenceProjectionTests(unittest.TestCase):
         s.events = (NS(kind="GenerationComparisonRecorded", payload={"comparison": {"generation": 0}}),)
         s.generation_cohort_for = lambda _: NS(revision_bindings={"historic-incumbent": "r"})
         report = _adaptive_progress_projection(s)
-        self.assertEqual(report["completed_origins"], 200)
-        self.assertEqual(report["run_total_origins"], 800)
+        # Progress closes the unused conditional reserve, without claiming
+        # those 100 skipped executions or reused warmup as physical work.
+        self.assertEqual(report["completed_origins"], 300)
+        self.assertEqual(report["terminal_skipped_origins"], 100)
+        self.assertEqual(sum(report[k] for k in ("screening_completed_origins", "formal_completed_origins", "holdout_completed_origins")), 200)
+        self.assertEqual(report["run_total_origins"], 1200)
         s.candidates = [NS(candidate_id="historic-incumbent", generation=0), NS(candidate_id="unrelated", generation=0)]
         self.assertEqual([item.candidate_id for item in _screening_candidates(s, 1)], ["historic-incumbent"])
 
@@ -193,8 +197,8 @@ class EvidenceProjectionTests(unittest.TestCase):
         self.assertEqual(report["stages"]["independent_certification"]["denominator"], 0)
         self.assertIsNone(report["stages"]["independent_certification"]["rate"])
 
-    def test_guided_diagnosis_targets_paired_regression_without_reinterpreting_legacy_events(self):
-        task = NS(task_id="t", digest="task-digest", metadata={"optimization_protocol": "evidence_guided_epoch@1"})
+    def test_joint_diagnosis_uses_paired_comparison_only_when_evidence_exists(self):
+        task = NS(task_id="t", digest="task-digest", metadata={"optimization_protocol": "joint_plugin_epoch@2"})
         comparison = NS(comparison_id="comparison-1", gate_results={"arms": {"finalist_1": {
             "cell_deltas": {"co2_concentration@6h": -.04, "air_temperature@1h": .02},
             "search_failures": ["cell_regression", "independent_review_not_accepted"]}}})
@@ -202,10 +206,9 @@ class EvidenceProjectionTests(unittest.TestCase):
         self.assertEqual(report.weak_cells, ("co2_concentration@6h",))
         self.assertIn("comparison:comparison-1", report.evidence_refs)
         self.assertIn("cell_regression", report.failure_patterns)
-        task.metadata = {"optimization_protocol": "quick_adaptive_epoch@1"}
-        legacy = diagnose_evidence(task, None, comparison, NS(snapshot_digest="knowledge"))
-        self.assertEqual(legacy.weak_cells, ())
-        self.assertNotIn("comparison:comparison-1", legacy.evidence_refs)
+        missing = diagnose_evidence(task, None, None, NS(snapshot_digest="knowledge"))
+        self.assertEqual(missing.weak_cells, ())
+        self.assertNotIn("comparison:comparison-1", missing.evidence_refs)
 
 
 if __name__ == "__main__":

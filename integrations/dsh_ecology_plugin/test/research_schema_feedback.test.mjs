@@ -1,3 +1,4 @@
+import { expandSharedSchema } from "../lib/runtime/schema.js";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -6,7 +7,7 @@ import { researchMissingFieldFeedback, researchNestedRequiredFields,
   installResearchSchemaFeedback } from "../lib/runtime/research-schema-feedback.js";
 
 const stage = "generation.research-synthesis";
-const raw = JSON.parse(await readFile(new URL("../schemas/research-synthesis.schema.json", import.meta.url)));
+const raw = expandSharedSchema(JSON.parse(await readFile(new URL("../schemas/research-synthesis.schema.json", import.meta.url))));
 const context = { required_candidate_direction_count: 4,
   knowledge_snapshot: { evidence_catalog: [{ knowledge_id: "paper:one" }] },
   synthesis_contract: {

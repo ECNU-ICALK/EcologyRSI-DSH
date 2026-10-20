@@ -13,7 +13,7 @@ from ecologyrsi_dsh.core.ledger import EventLedger
 from ecologyrsi_dsh.core.models import TaskManifest, canonical_json, digest
 from ecologyrsi_dsh.evolution.analysis import GenerationAnalysis
 from ecologyrsi_dsh.evolution.batches import start_generation_batch
-from ecologyrsi_dsh.evolution.strategies import StrategyRouterDSHAdapter
+from tests.native_fixtures import NativeRoleStub, native_manifest, start_native_run
 from ecologyrsi_dsh.knowledge import retrieval as knowledge_retrieval
 from ecologyrsi_dsh.knowledge.mapping import map_catalog_entry
 from ecologyrsi_dsh.knowledge.models import (
@@ -28,24 +28,11 @@ from ecologyrsi_dsh.knowledge.retrieval import (
 
 
 def _task(*, online: bool = False) -> TaskManifest:
-    return TaskManifest(
-        task_id="knowledge-loop",
-        objective="改进作物土壤水分预测",
-        domain_pack="crop-soil-water@toy",
-        visible_datasets=("generated-toy-series@1",),
-        budget={
-            "max_candidates": 3,
-            "max_generations": 1,
-            "candidates_per_generation": 3,
-        },
-        metadata={
-            "domain": "toy",
-            "strategy_id": "adaptive_local@1",
-            "prediction_model_id": "toy-rolling-water@1",
-            "evaluator_id": "toy_time_forward@1",
-            "knowledge_online_enabled": online,
-        },
-    )
+    return native_manifest(task_id="knowledge-loop", metadata={
+        "domain": "greenhouse", "prediction_model_id": "greenhouse-exogenous-ridge@1",
+        "evaluator_id": "greenhouse_multihorizon_time_forward@5",
+        "knowledge_online_enabled": online,
+    })
 
 
 class _JsonResponse:
@@ -348,8 +335,8 @@ class KnowledgeRetrievalTests(unittest.TestCase):
 
     def test_openalex_non_retryable_http_error_falls_back_immediately(self) -> None:
         ledger = EventLedger()
-        director = EvolutionDirector(ledger, StrategyRouterDSHAdapter())
-        director.start_evolution(_task(online=True), run_id="run:http-fallback")
+        director = EvolutionDirector(ledger, NativeRoleStub())
+        start_native_run(director, task=_task(online=True), run_id="run:http-fallback")
         error = HTTPError(
             "https://api.openalex.org/works",
             404,
@@ -733,7 +720,7 @@ class KnowledgeRetrievalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "knowledge_snapshot is too large"):
             validate_knowledge_context(oversized_context)
 
-    def test_legacy_cards_and_context_keep_their_original_shape(self) -> None:
+    def test_cards_and_context_have_explicit_current_evidence_shape(self) -> None:
         card = KnowledgeCard(
             knowledge_id="legacy:card",
             title="Legacy card",
@@ -747,9 +734,9 @@ class KnowledgeRetrievalTests(unittest.TestCase):
             capability_id="greenhouse-exogenous-ridge@1",
         )
         serialized_card = card.to_dict()
-        self.assertNotIn("abstract_summary", serialized_card)
-        self.assertNotIn("content_digest", serialized_card)
-        self.assertNotIn("capability_ids", serialized_card)
+        self.assertIn("abstract_summary", serialized_card)
+        self.assertIn("content_digest", serialized_card)
+        self.assertIn("capability_ids", serialized_card)
         identity = {
             "schema_version": "ecologyrsi-dsh.knowledge-snapshot/1",
             "run_id": "run:legacy",
@@ -768,7 +755,6 @@ class KnowledgeRetrievalTests(unittest.TestCase):
 
         self.assertEqual(restored.to_dict(), payload)
         legacy_context = restored.proposal_context()
-        legacy_context.pop("evidence_catalog")
         self.assertEqual(validate_knowledge_context(legacy_context), legacy_context)
 
     def test_ridge_evidence_maps_to_all_registered_ridge_predictors(self) -> None:
@@ -781,7 +767,7 @@ class KnowledgeRetrievalTests(unittest.TestCase):
             entry,
             {
                 "prediction_model_id": "greenhouse-targetwise-ridge@1",
-                "strategy_id": "adaptive_local@1",
+                "strategy_id": "autonomous_model@1",
                 "evaluator_id": "greenhouse_time_forward@1",
             },
         )
@@ -795,6 +781,7 @@ class KnowledgeRetrievalTests(unittest.TestCase):
                 "greenhouse-baseline-aligned-ridge@1",
                 "greenhouse-targetwise-ridge@1",
                 "greenhouse-horizon-targetwise-ridge@1",
+                "greenhouse-baseline-aligned-ridge@2",
             ),
         )
 
@@ -809,7 +796,7 @@ class KnowledgeRetrievalTests(unittest.TestCase):
         ridge = cards["sklearn-ridge"]
         self.assertEqual(ridge.execution_status, "adopted")
         self.assertEqual(ridge.capability_id, metadata["prediction_model_id"])
-        self.assertEqual(len(ridge.capability_ids), 4)
+        self.assertEqual(len(ridge.capability_ids), 5)
         self.assertIn("样本 Agent 自主决定", ridge.selection_reason)
         self.assertNotIn("不能在轮次中途切换", ridge.selection_reason)
         evaluator = cards["sklearn-time-series-split"]
@@ -907,11 +894,13 @@ class KnowledgeRetrievalTests(unittest.TestCase):
 
     def test_batch_freezes_one_shared_knowledge_snapshot(self) -> None:
         ledger = EventLedger()
-        director = EvolutionDirector(ledger, StrategyRouterDSHAdapter())
-        director.start_evolution(_task(), run_id="run:knowledge")
+        director = EvolutionDirector(ledger, NativeRoleStub())
+        start_native_run(director, task=_task(), run_id="run:knowledge")
 
-        first = start_generation_batch(director, "run:knowledge")
-        second = start_generation_batch(director, "run:knowledge")
+        # This test isolates snapshot freezing from the separately tested native research stage.
+        with mock.patch("ecologyrsi_dsh.evolution.batches._ensure_generation_research_iteration"):
+            first = start_generation_batch(director, "run:knowledge")
+            second = start_generation_batch(director, "run:knowledge")
         state = director.state("run:knowledge")
 
         self.assertEqual(first, second)
@@ -932,9 +921,9 @@ class KnowledgeRetrievalTests(unittest.TestCase):
 
     def test_terminal_run_rejects_in_flight_knowledge_retrieval_commit(self) -> None:
         ledger = EventLedger()
-        director = EvolutionDirector(ledger, StrategyRouterDSHAdapter())
+        director = EvolutionDirector(ledger, NativeRoleStub())
         run_id = "run:knowledge-cancel-race"
-        director.start_evolution(_task(), run_id=run_id)
+        start_native_run(director, task=_task(), run_id=run_id)
 
         def cancel_while_retrieving(state, **kwargs):
             snapshot = retrieve_generation_knowledge(state, **kwargs)
@@ -961,8 +950,8 @@ class KnowledgeRetrievalTests(unittest.TestCase):
 
     def test_online_failure_falls_back_without_stopping_the_round(self) -> None:
         ledger = EventLedger()
-        director = EvolutionDirector(ledger, StrategyRouterDSHAdapter())
-        director.start_evolution(_task(online=True), run_id="run:fallback")
+        director = EvolutionDirector(ledger, NativeRoleStub())
+        start_native_run(director, task=_task(online=True), run_id="run:fallback")
         with mock.patch(
             "ecologyrsi_dsh.knowledge.retrieval._openalex_cards",
             side_effect=TimeoutError("offline"),
@@ -980,8 +969,8 @@ class KnowledgeRetrievalTests(unittest.TestCase):
 
     def test_online_metadata_never_becomes_executable(self) -> None:
         ledger = EventLedger()
-        director = EvolutionDirector(ledger, StrategyRouterDSHAdapter())
-        director.start_evolution(_task(online=True), run_id="run:metadata")
+        director = EvolutionDirector(ledger, NativeRoleStub())
+        start_native_run(director, task=_task(online=True), run_id="run:metadata")
         online_card = {
             "knowledge_id": "openalex:W1",
             "title": "Unverified algorithm",

@@ -15,7 +15,7 @@ class PurposeBoundReviewTests(unittest.TestCase):
     def setUp(self):
         self.candidate = small_holdout(HoldoutArm.FINALIST_1, .2)
         self.incumbent = small_holdout(HoldoutArm.INCUMBENT, .1)
-        self.task = SimpleNamespace(metadata={"optimization_schedule": OptimizationSchedule.for_quick_run().to_dict()})
+        self.task = SimpleNamespace(metadata={"optimization_schedule": OptimizationSchedule.for_new_run().to_dict()})
 
     def decide(self, *, accepted=False, candidate=None, status="completed", policy=None):
         item = candidate or self.candidate

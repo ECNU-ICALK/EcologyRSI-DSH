@@ -1,6 +1,6 @@
 # 生态模型进化工作台
 
-工作台由 DSH 托管网页，Python Host 负责数据分区、执行编排、评分和 SQLite 事件账本。页面使用原生 HTML/CSS/JavaScript。安装与模型连接说明统一维护在[仓库 README](../../README.md)，当前交付版本为 **0.10.11 本地研究版**，适配 Harness 0.2.0-rc.2；历史实施记录不作为当前版本的科学验收结论。
+工作台由 DSH 托管网页，Python Host 负责数据分区、执行编排、评分和 SQLite 事件账本。页面使用原生 HTML/CSS/JavaScript。安装与模型连接说明统一维护在[仓库 README](../../README.md)，当前交付版本为 **0.11.0 本地研究版**，适配 Harness 0.2.0-rc.2；历史实施记录不作为当前版本的科学验收结论。
 
 ## 当前默认流程
 
@@ -8,13 +8,13 @@
 
 新实验固定使用 `joint_plugin_epoch@2`：四候选与当前最佳版本各 10 时点初筛，一条主线的父子版本各 25 时点配对，候选与轮初最佳版本各 50 时点比较。基础最多 200 次预测时点执行，另预留最多 100 次用于一次双臂复核。每轮使用 85 个不同评分起点；复测不增加独立观测数，历史上下文与时间隔离另计。
 
-创建页可选择标准搜索或 `cellwise_training_evidence@1` 逐目标、逐时距改进；后者默认启用 `prediction_contribution@2` 训练预测贡献诊断，历史 `@1` 合同继续兼容读取。过程页从本运行冻结合同显示实际搜索方式、诊断与行为去重开关；部署新版本或修改创建表单不会给旧运行补开关。工程执行回执通过、同组搜索采纳和独立科学验证分别展示。等价候选标记不代表已跳过评测，事件说明会结合后续实际评测记录。
+创建页可选择标准搜索或 `cellwise_training_evidence@1` 逐目标、逐时距改进；后者默认启用 `prediction_contribution@2` 训练预测贡献诊断。过程页从本运行冻结合同显示实际搜索方式、诊断与行为去重开关；部署新版本或修改创建表单不会给旧运行补开关。工程执行回执通过、同组搜索采纳和独立科学验证分别展示。等价候选标记不代表已跳过评测，事件说明会结合后续实际评测记录。
 
 候选最多四处关联修改，局部一次修订最多两处；联合继承提示词、参数、Skill、受控计算与经验记忆。仅对满足基础门槛的临界收益或跨日收益混合结果追加一次复测，两次都须通过。证据不足保留原版本，搜索晋级与独立验证分别展示。表单名义默认 5 轮，会依据容量预检调整未手动修改的默认值。
 
-历史四种协议按原合同读取和回放；新建入口只接受统一协议，不迁移既有运行。完整门槛见[统一流程与预算](../../README.md#实验模式与预算)。
+当前入口与回放只支持统一协议，不承担旧协议迁移。完整门槛见[统一流程与预算](../../README.md#联合进化流程)。
 
-一个样本指一个预测起点。Agent 读取截止该起点的因果信息，自行决定直接预测或调用登记模型工具，最终提交温度、湿度、CO₂ 在 1/6/24 小时的九个预测值。新运行每次 Planner 尝试冻结 4 个预测调用额度，历史运行沿用其冻结值；组合程序按内部工具调用加一次计算计费；工具结果是证据，最终数值由 Agent 提交。Planner 最多 10 步、Critic 最多 4 步；新运行单次输出额度分别为 32768/8192 tokens，历史冻结值保持不变。累计输出回执用于观察，不另设隐式累计 token 配额；步数、工具额度和绝对期限共同约束执行，不能解释为精确费用硬上限。
+一个样本指一个预测起点。Agent 读取截止该起点的因果信息，自行决定直接预测或调用登记模型工具，最终提交温度、湿度、CO₂ 在 1/6/24 小时的九个预测值。新运行每次 Planner 尝试冻结 4 个预测调用额度；组合程序按内部工具调用加一次计算计费；工具结果是证据，最终数值由 Agent 提交。Planner 最多 10 步、Critic 最多 4 步；新运行单次输出额度分别为 32768/8192 tokens。累计输出回执用于观察，不另设隐式累计 token 配额；步数、工具额度和绝对期限共同约束执行，不能解释为精确费用硬上限。
 
 服务 503、429、连接和超时进入有界恢复与路由冷却，已接受的 Planner 和工具结果可以供 Critic 恢复复用。不可恢复的协议、输出预算等故障关闭本次执行准入。执行不完整时不进入后续批次、反思择优或额外评测副本，不以失败罚分证明科学改善。
 
@@ -25,9 +25,8 @@
 - **进化过程**：显示当前阶段、有效样本、在途任务、等待恢复、最近故障、真实用量和轮末选择。
 - **候选评测**：按需读取所选候选的参数、工具、三目标 × 三时距指标及同 cohort 对照。
 - **独立评测**：单独启动隔离数据评测，不将结果混入搜索反馈。
-- **人工审核**：运行中或暂停时追加方向建议；本轮已冻结后提交的意见在后续轮次生效。模型咨询与人工干预各自保留审计回执。
 
-0.9.0 分别显示相对基线技能分、同组父版本增益和同组冠军增益，并按阶段统计有明确分母的成功漏斗。缺少配对证据时增益为空；“修改已应用”不表示已经改善预测。
+页面分别显示相对基线技能分、同组父版本增益和同组冠军增益，并按阶段统计有明确分母的成功漏斗。缺少配对证据时增益为空；“修改已应用”不表示已经改善预测。
 
 列表和总览只加载摘要；工作区按照自身版本号失效，遥测变化不触发全部候选重载。明细、样本和事件均按需请求，过期响应不得覆盖当前运行或候选。浏览器只展示结构化脱敏证据。
 
@@ -42,14 +41,14 @@ PYTHONPATH=src .venv/bin/python -m ecologyrsi_dsh serve \
   --host 127.0.0.1 --port 8765 --db /tmp/ecologyrsi-dsh.sqlite3
 ```
 
-未连接原生模型运行时时，真实执行显示不可用。静态演示须显式使用 `?demo=1`，不会在服务失败时自动伪造结果。
+未连接原生模型运行时时，真实执行显示不可用。网页只展示真实运行与数据目录，不提供静态演示或训练资产导出。
 
 ## DSH 宿主接入
 
 页面加载后向父窗口发送握手，目标 origin 取 `parent_origin` 查询参数，缺省为自身 origin：
 
 ```json
-{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.10.11","context_protocol":"ecology-evolution.host-context/1","supported_api_bases":["/api/ecology-evolution"]}
+{"type":"plugin.ready","plugin_id":"ecologyrsi.evolution","version":"0.11.0","context_protocol":"ecology-evolution.host-context/1","supported_api_bases":["/api/ecology-evolution"]}
 ```
 
 宿主用 `postMessage` 回 `dsh.context`。只接受来自父窗口且 origin 为自身或已登记 `parent_origin` 的消息；字段可平铺，也可嵌在 `context` 对象中。消息可提供同源代理地址和内存中的能力令牌，身份、能力范围和模型目录可选。下列身份及模型 ID 仅为示例，必须替换为后端已登记值：
@@ -60,7 +59,7 @@ PYTHONPATH=src .venv/bin/python -m ecologyrsi_dsh serve \
   "api_base": "/api/ecology-evolution",
   "capability_token": "短期能力令牌",
   "identity": {"subject_id": "researcher-17", "display_name": "研究员甲"},
-  "capabilities": ["evolution.catalog.read", "evolution.run.create", "evolution.run.advance", "evolution.projection.read", "run.control", "intervention.write"],
+  "capabilities": ["evolution.catalog.read", "evolution.run.create", "evolution.projection.read", "run.control"],
   "models": [
     {"model_id": "dsh-policy@1", "label": "DSH 策略模型 API", "roles": ["propose"]},
     {"model_id": "dsh-judge@1", "label": "DSH 独立评审模型 API", "roles": ["judge"]}
@@ -88,7 +87,6 @@ GET  /runs/{run_id}/events?after={cursor}
 POST /model-preflight
 POST /runs
 POST /runs/{run_id}/control
-POST /runs/{run_id}/advance
 ```
 
-旧运行保留原始冻结协议和审计记录。更改模型、工具、预算或绑定内容后须创建新实验；历史结果不会被升级为新协议证据。
+更改模型、工具、预算或绑定内容后须创建新实验；其他版本的历史结果不会被升级为当前协议证据。

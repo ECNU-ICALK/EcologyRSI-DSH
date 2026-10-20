@@ -157,17 +157,11 @@ def _cell_gate(
 
 def _constraint_violations(
     evaluation: HoldoutEvaluation,
-    *,
-    legacy_runtime_v2_shape: bool = False,
 ) -> int:
     value = evaluation.metrics.get(
         "constraint_violations",
-        0 if legacy_runtime_v2_shape else None,
+        None,
     )
-    if legacy_runtime_v2_shape:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return 1
-        return max(0, int(value))
     number = _finite_number(value)
     if number is None or number < 0 or not number.is_integer():
         # Evaluator counts are a fail-closed safety input.  Fractional,
@@ -195,12 +189,10 @@ def _strict_chain_pass(evaluation: HoldoutEvaluation) -> bool:
 def _gate(
     evaluation: HoldoutEvaluation,
     *,
-    legacy_runtime_v2_shape: bool = False,
     minimum_coverage: float = PROMOTION_REQUIRED_COVERAGE,
 ) -> dict[str, Any]:
     constraints = _constraint_violations(
         evaluation,
-        legacy_runtime_v2_shape=legacy_runtime_v2_shape,
     )
     coverage_pass = _coverage_pass(evaluation)
     sample = evaluation.metrics.get("sample_execution")
@@ -217,8 +209,6 @@ def _gate(
             overall_coverage = succeeded / attempted
         elif 'attempted_origin_samples' in sample or 'succeeded_origin_samples' in sample:
             overall_coverage = None
-    if legacy_runtime_v2_shape:
-        overall_coverage = _finite_number(evaluation.metrics.get("objective_weight_coverage"))
     if overall_coverage is None or overall_coverage < minimum_coverage:
         coverage_pass = False
     passed = bool(evaluation.passed)
@@ -242,44 +232,31 @@ def build_generation_comparison(
     fitness_profile: FitnessProfile | None = None,
     challenger_promotion_allowed: bool = True,
     positive_delta_search: bool = False,
-    legacy_runtime_v2_shape: bool = False,
-    legacy_incomplete_paired_scoring: bool = False,
     require_paired_strict_chain: bool = False,
     finalist_reviews: Mapping[str, Mapping[str, Any]] | None = None,
     quick_experiment: bool = False,
-    experiment_protocol: str = "quick_adaptive_epoch@1",
+    experiment_protocol: str = "joint_plugin_epoch@2",
     training_effect_evidence: Mapping[str, Mapping[str, Any]] | None = None,
     holdout_rechecks: Sequence[HoldoutEvaluation] = (),
+    _conditional_recheck: bool = True,
 ) -> GenerationComparison:
-    """Build one immutable three-arm comparison without model-authored ranking.
-
-    ``legacy_incomplete_paired_scoring`` reports every arm's paired scoring
-    evidence as incomplete instead of measuring it.  It exists only to replay
-    comparisons that a Host recorded before ``6458330`` fixed
-    ``_evidence_matches_evaluation``, which used to read complete evidence as
-    incomplete.  Forcing the verdict can only add failures and clear
-    eligibility, so a record that matches this build is at least as
-    conservative as one today's Host would produce.
-    """
-
+    """Compare the frozen finalist and incumbent; repeated evidence cannot create another repeat."""
+    if experiment_protocol != "joint_plugin_epoch@2":
+        raise ValueError("Only joint_plugin_epoch@2 is supported")
     if not isinstance(require_paired_strict_chain, bool):
         raise TypeError("require_paired_strict_chain must be a bool")
-    if require_paired_strict_chain and legacy_runtime_v2_shape:
-        raise ValueError("paired execution qualification cannot use a legacy gate shape")
-    unified = experiment_protocol == "joint_plugin_epoch@2"
+    unified = _conditional_recheck
     if holdout_rechecks and not unified:
-        raise ValueError("conditional rechecks require the unified joint protocol")
+        raise ValueError("a repeated comparison cannot trigger another recheck")
     evaluations = tuple(holdout_evaluations)
-    expected_arms = {HoldoutArm.FINALIST_1, HoldoutArm.INCUMBENT} if quick_experiment else set(HoldoutArm)
-    if quick_experiment:
-        if experiment_protocol not in {"quick_adaptive_epoch@1", "evidence_guided_epoch@1", "joint_plugin_epoch@1", "joint_plugin_epoch@2"}:
-            raise ValueError("unsupported exploratory experiment protocol")
-        positive_delta_search = True
+    expected_arms = {HoldoutArm.FINALIST_1, HoldoutArm.INCUMBENT}
+    positive_delta_search = True
+    quick_experiment = True
     if len(evaluations) != len(expected_arms):
-        raise ValueError("generation comparison requires exactly three holdout evaluations")
+        raise ValueError("generation comparison requires exactly two holdout evaluations")
     arms = {item.scope.holdout_arm for item in evaluations}
     if arms != expected_arms:
-        raise ValueError("generation comparison requires finalist_1, finalist_2, and incumbent")
+        raise ValueError("generation comparison requires finalist_1 and incumbent")
     if any(item.scope.run_id != run_id for item in evaluations):
         raise ValueError("holdout evaluation belongs to another run")
     if any(item.scope.generation != generation for item in evaluations):
@@ -303,9 +280,9 @@ def build_generation_comparison(
                 raise ValueError("training effect failure is invalid")
 
     def paired_evidence_complete(challenger: Any) -> bool:
-        """Measure one arm against the incumbent, or replay a legacy verdict."""
+        """Measure the frozen arm against the incumbent."""
 
-        return not legacy_incomplete_paired_scoring and paired_scoring_evidence_complete(
+        return paired_scoring_evidence_complete(
             incumbent, challenger
         )
 
@@ -318,8 +295,8 @@ def build_generation_comparison(
         for horizon in profile.expected_horizons
     }
     if finalist_reviews is not None:
-        if legacy_runtime_v2_shape or set(finalist_reviews) != {item.scope.holdout_arm.value for item in finalist_evaluations}:
-            raise ValueError("independent review requires the two current finalist arms")
+        if set(finalist_reviews) != {item.scope.holdout_arm.value for item in finalist_evaluations}:
+            raise ValueError("independent review requires the current finalist arm")
         for item in finalist_evaluations:
             review = finalist_reviews[item.scope.holdout_arm.value]
             if (review.get("candidate_id") != item.scope.candidate_id
@@ -338,7 +315,6 @@ def build_generation_comparison(
     for item in finalist_evaluations:
         scientific_gate = _gate(
             item,
-            legacy_runtime_v2_shape=legacy_runtime_v2_shape,
             minimum_coverage=profile.selection_minimum_coverage,
         )
         cell_gate = _cell_gate(item, incumbent, expected_grid, profile)
@@ -392,13 +368,12 @@ def build_generation_comparison(
             search_failures.append("strict_agent_chain_failed")
         if delta <= POSITIVE_SEARCH_MINIMUM_SCORE_DELTA:
             search_failures.append("no_positive_score_delta")
-        if quick_experiment:
-            if delta <= profile.selection_minimum_score_delta:
-                search_failures.append("below_practical_score_delta")
-            if not cell_gate["no_regression"]:
-                search_failures.append("cell_regression")
-            if not paired_evidence_complete(item):
-                search_failures.append("paired_scoring_evidence_incomplete")
+        if delta <= profile.selection_minimum_score_delta:
+            search_failures.append("below_practical_score_delta")
+        if not cell_gate["no_regression"]:
+            search_failures.append("cell_regression")
+        if not paired_evidence_complete(item):
+            search_failures.append("paired_scoring_evidence_incomplete")
         search_eligible = bool(
             not search_failures
             if positive_delta_search
@@ -408,16 +383,11 @@ def build_generation_comparison(
         if item.metrics.get("prediction_owner") == "sample_agent" or item.metrics.get("agent_inference_stability") is not None or incumbent.metrics.get("agent_inference_stability") is not None:
             inference_stability = paired_stability_gate(item, incumbent, minimum_delta=profile.selection_minimum_score_delta)
             certification_eligible = certification_eligible and inference_stability["passed"]
-        if not positive_delta_search:
-            # All epoch gates must settle before selecting the next parent.
-            # A successful first replica cannot bypass a failing second one.
-            search_eligible = certification_eligible
         certification_failures = list(cell_gate.get("failures", ()))
         if effect_failure:
             certification_failures.append(effect_failure)
-        if quick_experiment:
-            certification_eligible = False
-            certification_failures.append("quick_experiment_requires_independent_certification")
+        certification_eligible = False
+        certification_failures.append("quick_experiment_requires_independent_certification")
         if inference_stability is not None and not inference_stability["passed"]:
             certification_failures.append(inference_stability["reason"])
         if not review_pass:
@@ -438,53 +408,30 @@ def build_generation_comparison(
             certification_failures.append(selection.status)
         elif delta <= profile.selection_minimum_score_delta:
             certification_failures.append("below_practical_score_delta")
-        if legacy_runtime_v2_shape:
-            legacy_failures = list(cell_gate.get("failures", ()))
-            if effect_failure:
-                legacy_failures.append(effect_failure)
-            if not challenger_promotion_allowed:
-                legacy_failures.append("screening_exploration_only")
-            if not selection.primary_selection_gate:
-                legacy_failures.append(selection.status)
-            elif delta <= profile.selection_minimum_score_delta:
-                legacy_failures.append("below_practical_score_delta")
-            gate = {
-                **scientific_gate,
-                "eligible": certification_eligible,
-                "complete_objective_grid": cell_gate["complete"],
-                "coverage_pass": cell_gate["coverage_pass"],
-                "no_cell_regression": cell_gate["no_regression"],
-                "worst_cell_delta": cell_gate["worst_cell_delta"],
-                "cell_deltas": cell_gate.get("cell_deltas", {}),
-                "promotion_assessment": selection.to_dict(),
-                "stability_lower_bound": stability_floor,
-                "failures": legacy_failures,
-            }
-        else:
-            gate = {
-                **scientific_gate,
-                "eligible": search_eligible,
-                "search_eligible": search_eligible,
-                "certification_eligible": certification_eligible,
-                "complete_objective_grid": cell_gate["complete"],
-                "coverage_pass": cell_gate["coverage_pass"],
-                "no_cell_regression": cell_gate["no_regression"],
-                "worst_cell_delta": cell_gate["worst_cell_delta"],
-                "cell_deltas": cell_gate.get("cell_deltas", {}),
-                "promotion_assessment": selection.to_dict(),
-                "stability_lower_bound": stability_floor,
-                "strict_agent_chain_pass": strict_chain_pass,
-                **({"paired_scoring_evidence_complete": scoring_evidence_complete}
-                   if require_paired_strict_chain else {}),
-                "search_failures": search_failures,
-                "certification_failures": certification_failures,
-                "agent_inference_stability": inference_stability,
-                "failures": (
-                    search_failures
-                    if positive_delta_search
-                    else certification_failures
-                ),
-            }
+        gate = {
+            **scientific_gate,
+            "eligible": search_eligible,
+            "search_eligible": search_eligible,
+            "certification_eligible": certification_eligible,
+            "complete_objective_grid": cell_gate["complete"],
+            "coverage_pass": cell_gate["coverage_pass"],
+            "no_cell_regression": cell_gate["no_regression"],
+            "worst_cell_delta": cell_gate["worst_cell_delta"],
+            "cell_deltas": cell_gate.get("cell_deltas", {}),
+            "promotion_assessment": selection.to_dict(),
+            "stability_lower_bound": stability_floor,
+            "strict_agent_chain_pass": strict_chain_pass,
+            **({"paired_scoring_evidence_complete": scoring_evidence_complete}
+               if require_paired_strict_chain else {}),
+            "search_failures": search_failures,
+            "certification_failures": certification_failures,
+            "agent_inference_stability": inference_stability,
+            "failures": (
+                search_failures
+                if positive_delta_search
+                else certification_failures
+            ),
+        }
         if review is not None:
             gate["judge_available"] = review.get("judge_status") == "completed"
             gate["judge_accepted"] = review_pass
@@ -553,7 +500,6 @@ def build_generation_comparison(
     )
     incumbent_scientific_gate = _gate(
         incumbent,
-        legacy_runtime_v2_shape=legacy_runtime_v2_shape,
         minimum_coverage=profile.selection_minimum_coverage,
     )
     incumbent_scoring_complete = (
@@ -563,9 +509,7 @@ def build_generation_comparison(
     if require_paired_strict_chain and (not _strict_chain_pass(incumbent) or not incumbent_scoring_complete):
         incumbent_scientific_gate["eligible"] = False
     incumbent_gate = (
-        incumbent_scientific_gate
-        if legacy_runtime_v2_shape
-        else {
+        {
             **incumbent_scientific_gate,
             "search_eligible": True,
             "certification_eligible": incumbent_scientific_gate["eligible"],
@@ -635,38 +579,29 @@ def build_generation_comparison(
         ),
         "challenger_promotion_allowed": challenger_promotion_allowed,
     }
-    if quick_experiment:
-        gate_results["experiment_protocol"] = experiment_protocol
-        gate_results["selection_rule"] = "complete_paired_practical_delta_cell_nonregression_else_incumbent"
-    if not legacy_runtime_v2_shape:
-        gate_results.update(
-            {
-                "certification_selected_arm": (
-                    certification_selected.scope.holdout_arm.value
-                    if certification_selected is not None
-                    and certification_selected.scope.holdout_arm is not None
-                    else None
-                ),
-                "selected_search_certification_status": (
-                    "incumbent_retained"
-                    if selected is incumbent
-                    else "certification_selected"
-                    if certification_selected is selected
-                    else "certification_eligible_not_selected"
-                    if finalist_gates[selected.scope.holdout_arm.value][
-                        "certification_eligible"
-                    ]
-                    else "search_only"
-                ),
-            }
-        )
-    else:
-        for field in (
-            "search_eligible_finalist_count",
-            "certification_eligible_finalist_count",
-            "selection_policy",
-        ):
-            gate_results.pop(field, None)
+    gate_results["experiment_protocol"] = experiment_protocol
+    gate_results["selection_rule"] = "complete_paired_practical_delta_cell_nonregression_else_incumbent"
+    gate_results.update(
+        {
+            "certification_selected_arm": (
+                certification_selected.scope.holdout_arm.value
+                if certification_selected is not None
+                and certification_selected.scope.holdout_arm is not None
+                else None
+            ),
+            "selected_search_certification_status": (
+                "incumbent_retained"
+                if selected is incumbent
+                else "certification_selected"
+                if certification_selected is selected
+                else "certification_eligible_not_selected"
+                if finalist_gates[selected.scope.holdout_arm.value][
+                    "certification_eligible"
+                ]
+                else "search_only"
+            ),
+        }
+    )
     return GenerationComparison(
         comparison_id=f"generation-comparison:{run_id}:{generation}",
         run_id=run_id,

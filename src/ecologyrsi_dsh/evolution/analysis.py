@@ -7,7 +7,6 @@ import math
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from statistics import fmean, median
 from typing import Any
 
 from ..core.models import (
@@ -20,14 +19,7 @@ from ..core.models import (
     utc_now,
 )
 from ..core.protocols import is_strict_origin_protocol
-from .promotion import assess_promotion_improvement
 from .agent_policy import prior_candidate_tool_experience
-from ..evaluators.fitness import (
-    EXPLORATORY_EVIDENCE_CLASS,
-    FitnessProfile,
-    assess_generation_selection,
-    build_fitness_assessment,
-)
 
 _IMPROVEMENT_TOLERANCE = 1e-12
 GENERATION_CONTROL_EVALUATION_SCHEMA = (
@@ -162,66 +154,6 @@ def evaluation_cohort_digest(evaluation: Any) -> str | None:
     return None
 
 
-def _evaluation_cohort_window_summary(
-    metrics: Mapping[str, Any],
-    *,
-    cohort_digest: str,
-) -> dict[str, Any] | None:
-    raw_cohort = metrics.get("evaluation_cohort")
-    raw_window = (
-        raw_cohort.get("update_window")
-        if isinstance(raw_cohort, Mapping)
-        else None
-    )
-    if not isinstance(raw_window, Mapping):
-        return None
-    schema_version = raw_window.get("schema_version")
-    selection_policy = raw_window.get("selection_policy")
-    population_count = raw_window.get("population_count")
-    population_digest = raw_window.get("population_digest")
-    selected_count = raw_window.get("selected_count")
-    window_offset = raw_window.get("window_offset")
-    feedback_cohort_digest = metrics.get("feedback_update_cohort_digest")
-    if (
-        schema_version != "ecologyrsi-dsh.feedback-update-cohort/1"
-        or selection_policy
-        != "target_horizon_interleaved_rotating_window@1"
-        or not isinstance(feedback_cohort_digest, str)
-        or len(feedback_cohort_digest) != 64
-        or any(
-            character not in "0123456789abcdef"
-            for character in feedback_cohort_digest
-        )
-        or raw_window.get("cohort_digest") != feedback_cohort_digest
-        or isinstance(population_count, bool)
-        or not isinstance(population_count, int)
-        or population_count <= 0
-        or not isinstance(population_digest, str)
-        or len(population_digest) != 64
-        or any(
-            character not in "0123456789abcdef"
-            for character in population_digest
-        )
-        or isinstance(selected_count, bool)
-        or not isinstance(selected_count, int)
-        or selected_count <= 0
-        or selected_count > population_count
-        or isinstance(window_offset, bool)
-        or not isinstance(window_offset, int)
-        or window_offset < 0
-        or window_offset >= population_count
-    ):
-        return None
-    return {
-        "evaluation_cohort_digest": cohort_digest,
-        "feedback_update_cohort_digest": feedback_cohort_digest,
-        "schema_version": schema_version,
-        "selection_policy": selection_policy,
-        "population_count": population_count,
-        "population_digest": population_digest,
-        "selected_count": selected_count,
-        "window_offset": window_offset,
-    }
 
 
 def evaluation_cohort_comparison(
@@ -248,152 +180,8 @@ def evaluation_cohort_comparison(
     return "different_cohort"
 
 
-def strict_generation_controls_required(task: Any, generation: int) -> bool:
-    """Return whether formal selection needs same-cohort control replays.
-
-    Diagnostic smoke runs exercise the complete per-origin agent chain, but
-    intentionally do not spend the formal evidence budget needed to replay a
-    prior search parent or elite.  Requiring control evidence for those runs
-    would make every diagnostic run fail when it reaches generation two.
-    """
-
-    metadata = getattr(task, "metadata", None)
-    return bool(
-        generation > 0
-        and isinstance(metadata, Mapping)
-        and is_strict_origin_protocol(metadata.get("sample_agent_protocol"))
-        and metadata.get("sample_budget_class") == "selection_eligible"
-    )
 
 
-def generation_control_evaluations(
-    state: Any,
-    batch: Any,
-) -> dict[str, tuple[str, Evaluation]]:
-    """Validate and resolve strict same-cohort parent/elite evaluations.
-
-    Control evaluations are stored inside the first sibling's scientific
-    evaluation so they commit atomically with the generation evidence.  They
-    contain aggregates only; per-sample labels, predictions, and reflections
-    remain outside the proposer-visible analysis.
-    """
-
-    if not strict_generation_controls_required(
-        state.task_manifest, batch.generation
-    ):
-        return {}
-    expected: dict[str, str] = {}
-    if batch.parent_candidate_id is not None:
-        expected["search_parent"] = str(batch.parent_candidate_id)
-    incumbent_id = state.run.best_candidate_id
-    if incumbent_id is not None:
-        expected["formal_elite"] = str(incumbent_id)
-    if "search_parent" not in expected:
-        raise RuntimeError("strict generation controls require a search parent")
-
-    carriers: list[Any] = []
-    current_evaluations: list[Evaluation] = []
-    for candidate in state.candidates:
-        if (
-            candidate.generation != batch.generation
-            or getattr(candidate, "role", CandidateRole.SEARCH)
-            not in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
-        ):
-            continue
-        evaluation = state.evaluation_for(candidate.candidate_id)
-        if evaluation is None:
-            continue
-        current_evaluations.append(evaluation)
-        if "generation_control_evaluations" in evaluation.metrics:
-            carriers.append(evaluation)
-    if len(carriers) != 1:
-        raise RuntimeError(
-            "strict generation requires exactly one control-evidence carrier"
-        )
-    carrier = carriers[0]
-    carrier_candidate = state.candidate(carrier.candidate_id)
-    if carrier_candidate.slot_index != 0:
-        raise RuntimeError("generation controls must be attached to slot zero")
-    metrics = carrier.metrics
-    raw_controls = metrics.get("generation_control_evaluations")
-    if (
-        metrics.get("generation_control_policy") != GENERATION_CONTROL_POLICY
-        or not isinstance(raw_controls, list)
-        or not raw_controls
-        or metrics.get("generation_control_evidence_digest")
-        != digest(raw_controls)
-    ):
-        raise RuntimeError("generation control evidence envelope is invalid")
-
-    current_cohorts = {
-        evaluation_cohort_digest(evaluation)
-        for evaluation in current_evaluations
-    }
-    if None in current_cohorts or len(current_cohorts) != 1:
-        raise RuntimeError("generation candidates lack one verifiable cohort")
-    current_cohort = next(iter(current_cohorts))
-    evaluators = {item.evaluator_digest for item in current_evaluations}
-    partitions = {item.partition for item in current_evaluations}
-    if len(evaluators) != 1 or len(partitions) != 1:
-        raise RuntimeError("generation candidates do not share evaluator identity")
-
-    resolved: dict[str, tuple[str, Evaluation]] = {}
-    seen_candidates: set[str] = set()
-    for raw in raw_controls:
-        if not isinstance(raw, Mapping):
-            raise RuntimeError("generation control evidence item is invalid")
-        if (
-            raw.get("schema_version") != GENERATION_CONTROL_EVALUATION_SCHEMA
-            or raw.get("generation") != batch.generation
-            or not isinstance(raw.get("candidate_id"), str)
-            or not isinstance(raw.get("evaluation"), Mapping)
-        ):
-            raise RuntimeError("generation control evidence identity is invalid")
-        candidate_id = str(raw["candidate_id"])
-        if candidate_id in seen_candidates:
-            raise RuntimeError("generation control candidate is duplicated")
-        seen_candidates.add(candidate_id)
-        try:
-            evaluation = Evaluation.from_dict(raw["evaluation"])
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("generation control evaluation is invalid") from exc
-        if (
-            evaluation.run_id != state.run.run_id
-            or evaluation.candidate_id != candidate_id
-            or evaluation.evaluator_digest not in evaluators
-            or evaluation.partition not in partitions
-            or evaluation_cohort_digest(evaluation) != current_cohort
-        ):
-            raise RuntimeError(
-                "generation control evaluation is not bound to the current cohort"
-            )
-        sample_summary = evaluation.metrics.get("sample_execution")
-        if (
-            not isinstance(sample_summary, Mapping)
-            or sample_summary.get("strict_agent_contract") is not True
-            or sample_summary.get("strict_agent_chain_pass") is not True
-            or sample_summary.get("host_route_bypass_count") != 0
-        ):
-            raise RuntimeError(
-                "generation control lacks a complete strict sample-agent chain"
-            )
-        role = raw.get("comparison_role")
-        roles = (
-            ("search_parent", "formal_elite")
-            if role == "search_parent_and_formal_elite"
-            else (str(role),)
-        )
-        for resolved_role in roles:
-            if resolved_role not in expected:
-                raise RuntimeError("generation control role is unexpected")
-            if expected[resolved_role] != candidate_id:
-                raise RuntimeError("generation control candidate does not match its role")
-            if resolved_role in resolved:
-                raise RuntimeError("generation control role is duplicated")
-            resolved[resolved_role] = (candidate_id, evaluation)
-    if set(resolved) != set(expected):
-        raise RuntimeError("required generation controls are incomplete")
-    return resolved
 
 
 def _integer(value: Any, name: str, minimum: int = 0) -> int:
@@ -430,7 +218,6 @@ class GenerationBatch:
     stage_context_digests: Mapping[str, str] | None = None
     previous_analysis_digest: str | None = None
     knowledge_snapshot_digest: str | None = None
-    intervention_ids: tuple[str, ...] = ()
     context_digest: str = ""
     created_at: str = field(default_factory=utc_now)
 
@@ -509,11 +296,6 @@ class GenerationBatch:
             "knowledge_snapshot_digest",
             _optional_text(self.knowledge_snapshot_digest, "knowledge_snapshot_digest"),
         )
-        object.__setattr__(
-            self,
-            "intervention_ids",
-            tuple(_text(item, "intervention_id") for item in self.intervention_ids),
-        )
         expected = digest(self.identity_dict())
         if self.context_digest and self.context_digest != expected:
             raise ValueError("generation batch context_digest mismatch")
@@ -528,7 +310,6 @@ class GenerationBatch:
             "task_manifest_digest": self.task_manifest_digest,
             "parent_candidate_id": self.parent_candidate_id,
             "previous_analysis_digest": self.previous_analysis_digest,
-            "intervention_ids": list(self.intervention_ids),
         }
         # Omit this field for legacy batches so their recorded digest remains valid.
         if self.knowledge_snapshot_digest is not None:
@@ -710,301 +491,22 @@ def _finite(value: Any, default: float) -> float:
     return number if math.isfinite(number) else default
 
 
-def _skill(metrics: Mapping[str, Any]) -> float:
-    direct = _finite(metrics.get("skill_score"), math.nan)
-    if math.isfinite(direct):
-        return direct
-    value = _finite(metrics.get("normalized_rmse"), math.inf)
-    baseline = _finite(metrics.get("baseline_normalized_rmse"), 0.0)
-    if baseline > _IMPROVEMENT_TOLERANCE and math.isfinite(value):
-        return 1.0 - value / baseline
-    return -math.inf
 
 
-def _worst_skill(metrics: Mapping[str, Any]) -> float:
-    rows: list[float] = []
-    for field_name in ("targets", "horizons"):
-        raw = metrics.get(field_name)
-        if not isinstance(raw, list):
-            continue
-        for item in raw:
-            if isinstance(item, Mapping):
-                value = _skill(item)
-                if math.isfinite(value):
-                    rows.append(value)
-    return min(rows) if rows else _skill(metrics)
 
 
-def _parameter_summary(value: Mapping[str, Any]) -> dict[str, int | float]:
-    """Return only bounded-size finite numeric proposal parameters."""
-
-    result: dict[str, int | float] = {}
-    for name in sorted(value)[:32]:
-        raw = value[name]
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-            continue
-        number = float(raw)
-        if not math.isfinite(number):
-            continue
-        result[name] = raw
-    return result
 
 
-def _target_skill_summary(metrics: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Expose aggregate target skills without observations or predictions."""
-
-    raw_rows = metrics.get("targets")
-    if not isinstance(raw_rows, list):
-        return []
-    rows: list[dict[str, Any]] = []
-    for raw in raw_rows[:32]:
-        if not isinstance(raw, Mapping):
-            continue
-        skill = _skill(raw)
-        if not math.isfinite(skill):
-            continue
-        row: dict[str, Any] = {"skill_score": skill}
-        for name in ("target", "unit"):
-            value = raw.get(name)
-            if isinstance(value, str) and value.strip():
-                row[name] = value.strip()[:200]
-        horizon = raw.get("horizon_hours")
-        if (
-            not isinstance(horizon, bool)
-            and isinstance(horizon, (int, float))
-            and math.isfinite(float(horizon))
-        ):
-            row["horizon_hours"] = horizon
-        cell_sample_count = raw.get("n")
-        if (
-            isinstance(cell_sample_count, int)
-            and not isinstance(cell_sample_count, bool)
-            and cell_sample_count > 0
-        ):
-            row["n"] = cell_sample_count
-        for name in (
-            "mean_reward",
-            "normalized_mean_reward",
-            "negative_reward_fraction",
-        ):
-            value = _finite(raw.get(name), math.nan)
-            if math.isfinite(value):
-                row[name] = value
-        rows.append(row)
-    return rows
 
 
-def _parameter_distance(state: Any, candidate: Any, parent_id: str | None) -> float:
-    if parent_id is None:
-        return 0.0
-    try:
-        parent = state.candidate(parent_id)
-        parent_proposal = state.proposal(parent.proposal_id)
-        proposal = state.proposal(candidate.proposal_id)
-    except (KeyError, ValueError):
-        return math.inf
-    distance = 0.0
-    for name, raw in proposal.changes.items():
-        before = parent_proposal.changes.get(name)
-        if isinstance(raw, bool) or isinstance(before, bool):
-            continue
-        if isinstance(raw, (int, float)) and isinstance(before, (int, float)):
-            distance += abs(float(raw) - float(before)) / max(abs(float(before)), 1.0)
-    return distance
 
 
-def _candidate_row(state: Any, candidate: Any, parent_id: str | None) -> dict[str, Any]:
-    evaluation = state.evaluation_for(candidate.candidate_id)
-    metrics = dict(evaluation.metrics) if evaluation is not None else {}
-    proposal = state.proposal(candidate.proposal_id)
-    execution_success = evaluation is not None
-    scientific_pass = (
-        bool(metrics.get("scientific_pass", evaluation.passed))
-        if evaluation
-        else False
-    )
-    raw_judge_accepted = metrics.get("judge_accepted")
-    judge_status = metrics.get("judge_status")
-    judge_available = bool(
-        evaluation is not None
-        and (
-            judge_status == "completed"
-            or (judge_status is None and isinstance(raw_judge_accepted, bool))
-        )
-        and isinstance(raw_judge_accepted, bool)
-    )
-    judge_accepted = bool(raw_judge_accepted) if judge_available else False
-    eligible = execution_success and scientific_pass and judge_available and judge_accepted
-    violations = int(max(0, _finite(metrics.get("constraint_violations"), 0.0)))
-    worst_skill = _worst_skill(metrics) if evaluation is not None else -math.inf
-    if evaluation is not None and not math.isfinite(worst_skill):
-        worst_skill = evaluation.score
-    failed_algorithm_attempt = next(
-        (
-            item
-            for item in reversed(state.algorithm_attempts_for(candidate.candidate_id))
-            if item.status == "failed"
-        ),
-        None,
-    )
-    classification = (
-        "duplicate"
-        if candidate.status is CandidateStatus.DUPLICATE
-        else "screened_out"
-        if candidate.status is CandidateStatus.SCREENED_OUT
-        else f"algorithm_{failed_algorithm_attempt.phase}_failed"
-        if failed_algorithm_attempt is not None
-        else "execution_failed"
-        if candidate.status is CandidateStatus.FAILED or evaluation is None
-        else "scientific_gate_failed"
-        if not scientific_pass
-        else "judge_unavailable"
-        if not judge_available
-        else "judge_rejected"
-        if not judge_accepted
-        else "eligible"
-    )
-    row = {
-        "candidate_id": candidate.candidate_id,
-        "slot_index": candidate.slot_index,
-        "status": candidate.status.value,
-        "score": evaluation.score if evaluation is not None else None,
-        "scientific_pass": scientific_pass,
-        "judge_status": "completed" if judge_available else "unavailable",
-        "judge_available": judge_available,
-        "judge_accepted": judge_accepted,
-        "eligible": eligible,
-        "constraint_violations": violations,
-        "worst_skill_score": (
-            worst_skill if evaluation is not None else None
-        ),
-        "parameter_distance": _parameter_distance(state, candidate, parent_id),
-        "parameters": _parameter_summary(proposal.changes),
-        "target_skill_scores": _target_skill_summary(metrics),
-        "classification": classification,
-    }
-    cohort_digest = evaluation_cohort_digest(evaluation)
-    if cohort_digest is not None:
-        row["evaluation_cohort_digest"] = cohort_digest
-        cohort_window = _evaluation_cohort_window_summary(
-            metrics,
-            cohort_digest=cohort_digest,
-        )
-        if cohort_window is not None:
-            row["evaluation_cohort_window"] = cohort_window
-    sample_summary = metrics.get("sample_execution")
-    if isinstance(sample_summary, Mapping):
-        tool_performance = _bounded_tool_performance(
-            sample_summary.get("tool_performance")
-        )
-        if tool_performance:
-            row["tool_performance"] = tool_performance
-    row["agent_tool_performance"] = prior_candidate_tool_experience(state, candidate, metrics)
-    from .diversity import enabled as diversity_enabled, candidate_family
-    if diversity_enabled(state.task_manifest.metadata):
-        row["evolution_family"] = candidate_family(proposal)
-        measured = [item for item in getattr(state, "formal_batch_evaluations", ())
-                    if item.scope.candidate_id == candidate.candidate_id]
-        if measured:
-            latest = max(measured, key=lambda item: item.scope.batch_index)
-            behavior = latest.metrics.get("sample_execution", {}).get("observed_behavior")
-            if behavior is not None:
-                row["observed_training_behavior"] = dict(behavior)
-    return row
 
 
-def _algorithm_failure_summary(
-    state: Any, candidates: list[Any]
-) -> tuple[dict[str, Any], ...]:
-    grouped: dict[tuple[str, str, str, bool, str, str], list[str]] = defaultdict(list)
-    for candidate in candidates:
-        for attempt in state.algorithm_attempts_for(candidate.candidate_id):
-            if attempt.status != "failed":
-                continue
-            stage, retryable, error_type, details = _algorithm_failure_metadata(attempt)
-            grouped[
-                (
-                    attempt.phase,
-                    stage,
-                    str(attempt.failure_code or "unknown")[:100],
-                    retryable,
-                    error_type,
-                    canonical_json(details),
-                )
-            ].append(candidate.candidate_id)
-    rows = [
-        {
-            "phase": phase,
-            "stage": stage,
-            "failure_code": failure_code,
-            "retryable": retryable,
-            "error_type": error_type,
-            "attempt_count": len(candidate_ids),
-            # Compatibility alias retained for established analysis clients.
-            "count": len(candidate_ids),
-            "candidate_ids": candidate_ids[:8],
-            "details": json_details,
-        }
-        for (
-            phase,
-            stage,
-            failure_code,
-            retryable,
-            error_type,
-            encoded_details,
-        ), candidate_ids in sorted(grouped.items())
-        for json_details in (json.loads(encoded_details),)
-    ]
-    return tuple(rows[:16])
 
 
-def _algorithm_failure_metadata(attempt: Any) -> tuple[str, bool, str, dict[str, Any]]:
-    """Project an attempt's evidence onto a bounded, non-error-text schema."""
-
-    evidence = attempt.evidence if isinstance(attempt.evidence, Mapping) else {}
-    feedback = evidence.get("failure_feedback")
-    feedback = feedback if isinstance(feedback, Mapping) else {}
-    stage_value = evidence.get("stage")
-    stage = (
-        stage_value.strip()[:120]
-        if isinstance(stage_value, str) and stage_value.strip()
-        else str(attempt.phase)[:120]
-    )
-    retryable = feedback.get("retryable")
-    retryable = bool(retryable) if isinstance(retryable, bool) else False
-    error_value = feedback.get("exception_type", evidence.get("exception_type"))
-    error_type = (
-        error_value.strip()[:120]
-        if isinstance(error_value, str) and error_value.strip()
-        else "UnknownError"
-    )
-    details = _algorithm_failure_details(evidence, feedback)
-    return stage, retryable, error_type, details
 
 
-def _algorithm_failure_details(
-    evidence: Mapping[str, Any], feedback: Mapping[str, Any]
-) -> dict[str, Any]:
-    """Retain only fixed identifiers and finite counters from debug evidence."""
-
-    sources = (evidence, feedback.get("details"))
-    details: dict[str, Any] = {}
-    for source in sources:
-        if not isinstance(source, Mapping):
-            continue
-        for name in _ALGORITHM_DETAIL_TEXT_FIELDS:
-            value = source.get(name)
-            if isinstance(value, str) and value.strip():
-                details[name] = value.strip()[:200]
-        for name in _ALGORITHM_DETAIL_BOOLEAN_FIELDS:
-            value = source.get(name)
-            if isinstance(value, bool):
-                details[name] = value
-        for name in _ALGORITHM_DETAIL_INTEGER_FIELDS:
-            value = source.get(name)
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                details[name] = min(value, 1_000_000_000)
-    return dict(sorted(details.items()))
 
 
 def _sample_failure_summary(
@@ -1216,36 +718,9 @@ def _experience_parameter_set(value: Any) -> dict[str, int | float | bool]:
     return result
 
 
-def _experience_plan_sources(
-    state: Any,
-    generation: int,
-) -> tuple[dict[int, Mapping[str, Any]], dict[int, Mapping[str, Any]]]:
-    plans: dict[int, Mapping[str, Any]] = {}
-    adoptions: dict[int, Mapping[str, Any]] = {}
-    for iteration in sorted(
-        getattr(state, "research_iterations", ()),
-        key=lambda item: item.generation,
-    ):
-        if iteration.generation >= generation:
-            continue
-        if isinstance(iteration.plan, Mapping):
-            plans[iteration.generation] = iteration.plan
-        if isinstance(iteration.prediction_model_adoption, Mapping):
-            adoptions[iteration.generation] = iteration.prediction_model_adoption
-    proposals = sorted(
-        getattr(state, "proposals", ()),
-        key=lambda item: (item.generation, item.created_at, item.proposal_id),
-    )
-    for proposal in proposals:
-        if proposal.generation >= generation or proposal.generation in plans:
-            continue
-        raw_plan = proposal.metadata.get("plan")
-        if isinstance(raw_plan, Mapping):
-            plans[proposal.generation] = raw_plan
-        raw_adoption = proposal.metadata.get("prediction_model_adoption")
-        if isinstance(raw_adoption, Mapping):
-            adoptions[proposal.generation] = raw_adoption
-    return plans, adoptions
+def _experience_plan_sources(state: Any, generation: int) -> dict[int, Mapping[str, Any]]:
+    return {item.generation: item.plan for item in getattr(state, "research_iterations", ())
+            if item.generation < generation and isinstance(item.plan, Mapping)}
 
 
 def _experience_plan_changes(
@@ -1351,104 +826,18 @@ def _experience_candidate_behaviors(
 
 
 def _experience_modifications(
-    state: Any,
-    analysis: GenerationAnalysis,
-    plans: Mapping[int, Mapping[str, Any]],
-    adoptions: Mapping[int, Mapping[str, Any]],
+    state: Any, analysis: GenerationAnalysis, plans: Mapping[int, Mapping[str, Any]],
 ) -> dict[str, Any]:
     generation = analysis.generation
-    plan = plans.get(generation)
-    previous_generations = sorted(item for item in plans if item < generation)
-    previous_plan = plans.get(previous_generations[-1]) if previous_generations else None
-    adoption = adoptions.get(generation, {})
-    previous_adoption = (
-        adoptions.get(previous_generations[-1], {}) if previous_generations else {}
-    )
-    blueprint = plan.get("algorithm_blueprint") if isinstance(plan, Mapping) else None
-    synthesis = plan.get("algorithm_synthesis") if isinstance(plan, Mapping) else None
-    previous_blueprint = (
-        previous_plan.get("algorithm_blueprint")
-        if isinstance(previous_plan, Mapping)
-        else None
-    )
-    previous_synthesis = (
-        previous_plan.get("algorithm_synthesis")
-        if isinstance(previous_plan, Mapping)
-        else None
-    )
+    prior = sorted(item for item in plans if item < generation)
     parameter_sets = _experience_parameter_sets(state, analysis)
-    parameter_names = sorted(
-        {name for parameter_set in parameter_sets for name in parameter_set}
-    )[:16]
-    requested_id = _experience_text(adoption.get("requested_id"), maximum=200)
-    adopted_id = _experience_text(adoption.get("adopted_id"), maximum=200)
-    if adopted_id is None and isinstance(plan, Mapping):
-        prediction_model = plan.get("prediction_model")
-        if isinstance(prediction_model, Mapping):
-            adopted_id = _experience_text(prediction_model.get("id"), maximum=200)
-    previous_adopted_id = _experience_text(
-        previous_adoption.get("adopted_id"), maximum=200
-    )
-    result: dict[str, Any] = {
+    return {
         "research_plan_changed_fields": _experience_plan_changes(
-            plan, previous_plan
-        ),
-        "parameter_names_modified": parameter_names,
+            plans.get(generation), plans.get(prior[-1]) if prior else None),
+        "parameter_names_modified": sorted({name for row in parameter_sets for name in row})[:16],
         "candidate_parameter_sets": parameter_sets,
         "candidate_behaviors": _experience_candidate_behaviors(state, analysis),
-        "algorithm_changed": bool(
-            previous_adopted_id
-            and adopted_id
-            and previous_adopted_id != adopted_id
-        ),
     }
-    for name, value in (
-        ("requested_predictor_id", requested_id),
-        ("adopted_predictor_id", adopted_id),
-        ("adoption_status", _experience_text(adoption.get("status"), maximum=100)),
-        ("adoption_reason", _experience_text(adoption.get("reason"), maximum=200)),
-    ):
-        if value is not None:
-            result[name] = value
-    if isinstance(blueprint, Mapping):
-        pipeline_id = _experience_text(blueprint.get("pipeline_id"), maximum=200)
-        if pipeline_id is not None:
-            result["algorithm_blueprint_pipeline_id"] = pipeline_id
-        result["algorithm_blueprint_status"] = (
-            "inherited"
-            if isinstance(previous_blueprint, Mapping)
-            and canonical_json(blueprint) == canonical_json(previous_blueprint)
-            else "changed"
-        )
-    else:
-        result["algorithm_blueprint_status"] = "none"
-    if isinstance(synthesis, Mapping):
-        result["algorithm_synthesis_digest"] = digest(dict(synthesis))
-        pipeline_id = _experience_text(synthesis.get("pipeline_id"), maximum=200)
-        if pipeline_id is not None:
-            result["algorithm_synthesis_pipeline_id"] = pipeline_id
-        raw_focus = synthesis.get("parameter_focus")
-        if isinstance(raw_focus, (list, tuple)):
-            result["algorithm_synthesis_parameter_focus"] = [
-                value
-                for item in raw_focus[:16]
-                if (value := _experience_text(item, maximum=100)) is not None
-                and value.casefold() not in _EXPERIENCE_BLOCKED_PARAMETER_NAMES
-            ]
-        raw_refs = synthesis.get("evidence_refs")
-        if isinstance(raw_refs, (list, tuple)):
-            result["algorithm_synthesis_evidence_ref_count"] = min(
-                len(raw_refs), 16
-            )
-        result["algorithm_synthesis_status"] = (
-            "inherited"
-            if isinstance(previous_synthesis, Mapping)
-            and canonical_json(synthesis) == canonical_json(previous_synthesis)
-            else "changed"
-        )
-    else:
-        result["algorithm_synthesis_status"] = "none"
-    return result
 
 
 def _experience_algorithm_failures(
@@ -1669,8 +1058,6 @@ def _experience_score_comparison(
 
     if previous_analysis is None:
         return "no_previous_generation"
-    if not sample_update_windows_enabled(getattr(state, "task_manifest", None)):
-        return "legacy_full_cohort"
     cohort_digest = _experience_generation_cohort_digest(analysis)
     previous_cohort_digest = _experience_generation_cohort_digest(previous_analysis)
     if cohort_digest is None or previous_cohort_digest is None:
@@ -1680,121 +1067,7 @@ def _experience_score_comparison(
     return "different_cohort_not_compared"
 
 
-def _experience_synthesis_effect(
-    state: Any,
-    analysis: GenerationAnalysis,
-    modifications: Mapping[str, Any],
-    *,
-    score_comparison: str,
-    comparison_candidate: tuple[str, str, float] | None,
-    score_delta: float | None,
-    observed_improvement: bool,
-) -> dict[str, Any] | None:
-    synthesis_digest = _experience_text(
-        modifications.get("algorithm_synthesis_digest"), maximum=200
-    )
-    if synthesis_digest is None:
-        return None
-    proposal_ids = set()
-    for proposal in getattr(state, "proposals", ()):
-        if proposal.generation != analysis.generation:
-            continue
-        plan = proposal.metadata.get("plan")
-        synthesis = (
-            plan.get("algorithm_synthesis") if isinstance(plan, Mapping) else None
-        )
-        if isinstance(synthesis, Mapping) and digest(dict(synthesis)) == synthesis_digest:
-            proposal_ids.add(proposal.proposal_id)
-    attempts = [
-        attempt
-        for attempt in getattr(state, "algorithm_attempts", ())
-        if attempt.generation == analysis.generation
-        and (not proposal_ids or attempt.proposal_id in proposal_ids)
-    ]
 
-    def lowered_with_synthesis(attempt: Any) -> bool:
-        spec = attempt.algorithm_spec
-        if not isinstance(spec, Mapping):
-            return False
-        algorithm_ir = spec.get("algorithm_ir")
-        return isinstance(algorithm_ir, Mapping) and (
-            algorithm_ir.get("source_synthesis_digest") == synthesis_digest
-        )
-
-    lowered_candidates = {
-        attempt.candidate_id for attempt in attempts if lowered_with_synthesis(attempt)
-    }
-    compile_passed = {
-        attempt.candidate_id
-        for attempt in attempts
-        if attempt.phase == "compile"
-        and attempt.status == "passed"
-        and lowered_with_synthesis(attempt)
-    }
-    debug_passed = {
-        attempt.candidate_id
-        for attempt in attempts
-        if attempt.phase == "debug"
-        and attempt.status == "passed"
-        and lowered_with_synthesis(attempt)
-    }
-    evaluated_count = sum(row.get("score") is not None for row in analysis.ranking)
-    batch_highest_observed_score = _experience_batch_highest_observed_score(analysis)
-    selected = bool(
-        analysis.outcome == "promoted"
-        and analysis.champion_candidate_id is not None
-    )
-    selection_interpretation = (
-        "current_cohort_batch_champion"
-        if selected and score_comparison == "different_cohort_not_compared"
-        else "current_cohort_champion_unverifiable"
-        if selected and score_comparison == "cohort_digest_unavailable"
-        else "initial_champion"
-        if selected and score_comparison == "no_previous_generation"
-        else "comparable_score_improvement"
-        if observed_improvement
-        else "selected_without_comparable_score_baseline"
-        if selected
-        and score_comparison in {"legacy_full_cohort", "same_cohort"}
-        and score_delta is None
-        else "selected_without_observed_score_improvement"
-        if selected and score_comparison in {"legacy_full_cohort", "same_cohort"}
-        else "not_selected"
-    )
-    result: dict[str, Any] = {
-        "synthesis_digest": synthesis_digest,
-        "association_scope": "same_generation_frozen_plan",
-        "causal_attribution": False,
-        "score_comparison": score_comparison,
-        "selection_interpretation": selection_interpretation,
-        "lowered_candidate_count": len(lowered_candidates),
-        "compile_passed_candidate_count": len(compile_passed),
-        "debug_passed_candidate_count": len(debug_passed),
-        "failed_algorithm_attempt_count": sum(
-            attempt.status == "failed" for attempt in attempts
-        ),
-        "evaluated_candidate_count": evaluated_count,
-        "eligible_candidate_count": analysis.eligible_count,
-        "outcome": _experience_text(analysis.outcome, maximum=100) or "unknown",
-        "observed_improvement": observed_improvement,
-    }
-    if comparison_candidate is not None:
-        candidate_id, role, comparison_score = comparison_candidate
-        result.update(
-            {
-                "comparison_candidate_id": candidate_id,
-                "comparison_candidate_role": role,
-                "comparison_score": comparison_score,
-                # Compatibility alias: this is now explicitly the formal
-                # comparison score, never an unselected batch maximum.
-                "best_score": comparison_score,
-            }
-        )
-    if batch_highest_observed_score is not None:
-        result["batch_highest_observed_score"] = batch_highest_observed_score
-    if score_delta is not None:
-        result["best_score_delta_vs_previous_generation"] = score_delta
-    return result
 
 
 def _experience_generation_summary(
@@ -1802,7 +1075,6 @@ def _experience_generation_summary(
     analysis: GenerationAnalysis,
     previous_analysis: GenerationAnalysis | None,
     plans: Mapping[int, Mapping[str, Any]],
-    adoptions: Mapping[int, Mapping[str, Any]],
 ) -> dict[str, Any]:
     comparison_candidate = _experience_comparison_candidate(analysis)
     previous_comparison_candidate = (
@@ -1822,7 +1094,7 @@ def _experience_generation_summary(
         comparison_candidate[2] - previous_comparison_candidate[2]
         if comparison_candidate is not None
         and previous_comparison_candidate is not None
-        and score_comparison in {"legacy_full_cohort", "same_cohort"}
+        and score_comparison == "same_cohort"
         else None
     )
     observed_improvement = bool(
@@ -1830,7 +1102,7 @@ def _experience_generation_summary(
         and score_delta is not None
         and score_delta > _IMPROVEMENT_TOLERANCE
     )
-    modifications = _experience_modifications(state, analysis, plans, adoptions)
+    modifications = _experience_modifications(state, analysis, plans)
     result: dict[str, Any] = {
         "generation": analysis.generation,
         "score_comparison": score_comparison,
@@ -1883,17 +1155,6 @@ def _experience_generation_summary(
         result["evaluation_cohort_digest"] = cohort_digest
     if score_delta is not None:
         result["best_score_delta_vs_previous_generation"] = score_delta
-    synthesis_effect = _experience_synthesis_effect(
-        state,
-        analysis,
-        modifications,
-        score_comparison=score_comparison,
-        comparison_candidate=comparison_candidate,
-        score_delta=score_delta,
-        observed_improvement=observed_improvement,
-    )
-    if synthesis_effect is not None:
-        result["algorithm_synthesis_effect"] = synthesis_effect
     return result
 
 
@@ -2315,19 +1576,13 @@ def _history_generation_projection(
         "batch_highest_observed_score",
         "evaluation_cohort_digest",
         "best_score_delta_vs_previous_generation",
-        "algorithm_synthesis_effect",
     )
     projected = {
         name: json.loads(canonical_json(summary[name]))
         for name in allowed_fields
         if name in summary
     }
-    synthesis_effect = projected.get("algorithm_synthesis_effect")
-    if isinstance(synthesis_effect, dict):
-        synthesis_effect.pop("comparison_candidate_id", None)
     modifications = projected.get("modifications")
-    if isinstance(modifications, dict):
-        modifications.pop("adoption_reason", None)
     projected["gate_result"] = {
         "candidate_count": analysis.candidate_count,
         "eligible_count": analysis.eligible_count,
@@ -2361,7 +1616,6 @@ def _history_generation_projection(
             ("parameter_names_modified", 12),
             ("candidate_parameter_sets", 2),
             ("candidate_behaviors", 4),
-            ("algorithm_synthesis_parameter_focus", 8),
         ):
             rows = modifications.get(field_name)
             if isinstance(rows, list):
@@ -2622,7 +1876,7 @@ def _historical_experience_payload(
         )
         if not analyses:
             continue
-        plans, adoptions = _experience_plan_sources(
+        plans = _experience_plan_sources(
             historical_state, analyses[-1].generation + 1
         )
         previous_analysis: GenerationAnalysis | None = None
@@ -2632,7 +1886,6 @@ def _historical_experience_payload(
                 analysis,
                 previous_analysis,
                 plans,
-                adoptions,
             )
             records.append(
                 (
@@ -3071,7 +2324,7 @@ def build_cross_generation_experience(
         key=lambda item: item.generation,
     )
     scanned = available[-_EXPERIENCE_SCAN_GENERATIONS:]
-    plans, adoptions = _experience_plan_sources(state, generation)
+    plans = _experience_plan_sources(state, generation)
     summaries: list[dict[str, Any]] = []
     previous_analysis: GenerationAnalysis | None = None
     for analysis in scanned:
@@ -3081,7 +2334,6 @@ def build_cross_generation_experience(
                 analysis,
                 previous_analysis,
                 plans,
-                adoptions,
             )
         )
         previous_analysis = analysis
@@ -3147,770 +2399,20 @@ def build_cross_generation_experience(
     return result
 
 
-def _rank_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
-    has_finite_score = math.isfinite(_finite(row.get("score"), math.nan))
-    if row.get("evidence_class") == EXPLORATORY_EVIDENCE_CLASS:
-        floor = row.get("primary_selection_stability_floor")
-        interval = row.get("interval_score")
-        return (
-            has_finite_score,
-            bool(row.get("validity_pass")),
-            bool(row.get("primary_selection_gate")),
-            _finite(floor, -math.inf),
-            _finite(row.get("robustness_min_cell_delta"), -math.inf),
-            _finite(
-                row.get("robustness_lower_quartile_cell_delta"), -math.inf
-            ),
-            _finite(row.get("primary_score", row.get("score")), -math.inf),
-            bool(row.get("uq_pass_or_not_required")),
-            -_finite(interval, 0.0),
-            _finite(row.get("execution_policy_score"), -math.inf),
-            _finite(row.get("efficiency_score"), -math.inf),
-            -_finite(row.get("complexity"), math.inf),
-            -int(row.get("slot_index", 0)),
-            str(row.get("candidate_id") or ""),
-        )
-    score = _finite(row.get("score"), -math.inf)
-    worst = _finite(row.get("worst_skill_score"), -math.inf)
-    scientific_pass = bool(row.get("scientific_pass"))
-    judge_accepted = bool(row.get("judge_accepted"))
-    return (
-        has_finite_score,
-        scientific_pass,
-        -int(row.get("constraint_violations", 0)),
-        score,
-        worst,
-        # Independent review remains a formal eligibility filter below, but it
-        # cannot override objective evidence when choosing a search parent.
-        judge_accepted,
-        -_finite(row.get("parameter_distance"), math.inf),
-        -int(row.get("slot_index", 0)),
-    )
 
 
-def _cross_generation_search_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
-    """Rank comparable search evidence without generation-local tie breakers."""
-
-    has_finite_score = math.isfinite(_finite(row.get("score"), math.nan))
-    constraint_safety = -int(row.get("constraint_violations", 0))
-    if row.get("evidence_class") == EXPLORATORY_EVIDENCE_CLASS:
-        return (
-            has_finite_score,
-            constraint_safety,
-            bool(row.get("validity_pass")),
-            bool(row.get("primary_selection_gate")),
-            _finite(row.get("primary_selection_stability_floor"), -math.inf),
-            _finite(row.get("robustness_min_cell_delta"), -math.inf),
-            _finite(
-                row.get("robustness_lower_quartile_cell_delta"), -math.inf
-            ),
-            _finite(row.get("primary_score", row.get("score")), -math.inf),
-            bool(row.get("uq_pass_or_not_required")),
-            -_finite(row.get("interval_score"), 0.0),
-            _finite(row.get("execution_policy_score"), -math.inf),
-            _finite(row.get("efficiency_score"), -math.inf),
-            -_finite(row.get("complexity"), math.inf),
-        )
-    return (
-        has_finite_score,
-        bool(row.get("scientific_pass")),
-        constraint_safety,
-        _finite(row.get("score"), -math.inf),
-        _finite(row.get("worst_skill_score"), -math.inf),
-        bool(row.get("judge_accepted")),
-    )
 
 
-def _select_search_parent(
-    state: Any,
-    batch: GenerationBatch,
-    rows: Sequence[Mapping[str, Any]],
-    *,
-    generation_controls: Mapping[str, tuple[str, Evaluation]] | None = None,
-    profile: FitnessProfile | None = None,
-) -> tuple[str | None, bool, dict[str, Any]]:
-    """Choose the best comparable current-or-prior candidate for exploration."""
-
-    search_rows = [
-        row
-        for row in rows
-        if row.get("score") is not None
-        and int(row.get("constraint_violations", 0)) == 0
-    ]
-    if not search_rows:
-        search_rows = [row for row in rows if row.get("score") is not None]
-    current_row = search_rows[0] if search_rows else None
-    current_id = (
-        str(current_row["candidate_id"])
-        if current_row is not None
-        else None
-    )
-    if batch.generation <= 0:
-        return current_id, False, {}
-
-    if generation_controls:
-        if profile is None:
-            raise RuntimeError("strict search-parent selection requires a fitness profile")
-        control_id, control_evaluation = generation_controls["search_parent"]
-        current_evaluations = tuple(
-            evaluation
-            for row in search_rows
-            if (evaluation := state.evaluation_for(str(row["candidate_id"])))
-            is not None
-        )
-        assessments = {
-            item.candidate_id: item
-            for item in assess_generation_selection(
-                current_evaluations,
-                control_evaluation,
-                profile,
-            )
-        }
-        for row in search_rows:
-            candidate_id = str(row["candidate_id"])
-            assessment = assessments.get(candidate_id)
-            if (
-                assessment is not None
-                and bool(row.get("validity_pass"))
-                and assessment.primary_selection_gate
-            ):
-                return candidate_id, False, assessments
-        return control_id, True, assessments
-
-    previous = state.analysis_for(batch.generation - 1)
-    previous_id = (
-        previous.search_parent_candidate_id if previous is not None else None
-    )
-    if previous_id is None:
-        return current_id, False, {}
-    previous_row = next(
-        (
-            row
-            for row in previous.ranking
-            if row.get("candidate_id") == previous_id
-            and row.get("score") is not None
-        ),
-        None,
-    )
-    if previous_row is None:
-        return current_id, False, {}
-    if current_row is None:
-        return previous_id, True, {}
-
-    current_evaluation = state.evaluation_for(current_id)
-    previous_evaluation = state.evaluation_for(previous_id)
-    if current_evaluation is None or previous_evaluation is None:
-        return current_id, False, {}
-    if current_evaluation.evaluator_digest != previous_evaluation.evaluator_digest:
-        return current_id, False, {}
-    comparison = evaluation_cohort_comparison(
-        state.task_manifest,
-        current_evaluation,
-        previous_evaluation,
-    )
-    if comparison not in {"legacy_full_cohort", "same_cohort"}:
-        return current_id, False, {}
-    if _cross_generation_search_key(previous_row) >= _cross_generation_search_key(
-        current_row
-    ):
-        return previous_id, previous_id != current_id, {}
-    return current_id, False, {}
 
 
-def _metric_weaknesses(
-    state: Any,
-    candidates: list[Any],
-    field_name: str,
-    identity_fields: tuple[str, ...],
-) -> tuple[dict[str, Any], ...]:
-    groups: dict[tuple[Any, ...], dict[str, list[float]]] = defaultdict(
-        lambda: {"skills": [], "normalized_mean_rewards": []}
-    )
-    for candidate in candidates:
-        evaluation = state.evaluation_for(candidate.candidate_id)
-        if evaluation is None:
-            continue
-        raw_rows = evaluation.metrics.get(field_name)
-        if not isinstance(raw_rows, list):
-            continue
-        for raw in raw_rows:
-            if not isinstance(raw, Mapping):
-                continue
-            score = _skill(raw)
-            reward = _finite(raw.get("normalized_mean_reward"), math.nan)
-            if not math.isfinite(score) and not math.isfinite(reward):
-                continue
-            identity = tuple(raw.get(name) for name in identity_fields)
-            if math.isfinite(score):
-                groups[identity]["skills"].append(score)
-            if math.isfinite(reward):
-                groups[identity]["normalized_mean_rewards"].append(reward)
-    rows = []
-    for identity, aggregates in groups.items():
-        scores = aggregates["skills"]
-        rewards = aggregates["normalized_mean_rewards"]
-        row = {name: value for name, value in zip(identity_fields, identity)}
-        if scores:
-            row.update(
-                {
-                    "median_skill_score": median(scores),
-                    "mean_skill_score": fmean(scores),
-                    "evidence_count": len(scores),
-                }
-            )
-        if rewards:
-            row.update(
-                {
-                    "median_normalized_mean_reward": median(rewards),
-                    "mean_normalized_mean_reward": fmean(rewards),
-                    "reward_evidence_count": len(rewards),
-                }
-            )
-        rows.append(row)
-    rows.sort(
-        key=lambda item: (
-            min(
-                _finite(item.get("median_skill_score"), math.inf),
-                _finite(
-                    item.get("median_normalized_mean_reward"), math.inf
-                ),
-            ),
-            *(str(item.get(name)) for name in identity_fields),
-        )
-    )
-    return tuple(rows[:_METRIC_WEAKNESS_MAX_GROUPS])
 
 
-def _historical_scored_configurations(
-    state: Any,
-    generation: int,
-) -> list[tuple[Any, float]]:
-    """Accumulate one score per unique parameter set through this generation."""
-
-    required_cohort_digest: str | None = None
-    if sample_update_windows_enabled(state.task_manifest):
-        current_digests = {
-            digest_value
-            for candidate in state.candidates
-            if candidate.generation == generation
-            if getattr(candidate, "role", CandidateRole.SEARCH)
-            in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
-            if (evaluation := state.evaluation_for(candidate.candidate_id)) is not None
-            if (digest_value := evaluation_cohort_digest(evaluation)) is not None
-        }
-        if len(current_digests) != 1:
-            return []
-        required_cohort_digest = next(iter(current_digests))
-
-    grouped: dict[str, tuple[Any, list[float]]] = {}
-    candidates = sorted(
-        (
-            item
-            for item in state.candidates
-            if item.generation <= generation
-            and getattr(item, "role", CandidateRole.SEARCH)
-            in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
-        ),
-        key=lambda item: (item.generation, item.slot_index, item.candidate_id),
-    )
-    for candidate in candidates:
-        evaluation = state.evaluation_for(candidate.candidate_id)
-        if evaluation is None:
-            continue
-        if (
-            required_cohort_digest is not None
-            and evaluation_cohort_digest(evaluation) != required_cohort_digest
-        ):
-            continue
-        proposal = state.proposal(candidate.proposal_id)
-        key = canonical_json(_parameter_summary(proposal.changes))
-        if key not in grouped:
-            grouped[key] = (proposal, [])
-        grouped[key][1].append(float(evaluation.score))
-    return [
-        (proposal, fmean(scores))
-        for proposal, scores in grouped.values()
-        if scores
-    ]
 
 
-def _parameter_effects(state: Any, generation: int) -> tuple[dict[str, Any], ...]:
-    scored = _historical_scored_configurations(state, generation)
-    if len(scored) < 3:
-        return ()
-    names = sorted({name for proposal, _ in scored for name in proposal.changes})
-    effects = []
-    for name in names:
-        pairs = [
-            (float(proposal.changes[name]), float(score))
-            for proposal, score in scored
-            if isinstance(proposal.changes.get(name), (int, float))
-            and not isinstance(proposal.changes.get(name), bool)
-        ]
-        if len(pairs) < 3 or len({item[0] for item in pairs}) < 2:
-            if len(pairs) >= 3:
-                effects.append(
-                    {
-                        "parameter": name,
-                        "association_with_score": None,
-                        "direction": "unidentifiable",
-                        "evidence_count": len(pairs),
-                        "unique_value_count": len({item[0] for item in pairs}),
-                        "unique_configuration_count": len(scored),
-                        "generation_end": generation,
-                        "interpretation": "constant_axis_requires_new_exploration",
-                    }
-                )
-            continue
-        xs = [item[0] for item in pairs]
-        ys = [item[1] for item in pairs]
-        x_mean, y_mean = fmean(xs), fmean(ys)
-        numerator = sum((x - x_mean) * (y - y_mean) for x, y in pairs)
-        denominator = math.sqrt(
-            sum((x - x_mean) ** 2 for x in xs)
-            * sum((y - y_mean) ** 2 for y in ys)
-        )
-        association = numerator / denominator if denominator > 1e-15 else 0.0
-        effects.append(
-            {
-                "parameter": name,
-                "association_with_score": association,
-                "direction": (
-                    "positive" if association > 0.2 else "negative" if association < -0.2 else "weak"
-                ),
-                "evidence_count": len(pairs),
-                "unique_value_count": len({item[0] for item in pairs}),
-                "unique_configuration_count": len(scored),
-                "generation_end": generation,
-                "interpretation": (
-                    "same_cohort_observational_association_non_causal"
-                    if sample_update_windows_enabled(state.task_manifest)
-                    else "cross_generation_observational_association_non_causal"
-                ),
-            }
-        )
-    effects.sort(
-        key=lambda item: (
-            -abs(float(item["association_with_score"]))
-            if isinstance(item.get("association_with_score"), (int, float))
-            else 1.0,
-            item["parameter"],
-        )
-    )
-    return tuple(effects)
 
 
-def _previous_incumbent(state: Any, generation: int) -> tuple[Any, Any] | None:
-    candidate_id = state.run.best_candidate_id
-    if candidate_id is None:
-        return None
-    candidate = state.candidate(candidate_id)
-    evaluation = state.evaluation_for(candidate_id)
-    if (
-        candidate.generation >= generation
-        or candidate.status is not CandidateStatus.PROMOTED
-        or evaluation is None
-    ):
-        raise RuntimeError("run incumbent is missing its prior promotion evidence")
-    return candidate, evaluation
 
 
-def build_generation_analysis(state: Any, batch: GenerationBatch) -> GenerationAnalysis:
-    """Analyze one terminal batch without using raw rows or completion times."""
-
-    dsh_native = (
-        state.task_manifest.metadata.get("execution_protocol")
-        == "dsh_native_plugin_evolution@1"
-    )
-    diagnostic_smoke = bool(
-        dsh_native
-        and state.task_manifest.metadata.get("sample_budget_class")
-        == "diagnostic_smoke"
-    )
-    candidates = sorted(
-        (
-            item
-            for item in state.candidates
-            if item.generation == batch.generation
-            and getattr(item, "role", CandidateRole.SEARCH)
-            in {CandidateRole.SEARCH, CandidateRole.SEARCH.value}
-        ),
-        key=lambda item: item.slot_index,
-    )
-    if len(candidates) != batch.batch_size:
-        raise RuntimeError("generation batch is not fully generated")
-    terminal = {
-        CandidateStatus.EVALUATED,
-        CandidateStatus.PROMOTED,
-        CandidateStatus.REJECTED,
-        CandidateStatus.FAILED,
-        CandidateStatus.DUPLICATE,
-        CandidateStatus.SCREENED_OUT,
-    }
-    if any(item.status not in terminal for item in candidates):
-        raise RuntimeError("generation batch still has unfinished candidates")
-
-    incumbent = _previous_incumbent(state, batch.generation)
-    controls = generation_control_evaluations(state, batch)
-    formal_comparator = (
-        controls["formal_elite"][1]
-        if "formal_elite" in controls
-        else incumbent[1]
-        if incumbent is not None
-        else None
-    )
-    rows = [_candidate_row(state, item, batch.parent_candidate_id) for item in candidates]
-    if dsh_native:
-        profile = FitnessProfile.from_task(state.task_manifest)
-        selection_by_candidate: dict[str, Any] = {}
-        evaluated = [
-            evaluation
-            for candidate in candidates
-            if (evaluation := state.evaluation_for(candidate.candidate_id)) is not None
-        ]
-        if formal_comparator is not None and evaluated:
-            selection_by_candidate = {
-                item.candidate_id: item
-                for item in assess_generation_selection(
-                    tuple(evaluated), formal_comparator, profile
-                )
-            }
-        for row in rows:
-            evaluation = state.evaluation_for(str(row["candidate_id"]))
-            if evaluation is None:
-                continue
-            runtime = evaluation.metrics.get("runtime_metrics", {})
-            assessment = build_fitness_assessment(
-                evaluation,
-                formal_comparator,
-                runtime if isinstance(runtime, Mapping) else {},
-                profile,
-            )
-            assessment_fields = assessment.to_dict()
-            # Candidate identity is assigned by the Host ledger.  Evaluation
-            # metrics may omit their optional slot hint (whose legacy default
-            # is zero), so they must never overwrite the durable candidate
-            # slot used for replay and generation attribution.
-            assessment_fields.pop("candidate_id", None)
-            assessment_fields.pop("slot_index", None)
-            row.update(assessment_fields)
-            row["fitness_profile_digest"] = profile.profile_digest
-            selection = selection_by_candidate.get(assessment.candidate_id)
-            if selection is not None:
-                row.update(
-                    {
-                        "selection_status": selection.status,
-                        "primary_selection_stability_floor": (
-                            selection.selection_stability_floor
-                        ),
-                        "primary_selection_gate": bool(
-                            assessment.primary_selection_gate
-                            and assessment.robustness_pass
-                            and selection.primary_selection_gate
-                        ),
-                        "paired_block_count": selection.paired_block_count,
-                        "valid_three_day_start_count": (
-                            selection.valid_three_day_start_count
-                        ),
-                        "paired_block_ids_digest": (
-                            selection.paired_block_ids_digest
-                        ),
-                        "formal_confirmation": False,
-                    }
-                )
-            else:
-                row["primary_selection_gate"] = bool(
-                    assessment.primary_selection_gate
-                    and assessment.robustness_pass
-                )
-    rows.sort(key=_rank_key, reverse=True)
-    scientific_rank = 0
-    for row in rows:
-        if math.isfinite(_finite(row.get("score"), math.nan)):
-            scientific_rank += 1
-            row["rank"] = scientific_rank
-        else:
-            row["rank"] = None
-    eligible = [row for row in rows if row["eligible"]]
-    selected_id = eligible[0]["candidate_id"] if eligible else None
-    incumbent_id = incumbent[0].candidate_id if incumbent else None
-    selected_evaluation = state.evaluation_for(selected_id) if selected_id else None
-    cohort_comparison = (
-        evaluation_cohort_comparison(
-            state.task_manifest,
-            selected_evaluation,
-            formal_comparator,
-        )
-        if selected_evaluation is not None and formal_comparator is not None
-        else "no_incumbent"
-    )
-    current_cohort_verifiable = bool(
-        not sample_update_windows_enabled(state.task_manifest)
-        or (
-            selected_evaluation is not None
-            and evaluation_cohort_digest(selected_evaluation) is not None
-        )
-    )
-    promotion_assessment = (
-        assess_promotion_improvement(
-            selected_evaluation,
-            formal_comparator,
-        )
-        if selected_evaluation is not None
-        and formal_comparator is not None
-        and not dsh_native
-        and cohort_comparison in {"legacy_full_cohort", "same_cohort"}
-        else None
-    )
-    selected_row = next(
-        (row for row in rows if row["candidate_id"] == selected_id), None
-    )
-    if dsh_native:
-        improved = bool(
-            not diagnostic_smoke
-            and selected_evaluation is not None
-            and current_cohort_verifiable
-            and selected_row is not None
-            and selected_row.get("primary_selection_gate")
-        )
-    else:
-        improved = bool(
-            selected_evaluation is not None
-            and current_cohort_verifiable
-            and (
-                incumbent is None
-                or (
-                    cohort_comparison in {"legacy_full_cohort", "same_cohort"}
-                    and promotion_assessment is not None
-                    and promotion_assessment["improved"]
-                )
-            )
-        )
-    champion_id = selected_id if improved else None
-    outcome = (
-        "promoted"
-        if champion_id is not None
-        else "no_improvement"
-        if selected_id is not None
-        else "no_eligible_candidate"
-    )
-    after_id = champion_id or incumbent_id
-    (
-        search_parent_id,
-        retained_prior_search_elite,
-        search_control_assessments,
-    ) = _select_search_parent(
-        state,
-        batch,
-        rows,
-        generation_controls=controls,
-        profile=profile if dsh_native else None,
-    )
-    for row in rows:
-        search_assessment = search_control_assessments.get(
-            str(row["candidate_id"])
-        )
-        if search_assessment is not None:
-            row.update(
-                {
-                    "search_parent_control_candidate_id": controls[
-                        "search_parent"
-                    ][0],
-                    "search_parent_selection_status": search_assessment.status,
-                    "search_parent_primary_delta": search_assessment.primary_delta,
-                    "search_parent_stability_floor": (
-                        search_assessment.selection_stability_floor
-                    ),
-                    "search_parent_selection_gate": (
-                        search_assessment.primary_selection_gate
-                    ),
-                }
-            )
-        row["search_parent"] = row["candidate_id"] == search_parent_id
-        if diagnostic_smoke and row["candidate_id"] == selected_id:
-            row["selection_reason"] = "diagnostic_smoke_search_parent_only"
-        elif row["candidate_id"] == champion_id:
-            row["selection_reason"] = (
-                "cohort_changed_batch_champion"
-                if cohort_comparison == "different_cohort"
-                else "generation_champion_strictly_improved_incumbent"
-            )
-        elif row["candidate_id"] == selected_id:
-            row["selection_reason"] = (
-                "cohort_digest_unavailable"
-                if not current_cohort_verifiable
-                or cohort_comparison == "unverifiable"
-                else "cohort_changed_search_parent_only"
-                if cohort_comparison == "different_cohort"
-                else "generation_best_did_not_improve_incumbent"
-            )
-        elif row["eligible"]:
-            row["selection_reason"] = "lower_stable_rank_than_generation_best"
-        else:
-            row["selection_reason"] = row["classification"]
-
-    failures = Counter(row["classification"] for row in rows if not row["eligible"])
-    threshold = 1 if len(rows) == 1 else max(2, math.ceil(len(rows) / 2))
-    common_failures = tuple(
-        name for name, count in sorted(failures.items()) if count >= threshold
-    )
-    constraint_ids = tuple(
-        str(row["candidate_id"])
-        for row in rows
-        if int(row["constraint_violations"]) > 0
-    )
-    disagreements = tuple(
-        {
-            "candidate_id": row["candidate_id"],
-            "scientific_pass": row["scientific_pass"],
-            "judge_accepted": row["judge_accepted"],
-        }
-        for row in rows
-        if row["score"] is not None
-        and bool(row["judge_available"])
-        and bool(row["scientific_pass"]) != bool(row["judge_accepted"])
-    )
-    target_weaknesses = _metric_weaknesses(
-        state, candidates, "targets", ("target", "horizon_hours", "unit")
-    )
-    horizon_weaknesses = _metric_weaknesses(
-        state, candidates, "horizons", ("horizon_hours",)
-    )
-    historical_scored = _historical_scored_configurations(state, batch.generation)
-    effects = _parameter_effects(state, batch.generation)
-    algorithm_failures = _algorithm_failure_summary(state, candidates)
-    sample_failures = _sample_failure_summary(state, candidates)
-    insufficient = len(historical_scored) < 3 or not any(
-        item.get("direction") != "unidentifiable" for item in effects
-    )
-
-    directions = []
-    if constraint_ids:
-        directions.append("收缩引发物理范围违规的参数和搜索步长")
-    if target_weaknesses:
-        weakest = target_weaknesses[0]
-        target = str(weakest.get("target") or "")
-        label = _TARGET_LABELS.get(target, target or "预测目标")
-        horizon = weakest.get("horizon_hours")
-        directions.append(
-            f"优先改善 {label}" + (f" 的 {horizon} 小时时距" if horizon is not None else "")
-        )
-    if disagreements:
-        directions.append("保留科学指标，单独处理独立评审提出的治理问题")
-    if algorithm_failures:
-        directions.append("根据编译或调试失败码更换已登记算法配置并重新预检")
-    if any(
-        int(row.get("failed", 0)) > 0
-        or int(row.get("skipped", 0)) > 0
-        or row.get("coverage_pass") is False
-        for row in sample_failures
-    ):
-        directions.append("根据样本失败计数调整工具调用与重试策略，同时保持覆盖率门槛")
-    if any(row.get("tool_performance") for row in sample_failures):
-        directions.append("根据工具采用率和分目标误差调整下一轮模型工具与路由偏好")
-    if outcome == "no_improvement":
-        directions.append("保持当前最优方案，仅扩大一个可识别参数方向")
-    elif outcome == "no_eligible_candidate":
-        if search_parent_id is not None:
-            directions.append("从本轮最佳安全评测候选继续搜索，但不将其视为正式通过")
-        else:
-            directions.append("回到当前最优方案附近，采用更保守的恢复搜索")
-    else:
-        directions.append("围绕新冠军缩小步长并继续时间前向评测")
-    if insufficient:
-        directions.append("参数效果证据不足，不推断因果影响")
-    directions = list(dict.fromkeys(directions))
-
-    if diagnostic_smoke and selected_id is not None:
-        reason = (
-            f"候选 {selected_id} 是本轮诊断样本上的最佳可用方案；"
-            "诊断预算低于冻结的正式选择证据门槛，因此仅作为下一轮搜索父方案，"
-            "不生成冠军、不改变正式最优方案。"
-        )
-    elif selected_id is not None and cohort_comparison == "different_cohort":
-        reason = (
-            f"候选 {selected_id} 是本轮固定样本窗口内排名第一的合格方案；"
-            "本轮与历史最优方案使用不同评测窗口，因此未比较跨窗口原始分数，"
-            "不改变正式最优方案，仅作为下一轮搜索父方案。"
-        )
-    elif champion_id is not None and dsh_native:
-        if incumbent is None:
-            reason = (
-                f"候选 {champion_id} 在冻结的自适应选择数据上通过有效性、"
-                "实用差异与单元稳健性门禁，建立搜索基线；该结果仅用于选择与"
-                "后续搜索，不构成正式确认。"
-            )
-        else:
-            reason = (
-                f"候选 {champion_id} 在冻结的自适应选择数据上通过实用差异、"
-                "单元稳健性与同轮 max-T 稳定性门禁；该结果仅用于选择与后续搜索，"
-                "不构成正式确认。"
-            )
-    elif champion_id is not None:
-        reason = (
-            f"候选 {champion_id} 同轮排名第一且通过实用差异与"
-            "配对区块置信度晋级门槛。"
-        )
-    elif selected_id is not None and (
-        not current_cohort_verifiable or cohort_comparison == "unverifiable"
-    ):
-        reason = (
-            f"同轮最佳候选 {selected_id} 缺少可验证的固定样本窗口摘要；"
-            "为避免错误比较跨窗口分数，未作正式晋升。"
-        )
-    elif selected_id is not None and incumbent is not None and selected_evaluation is not None:
-        if dsh_native and selected_row is not None:
-            policy_reason = str(
-                selected_row.get("selection_status")
-                or selected_row.get("classification")
-                or "selection_gate_failed"
-            )
-        else:
-            policy_reason = (
-                str(promotion_assessment.get("reason_code"))
-                if promotion_assessment is not None
-                else "score_not_improved"
-            )
-        reason = (
-            f"同轮最佳候选 {selected_id} 得分 {selected_evaluation.score:.12g}，"
-            f"未通过当前最优方案 {incumbent_id} 的晋级门槛"
-            f"（{policy_reason}）。"
-        )
-    else:
-        reason = "本轮没有同时通过科学门禁和独立评审的候选，保留当前正式最优方案。"
-        if search_parent_id is not None:
-            reason += f" 后续搜索从已完成评测候选 {search_parent_id} 继续。"
-    if retained_prior_search_elite and search_parent_id is not None:
-        reason += (
-            f" 同一评测队列内，本轮最佳未超过既有搜索精英 {search_parent_id}，"
-            "因此保留该父方案以避免跨轮退化。"
-        )
-    focus = directions[0] if directions else "保持当前最优方案并继续有界搜索"
-    return GenerationAnalysis(
-        run_id=state.run.run_id,
-        generation=batch.generation,
-        candidate_count=len(candidates),
-        eligible_count=len(eligible),
-        outcome=outcome,
-        selected_candidate_id=selected_id,
-        champion_candidate_id=champion_id,
-        incumbent_before_candidate_id=incumbent_id,
-        incumbent_after_candidate_id=after_id,
-        search_parent_candidate_id=search_parent_id,
-        ranking=tuple(rows),
-        common_failures=common_failures,
-        target_weaknesses=target_weaknesses,
-        horizon_weaknesses=horizon_weaknesses,
-        constraint_failures=constraint_ids,
-        judge_disagreements=disagreements,
-        parameter_effects=effects,
-        next_search_direction=tuple(directions),
-        next_generation_focus=focus,
-        selection_reason=reason,
-        insufficient_evidence=insufficient,
-        algorithm_failures=algorithm_failures,
-        sample_failures=sample_failures,
-    )
 
 
 __all__ = [
@@ -3920,10 +2422,7 @@ __all__ = [
     "GenerationAnalysis",
     "GenerationBatch",
     "build_cross_generation_experience",
-    "build_generation_analysis",
     "evaluation_cohort_comparison",
     "evaluation_cohort_digest",
-    "generation_control_evaluations",
     "sample_update_windows_enabled",
-    "strict_generation_controls_required",
 ]

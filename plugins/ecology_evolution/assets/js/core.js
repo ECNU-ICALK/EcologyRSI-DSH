@@ -81,9 +81,6 @@
     evapotranspiration: "蒸散量", irrigation: "灌溉量", biomass: "生物量",
     water_stress: "水分胁迫指数", split: "数据分区"
   };
-  var interventionLabels = {
-    guidance: "方向建议", parameter_override: "参数覆盖", constraint: "新增约束", parent_selection: "指定父方案", domain_knowledge: "专家知识"
-  };
   // The twelve mutation axes the host advertises to the researcher. A candidate
   // card that only names the raw operation ("set_bounded_workflow_parameter")
   // asks the expert to know the contract vocabulary before they can judge the
@@ -124,9 +121,6 @@
     "holdout.arm_started": "轮末留出评测臂已启动", "holdout.recheck_started": "条件复核已启动", "generation.comparison_recorded": "轮末比较结果已记录",
     "artifact.recorded": "候选训练产物已记录",
     "evaluation.progress": "真实样本评测正在推进", "evaluation.sample_results_started": "样本评测结果开始写入", "evaluation.sample_result_batch": "样本评测结果批次已写入", "evaluation.sample_results_completed": "样本评测结果已写入", "evaluation.completed": "训练反馈检查已完成", "evaluation.judged": "候选方案独立评审结论已记录", "promotion.decided": "搜索保留决策已记录", "promotion.pending": "等待搜索保留决策",
-    "intervention.recorded": "专家主动意见已记录", "intervention.applied": "专家主动意见处理结果已记录", "intervention.submitted": "专家主动意见已提交",
-    "expert_consultation.requested": "模型已提交专家咨询", "expert_consultation.answered": "专家咨询已答复", "expert_consultation.applied": "专家答复已用于后续轮次",
-    "consultation.requested": "模型已提交专家咨询", "consultation.answered": "专家咨询已答复", "consultation.applied": "专家答复已用于后续轮次",
     "stage.recorded": "进化阶段状态已更新", "gateway.retry_scheduled": "网关繁忙，已安排延迟重试", "model.usage_recorded": "模型调用用量已记录", "host.execution_interrupted": "宿主运行间断已记录",
     "dsh.child_execution_failed": "DSH 子任务请求失败", "dshchildlaunchreserved": "DSH 子任务已获得执行槽位", "dshretrievalexecuted": "DSH 资料检索已执行", "dshpredictiontoolexecuted": "DSH 预测工具已执行", "dshstructuredresultaccepted": "DSH 结构化结果已验收"
   };
@@ -134,8 +128,6 @@
     apiBase: EcologyDSHHost.getPublicContext().apiBase,
     hostContextReceived: false,
     hostContext: EcologyDSHHost.getPublicContext(),
-    allowDemo: query.get("demo") === "1",
-    usingDemo: false,
     connection: "checking",
     loadState: "loading",
     workspace: "settings",
@@ -188,9 +180,6 @@
     contextEpoch: 0,
     runReadRequest: 0,
     commandKeys: {},
-    // Answer forms are rebuilt from the latest projection on every poll. Keep
-    // unsent text outside the DOM so a refresh cannot erase expert input.
-    expertConsultationDrafts: {},
     // Continuous evolution is coordinated by one serial scheduler.  Timer
     // handles stay in page memory and are intentionally omitted from the
     // public projection exported to host integrations.
@@ -207,8 +196,6 @@
     workspaceVersions: {},
     workspaceRequests: {},
     workspaceErrors: {},
-    trainingAssetDetails: {},
-    trainingAssetRequests: {},
     eventReadRequest: 0,
     eventReadPending: null,
     candidateBudgetManual: false,
@@ -233,27 +220,6 @@
     return serviceCapabilities.filter(function (name) { return hostCapabilities.indexOf(name) >= 0; });
   }
   function hasCapability(name) { return capabilities().indexOf(name) >= 0; }
-
-  function expertConsultationId(item) {
-    return String(item && (item.consultation_id || item.id) || "");
-  }
-  function expertConsultationDraftKey(runId, consultationId) {
-    return String(runId || "") + "::" + String(consultationId || "");
-  }
-  function defaultExpertIdentity() {
-    var identity = state.hostContext && state.hostContext.identity || {};
-    return String(identity.displayName || identity.subjectId || "");
-  }
-  function expertConsultationDraft(runId, consultationId) {
-    var key = expertConsultationDraftKey(runId, consultationId);
-    if (!state.expertConsultationDrafts[key]) {
-      state.expertConsultationDrafts[key] = { answer: "", selected_option: "", answered_by: defaultExpertIdentity(), persistent: false };
-    }
-    return state.expertConsultationDrafts[key];
-  }
-  function clearExpertConsultationDraft(runId, consultationId) {
-    delete state.expertConsultationDrafts[expertConsultationDraftKey(runId, consultationId)];
-  }
 
   function escapeHTML(value) {
     return String(value == null ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;")
@@ -385,7 +351,7 @@
     return "pill-neutral";
   }
   function runHasEvolutionProgress(run, events) {
-    var progressArrays = ["trajectory", "rounds", "generation_batches", "generation_analyses", "knowledge_snapshots", "knowledge_assessments", "training_assets", "artifacts", "candidates"];
+    var progressArrays = ["trajectory", "rounds", "generation_batches", "generation_analyses", "knowledge_snapshots", "knowledge_assessments", "artifacts", "candidates"];
     if (run && (run.has_evolution_progress === true || Number(run.generation || run.current_generation || 0) > 0
       || progressArrays.some(function (field) { return Array.isArray(run[field]) && run[field].length > 0; })
       || Number(run.execution_progress && run.execution_progress.completed_steps || 0) > 0)) {
@@ -397,25 +363,6 @@
       var type = String(event && (event.type || event.event_type || event.kind) || "").toLowerCase();
       return type.indexOf("generation") >= 0 || type.indexOf("knowledge") >= 0 || type.indexOf("proposal") >= 0 || type.indexOf("candidate") >= 0 || type.indexOf("artifact") >= 0 || type.indexOf("evaluation") >= 0 || type.indexOf("promotion") >= 0 || type.indexOf("stage") >= 0;
     });
-  }
-  function runWaitingForAdvance(run, events) {
-    if (!run || String(run.status || "").toLowerCase() !== "running") { return false; }
-    var totalGenerations = Number(run.total_generations || run.budget && run.budget.max_generations || 0);
-    var maxCandidates = Number(run.max_candidates || run.budget && run.budget.max_candidates || 0);
-    var generation = Number(run.generation || run.current_generation || 0);
-    var candidates = Number(run.candidates_count != null ? run.candidates_count : run.candidate_count != null ? run.candidate_count : Array.isArray(run.candidates) ? run.candidates.length : 0);
-    // A true legacy projection has no execution phase. Its /advance call is
-    // synchronous, so any running run below both frozen budgets is a resumable
-    // boundary, including a partially written generation after a page reload.
-    return !(totalGenerations > 0 && generation >= totalGenerations) && !(maxCandidates > 0 && candidates >= maxCandidates);
-  }
-  function runNeedsAdvanceAction(run, events) {
-    if (!run || String(run.status || "").toLowerCase() !== "running") { return false; }
-    if (runHasContinuousAutoProgress(run)) { return false; }
-    var progress = run.execution_progress && typeof run.execution_progress === "object" ? run.execution_progress : {};
-    var phase = String(progress.phase || "").toLowerCase();
-    if (phase) { return phase === "waiting"; }
-    return runWaitingForAdvance(run, events);
   }
   function runHasContinuousAutoProgress(run) {
     var progress = run && run.execution_progress && typeof run.execution_progress === "object" ? run.execution_progress : {};
@@ -455,9 +402,6 @@
   function runIsTerminal(run) {
     return Boolean(run) && ["completed", "cancelled", "failed"].indexOf(String(run.status || "").toLowerCase()) >= 0;
   }
-  function expertConsultationRunIsTerminal(run) {
-    return Boolean(run) && ["completed", "cancelled", "failed", "released", "quarantined"].indexOf(String(run.status || "").toLowerCase()) >= 0;
-  }
   function reconcileVisibleRunSelection() {
     var runs = visibleRuns();
     if (state.activeRun && runs.some(function (run) { return run.id === state.activeRun.id; })) { return false; }
@@ -472,7 +416,7 @@
     state.datasetContext = null;
     state.datasetError = null;
     state.datasetLoading = false;
-    state.loadState = state.activeRun ? state.usingDemo ? "demo" : "ready" : "empty";
+    state.loadState = state.activeRun ? "ready" : "empty";
     return true;
   }
   function runOutcomeCode(run) {
@@ -668,7 +612,6 @@
     return runStatusExplanation(run, events).label;
   }
   function displayRunStatusClass(run, events) {
-    if (runNeedsAdvanceAction(run, events)) { return "pill-amber"; }
     if (runOutcomeCode(run) === "budget_exhausted_without_acceptable_candidate") { return "pill-amber"; }
     return statusClass(run && run.status);
   }
@@ -682,12 +625,6 @@
     }
     if (runHasRetryCircuitPause(run)) {
       return {label: "等待检查", detail: retryCircuitDetailText(run), nextAction: "检查对应服务后点击“恢复”。", tone: "waiting"};
-    }
-    if (runNeedsAdvanceAction(run, events)) {
-      if (Number(run.generation || 0) === 0) {
-        return {label: "等待下一步", detail: "任务已准备就绪，等待开始第一轮。", nextAction: "点击“开始第一轮”执行。", tone: "waiting"};
-      }
-      return {label: "等待下一步", detail: "上一轮已完成，等待继续执行下一轮。", nextAction: "点击“继续下一步”开始下一轮。", tone: "waiting"};
     }
     if (status === "running") {
       var phase = String(run.execution_progress && run.execution_progress.phase || "");
@@ -844,10 +781,7 @@
   }
   function selectedModelCatalogItem(selector) {
     var id = $(selector).value;
-    // Prefer the canonical DSH entry because it carries the authoritative
-    // credential and connection state.  ``models`` remains the compatibility
-    // fallback for older catalog responses and local demo entries.
-    return catalogItem("dsh_models", id) || catalogItem("models", id);
+    return catalogItem("dsh_models", id);
   }
   function modelReferenceLabel(id) {
     var value = String(id || "");
@@ -861,115 +795,22 @@
     return typeof item === "object" && item ? String(item.description || item.summary || item.detail || "") : "";
   }
   function normalizeList(value) { return Array.isArray(value) ? value.filter(function (item) { return itemId(item); }) : []; }
-  function mergeModelDirectory(lists) {
-    var merged = [];
-    var positions = Object.create(null);
-    (Array.isArray(lists) ? lists : []).forEach(function (list) {
-      normalizeList(list).forEach(function (item) {
-        var id = itemId(item);
-        if (!id) { return; }
-        if (positions[id] == null) {
-          positions[id] = merged.length;
-          merged.push(Object.assign({}, item));
-          return;
-        }
-        var index = positions[id];
-        var current = merged[index];
-        var roles = (Array.isArray(current.roles) ? current.roles : []).concat(Array.isArray(item.roles) ? item.roles : []).map(function (role) {
-          var value = String(role || "").toLowerCase();
-          return { strategy: "propose", policy: "propose", planner: "propose", proposer: "propose", review: "judge", reviewer: "judge", critic: "judge" }[value] || value;
-        }).filter(function (role, roleIndex, values) {
-          return role && values.indexOf(role) === roleIndex;
-        });
-        merged[index] = Object.assign({}, current, item, roles.length ? { roles: roles } : {});
-      });
-    });
-    return merged;
-  }
   function modelSupportsRole(item, role) {
-    if (!item || !role) { return false; }
-    var aliases = { strategy: "propose", policy: "propose", planner: "propose", proposer: "propose", review: "judge", reviewer: "judge", critic: "judge" };
-    var roles = Array.isArray(item.roles) ? item.roles.map(function (value) {
-      var normalized = String(value || "").toLowerCase();
-      return aliases[normalized] || normalized;
-    }) : [];
-    // Older DSH catalogues omitted roles; leave those entries selectable and let
-    // the server perform the authoritative role check.
-    var required = String(role).toLowerCase();
-    return !roles.length || roles.indexOf(aliases[required] || required) >= 0;
+    return Boolean(item && Array.isArray(item.roles) && item.roles.indexOf(role) >= 0);
   }
-  function finiteCatalogCount(value) {
-    var number = Number(value);
-    return Number.isFinite(number) && number >= 0 ? number : null;
+  function dshModelCountItems(verified) {
+    return verified ? state.catalog.authenticated_models || [] : sharedDshModelItems();
   }
-  function catalogCountFromFields(source, fields) {
-    if (!source || typeof source !== "object") { return null; }
-    for (var index = 0; index < fields.length; index += 1) {
-      var field = fields[index];
-      if (!Object.prototype.hasOwnProperty.call(source, field)) { continue; }
-      var count = finiteCatalogCount(source[field]);
-      if (count != null) { return count; }
-    }
-    return null;
-  }
-  function dshModelTotalCount(verified) {
-    var catalog = state.catalog || {};
-    var dsh = catalog.dsh || {};
-    var fields = verified
-      ? ["authenticated_dsh_model_count", "authenticated_model_count"]
-      : ["dsh_model_count", "configured_model_count"];
-    var direct = catalogCountFromFields(dsh, fields);
-    if (!verified && state.hostContextReceived && catalog.dsh_models_explicit === true && typeof sharedDshModelItems === "function") {
-      var backendCount = direct == null ? (catalog.dsh_models || []).length : direct;
-      var hostOnlyCount = sharedDshModelItems().filter(function (item) { return item && item.model_source === "dsh_host_only"; }).length;
-      return backendCount + hostOnlyCount;
-    }
-    if (direct != null) { return direct; }
-    var list = verified ? catalog.authenticated_models : catalog.dsh_models;
-    return Array.isArray(list) ? list.length : 0;
-  }
+  function dshModelTotalCount(verified) { return dshModelCountItems(verified).length; }
   function dshModelRoleCount(role, verified) {
-    var catalog = state.catalog || {};
-    var dsh = catalog.dsh || {};
-    var normalizedRole = String(role || "").toLowerCase();
-    normalizedRole = normalizedRole === "review" || normalizedRole === "judge" ? "review" : "strategy";
-    var fields = verified
-      ? ["authenticated_" + normalizedRole + "_model_count", "authenticated_dsh_" + normalizedRole + "_model_count"]
-      : ["dsh_" + normalizedRole + "_model_count", "configured_" + normalizedRole + "_model_count"];
-    var direct = catalogCountFromFields(dsh, fields);
-    if (!verified && state.hostContextReceived && catalog.dsh_models_explicit === true && typeof sharedDshModelItems === "function") {
-      var backendRoleCount = direct;
-      if (backendRoleCount == null) {
-        backendRoleCount = (catalog.dsh_models || []).filter(function (item) { return modelSupportsRole(item, normalizedRole); }).length;
-      }
-      var hostOnlyRoleCount = sharedDshModelItems().filter(function (item) {
-        return item && item.model_source === "dsh_host_only" && modelSupportsRole(item, normalizedRole);
-      }).length;
-      return backendRoleCount + hostOnlyRoleCount;
-    }
-    if (direct != null) { return direct; }
-    var list = verified ? catalog.authenticated_models : catalog.dsh_models;
-    if (Array.isArray(list) && list.length) {
-      return list.filter(function (item) { return modelSupportsRole(item, normalizedRole); }).length;
-    }
-    return dshModelTotalCount(verified);
+    var required = role === "judge" || role === "review" ? "judge" : "propose";
+    return dshModelCountItems(verified).filter(function (item) { return modelSupportsRole(item, required); }).length;
   }
   function normalizeCatalog(data) {
     var value = data && data.catalog || data || {};
-    var hasExplicitDshDirectory = Array.isArray(value.dsh_models);
-    var compatibilityModels = mergeModelDirectory([value.models, value.strategy_models, value.review_models, value.policy_models, value.judge_models, value.reviewer_models]);
-    var explicitAuthenticated = mergeModelDirectory([value.authenticated_models]);
-    var dshModels = hasExplicitDshDirectory ? mergeModelDirectory([explicitAuthenticated, value.dsh_models]) : compatibilityModels.filter(function (item) {
-      return item.local_model !== true && String(item.authentication_state || "").toLowerCase() !== "local";
-    });
-    // Canonical DSH entries are merged last so compatibility lists cannot
-    // overwrite current backend verification or availability state.
-    var models = mergeModelDirectory([compatibilityModels, dshModels]);
-    var authenticatedModels = dshModels.filter(function (item) {
-      return item.authentication_verified === true;
-    });
+    var dshModels = normalizeList(value.dsh_models);
+    var authenticatedModels = dshModels.filter(function (item) { return item.authentication_verified === true; });
     var availableModels = dshModels.filter(function (item) { return item.available === true; });
-    var sharedModels = hasExplicitDshDirectory ? dshModels : (dshModels.length ? dshModels : models);
     return {
       domain_packs: normalizeList(value.domain_packs), datasets: normalizeList(value.datasets),
       unavailable_datasets: normalizeList(value.unavailable_datasets),
@@ -978,13 +819,12 @@
       prediction_selection_policy: value.prediction_selection_policy,
       run_parameters: value.run_parameters || null,
       strategies: normalizeList(value.strategies), evaluators: normalizeList(value.evaluators),
-      models: models,
+      models: dshModels,
       dsh_models: dshModels,
-      dsh_models_explicit: hasExplicitDshDirectory,
       authenticated_models: authenticatedModels,
       available_models: availableModels,
-      policy_models: sharedModels.filter(function (item) { return modelSupportsRole(item, "propose"); }),
-      judge_models: sharedModels.filter(function (item) { return modelSupportsRole(item, "judge"); }),
+      policy_models: dshModels.filter(function (item) { return modelSupportsRole(item, "propose"); }),
+      judge_models: dshModels.filter(function (item) { return modelSupportsRole(item, "judge"); }),
       dsh: value.dsh && typeof value.dsh === "object" ? value.dsh : {}
     };
   }
@@ -1006,39 +846,14 @@
       mutation_explanation: item.mutation_explanation && typeof item.mutation_explanation === "object" ? item.mutation_explanation : null
     });
   }
-  function normalizeExpertConsultation(value, index) {
-    var item = value || {};
-    var nestedAnswer = item.answer && typeof item.answer === "object" ? item.answer : {};
-    var answer = typeof item.answer === "string" ? item.answer : nestedAnswer.answer || null;
-    var rawStatus = String(item.status || (answer ? "answered" : "pending")).toLowerCase();
-    var answered = rawStatus === "answered" || rawStatus === "answered_pending" || rawStatus === "applied" || rawStatus === "audit_only" || !isBlank(answer);
-    var id = item.consultation_id || item.id || "consultation-" + index;
-    return Object.assign({}, item, {
-      id: item.id || id,
-      consultation_id: id,
-      status: answered ? "answered" : "pending",
-      question: item.question || "",
-      context: item.context || "",
-      options: Array.isArray(item.options) ? item.options : [],
-      non_blocking: item.non_blocking !== false,
-      answer: answer,
-      selected_option: Object.prototype.hasOwnProperty.call(item, "selected_option") ? item.selected_option : nestedAnswer.selected_option,
-      answered_by: item.answered_by || nestedAnswer.answered_by || null,
-      answered_at: item.answered_at || nestedAnswer.answered_at || nestedAnswer.created_at || null,
-      effective_generation: Object.prototype.hasOwnProperty.call(item, "effective_generation") ? item.effective_generation : nestedAnswer.effective_generation,
-      applied_generation: Object.prototype.hasOwnProperty.call(item, "applied_generation") ? item.applied_generation : nestedAnswer.applied_generation,
-      persistent: (Object.prototype.hasOwnProperty.call(item, "persistent") ? item.persistent : nestedAnswer.persistent) === true
-    });
-  }
   function processCandidates(run) {
     if (!run) { return []; }
     return Array.isArray(run.candidate_summaries) ? run.candidate_summaries : (run.candidates || []);
   }
 
   function normalizeRun(input) {
-    var item = input && (input.projection || input.run_projection) || input || {};
+    var item = input && (input.projection) || input || {};
     var configuration = item.configuration || {};
-    var task = item.task || {};
     var candidates = Array.isArray(item.candidates) ? item.candidates.map(normalizeCandidate) : [];
     var observedCandidate = candidates.filter(function (candidate) {
       return !isBlank(candidate.score) && Number.isFinite(Number(candidate.score));
@@ -1058,16 +873,6 @@
       ? bestCandidateId ? "completed_with_acceptable_candidate" : "budget_exhausted_without_acceptable_candidate"
       : null);
     var trajectory = Array.isArray(item.trajectory) ? item.trajectory : [];
-    if (!trajectory.length) {
-      trajectory = candidates.slice().sort(function (a, b) { return a.generation - b.generation; }).filter(function (candidate) {
-        return !isBlank(candidate.score) && Number.isFinite(Number(candidate.score));
-      }).map(function (candidate, index) {
-        var score = Number(candidate.score);
-        // Legacy projections without a trajectory can still show candidate
-        // scatter points. Do not synthesize a cross-window incumbent line.
-        return { generation: candidate.generation || index + 1, candidate_id: candidate.id, score: score };
-      });
-    }
     return Object.assign({}, item, {
       id: item.id || item.run_id || "未知运行",
       status: status,
@@ -1078,11 +883,11 @@
       best_candidate_id: bestCandidateId,
       best_observed_candidate_id: bestObservedCandidateId,
       best_observed_score: bestObservedScore,
-      generation: Number(item.generation || item.current_generation || 0),
-      total_generations: Number(item.total_generations || item.max_generations || item.budget && item.budget.max_generations || 0),
-      candidates_count: Number(item.candidates_count != null ? item.candidates_count : item.candidate_count != null ? item.candidate_count : candidates.length),
-      max_candidates: Number(item.max_candidates || item.budget && item.budget.max_candidates || 0),
-      candidates_per_generation: Number(item.candidates_per_generation || configuration.candidates_per_generation || item.budget && item.budget.candidates_per_generation || 1),
+      generation: Number(item.generation || 0),
+      total_generations: Number(item.total_generations || 0),
+      candidates_count: Number(item.candidates_count != null ? item.candidates_count : candidates.length),
+      max_candidates: Number(item.max_candidates || 0),
+      candidates_per_generation: Number(item.candidates_per_generation || configuration.candidates_per_generation || 1),
       optimization_protocol: item.optimization_protocol || configuration.optimization_protocol || null,
       optimization_schedule: item.optimization_schedule || configuration.optimization_schedule || null,
       samples_per_update: Number(item.samples_per_update || configuration.samples_per_update || 0),
@@ -1094,38 +899,23 @@
       sample_concurrency: Number(item.sample_concurrency || configuration.sample_concurrency || 0),
       projection_revision: Number(item.projection_revision || item.revision || 0),
       workspace_revisions: item.workspace_revisions || {},
-      configuration: Object.assign({
-        domain_pack_id: task.domain_pack_id || item.domain_pack_id || item.domain,
-        research_domain_id: task.research_domain_id || item.research_domain_id || item.domain_pack_id || item.domain,
-        dataset_id: task.dataset_id || item.dataset_id,
-        episode_id: item.dataset && item.dataset.episode_id || item.episode_id,
-        strategy_id: item.strategy_id, prediction_model_id: item.prediction_model_id, evaluator_id: item.evaluator_id,
-        policy_model_id: item.policy_model_id, judge_model_id: item.judge_model_id,
-        strategy_model_id: item.strategy_model_id || item.policy_model_id,
-        review_model_id: item.review_model_id || item.reviewer_model_id || item.judge_model_id,
-        autonomous_mode: item.autonomous_mode === true || item.autonomous_mode === "true",
-        slot: task.slot || item.slot
-      }, configuration),
+      configuration: configuration,
       dataset: item.dataset && typeof item.dataset === "object" ? item.dataset : {},
       trajectory: trajectory,
       adaptive_trajectories: Array.isArray(item.adaptive_trajectories) ? item.adaptive_trajectories : [],
       evolution_evidence: item.evolution_evidence && typeof item.evolution_evidence === "object" ? item.evolution_evidence : {},
       artifacts: Array.isArray(item.artifacts) ? item.artifacts : [],
-      interventions: Array.isArray(item.interventions) ? item.interventions : [],
-      expert_consultations: Array.isArray(item.expert_consultations) ? item.expert_consultations.map(normalizeExpertConsultation) : [],
-      training_assets: Array.isArray(item.training_assets) ? item.training_assets : [],
       rounds: Array.isArray(item.rounds) ? item.rounds : [],
       generation_analyses: Array.isArray(item.generation_analyses) ? item.generation_analyses : [],
       candidates: candidates,
       candidate_summaries: Array.isArray(item.candidate_summaries) ? item.candidate_summaries.map(normalizeCandidate) : undefined,
-      intervention_candidates: Array.isArray(item.intervention_candidates) ? item.intervention_candidates.map(normalizeCandidate) : undefined,
       gate: item.gate && typeof item.gate === "object" ? item.gate : {},
       metrics: item.metrics && typeof item.metrics === "object" ? item.metrics : {}
     });
   }
   function mergeRunProjection(existingRun, payload) {
     var envelope = payload && payload.response || payload;
-    var projection = envelope && (envelope.projection || envelope.run_projection) || envelope || {};
+    var projection = envelope && (envelope.projection) || envelope || {};
     return normalizeRun(Object.assign({}, existingRun || {}, projection));
   }
   function listFrom(data, key) {

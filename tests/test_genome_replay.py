@@ -3,18 +3,17 @@ from __future__ import annotations
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
+from tests.native_fixtures import native_manifest, NativeRoleStub, start_native_run
 from ecologyrsi_dsh.core.director import EvolutionDirector
 from ecologyrsi_dsh.integrations.dsh_tools import DshToolService
 from ecologyrsi_dsh.api.projection import _candidate_projection
 from ecologyrsi_dsh.core.ledger import EventLedger
-from ecologyrsi_dsh.core.state import RunState, project_run_state
+from ecologyrsi_dsh.core.state import RunState
 from ecologyrsi_dsh.core.models import (
     CandidateStatus,
     Evaluation,
-    HumanIntervention,
-    InterventionKind,
     ModelArtifact,
     Promotion,
     PromotionDecision,
@@ -32,22 +31,12 @@ from ecologyrsi_dsh.evolution.analysis import (
     GenerationAnalysis,
     build_cross_generation_experience,
 )
-from ecologyrsi_dsh.core.trajectory import (
-    EvaluationPhase,
-    EvaluationScope,
-    GenerationComparison,
-    HoldoutArm,
-    HoldoutEvaluation,
-)
 from ecologyrsi_dsh.evolution.batches import (
     _generation_parent_candidate_id,
     _generation_parent_genome,
-    _search_parent_from_analysis,
     start_generation_batch,
 )
-from ecologyrsi_dsh.evolution.schedule import OPTIMIZATION_PROTOCOL
 from ecologyrsi_dsh.evolution.strategies import (
-    FakeDSHAdapter,
     _native_evolution_reflection_from_experience,
 )
 from ecologyrsi_dsh.knowledge.algorithms import AlgorithmAttempt
@@ -55,17 +44,11 @@ from ecologyrsi_dsh.knowledge.program_registry import current_program_registry
 
 
 def _new_task() -> TaskManifest:
-    return TaskManifest(
-        task_id="genome-replay",
-        objective="predict greenhouse climate",
-        domain_pack="greenhouse_environment@1",
-        visible_datasets=("agc_cucumber_2018",),
-        budget={"max_candidates": 4, "candidates_per_generation": 2},
-        metadata={
+    return native_manifest(task_id="genome-replay", generations=2, metadata={
             "execution_protocol": "dsh_native_plugin_evolution@1",
-            "seed_genome_template_id": "greenhouse-default@1",
+            "seed_genome_template_id": "greenhouse-default@2",
             "prediction_model_id": "greenhouse-horizon-targetwise-ridge@1",
-            "evaluator_id": "greenhouse_multihorizon_time_forward@2",
+            "evaluator_id": "greenhouse_multihorizon_time_forward@4",
             "strategy_id": "autonomous_model@1",
             "dataset_digest": "2" * 64,
             "dataset_snapshot_set_digest": "2" * 64,
@@ -84,21 +67,19 @@ def _new_task() -> TaskManifest:
             "preset_content_digest": "d" * 64,
             "standing_tool_surface_digest": "e" * 64,
             "evaluation_cohort_digest": "f" * 64,
-        },
-    )
+        })
 
 
 class GenomeReplayTests(unittest.TestCase):
     def setUp(self) -> None:
         self.ledger = EventLedger()
-        self.director = EvolutionDirector(self.ledger, FakeDSHAdapter())
+        self.director = EvolutionDirector(self.ledger, NativeRoleStub())
 
     def tearDown(self) -> None:
         self.ledger.close()
 
     def _start_new(self, run_id: str = "run:genome-replay") -> str:
-        self.director.create_run(_new_task(), run_id=run_id)
-        self.director.start_run(run_id)
+        start_native_run(self.director, task=_new_task(), run_id=run_id)
         return run_id
 
     def test_adaptive_next_epoch_uses_frozen_effective_final_revision(self) -> None:
@@ -171,7 +152,7 @@ class GenomeReplayTests(unittest.TestCase):
                 best_candidate_id=failed_finalist_id,
             ),
             task_manifest=SimpleNamespace(
-                metadata={"optimization_protocol": OPTIMIZATION_PROTOCOL}
+                metadata={"optimization_protocol": "joint_plugin_epoch@2"}
             ),
             pending_interventions=(),
             effective_revision_for=lambda generation: (
@@ -193,9 +174,6 @@ class GenomeReplayTests(unittest.TestCase):
 
         # The legacy completed-candidate resolver skips the screened-out
         # incumbent and would incorrectly choose the failed finalist.
-        self.assertEqual(
-            _search_parent_from_analysis(state, analysis), failed_finalist_id
-        )
         self.assertEqual(_generation_parent_candidate_id(state), incumbent_id)
         parent = _generation_parent_genome(state, incumbent_id)
         self.assertEqual(parent.genome_digest, final.genome_digest)
@@ -468,49 +446,6 @@ class GenomeReplayTests(unittest.TestCase):
         self.assertEqual(diff_by_name["confidence_threshold"]["change_kind"], "removed")
         self.assertEqual(diff_by_name["confidence_threshold"]["previous_value"], 0.5)
 
-    def test_mutation_explanation_degrades_for_a_legacy_candidate(self) -> None:
-        # A run recorded before the native protocol has no genome to diff.
-        legacy_manifest = _new_task().to_dict()
-        legacy_metadata = dict(legacy_manifest["metadata"])
-        legacy_metadata.pop("execution_protocol")
-        run_id = "run:mutation-explanation-legacy"
-        self.director.create_run(
-            TaskManifest.from_dict(
-                {**legacy_manifest, "metadata": legacy_metadata}
-            ),
-            run_id=run_id,
-        )
-        self.director.start_run(run_id)
-        proposal = Proposal(
-            proposal_id="proposal:legacy",
-            run_id=run_id,
-            generation=0,
-            title="pre-genome proposal",
-            changes={"ridge_alpha": 0.2},
-        )
-        self.director.submit_proposal(proposal)
-        candidate = self.director.spawn_candidate(
-            run_id,
-            proposal,
-            candidate_id="candidate:legacy",
-            slot_index=0,
-        )
-
-        explanation = _candidate_projection(
-            self.director.state(run_id),
-            candidate,
-        )["mutation_explanation"]
-
-        # The panel says so instead of failing the read or inventing a parent.
-        self.assertEqual(
-            explanation,
-            {
-                "available": False,
-                "reason": "historical_legacy_projection",
-                "operations": [],
-                "diff": [],
-            },
-        )
 
     def test_cross_generation_experience_keeps_full_behavior_identity(self) -> None:
         run_id = self._start_new("run:behavior-experience")
@@ -621,342 +556,20 @@ class GenomeReplayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "retrieval.*digest"):
             self.director.state(corrupt_run)
 
-    def test_native_approval_uses_recorded_adaptive_champion_not_legacy_policy(
-        self,
-    ) -> None:
-        run_id = self._start_new("run:native-selection-authority")
-        first = self._spawn(run_id)
-        first_artifact = ModelArtifact(
-            artifact_id="artifact:native-selection:first",
-            run_id=run_id,
-            candidate_id=first.candidate_id,
-            model_id="greenhouse-horizon-targetwise-ridge@1",
-            dataset_digest="2" * 64,
-            training_partition="training_fit",
-            training_rows=10,
-        )
-        self.director.record_artifact(first_artifact)
-        self.director.record_evaluation(
-            Evaluation(
-                evaluation_id="evaluation:native-selection:first",
-                run_id=run_id,
-                candidate_id=first.candidate_id,
-                score=0.2,
-                passed=True,
-                evaluator_digest="6" * 64,
-                artifact_digest=first_artifact.digest,
-            )
-        )
-        with self.assertRaisesRegex(ValueError, "recorded generation champion"):
-            self.director.decide_promotion(
-                Promotion(
-                    promotion_id="promotion:native-selection:premature",
-                    run_id=run_id,
-                    candidate_id=first.candidate_id,
-                    decision=PromotionDecision.APPROVED,
-                    reason="must not bypass unified generation selection",
-                )
-            )
-        first_analysis = GenerationAnalysis(
-            run_id=run_id,
-            generation=0,
-            candidate_count=1,
-            eligible_count=1,
-            outcome="promoted",
-            selected_candidate_id=first.candidate_id,
-            champion_candidate_id=first.candidate_id,
-            incumbent_after_candidate_id=first.candidate_id,
-            search_parent_candidate_id=first.candidate_id,
-            ranking=(
-                {
-                    "candidate_id": first.candidate_id,
-                    "primary_selection_gate": True,
-                },
-            ),
-        )
-        self.ledger.append(
-            run_id,
-            "GenerationAnalyzed",
-            {"analysis": first_analysis.to_dict()},
-        )
-        self.director.decide_promotion(
-            Promotion(
-                promotion_id="promotion:native-selection:first",
-                run_id=run_id,
-                candidate_id=first.candidate_id,
-                decision=PromotionDecision.APPROVED,
-                reason="recorded first-generation adaptive champion",
-            )
-        )
-        self.director.advance_generation(run_id)
+    def test_native_approval_rejects_analysis_without_frozen_paired_comparison(self):
+        run_id = self._start_new("run:selection-authority")
+        candidate = self._spawn(run_id)
+        self._record_artifact_and_evaluation(run_id, candidate.candidate_id)
+        analysis = GenerationAnalysis(run_id=run_id, generation=0,
+            candidate_count=1, eligible_count=1, outcome="promoted",
+            selected_candidate_id=candidate.candidate_id, champion_candidate_id=candidate.candidate_id)
+        self.ledger.append(run_id, "GenerationAnalyzed", {"analysis": analysis.to_dict()})
+        before = self.ledger.count()
+        with self.assertRaisesRegex(ValueError, "recorded generation comparison"):
+            self.director.decide_promotion(Promotion("promotion:forged", run_id,
+                candidate.candidate_id, PromotionDecision.APPROVED, "missing paired evidence"))
+        self.assertEqual(self.ledger.count(), before)
 
-        second = self._spawn(run_id)
-        second_artifact = ModelArtifact(
-            artifact_id="artifact:native-selection:second",
-            run_id=run_id,
-            candidate_id=second.candidate_id,
-            model_id="greenhouse-horizon-targetwise-ridge@1",
-            dataset_digest="2" * 64,
-            training_partition="training_fit",
-            training_rows=10,
-        )
-        self.director.record_artifact(second_artifact)
-        self.director.record_evaluation(
-            Evaluation(
-                evaluation_id="evaluation:native-selection:second",
-                run_id=run_id,
-                candidate_id=second.candidate_id,
-                score=0.3,
-                passed=True,
-                metrics={
-                    "objective_aggregation_version": "weighted_task_skill_reward@3"
-                },
-                evaluator_digest="6" * 64,
-                artifact_digest=second_artifact.digest,
-            )
-        )
-        second_analysis = GenerationAnalysis(
-            run_id=run_id,
-            generation=1,
-            candidate_count=1,
-            eligible_count=1,
-            outcome="promoted",
-            selected_candidate_id=second.candidate_id,
-            champion_candidate_id=second.candidate_id,
-            incumbent_before_candidate_id=first.candidate_id,
-            incumbent_after_candidate_id=second.candidate_id,
-            search_parent_candidate_id=second.candidate_id,
-            ranking=(
-                {
-                    "candidate_id": second.candidate_id,
-                    "primary_selection_gate": True,
-                    "selection_status": "selection_only",
-                },
-            ),
-        )
-        self.ledger.append(
-            run_id,
-            "GenerationAnalyzed",
-            {"analysis": second_analysis.to_dict()},
-        )
-
-        promotion = self.director.decide_promotion(
-            Promotion(
-                promotion_id="promotion:native-selection:second",
-                run_id=run_id,
-                candidate_id=second.candidate_id,
-                decision=PromotionDecision.APPROVED,
-                reason="recorded max-T adaptive champion",
-            )
-        )
-
-        self.assertIs(promotion.decision, PromotionDecision.APPROVED)
-        self.assertEqual(
-            self.director.state(run_id).run.best_candidate_id,
-            second.candidate_id,
-        )
-
-    def test_runtime_v3_approval_allows_certified_champion_to_differ_from_search_version(
-        self,
-    ) -> None:
-        run_id = self._start_new("run:v3-split-search-and-certification")
-        search_candidate = self._spawn(run_id, slot_index=0)
-        certified_candidate = self._spawn(run_id, slot_index=1)
-        artifact = ModelArtifact(
-            artifact_id="artifact:v3-certified",
-            run_id=run_id,
-            candidate_id=certified_candidate.candidate_id,
-            model_id="greenhouse-horizon-targetwise-ridge@1",
-            dataset_digest="2" * 64,
-            training_partition="training_fit",
-            training_rows=10,
-        )
-        self.director.record_artifact(artifact)
-        self.director.record_evaluation(
-            Evaluation(
-                evaluation_id="evaluation:v3-certified",
-                run_id=run_id,
-                candidate_id=certified_candidate.candidate_id,
-                score=0.3,
-                passed=True,
-                evaluator_digest="6" * 64,
-                artifact_digest=artifact.digest,
-            )
-        )
-        cohort_digest = digest({"cohort": "v3-split"})
-
-        def holdout(
-            arm: HoldoutArm,
-            candidate_id: str,
-            revision_id: str,
-            score: float,
-        ) -> HoldoutEvaluation:
-            return HoldoutEvaluation(
-                evaluation_id=f"holdout:v3:{arm.value}",
-                scope=EvaluationScope(
-                    run_id=run_id,
-                    generation=0,
-                    candidate_id=candidate_id,
-                    candidate_revision_id=revision_id,
-                    phase=EvaluationPhase.HOLDOUT,
-                    cohort_digest=cohort_digest,
-                    origin_count=10,
-                    holdout_arm=arm,
-                ),
-                score=score,
-                passed=True,
-                metrics={"constraint_violations": 0},
-                evaluator_digest="6" * 64,
-            )
-
-        search_holdout = holdout(
-            HoldoutArm.FINALIST_1,
-            search_candidate.candidate_id,
-            "revision:v3:search",
-            0.31,
-        )
-        certified_holdout = holdout(
-            HoldoutArm.FINALIST_2,
-            certified_candidate.candidate_id,
-            "revision:v3:certified",
-            0.30,
-        )
-        incumbent_holdout = holdout(
-            HoldoutArm.INCUMBENT,
-            "candidate:v3:incumbent",
-            "revision:v3:incumbent",
-            0.20,
-        )
-        comparison = GenerationComparison(
-            comparison_id="comparison:v3-split",
-            run_id=run_id,
-            generation=0,
-            cohort_digest=cohort_digest,
-            holdout_evaluations=(
-                search_holdout,
-                certified_holdout,
-                incumbent_holdout,
-            ),
-            selected_candidate_id=search_candidate.candidate_id,
-            selected_revision_id=search_holdout.scope.candidate_revision_id,
-            gate_results={
-                "selection_policy": "positive_delta_search@1",
-                "selected_arm": HoldoutArm.FINALIST_1.value,
-                "certification_selected_arm": HoldoutArm.FINALIST_2.value,
-                "arms": {
-                    HoldoutArm.FINALIST_1.value: {
-                        "search_eligible": True,
-                        "certification_eligible": False,
-                    },
-                    HoldoutArm.FINALIST_2.value: {
-                        "search_eligible": True,
-                        "certification_eligible": True,
-                    },
-                    HoldoutArm.INCUMBENT.value: {
-                        "search_eligible": True,
-                        "certification_eligible": True,
-                    },
-                },
-            },
-        )
-        analysis = GenerationAnalysis(
-            run_id=run_id,
-            generation=0,
-            candidate_count=2,
-            eligible_count=2,
-            outcome="promoted",
-            selected_candidate_id=search_candidate.candidate_id,
-            champion_candidate_id=certified_candidate.candidate_id,
-            incumbent_after_candidate_id=certified_candidate.candidate_id,
-            search_parent_candidate_id=search_candidate.candidate_id,
-            ranking=(
-                {
-                    "candidate_id": search_candidate.candidate_id,
-                    "search_eligible": True,
-                    "certification_eligible": False,
-                    "primary_selection_gate": False,
-                },
-                {
-                    "candidate_id": certified_candidate.candidate_id,
-                    "search_eligible": True,
-                    "certification_eligible": True,
-                    "primary_selection_gate": True,
-                },
-            ),
-        )
-        real_state = self.director.state(run_id)
-        runtime_v3_task = TaskManifest.from_dict(
-            {
-                **real_state.task_manifest.to_dict(),
-                "metadata": {
-                    **dict(real_state.task_manifest.metadata),
-                    "host_runtime_build": {
-                        "package_version": "0.3.55",
-                        "evolution_runtime_schema": (
-                            "ecologyrsi-dsh.evolution-runtime/3"
-                        ),
-                        "generation_comparison_schema": (
-                            "ecologyrsi-dsh.generation-comparison/1"
-                        ),
-                        "projection_schema": (
-                            "ecologyrsi-dsh.execution-projection/2"
-                        ),
-                    },
-                },
-            }
-        )
-        v3_state = Mock(wraps=real_state)
-        v3_state.task_manifest = runtime_v3_task
-        v3_state.run = real_state.run
-        v3_state.candidates = real_state.candidates
-        v3_state.promotions = real_state.promotions
-        v3_state.events = real_state.events
-        v3_state.formal_batch_comparisons = real_state.formal_batch_comparisons
-        v3_state.generation_comparisons = (comparison,)
-        v3_state.analysis_for = lambda generation: analysis if generation == 0 else None
-        v3_state.comparison_for = (
-            lambda generation: comparison if generation == 0 else None
-        )
-        v3_state.effective_revision_for = lambda generation: (
-            comparison.selected_revision_id if generation == 0 else None
-        )
-
-        search_projection = _candidate_projection(v3_state, search_candidate)
-        certified_projection = _candidate_projection(v3_state, certified_candidate)
-        self.assertTrue(search_projection["search_version_selected"])
-        self.assertFalse(search_projection["certification_selected"])
-        self.assertEqual(
-            search_projection["certification_status"],
-            "search_version_not_certified",
-        )
-        self.assertFalse(certified_projection["search_version_selected"])
-        self.assertTrue(certified_projection["certification_selected"])
-
-        with patch.object(self.director, "state", return_value=v3_state):
-            with self.assertRaisesRegex(
-                ValueError,
-                "strict-certification decision",
-            ):
-                self.director.decide_promotion(
-                    Promotion(
-                        promotion_id="promotion:v3-certified:tampered-rejection",
-                        run_id=run_id,
-                        candidate_id=certified_candidate.candidate_id,
-                        decision=PromotionDecision.REJECTED,
-                        reason="tampered ledger decision must fail closed",
-                    )
-                )
-            promotion = self.director.decide_promotion(
-                Promotion(
-                    promotion_id="promotion:v3-certified",
-                    run_id=run_id,
-                    candidate_id=certified_candidate.candidate_id,
-                    decision=PromotionDecision.APPROVED,
-                    reason="strict certification winner may differ from search parent",
-                )
-            )
-
-        self.assertIs(promotion.decision, PromotionDecision.APPROVED)
 
     def _record_artifact_and_evaluation(self, run_id: str, candidate_id: str):
         artifact = ModelArtifact(
@@ -1007,7 +620,7 @@ class GenomeReplayTests(unittest.TestCase):
         seed = state.materialized_seed_genome()
         kinds = [event.kind for event in state.events]
 
-        self.assertEqual(kinds[:3], ["RunCreated", "RunSeedGenomeMaterialized", "RunStarted"])
+        self.assertEqual(kinds[:4], ["RunCreated", "RunSeedGenomeMaterialized", "ModelContractPreflightRecorded", "RunStarted"])
         self.assertEqual(seed.genome_digest, state.parent_genome_for_generation(0).genome_digest)
         self.assertNotIn("GenerationBatchStarted", kinds[:2])
 
@@ -1025,7 +638,7 @@ class GenomeReplayTests(unittest.TestCase):
             current_program_registry().catalog_digest,
         )
 
-        restarted = EvolutionDirector(self.ledger, FakeDSHAdapter())
+        restarted = EvolutionDirector(self.ledger, NativeRoleStub())
         self.assertEqual(
             restarted.state(run_id).materialized_seed_genome().to_dict(), before
         )
@@ -1036,7 +649,7 @@ class GenomeReplayTests(unittest.TestCase):
         run_id = "run:partial-initialization"
         run, payload = self.director.prepare_run_creation(_new_task(), run_id=run_id)
         self.ledger.append(run_id, "RunCreated", payload, event_id=f"{run_id}:created")
-        with self.assertRaisesRegex(RuntimeError, "seed|initial"):
+        with self.assertRaisesRegex(RuntimeError, "seed|initial|preflight"):
             self.director.start_run(run_id)
 
         recovered = self.director.recover_run_initialization(run_id)
@@ -1055,7 +668,8 @@ class GenomeReplayTests(unittest.TestCase):
 
     def test_generation_batch_freezes_complete_parent_genome_and_stage_context(self) -> None:
         run_id = self._start_new("run:frozen-parent")
-        batch = start_generation_batch(self.director, run_id)
+        with patch("ecologyrsi_dsh.evolution.batches._ensure_generation_research_iteration", return_value=None):
+            batch = start_generation_batch(self.director, run_id)
         state = self.director.state(run_id)
         parent = state.materialized_seed_genome()
 
@@ -1072,114 +686,7 @@ class GenomeReplayTests(unittest.TestCase):
             current_program_registry().catalog_digest,
         )
 
-    def test_native_parent_override_replays_without_a_missing_enum(self) -> None:
-        # A DSH-native generation-1 batch is the only path that evaluates the
-        # frozen parent-selection comparison in the reducer, and it evaluates it
-        # only when the batch actually froze an intervention. `InterventionKind`
-        # was never imported into core.state, so this replay raised NameError
-        # while every green test either used the non-native path or froze no
-        # interventions at all. Ledger replay must never depend on which branch
-        # a run happened to take.
-        run_id = self._start_new("run:native-parent-override")
-        start_generation_batch(self.director, run_id)
-        candidates = [
-            self._spawn(run_id, slot_index=slot_index) for slot_index in range(2)
-        ]
-        for candidate in candidates:
-            self._record_artifact_and_evaluation(run_id, candidate.candidate_id)
-            self.director.decide_promotion(
-                Promotion(
-                    promotion_id=f"promotion:{candidate.candidate_id}",
-                    run_id=run_id,
-                    candidate_id=candidate.candidate_id,
-                    decision=PromotionDecision.REJECTED,
-                    reason="test parent override",
-                )
-            )
-        chosen = candidates[0]
-        self.ledger.append(
-            run_id,
-            "GenerationAnalyzed",
-            {
-                "analysis": GenerationAnalysis(
-                    run_id=run_id,
-                    generation=0,
-                    candidate_count=2,
-                    eligible_count=0,
-                    outcome="no_eligible_candidate",
-                    search_parent_candidate_id=chosen.candidate_id,
-                ).to_dict()
-            },
-        )
-        self.director.advance_generation(run_id)
-        self.director.pause_run(run_id)
-        self.director.record_intervention(
-            HumanIntervention(
-                intervention_id="parent-override-1",
-                run_id=run_id,
-                kind=InterventionKind.PARENT_SELECTION,
-                message="继续演化这个候选。",
-                created_by="review-test",
-                target_candidate_id=chosen.candidate_id,
-            )
-        )
-        self.director.resume_run(run_id)
 
-        batch = start_generation_batch(self.director, run_id)
-        self.assertEqual(batch.intervention_ids, ("parent-override-1",))
-        self.assertEqual(batch.parent_candidate_id, chosen.candidate_id)
-        # Replayed from zero, not read off the live reducer: the defect only
-        # surfaced when the event was applied, so a cached state would hide it.
-        replayed = project_run_state(self.ledger.events(run_id))
-        self.assertEqual(
-            replayed.batch_for(1).parent_candidate_id, chosen.candidate_id
-        )
-
-    def test_next_generation_research_resolves_search_parent_before_batch_exists(
-        self,
-    ) -> None:
-        run_id = self._start_new("run:next-research-parent")
-        start_generation_batch(self.director, run_id)
-        candidates = [
-            self._spawn(run_id, slot_index=slot_index)
-            for slot_index in range(2)
-        ]
-        for candidate in candidates:
-            artifact, evaluation = self._record_artifact_and_evaluation(
-                run_id, candidate.candidate_id
-            )
-            self.director.decide_promotion(
-                Promotion(
-                    promotion_id=f"promotion:{candidate.candidate_id}",
-                    run_id=run_id,
-                    candidate_id=candidate.candidate_id,
-                    decision=PromotionDecision.REJECTED,
-                    reason="test search parent",
-                )
-            )
-        analysis = GenerationAnalysis(
-            run_id=run_id,
-            generation=0,
-            candidate_count=2,
-            eligible_count=0,
-            outcome="no_eligible_candidate",
-            search_parent_candidate_id=candidates[0].candidate_id,
-        )
-        self.ledger.append(
-            run_id,
-            "GenerationAnalyzed",
-            {"analysis": analysis.to_dict()},
-        )
-
-        self.director.advance_generation(run_id)
-        state = self.director.state(run_id)
-        self.assertIsNone(state.batch_for(1))
-        parent_candidate_id = analysis.search_parent_candidate_id
-        self.assertIsNotNone(parent_candidate_id)
-        self.assertEqual(
-            state.parent_genome_for_generation(1).genome_digest,
-            state.persisted_genome_for(parent_candidate_id).genome_digest,
-        )
 
     def test_proposal_does_not_require_candidate_dependent_instance_digest(self) -> None:
         run_id = self._start_new()

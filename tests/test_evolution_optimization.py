@@ -188,4 +188,4 @@ class EvolutionOptimizationTests(unittest.TestCase):
         self.assertFalse(active_session_ids(events))
         self.assertEqual(_workspace_revisions(state)['candidates'], 3)
         events.append(event(5, 'CandidateEvaluated'))
-        self.assertEqual(_workspace_revisions(state)['training'], 5)
+        self.assertEqual(_workspace_revisions(state), {'process': 5, 'candidates': 5, 'candidate': 5})

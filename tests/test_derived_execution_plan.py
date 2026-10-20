@@ -19,24 +19,9 @@ from ecologyrsi_dsh.knowledge.algorithms import (
 )
 
 
-def _task() -> TaskManifest:
-    return TaskManifest(
-        task_id="derived-execution-plan",
-        objective="predict soil water",
-        domain_pack="crop-soil-water@toy",
-        visible_datasets=("generated-toy-series@1",),
-        budget={
-            "max_candidates": 2,
-            "max_generations": 2,
-            "candidates_per_generation": 1,
-        },
-        metadata={
-            "domain": "toy",
-            "strategy_id": "adaptive_local@1",
-            "prediction_model_id": "toy-rolling-water@1",
-            "evaluator_id": "toy_time_forward@1",
-        },
-    )
+def _task():
+    from tests.native_fixtures import native_manifest
+    return native_manifest(generations=2)
 
 
 def _analysis() -> GenerationAnalysis:
@@ -132,48 +117,22 @@ class DerivedExecutionPlanTests(unittest.TestCase):
         self.assertEqual(plan.retry_backoff_seconds, 0.0)
         self.assertEqual(plan.repair_sequence[0], "bounded-projection-repair")
 
-    def test_director_freezes_host_plan_in_proposal_and_algorithm_spec(self) -> None:
-        with EventLedger() as ledger:
-            director = EvolutionDirector(ledger, StrategyRouterDSHAdapter())
-            director.start_evolution(_task(), run_id="run:initial-plan")
-            batch = start_generation_batch(director, "run:initial-plan")
-            proposal = director.request_proposal(
-                "run:initial-plan", generation_batch=batch, slot_index=0
-            )
-            proposal_plan = DerivedExecutionPlan.from_dict(
-                proposal.metadata["derived_execution_plan"]
-            )
-            self.assertIsNone(proposal_plan.source_generation)
+    def test_native_compiler_preserves_the_host_plan_identity(self):
+        from dataclasses import replace
+        from tests.native_candidate_fixture import seed_proposal
+        task=_task(); proposal=seed_proposal(task)
+        plan=derive_execution_plan(None)
+        proposal=replace(proposal,metadata={**proposal.metadata,'derived_execution_plan':plan.to_dict()})
+        spec=compile_algorithm_spec(task,proposal,None)
+        replayed=AlgorithmSpec.from_dict(spec.to_dict())
+        self.assertEqual(replayed.derived_execution_plan,plan.to_dict())
+        self.assertEqual(replayed.spec_digest,spec.spec_digest)
 
-            state = director.state("run:initial-plan")
-            spec = compile_algorithm_spec(
-                state.task_manifest,
-                proposal,
-                state.knowledge_for(0),
-            )
-            replayed = AlgorithmSpec.from_dict(spec.to_dict())
-            self.assertEqual(
-                replayed.derived_execution_plan,
-                proposal_plan.to_dict(),
-            )
-            self.assertEqual(replayed.spec_digest, spec.spec_digest)
-
-    def test_compiler_rejects_plan_from_wrong_generation(self) -> None:
-        proposal = Proposal(
-            proposal_id="proposal:wrong-plan-scope",
-            run_id="run:wrong-plan-scope",
-            generation=1,
-            title="wrong plan scope",
-            changes={"alpha": 0.4, "window": 5, "water_threshold": 0.4},
-            metadata={"derived_execution_plan": derive_execution_plan(None).to_dict()},
-        )
-        with self.assertRaises(AlgorithmCompileError) as caught:
-            compile_algorithm_spec(_task(), proposal, None)
-        self.assertEqual(
-            caught.exception.code,
-            "derived_execution_plan_scope_mismatch",
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_compiler_rejects_plan_from_wrong_generation(self):
+        from dataclasses import replace
+        from tests.native_candidate_fixture import seed_proposal
+        task=_task(); proposal=seed_proposal(task)
+        proposal=replace(proposal,generation=1,metadata={**proposal.metadata,
+            'derived_execution_plan':derive_execution_plan(None).to_dict()})
+        with self.assertRaisesRegex(ValueError,'source does not precede'):
+            compile_algorithm_spec(task,proposal,None)

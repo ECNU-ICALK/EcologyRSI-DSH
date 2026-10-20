@@ -23,11 +23,6 @@ GATEWAY_RETRY_EPOCH_SECONDS = 30 * 60
 GATEWAY_RETRY_MAX_DELAY_SECONDS = 60 * 60
 GATEWAY_RETRY_POLICIES: Mapping[str, GatewayRetryPolicy] = MappingProxyType(
     {
-        "model_gateway": GatewayRetryPolicy(
-            "gateway_retry_circuit_open",
-            "check_gateway_then_resume",
-            "模型网关暂时不可用，已安排有界延迟重试。",
-        ),
         "dsh_native_runtime": GatewayRetryPolicy(
             "dsh_runtime_retry_circuit_open",
             "check_dsh_runtime_then_resume",

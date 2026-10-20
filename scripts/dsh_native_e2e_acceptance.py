@@ -24,6 +24,7 @@ def request_json(
     method: str = "GET",
     body: dict[str, Any] | None = None,
     token: str = "",
+    timeout: float = 30.0,
 ) -> dict[str, Any]:
     encoded = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
     headers = {"Accept": "application/json"}
@@ -34,19 +35,18 @@ def request_json(
     try:
         with urlopen(
             Request(origin.rstrip("/") + path, data=encoded, method=method, headers=headers),
-            timeout=30,
+            timeout=timeout,
         ) as response:
             value = json.loads(response.read())
     except HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{path} returned HTTP {error.code}: {detail}") from error
+        raise RuntimeError(f"{path} returned HTTP {error.code}") from error
     if not isinstance(value, dict):
         raise RuntimeError(f"non-object response from {path}")
     return value
 
 
 def item_id(item: dict[str, Any]) -> str:
-    return str(item.get("id") or item.get("dataset_id") or item.get("model_id") or "")
+    return str(item.get("id") or item.get("dataset_id") or item.get("episode_id") or item.get("model_id") or "")
 
 
 def _verified_skill_runtime(
@@ -72,50 +72,6 @@ def _verified_skill_runtime(
     return skill_runtime
 
 
-def _prediction_tool_event_count_is_valid(
-    *,
-    durable_event_count: int,
-    completed_origin_summaries: list[dict[str, Any]],
-    candidate_count: int,
-    prediction_cell_budget_per_candidate: int,
-) -> bool:
-    """Return whether the public tool-event count matches sample evidence."""
-
-    completed_event_floor = sum(
-        int(summary.get("dsh_agent_prediction_tool_invocations") or 0)
-        for summary in completed_origin_summaries
-    )
-    if (
-        durable_event_count < 0
-        or candidate_count < 1
-        or prediction_cell_budget_per_candidate < 9
-    ):
-        return False
-    origin_budget_per_candidate = prediction_cell_budget_per_candidate // 9
-    frozen_budget_ceiling = candidate_count * origin_budget_per_candidate
-    return completed_event_floor <= durable_event_count <= frozen_budget_ceiling
-
-
-def _validate_prediction_tool_event_count(
-    *,
-    durable_event_count: int,
-    completed_origin_summaries: list[dict[str, Any]],
-    candidate_count: int,
-    prediction_cell_budget_per_candidate: int,
-) -> None:
-    """Verify the public durable tool-event count against sample evidence."""
-
-    if not _prediction_tool_event_count_is_valid(
-        durable_event_count=durable_event_count,
-        completed_origin_summaries=completed_origin_summaries,
-        candidate_count=candidate_count,
-        prediction_cell_budget_per_candidate=prediction_cell_budget_per_candidate,
-    ):
-        raise RuntimeError(
-            "durable DSH prediction-tool event count is outside completed-to-budget bounds"
-        )
-
-
 def all_run_events(origin: str, run_id: str, *, token: str) -> list[dict[str, Any]]:
     """Read the complete paginated public event stream for one run."""
 
@@ -139,210 +95,117 @@ def all_run_events(origin: str, run_id: str, *, token: str) -> list[dict[str, An
         after = next_cursor
 
 
+def configured_role_models(catalog: dict[str, Any], role: str) -> list[dict[str, Any]]:
+    """Use only the authoritative DSH directory and explicit role binding."""
+    return [item for item in catalog.get("dsh_models", [])
+            if isinstance(item, dict) and item.get("configured") is True
+            and item.get("execution_available") is True and role in item.get("roles", [])]
+
+
+def _current_execution_evidence(projection: dict[str, Any], generations: int) -> dict[str, Any]:
+    if projection.get("status") != "completed":
+        raise RuntimeError("native evolution did not complete")
+    config = projection.get("configuration", {})
+    if config.get("optimization_protocol") != "joint_plugin_epoch@2":
+        raise RuntimeError("acceptance requires the current joint protocol")
+    diagnostics = projection.get("execution_diagnostics", {})
+    origins = diagnostics.get("adaptive_all_settled_origins")
+    cells = diagnostics.get("adaptive_scored_cells")
+    # Five screen arms, two formal arms and two holdout arms; one optional
+    # paired recheck. Replans are not new origins; failed predictions cannot
+    # turn an incomplete run into a passing engineering acceptance.
+    if (type(origins) is not int or not 200 * generations <= origins <= 300 * generations
+            or type(cells) is not int or cells != origins * 9):
+        raise RuntimeError("complete current vector execution evidence is missing")
+    return {"candidate_origin_executions": origins, "scoring_cells": cells}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dsh-origin", default="http://127.0.0.1:8848")
     parser.add_argument("--sidecar-origin", default="http://127.0.0.1:8777")
     parser.add_argument("--generations", type=int, default=1)
-    parser.add_argument("--candidates", type=int, default=2)
+    parser.add_argument("--candidates", type=int, default=4, choices=(4,))
     parser.add_argument("--dataset-id", default="")
+    parser.add_argument("--episode-id", default="")
     parser.add_argument("--strategy-model-id", default="")
     parser.add_argument("--review-model-id", default="")
-    parser.add_argument(
-        "--run-id",
-        default="",
-        help="verify an existing run instead of creating a new one",
-    )
-    parser.add_argument(
-        "--samples-per-update",
-        type=int,
-        default=1521,
-        help="prediction-cell budget; use 9 for a one-origin diagnostic smoke",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=3600.0,
-        help="maximum seconds to wait; real provider pacing can exceed 20 minutes",
-    )
+    parser.add_argument("--run-id", default="", help="verify an existing current run; no new model work")
+    parser.add_argument("--timeout", type=float, default=7200.0)
     args = parser.parse_args()
-    if (
-        args.generations < 1
-        or args.candidates < 1
-        or args.samples_per_update < 1
-    ):
-        parser.error("generations, candidates, and samples-per-update must be positive")
-
+    if not 1 <= args.generations <= 50 or args.timeout <= 0:
+        parser.error("generations must be 1–50 and timeout must be positive")
     runtime_token = os.environ.get("ECOLOGYRSI_DSH_RUNTIME_TOKEN", "")
     service_token = os.environ.get("ECOLOGYRSI_SERVICE_TOKEN", "")
-    capabilities = request_json(
-        args.dsh_origin,
-        "/api/ecology-agent-runtime/v1/capabilities",
-        token=runtime_token,
-    )
+    capabilities = request_json(args.dsh_origin,
+        "/api/ecology-agent-runtime/v1/capabilities", token=runtime_token)
     if capabilities.get("ready") is not True:
         raise RuntimeError("DSH runtime capabilities are not ready")
     health = request_json(args.sidecar_origin, "/api/health", token=service_token)
     if health.get("ok") is not True:
         raise RuntimeError("Python sidecar is not healthy")
     run_id = args.run_id.strip()
-    if run_id:
-        existing = request_json(
-            args.sidecar_origin,
-            f"/api/runs/{quote(run_id, safe='')}",
-            token=service_token,
-        )
-        projection = existing.get("projection", existing)
-        configuration = projection.get("configuration", {})
-        runtime = projection.get("dsh_runtime", {})
-        if (
-            configuration.get("execution_protocol") != PROTOCOL
-            or runtime.get("execution_protocol") != PROTOCOL
-        ):
-            raise RuntimeError("existing run is not a DSH-native evolution")
-        dataset_id = str(configuration.get("dataset_id") or "")
-        strategy_model_id = str(configuration.get("strategy_model_id") or "")
-        review_model_id = str(configuration.get("review_model_id") or "")
-    else:
+    if not run_id:
         catalog = request_json(args.sidecar_origin, "/api/catalog", token=service_token)
-        datasets = [
-            item
-            for item in catalog.get("datasets", [])
-            if isinstance(item, dict)
-            and (
-                item.get("ready") is True
-                or (
-                    isinstance(item.get("readiness"), dict)
-                    and item["readiness"].get("ready") is True
-                )
-            )
-            and item_id(item) != "generated-toy-series@1"
-        ]
-        configured_models = [
-            item
-            for item in catalog.get("dsh_models", catalog.get("models", []))
-            if isinstance(item, dict)
-            and item.get("configured", True) is not False
-            and item.get("credential_configured", True) is not False
-        ]
-        available_models = [
-            item
-            for item in configured_models
-            if item.get("available") is True or item.get("authenticated") is True
-        ]
-        models = available_models if len(available_models) >= 2 else configured_models
-        if not datasets or len(models) < 2:
-            raise RuntimeError(
-                "one runnable real dataset and two configured DSH models are required"
-            )
-        dataset_by_id = {item_id(item): item for item in datasets}
-        dataset_id = args.dataset_id.strip() or item_id(datasets[0])
-        if dataset_id not in dataset_by_id:
-            raise RuntimeError(f"requested dataset is not runnable: {dataset_id}")
-        models = sorted(
-            models,
-            key=lambda item: (
-                "glm" not in item_id(item).casefold(),
-                "gpt-5.6-sol" not in item_id(item).casefold(),
-                "flash" not in item_id(item).casefold(),
-                item_id(item),
-            ),
-        )
-        model_by_id = {item_id(item): item for item in models}
-        strategy_model_id = args.strategy_model_id.strip() or item_id(models[0])
-        review_model_id = args.review_model_id.strip() or item_id(models[1])
-        for role, model_id in (
-            ("strategy", strategy_model_id),
-            ("review", review_model_id),
-        ):
-            if model_id not in model_by_id:
-                raise RuntimeError(
-                    f"requested {role} model is not executable: {model_id}"
-                )
-        if not dataset_id or not strategy_model_id or not review_model_id:
-            raise RuntimeError("catalog identities are incomplete")
-        created = request_json(
-            args.sidecar_origin,
-            "/api/runs",
-            method="POST",
-            token=service_token,
-            body={
-                "execution_protocol": PROTOCOL,
-                "dataset_id": dataset_id,
-                "strategy_model_id": strategy_model_id,
-                "review_model_id": review_model_id,
-                "autonomous_mode": True,
-                "rounds": args.generations,
-                "candidates_per_generation": args.candidates,
-                "max_candidates": args.generations * args.candidates,
-                # The real greenhouse evaluator needs 169 complete origins × nine
-                # target/horizon cells before a generation is selection-eligible.
-                "samples_per_update": args.samples_per_update,
-                "sample_agent_batch_size": 9,
-                "sample_concurrency": 2,
-                "auto_progress": True,
-                "auto_advance": "continuous",
-                "allow_host_fallback": False,
-                "idempotency_key": f"dsh-native-e2e-{uuid4().hex}",
-            },
-        )
-        projection = created.get("projection", created)
-        run_id = str(projection.get("run_id") or "")
+        datasets = [item for item in catalog.get("datasets", [])
+                    if isinstance(item, dict) and item.get("training_selectable") is True
+                    and item.get("readiness", {}).get("ready") is True]
+        dataset_id = args.dataset_id.strip() or (item_id(datasets[0]) if datasets else "")
+        dataset = next((item for item in datasets if item_id(item) == dataset_id), None)
+        if dataset is None:
+            raise RuntimeError("a runnable observed greenhouse dataset is required")
+        episodes = dataset.get("episodes", [])
+        episode_id = args.episode_id.strip() or (item_id(episodes[0]) if episodes else "")
+        if not episode_id:
+            raise RuntimeError("an explicit available episode is required")
+        selected = {}
+        for role, supplied in (("propose", args.strategy_model_id), ("judge", args.review_model_id)):
+            models = configured_role_models(catalog, role)
+            model_id = supplied.strip() or (item_id(models[0]) if models else "")
+            if not any(item_id(item) == model_id for item in models):
+                raise RuntimeError(f"an executable configured {role} model is required")
+            selected[role] = model_id
+        # Separate role identities may intentionally use the same model route.
+        body = {"execution_protocol": PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2",
+                "dataset_id": dataset_id, "episode_id": episode_id,
+                "strategy_model_id": selected["propose"], "review_model_id": selected["judge"],
+                "autonomous_mode": True, "knowledge_online_enabled": False,
+                "budget": {"max_generations": args.generations,
+                           "candidates_per_generation": 4, "max_candidates": 4 * args.generations},
+                "candidate_concurrency": 2, "sample_concurrency": 4,
+                "auto_progress": True, "auto_advance": "continuous",
+                "idempotency_key": f"dsh-native-e2e-{uuid4().hex}"}
+        preflight = request_json(args.sidecar_origin, "/api/model-preflight", method="POST",
+                                 token=service_token, body=body, timeout=args.timeout)
+        if preflight.get("passed") is not True:
+            raise RuntimeError("standard four-role native preflight did not pass")
+        created = request_json(args.sidecar_origin, "/api/runs", method="POST", token=service_token, body=body)
+        run_id = str(created.get("projection", {}).get("run_id") or "")
         if not run_id:
             raise RuntimeError("run creation returned no run_id")
     print(f"run_id={run_id}", flush=True)
     deadline = time.monotonic() + args.timeout
+    route = f"/api/runs/{quote(run_id, safe='')}"
     while time.monotonic() < deadline:
-        current = request_json(
-            args.sidecar_origin,
-            f"/api/runs/{quote(run_id, safe='')}",
-            token=service_token,
-        )
-        projection = current.get("projection", current)
-        if projection.get("status") in {"completed", "failed", "cancelled"}:
+        current = request_json(args.sidecar_origin, route + "?view=monitor", token=service_token)
+        projection = current.get("projection", {})
+        if projection.get("status") in {"completed", "failed", "cancelled", "paused"}:
             break
-        time.sleep(2.0)
+        time.sleep(5.0)
     else:
-        raise TimeoutError("DSH-native smoke timed out")
-    if projection.get("status") != "completed":
-        raise RuntimeError(
-            "DSH-native smoke did not complete: "
-            + str(projection.get("failure_reason") or projection.get("status"))
-        )
-    candidates = projection.get("candidates", [])
-    expected_candidate_count = args.generations * args.candidates
-    if len(candidates) != expected_candidate_count:
-        raise RuntimeError(
-            "completed run has an unexpected candidate count: "
-            f"expected {expected_candidate_count}, got {len(candidates)}"
-        )
-    genomes = sum(
-        1
-        for item in candidates
-        if isinstance(item, dict) and item.get("genome", {}).get("available") is True
-    )
-    origin_summaries = [
-        item["metrics"]["sample_execution"]
-        for item in candidates
-        if isinstance(item, dict)
-        and isinstance(item.get("metrics"), dict)
-        and isinstance(item["metrics"].get("sample_execution"), dict)
-    ]
-    if genomes != len(candidates):
-        raise RuntimeError("one or more candidates have no durable Genome")
-    cohort_digests_by_generation: dict[int, set[str]] = {}
-    for candidate in candidates:
-        if not isinstance(candidate, dict) or not isinstance(
-            candidate.get("metrics"), dict
-        ):
-            continue
-        cohort_digest = candidate["metrics"].get("feedback_update_cohort_digest")
-        if not isinstance(cohort_digest, str) or len(cohort_digest) != 64:
-            raise RuntimeError("candidate has no verifiable feedback cohort digest")
-        generation = int(candidate.get("generation") or 0)
-        cohort_digests_by_generation.setdefault(generation, set()).add(cohort_digest)
-    if any(len(digests) != 1 for digests in cohort_digests_by_generation.values()):
-        raise RuntimeError("sibling candidates did not share one frozen feedback cohort")
+        raise TimeoutError("native acceptance observation timed out; run state was not changed")
+    overview = request_json(args.sidecar_origin, route + "?view=overview", token=service_token)
+    projection.update(overview.get("projection", {}))
+    generations = projection.get("total_generations")
+    if type(generations) is not int or not 1 <= generations <= 50:
+        raise RuntimeError("run projection has no valid frozen generation count")
+    evidence = _current_execution_evidence(projection, generations)
+    configuration = projection["configuration"]
+    dataset_id = configuration["dataset_id"]
+    strategy_model_id = configuration["strategy_model_id"]
+    review_model_id = configuration["review_model_id"]
+    if configuration.get("execution_protocol") != PROTOCOL:
+        raise RuntimeError("existing run is not native")
     events = all_run_events(args.sidecar_origin, run_id, token=service_token)
     analyzed_generations = {
         int(event.get("payload", {}).get("generation"))
@@ -352,7 +215,7 @@ def main() -> int:
         and isinstance(event["payload"].get("generation"), int)
         and not isinstance(event["payload"].get("generation"), bool)
     }
-    expected_generations = set(range(args.generations))
+    expected_generations = set(range(generations))
     if analyzed_generations != expected_generations:
         raise RuntimeError(
             "generation-level analysis coverage mismatch: "
@@ -453,125 +316,16 @@ def main() -> int:
         for event in reflected
     ):
         raise RuntimeError("generation reflection evidence is incomplete")
-    prediction_tool_events = [
-        event
-        for event in events
-        if event.get("kind") == "DshPredictionToolExecuted"
-    ]
-    structured_events = [
-        event
-        for event in events
-        if event.get("kind") == "DshStructuredResultAccepted"
-    ]
-    if projection.get("sample_agent_protocol") == "dsh-strict-origin-bundle@3":
-        if not origin_summaries:
-            raise RuntimeError("strict origin smoke produced no sample evidence")
-        for summary in origin_summaries:
-            origins = int(summary.get("attempted_origin_samples") or 0)
-            cells = int(summary.get("prediction_cell_count") or 0)
-            cells_per_origin = int(summary.get("prediction_cells_per_origin") or 0)
-            if (
-                origins < 1
-                or cells_per_origin != 9
-                or cells != origins * cells_per_origin
-                or summary.get("strict_agent_chain_pass") is not True
-            ):
-                raise RuntimeError("strict origin vector evidence is incomplete")
-            if any(
-                int(summary.get(name) or 0) != origins
-                for name in (
-                    "remote_planner_invocations",
-                    "registered_prediction_tool_invocations",
-                    "dsh_agent_prediction_tool_invocations",
-                    "remote_reflection_invocations",
-                )
-            ) or int(summary.get("remote_critic_invocations") or 0) < origins:
-                raise RuntimeError(
-                    "strict origin run did not execute one complete agent/tool chain per origin"
-                )
-        _validate_prediction_tool_event_count(
-            durable_event_count=len(prediction_tool_events),
-            completed_origin_summaries=origin_summaries,
-            candidate_count=len(candidates),
-            prediction_cell_budget_per_candidate=int(
-                projection.get("configuration", {}).get("samples_per_update")
-                or args.samples_per_update
-            ),
-        )
+    structured_events = [event for event in events if event.get("kind") == "DshStructuredResultAccepted"]
     runtime = projection.get("dsh_runtime", {})
-    skill_runtime = _verified_skill_runtime(
-        runtime,
-        structured_event_count=len(structured_events),
-    )
-    model_usage = projection.get("model_usage", {})
-    sample_budget_class = projection.get("configuration", {}).get(
-        "sample_budget_class"
-    )
-    if sample_budget_class == "diagnostic_smoke":
-        champion_events = [
-            event
-            for event in events
-            if event.get("kind") == "GenerationChampionSelected"
-            and isinstance(event.get("payload"), dict)
-        ]
-        if (
-            projection.get("outcome") != "diagnostic_smoke_completed"
-            or projection.get("termination_reason")
-            != "diagnostic_smoke_completed_no_promotion"
-            or projection.get("best_candidate_id") is not None
-            or any(
-                candidate.get("status") == "promoted"
-                for candidate in candidates
-                if isinstance(candidate, dict)
-            )
-            or any(
-                event["payload"].get("champion_candidate_id") is not None
-                for event in champion_events
-            )
-        ):
-            raise RuntimeError(
-                "diagnostic run crossed the formal promotion boundary"
-            )
-    print(f"protocol={runtime.get('execution_protocol')}")
-    print(f"dataset_id={dataset_id}")
-    print(f"strategy_model_id={strategy_model_id}")
-    print(f"review_model_id={review_model_id}")
-    print(f"genomes={genomes}")
-    print(f"python_model_requests={model_usage.get('call_count', 0)}")
-    print(f"dsh_agent_sessions>={len(runtime.get('preset_ids', []))}")
-    print(
-        "skill_first_stages="
-        f"{skill_runtime.get('verified_call_count', 0)} verified calls/"
-        f"{len(skill_runtime.get('skills', []))} skills"
-    )
-    print(
-        "autonomous_generation_contract="
-        f"{len(analyzed_generations)} analyzed/search/research/reflection cycles"
-    )
-    if origin_summaries:
-        print(
-            "origin_vector_contract="
-            + ",".join(
-                (
-                    f"{int(summary.get('attempted_origin_samples') or 0)} origins/"
-                    f"{int(summary.get('prediction_cell_count') or 0)} cells/"
-                    f"{int(summary.get('dsh_agent_prediction_tool_invocations') or 0)} agent tool calls"
-                )
-                for summary in origin_summaries
-            )
-        )
-        print(f"durable_prediction_tool_events={len(prediction_tool_events)}")
-    print("direct_child_reconciliation=verified_by_durable_acceptance")
-    print("reward_contract=unchanged")
-    print(f"sample_budget_class={sample_budget_class}")
-    print(
-        "scientific_result="
-        + (
-            "diagnostic_only_no_promotion"
-            if sample_budget_class == "diagnostic_smoke"
-            else "selection_only"
-        )
-    )
+    skill_runtime = _verified_skill_runtime(runtime, structured_event_count=len(structured_events))
+    usage = runtime.get("provider_usage", {})
+    print(json.dumps({"protocol": PROTOCOL, "dataset_id": dataset_id,
+        "strategy_model_id": strategy_model_id, "review_model_id": review_model_id,
+        **evidence, "skill_verified_calls": skill_runtime["verified_call_count"],
+        "reported_tokens": usage.get("total_tokens"), "accounting_coverage": usage.get("accounting_coverage"),
+        "prediction_tool_events": sum(event.get("kind") == "DshPredictionToolExecuted" for event in events),
+        "analyzed_generations": len(analyzed_generations), "scientific_result": "selection_only"}, ensure_ascii=False))
     return 0
 
 

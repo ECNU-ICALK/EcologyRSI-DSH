@@ -160,7 +160,7 @@ function stageBinding({ samplePlan = false, suffix = "race", revision = 7 } = {}
     : { question: "bounded launch fence" };
   return {
     run_id: samplePlan ? "run-sample-plan-launch-race" : "run-child-launch-race",
-    stage: samplePlan ? "sample.plan" : "generation.research",
+    stage: samplePlan ? "sample.plan" : "candidate.propose",
     admission_id: `admission-${suffix}`,
     run_state_revision: revision,
     stage_attempt: 2,
@@ -168,10 +168,10 @@ function stageBinding({ samplePlan = false, suffix = "race", revision = 7 } = {}
     idempotency_key: `stage-${suffix}`,
     binding: { initial_run_status: "running" },
     request: {
-      role: samplePlan ? "sample-planner" : "researcher",
+      role: samplePlan ? "sample-planner" : "candidate-proposer",
       output_schema_id: samplePlan
         ? "ecology-sample-predictions@2"
-        : "ecology-research-result@1",
+        : "ecology-genome-mutation@1",
       ...(samplePlan ? { max_tokens: 2048 } : {}),
       context,
       context_canonical_json: canonicalJson(context),
@@ -209,7 +209,7 @@ function launchRaceHarness({ samplePlan = false } = {}) {
       wave_digest: "f".repeat(64),
       decisions: [],
     }
-    : { schema_version: "ecology-research-result@1", findings: [] };
+    : { schema_version: "ecology-genome-mutation@1", findings: [] };
   const outputSchema = samplePlan
     ? {
       type: "object",
@@ -237,7 +237,7 @@ function launchRaceHarness({ samplePlan = false } = {}) {
     sessions: {
       get: (sessionId) => ({
         id: sessionId,
-        events: skillFirstEvents("autonomous-ecology-research"),
+        events: skillFirstEvents("bounded-plugin-experiment"),
       }),
     },
     subagents: {

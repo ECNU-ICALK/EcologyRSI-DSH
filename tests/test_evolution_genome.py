@@ -45,7 +45,7 @@ def _initialization(**changes: object) -> FrozenRunInitialization:
 def _seed_genome() -> EcologyEvolutionPluginGenome:
     registry = current_program_registry()
     return materialize_seed_genome(
-        registry.seed_template("greenhouse-default@1"),
+        registry.seed_template("greenhouse-default@2"),
         _initialization(registry_catalog_digest=registry.catalog_digest),
     )
 
@@ -330,11 +330,11 @@ class EvolutionGenomeTests(unittest.TestCase):
         self,
     ) -> None:
         registry = current_program_registry()
-        template = registry.seed_template("greenhouse-default@1").to_dict()
+        template = registry.seed_template("greenhouse-default@2").to_dict()
         template.pop("template_digest")
         template["scientific_program"]["parameter_overrides"]["history_steps"] = True
         with self.assertRaisesRegex((TypeError, ValueError), "bool|number|integer"):
-            type(registry.seed_template("greenhouse-default@1")).from_dict(template)
+            type(registry.seed_template("greenhouse-default@2")).from_dict(template)
 
         for bad in (math.nan, math.inf, -math.inf):
             with self.assertRaises(ValueError):
@@ -502,10 +502,10 @@ class EvolutionGenomeTests(unittest.TestCase):
 
     def test_seed_template_cannot_contain_run_specific_bindings(self) -> None:
         template_type = type(
-            current_program_registry().seed_template("greenhouse-default@1")
+            current_program_registry().seed_template("greenhouse-default@2")
         )
         value = current_program_registry().seed_template(
-            "greenhouse-default@1"
+            "greenhouse-default@2"
         ).to_dict()
         value["runtime_binding"] = {"protocol": "forbidden"}
         with self.assertRaisesRegex(ValueError, "run-specific|unsupported"):
@@ -514,7 +514,7 @@ class EvolutionGenomeTests(unittest.TestCase):
     def test_materialized_seed_contains_all_frozen_run_bindings(self) -> None:
         initialization = _initialization()
         genome = materialize_seed_genome(
-            current_program_registry().seed_template("greenhouse-default@1"),
+            current_program_registry().seed_template("greenhouse-default@2"),
             initialization,
         )
         result = genome.to_dict()

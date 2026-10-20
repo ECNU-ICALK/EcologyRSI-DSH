@@ -19,7 +19,6 @@ from ecologyrsi_dsh.evolution.strategies import (
     _predictor_semantics, _validate_candidate_direction_realizability,
 )
 from ecologyrsi_dsh.knowledge.autonomous_cycle import GenerationSearchPlan, GenerationReflection, validate_research_synthesis
-from ecologyrsi_dsh.knowledge.algorithms import resolve_predictor_adoption
 from ecologyrsi_dsh.knowledge.research_iteration import ResearchIteration, validate_research_plan
 from ecologyrsi_dsh.knowledge.models import KnowledgeCard, KnowledgeSnapshot
 from ecologyrsi_dsh.knowledge.program_registry import current_program_registry
@@ -49,11 +48,11 @@ class ResearchContextTests(unittest.TestCase):
     def setUp(self):
         self.task = replace(_task(), metadata={**_task().metadata,
             "prediction_model_id": "greenhouse-baseline-aligned-ridge@1",
-            "evaluator_id": "greenhouse_multihorizon_time_forward@3",
-            "seed_genome_template_id": "greenhouse-baseline-aligned-default@1"})
+            "evaluator_id": "greenhouse_multihorizon_time_forward@4",
+            "seed_genome_template_id": "greenhouse-baseline-aligned-default@2"})
         self.run = Run(run_id="run:research-context", task_id=self.task.task_id, task_manifest_digest=self.task.digest)
         registry = current_program_registry()
-        self.parent = materialize_seed_genome(registry.seed_template("greenhouse-baseline-aligned-default@1"),
+        self.parent = materialize_seed_genome(registry.seed_template("greenhouse-baseline-aligned-default@2"),
                                               _initialization(task_manifest_digest=self.task.digest))
         self.schemas = StrategyRouterDSHAdapter._GREENHOUSE_ALIGNED_RIDGE_SCHEMAS
         self.search = GenerationSearchPlan(run_id=self.run.run_id, generation=0,
@@ -115,7 +114,7 @@ class ResearchContextTests(unittest.TestCase):
             with self.subTest(enabled=enabled):
                 task = replace(self.task, metadata={**self.task.metadata,
                     **({"research_execution_policy": dict(RESEARCH_EXECUTION_POLICY)} if enabled else {})})
-                parent = materialize_seed_genome(current_program_registry().seed_template("greenhouse-baseline-aligned-default@1"),
+                parent = materialize_seed_genome(current_program_registry().seed_template("greenhouse-baseline-aligned-default@2"),
                                                 _initialization(task_manifest_digest=task.digest))
                 captured = []
                 def invoke(**request):
@@ -142,7 +141,7 @@ class ResearchContextTests(unittest.TestCase):
 
         task = replace(self.task, metadata={**self.task.metadata,
             "research_execution_policy": dict(RESEARCH_EXECUTION_POLICY)})
-        parent = materialize_seed_genome(current_program_registry().seed_template("greenhouse-baseline-aligned-default@1"),
+        parent = materialize_seed_genome(current_program_registry().seed_template("greenhouse-baseline-aligned-default@2"),
                                         _initialization(task_manifest_digest=task.digest))
         adapter = StrategyRouterDSHAdapter(gateway=object())
         with patch.object(adapter, "_native_runtime", return_value=SimpleNamespace(run=invoke)):
@@ -193,7 +192,7 @@ class ResearchContextTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exceeds the bounded contract"):
             validate_research_plan(expanded)
         iteration = ResearchIteration(run_id=next_run.run_id, generation=1, status=result["status"],
-            plan=plan, prediction_model_adoption=resolve_predictor_adoption(self.task, plan).to_dict(),
+            plan=plan,
             knowledge_snapshot_digest="test-frozen-knowledge")
         self.assertEqual(ResearchIteration.from_dict(iteration.to_dict()), iteration)
 
@@ -232,7 +231,7 @@ class ResearchContextTests(unittest.TestCase):
         self.assertEqual(calls[0]["context"]["cross_generation_experience"]["exploration_archive"], original)
         self.assertEqual(plan["exploration_archive"], original)
         iteration = ResearchIteration(run_id=self.run.run_id, generation=0, status="model_generated", plan=plan,
-            prediction_model_adoption=resolve_predictor_adoption(self.task, plan).to_dict(),
+
             knowledge_snapshot_digest="test-frozen-knowledge")
         self.assertEqual(ResearchIteration.from_dict(iteration.to_dict()), iteration)
         feedback = safe_aggregate_feedback(iteration.to_dict(), name="next-round research")
@@ -407,6 +406,8 @@ class ResearchContextTests(unittest.TestCase):
                 director = EvolutionDirector(ledger, adapter)
                 run_id = f"run:proposal-exclusions-{enabled}"
                 director.create_run(task, run_id=run_id)
+                from tests.native_fixtures import canary_receipts
+                director.record_model_contract_preflight(run_id, canary_receipts(task.metadata))
                 director.start_run(run_id)
                 batch = start_generation_batch(director, run_id)
                 for slot in range(4):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from ..evolution.diversity import preregister_candidate
 from ..evolution.effect_contracts import hard_effect_failure
 from ..core.training_race import race_bindings
 from ..core.training_effect_evidence import finalist_training_effect_evidence
@@ -11,9 +10,6 @@ from ..core.review_policy import build_review_policy, review_result_metrics
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
 
 from ..evaluators.agent_stability import (
-    REPLICA_COUNT,
-    replica_summary,
-    stability_evidence,
     capacity_with_inference_replicas,
 )
 
@@ -60,7 +56,6 @@ from ..core.sample_results import (
     sample_results_completion_payload,
     sample_results_event_payload,
 )
-from ..core.sample_budget import complete_origin_count
 from ..core.screening import screening_cohort_digest
 from ..core.search_policy import guarded_search
 from ..core.trajectory import (
@@ -81,28 +76,21 @@ from ..evaluators.epoch_cohorts import (
 )
 from ..evaluators.fitness import FitnessProfile
 from ..evaluators.greenhouse_prediction import origin_history_alignment_hours
-from ..evaluators.registry import RULE_JUDGE_ID, EvaluationBundle, EvaluatorRegistry
+from ..evaluators.registry import EvaluationBundle
 from ..evaluators.generation_comparison import build_generation_comparison
-from ..evaluators.gateway_sample_adapter import ModelTokenBudgetExhaustedError
 from ..evaluators.sample_execution import (
     SampleExecutionCancelledError,
     SampleExecutionControlError,
-    SampleExecutionControlUnavailableError,
     SampleExecutionPausedError,
     SampleResultCallbackError,
 )
-from ..evolution.batches import finalize_generation_batch, start_generation_batch
+from ..evolution.batches import start_generation_batch
 from ..evolution.analysis import (
-    GENERATION_CONTROL_EVALUATION_SCHEMA,
-    GENERATION_CONTROL_POLICY,
     GenerationAnalysis,
-    generation_control_evaluations,
-    strict_generation_controls_required,
 )
 from ..evolution.context import safe_aggregate_feedback
 from ..evolution.genome import deep_thaw_json
 from ..evolution.schedule import (
-    OPTIMIZATION_PROTOCOL,
     PAIRED_LOCAL_EVALUATION_MODE,
     OptimizationSchedule,
 )
@@ -111,11 +99,6 @@ from ..integrations.dsh_native_runtime import (
     DshNativeRuntimeUnavailableError,
 )
 from ..integrations.dsh_structured_roles import DshStructuredRoleRuntime
-from ..integrations.model_gateway import (
-    GatewayConfigurationError,
-    GatewayResponseError,
-    gateway_error_in_chain,
-)
 from ..knowledge.algorithm_smoke import (
     AlgorithmSmokeError,
     smoke_test_algorithm_spec,
@@ -341,8 +324,7 @@ def _freeze_adaptive_generation_inputs(
         seed=state.task_manifest.seed,
         history_steps=history_steps,
     )
-    if schedule.race:
-        planned = replace(planned, revision_bindings=race_bindings(services.director.state(run_id), generation))
+    planned = replace(planned, revision_bindings=race_bindings(services.director.state(run_id), generation))
     _director_mutation(
         services,
         "freeze_run_adaptation_cohort",
@@ -358,42 +340,14 @@ def _freeze_adaptive_generation_inputs(
 
 
 def _phase_task_manifest(task: Any, generation: int, phase: str) -> Any:
-    if task.metadata.get("optimization_protocol") in ADAPTIVE_PROTOCOLS:
-        return replace(
-            task,
-            metadata={
-                **dict(task.metadata),
-                "evaluation_phase": phase,
-                "two_stage_evaluation_enabled": True,
-            },
-        )
-    cells_per_origin = int(task.metadata.get("prediction_cells_per_origin", 1))
-    formal_cells = int(task.metadata.get("samples_per_update", cells_per_origin))
-    formal_origins = complete_origin_count(formal_cells, cells_per_origin)
-    generation_stride = _SCREENING_ORIGIN_COUNT + formal_origins
-    if phase == "screening":
-        origin_count = _SCREENING_ORIGIN_COUNT
-        origin_offset = generation * generation_stride
-    elif phase == "formal":
-        origin_count = formal_origins
-        origin_offset = generation * generation_stride + _SCREENING_ORIGIN_COUNT
-    else:
+    if phase not in {"screening", "formal", "holdout"}:
         raise ValueError("unknown evaluation phase")
-    return replace(
-        task,
-        metadata={
-            **dict(task.metadata),
-            "evaluation_phase": phase,
-            "evaluation_origin_window_offset": origin_offset,
-            "samples_per_update": origin_count * cells_per_origin,
-            "evaluation_origin_count": origin_count,
-            "two_stage_evaluation_enabled": True,
-        },
-    )
+    return replace(task, metadata={**dict(task.metadata), "evaluation_phase": phase,
+                                   "two_stage_evaluation_enabled": True})
 
 
 def _screen_candidate(services: GenerationRuntime, run_id: str, candidate_id: str, *, generation: int | None = None) -> None:
-    """Evaluate one restart-safe 64-origin screening cohort."""
+    """Evaluate the frozen ten-origin screening cohort with restart safety."""
 
     state = services.director.state(run_id)
     if state.run.status is not RunStatus.RUNNING:
@@ -403,27 +357,17 @@ def _screen_candidate(services: GenerationRuntime, run_id: str, candidate_id: st
     schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata["optimization_schedule"])
     if candidate.candidate_id in _screening_records(state, generation):
         return
-    if candidate.status is not CandidateStatus.SPAWNED and not schedule.race:
-        return
+    pass
     generation_cohorts = state.generation_cohort_for(generation)
     if generation_cohorts is None:
         raise RuntimeError("screening requires frozen generation cohorts")
     screening_task = _phase_task_manifest(state.task_manifest, generation, "screening")
-    if schedule.race:
-        bound = (generation_cohorts.revision_bindings or {}).get(candidate_id)
-        if bound is None:
-            raise ValueError("candidate is not admitted to frozen training race")
-        revision = state.revision(bound)
-        candidate, proposal, algorithm = _holdout_replay_inputs(state, candidate, generation, bound, screening_task)
-        compiled = algorithm.to_dict()
-    else:
-        proposal = state.proposal(candidate.proposal_id)
-        if not _ensure_candidate_algorithm_ready(services, state, proposal, candidate):
-            return
-        state = services.director.state(run_id)
-        candidate = state.candidate(candidate_id)
-        compiled = state.compiled_algorithm_for(candidate_id)
-        revision = state.initial_revision_for(candidate_id)
+    bound = (generation_cohorts.revision_bindings or {}).get(candidate_id)
+    if bound is None:
+        raise ValueError("candidate is not admitted to frozen training race")
+    revision = state.revision(bound)
+    candidate, proposal, algorithm = _holdout_replay_inputs(state, candidate, generation, bound, screening_task)
+    compiled = algorithm.to_dict()
     if revision is None or compiled is None:
         raise RuntimeError("screening requires compiled frozen revision")
     screening_cohort = generation_cohorts.screening
@@ -462,8 +406,7 @@ def _screen_candidate(services: GenerationRuntime, run_id: str, candidate_id: st
     except Exception as exc:  # noqa: BLE001 - preserve remote retry boundary
         if _recoverable_evaluation_error(exc):
             raise
-        if schedule.race:
-            raise  # Preserve a resumable five-arm race; never hide missing control evidence.
+        raise  # Preserve a resumable five-arm race; never hide missing control evidence.
         _director_mutation(
             services,
             "fail_candidate",
@@ -499,7 +442,7 @@ def _screen_candidate(services: GenerationRuntime, run_id: str, candidate_id: st
         candidate_id=candidate_id,
         generation=generation,
         **({"metrics": {**_durable_batch_metrics(bundle.evaluation.metrics), "screening_evaluator_digest": bundle.evaluation.evaluator_digest},
-            "candidate_revision_id": revision.revision_id} if schedule.race else {}),
+            "candidate_revision_id": revision.revision_id}),
         score=bundle.evaluation.score,
         passed=bundle.evaluation.passed,
         constraint_violations=max(
@@ -529,21 +472,14 @@ def _prepare_formal_finalists(
     state = services.director.state(run_id)
     generation = int(candidates[0].generation)
     frozen = _formal_selection_event(state, generation)
-    schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata.get("optimization_schedule") or OptimizationSchedule.default().to_dict())
-    if frozen is None and schedule.quick and not schedule.race:
-        # Preregister the first proposal before seeing any evaluation labels.
-        # Other proposals are never scored or ranked in the quick protocol.
-        selected = preregister_candidate(candidates, state.proposal, state.task_manifest.metadata, generation)
-        frozen = _director_mutation(services, "freeze_formal_selection_cohort", run_id,
-            generation=generation, selected_candidate_ids=(selected.candidate_id,),
-            screening_digest=screening_cohort_digest(()))
-        state = services.director.state(run_id)
+    schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata.get("optimization_schedule") or OptimizationSchedule.for_new_run().to_dict())
+    pass
     if frozen is None:
-        race_ids = state.generation_cohort_for(generation).revision_bindings if schedule.race else None
+        race_ids = state.generation_cohort_for(generation).revision_bindings
         evaluation_candidates = tuple(state.candidate(cid) for cid in race_ids) if race_ids else candidates
         tasks = tuple(
             CandidateEvaluationTask(
-                slot_index=index if schedule.race else int(candidate.slot_index),
+                slot_index=index,
                 candidate_id=str(candidate.candidate_id),
             )
             for index, candidate in enumerate(evaluation_candidates)
@@ -658,234 +594,12 @@ def _quiesce_native_terminal(services: GenerationRuntime, state: Any, terminal: 
         return
 
 
-def _bounded_control_evaluation(
-    evaluation: Evaluation,
-    *,
-    generation: int,
-    comparison_role: str,
-) -> dict[str, Any]:
-    """Keep only aggregate evidence needed for same-cohort selection."""
-
-    value = evaluation.to_dict()
-    metrics = dict(evaluation.metrics)
-    for field_name in (
-        "prediction_preview",
-        "sample_execution_records",
-        "sample_execution_trace_archive",
-    ):
-        metrics.pop(field_name, None)
-    sample_execution = metrics.get("sample_execution")
-    if isinstance(sample_execution, Mapping):
-        metrics["sample_execution"] = {
-            name: item
-            for name, item in sample_execution.items()
-            if name not in {"action_catalog", "failure_preview"}
-        }
-    value["metrics"] = metrics
-    return {
-        "schema_version": GENERATION_CONTROL_EVALUATION_SCHEMA,
-        "generation": generation,
-        "comparison_role": comparison_role,
-        "candidate_id": evaluation.candidate_id,
-        "evaluation": value,
-    }
 
 
-def _evaluate_generation_controls(
-    services: GenerationRuntime,
-    state: Any,
-    candidate: Candidate,
-    *,
-    on_model_usage: Any = None,
-    on_sample_control: Any = None,
-) -> list[dict[str, Any]]:
-    """Re-evaluate the search parent and formal elite on the current cohort."""
-
-    formal_event = _formal_selection_event(state, candidate.generation)
-    control_candidate_id = (
-        str(formal_event.payload["selected_candidate_ids"][0])
-        if formal_event is not None
-        else None
-    )
-    if (
-        (
-            candidate.candidate_id != control_candidate_id
-            if control_candidate_id is not None
-            else candidate.slot_index != 0
-        )
-        or candidate.generation <= 0
-        or not is_strict_origin_protocol(
-            state.task_manifest.metadata.get("sample_agent_protocol")
-        )
-        or state.task_manifest.metadata.get("sample_budget_class")
-        != "selection_eligible"
-        or not isinstance(services.evaluators, EvaluatorRegistry)
-    ):
-        return []
-    evaluation_task = (
-        _phase_task_manifest(state.task_manifest, candidate.generation, "formal")
-        if formal_event is not None
-        else state.task_manifest
-    )
-    batch = state.batch_for(candidate.generation)
-    if batch is None:
-        raise RuntimeError("strict generation control requires a frozen batch")
-    current_compiled = state.compiled_algorithm_for(candidate.candidate_id)
-    if current_compiled is None:
-        raise RuntimeError("strict generation control requires the current algorithm")
-    current_execution_plan = current_compiled.get("derived_execution_plan")
-    control_roles: dict[str, str] = {}
-    if batch.parent_candidate_id is not None:
-        control_roles[str(batch.parent_candidate_id)] = "search_parent"
-    if state.run.best_candidate_id is not None:
-        elite_id = str(state.run.best_candidate_id)
-        control_roles[elite_id] = (
-            "search_parent_and_formal_elite"
-            if elite_id in control_roles
-            else "formal_elite"
-        )
-
-    results: list[dict[str, Any]] = []
-    for control_id, role in control_roles.items():
-        control_candidate = state.candidate(control_id)
-        control_proposal = state.proposal(control_candidate.proposal_id)
-        compiled = state.compiled_algorithm_for(control_id)
-        if compiled is None:
-            raise RuntimeError(
-                "generation control candidate has no compiled algorithm"
-            )
-        proposal_metadata = dict(control_proposal.metadata)
-        if isinstance(current_execution_plan, Mapping):
-            proposal_metadata["derived_execution_plan"] = dict(
-                current_execution_plan
-            )
-        else:
-            proposal_metadata.pop("derived_execution_plan", None)
-        replay_proposal = Proposal(
-            proposal_id=control_proposal.proposal_id,
-            run_id=control_proposal.run_id,
-            generation=candidate.generation,
-            title=control_proposal.title,
-            changes=control_proposal.changes,
-            parent_candidate_id=control_proposal.parent_candidate_id,
-            rationale=control_proposal.rationale,
-            metadata=proposal_metadata,
-            created_at=control_proposal.created_at,
-        )
-        replay_candidate = Candidate(
-            candidate_id=control_candidate.candidate_id,
-            run_id=control_candidate.run_id,
-            proposal_id=control_candidate.proposal_id,
-            generation=candidate.generation,
-            slot_index=control_candidate.slot_index,
-            status=CandidateStatus.SPAWNED,
-            created_at=control_candidate.created_at,
-        )
-        spec_data = dict(compiled)
-        spec_data.pop("spec_digest", None)
-        if isinstance(current_execution_plan, Mapping):
-            spec_data["derived_execution_plan"] = dict(current_execution_plan)
-        else:
-            spec_data.pop("derived_execution_plan", None)
-        spec_data["generation"] = candidate.generation
-        replay_spec = AlgorithmSpec.from_dict(spec_data)
-        bundle = services.evaluators.evaluate_scientific(
-            evaluation_task,
-            replay_candidate,
-            replay_proposal,
-            on_training_complete=lambda: None,
-            on_model_usage=on_model_usage,
-            on_sample_control=on_sample_control,
-            algorithm_spec=replay_spec,
-        )
-        sample_summary = bundle.evaluation.metrics.get("sample_execution")
-        if (
-            not isinstance(sample_summary, Mapping)
-            or sample_summary.get("strict_agent_contract") is not True
-            or sample_summary.get("strict_agent_chain_pass") is not True
-            or sample_summary.get("host_route_bypass_count") != 0
-        ):
-            raise RuntimeError(
-                "generation control did not complete the strict per-sample agent chain"
-            )
-        results.append(
-            _bounded_control_evaluation(
-                bundle.evaluation,
-                generation=candidate.generation,
-                comparison_role=role,
-            )
-        )
-    return results
 
 
-def _model_token_budget_error_in_chain(
-    exc: BaseException,
-) -> ModelTokenBudgetExhaustedError | None:
-    pending: list[tuple[BaseException, int]] = [(exc, 0)]
-    seen: set[int] = set()
-    while pending:
-        current, depth = pending.pop()
-        identity = id(current)
-        if identity in seen or depth > 32:
-            continue
-        seen.add(identity)
-        if isinstance(current, ModelTokenBudgetExhaustedError):
-            return current
-        for related in (
-            getattr(current, "__cause__", None),
-            getattr(current, "__context__", None),
-        ):
-            if isinstance(related, BaseException):
-                pending.append((related, depth + 1))
-        grouped = getattr(current, "exceptions", None)
-        if isinstance(grouped, (tuple, list)):
-            pending.extend(
-                (related, depth + 1)
-                for related in grouped
-                if isinstance(related, BaseException)
-            )
-    return None
 
 
-def _model_token_budget_state(state: Any) -> dict[str, int]:
-    """Summarize durable run-wide receipts for scheduler admission."""
-
-    tokens_used = 0
-    missing_call_count = 0
-    missing_call_reservation = int(
-        state.task_manifest.token_reservation_per_wave
-    )
-    for event in state.events:
-        if event.kind != "ModelUsageRecorded":
-            continue
-        payload = event.payload
-        usage_reported = (
-            payload.get("usage_reported") is True
-            if payload.get("schema_version") == "ecologyrsi-dsh.model-usage/2"
-            else True
-        )
-        if not usage_reported:
-            if missing_call_reservation > 0:
-                # The exact amount is unavailable, but strict per-call
-                # admission proves this frozen reservation is an upper bound.
-                # Charge it in full so a retryable gateway failure can keep its
-                # delayed-retry semantics without under-accounting the budget.
-                tokens_used += missing_call_reservation
-            else:
-                missing_call_count += 1
-            continue
-        total_tokens = payload.get("total_tokens")
-        if (
-            isinstance(total_tokens, int)
-            and not isinstance(total_tokens, bool)
-            and total_tokens >= 0
-        ):
-            tokens_used += total_tokens
-    return {
-        "token_limit": state.task_manifest.token_limit,
-        "tokens_used": tokens_used,
-        "missing_call_count": missing_call_count,
-    }
 
 
 class EvaluationSession:
@@ -964,9 +678,6 @@ class EvaluationSession:
         self.batch_index = next_batch_index - 1
         return {
             **prepared,
-            "token_budget_state": _model_token_budget_state(
-                self.services.director.state(self.run_id)
-            ),
         }
 
     def record_results(self, scoring_rows: Any) -> None:
@@ -997,28 +708,6 @@ class EvaluationSession:
                 return
             raise
 
-    def record_model_usage(self, receipts: Any) -> Mapping[str, Any]:
-        if self.revision is None:
-            raise SampleResultCallbackError(
-                "model usage callback ran before checkpoint"
-            )
-        try:
-            _director_mutation(
-                self.services,
-                "record_model_usage_batch",
-                self.run_id,
-                generation=self.generation,
-                candidate_id=self.candidate_id,
-                revision=self.revision,
-                receipts=receipts,
-            )
-        except Exception as exc:
-            raise SampleResultCallbackError(
-                "model usage receipts could not be persisted"
-            ) from exc
-        return _model_token_budget_state(
-            self.services.director.state(self.run_id)
-        )
 
     def record_progress(self, progress: Mapping[str, Any]) -> None:
         if progress.get("role") != "planner" or not self.accepts_publication():
@@ -1051,7 +740,6 @@ class EvaluationSession:
             "on_sample_control": self.run_control,
             "on_sample_checkpoint": self.prepare_checkpoint,
             "on_sample_results": self.record_results,
-            "on_model_usage": self.record_model_usage,
             "on_evaluation_progress": self.record_progress,
         }
 
@@ -1077,35 +765,6 @@ class EvaluationSession:
         )
 
 
-def _pause_for_model_token_budget(
-    services: GenerationRuntime,
-    run_id: str,
-    error: ModelTokenBudgetExhaustedError,
-) -> Any:
-    if error.reason == "usage_unreported":
-        reason = (
-            "模型 Token 用量回执不完整，硬预算无法继续安全核算；"
-            f"已记录 {error.tokens_used} tokens，缺失 "
-            f"{error.missing_usage_call_count} 次调用用量。"
-        )
-    else:
-        reason = (
-            "模型 Token 硬预算已停止新调用："
-            f"已用 {error.tokens_used}，在途预留 {error.reserved_tokens}，"
-            f"单次网关调用预留上限 {error.token_reservation_per_wave}，"
-            f"上限 {error.token_limit}。"
-        )
-    latest = services.director.state(run_id)
-    if latest.run.status is RunStatus.RUNNING:
-        _director_mutation(
-            services,
-            "pause_run",
-            run_id,
-            reason=reason,
-            code="model_token_budget_exhausted",
-        )
-        latest = services.director.state(run_id)
-    return latest
 
 
 def _recoverable_evaluation_error(exc: BaseException) -> bool:
@@ -1117,11 +776,6 @@ def _recoverable_evaluation_error(exc: BaseException) -> bool:
     failures, so inspect both boundaries before applying ``CandidateFailed``.
     """
 
-    if _model_token_budget_error_in_chain(exc) is not None:
-        return True
-    gateway_error = gateway_error_in_chain(exc)
-    if gateway_error is not None and gateway_error.retryable:
-        return True
     dsh_error = dsh_native_runtime_error_in_chain(exc)
     if dsh_error is not None and (
         dsh_native_runtime_retryable(dsh_error)
@@ -1169,51 +823,6 @@ def _record_stage(
     )
 
 
-def _restore_orphan_interventions(services: GenerationRuntime, state: Any, proposal: Any) -> None:
-    proposal_event = next(
-        (
-            event
-            for event in reversed(state.events)
-            if event.kind == "ProposalSubmitted"
-            and isinstance(event.payload.get("proposal"), dict)
-            and event.payload["proposal"].get("proposal_id") == proposal.proposal_id
-        ),
-        None,
-    )
-    receipts = (
-        proposal_event.payload.get("intervention_receipts", [])
-        if proposal_event is not None
-        else []
-    )
-    receipts_by_id = {
-        str(item.get("intervention_id")): dict(item)
-        for item in receipts
-        if isinstance(item, dict) and item.get("intervention_id")
-    }
-    for intervention in state.pending_interventions:
-        receipt = receipts_by_id.get(intervention.intervention_id)
-        if receipt is None:
-            receipt = {
-                "kind": intervention.kind.value,
-                "recorded": True,
-                "applied": False,
-                "enforced": False,
-                "application_status": "recorded",
-                "reason": "恢复提案时缺少原执行收据，仅保留审计记录",
-            }
-        services.ledger.append(
-            state.run.run_id,
-            "HumanInterventionApplied",
-            {
-                **receipt,
-                "intervention_id": intervention.intervention_id,
-                "proposal_id": proposal.proposal_id,
-            },
-            event_id=(
-                f"{state.run.run_id}:intervention:{intervention.intervention_id}:"
-                f"applied:{proposal.proposal_id}"
-            ),
-        )
 
 
 def _candidate_signature(state: Any, proposal: Any) -> str:
@@ -1236,24 +845,18 @@ def _candidate_signature(state: Any, proposal: Any) -> str:
         if isinstance(execution_plan, Mapping)
         else None
     )
-    predictor_adoption = proposal_metadata.get("prediction_model_adoption")
-    adopted_predictor_id = (
-        predictor_adoption.get("adopted_id")
-        if isinstance(predictor_adoption, Mapping)
-        else metadata.get("prediction_model_id")
-    )
-    adopted_predictor_digest = (
-        predictor_adoption.get("adopted_digest")
-        if isinstance(predictor_adoption, Mapping)
-        else metadata.get("prediction_model_digest")
-    )
+    from ..core.state import persisted_genome_from_proposal
+    genome = persisted_genome_from_proposal(proposal)
+    if genome is None:
+        raise ValueError("candidate signature requires a frozen native genome")
+    predictor_ref = genome.scientific_program["predictor_ref"]
     return canonical_json(
         {
             "parameters": dict(proposal.changes),
             "behavior_digest": behavior_digest,
             "derived_execution_semantics_digest": execution_plan_digest,
-            "prediction_model_id": adopted_predictor_id,
-            "prediction_model_digest": adopted_predictor_digest,
+            "prediction_model_id": predictor_ref["id"],
+            "prediction_model_digest": predictor_ref["catalog_digest"],
             "dataset_digest": metadata.get("dataset_digest")
             or list(state.task_manifest.visible_datasets),
             "evaluator_digest": metadata.get("evaluator_digest"),
@@ -1296,12 +899,9 @@ def _spawn_generation_candidates(services: GenerationRuntime, run_id: str, batch
                 parent_candidate_id=batch.parent_candidate_id,
                 generation_batch=batch,
                 slot_index=slot_index,
-                consume_interventions=slot_index == batch.batch_size - 1,
             )
         else:
             proposal = orphan
-            if slot_index == batch.batch_size - 1:
-                _restore_orphan_interventions(services, state, proposal)
         fallback = (
             proposal.metadata.get("host_fallback")
             if isinstance(proposal.metadata, Mapping)
@@ -1430,67 +1030,61 @@ def _unavailable_judgment(
     evaluation: Evaluation,
     exc: BaseException,
 ) -> Evaluation:
-    gateway_error = gateway_error_in_chain(exc)
-    if gateway_error is not None:
-        failure_class = "transient" if gateway_error.retryable else "permanent"
-        error_code = gateway_error.error_code
+    dsh_error = dsh_native_runtime_error_in_chain(exc)
+    if dsh_error is not None:
+        failure_class = (
+            "transient"
+            if dsh_native_runtime_retryable(dsh_error)
+            else "permanent"
+        )
+        error_code = str(
+            getattr(dsh_error, "error_code", "dsh_native_runtime_unavailable")
+        )
     else:
-        dsh_error = dsh_native_runtime_error_in_chain(exc)
-        if dsh_error is not None:
-            failure_class = (
-                "transient"
-                if dsh_native_runtime_retryable(dsh_error)
-                else "permanent"
+        pending: list[tuple[BaseException, int]] = [(exc, 0)]
+        seen: set[int] = set()
+        transient = False
+        permanent = False
+        while pending:
+            current, depth = pending.pop()
+            identity = id(current)
+            if identity in seen or depth > 32:
+                continue
+            seen.add(identity)
+            permanent = permanent or isinstance(
+                current,
+                (
+                    KeyError,
+                    PermissionError,
+                    TypeError,
+                    ValueError,
+                ),
             )
-            error_code = str(
-                getattr(dsh_error, "error_code", "dsh_native_runtime_unavailable")
+            transient = transient or isinstance(
+                current,
+                (ConnectionError, TimeoutError),
             )
-        else:
-            pending: list[tuple[BaseException, int]] = [(exc, 0)]
-            seen: set[int] = set()
-            transient = False
-            permanent = False
-            while pending:
-                current, depth = pending.pop()
-                identity = id(current)
-                if identity in seen or depth > 32:
-                    continue
-                seen.add(identity)
-                permanent = permanent or isinstance(
-                    current,
-                    (
-                        GatewayConfigurationError,
-                        KeyError,
-                        PermissionError,
-                        TypeError,
-                        ValueError,
-                    ),
+            for related in (
+                getattr(current, "__cause__", None),
+                getattr(current, "__context__", None),
+            ):
+                if isinstance(related, BaseException):
+                    pending.append((related, depth + 1))
+            grouped = getattr(current, "exceptions", None)
+            if isinstance(grouped, (tuple, list)):
+                pending.extend(
+                    (related, depth + 1)
+                    for related in grouped
+                    if isinstance(related, BaseException)
                 )
-                transient = transient or isinstance(
-                    current,
-                    (ConnectionError, TimeoutError),
-                )
-                for related in (
-                    getattr(current, "__cause__", None),
-                    getattr(current, "__context__", None),
-                ):
-                    if isinstance(related, BaseException):
-                        pending.append((related, depth + 1))
-                grouped = getattr(current, "exceptions", None)
-                if isinstance(grouped, (tuple, list)):
-                    pending.extend(
-                        (related, depth + 1)
-                        for related in grouped
-                        if isinstance(related, BaseException)
-                    )
-            failure_class = (
-                "permanent"
-                if permanent
-                else "transient"
-                if transient
-                else "unknown"
-            )
-            error_code = safe_error_code(type(exc).__name__, "judge_unavailable")
+        failure_class = (
+            "permanent"
+            if permanent
+            else "transient"
+            if transient
+            else "unknown"
+        )
+        error_code = safe_error_code(type(exc).__name__, "judge_unavailable")
     metrics = dict(evaluation.metrics)
     metrics.pop("sample_execution_trace_archive", None)
     metrics.update(
@@ -1498,7 +1092,7 @@ def _unavailable_judgment(
             "scientific_pass": _scientific_pass(evaluation),
             "judge_model_id": str(
                 state.task_manifest.metadata.get("review_model_id")
-                or state.task_manifest.metadata.get("judge_model_id") or RULE_JUDGE_ID
+                or state.task_manifest.metadata.get("judge_model_id") or "dsh-generation-judge"
             ),
             "judge_status": "unavailable",
             "judge_accepted": False,
@@ -1535,113 +1129,96 @@ def _apply_candidate_judge(
         candidate_id=candidate.candidate_id,
     )
     try:
-        if (
-            state.task_manifest.metadata.get("execution_protocol")
-            == DSH_NATIVE_EXECUTION_PROTOCOL
+        latest = services.director.state(evaluation.run_id)
+        identity_binding = latest.candidate_identity_binding(candidate.candidate_id)
+        if identity_binding is None:
+            raise ValueError("DSH generation judge requires candidate identity binding")
+        aggregate_metrics = safe_aggregate_feedback(
+            dict(evaluation.metrics),
+            name="generation judge aggregate metrics",
+        )
+        review_policy = build_review_policy(state.task_manifest, evaluation, incumbent,
+                                            training_effect_evidence=training_effect_evidence)
+        context = {
+            "review_policy": review_policy,
+            "candidate_id": candidate.candidate_id,
+            "proposal_id": proposal.proposal_id,
+            "generation": candidate.generation,
+            "scientific_evaluation": {
+                "score": evaluation.score,
+                "passed": _scientific_pass(evaluation),
+                "metrics": aggregate_metrics,
+                "evaluation_digest": digest(evaluation.to_dict()),
+                "artifact_digest": artifact.digest,
+                "candidate_revision_id": evaluation.candidate_revision_id,
+                "evaluation_scope": deep_thaw_json(evaluation.evaluation_scope),
+            },
+            "fitness_profile_digest": state.task_manifest.metadata.get(
+                "fitness_profile_digest"
+            ),
+            "evaluation_cohort_digest": state.task_manifest.metadata.get(
+                "evaluation_cohort_digest"
+            ),
+        }
+        review = DshStructuredRoleRuntime(
+            services.dsh_native_runtime,
+            admission=services.dsh_tools,
+        ).run(
+            run_id=evaluation.run_id,
+            stage="generation.judge",
+            role="generation-judge",
+            context=context,
+            output_schema_id="ecology-generation-review@1",
+            run_state_revision=latest.events[-1].seq,
+            stage_attempt=1,
+            ledger_expected_revision=services.ledger.latest_seq(),
+            idempotency_key=(
+                f"{evaluation.run_id}:candidate:{candidate.candidate_id}:judge"
+            ),
+            identity_digests={
+                "genome_digest": str(identity_binding["genome_digest"]),
+                "compiled_behavior_digest": str(
+                    identity_binding["compiled_behavior_digest"]
+                ),
+                "phenotype_instance_digest": str(
+                    identity_binding["phenotype_instance_digest"]
+                ),
+            },
+        )
+        if review.get("schema_version") != "ecology-generation-review@1":
+            raise ValueError("DSH generation judge returned an unsupported schema")
+        if not isinstance(review.get("accepted"), bool):
+            raise TypeError("DSH generation judge accepted must be boolean")
+        rationale = review.get("rationale")
+        flags = review.get("flags")
+        if not isinstance(rationale, str) or not rationale.strip():
+            raise ValueError("DSH generation judge rationale is required")
+        if not isinstance(flags, list) or any(
+            not isinstance(item, str) for item in flags
         ):
-            latest = services.director.state(evaluation.run_id)
-            identity_binding = latest.candidate_identity_binding(candidate.candidate_id)
-            if identity_binding is None:
-                raise ValueError("DSH generation judge requires candidate identity binding")
-            aggregate_metrics = safe_aggregate_feedback(
-                dict(evaluation.metrics),
-                name="generation judge aggregate metrics",
-            )
-            review_policy = build_review_policy(state.task_manifest, evaluation, incumbent,
-                                                training_effect_evidence=training_effect_evidence)
-            context = {
-                "review_policy": review_policy,
-                "candidate_id": candidate.candidate_id,
-                "proposal_id": proposal.proposal_id,
-                "generation": candidate.generation,
-                "scientific_evaluation": {
-                    "score": evaluation.score,
-                    "passed": _scientific_pass(evaluation),
-                    "metrics": aggregate_metrics,
-                    "evaluation_digest": digest(evaluation.to_dict()),
-                    "artifact_digest": artifact.digest,
-                    "candidate_revision_id": evaluation.candidate_revision_id,
-                    "evaluation_scope": deep_thaw_json(evaluation.evaluation_scope),
-                },
-                "fitness_profile_digest": state.task_manifest.metadata.get(
-                    "fitness_profile_digest"
-                ),
-                "evaluation_cohort_digest": state.task_manifest.metadata.get(
-                    "evaluation_cohort_digest"
-                ),
-            }
-            review = DshStructuredRoleRuntime(
-                services.dsh_native_runtime,
-                admission=services.dsh_tools,
-            ).run(
-                run_id=evaluation.run_id,
-                stage="generation.judge",
-                role="generation-judge",
-                context=context,
-                output_schema_id="ecology-generation-review@1",
-                run_state_revision=latest.events[-1].seq,
-                stage_attempt=1,
-                ledger_expected_revision=services.ledger.latest_seq(),
-                idempotency_key=(
-                    f"{evaluation.run_id}:candidate:{candidate.candidate_id}:judge"
-                ),
-                identity_digests={
-                    "genome_digest": str(identity_binding["genome_digest"]),
-                    "compiled_behavior_digest": str(
-                        identity_binding["compiled_behavior_digest"]
-                    ),
-                    "phenotype_instance_digest": str(
-                        identity_binding["phenotype_instance_digest"]
-                    ),
-                },
-            )
-            if review.get("schema_version") != "ecology-generation-review@1":
-                raise ValueError("DSH generation judge returned an unsupported schema")
-            if not isinstance(review.get("accepted"), bool):
-                raise TypeError("DSH generation judge accepted must be boolean")
-            rationale = review.get("rationale")
-            flags = review.get("flags")
-            if not isinstance(rationale, str) or not rationale.strip():
-                raise ValueError("DSH generation judge rationale is required")
-            if not isinstance(flags, list) or any(
-                not isinstance(item, str) for item in flags
-            ):
-                raise TypeError("DSH generation judge flags must be text")
-            data = evaluation.to_dict()
-            data["passed"] = bool(review["accepted"])
-            data["metrics"] = {
-                **dict(evaluation.metrics),
-                "judge_model_id": str(
-                    state.task_manifest.metadata.get("review_model_id")
-                    or "dsh-generation-judge"
-                ),
-                "judge_accepted": bool(review["accepted"]),
-                "judge_guidance": rationale.strip(),
-                "judge_flags": list(flags),
-                "judge_parameter_override": {},
-                "judge_result_digest": digest(review),
-                **review_result_metrics(review_policy, review),
-            }
-            judged = EvaluationBundle(
-                artifact=artifact,
-                evaluation=Evaluation.from_dict(data),
-            )
-        else:
-            judged = services.evaluators.apply_judge(
-                state.task_manifest,
-                proposal,
-                EvaluationBundle(artifact=artifact, evaluation=evaluation),
-            )
+            raise TypeError("DSH generation judge flags must be text")
+        data = evaluation.to_dict()
+        data["passed"] = bool(review["accepted"])
+        data["metrics"] = {
+            **dict(evaluation.metrics),
+            "judge_model_id": str(
+                state.task_manifest.metadata.get("review_model_id")
+                or "dsh-generation-judge"
+            ),
+            "judge_accepted": bool(review["accepted"]),
+            "judge_guidance": rationale.strip(),
+            "judge_flags": list(flags),
+            "judge_parameter_override": {},
+            "judge_result_digest": digest(review),
+            **review_result_metrics(review_policy, review),
+        }
+        judged = EvaluationBundle(
+            artifact=artifact,
+            evaluation=Evaluation.from_dict(data),
+        )
     except Exception as exc:
-        gateway_error = gateway_error_in_chain(exc)
         dsh_error = dsh_native_runtime_error_in_chain(exc)
-        if (
-            gateway_error is not None
-            and gateway_error.retryable
-        ) or (
-            dsh_error is not None
-            and dsh_native_runtime_retryable(dsh_error)
-        ):
+        if dsh_error is not None and dsh_native_runtime_retryable(dsh_error):
             # Keep the started stage resumable.  Reusing a ``failed`` stage
             # event with attempt=1 would collide with the next retry's
             # idempotent ``started`` event and strand the candidate.
@@ -1948,14 +1525,6 @@ def _ensure_candidate_algorithm_ready(
                 failure_feedback=failure_feedback,
             )
         except Exception as exc:  # noqa: BLE001 - isolate registered smoke tools
-            gateway_error = gateway_error_in_chain(exc)
-            if gateway_error is not None and gateway_error.retryable:
-                # A registered smoke tool may consult the same remote provider
-                # as the proposal/evaluator.  Preserve the candidate's
-                # resumable state instead of spending the algorithm smoke
-                # budget and permanently rejecting it during a provider
-                # cooldown.
-                raise
             feedback = _smoke_failure_feedback(exc, attempt_number)
             _director_mutation(
                 services,
@@ -2025,226 +1594,6 @@ def _ensure_candidate_algorithm_ready(
     return False
 
 
-def _evaluate_candidate(services: GenerationRuntime, run_id: str, candidate_id: str) -> None:
-    state = services.director.state(run_id)
-    if state.run.status is not RunStatus.RUNNING:
-        return
-    candidate = state.candidate(candidate_id)
-    proposal = state.proposal(candidate.proposal_id)
-    existing_artifact = state.artifact_for(candidate.candidate_id)
-    existing_evaluation = state.evaluation_for(candidate.candidate_id)
-    if candidate.status is CandidateStatus.EVALUATED:
-        judge_status = (
-            existing_evaluation.metrics.get("judge_status")
-            if existing_evaluation is not None
-            else None
-        )
-        if (
-            existing_artifact is not None
-            and existing_evaluation is not None
-            and judge_status != "completed"
-            and state.promotion_for(candidate.candidate_id) is None
-        ):
-            _apply_candidate_judge(
-                services,
-                state,
-                proposal,
-                existing_artifact,
-                existing_evaluation,
-            )
-        return
-    if candidate.status is not CandidateStatus.SPAWNED:
-        return
-    if not _ensure_candidate_algorithm_ready(
-        services, state, proposal, candidate
-    ):
-        return
-    state = services.director.state(run_id)
-    compiled_algorithm = state.compiled_algorithm_for(candidate.candidate_id)
-    if compiled_algorithm is None:
-        raise RuntimeError("debugged candidate is missing its compiled algorithm spec")
-    algorithm_spec = AlgorithmSpec.from_dict(compiled_algorithm)
-    formal_event = _formal_selection_event(state, candidate.generation)
-    evaluation_task = (
-        _phase_task_manifest(state.task_manifest, candidate.generation, "formal")
-        if formal_event is not None
-        and candidate.candidate_id in formal_event.payload["selected_candidate_ids"]
-        else state.task_manifest
-    )
-    active_stage = "training"
-    _record_stage(
-        services,
-        run_id,
-        candidate.generation,
-        "training",
-        "started",
-        proposal_id=proposal.proposal_id,
-        candidate_id=candidate.candidate_id,
-    )
-    try:
-        evaluation_started = False
-
-        def start_evaluation() -> None:
-            nonlocal active_stage, evaluation_started
-            if evaluation_started:
-                return
-            _record_stage(
-                services,
-                run_id,
-                candidate.generation,
-                "training",
-                "completed",
-                proposal_id=proposal.proposal_id,
-                candidate_id=candidate.candidate_id,
-            )
-            active_stage = "evaluation"
-            _record_stage(
-                services,
-                run_id,
-                candidate.generation,
-                "evaluation",
-                "started",
-                proposal_id=proposal.proposal_id,
-                candidate_id=candidate.candidate_id,
-            )
-            evaluation_started = True
-
-        evaluation_kwargs: dict[str, Any] = {
-            "on_training_complete": start_evaluation,
-        }
-        session = EvaluationSession(
-            services, run_id=run_id, generation=candidate.generation,
-            proposal_id=proposal.proposal_id, candidate_id=candidate.candidate_id,
-            on_evaluation_started=start_evaluation,
-        )
-        if isinstance(services.evaluators, EvaluatorRegistry):
-            evaluation_kwargs.update(algorithm_spec=algorithm_spec, **session.evaluation_kwargs())
-        bundle = services.evaluators.evaluate_scientific(
-            evaluation_task,
-            candidate,
-            proposal,
-            **evaluation_kwargs,
-        )
-        if not evaluation_started:
-            start_evaluation()
-        evaluation = bundle.evaluation
-        if existing_artifact is None:
-            existing_artifact = _director_mutation(
-                services,
-                "record_artifact",
-                bundle.artifact,
-            )
-        else:
-            expected = bundle.artifact.to_dict()
-            actual = existing_artifact.to_dict()
-            expected.pop("created_at", None)
-            actual.pop("created_at", None)
-            if expected != actual:
-                raise RuntimeError("恢复评测时训练产物与已记录产物不一致")
-            data = evaluation.to_dict()
-            data["artifact_digest"] = existing_artifact.digest
-            evaluation = Evaluation.from_dict(data)
-            bundle = EvaluationBundle(
-                artifact=existing_artifact,
-                evaluation=evaluation,
-                sample_results=bundle.sample_results,
-            )
-        controls = _evaluate_generation_controls(
-            services,
-            state,
-            candidate,
-            on_model_usage=evaluation_kwargs.get("on_model_usage"),
-            on_sample_control=evaluation_kwargs.get("on_sample_control"),
-        )
-        if controls:
-            evaluation_data = bundle.evaluation.to_dict()
-            evaluation_metrics = dict(bundle.evaluation.metrics)
-            evaluation_metrics.update(
-                {
-                    "generation_control_policy": GENERATION_CONTROL_POLICY,
-                    "generation_control_evaluations": controls,
-                    "generation_control_evidence_digest": digest(controls),
-                }
-            )
-            evaluation_data["metrics"] = evaluation_metrics
-            evaluation = Evaluation.from_dict(evaluation_data)
-            bundle = EvaluationBundle(
-                artifact=bundle.artifact,
-                evaluation=evaluation,
-                sample_results=bundle.sample_results,
-            )
-        _record_stage(
-            services,
-            run_id,
-            candidate.generation,
-            "evaluation",
-            "completed",
-            proposal_id=proposal.proposal_id,
-            candidate_id=candidate.candidate_id,
-        )
-        completed_sample_results = (
-            sample_results_event_payload(
-                bundle.evaluation,
-                bundle.sample_results,
-                revision=session.revision,
-            )
-            if bundle.sample_results is not None
-            and session.revision is not None
-            else None
-        )
-        scientific_evaluation = _director_mutation(
-            services,
-            "record_evaluation",
-            bundle.evaluation,
-            sample_results=completed_sample_results,
-        )
-    except (SampleExecutionPausedError, SampleExecutionCancelledError):
-        # Run control owns these transitions. Keep the exact sample checkpoint
-        # and candidate open so pause can resume and cancel remains terminal.
-        return
-    except SampleExecutionControlUnavailableError:
-        # Fail closed before another API call, but keep the candidate recoverable.
-        raise
-    except Exception as exc:  # noqa: BLE001 - isolate one candidate evaluation
-        token_budget_error = _model_token_budget_error_in_chain(exc)
-        if token_budget_error is not None:
-            _pause_for_model_token_budget(services, run_id, token_budget_error)
-            return
-        # Leave the candidate resumable when a provider or the durable sample
-        # result callback is temporarily unavailable.  A CandidateFailed
-        # event here would make the background worker unable to retry the
-        # interrupted evaluation after its gateway cooldown.
-        if _recoverable_evaluation_error(exc):
-            raise
-        _record_stage(
-            services,
-            run_id,
-            candidate.generation,
-            active_stage,
-            "failed",
-            proposal_id=proposal.proposal_id,
-            candidate_id=candidate.candidate_id,
-            public_error=public_exception_summary(exc),
-        )
-        _director_mutation(
-            services,
-            "fail_candidate",
-            run_id,
-            candidate.candidate_id,
-            f"候选训练或评测失败：{public_exception_summary(exc)}",
-        )
-        return
-    state = services.director.state(run_id)
-    artifact = state.artifact_for(candidate.candidate_id)
-    if artifact is None:
-        raise RuntimeError("recorded scientific evaluation is missing its artifact")
-    _apply_candidate_judge(
-        services,
-        state,
-        proposal,
-        artifact,
-        scientific_evaluation,
-    )
 
 
 def _has_advanced_to_current_generation(state: Any) -> bool:
@@ -2405,171 +1754,8 @@ def complete_if_budget_exhausted(
     return services.director.state(run_id)
 
 
-def _generation_evidence_failure(state: Any, generation: int) -> str | None:
-    """Reject a round that cannot provide feedback for the next proposal."""
-
-    evaluations = tuple(
-        evaluation
-        for candidate in state.candidates
-        if candidate.generation == generation
-        and _is_search_candidate(candidate)
-        if (evaluation := state.evaluation_for(candidate.candidate_id)) is not None
-    )
-    if not evaluations:
-        return (
-            "本轮证据门禁失败（generation_evidence_missing）："
-            "未产生任何新的科学评测，候选可能全部执行失败或与历史候选重复；"
-            "已停止连续进化，未推进到下一轮。"
-        )
-    if strict_generation_controls_required(state.task_manifest, generation) or (
-        is_strict_origin_protocol(
-            state.task_manifest.metadata.get("sample_agent_protocol")
-        )
-    ):
-        metadata = state.task_manifest.metadata
-        sample_budget_class = metadata.get("sample_budget_class")
-        selection_eligible = sample_budget_class == "selection_eligible"
-        diagnostic_smoke = sample_budget_class == "diagnostic_smoke"
-        if not selection_eligible and not diagnostic_smoke:
-            return (
-                "本轮证据门禁失败（generation_selection_evidence_ineligible）："
-                "严格逐样本运行缺少可识别的冻结样本预算；"
-                "已停止连续进化，未推进到下一轮。"
-            )
-        cells_per_origin = metadata.get("prediction_cells_per_origin")
-        if (
-            isinstance(cells_per_origin, bool)
-            or not isinstance(cells_per_origin, int)
-            or cells_per_origin < 1
-        ):
-            return (
-                "本轮证据门禁失败（generation_selection_evidence_ineligible）："
-                "严格逐样本运行缺少有效的预测向量宽度；"
-                "已停止连续进化，未推进到下一轮。"
-            )
-        if selection_eligible:
-            minimum_samples = metadata.get(
-                "minimum_selection_samples_per_update"
-            )
-            minimum_origins = metadata.get(
-                "minimum_selection_origin_samples_per_update"
-            )
-        else:
-            configured_samples = metadata.get("samples_per_update")
-            if (
-                isinstance(configured_samples, bool)
-                or not isinstance(configured_samples, int)
-                or configured_samples < cells_per_origin
-            ):
-                return (
-                    "本轮证据门禁失败（generation_selection_evidence_ineligible）："
-                    "诊断运行不能覆盖一个完整预测向量；"
-                    "已停止连续进化，未推进到下一轮。"
-                )
-            try:
-                minimum_origins = complete_origin_count(
-                    configured_samples, cells_per_origin
-                )
-            except ValueError:
-                return (
-                    "本轮证据门禁失败（generation_selection_evidence_ineligible）："
-                    "诊断运行不能覆盖完整预测向量；"
-                    "已停止连续进化，未推进到下一轮。"
-                )
-            minimum_samples = configured_samples
-        if (
-            isinstance(minimum_samples, bool)
-            or not isinstance(minimum_samples, int)
-            or minimum_samples < 1
-            or isinstance(minimum_origins, bool)
-            or not isinstance(minimum_origins, int)
-            or minimum_origins < 1
-        ):
-            return (
-                "本轮证据门禁失败（generation_selection_evidence_ineligible）："
-                "严格逐样本运行的冻结证据门槛无效；"
-                "已停止连续进化，未推进到下一轮。"
-            )
-        for evaluation in evaluations:
-            summary = evaluation.metrics.get("sample_execution")
-            attempted = (
-                summary.get("attempted_examples")
-                if isinstance(summary, Mapping)
-                else None
-            )
-            attempted_origins = (
-                summary.get("attempted_origin_samples")
-                if isinstance(summary, Mapping)
-                else None
-            )
-            if (
-                not isinstance(summary, Mapping)
-                or summary.get("strict_agent_contract") is not True
-                or summary.get("strict_agent_chain_pass") is not True
-                or summary.get("host_route_bypass_count") != 0
-                or isinstance(attempted, bool)
-                or not isinstance(attempted, int)
-                or attempted < minimum_samples
-                or (
-                    isinstance(minimum_origins, bool)
-                    or not isinstance(minimum_origins, int)
-                    or minimum_origins < 1
-                    or isinstance(attempted_origins, bool)
-                    or not isinstance(attempted_origins, int)
-                    or attempted_origins < minimum_origins
-                    or summary.get("prediction_cells_per_origin")
-                    != cells_per_origin
-                )
-            ):
-                return (
-                    "本轮证据门禁失败（generation_strict_agent_evidence_incomplete）："
-                    "至少一个候选缺少足量的 Planner→注册工具→Critic→评分后 "
-                    "Reflector 完整链证据；已停止连续进化，未推进到下一轮。"
-                )
-        if generation > 0 and selection_eligible:
-            batch = state.batch_for(generation)
-            if batch is None:
-                return (
-                    "本轮证据门禁失败（generation_control_evidence_missing）："
-                    "严格代际选择缺少冻结批次；已停止连续进化，未推进到下一轮。"
-                )
-            try:
-                generation_control_evaluations(state, batch)
-            except RuntimeError:
-                return (
-                    "本轮证据门禁失败（generation_control_evidence_invalid）："
-                    "父代或历史精英没有在当前 cohort 上完成同协议复评；"
-                    "已停止连续进化，未推进到下一轮。"
-                )
-    if all(
-        evaluation.metrics.get("judge_status") == "unavailable"
-        for evaluation in evaluations
-    ):
-        return (
-            "本轮证据门禁失败（generation_judges_unavailable）："
-            f"已完成的 {len(evaluations)} 个科学评测的独立评审均不可用；"
-            "已停止连续进化，未推进到下一轮。"
-        )
-    return None
 
 
-def _generation_judges_should_retry(state: Any, generation: int) -> bool:
-    """Keep a generation resumable while every judge result is unavailable."""
-
-    evaluations = tuple(
-        evaluation
-        for candidate in state.candidates
-        if candidate.generation == generation
-        and _is_search_candidate(candidate)
-        if (evaluation := state.evaluation_for(candidate.candidate_id)) is not None
-    )
-    return bool(evaluations) and all(
-        evaluation.metrics.get("judge_status") == "unavailable"
-        for evaluation in evaluations
-    ) and any(
-        evaluation.metrics.get("judge_failure_class") == "transient"
-        for evaluation in evaluations
-    )
 
 
 def _evaluate_generation_candidates(
@@ -2624,25 +1810,7 @@ def _evaluate_generation_candidates(
             ),
         )
         return
-    tasks = tuple(
-        CandidateEvaluationTask(
-            slot_index=int(candidate.slot_index),
-            candidate_id=str(candidate.candidate_id),
-        )
-        for candidate in frozen_candidates
-    )
-    run_candidate_evaluations(
-        tasks,
-        max_concurrency=raw_concurrency,
-        evaluate=lambda candidate_id: _evaluate_candidate(
-            services,
-            run_id,
-            candidate_id,
-        ),
-        admission_open=lambda: _run_admission_open(
-            services.director, run_id
-        ),
-    )
+    raise RuntimeError("joint_plugin_epoch@2 requires the frozen two-stage schedule")
 
 
 def _holdout_replay_inputs(
@@ -2780,21 +1948,7 @@ def _execute_adaptive_holdout_arm(
     from ..evaluators.execution_validity import require_valid_execution
     require_valid_execution(metrics, cohort.origin_count, phase="holdout")
     schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata["optimization_schedule"])
-    if task.metadata.get("sample_agent_mode") == "dsh_native_agent" and not schedule.quick:
-        replicas = [replica_summary(scope, bundle.evaluation)]
-        for replica_index in range(1, REPLICA_COUNT):
-            replica_scope = replace(scope, inference_replica=replica_index)
-            replica_callbacks = EvaluationSession(
-                services, run_id=run_id, generation=generation,
-                proposal_id=candidate.proposal_id, candidate_id=candidate.candidate_id, scope=replica_scope,
-            )
-            replica_bundle = services.evaluators.evaluate_scientific(
-                task, candidate, proposal, scope=replica_scope, cohort=cohort,
-                algorithm_spec=spec, **replica_callbacks.evaluation_kwargs(),
-            )
-            require_valid_execution(replica_bundle.evaluation.metrics, cohort.origin_count, phase="holdout_replica")
-            replicas.append(replica_summary(replica_scope, replica_bundle.evaluation))
-        metrics["agent_inference_stability"] = stability_evidence(replicas)
+    pass
     summary = metrics.get("sample_execution")
     if not isinstance(summary, Mapping) or int(summary.get("attempted_origin_samples", 0)) < cohort.origin_count:
         raise RuntimeError(f"holdout did not complete the frozen {cohort.origin_count}-origin cohort")
@@ -3767,49 +2921,6 @@ def _build_adaptive_analysis(
     )
 
 
-def _runtime_v3_promotion_reason(
-    comparison: GenerationComparison,
-    finalist: Candidate,
-    *,
-    approved: bool,
-) -> str:
-    """Explain certification without attributing the search winner to it."""
-
-    evaluation = next(
-        (
-            item
-            for item in comparison.holdout_evaluations
-            if item.scope.candidate_id == finalist.candidate_id
-        ),
-        None,
-    )
-    arm = (
-        evaluation.scope.holdout_arm.value
-        if evaluation is not None and evaluation.scope.holdout_arm is not None
-        else None
-    )
-    arms = comparison.gate_results.get("arms")
-    gate = arms.get(arm) if isinstance(arms, Mapping) and arm is not None else None
-    if not isinstance(gate, Mapping):
-        gate = {}
-    if approved:
-        return "候选通过同一冻结 holdout 的严格认证门禁，成为稳健认证版本。"
-    failures = gate.get("certification_failures")
-    failure_codes = (
-        [str(item) for item in failures[:8]]
-        if isinstance(failures, (list, tuple))
-        else []
-    )
-    detail = ",".join(failure_codes) or (
-        "lower_deterministic_certification_rank"
-        if gate.get("certification_eligible") is True
-        else "strict_certification_gate_failed"
-    )
-    if finalist.candidate_id == comparison.selected_candidate_id:
-        return (
-            "候选已成为下一轮搜索版本，但未获严格认证：" + detail
-        )[:500]
-    return ("候选未获严格认证：" + detail)[:500]
 
 
 def _trajectory_holdout_revision_id(
@@ -3826,19 +2937,18 @@ def _trajectory_holdout_revision_id(
         or not final_revision_id
     ):
         raise ValueError("holdout requires a completed trajectory final revision")
-    if schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
-        final_comparison = state.batch_comparison_for(
-            trajectory.candidate_id,
-            trajectory.batch_count - 1,
+    final_comparison = state.batch_comparison_for(
+        trajectory.candidate_id,
+        trajectory.batch_count - 1,
+    )
+    if (
+        final_comparison is None
+        or final_revision_id
+        != final_comparison.champion_after_revision_id
+    ):
+        raise ValueError(
+            "paired trajectory final revision is not the durable champion"
         )
-        if (
-            final_comparison is None
-            or final_revision_id
-            != final_comparison.champion_after_revision_id
-        ):
-            raise ValueError(
-                "paired trajectory final revision is not the durable champion"
-            )
     return final_revision_id
 
 
@@ -3958,10 +3068,7 @@ def _finalize_adaptive_generation(services: GenerationRuntime, run_id: str, batc
             "candidate_revision_id": incumbent_revision_id,
         },
     }
-    if not schedule.quick:
-        bindings[HoldoutArm.FINALIST_2.value] = {
-            "candidate_id": finalist_ids[1], "candidate_revision_id": finalist_revision_ids[1],
-        }
+    pass
     holdout = _director_mutation(
         services,
         "freeze_generation_holdout",
@@ -4013,12 +3120,11 @@ def _finalize_adaptive_generation(services: GenerationRuntime, run_id: str, batc
             require_paired_strict_chain=guarded_search(state.task_manifest.metadata),
         )
         comparison = build_generation_comparison(**comparison_inputs)
-        if schedule.unified:
-            recheck = comparison.gate_results["arms"]["finalist_1"]["joint_recheck"]
-            if recheck["required"]:
-                repeats = tuple(_execute_joint_holdout_recheck(services, run_id, item, cohorts.holdout)
-                                for item in evaluations)
-                comparison = build_generation_comparison(**comparison_inputs, holdout_rechecks=repeats)
+        recheck = comparison.gate_results["arms"]["finalist_1"]["joint_recheck"]
+        if recheck["required"]:
+            repeats = tuple(_execute_joint_holdout_recheck(services, run_id, item, cohorts.holdout)
+                            for item in evaluations)
+            comparison = build_generation_comparison(**comparison_inputs, holdout_rechecks=repeats)
         _director_mutation(services, "record_generation_comparison", run_id, comparison)
     _director_mutation(
         services,
@@ -4044,33 +3150,8 @@ def _finalize_adaptive_generation(services: GenerationRuntime, run_id: str, batc
     for finalist in finalists:
         if state.promotion_for(finalist.candidate_id) is not None:
             continue
-        certification_selected_arm = comparison.gate_results.get(
-            "certification_selected_arm"
-        )
-        approved = bool(
-            certification_selected_arm is not None
-            and next(
-                (
-                    item.scope.candidate_id
-                    for item in comparison.holdout_evaluations
-                    if item.scope.holdout_arm is not None
-                    and item.scope.holdout_arm.value == certification_selected_arm
-                ),
-                None,
-            )
-            == finalist.candidate_id
-        )
-        if not uses_positive_delta_search_protocol(state.task_manifest):
-            approved = finalist.candidate_id == comparison.selected_candidate_id
-        reason = (
-            _runtime_v3_promotion_reason(
-                comparison,
-                finalist,
-                approved=approved,
-            )
-            if uses_positive_delta_search_protocol(state.task_manifest)
-            else analysis.selection_reason
-        )
+        approved = finalist.candidate_id == comparison.selected_candidate_id
+        reason = analysis.selection_reason
         # ``record_evaluation`` above makes the finalists eligible for the
         # existing DSH identity/artifact promotion fence.
         _director_mutation(
@@ -4115,15 +3196,8 @@ def execute_generation(services: GenerationRuntime, run_id: str) -> Any:
         latest = services.director.state(run_id)
         if latest.run.status is not RunStatus.RUNNING:
             return latest
-        gateway_error = gateway_error_in_chain(exc)
         dsh_error = dsh_native_runtime_error_in_chain(exc)
-        if (
-            gateway_error is not None
-            and gateway_error.retryable
-        ) or (
-            dsh_error is not None
-            and dsh_native_runtime_retryable(dsh_error)
-        ):
+        if dsh_error is not None and dsh_native_runtime_retryable(dsh_error):
             _record_stage(
                 services,
                 run_id,
@@ -4178,106 +3252,7 @@ def execute_generation(services: GenerationRuntime, run_id: str) -> Any:
         services.director.advance_generation(run_id)
         return complete_if_budget_exhausted(services, run_id)
 
-    state = services.director.state(run_id)
-    if _generation_judges_should_retry(state, batch.generation):
-        raise GatewayResponseError(
-            "all generation judges are temporarily unavailable",
-            retryable=True,
-            error_code="generation_judges_unavailable",
-        )
-    evidence_failure = _generation_evidence_failure(state, batch.generation)
-    if (
-        evidence_failure is not None
-        and "generation_judges_unavailable" in evidence_failure
-    ):
-        _record_stage(
-            services,
-            run_id,
-            batch.generation,
-            "decision",
-            "failed",
-            public_error=evidence_failure[:500],
-            event_id=f"{run_id}:stage:{batch.generation}:batch:decision:evidence-failed",
-        )
-        state = services.director.state(run_id)
-        _quiesce_native_terminal(services, state, "judges_unavailable")
-        services.director.fail_run(run_id, evidence_failure)
-        return services.director.state(run_id)
-    for candidate in current:
-        refreshed = state.candidate(candidate.candidate_id)
-        if refreshed.status is CandidateStatus.EVALUATED:
-            _record_stage(
-                services,
-                run_id,
-                batch.generation,
-                "decision",
-                "started",
-                proposal_id=refreshed.proposal_id,
-                candidate_id=refreshed.candidate_id,
-            )
-    try:
-        finalize_generation_batch(services.director, run_id)
-    except Exception as exc:
-        state = services.director.state(run_id)
-        gateway_error = gateway_error_in_chain(exc)
-        dsh_error = dsh_native_runtime_error_in_chain(exc)
-        retryable_remote_failure = bool(
-            (gateway_error is not None and gateway_error.retryable)
-            or (
-                dsh_error is not None
-                and dsh_native_runtime_retryable(dsh_error)
-            )
-        )
-        if not retryable_remote_failure:
-            for candidate in current:
-                refreshed = state.candidate(candidate.candidate_id)
-                if (
-                    refreshed.status is CandidateStatus.EVALUATED
-                    and state.promotion_for(refreshed.candidate_id) is None
-                ):
-                    _record_stage(
-                        services,
-                        run_id,
-                        batch.generation,
-                        "decision",
-                        "failed",
-                        proposal_id=refreshed.proposal_id,
-                        candidate_id=refreshed.candidate_id,
-                        public_error=public_exception_summary(exc),
-                    )
-        raise
-    state = services.director.state(run_id)
-    for candidate in current:
-        refreshed = state.candidate(candidate.candidate_id)
-        if refreshed.status in {CandidateStatus.PROMOTED, CandidateStatus.REJECTED}:
-            _record_stage(
-                services,
-                run_id,
-                batch.generation,
-                "decision",
-                "completed",
-                proposal_id=refreshed.proposal_id,
-                candidate_id=refreshed.candidate_id,
-            )
-    if _generation_all_duplicates(state, batch.generation):
-        return _complete_converged_run(services, run_id, state)
-    evidence_failure = _generation_evidence_failure(state, batch.generation)
-    if evidence_failure is not None:
-        _record_stage(
-            services,
-            run_id,
-            batch.generation,
-            "decision",
-            "failed",
-            public_error=evidence_failure[:500],
-            event_id=f"{run_id}:stage:{batch.generation}:batch:decision:evidence-failed",
-        )
-        state = services.director.state(run_id)
-        _quiesce_native_terminal(services, state, "evidence_failed")
-        services.director.fail_run(run_id, evidence_failure)
-        return services.director.state(run_id)
-    services.director.advance_generation(run_id)
-    return complete_if_budget_exhausted(services, run_id)
+    raise RuntimeError("joint_plugin_epoch@2 requires the frozen two-stage schedule")
 
 
 __all__ = [

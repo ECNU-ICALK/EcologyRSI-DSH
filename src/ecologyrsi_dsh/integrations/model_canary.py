@@ -22,19 +22,6 @@ RECEIPT_SCHEMA = "ecologyrsi-dsh.model-contract-canary-receipt/1"
 SCOPE = "tool_and_schema_transport_only"
 from .role_contracts import CANARY_ROLES as _ROLES
 
-# Read-only replay compatibility: these exact historical stage/schema contracts
-# remain valid evidence, but are never accepted by the live canary gate.
-_RECORDED_ROLES = (
-    ("strategy_model_id", "resolved_policy_route_config_digest", "researcher",
-     "ecology-researcher-v15", "generation.search-plan", "ecology-research-search-plan@1"),
-    ("strategy_model_id", "resolved_policy_route_config_digest", "researcher",
-     "ecology-researcher-v16", "generation.search-plan", "ecology-research-search-plan@1"),
-    ("strategy_model_id", "resolved_policy_route_config_digest", "sample-planner",
-     "ecology-sample-planner-v12", "sample.plan", "ecology-sample-predictions@2"),
-    ("strategy_model_id", "resolved_policy_route_config_digest", "sample-planner",
-     "ecology-sample-planner-v13", "sample.plan", "ecology-sample-predictions@2"),
-)
-
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
 _ROUTE_PART = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,119}$")
 
@@ -72,7 +59,7 @@ def required_canary_identities(metadata: Mapping[str, Any], *, recorded: bool = 
             raise ValueError("invalid recorded canary preset inventory")
         selected = []
         for current in _ROLES:
-            matches = [row for row in dict.fromkeys((*_ROLES, *_RECORDED_ROLES))
+            matches = [row for row in _ROLES
                        if row[2] == current[2] and row[3] in frozen]
             if len(matches) != 1:
                 raise ValueError("recorded canary role requires one supported frozen preset")
@@ -104,7 +91,7 @@ def _validate_identity(identity: Mapping[str, Any], *, recorded: bool = False) -
         raise ValueError("invalid model canary provider/model")
     if not all(isinstance(identity[k], str) and _DIGEST.fullmatch(identity[k]) for k in ("preset_content_digest", "standing_tool_surface_digest", "route_config_digest")):
         raise ValueError("model canary requires Host-frozen content and route digests")
-    roles = (*_ROLES, *_RECORDED_ROLES) if recorded else _ROLES
+    roles = _ROLES
     if (identity["role"], identity["preset_id"], identity["stage"], identity["output_schema_id"]) not in {r[2:] for r in roles}:
         raise ValueError("model canary stage unsupported")
 

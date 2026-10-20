@@ -79,7 +79,7 @@ def _initialization() -> FrozenRunInitialization:
 def _seed_genome() -> EcologyEvolutionPluginGenome:
     registry = current_program_registry()
     return materialize_seed_genome(
-        registry.seed_template("greenhouse-default@1"), _initialization()
+        registry.seed_template("greenhouse-default@2"), _initialization()
     )
 
 

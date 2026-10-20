@@ -55,10 +55,10 @@ def _task(**metadata) -> TaskManifest:
     return TaskManifest(
         task_id="axis-wiring",
         objective="axis wiring",
-        domain_pack="toy_water@1",
-        visible_datasets=(TOY_DATASET_ID,),
+        domain_pack="greenhouse_environment@1",
+        visible_datasets=("agc_cucumber_2018",),
         budget={"max_candidates": 1},
-        metadata=metadata,
+        metadata={"search_guard_policy":"practical_delta_cell_noninferiority_paired_blocks@1",**metadata},
     )
 
 
@@ -103,14 +103,14 @@ def _proposal(profile: dict | None) -> Proposal:
         title="axis wiring",
         changes={},
         rationale="axis wiring",
-        metadata=metadata,
+        metadata={"search_guard_policy":"practical_delta_cell_noninferiority_paired_blocks@1",**metadata},
     )
 
 
 def _seed_genome() -> EcologyEvolutionPluginGenome:
     return materialize_seed_genome(
         current_program_registry().seed_template(
-            "greenhouse-baseline-aligned-default@1"
+            "greenhouse-baseline-aligned-default@2"
         ),
         _initialization(),
     )
@@ -402,7 +402,7 @@ class ClosedAxisTests(unittest.TestCase):
             proposal=lambda _proposal_id: SimpleNamespace(metadata={}),
             task_manifest=SimpleNamespace(
                 metadata={
-                    "optimization_schedule": OptimizationSchedule.default().to_dict(),
+                    "optimization_schedule": OptimizationSchedule.for_new_run().to_dict(),
                     "fitness_profile": {
                         "expected_targets": [
                             "air_temperature",

@@ -1,3 +1,4 @@
+import { expandSharedSchema } from "./schema.js";
 import { CANARY_PRESETS } from "./contracts.js";
 // Independent, bounded transport canary. Never writes scientific run events.
 import { randomUUID } from "node:crypto";
@@ -147,7 +148,7 @@ export class ModelContractCanary {
       // Bound host creation too: a late host is disposed without launching a child.
       const hostTimeout = new Promise((_, reject) => { timer = setTimeout(() => { const e = new Error("structured_role_operational_timeout"); e.code = e.message; cleanup(); reject(e); }, bounds.total_timeout_ms); });
       const work = async () => {
-        schema = JSON.parse(await readFile(new URL(`../../schemas/${contract.file}.schema.json`, import.meta.url), "utf8"));
+        schema = expandSharedSchema(JSON.parse(await readFile(new URL(`../../schemas/${contract.file}.schema.json`, import.meta.url), "utf8")));
         expected = fixture(schema);
         const hostCreation = this.roleAgents.createRoleAgent({ run_id: id, role: identity.role, preset_id: identity.preset_id,
           model: `${identity.provider_id}/${identity.model_id}`, cwd: process.cwd(), tool_profile: "dynamic-retrieval-v1",

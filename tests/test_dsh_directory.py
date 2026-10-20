@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from ecologyrsi_dsh.integrations.dsh_directory import discover_model_entries
-from ecologyrsi_dsh.integrations.model_gateway import ModelGateway
+from ecologyrsi_dsh.integrations.model_directory import ModelDirectory
 
 
 class DshDirectoryTests(unittest.TestCase):
@@ -19,7 +19,7 @@ class DshDirectoryTests(unittest.TestCase):
         self.settings.write_text(configured)
         def bindings():
             return {item["model_id"]: item["configuration_digest"]
-                    for item in ModelGateway.from_env(self._env()).catalog() if item.get("configuration_digest")}
+                    for item in ModelDirectory.from_env(self._env()).catalog() if item.get("configuration_digest")}
         before = bindings()
         with patch("ecologyrsi_dsh.integrations.dsh_directory._yaml_load", side_effect=_fallback_settings_load):
             self.assertEqual(bindings(), before)
@@ -99,7 +99,7 @@ llm-pi-ai:
         )
         self.assertEqual(entries[0]["token"], "dsh-secret")
 
-        gateway = ModelGateway.from_env(self._env())
+        gateway = ModelDirectory.from_env(self._env())
         catalog = gateway.catalog()
         self.assertEqual(
             {item["model_id"] for item in catalog},
@@ -120,7 +120,7 @@ llm-pi-ai:
             "ECOLOGYRSI_DSH_CREDENTIALS_FILE": str(self.credentials),
         }
         self.assertEqual(discover_model_entries(env), [])
-        self.assertEqual(ModelGateway.from_env(env).catalog(), [])
+        self.assertEqual(ModelDirectory.from_env(env).catalog(), [])
 
     def test_insecure_http_is_blocked_by_default(self) -> None:
         entries = discover_model_entries(self._env())
@@ -149,7 +149,7 @@ llm-pi-ai:
 
         catalog = {
             item["model_id"]: item
-            for item in ModelGateway.from_env(allowed_env).catalog()
+            for item in ModelDirectory.from_env(allowed_env).catalog()
         }
         runnable = catalog["newapi/blocked"]
         self.assertTrue(runnable["directory_available"])
@@ -169,11 +169,11 @@ llm-pi-ai:
     def test_allowlist_does_not_change_https_or_loopback_bindings(self) -> None:
         baseline = {
             item["model_id"]: item["configuration_digest"]
-            for item in ModelGateway.from_env(self._env()).catalog()
+            for item in ModelDirectory.from_env(self._env()).catalog()
         }
         https_listed = {
             item["model_id"]: item["configuration_digest"]
-            for item in ModelGateway.from_env(
+            for item in ModelDirectory.from_env(
                 self._env(
                     ECOLOGYRSI_DSH_ALLOW_INSECURE_HTTP_PROVIDERS="secure"
                 )
@@ -215,11 +215,11 @@ llm-pi-ai:
         self.assertEqual(
             {
                 item["model_id"]: item["configuration_digest"]
-                for item in ModelGateway.from_env(self._env()).catalog()
+                for item in ModelDirectory.from_env(self._env()).catalog()
             },
             {
                 item["model_id"]: item["configuration_digest"]
-                for item in ModelGateway.from_env(listed_env).catalog()
+                for item in ModelDirectory.from_env(listed_env).catalog()
             },
         )
         self.assertEqual(
@@ -273,25 +273,21 @@ llm-pi-ai:
         # One malformed provider must not prevent the valid provider or the
         # structured unavailable entries from reaching the redacted catalog.
         catalog = {
-            item["model_id"]: item for item in ModelGateway.from_env(env).catalog()
+            item["model_id"]: item for item in ModelDirectory.from_env(env).catalog()
         }
         self.assertEqual(set(catalog), set(entries))
         self.assertTrue(catalog["valid-loopback/runnable"]["directory_available"])
         self.assertFalse(catalog["query-url/blocked"]["directory_available"])
 
-    def test_legacy_global_insecure_http_switch_remains_compatible(self) -> None:
-        env = self._env(ECOLOGYRSI_DSH_ALLOW_INSECURE_HTTP="1")
-        entries = {
-            item["id"]: item for item in discover_model_entries(env)
-        }
-        self.assertTrue(entries["newapi/blocked"]["directory_available"])
-        self.assertTrue(entries["other-http/also-blocked"]["directory_available"])
+    def test_global_http_switch_no_longer_authorizes_providers(self):
+        entries = discover_model_entries(self._env(ECOLOGYRSI_DSH_ALLOW_INSECURE_HTTP="1"))
+        self.assertFalse(next(x for x in entries if x["id"] == "newapi/blocked")["directory_available"])
 
-        catalog = {
-            item["model_id"]: item for item in ModelGateway.from_env(env).catalog()
-        }
-        self.assertTrue(catalog["newapi/blocked"]["configured"])
-        self.assertTrue(catalog["other-http/also-blocked"]["configured"])
+    def test_invalid_roles_do_not_gain_execution_permission(self):
+        self.settings.write_text(self.settings.read_text().replace("role: proposer", "role: unknown"))
+        item = next(x for x in ModelDirectory.from_env(self._env()).catalog() if x["model_id"] == "secure/glm-5.2")
+        self.assertFalse(item["execution_available"])
+        self.assertEqual(item["roles"], [])
 
     def test_provider_and_model_role_aliases_are_canonicalized(self) -> None:
         entries = {
@@ -304,7 +300,7 @@ llm-pi-ai:
 
         catalog = {
             item["model_id"]: item
-            for item in ModelGateway.from_env(self._env()).catalog()
+            for item in ModelDirectory.from_env(self._env()).catalog()
         }
         self.assertEqual(catalog["secure/glm-5.2"]["roles"], ["propose"])
         self.assertEqual(catalog["secure/kimi-k3"]["roles"], ["judge"])

@@ -65,7 +65,7 @@ def assess_recheck(candidate, incumbent, profile, *, base_eligible, repeats=()):
     repeated = build_generation_comparison(run_id=candidate.scope.run_id,
         generation=candidate.scope.generation, cohort_digest=candidate.scope.cohort_digest,
         holdout_evaluations=tuple(repeats), fitness_profile=profile,
-        quick_experiment=True, experiment_protocol="joint_plugin_epoch@1")
+        quick_experiment=True, experiment_protocol="joint_plugin_epoch@2", _conditional_recheck=False)
     repeat_gate = repeated.gate_results["arms"][HoldoutArm.FINALIST_1.value]
     repeat_temporal = temporal_gate(by_arm[HoldoutArm.FINALIST_1], by_arm[HoldoutArm.INCUMBENT], profile)
     passed = bool(repeat_gate["search_eligible"] and repeat_temporal["passed"])

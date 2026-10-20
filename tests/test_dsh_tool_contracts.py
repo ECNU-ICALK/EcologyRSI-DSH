@@ -2131,8 +2131,8 @@ class DshToolServiceTests(unittest.TestCase):
     def test_cross_language_schemas_are_closed_and_role_sets_match(self) -> None:
         root = Path(__file__).resolve().parents[1] / "integrations" / "dsh_ecology_plugin"
         schemas = sorted((root / "schemas").glob("*.schema.json"))
-        self.assertEqual(len(schemas), 13)
-        self.assertTrue((root / "schemas" / "sample-reflection.schema.json").is_file())
+        self.assertEqual(len(schemas), 8)
+        self.assertFalse((root / "schemas" / "sample-reflection.schema.json").exists())
         for path in schemas:
             value = json.loads(path.read_text(encoding="utf-8"))
             self.assertFalse(value["additionalProperties"])

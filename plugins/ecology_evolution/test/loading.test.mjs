@@ -14,7 +14,7 @@ function sandbox() {
     EcologyDSHHost:{getPublicContext:()=>({apiBase:'/api'}),request:async()=>({})}};
   vm.createContext(c);
   for (const file of ['core','catalog','data','commands']) vm.runInContext(readFileSync(new URL('../assets/js/'+file+'.js',import.meta.url),'utf8'),c);
-  c.renderAll=()=>{};c.renderProcess=()=>{};c.renderTrainingAssets=()=>{};c.showToast=()=>{};
+  c.renderAll=()=>{};c.renderProcess=()=>{};c.showToast=()=>{};
   c.refreshEventsForRun=async()=>true;c.refreshCandidateSamples=async()=>true;c.loadSelectedDataset=async()=>true;
   c.state.activeRun=c.normalizeRun({run_id:'run:a',status:'running',projection_revision:5,candidates_count:1,candidates:[{id:'candidate:a',status:'evaluating'}]});
   c.state.runs=[c.state.activeRun];
@@ -26,7 +26,6 @@ test('dataset adapters control the training selector and per-dataset evaluation 
   const c=sandbox();
   const dataset=(id,cells)=>({id,training_selectable:true,task_adapter:{evaluator_id:'engine'},
     evaluation:{id:'engine',prediction_cells_per_origin:cells,minimum_samples_per_update:cells}});
-  c.state.usingDemo=false;
   c.state.catalog.datasets=[dataset('dataset:a',9),dataset('dataset:b',4),
     {id:'synthetic',available:true}, {...dataset('unready',2),readiness:{ready:false}}];
   c.state.catalog.evaluators=[{id:'engine',prediction_cells_per_origin:99}];
@@ -96,16 +95,7 @@ test('process summaries and candidate detail cannot overwrite each other across 
   assert.equal(c.selectedCandidateForSamples().score,.8);
 });
 
-test('collaboration options stay independent of scientific candidate snapshots',async()=>{
-  const c=sandbox();c.state.workspace='collaboration';
-  c.state.activeRun.candidates=[{id:'candidate:a',score:.4,metrics:{bound:'detail'}}];
-  c.state.activeRun.candidate_summaries=[{id:'candidate:a',score:.6}];
-  c.request=async()=>section('collaboration',9,{intervention_candidates:[{id:'candidate:b',generation:2}],interventions:[],expert_consultations:[]});
-  await c.ensureWorkspaceData();
-  assert.equal(c.state.activeRun.intervention_candidates[0].id,'candidate:b');
-  assert.equal(c.state.activeRun.candidates[0].metrics.bound,'detail');
-  assert.equal(c.state.activeRun.candidate_summaries[0].score,.6);
-});
+
 
 test('switching runs rejects old section data and failed reads remain retryable',async()=>{
   const c=sandbox();let finish;c.state.workspace='process';c.request=()=>new Promise(resolve=>{finish=resolve;});
@@ -118,17 +108,7 @@ test('switching runs rejects old section data and failed reads remain retryable'
   assert.equal(c.state.workspaceErrors.process,undefined);
 });
 
-test('training trace loads only by explicit candidate request and verifies identity',async()=>{
-  const c=sandbox();c.state.workspace='training';let calls=[];
-  c.request=async path=>{calls.push(path);return path.includes('view=asset')
-    ? {projection:{run_id:'run:a',projection_revision:5,training_asset:{candidate_id:'candidate:a',episode:{stages:{}}}}}
-    : section('training',5,{training_assets:[{candidate_id:'candidate:a',details_loaded:false}]});};
-  await c.ensureWorkspaceData();assert.equal(calls.length,1);assert.ok(!calls[0].includes('view=asset'));
-  assert.equal(await c.loadTrainingAsset('candidate:a'),true);assert.ok(calls[1].includes('candidate_id=candidate%3Aa'));
-  assert.equal(c.state.trainingAssetDetails['candidate:a'].asset.details_loaded,true);
-  c.request=async()=>({projection:{run_id:'run:b',training_asset:{candidate_id:'candidate:a'}}});
-  assert.equal(await c.loadTrainingAsset('candidate:a'),false);
-});
+
 
 test('GET requests coalesce, metadata cache is bounded and scoped to host context',async()=>{
   const c=sandbox();let calls=0,finish;

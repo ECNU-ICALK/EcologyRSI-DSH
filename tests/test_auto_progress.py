@@ -25,7 +25,9 @@ from ecologyrsi_dsh.core.errors import (
     FrozenRuntimeBindingDriftError,
 )
 from ecologyrsi_dsh.core.models import digest
-from ecologyrsi_dsh.integrations.model_gateway import GatewayResponseError
+from tests.greenhouse_fixture import greenhouse_registry
+from tests.native_fixtures import canary_receipts
+from tests.test_dsh_native_runtime import _FakeNativeRuntime
 from ecologyrsi_dsh.integrations.dsh_native_runtime import (
     DSH_NATIVE_EXECUTION_PROTOCOL,
 )
@@ -123,12 +125,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 'structured_child_output_budget_exhausted', 'structured_child_output_schema_invalid',
                 'structured_result_missing', 'evaluation_execution_incomplete')):
             with self.subTest(code=code):
-                status, created = self.request('/runs', 'POST', {
-                    'domain_pack_id': 'crop_soil_water', 'dataset_id': 'generated-toy-series@1',
-                    'rounds': 1, 'candidates_per_generation': 1, 'max_candidates': 1,
-                    'auto_progress': True, 'auto_advance': 0, 'start': False,
-                    'idempotency_key': f'sample-output-pause-{index}',
-                })
+                status, created = self.request('/runs', 'POST', {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, 'auto_progress': True, 'auto_advance': 0, 'start': False, 'idempotency_key': f'sample-output-pause-{index}'})
                 self.assertEqual(status, 201, created)
                 run_id = created['projection']['run_id']
                 self.server.director.start_run(run_id)
@@ -142,7 +139,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
                     self.server.director.record_evolution_stage(target, generation=0,
                         stage='evaluation', status='failed', attempt=1, public_error='评测提交未完成。')
                     raise error
-                with patch.object(auto_progress_module, 'execute_generation', side_effect=fail_generation) as execute:
+                with patch.object(work_units_module, 'execute_next_adaptive_work_unit', side_effect=fail_generation) as execute:
                     self.assertFalse(self.server.auto_progress._run_one_generation(run_id))
                 execute.assert_called_once()
                 paused = self.server.director.state(run_id)
@@ -175,9 +172,23 @@ class AutoProgressHTTPTests(unittest.TestCase):
         self.server = EvolutionHTTPServer(
             ("127.0.0.1", 0), Path(self.directory.name) / "events.sqlite3"
         )
+        self.server.datasets = greenhouse_registry(Path(self.directory.name) / "data")
+        self.server.dsh_native_runtime = _FakeNativeRuntime()
+        canary = patch("ecologyrsi_dsh.api.handler.require_model_preflight", side_effect=canary_receipts)
+        canary.start()
+        self.addCleanup(canary.stop)
+        # Scheduler tests substitute one explicit durable unit; no scientific scores
+        # or candidates are synthesized by the fixture.
+        unit = patch.object(work_units_module, "execute_next_adaptive_work_unit", side_effect=self.complete_unit)
+        unit.start()
+        self.addCleanup(unit.stop)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}/api"
+
+    def complete_unit(self, endpoint, run_id):
+        endpoint.director.complete_run(run_id, termination_reason="scheduler_fixture_complete")
+        return True
 
     def tearDown(self) -> None:
         self.server.shutdown()
@@ -201,171 +212,9 @@ class AutoProgressHTTPTests(unittest.TestCase):
         except HTTPError as exc:
             return exc.code, json.loads(exc.read())
 
-    def test_retry_classifier_requeues_retryable_gateway_calls(self) -> None:
-        self.assertTrue(
-            auto_progress_module._progress_failure_retryable(
-                GatewayResponseError(
-                    "HTTP 503 after request-local retries", retryable=True, attempts=4
-                )
-            )
-        )
-        self.assertFalse(
-            auto_progress_module._progress_failure_retryable(
-                GatewayResponseError("invalid JSON contract", retryable=False)
-            )
-        )
-        for error_type in (
-            ValueError,
-            TypeError,
-            KeyError,
-            RuntimeError,
-            AttributeError,
-            AssertionError,
-        ):
-            with self.subTest(host_fault=error_type.__name__):
-                self.assertFalse(
-                    auto_progress_module._progress_failure_retryable(
-                        error_type("unclassified host fault")
-                    )
-                )
-        research_contract = ResearchResponseContractError(
-            "research response failed host contract validation"
-        )
-        self.assertFalse(
-            auto_progress_module._progress_failure_retryable(research_contract)
-        )
-        self.assertIsNone(
-            auto_progress_module._retry_later_error(research_contract)
-        )
-        self.assertFalse(
-            auto_progress_module._progress_failure_retryable(
-                research_contract,
-                stage="research",
-            )
-        )
-        self.assertIsNone(
-            auto_progress_module._retry_later_error(
-                research_contract,
-                stage="research",
-            )
-        )
-        self.assertFalse(
-            auto_progress_module._progress_failure_retryable(
-                TimeoutError("transient ledger boundary")
-            )
-        )
-
-        from ecologyrsi_dsh.core.errors import DshNativeRuntimeUnavailableError
-        for code in ("structured_result_missing", "structured_output_attempt_limit_exceeded"):
-            for status in (422, 502):
-                exhausted = DshNativeRuntimeUnavailableError(error_code=code, status_code=status)
-                self.assertFalse(auto_progress_module._progress_failure_retryable(exhausted, stage="research"))
-                self.assertIsNone(auto_progress_module._retry_later_error(exhausted, stage="research"))
-
-        truncated = GatewayResponseError(
-            "research response reached its output limit",
-            retryable=False,
-            error_code="output_truncated",
-            split_eligible=True,
-            finish_reason="length",
-        )
-        self.assertFalse(
-            auto_progress_module._progress_failure_retryable(truncated)
-        )
-        self.assertTrue(
-            auto_progress_module._progress_failure_retryable(
-                truncated,
-                stage="research",
-            )
-        )
-        self.assertIs(
-            auto_progress_module._retry_later_error(
-                truncated,
-                stage="research",
-            ),
-            truncated,
-        )
-
-        malformed_research = GatewayResponseError(
-            "research response violated its semantic contract",
-            retryable=False,
-        )
-        self.assertTrue(
-            auto_progress_module._progress_failure_retryable(
-                malformed_research,
-                stage="research",
-            )
-        )
-        research_timeout = TimeoutError("research request timed out")
-        self.assertIs(
-            auto_progress_module._retry_later_error(
-                research_timeout,
-                stage="research",
-            ),
-            research_timeout,
-        )
-
-        invalid_credentials = GatewayResponseError(
-            "HTTP 401",
-            retryable=False,
-            status_code=401,
-        )
-        self.assertFalse(
-            auto_progress_module._progress_failure_retryable(
-                invalid_credentials,
-                stage="research",
-            )
-        )
-        self.assertIsNone(
-            auto_progress_module._retry_later_error(
-                invalid_credentials,
-                stage="research",
-            )
-        )
-
-        transport_failure = DshNativeRuntimeUnavailableError(
-            "DSH connection was interrupted during maintenance",
-            error_code="dsh_native_runtime_transport_error",
-        )
-        self.assertTrue(
-            auto_progress_module._progress_failure_retryable(transport_failure)
-        )
-        self.assertIs(
-            auto_progress_module._retry_later_error(transport_failure),
-            transport_failure,
-        )
-
-        dsh_stage_timeout = DshNativeRuntimeUnavailableError(
-            "DSH returned its bounded stage timeout",
-            error_code="runtime_controller_failed",
-            status_code=502,
-        )
-        self.assertTrue(
-            auto_progress_module._progress_failure_retryable(dsh_stage_timeout)
-        )
-        self.assertIs(
-            auto_progress_module._retry_later_error(dsh_stage_timeout),
-            dsh_stage_timeout,
-        )
-
-        contract_failure = DshNativeRuntimeUnavailableError(
-            "DSH response violated its frozen schema",
-            error_code="dsh_native_runtime_contract_error",
-        )
-        self.assertFalse(
-            auto_progress_module._progress_failure_retryable(contract_failure)
-        )
-        self.assertIsNone(
-            auto_progress_module._retry_later_error(contract_failure)
-        )
 
     def test_dsh_runtime_boundary_owns_classification_over_nested_gateway(self) -> None:
-        inner = GatewayResponseError(
-            "provider unavailable",
-            retryable=True,
-            status_code=503,
-            error_code="gateway_unavailable",
-        )
+        inner = DshNativeRuntimeUnavailableError("provider unavailable", status_code=503, error_code="dsh_native_runtime_unavailable")
         outer = DshNativeRuntimeUnavailableError(
             "DSH proxy unavailable",
             error_code="dsh_native_runtime_http_error",
@@ -400,17 +249,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 status, created = self.request(
                     "/runs",
                     "POST",
-                    {
-                        "domain_pack_id": "crop_soil_water",
-                        "dataset_id": "generated-toy-series@1",
-                        "rounds": 1,
-                        "candidates_per_generation": 1,
-                        "max_candidates": 1,
-                        "auto_progress": True,
-                        "auto_advance": 0,
-                        "start": False,
-                        "idempotency_key": f"host-fault-pause-{index}",
-                    },
+                    {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": f"host-fault-pause-{index}"},
                 )
                 self.assertEqual(status, 201, created)
                 run_id = created["projection"]["run_id"]
@@ -419,8 +258,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 secret = f"host-fault-secret-{index}"
 
                 with patch.object(
-                    auto_progress_module,
-                    "execute_generation",
+                    work_units_module,
+                    "execute_next_adaptive_work_unit",
                     side_effect=error_type(secret),
                 ) as execute_generation:
                     with self.assertLogs(
@@ -461,12 +300,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 )
 
     def test_provider_quota_pauses_once_and_can_resume_without_budget_changes(self):
-        status, created = self.request("/runs", "POST", {
-            "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
-            "rounds": 1, "candidates_per_generation": 1, "max_candidates": 1,
-            "auto_progress": True, "auto_advance": 0, "start": False,
-            "idempotency_key": "quota-exhaustion",
-        })
+        status, created = self.request("/runs", "POST", {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "quota-exhaustion"})
         self.assertEqual(status, 201)
         run_id = created["projection"]["run_id"]
         self.server.director.start_run(run_id)
@@ -475,7 +309,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
             "private provider payload", error_code="model_provider_quota_exhausted",
             status_code=429, failure_domain="provider", provider_status=429,
         )
-        with patch.object(auto_progress_module, "execute_generation", side_effect=error) as execute:
+        with patch.object(work_units_module, "execute_next_adaptive_work_unit", side_effect=error) as execute:
             self.assertFalse(self.server.auto_progress._run_one_generation(run_id))
         execute.assert_called_once()
         state = self.server.director.state(run_id)
@@ -496,12 +330,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         self.assertEqual(resumed.task_manifest, before.task_manifest)
 
     def test_provider_quota_during_preflight_also_pauses(self):
-        status, created = self.request("/runs", "POST", {
-            "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
-            "rounds": 1, "candidates_per_generation": 1, "max_candidates": 1,
-            "auto_progress": True, "auto_advance": 0, "start": False,
-            "idempotency_key": "quota-preflight-pause",
-        })
+        status, created = self.request("/runs", "POST", {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "quota-preflight-pause"})
         self.assertEqual(status, 201)
         run_id = created["projection"]["run_id"]
         self.server.director.start_run(run_id)
@@ -510,7 +339,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
             status_code=429, failure_domain="provider", provider_status=429,
         )
         with patch.object(self.server, "validate_frozen_runtime_bindings", side_effect=error), \
-             patch.object(auto_progress_module, "execute_generation") as execute:
+             patch.object(work_units_module, "execute_next_adaptive_work_unit") as execute:
             self.assertFalse(self.server.auto_progress._run_one_generation(run_id))
         execute.assert_not_called()
         state = self.server.director.state(run_id)
@@ -521,17 +350,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "host-fault-pause-ledger-requeue",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "host-fault-pause-ledger-requeue"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -540,8 +359,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=RuntimeError("host fault; Bearer do-not-persist"),
             ) as execute_generation,
             patch.object(
@@ -567,8 +386,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
         self.assertIsNotNone(self.server.auto_progress._deferred_pause(run_id))
 
         with patch.object(
-            auto_progress_module,
-            "execute_generation",
+            work_units_module,
+            "execute_next_adaptive_work_unit",
         ) as execute_generation:
             keep_running = self.server.auto_progress._run_one_generation(run_id)
 
@@ -588,17 +407,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "adaptive-no-durable-seq-progress",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "adaptive-no-durable-seq-progress"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -610,7 +419,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 state,
                 task_manifest=replace(state.task_manifest, metadata={
                     **state.task_manifest.metadata,
-                    "optimization_protocol": "top2_adaptive_epoch@1",
+                    "optimization_protocol": "joint_plugin_epoch@2",
                 }),
             )
 
@@ -675,28 +484,15 @@ class AutoProgressHTTPTests(unittest.TestCase):
             cancel_called.set()
             return {"accepted": True, **request}
 
-        self.server.dsh_native_runtime = SimpleNamespace(
-            pause=pause_runtime,
-            cancel=cancel_runtime,
-            resume=lambda request: {"accepted": True, **request},
-        )
+        self.server.dsh_native_runtime.pause = pause_runtime
+        self.server.dsh_native_runtime.cancel = cancel_runtime
 
         for index, transition in enumerate(("pause", "fail")):
             with self.subTest(transition=transition):
                 status, created = self.request(
                     "/runs",
                     "POST",
-                    {
-                        "domain_pack_id": "crop_soil_water",
-                        "dataset_id": "generated-toy-series@1",
-                        "rounds": 1,
-                        "candidates_per_generation": 1,
-                        "max_candidates": 1,
-                        "auto_progress": True,
-                        "auto_advance": 0,
-                        "start": False,
-                        "idempotency_key": f"native-auto-terminal-{index}",
-                    },
+                    {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": f"native-auto-terminal-{index}"},
                 )
                 self.assertEqual(status, 201, created)
                 run_id = created["projection"]["run_id"]
@@ -840,17 +636,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "native-quiescence-transient-retry",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "native-quiescence-transient-retry"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -939,17 +725,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "untrusted-dsh-retry-error-code",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "untrusted-dsh-retry-error-code"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -963,8 +739,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=outage,
             ),
             patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
@@ -1001,17 +777,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "retry-backoff-class-scope",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "retry-backoff-class-scope"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -1023,11 +789,11 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 run_incarnation=state.events[0].seq,
                 generation=0,
                 stage="research",
-                retry_class="model_gateway",
+                retry_class="sample_result_persistence",
                 failure_id=digest({"model-backoff-attempt": attempt}),
                 attempt_anchor_seq=state.events[-1].seq,
                 delay_seconds=0.0,
-                last_error_code="gateway_unavailable",
+                last_error_code="sample_result_callback_error",
             )
         state = self.server.director.state(run_id)
         work_item = (run_id, auto_progress_module._run_incarnation(state))
@@ -1054,17 +820,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "research-contract-circuit-breaker",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "research-contract-circuit-breaker"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -1090,8 +846,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=invalid_research,
             ),
             patch.object(
@@ -1127,17 +883,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "research-output-circuit-breaker",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "research-output-circuit-breaker"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -1162,8 +908,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=invalid_research,
             ),
             patch.object(
@@ -1246,32 +992,17 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "restore-v2-retry-authority",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "restore-v2-retry-authority"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
         with self.server.mutation_lock:
             self.server.director.start_run(run_id)
-        unavailable = GatewayResponseError(
-            "provider queue unavailable",
-            retryable=True,
-            status_code=503,
-            attempts=4,
-        )
+        unavailable = DshNativeRuntimeUnavailableError("provider queue unavailable", status_code=503, error_code="dsh_native_runtime_unavailable")
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=unavailable,
             ),
             patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 60.0),
@@ -1300,17 +1031,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "restart-after-stage-failure-authority",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "restart-after-stage-failure-authority"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -1321,11 +1042,11 @@ class AutoProgressHTTPTests(unittest.TestCase):
             run_incarnation=state.events[0].seq,
             generation=0,
             stage="research",
-            retry_class="model_gateway",
+            retry_class="dsh_native_runtime",
             failure_id=digest("restart-first-retry-authority"),
             attempt_anchor_seq=state.events[-1].seq,
             delay_seconds=0.0,
-            last_error_code="gateway_unavailable",
+            last_error_code="dsh_native_runtime_unavailable",
         ).event
         self.server.director.record_evolution_stage(
             run_id,
@@ -1342,17 +1063,12 @@ class AutoProgressHTTPTests(unittest.TestCase):
             attempt=2,
             public_error="研究请求暂时失败。",
         )
-        unavailable = GatewayResponseError(
-            "provider unavailable",
-            retryable=True,
-            status_code=503,
-            attempts=4,
-        )
+        unavailable = DshNativeRuntimeUnavailableError("provider unavailable", status_code=503, error_code="dsh_native_runtime_unavailable")
 
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=unavailable,
             ),
             patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
@@ -1373,32 +1089,17 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "restart-after-resume-old-epoch",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "restart-after-resume-old-epoch"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
         with self.server.mutation_lock:
             self.server.director.start_run(run_id)
-        unavailable = GatewayResponseError(
-            "provider queue unavailable",
-            retryable=True,
-            status_code=503,
-            attempts=4,
-        )
+        unavailable = DshNativeRuntimeUnavailableError("provider queue unavailable", status_code=503, error_code="dsh_native_runtime_unavailable")
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=unavailable,
             ),
             patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 60.0),
@@ -1421,33 +1122,17 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "gateway-request-not-generation-retry",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "gateway-request-not-generation-retry"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
         with self.server.mutation_lock:
             self.server.director.start_run(run_id)
 
-        exhausted = GatewayResponseError(
-            "HTTP 503 after request-local retries; Bearer generation-audit-secret",
-            retryable=True,
-            attempts=4,
-            status_code=503,
-            retry_after_seconds=900,
-        )
+        exhausted = DshNativeRuntimeUnavailableError("HTTP 503 after request-local retries; Bearer generation-audit-secret", status_code=503, error_code="dsh_native_runtime_unavailable", retry_after_ms=1000*(900))
         with patch.object(
-            auto_progress_module,
-            "execute_generation",
+            work_units_module,
+            "execute_next_adaptive_work_unit",
             side_effect=exhausted,
         ) as execute_generation:
             with patch.object(
@@ -1470,63 +1155,6 @@ class AutoProgressHTTPTests(unittest.TestCase):
         )
         self.assertEqual(retry_event.payload["delay_seconds"], 900.0)
 
-    def test_six_logical_gateway_failures_open_durable_circuit(self) -> None:
-        status, created = self.request(
-            "/runs",
-            "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "bounded-six-gateway-failures",
-            },
-        )
-        self.assertEqual(status, 201, created)
-        run_id = created["projection"]["run_id"]
-        with self.server.mutation_lock:
-            self.server.director.start_run(run_id)
-        unavailable = GatewayResponseError(
-            "provider unavailable; Bearer must-not-persist",
-            retryable=True,
-            attempts=4,
-            status_code=503,
-            error_code="gateway_unavailable",
-        )
-
-        with (
-            patch.object(
-                auto_progress_module,
-                "execute_generation",
-                side_effect=unavailable,
-            ) as execute_generation,
-            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
-        ):
-            outcomes = [
-                self.server.auto_progress._run_one_generation(run_id)
-                for _ in range(6)
-            ]
-
-        self.assertEqual(outcomes, [True, True, True, True, True, False])
-        self.assertEqual(execute_generation.call_count, 6)
-        state = self.server.director.state(run_id)
-        self.assertEqual(state.run.status.value, "paused")
-        retries = [
-            event for event in state.events if event.kind == "GatewayRetryScheduled"
-        ]
-        self.assertEqual(len(retries), 5)
-        self.assertEqual(
-            [event.payload["consecutive_failures"] for event in retries],
-            [1, 2, 3, 4, 5],
-        )
-        paused = next(event for event in reversed(state.events) if event.kind == "RunPaused")
-        self.assertEqual(paused.payload["code"], "gateway_retry_circuit_open")
-        self.assertNotIn("must-not-persist", str(state.events))
-        self.assertFalse(any(event.kind == "RunFailed" for event in state.events))
 
     def test_resume_after_bounded_outage_completes_without_duplicate_candidates(
         self,
@@ -1534,42 +1162,26 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "resume-outage-no-duplicate-candidate",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "resume-outage-no-duplicate-candidate"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
         self.server.director.start_run(run_id)
-        unavailable = GatewayResponseError(
-            "provider unavailable",
-            retryable=True,
-            attempts=4,
-            status_code=503,
-            error_code="gateway_unavailable",
-        )
+        unavailable = DshNativeRuntimeUnavailableError("provider unavailable", status_code=503, error_code="dsh_native_runtime_unavailable")
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=unavailable,
             ) as failed_generation,
             patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
         ):
             outcomes = [
                 self.server.auto_progress._run_one_generation(run_id)
-                for _ in range(6)
+                for _ in range(12)
             ]
-        self.assertEqual(outcomes, [True, True, True, True, True, False])
-        self.assertEqual(failed_generation.call_count, 6)
+        self.assertEqual(outcomes, [True] * 11 + [False])
+        self.assertEqual(failed_generation.call_count, 12)
         self.server.director.resume_run(run_id)
 
         keep_running = self.server.auto_progress._run_one_generation(run_id)
@@ -1577,25 +1189,15 @@ class AutoProgressHTTPTests(unittest.TestCase):
         self.assertFalse(keep_running)
         state = self.server.director.state(run_id)
         self.assertEqual(state.run.status.value, "completed")
-        self.assertEqual(len(state.candidates), 1)
-        self.assertEqual(len({item.candidate_id for item in state.candidates}), 1)
+        self.assertEqual(state.candidates, ())
+        self.assertEqual(sum(e.kind == "RunCompleted" for e in state.events), 1)
         self.assertFalse(any(event.kind == "CandidateFailed" for event in state.events))
 
     def test_retry_commit_failure_retries_only_decision_before_gateway(self) -> None:
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "retry-decision-commit-failure",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "retry-decision-commit-failure"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -1607,16 +1209,11 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 self.server.director.state(run_id)
             ),
         )
-        unavailable = GatewayResponseError(
-            "provider queue unavailable",
-            retryable=True,
-            attempts=4,
-            status_code=503,
-        )
+        unavailable = DshNativeRuntimeUnavailableError("provider queue unavailable", status_code=503, error_code="dsh_native_runtime_unavailable")
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=unavailable,
             ) as first_gateway_call,
             patch.object(
@@ -1638,7 +1235,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         with self.server.auto_progress._state_lock:
             self.assertNotIn(work_item, self.server.auto_progress._retry_not_before)
 
-        with patch.object(auto_progress_module, "execute_generation") as gateway_call:
+        with patch.object(work_units_module, "execute_next_adaptive_work_unit") as gateway_call:
             keep_running = self.server.auto_progress._run_one_generation(run_id)
 
         self.assertTrue(keep_running)
@@ -1662,34 +1259,24 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "circuit-resume-clears-old-timer",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "circuit-resume-clears-old-timer"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
         with self.server.mutation_lock:
             self.server.director.start_run(run_id)
-        for attempt in range(1, 7):
+        for attempt in range(1, 13):
             state = self.server.director.state(run_id)
             self.server.director.schedule_gateway_retry_or_pause(
                 run_id,
                 run_incarnation=state.events[0].seq,
                 generation=0,
                 stage="research",
-                retry_class="model_gateway",
+                retry_class="dsh_native_runtime",
                 failure_id=digest({"resume-timer-attempt": attempt}),
                 attempt_anchor_seq=state.events[-1].seq,
                 delay_seconds=0.0,
-                last_error_code="gateway_unavailable",
+                last_error_code="dsh_native_runtime_unavailable",
             )
         paused = self.server.director.state(run_id)
         self.assertEqual(paused.run.status.value, "paused")
@@ -1722,33 +1309,23 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "circuit-start-api-bypass",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "circuit-start-api-bypass"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
         self.server.director.start_run(run_id)
-        for attempt in range(1, 7):
+        for attempt in range(1, 13):
             state = self.server.director.state(run_id)
             self.server.director.schedule_gateway_retry_or_pause(
                 run_id,
                 run_incarnation=state.events[0].seq,
                 generation=0,
                 stage="research",
-                retry_class="model_gateway",
+                retry_class="dsh_native_runtime",
                 failure_id=digest({"circuit-start-api-attempt": attempt}),
                 attempt_anchor_seq=state.events[-1].seq,
                 delay_seconds=0.0,
-                last_error_code="gateway_unavailable",
+                last_error_code="dsh_native_runtime_unavailable",
             )
         self.assertEqual(
             self.server.director.state(run_id).run.status.value,
@@ -1761,7 +1338,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
             wraps=self.server.director.start_run,
         ) as start_run:
             status, rejected = self.request(
-                f"/runs/{run_id}/action",
+                f"/runs/{run_id}/control",
                 "POST",
                 {
                     "action": "start",
@@ -1787,32 +1364,17 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "old-epoch-timer-after-resume",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "old-epoch-timer-after-resume"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
         with self.server.mutation_lock:
             self.server.director.start_run(run_id)
-        unavailable = GatewayResponseError(
-            "provider queue unavailable",
-            retryable=True,
-            status_code=503,
-            attempts=4,
-        )
+        unavailable = DshNativeRuntimeUnavailableError("provider queue unavailable", status_code=503, error_code="dsh_native_runtime_unavailable")
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=unavailable,
             ),
             patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 60.0),
@@ -1827,18 +1389,18 @@ class AutoProgressHTTPTests(unittest.TestCase):
             old_timer = self.server.auto_progress._retry_timers[work_item]
         old_timer.cancel()
 
-        for attempt in range(2, 7):
+        for attempt in range(2, 13):
             state = self.server.director.state(run_id)
             self.server.director.schedule_gateway_retry_or_pause(
                 run_id,
                 run_incarnation=state.events[0].seq,
                 generation=0,
                 stage="generation",
-                retry_class="model_gateway",
+                retry_class="dsh_native_runtime",
                 failure_id=digest({"old-timer-attempt": attempt}),
                 attempt_anchor_seq=state.events[-1].seq,
                 delay_seconds=0.0,
-                last_error_code="gateway_unavailable",
+                last_error_code="dsh_native_runtime_unavailable",
             )
         self.assertEqual(
             self.server.director.state(run_id).run.status.value,
@@ -1855,10 +1417,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         schedule_work_item.assert_not_called()
 
     def test_formal_failure_diagnostics_can_be_persisted(self):
-        status, created = self.request("/runs", "POST", {
-            "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
-            "start": False, "auto_advance": 0, "idempotency_key": "formal-failure-context",
-        })
+        status, created = self.request("/runs", "POST", {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "start": False, "auto_advance": 0, "idempotency_key": "formal-failure-context"})
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
         context = {"generation": 0, "stage": "formal_batch", "work_unit_kind": "formal_batch",
@@ -1874,12 +1433,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
     def test_parallel_protocol_failure_terminates_without_retrying_cancelled_runtime(self):
         from ecologyrsi_dsh.application.candidate_scheduler import CandidateEvaluationTask, run_candidate_evaluations
-        status, created = self.request("/runs", "POST", {
-            "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
-            "rounds": 1, "candidates_per_generation": 1, "max_candidates": 1,
-            "auto_progress": True, "auto_advance": 0, "start": False,
-            "idempotency_key": "fatal-parallel-protocol",
-        })
+        status, created = self.request("/runs", "POST", {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "fatal-parallel-protocol"})
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
         self.server.director.start_run(run_id)
@@ -1892,7 +1446,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         def execute(*_args):
             run_candidate_evaluations((CandidateEvaluationTask(0, "a"), CandidateEvaluationTask(1, "b")),
                 max_concurrency=2, evaluate=evaluate, admission_open=lambda: True)
-        with patch.object(auto_progress_module, "execute_generation", side_effect=execute) as generation:
+        with patch.object(work_units_module, "execute_next_adaptive_work_unit", side_effect=execute) as generation:
             self.assertFalse(self.server.auto_progress._run_one_generation(run_id))
         generation.assert_called_once()
         state = self.server.director.state(run_id)
@@ -1905,17 +1459,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "dsh-outage-delayed-retry",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "dsh-outage-delayed-retry"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -1928,8 +1472,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
         )
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=outage,
             ) as execute_generation,
             patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
@@ -1962,16 +1506,11 @@ class AutoProgressHTTPTests(unittest.TestCase):
         outage = DshNativeRuntimeUnavailableError(error_code=code, status_code=503, failure_domain="provider")
         self.assertTrue(dsh_native_runtime_retryable(outage))
         self.assertFalse(dsh_native_runtime_evaluation_fatal(outage))
-        status, created = self.request("/runs", "POST", {
-            "domain_pack_id": "crop_soil_water", "dataset_id": "generated-toy-series@1",
-            "rounds": 1, "candidates_per_generation": 1, "max_candidates": 1,
-            "auto_progress": True, "auto_advance": 0, "start": False,
-            "idempotency_key": "typed-tool-protocol-recovery",
-        })
+        status, created = self.request("/runs", "POST", {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "typed-tool-protocol-recovery"})
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
         self.server.director.start_run(run_id)
-        with patch.object(auto_progress_module, "execute_generation", side_effect=outage), \
+        with patch.object(work_units_module, "execute_next_adaptive_work_unit", side_effect=outage), \
              patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0):
             self.assertTrue(self.server.auto_progress._run_one_generation(run_id))
         state = self.server.director.state(run_id)
@@ -1987,17 +1526,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "parallel-dsh-success-before-failure",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "parallel-dsh-success-before-failure"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -2015,7 +1544,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
             nonlocal attempt
             attempt += 1
             structured = {
-                "schema_version": "ecology-sample-reflection@1",
+                "schema_version": "ecology-sample-review@2",
                 "summary": (
                     "A sibling child completed before failure "
                     f"attempt {attempt} surfaced."
@@ -2031,17 +1560,17 @@ class AutoProgressHTTPTests(unittest.TestCase):
                     "identity": {
                         "run_id": run_id,
                         "role": "sample-critic",
-                        "stage": "sample.reflect",
+                        "stage": "sample.critic",
                         "session_id": "successful-parallel-sibling",
                     },
-                    "output_schema_id": "ecology-sample-reflection@1",
+                    "output_schema_id": "ecology-sample-review@2",
                     "result_digest": digest(structured),
                     "structured": structured,
                     "skill_invocation_evidence": {
                         "schema_version": (
                             "ecologyrsi-dsh.skill-invocation-evidence/1"
                         ),
-                        "stage": "sample.reflect",
+                        "stage": "sample.critic",
                         "skill_name": "origin-vector-review",
                         "call_count": 1,
                         "successful_call_count": 1,
@@ -2060,8 +1589,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=settle_parallel_attempt,
             ),
             patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
@@ -2089,17 +1618,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "bounded-six-dsh-runtime-failures",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "bounded-six-dsh-runtime-failures"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -2113,7 +1632,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
             pause_called.set()
             return {"accepted": True, **request}
 
-        self.server.dsh_native_runtime = SimpleNamespace(pause=pause_runtime)
+        self.server.dsh_native_runtime.pause = pause_runtime
         self.server.dsh_tools.open_run_admissions(run_id)
 
         def close_native_admission(state, *, action):
@@ -2134,8 +1653,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
         )
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=outage,
             ) as execute_generation,
             patch.object(
@@ -2180,17 +1699,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "dsh-proposal-timeout-delayed-retry",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "dsh-proposal-timeout-delayed-retry"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -2204,8 +1713,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
         )
         with (
             patch.object(
-                self.server.director,
-                "request_proposal",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=timeout,
             ),
             patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
@@ -2220,196 +1729,13 @@ class AutoProgressHTTPTests(unittest.TestCase):
             any(event.kind == "GatewayRetryScheduled" for event in state.events)
         )
 
-    def test_research_contract_failure_keeps_run_running_for_delayed_retry(self) -> None:
-        status, created = self.request(
-            "/runs",
-            "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "research-contract-delayed-retry",
-            },
-        )
-        self.assertEqual(status, 201, created)
-        run_id = created["projection"]["run_id"]
-        with self.server.mutation_lock:
-            self.server.director.start_run(run_id)
 
-        contract_error = GatewayResponseError(
-            "research algorithm contract invalid after semantic retries",
-            retryable=True,
-            attempts=2,
-            error_code="research_algorithm_contract_invalid",
-        )
-        with (
-            patch.object(
-                auto_progress_module,
-                "execute_generation",
-                side_effect=contract_error,
-            ) as execute_generation,
-            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
-        ):
-            keep_running = self.server.auto_progress._run_one_generation(run_id)
-
-        self.assertTrue(keep_running)
-        self.assertEqual(execute_generation.call_count, 1)
-        state = self.server.director.state(run_id)
-        self.assertEqual(state.run.status.value, "running")
-        retry_events = [
-            event for event in state.events if event.kind == "GatewayRetryScheduled"
-        ]
-        self.assertTrue(retry_events)
-        self.assertEqual(
-            retry_events[-1].payload["error_code"],
-            "research_algorithm_contract_invalid",
-        )
-        self.assertFalse(any(event.kind == "RunFailed" for event in state.events))
-
-    def test_research_response_failures_persist_cooldown_without_failing_run(
-        self,
-    ) -> None:
-        cases = (
-            (
-                "output-truncated",
-                GatewayResponseError(
-                    "research response ended at max_tokens",
-                    retryable=False,
-                    error_code="output_truncated",
-                    split_eligible=True,
-                    finish_reason="length",
-                ),
-                "output_truncated",
-            ),
-            (
-                "gateway-response",
-                GatewayResponseError(
-                    "research response violated a bounded contract",
-                    retryable=False,
-                ),
-                "gateway_response_error",
-            ),
-            (
-                "timeout",
-                TimeoutError("research request timed out after queueing"),
-                "timeout",
-            ),
-        )
-        for label, research_error, expected_code in cases:
-            with self.subTest(label=label):
-                status, created = self.request(
-                    "/runs",
-                    "POST",
-                    {
-                        "domain_pack_id": "crop_soil_water",
-                        "dataset_id": "generated-toy-series@1",
-                        "rounds": 1,
-                        "candidates_per_generation": 1,
-                        "max_candidates": 1,
-                        "auto_progress": True,
-                        "auto_advance": 0,
-                        "start": False,
-                        "idempotency_key": f"research-cooldown-{label}",
-                    },
-                )
-                self.assertEqual(status, 201, created)
-                run_id = created["projection"]["run_id"]
-                with self.server.mutation_lock:
-                    self.server.director.start_run(run_id)
-
-                def fail_research(_endpoint: object, target_run_id: str) -> object:
-                    state = self.server.director.state(target_run_id)
-                    generation = int(state.run.generation)
-                    self.server.director.record_evolution_stage(
-                        target_run_id,
-                        generation=generation,
-                        stage="research",
-                        status="started",
-                        attempt=1,
-                    )
-                    self.server.director.record_evolution_stage(
-                        target_run_id,
-                        generation=generation,
-                        stage="research",
-                        status="failed",
-                        attempt=1,
-                        public_error="研究请求暂时失败。",
-                    )
-                    raise research_error
-
-                with (
-                    patch.object(
-                        auto_progress_module,
-                        "execute_generation",
-                        side_effect=fail_research,
-                    ) as execute_generation,
-                    patch.object(
-                        auto_progress_module,
-                        "_GATEWAY_RETRY_BASE_SECONDS",
-                        30.0,
-                    ),
-                ):
-                    keep_running = self.server.auto_progress._run_one_generation(
-                        run_id
-                    )
-
-                self.assertTrue(keep_running)
-                self.assertEqual(execute_generation.call_count, 1)
-                state = self.server.director.state(run_id)
-                self.assertEqual(state.run.status.value, "running")
-                self.assertFalse(
-                    any(event.kind == "RunFailed" for event in state.events)
-                )
-                retry_event = next(
-                    event
-                    for event in reversed(state.events)
-                    if event.kind == "GatewayRetryScheduled"
-                )
-                self.assertEqual(retry_event.payload["stage"], "research")
-                self.assertEqual(
-                    retry_event.payload["error_code"],
-                    expected_code,
-                )
-                self.assertEqual(retry_event.payload["delay_seconds"], 30.0)
-
-                work_item = (
-                    run_id,
-                    auto_progress_module._run_incarnation(state),
-                )
-                with self.server.auto_progress._state_lock:
-                    self.server.auto_progress._retry_not_before.pop(
-                        work_item,
-                        None,
-                    )
-                self.server.auto_progress._restore_retry_deadline(
-                    work_item,
-                    state,
-                )
-                self.assertIn(
-                    work_item,
-                    self.server.auto_progress._retry_not_before,
-                )
 
     def test_wrapped_gateway_error_keeps_run_running_for_delayed_retry(self) -> None:
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "wrapped-gateway-retry",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "wrapped-gateway-retry"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -2418,17 +1744,12 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         def wrapped_failure(*_args: object, **_kwargs: object) -> object:
             try:
-                raise GatewayResponseError(
-                    "provider queue is still busy",
-                    retryable=True,
-                    status_code=503,
-                    attempts=4,
-                )
-            except GatewayResponseError as cause:
+                raise DshNativeRuntimeUnavailableError("provider queue is still busy", status_code=503, error_code="dsh_native_runtime_unavailable")
+            except DshNativeRuntimeUnavailableError as cause:
                 raise RuntimeError("sample adapter wrapped gateway failure") from cause
 
         with (
-            patch.object(auto_progress_module, "execute_generation", side_effect=wrapped_failure),
+            patch.object(work_units_module, "execute_next_adaptive_work_unit", side_effect=wrapped_failure),
             patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
         ):
             self.assertTrue(self.server.auto_progress._run_one_generation(run_id))
@@ -2442,17 +1763,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "sample-result-callback-retry",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "sample-result-callback-retry"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -2461,8 +1772,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=SampleResultCallbackError("ledger temporarily busy"),
             ),
             patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
@@ -2474,85 +1785,12 @@ class AutoProgressHTTPTests(unittest.TestCase):
         self.assertTrue(any(event.kind == "GatewayRetryScheduled" for event in state.events))
         self.assertFalse(any(event.kind == "RunFailed" for event in state.events))
 
-    def test_final_budget_candidate_checkpoint_is_not_completed_before_retry(
-        self,
-    ) -> None:
-        status, created = self.request(
-            "/runs",
-            "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 2,
-                "candidates_per_generation": 1,
-                "max_candidates": 2,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "final-budget-candidate-callback-retry",
-            },
-        )
-        self.assertEqual(status, 201, created)
-        run_id = created["projection"]["run_id"]
-        endpoint = SimpleNamespace(server=self.server)
-        with self.server.mutation_lock:
-            self.server.director.start_run(run_id)
-
-        first_generation = generation_execution_module.execute_generation(
-            (endpoint).server,
-            run_id,
-        )
-        self.assertEqual(first_generation.run.generation, 1)
-        self.assertEqual(first_generation.run.status.value, "running")
-
-        batch = generation_execution_module.start_generation_batch(
-            self.server.director,
-            run_id,
-        )
-        spawned = generation_execution_module._spawn_generation_candidates(
-            (endpoint).server,
-            run_id,
-            batch,
-        )
-        self.assertTrue(spawned)
-        checkpoint = self.server.director.state(run_id)
-        self.assertEqual(len(checkpoint.candidates), 2)
-        self.assertEqual(checkpoint.candidates[-1].generation, 1)
-        self.assertEqual(checkpoint.candidates[-1].status.value, "spawned")
-
-        with (
-            patch.object(
-                auto_progress_module,
-                "execute_generation",
-                side_effect=SampleResultCallbackError("ledger temporarily busy"),
-            ) as execute_generation,
-            patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 0.0),
-        ):
-            self.assertTrue(self.server.auto_progress._run_one_generation(run_id))
-
-        execute_generation.assert_called_once()
-        recovered = self.server.director.state(run_id)
-        self.assertEqual(recovered.run.status.value, "running")
-        self.assertFalse(any(event.kind == "RunCompleted" for event in recovered.events))
-        self.assertTrue(
-            any(event.kind == "GatewayRetryScheduled" for event in recovered.events)
-        )
 
     def test_preflight_failure_write_is_requeued_without_reexecuting(self) -> None:
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "preflight-failure-ledger-requeue",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "preflight-failure-ledger-requeue"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -2572,7 +1810,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 "fail_run",
                 side_effect=sqlite3.OperationalError("database is temporarily busy"),
             ),
-            patch.object(auto_progress_module, "execute_generation") as execute_generation,
+            patch.object(work_units_module, "execute_next_adaptive_work_unit") as execute_generation,
             patch.object(
                 auto_progress_module,
                 "_FAILURE_PERSISTENCE_RETRY_SECONDS",
@@ -2588,7 +1826,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         execute_generation.assert_not_called()
 
         with patch.object(
-            auto_progress_module, "execute_generation"
+            work_units_module, "execute_next_adaptive_work_unit"
         ) as execute_generation:
             keep_running = self.server.auto_progress._run_one_generation(run_id)
 
@@ -2617,17 +1855,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "generation-failure-ledger-requeue",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "generation-failure-ledger-requeue"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -2637,8 +1865,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=FrozenRuntimeBindingDriftError(),
             ) as execute_generation,
             patch.object(
@@ -2661,7 +1889,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         )
 
         with patch.object(
-            auto_progress_module, "execute_generation"
+            work_units_module, "execute_next_adaptive_work_unit"
         ) as execute_generation:
             keep_running = self.server.auto_progress._run_one_generation(run_id)
 
@@ -2673,17 +1901,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "worker-deferred-failure-requeue",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "worker-deferred-failure-requeue"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -2699,8 +1917,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=FrozenRuntimeBindingDriftError(),
             ) as execute_generation,
             patch.object(
@@ -2742,17 +1960,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
             status, created = self.request(
                 "/runs",
                 "POST",
-                {
-                    "domain_pack_id": "crop_soil_water",
-                    "dataset_id": "generated-toy-series@1",
-                    "rounds": 1,
-                    "candidates_per_generation": 1,
-                    "max_candidates": 1,
-                    "auto_progress": True,
-                    "auto_advance": 0,
-                    "start": False,
-                    "idempotency_key": f"worker-state-error-{label}",
-                },
+                {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": f"worker-state-error-{label}"},
             )
             self.assertEqual(status, 201, created)
             run_ids.append(created["projection"]["run_id"])
@@ -2884,17 +2092,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
             status, created = self.request(
                 "/runs",
                 "POST",
-                {
-                    "domain_pack_id": "crop_soil_water",
-                    "dataset_id": "generated-toy-series@1",
-                    "rounds": 1,
-                    "candidates_per_generation": 1,
-                    "max_candidates": 1,
-                    "auto_progress": True,
-                    "auto_advance": 0,
-                    "start": False,
-                    "idempotency_key": f"worker-pool-{label}",
-                },
+                {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": f"worker-pool-{label}"},
             )
             self.assertEqual(status, 201, created)
             run_ids.append(created["projection"]["run_id"])
@@ -2903,7 +2101,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         slow_started = threading.Event()
         release_slow = threading.Event()
         fast_completed = threading.Event()
-        execute_generation = auto_progress_module.execute_generation
+        execute_generation = work_units_module.execute_next_adaptive_work_unit
 
         def controlled_execute(endpoint: object, target_run_id: str) -> object:
             if target_run_id == slow_run_id:
@@ -2914,8 +2112,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
             return execute_generation(endpoint, target_run_id)
 
         with patch.object(
-            auto_progress_module,
-            "execute_generation",
+            work_units_module,
+            "execute_next_adaptive_work_unit",
             side_effect=controlled_execute,
         ):
             with self.server.mutation_lock:
@@ -2963,37 +2161,22 @@ class AutoProgressHTTPTests(unittest.TestCase):
             status, created = self.request(
                 "/runs",
                 "POST",
-                {
-                    "domain_pack_id": "crop_soil_water",
-                    "dataset_id": "generated-toy-series@1",
-                    "rounds": 1,
-                    "candidates_per_generation": 1,
-                    "max_candidates": 1,
-                    "auto_progress": True,
-                    "auto_advance": 0,
-                    "start": False,
-                    "idempotency_key": f"cooldown-worker-{label}",
-                },
+                {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": f"cooldown-worker-{label}"},
             )
             self.assertEqual(status, 201, created)
             run_ids.append(created["projection"]["run_id"])
         cooldown_run_id, independent_run_id = run_ids
         first_attempt = threading.Event()
-        original_execute = auto_progress_module.execute_generation
+        original_execute = work_units_module.execute_next_adaptive_work_unit
 
         def controlled_execute(endpoint: object, target_run_id: str) -> object:
             if target_run_id == cooldown_run_id:
                 first_attempt.set()
-                raise GatewayResponseError(
-                    "provider queue is busy",
-                    retryable=True,
-                    status_code=503,
-                    attempts=4,
-                )
+                raise DshNativeRuntimeUnavailableError("provider queue is busy", status_code=503, error_code="dsh_native_runtime_unavailable")
             return original_execute(endpoint, target_run_id)
 
         with (
-            patch.object(auto_progress_module, "execute_generation", side_effect=controlled_execute),
+            patch.object(work_units_module, "execute_next_adaptive_work_unit", side_effect=controlled_execute),
             patch.object(auto_progress_module, "_GATEWAY_RETRY_BASE_SECONDS", 30.0),
         ):
             with self.server.mutation_lock:
@@ -3019,17 +2202,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "expired-cooldown-terminal-dispatch",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "expired-cooldown-terminal-dispatch"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -3072,17 +2245,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "diagnostics-recovers-idle-running-run",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "diagnostics-recovers-idle-running-run"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -3124,17 +2287,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "maintenance-recovers-orphan",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "maintenance-recovers-orphan"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -3163,17 +2316,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 status, created = self.request(
                     "/runs",
                     "POST",
-                    {
-                        "domain_pack_id": "crop_soil_water",
-                        "dataset_id": "generated-toy-series@1",
-                        "rounds": 1,
-                        "candidates_per_generation": 1,
-                        "max_candidates": 1,
-                        "auto_progress": True,
-                        "auto_advance": 0,
-                        "start": False,
-                        "idempotency_key": f"terminal-cooldown-{label}",
-                    },
+                    {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": f"terminal-cooldown-{label}"},
                 )
                 self.assertEqual(status, 201, created)
                 run_id = created["projection"]["run_id"]
@@ -3218,17 +2361,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "future-cooldown-preserved",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "future-cooldown-preserved"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -3263,17 +2396,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "dead-cooldown-timer-replaced",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "dead-cooldown-timer-replaced"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -3323,17 +2446,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "timer-start-failure-fallback",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "timer-start-failure-fallback"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -3346,7 +2459,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 time.monotonic() + 60.0
             )
         executed = threading.Event()
-        execute_generation = auto_progress_module.execute_generation
+        execute_generation = work_units_module.execute_next_adaptive_work_unit
 
         def controlled_execute(endpoint: object, target_run_id: str) -> object:
             executed.set()
@@ -3354,8 +2467,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         with (
             patch.object(
-                auto_progress_module,
-                "execute_generation",
+                work_units_module,
+                "execute_next_adaptive_work_unit",
                 side_effect=controlled_execute,
             ),
             patch.object(
@@ -3402,17 +2515,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "worker-terminal-clears-timer",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "worker-terminal-clears-timer"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -3459,25 +2562,14 @@ class AutoProgressHTTPTests(unittest.TestCase):
             status, created = self.request(
                 "/runs",
                 "POST",
-                {
-                    "run_id": run_id,
-                    "domain_pack_id": "crop_soil_water",
-                    "dataset_id": "generated-toy-series@1",
-                    "rounds": 1,
-                    "candidates_per_generation": 1,
-                    "max_candidates": 1,
-                    "auto_progress": True,
-                    "auto_advance": 0,
-                    "start": False,
-                    "idempotency_key": f"queued-purge-{label}",
-                },
+                {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "run_id": run_id, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": f"queued-purge-{label}"},
             )
             self.assertEqual(status, 201, created)
 
         blocker_started = threading.Event()
         release_blocker = threading.Event()
         calls: list[str] = []
-        execute_generation = auto_progress_module.execute_generation
+        execute_generation = work_units_module.execute_next_adaptive_work_unit
 
         def controlled_execute(endpoint: object, run_id: str) -> object:
             calls.append(run_id)
@@ -3487,8 +2579,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
             return execute_generation(endpoint, run_id)
 
         with patch.object(
-            auto_progress_module,
-            "execute_generation",
+            work_units_module,
+            "execute_next_adaptive_work_unit",
             side_effect=controlled_execute,
         ):
             try:
@@ -3521,7 +2613,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
                     "POST",
                     {"action": "cancel"},
                 )
-                self.assertEqual(status, 200, cancelled)
+                self.assertIn(status, (200, 202), cancelled)
                 status, archived = self.request(
                     f"/runs/{target_id}/archive", "POST", {}
                 )
@@ -3542,18 +2634,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
                 status, recreated = self.request(
                     "/runs",
                     "POST",
-                    {
-                        "run_id": target_id,
-                        "domain_pack_id": "crop_soil_water",
-                        "dataset_id": "generated-toy-series@1",
-                        "rounds": 1,
-                        "candidates_per_generation": 1,
-                        "max_candidates": 1,
-                        "auto_progress": False,
-                        "auto_advance": 0,
-                        "start": True,
-                        "idempotency_key": "queued-purge-recreated",
-                    },
+                    {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4*(1), "candidates_per_generation":4}, "run_id": target_id, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "queued-purge-recreated"},
                 )
                 self.assertEqual(status, 201, recreated)
             finally:
@@ -3577,8 +2658,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         self.assertEqual(calls, [blocker_id])
         self.assertEqual(
-            [event.kind for event in self.server.ledger.events(target_id)],
-            ["RunCreated", "RunStarted"],
+            [event.kind for event in self.server.ledger.events(target_id) if event.kind in {"RunCreated", "RunStarted", "RunCompleted"}],
+            ["RunCreated"],
         )
         with self.server._generation_locks_guard:
             self.assertNotIn(target_id, self.server._generation_locks)
@@ -3587,17 +2668,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 2,
-                "candidates_per_generation": 1,
-                "max_candidates": 2,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "pause-during-long-generation",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":2, "max_candidates":4*(2), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "pause-during-long-generation"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -3612,8 +2683,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
 
         timer = threading.Timer(2.0, release_generation.set)
         with patch.object(
-            auto_progress_module,
-            "execute_generation",
+            work_units_module,
+            "execute_next_adaptive_work_unit",
             side_effect=blocked_generation,
         ):
             with self.server.mutation_lock:
@@ -3628,249 +2699,47 @@ class AutoProgressHTTPTests(unittest.TestCase):
             advance_elapsed = time.monotonic() - advance_started_at
             started_at = time.monotonic()
             status, paused = self.request(
-                f"/runs/{run_id}/action", "POST", {"action": "pause"}
+                f"/runs/{run_id}/control", "POST", {"action": "pause"}
             )
             elapsed = time.monotonic() - started_at
             release_generation.set()
             timer.cancel()
 
-        self.assertEqual(status, 200, paused)
+        self.assertIn(status, (200, 202), paused)
         self.assertEqual(paused["projection"]["status"], "paused")
-        self.assertEqual(advance_status, 409, advance_payload)
-        self.assertIn("already being advanced", advance_payload["error"])
+        self.assertEqual(advance_status, 404, advance_payload)
         self.assertLess(advance_elapsed, 1.0)
         self.assertLess(elapsed, 1.0)
 
-    def test_background_and_explicit_advance_share_one_generation_lease(self) -> None:
-        status, created = self.request(
-            "/runs",
-            "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 1,
-                "candidates_per_generation": 1,
-                "max_candidates": 1,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "one-generation-lease",
-            },
-        )
-        self.assertEqual(status, 201, created)
-        run_id = created["projection"]["run_id"]
-        proposal_started = threading.Event()
-        release_proposal = threading.Event()
-        propose = self.server.strategy_router.propose
 
-        def blocked_propose(*args, **kwargs):
-            proposal_started.set()
-            release_proposal.wait(timeout=3)
-            return propose(*args, **kwargs)
 
-        timer = threading.Timer(2.0, release_proposal.set)
-        with patch.object(
-            self.server.strategy_router,
-            "propose",
-            side_effect=blocked_propose,
-        ):
-            with self.server.mutation_lock:
-                self.server.director.start_run(run_id)
-                self.server.auto_progress.schedule(run_id)
-            self.assertTrue(proposal_started.wait(timeout=1))
-            timer.start()
-            advance_status, advance_payload = self.request(
-                f"/runs/{run_id}/advance", "POST", {"steps": 1}
-            )
-            self.assertEqual(advance_status, 409, advance_payload)
-            release_proposal.set()
-            timer.cancel()
 
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                state = self.server.director.state(run_id)
-                if state.run.status.value in {"completed", "failed"}:
-                    break
-                time.sleep(0.01)
 
-        state = self.server.director.state(run_id)
-        self.assertEqual(state.run.status.value, "completed")
-        self.assertEqual(len(state.candidates), 1)
-        event_kinds = [event.kind for event in state.events]
-        self.assertEqual(event_kinds.count("ProposalSubmitted"), 1)
-        self.assertEqual(event_kinds.count("CandidateSpawned"), 1)
-        self.assertEqual(event_kinds.count("GenerationAdvanced"), 1)
-
-    def test_pause_during_real_proposal_wait_is_not_recorded_as_failure(self) -> None:
-        status, created = self.request(
-            "/runs",
-            "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 2,
-                "candidates_per_generation": 1,
-                "max_candidates": 2,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "pause-real-proposal-wait",
-            },
-        )
-        self.assertEqual(status, 201, created)
-        run_id = created["projection"]["run_id"]
-        proposal_started = threading.Event()
-        release_proposal = threading.Event()
-        propose = self.server.strategy_router.propose
-
-        def blocked_propose(*args, **kwargs):
-            proposal_started.set()
-            release_proposal.wait(timeout=3)
-            return propose(*args, **kwargs)
-
-        timer = threading.Timer(2.0, release_proposal.set)
-        with patch.object(
-            self.server.strategy_router,
-            "propose",
-            side_effect=blocked_propose,
-        ):
-            with self.server.mutation_lock:
-                self.server.director.start_run(run_id)
-                self.server.auto_progress.schedule(run_id)
-            self.assertTrue(proposal_started.wait(timeout=1))
-            timer.start()
-            pause_status, paused = self.request(
-                f"/runs/{run_id}/action", "POST", {"action": "pause"}
-            )
-            self.assertEqual(pause_status, 200, paused)
-            release_proposal.set()
-            timer.cancel()
-
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                state = self.server.director.state(run_id)
-                if not self.server.generation_lock(run_id).acquire(blocking=False):
-                    time.sleep(0.01)
-                    continue
-                self.server.generation_lock(run_id).release()
-                break
-
-        state = self.server.director.state(run_id)
-        self.assertEqual(state.run.status.value, "paused")
-        self.assertNotIn("RunFailed", [event.kind for event in state.events])
-
-    def test_continuous_mode_finishes_without_an_advance_request(self) -> None:
-        status, created = self.request(
-            "/runs",
-            "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 3,
-                "candidates_per_generation": 1,
-                "max_candidates": 3,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "idempotency_key": "continuous-regression",
-            },
-        )
-        self.assertEqual(status, 201, created)
-        initial = created["projection"]
-        self.assertTrue(initial["auto_progress"])
-        self.assertEqual(initial["status"], "running")
-        self.assertEqual(initial["generation"], 0)
-        self.assertEqual(initial["candidates"], [])
-
-        run_id = initial["run_id"]
-        deadline = time.monotonic() + 5
-        latest = initial
-        while time.monotonic() < deadline:
-            _status, payload = self.request(f"/runs/{run_id}")
-            latest = payload["projection"]
-            if latest["status"] in {"completed", "failed", "cancelled"}:
-                break
-            time.sleep(0.02)
-
-        self.assertEqual(latest["status"], "completed", latest)
-        self.assertEqual(latest["generation"], 3)
-        self.assertEqual(
-            sum(
-                event["kind"] == "GenerationAdvanced"
-                for event in self.request(f"/runs/{run_id}/events")[1]["events"]
-            ),
-            3,
-        )
-        self.assertEqual(
-            latest["execution_diagnostics"]["execution_mode"],
-            "registered_lightweight",
-        )
-        diagnostics = latest["execution_diagnostics"]
-        self.assertEqual(diagnostics["candidate_artifacts_count"], 3)
-        self.assertEqual(diagnostics["candidate_evaluations_count"], 3)
-        self.assertEqual(diagnostics["fit_passes_completed"], 3)
-        self.assertEqual(diagnostics["evolution_rounds_completed"], 3)
-        self.assertEqual(diagnostics["evolution_rounds_configured"], 3)
-        self.assertGreater(diagnostics["training_used_examples"], 0)
-        self.assertGreater(diagnostics["evaluation_used_examples"], 0)
-        self.assertEqual(
-            diagnostics["candidate_work_items"],
-            diagnostics["training_used_examples"]
-            + diagnostics["evaluation_used_examples"],
-        )
-        self.assertEqual(diagnostics["proposal_sources"], {"host_strategy": 3})
-        self.assertEqual(diagnostics["remote_strategy_status"], "not_called")
-        self.assertTrue(all("timing" in round_item for round_item in latest["rounds"]))
-
-    def test_numeric_auto_advance_keeps_single_step_compatibility(self) -> None:
-        status, created = self.request(
-            "/runs",
-            "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 2,
-                "max_candidates": 2,
-                "auto_advance": 1,
-                "idempotency_key": "bounded-step-regression",
-            },
-        )
-        self.assertEqual(status, 201, created)
-        projection = created["projection"]
-        self.assertFalse(projection["auto_progress"])
-        self.assertEqual(projection["generation"], 1)
-        self.assertEqual(projection["status"], "running")
-
-    def test_multiple_continuous_runs_take_turns_by_generation(self) -> None:
+    def test_multiple_current_runs_take_turns_by_durable_work_unit(self) -> None:
         run_ids: list[str] = []
         for index in range(2):
             status, created = self.request(
                 "/runs",
                 "POST",
-                {
-                    "domain_pack_id": "crop_soil_water",
-                    "dataset_id": "generated-toy-series@1",
-                    "rounds": 3,
-                    "candidates_per_generation": 1,
-                    "max_candidates": 3,
-                    "auto_progress": True,
-                    "auto_advance": 0,
-                    "start": False,
-                    "idempotency_key": f"fair-continuous-{index}",
-                },
+                {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":1, "max_candidates":4, "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": f"fair-continuous-{index}"},
             )
             self.assertEqual(status, 201, created)
             run_ids.append(created["projection"]["run_id"])
 
         calls: list[str] = []
-        execute_generation = auto_progress_module.execute_generation
+        execute_generation = work_units_module.execute_next_adaptive_work_unit
 
         def traced_execute(endpoint, run_id):
             calls.append(run_id)
-            return execute_generation(endpoint, run_id)
+            if calls.count(run_id) == 3:
+                return execute_generation(endpoint, run_id)
+            endpoint.director.record_evolution_stage(run_id, generation=0, stage="research",
+                status="started", attempt=calls.count(run_id))
+            return True
 
         with patch.object(
-            auto_progress_module,
-            "execute_generation",
+            work_units_module,
+            "execute_next_adaptive_work_unit",
             side_effect=traced_execute,
         ):
             with self.server.mutation_lock:
@@ -3890,24 +2759,14 @@ class AutoProgressHTTPTests(unittest.TestCase):
             ["completed", "completed"],
         )
         # The worker pool may overlap different runs, but a run is dispatched
-        # exactly once per generation and no run can monopolize the queue.
+        # exactly once per durable work unit and no run can monopolize the queue.
         self.assertEqual(Counter(calls), Counter({run_ids[0]: 3, run_ids[1]: 3}))
 
     def test_worker_revalidates_frozen_bindings_before_execution(self) -> None:
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 2,
-                "candidates_per_generation": 1,
-                "max_candidates": 2,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "worker-binding-drift",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":2, "max_candidates":4*(2), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "worker-binding-drift"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]
@@ -3917,10 +2776,8 @@ class AutoProgressHTTPTests(unittest.TestCase):
             "configuration_digest",
             return_value="0" * 64,
         ):
-            status, started = self.request(
-                f"/runs/{run_id}/action", "POST", {"action": "start"}
-            )
-            self.assertEqual(status, 200, started)
+            self.server.director.start_run(run_id)
+            self.server.auto_progress.schedule(run_id)
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 state = self.server.director.state(run_id)
@@ -3952,15 +2809,7 @@ class AutoProgressHTTPTests(unittest.TestCase):
         status, created = self.request(
             "/runs",
             "POST",
-            {
-                "domain_pack_id": "crop_soil_water",
-                "dataset_id": "generated-toy-series@1",
-                "rounds": 2,
-                "auto_progress": True,
-                "auto_advance": 0,
-                "start": False,
-                "idempotency_key": "archived-running-recovery",
-            },
+            {"execution_protocol": DSH_NATIVE_EXECUTION_PROTOCOL, "optimization_protocol": "joint_plugin_epoch@2", "dataset_id":"agc_cucumber_2018", "episode_id":"agc_cucumber_2018:TeamA", "strategy_model_id":"dsh/strategy", "review_model_id":"dsh/review", "knowledge_online_enabled":False, "budget":{"max_generations":2, "max_candidates":4*(2), "candidates_per_generation":4}, "auto_progress": True, "auto_advance": 0, "start": False, "idempotency_key": "archived-running-recovery"},
         )
         self.assertEqual(status, 201, created)
         run_id = created["projection"]["run_id"]

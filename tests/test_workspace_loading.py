@@ -8,11 +8,9 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from urllib.parse import quote
 
-from tests import test_http as http_helpers
-from ecologyrsi_dsh.application.config import bind_toy_dataset
+from tests import test_runtime_integration as http_helpers
+from tests.native_candidate_fixture import seed_candidate
 from ecologyrsi_dsh.application.read_cache import ReadSectionCache
-from ecologyrsi_dsh.core.models import TaskManifest
-from ecologyrsi_dsh.presentation.training_assets import training_assets
 
 
 class WorkspaceHTTPTests(unittest.TestCase):
@@ -33,22 +31,18 @@ class WorkspaceHTTPTests(unittest.TestCase):
         self.assertEqual(detail, {**_candidate_projection(state, state.candidate(candidate)), 'details_loaded': True})
         self.assertEqual(self.request('/api/runs/' + quote(run) + '?view=candidate&candidate_id=foreign')[0], 404)
 
-    setUp = http_helpers.HTTPContractTests.setUp
-    tearDown = http_helpers.HTTPContractTests.tearDown
-    request = http_helpers.HTTPContractTests.request
+    setUp = http_helpers.RuntimeIntegrationTests.setUp
+    tearDown = http_helpers.RuntimeIntegrationTests.tearDown
+    def request(self, path, method="GET", body=None):
+        return http_helpers.RuntimeIntegrationTests.request(self, path.removeprefix("/api"), method, body)
 
     def seed(self):
-        task = bind_toy_dataset(TaskManifest(task_id='workspace', objective='loading test',
-            domain_pack='crop_soil_water', visible_datasets=('generated-toy-series@1',),
-            budget=1, seed=7, metadata={'evaluation_partition': 'validation'}), required=True)
-        run = self.server.director.start_evolution(task, run_id='run:workspace')
-        candidate = self.server.director.propose_and_spawn(run.run.run_id)
-        return run.run.run_id, candidate.candidate_id
+        _proposal, candidate = seed_candidate(self.server.director, "run:workspace", "candidate:workspace")
+        return candidate.run_id, candidate.candidate_id
 
     def test_overview_never_builds_hidden_collections(self):
         run, _ = self.seed()
-        with (patch('ecologyrsi_dsh.api.projection.training_assets', side_effect=AssertionError('heavy assets')),
-             patch('ecologyrsi_dsh.api.projection._candidate_projection', side_effect=AssertionError('heavy candidate')),
+        with (patch('ecologyrsi_dsh.api.projection._candidate_projection', side_effect=AssertionError('heavy candidate')),
              patch('ecologyrsi_dsh.api.projection._rounds_projection', side_effect=AssertionError('heavy round'))):
             status, value = self.request('/api/runs/' + quote(run) + '?view=overview')
         self.assertEqual(status, 200, value)
@@ -104,8 +98,8 @@ class WorkspaceHTTPTests(unittest.TestCase):
         run, candidate = self.seed()
         self.server.director.complete_run(run)
         paths = ['/api/runs/' + quote(run) + '?view=' + view
-                 for view in ('overview', 'process', 'training', 'candidates', 'collaboration')]
-        paths.append('/api/runs/' + quote(run) + '?view=asset&candidate_id=' + quote(candidate))
+                 for view in ('overview', 'process', 'candidates')]
+        paths.append('/api/runs/' + quote(run) + '?view=candidate&candidate_id=' + quote(candidate))
         paths.append('/api/runs/' + quote(run) + '/events?tail=60')
         paths.append('/api/runs/' + quote(run) + '/samples?candidate_id=' + quote(candidate) + '&offset=0&limit=25')
         first = [self.request(path) for path in paths]
@@ -145,8 +139,8 @@ class WorkspaceHTTPTests(unittest.TestCase):
         before = self.server.ledger.latest_seq()
         with self.server.mutation_lock:
             status, result = self.request('/api/evolution-capacity', 'POST', {
-                'dataset_id': 'generated-toy-series@1', 'episode_id': None,
-                'optimization_schedule': OptimizationSchedule.default().to_dict(),
+                'dataset_id': 'agc_cucumber_2018', 'episode_id': None,
+                'optimization_schedule': OptimizationSchedule.for_new_run().to_dict(),
                 'planned_generations': 1,
             })
         self.assertEqual(status, 200, result)
@@ -165,8 +159,6 @@ class WorkspaceHTTPTests(unittest.TestCase):
         for view, included, excluded in (
             ('process', 'rounds', 'training_assets'),
             ('candidates', 'artifacts', 'rounds'),
-            ('training', 'training_assets', 'candidates'),
-            ('collaboration', 'interventions', 'training_assets'),
         ):
             status, result = self.request('/api/runs/' + quote(run) + '?view=' + view)
             self.assertEqual(status, 200, result)
@@ -189,7 +181,7 @@ class WorkspaceHTTPTests(unittest.TestCase):
         hidden = {'metrics', 'inference_trace', 'algorithm_execution', 'model_plan',
                   'genome', 'mutation_explanation'}
         with ExitStack() as stack:
-            for name in ('_algorithm_execution_projection', '_public_inference_trace',
+            for name in ('_algorithm_execution_projection',
                          '_public_evaluation_metrics', '_safe_plan_value'):
                 stack.enter_context(patch('ecologyrsi_dsh.api.projection.' + name,
                     side_effect=AssertionError('summary attempted hidden detail construction')))
@@ -198,42 +190,14 @@ class WorkspaceHTTPTests(unittest.TestCase):
         summary = payload['projection']['candidate_summaries'][0]
         self.assertEqual(summary, {k: v for k, v in complete.items() if k not in hidden})
 
-    def test_collaboration_contains_parent_options_without_loading_candidate_detail(self):
-        from ecologyrsi_dsh.core.models import Evaluation, Promotion
-        run, candidate = self.seed()
-        director = self.server.director
-        director.record_evaluation(Evaluation(evaluation_id='evaluation:parent', run_id=run,
-            candidate_id=candidate, score=.5, passed=True, metrics={}, partition='validation'))
-        director.decide_promotion(Promotion(promotion_id='promotion:parent', run_id=run,
-            candidate_id=candidate, decision='approved', reason='eligible test parent'))
-        status, payload = self.request('/api/runs/' + quote(run) + '?view=collaboration')
-        self.assertEqual(status, 200, payload)
-        self.assertEqual([c['id'] for c in payload['projection']['intervention_candidates']], [candidate])
-        self.assertNotIn('candidate_summaries', payload['projection'])
-        self.assertNotIn('candidates', payload['projection'])
 
-    def test_training_summary_defers_trace_but_detail_keeps_exact_identity(self):
-        run, candidate = self.seed()
-        with patch('ecologyrsi_dsh.presentation.training_assets.build_training_trajectory', side_effect=AssertionError('trace')):
-            status, result = self.request('/api/runs/' + quote(run) + '?view=training')
-        self.assertEqual(status, 200, result)
-        summary = result['projection']['training_assets'][0]
-        self.assertFalse(summary['details_loaded'])
-        self.assertNotIn('episode', summary)
-        status, result = self.request('/api/runs/' + quote(run) + '?view=asset&candidate_id=' + quote(candidate))
-        self.assertEqual(status, 200, result)
-        detail = result['projection']['training_asset']
-        expected = training_assets(self.server.director.state(run), candidate_id=candidate)[0]
-        self.assertEqual(detail, json.loads(json.dumps(expected)))
-        self.assertEqual(detail['sample_id'], summary['sample_id'])
-        self.assertIn('episode', detail)
 
     def test_workspace_query_rejects_ambiguous_or_foreign_detail(self):
         run, _ = self.seed()
         for query in ('view=process&view=training', 'view=unknown', 'view=overview&candidate_id=x'):
             status, _ = self.request('/api/runs/' + quote(run) + '?' + query)
             self.assertEqual(status, 400)
-        status, _ = self.request('/api/runs/' + quote(run) + '?view=asset&candidate_id=foreign')
+        status, _ = self.request('/api/runs/' + quote(run) + '?view=candidate&candidate_id=foreign')
         self.assertEqual(status, 404)
 
     def test_event_tail_reuses_validated_stream_without_ledger_decode(self):

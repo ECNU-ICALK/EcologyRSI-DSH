@@ -7,9 +7,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..core.models import TaskManifest, digest
-from ..data.contracts import DatasetSeries
+from ..data.contracts import DatasetSeries, SelectionDatasetView
 from ..data.splits import IndexRange
-from ..data.toy import ToyCropSoilWater
 from ..evaluators.greenhouse_prediction import (
     BASELINE_ALIGNED_RIDGE_MODEL_ID,
     BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
@@ -20,21 +19,16 @@ from ..evaluators.greenhouse_prediction import (
     TargetwiseExogenousRidgeConfig,
     fit_predict_exogenous_ridge,
 )
-from ..evaluators.metrics import _fit_bias, _greenhouse_parameters
 from .algorithm_ir import AlgorithmIR
 from .algorithms import AlgorithmSpec
 
 ALGORITHM_SMOKE_VERSION = "ecologyrsi-dsh.algorithm-smoke/1"
 
-_TOY_PREDICTOR_ID = "toy-rolling-water@1"
-_ROLLING_PREDICTOR_ID = "greenhouse-rolling-residual@1"
 _RIDGE_PREDICTOR_ID = "greenhouse-exogenous-ridge@1"
 _TARGETWISE_RIDGE_PREDICTOR_ID = "greenhouse-targetwise-ridge@1"
 _HORIZON_TARGETWISE_RIDGE_PREDICTOR_ID = (
     "greenhouse-horizon-targetwise-ridge@1"
 )
-_MULTIHORIZON_EVALUATOR_ID = "greenhouse_multihorizon_time_forward@1"
-_MULTIHORIZON_EVALUATOR_V2_ID = "greenhouse_multihorizon_time_forward@2"
 _TARGETS = (
     ("air_temperature", -10.0, 60.0),
     ("relative_humidity", 0.0, 100.0),
@@ -128,61 +122,8 @@ def _operator_trace(algorithm_ir: AlgorithmIR) -> list[dict[str, str]]:
     ]
 
 
-def _legacy_compatibility_evidence(spec: AlgorithmSpec) -> dict[str, Any]:
-    return _finalize_evidence(
-        {
-            "schema_version": ALGORITHM_SMOKE_VERSION,
-            "status": "compatibility_skipped",
-            "reason": "task_manifest_has_no_frozen_dataset_snapshot",
-            "predictor_id": spec.adapter_id,
-            "source_partition": "training_fit",
-            "restricted_partition_access": False,
-            "operator_trace": [],
-        }
-    )
 
 
-def _toy_smoke(
-    spec: AlgorithmSpec,
-    task: TaskManifest,
-    algorithm_ir: AlgorithmIR,
-) -> dict[str, Any]:
-    toy = ToyCropSoilWater(seed=int(task.metadata.get("dataset_seed", 0)))
-    expected_digest = task.metadata.get("dataset_digest")
-    if expected_digest != toy.dataset_digest:
-        raise AlgorithmSmokeError(
-            "smoke_dataset_snapshot_mismatch",
-            "toy smoke dataset does not match the frozen task snapshot",
-        )
-    metrics = toy.score(spec.parameters, "train")
-    numeric = [float(value) for value in metrics.values()]
-    if not numeric or not all(math.isfinite(value) for value in numeric):
-        raise AlgorithmSmokeError(
-            "smoke_nonfinite_output",
-            "toy smoke execution returned a non-finite metric",
-        )
-    if float(metrics.get("constraint_violations", 1.0)) != 0.0:
-        raise AlgorithmSmokeError(
-            "smoke_constraint_violation",
-            "toy smoke execution violated its registered physical bounds",
-        )
-    return _finalize_evidence(
-        {
-            "schema_version": ALGORITHM_SMOKE_VERSION,
-            "status": "passed",
-            "dataset_kind": "synthetic",
-            "dataset_digest": toy.dataset_digest,
-            "source_partition": "training_fit",
-            "restricted_partition_access": False,
-            "predictor_id": spec.adapter_id,
-            "algorithm_ir_digest": algorithm_ir.ir_digest,
-            "rows_examined": len(toy.splits["train"]),
-            "usable_predictions": int(metrics["n"]),
-            "finite_outputs": True,
-            "constraint_violations": 0,
-            "operator_trace": _operator_trace(algorithm_ir),
-        }
-    )
 
 
 def _load_greenhouse_series(
@@ -190,13 +131,13 @@ def _load_greenhouse_series(
     datasets: Any,
 ) -> DatasetSeries:
     dataset_id = task.dataset
-    if dataset_id is None or not callable(getattr(datasets, "series", None)):
+    if dataset_id is None or not callable(getattr(datasets, "selection_view", None)):
         raise AlgorithmSmokeError(
             "smoke_dataset_unavailable",
             "greenhouse smoke execution requires the registered dataset runtime",
         )
     try:
-        series = datasets.series(
+        series = datasets.selection_view(
             dataset_id,
             str(task.metadata.get("episode_id"))
             if task.metadata.get("episode_id") is not None
@@ -212,10 +153,10 @@ def _load_greenhouse_series(
             f"greenhouse smoke dataset is temporarily unavailable: {type(exc).__name__}",
             retryable=True,
         ) from exc
-    if not isinstance(series, DatasetSeries):
+    if not isinstance(series, SelectionDatasetView):
         raise AlgorithmSmokeError(
             "smoke_dataset_contract",
-            "registered dataset runtime did not return a DatasetSeries",
+            "registered dataset runtime did not return a SelectionDatasetView",
         )
     if (
         series.digest != task.metadata["dataset_digest"]
@@ -229,80 +170,6 @@ def _load_greenhouse_series(
     return series
 
 
-def _rolling_smoke(
-    spec: AlgorithmSpec,
-    series: DatasetSeries,
-    algorithm_ir: AlgorithmIR,
-) -> dict[str, Any]:
-    parameters = _greenhouse_parameters(spec.parameters)
-    selected = series.partitions["training_fit"]
-    timestamp_index = {
-        series.timestamps[index]: index
-        for index in range(selected.start, selected.end)
-    }
-    usable_predictions = 0
-    violations = 0
-    target_rows: list[dict[str, Any]] = []
-    for target, minimum, maximum in _TARGETS:
-        values = tuple(series.values.get(target, ()))
-        if len(values) != len(series.timestamps):
-            raise AlgorithmSmokeError(
-                "smoke_dataset_contract",
-                f"greenhouse smoke target is unavailable: {target}",
-            )
-        _bias, errors, indices = _fit_bias(
-            values,
-            selected.start,
-            selected.end,
-            parameters,
-            timestamps=tuple(series.timestamps),
-            timestamp_index=timestamp_index,
-        )
-        predictions = [
-            float(values[index]) + float(error)  # type: ignore[arg-type]
-            for error, index in zip(errors, indices)
-        ]
-        if not predictions or not all(math.isfinite(value) for value in predictions):
-            raise AlgorithmSmokeError(
-                "smoke_nonfinite_output",
-                f"rolling smoke execution returned no finite predictions for {target}",
-            )
-        target_violations = sum(
-            not minimum <= value <= maximum for value in predictions
-        )
-        usable_predictions += len(predictions)
-        violations += target_violations
-        target_rows.append(
-            {
-                "target": target,
-                "usable_predictions": len(predictions),
-                "constraint_violations": target_violations,
-            }
-        )
-    if violations:
-        raise AlgorithmSmokeError(
-            "smoke_constraint_violation",
-            "rolling smoke execution violated registered physical bounds",
-            evidence={"constraint_violations": violations},
-        )
-    return _finalize_evidence(
-        {
-            "schema_version": ALGORITHM_SMOKE_VERSION,
-            "status": "passed",
-            "dataset_kind": "observed",
-            "dataset_digest": series.digest,
-            "source_partition": "training_fit",
-            "restricted_partition_access": False,
-            "predictor_id": spec.adapter_id,
-            "algorithm_ir_digest": algorithm_ir.ir_digest,
-            "rows_examined": selected.size,
-            "usable_predictions": usable_predictions,
-            "finite_outputs": True,
-            "constraint_violations": 0,
-            "targets": target_rows,
-            "operator_trace": _operator_trace(algorithm_ir),
-        }
-    )
 
 
 def _smoke_split(
@@ -358,13 +225,7 @@ def _ridge_smoke(
         if spec.adapter_id == _TARGETWISE_RIDGE_PREDICTOR_ID
         else ExogenousRidgeConfig.from_mapping(spec.parameters)
     )
-    horizons = (
-        (1, 6, 24)
-        if spec.evaluator_id
-        in {_MULTIHORIZON_EVALUATOR_ID, _MULTIHORIZON_EVALUATOR_V2_ID,
-            "greenhouse_multihorizon_time_forward@3", "greenhouse_multihorizon_time_forward@4", "greenhouse_multihorizon_time_forward@5"}
-        else (1,)
-    )
+    horizons = (1, 6, 24)
     smoke_series = _smoke_split(
         series,
         history_steps=config.history_steps,
@@ -445,31 +306,14 @@ def smoke_test_algorithm_spec(
     if not isinstance(task.metadata.get("dataset_digest"), str) or not isinstance(
         task.metadata.get("split_manifest_digest"), str
     ):
-        evidence = _legacy_compatibility_evidence(spec)
-        return _attach_retry_context(
-            evidence,
-            attempt=attempt,
-            failure_feedback=failure_feedback,
-        )
-    if spec.adapter_id == _TOY_PREDICTOR_ID:
-        evidence = _toy_smoke(spec, task, algorithm_ir)
-    else:
-        series = _load_greenhouse_series(task, datasets)
-        if spec.adapter_id == _ROLLING_PREDICTOR_ID:
-            evidence = _rolling_smoke(spec, series, algorithm_ir)
-        elif spec.adapter_id in {
-            BASELINE_ALIGNED_RIDGE_MODEL_ID,
-            BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
-            _RIDGE_PREDICTOR_ID,
-            _TARGETWISE_RIDGE_PREDICTOR_ID,
-            _HORIZON_TARGETWISE_RIDGE_PREDICTOR_ID,
-        }:
-            evidence = _ridge_smoke(spec, series, algorithm_ir)
-        else:
-            raise AlgorithmSmokeError(
-                "smoke_unregistered_predictor",
-                f"no smoke runner is registered for predictor {spec.adapter_id}",
-            )
+        raise AlgorithmSmokeError("smoke_missing_snapshot", "task requires frozen dataset and split identities")
+    series = _load_greenhouse_series(task, datasets)
+    if spec.adapter_id not in {
+        BASELINE_ALIGNED_RIDGE_MODEL_ID, BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
+        _RIDGE_PREDICTOR_ID, _TARGETWISE_RIDGE_PREDICTOR_ID, _HORIZON_TARGETWISE_RIDGE_PREDICTOR_ID,
+    }:
+        raise AlgorithmSmokeError("smoke_unregistered_predictor", "no registered smoke runner for predictor")
+    evidence = _ridge_smoke(spec, series, algorithm_ir)
     return _attach_retry_context(
         evidence,
         attempt=attempt,

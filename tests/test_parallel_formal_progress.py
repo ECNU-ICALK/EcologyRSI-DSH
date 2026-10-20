@@ -1,11 +1,22 @@
 """Concurrent finalist progress is a sum of distinct Host scoring scopes."""
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace as NS
+from types import SimpleNamespace as _Namespace
 import unittest
 from unittest.mock import patch
 
 from ecologyrsi_dsh.api.projection import _adaptive_progress_projection
 from ecologyrsi_dsh.core.models import CandidateRole
+from tests.native_fixtures import native_manifest
+
+
+def NS(**values):
+    """Projection-only states explicitly expose frozen candidate bindings."""
+    result = _Namespace(**values)
+    if 'task_manifest' in values and 'run' in values and not hasattr(result, 'generation_cohort_for'):
+        result.generation_cohort_for = lambda generation: _Namespace(revision_bindings={
+            c.candidate_id: 'revision:' + c.candidate_id for c in getattr(result,'candidates',())
+            if getattr(c,'generation',generation) == generation})
+    return result
 
 
 class ParallelFormalProgressTests(unittest.TestCase):
@@ -14,19 +25,14 @@ class ParallelFormalProgressTests(unittest.TestCase):
         self.now = datetime.now(timezone.utc) - timedelta(minutes=1)
         self.state = NS(
             run=NS(run_id="run:parallel", generation=0, status=NS(value="running")),
-            task_manifest=NS(max_generations=1, metadata={
-                "optimization_protocol": "top2_adaptive_epoch@1",
-                "optimization_schedule": {"screening_origin_count": 1,
-                    "formal_origin_count_per_finalist": 10,
-                    "selection_holdout_origin_count": 3, "local_batch_origin_count": 5},
-                "prediction_cells_per_origin": 9,
-            }),
+            task_manifest=native_manifest(),
             candidates=tuple(NS(candidate_id=c, generation=0, role=CandidateRole.SEARCH)
                              for c in ("a", "b")),
             candidate_screening_events=tuple(NS(payload={"generation": 0,
                 "candidate_id": str(i), "origin_count": 1}) for i in range(4)),
             formal_batch_evaluations=(), holdout_evaluations=(), formal_batches=(), events=(),
         )
+        self.event("FormalSelectionCohortFrozen", {"generation": 0})
 
     def event(self, kind, payload):
         seq = len(self.events) + 1
@@ -39,12 +45,12 @@ class ParallelFormalProgressTests(unittest.TestCase):
         revision_id = revision_id or f"revision:{candidate}"
         if new_batch:
             self.event("FormalBatchStarted", {"batch": {"generation": 0,
-                "candidate_id": candidate, "revision_id": revision_id, "batch_index": 0,
+                "candidate_id": candidate, "revision_id": revision_id, "batch_index": 1,
                 "cohort_digest": "cohort", "origin_count": 5}})
-            self.state.formal_batches += (NS(generation=0, candidate_id=candidate, batch_index=0),)
+            self.state.formal_batches += (NS(generation=0, candidate_id=candidate, batch_index=1),)
         self.event("EvaluationSampleResultsStarted", {"candidate_id": candidate,
             "revision": result_revision, "checkpoint": {"evaluation_phase": "formal_batch",
-                "formal_batch_index": 0, "holdout_arm": None,
+                "formal_batch_index": 1, "holdout_arm": None,
                 "candidate_revision_id": revision_id, "cohort_digest": "cohort",
                 **({"execution_scope_digest": scope} if scope else {})}})
 
@@ -69,7 +75,7 @@ class ParallelFormalProgressTests(unittest.TestCase):
         self.result("b", 1)
         self.heartbeat("b", 0, 1)
         p = _adaptive_progress_projection(self.state)
-        self.assertEqual((p["formal_completed_origins"], p["run_completed_origins"]), (2, 6))
+        self.assertEqual((p["formal_completed_origins"], p["run_completed_origins"]), (2, 52))
         self.assertEqual((p["phase_succeeded_origins"], p["phase_failed_origins"]), (1, 1))
         self.assertEqual(p["phase_outcome_scope"], "formal_batch")
 
@@ -95,7 +101,7 @@ class ParallelFormalProgressTests(unittest.TestCase):
         self.heartbeat("a", 5, 0)
         before = _adaptive_progress_projection(self.state)
         self.state.formal_batch_evaluations = (NS(scope=NS(generation=0, candidate_id="a",
-            candidate_revision_id="revision:a", cohort_digest="cohort", batch_index=0, origin_count=5),
+            candidate_revision_id="revision:a", cohort_digest="cohort", batch_index=1, origin_count=5),
             metrics={"sample_execution": {"succeeded_origin_samples": 5, "failed_origin_samples": 0}}),)
         after = _adaptive_progress_projection(self.state)
         self.assertEqual(before["run_completed_origins"], after["run_completed_origins"])
@@ -105,7 +111,7 @@ class ParallelFormalProgressTests(unittest.TestCase):
     def test_sealed_champion_does_not_hide_live_challenger_or_recount_old_revision(self):
         self.start("a", scope="scope:champion")
         self.state.formal_batch_evaluations = (NS(scope=NS(generation=0, candidate_id="a",
-            candidate_revision_id="revision:a", cohort_digest="cohort", batch_index=0,
+            candidate_revision_id="revision:a", cohort_digest="cohort", batch_index=1,
             origin_count=5, scope_key="scope:champion"),
             metrics={"sample_execution": {"succeeded_origin_samples": 4, "failed_origin_samples": 1}}),)
         self.start("a", result_revision="results:challenger", revision_id="revision:challenger",

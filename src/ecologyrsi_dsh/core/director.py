@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from .protocols import require_current_run_contract
+
 from .local_edit_events import local_edit_key, validate_local_edit_event, validate_local_effect_event
 
-from ..evolution.diversity import preregister_candidate
 
 from ..evolution.schedule import ADAPTIVE_PROTOCOLS
 
@@ -26,8 +27,6 @@ from uuid import uuid4
 from ..evolution.analysis import (
     GenerationBatch,
     evaluation_cohort_comparison,
-    evaluation_cohort_digest,
-    sample_update_windows_enabled,
 )
 from .search_policy import local_challenger_policy, paired_execution_qualification_required
 from .model_preflight import AUDIT_EVENT, build_preflight_audit, preflight_audit_required
@@ -37,8 +36,6 @@ from .artifact_identity import (
     validate_evaluation_artifact_binding,
 )
 from ..evolution.champion_challenger import (
-    LOCAL_MINIMUM_SCORE_DELTA,
-    POSITIVE_DELTA_MINIMUM_SCORE_DELTA,
     validate_formal_batch_comparison,
 )
 from ..evolution.execution_plan import derive_execution_plan
@@ -55,16 +52,11 @@ from ..evolution.workflow_ir import (
     resolve_candidate_agent_profile,
 )
 from ..evolution.promotion import assess_promotion_improvement
-from ..evolution.interventions import advisory_only_receipts
 from ..evolution.strategies import (
     DSHAdapter,
-    FakeDSHAdapter,
-    apply_bounded_interventions,
 )
 from ..knowledge.algorithms import (
     AlgorithmAttempt,
-    PredictorAdoption,
-    resolve_predictor_adoption,
 )
 from ..knowledge.autonomous_cycle import (
     AUTONOMOUS_RESEARCH_PROTOCOL,
@@ -87,10 +79,6 @@ from .models import (
     CandidateRole,
     CandidateStatus,
     Evaluation,
-    ExpertConsultation,
-    ExpertConsultationAnswer,
-    HumanIntervention,
-    InterventionKind,
     ModelArtifact,
     Promotion,
     PromotionDecision,
@@ -132,15 +120,11 @@ from .state import (
     gateway_retry_error_code,
     is_dsh_native_protocol,
     persisted_genome_from_proposal,
-    project_run_state,
-    uses_global_incumbent_protocol,
-    uses_positive_delta_search_protocol,
     validate_generation_comparison_binding,
     validate_generation_zero_incumbent_binding,
     validate_runtime_promotion_decision,
     validate_evaluation_progress_payload,
     validate_evolution_stage_payload,
-    validate_model_usage_payload,
 )
 from .trajectory import (
     BatchEvaluation,
@@ -163,7 +147,6 @@ from .trajectory import (
     TrajectoryStatus,
 )
 from ..evolution.schedule import (
-    OPTIMIZATION_PROTOCOL,
     PAIRED_LOCAL_EVALUATION_MODE,
     OptimizationSchedule,
 )
@@ -262,26 +245,6 @@ def _gateway_retry_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _frozen_runtime_binding(state: RunState) -> dict[str, Any] | None:
-    """Recover the first host-validated autonomous binding from the ledger."""
-
-    for proposal in sorted(
-        state.proposals,
-        key=lambda item: (item.generation, item.created_at, item.proposal_id),
-    ):
-        plan = proposal.metadata.get("plan")
-        adoption = proposal.metadata.get("prediction_model_adoption")
-        if not isinstance(plan, Mapping) or not isinstance(adoption, Mapping):
-            continue
-        return {
-            "source_proposal_id": proposal.proposal_id,
-            "source_proposal_digest": proposal.digest,
-            "plan": dict(plan),
-            "prediction_model_adoption": dict(adoption),
-        }
-    return None
-
-
 def _effective_artifact_binding(state: RunState, artifact: ModelArtifact) -> dict[str, Any]:
     if artifact.candidate_revision_id is None:
         raise ValueError("effective artifact identity requires a candidate revision")
@@ -338,8 +301,6 @@ def _generation_sibling_behaviors(
         genome = persisted_genome_from_proposal(proposal)
         if genome is not None:
             predictor_id = genome.scientific_program["predictor_ref"]["id"]
-        elif isinstance(metadata.get("prediction_model_adoption"), Mapping):
-            predictor_id = metadata["prediction_model_adoption"].get("adopted_id")
         uniqueness = (behavior_digest, parameters_digest)
         if uniqueness in seen:
             continue
@@ -361,45 +322,6 @@ def _generation_sibling_behaviors(
     return rows
 
 
-def _task_for_proposal_predictor(
-    task: TaskManifest,
-    proposal: Proposal,
-) -> TaskManifest:
-    raw_plan = proposal.metadata.get("plan")
-    raw_adoption = proposal.metadata.get("prediction_model_adoption")
-    genome = persisted_genome_from_proposal(proposal)
-    if genome is not None:
-        if raw_plan is not None or raw_adoption is not None:
-            raise ValueError("DSH-native proposal cannot mix genome and legacy predictor adoption")
-        predictor_ref = genome.scientific_program["predictor_ref"]
-        predictor_id = str(predictor_ref["id"])
-        expected_ref = current_program_registry().program_ref(
-            "predictors", predictor_id
-        )
-        if dict(predictor_ref) != expected_ref:
-            raise ValueError("proposal genome predictor is outside the frozen Host registry")
-        data = task.to_dict()
-        data["metadata"] = {
-            **dict(task.metadata),
-            "prediction_model_id": predictor_id,
-            "prediction_model_digest": expected_ref["catalog_digest"],
-        }
-        return TaskManifest.from_dict(data)
-    if raw_plan is None and raw_adoption is None:
-        return task
-    if not isinstance(raw_plan, Mapping) or not isinstance(raw_adoption, Mapping):
-        raise TypeError("proposal predictor adoption is incomplete")
-    adoption = PredictorAdoption.from_dict(raw_adoption)
-    expected = resolve_predictor_adoption(task, raw_plan)
-    if adoption.to_dict() != expected.to_dict():
-        raise ValueError("proposal predictor adoption does not match the host catalog")
-    data = task.to_dict()
-    data["metadata"] = {
-        **dict(task.metadata),
-        "prediction_model_id": adoption.adopted_id,
-        "prediction_model_digest": adoption.adopted_digest,
-    }
-    return TaskManifest.from_dict(data)
 
 
 _INCUMBENT_SCORE_TOLERANCE = 1e-12
@@ -477,7 +399,7 @@ class EvolutionDirector:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.ledger = ledger
-        self.dsh: DSHAdapter = dsh or FakeDSHAdapter()
+        self.dsh: DSHAdapter | None = dsh
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         # State is immutable once projected.  Cache the latest projection per
         # run and use the indexed event tail as the invalidation key so polling
@@ -532,6 +454,7 @@ class EvolutionDirector:
 
         if not isinstance(task_manifest, TaskManifest):
             raise TypeError("task_manifest must be a TaskManifest")
+        require_current_run_contract(task_manifest)
         run_id = run_id or f"run:{uuid4()}"
         run = Run(
             run_id=run_id,
@@ -542,56 +465,55 @@ class EvolutionDirector:
             "run": run.to_dict(),
             "task_manifest": task_manifest.to_dict(),
         }
-        if is_dsh_native_protocol(task_manifest):
-            metadata = task_manifest.metadata
-            registry = current_program_registry()
-            template_id = str(
-                metadata.get("seed_genome_template_id") or ""
-            ).strip()
-            if not template_id:
-                raise ValueError("DSH-native run requires seed_genome_template_id")
-            template = registry.seed_template(template_id)
-            initialization = FrozenRunInitialization(
-                run_id=run_id,
-                task_manifest_digest=task_manifest.digest,
-                dataset_snapshot_set_digest=metadata.get(
-                    "dataset_snapshot_set_digest"
-                ),
-                split_manifest_digest=metadata.get("split_manifest_digest"),
-                data_protocol_digest=metadata.get("data_protocol_digest"),
-                stage_policy_digest=metadata.get("stage_policy_digest"),
-                evaluator_digest=metadata.get("evaluator_digest"),
-                fitness_profile_digest=metadata.get("fitness_profile_digest"),
-                security_kernel_digest=metadata.get("security_kernel_digest"),
-                selection_reviewer_program_digest=metadata.get(
-                    "selection_reviewer_program_digest"
-                ),
-                protocol=DSH_NATIVE_EVOLUTION_PROTOCOL,
-                required_capability_digest=metadata.get(
-                    "required_capability_digest"
-                ),
-                resolved_policy_route_digest=metadata.get(
-                    "resolved_policy_route_digest"
-                ),
-                resolved_review_route_digest=metadata.get(
-                    "resolved_review_route_digest"
-                ),
-                registry_catalog_digest=registry.catalog_digest,
-                compiler_digest=str(
-                    metadata.get("compiler_semantic_digest")
-                    or DEFAULT_COMPILER_SEMANTIC_DIGEST
-                ),
-            )
-            seed = materialize_seed_genome(template, initialization)
-            payload["genome_initialization"] = {
-                "schema_version": "ecologyrsi-dsh.run-genome-initialization/1",
-                "materializer_version": MATERIALIZER_VERSION,
-                "seed_template_canonical_json": canonical_json(template.to_dict()),
-                "seed_template_digest": template.template_digest,
-                "materialization_input": initialization.to_dict(),
-                "expected_seed_canonical_json": canonical_json(seed.to_dict()),
-                "expected_seed_genome_digest": seed.genome_digest,
-            }
+        metadata = task_manifest.metadata
+        registry = current_program_registry()
+        template_id = str(
+            metadata.get("seed_genome_template_id") or ""
+        ).strip()
+        if not template_id:
+            raise ValueError("DSH-native run requires seed_genome_template_id")
+        template = registry.seed_template(template_id)
+        initialization = FrozenRunInitialization(
+            run_id=run_id,
+            task_manifest_digest=task_manifest.digest,
+            dataset_snapshot_set_digest=metadata.get(
+                "dataset_snapshot_set_digest"
+            ),
+            split_manifest_digest=metadata.get("split_manifest_digest"),
+            data_protocol_digest=metadata.get("data_protocol_digest"),
+            stage_policy_digest=metadata.get("stage_policy_digest"),
+            evaluator_digest=metadata.get("evaluator_digest"),
+            fitness_profile_digest=metadata.get("fitness_profile_digest"),
+            security_kernel_digest=metadata.get("security_kernel_digest"),
+            selection_reviewer_program_digest=metadata.get(
+                "selection_reviewer_program_digest"
+            ),
+            protocol=DSH_NATIVE_EVOLUTION_PROTOCOL,
+            required_capability_digest=metadata.get(
+                "required_capability_digest"
+            ),
+            resolved_policy_route_digest=metadata.get(
+                "resolved_policy_route_digest"
+            ),
+            resolved_review_route_digest=metadata.get(
+                "resolved_review_route_digest"
+            ),
+            registry_catalog_digest=registry.catalog_digest,
+            compiler_digest=str(
+                metadata.get("compiler_semantic_digest")
+                or DEFAULT_COMPILER_SEMANTIC_DIGEST
+            ),
+        )
+        seed = materialize_seed_genome(template, initialization)
+        payload["genome_initialization"] = {
+            "schema_version": "ecologyrsi-dsh.run-genome-initialization/1",
+            "materializer_version": MATERIALIZER_VERSION,
+            "seed_template_canonical_json": canonical_json(template.to_dict()),
+            "seed_template_digest": template.template_digest,
+            "materialization_input": initialization.to_dict(),
+            "expected_seed_canonical_json": canonical_json(seed.to_dict()),
+            "expected_seed_genome_digest": seed.genome_digest,
+        }
         return run, payload
 
     def create_run(self, task_manifest: TaskManifest, *, run_id: str | None = None) -> Run:
@@ -605,8 +527,7 @@ class EvolutionDirector:
             payload,
             event_id=f"{run_id}:created",
         )
-        if is_dsh_native_protocol(task_manifest):
-            self.recover_run_initialization(run_id)
+        self.recover_run_initialization(run_id)
         return run
 
     def record_model_contract_preflight(self, run_id: str, receipts: Sequence[Mapping[str, Any]]) -> Event:
@@ -630,8 +551,7 @@ class EvolutionDirector:
             raise KeyError(f"unknown run: {run_id}")
         created = events[0]
         task = TaskManifest.from_dict(created.payload["task_manifest"])
-        if not is_dsh_native_protocol(task):
-            raise ValueError("historical run has no DSH-native initialization")
+        pass
         existing = next(
             (event for event in events if event.kind == "RunSeedGenomeMaterialized"),
             None,
@@ -697,15 +617,16 @@ class EvolutionDirector:
                     raise RuntimeError(
                         "gateway circuit requires an explicit resume"
                     )
-            if is_dsh_native_protocol(state.task_manifest):
-                try:
-                    state.materialized_seed_genome()
-                except RuntimeError as exc:
-                    raise RuntimeError(
-                        "DSH-native run seed initialization is incomplete"
-                    ) from exc
+            try:
+                state.materialized_seed_genome()
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "DSH-native run seed initialization is incomplete"
+                ) from exc
             session_id = state.run.session_id or opened_session_id
             if session_id is None:
+                if self.dsh is None:
+                    raise RuntimeError("native runtime adapter is required to start a run")
                 session_id = self.dsh.open_session(state.run, state.task_manifest)
                 opened_session_id = session_id
             return {"session_id": session_id}
@@ -1165,7 +1086,6 @@ class EvolutionDirector:
         parent_candidate_id: str | None = None,
         generation_batch: GenerationBatch | None = None,
         slot_index: int = 0,
-        consume_interventions: bool = True,
     ) -> Proposal:
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING)
@@ -1180,22 +1100,7 @@ class EvolutionDirector:
                 raise ValueError("generation batch is outside the current run scope")
             if not 0 <= slot_index < generation_batch.batch_size:
                 raise ValueError("slot_index is outside the generation batch")
-            frozen_ids = set(generation_batch.intervention_ids)
-            pending_interventions = tuple(
-                item for item in state.interventions if item.intervention_id in frozen_ids
-            )
-            if len(pending_interventions) != len(frozen_ids):
-                raise RuntimeError("generation batch references missing interventions")
             parent_candidate_id = generation_batch.parent_candidate_id
-        else:
-            pending_interventions = state.pending_interventions
-        selected_parents = [
-            item.target_candidate_id
-            for item in pending_interventions
-            if item.kind is InterventionKind.PARENT_SELECTION
-        ]
-        if selected_parents:
-            parent_candidate_id = selected_parents[-1]
         parent_context = None
         adaptive_effective_parent = False
         if (
@@ -1262,36 +1167,8 @@ class EvolutionDirector:
                     )
                 research_iteration_context = research_iteration.to_dict()
         existing_ids = {item.proposal_id for item in state.proposals}
-        frozen_runtime_binding = _frozen_runtime_binding(state)
-        intervention_overrides: dict[str, Any] = {}
-        guidance_notes: list[str] = []
-        constraint_notes: list[str] = []
-        knowledge_notes: list[str] = []
-        for intervention in pending_interventions:
-            if intervention.kind is InterventionKind.GUIDANCE:
-                guidance_notes.append(intervention.message)
-            elif intervention.kind is InterventionKind.CONSTRAINT:
-                constraint_notes.append(intervention.message)
-            elif intervention.kind is InterventionKind.DOMAIN_KNOWLEDGE:
-                knowledge_notes.append(intervention.message)
-            elif intervention.kind is InterventionKind.PARAMETER_OVERRIDE:
-                intervention_overrides.update(intervention.parameter_overrides)
-        adapter_interventions = None
-        if (
-            guidance_notes
-            or constraint_notes
-            or knowledge_notes
-            or intervention_overrides
-        ):
-            adapter_interventions = {"host_applies_interventions": True}
-            if guidance_notes:
-                adapter_interventions["guidance"] = " | ".join(guidance_notes)
-            if constraint_notes:
-                adapter_interventions["constraints"] = list(constraint_notes)
-            if knowledge_notes:
-                adapter_interventions["domain_knowledge"] = list(knowledge_notes)
-            if intervention_overrides:
-                adapter_interventions["parameter_override"] = intervention_overrides
+        if self.dsh is None:
+            raise RuntimeError("native runtime adapter is required to propose")
         proposal = None
         # An adapter may keep only in-memory counters.  After replaying a
         # SQLite run in a fresh process, retry until its next proposal ID is
@@ -1303,7 +1180,6 @@ class EvolutionDirector:
                 state.run.session_id,
                 parent_candidate_id=parent_candidate_id,
                 parent_context=parent_context,
-                interventions=adapter_interventions,
                 batch_context=(
                     {
                         "generation": generation_batch.generation,
@@ -1326,7 +1202,6 @@ class EvolutionDirector:
                             generation_batch.knowledge_snapshot_digest
                         ),
                         "research_iteration": research_iteration_context,
-                        "frozen_runtime_binding": frozen_runtime_binding,
                         "context_digest": generation_batch.context_digest,
                         "parent_genome_digest": generation_batch.parent_genome_digest,
                         "parent_genome_canonical_json": (
@@ -1372,69 +1247,6 @@ class EvolutionDirector:
                 "derived_execution_plan": execution_plan.to_dict(),
             },
         )
-        effective_task = _task_for_proposal_predictor(state.task_manifest, proposal)
-        bounded_changes, application_receipts = apply_bounded_interventions(
-            effective_task,
-            proposal.changes,
-            [item.to_dict() for item in pending_interventions],
-            selected_parent_candidate_id=parent_candidate_id,
-        )
-        if (
-            proposal.metadata.get("execution_protocol")
-            == DSH_NATIVE_EVOLUTION_PROTOCOL
-        ):
-            # The call above still validates the proposal against the task
-            # parameter boundary, which is worth keeping. Its *result* is not:
-            # under the native protocol the genome is authoritative and
-            # `changes` only mirrors it, so writing a human-adjusted number
-            # here would desynchronize the two and report an execution that
-            # never happens. The interventions reach this proposal as expert
-            # directives in its stage context instead.
-            bounded_changes = dict(proposal.changes)
-            application_receipts = advisory_only_receipts(
-                [item.to_dict() for item in pending_interventions],
-                application_receipts,
-            )
-        if application_receipts:
-            rationale = proposal.rationale.strip()
-            audit_notes = []
-            for intervention, receipt in zip(
-                pending_interventions, application_receipts
-            ):
-                status = receipt["application_status"]
-                status_text = {
-                    "enforced": "已强制执行",
-                    "applied": "已应用",
-                    "recorded": "仅记录、未执行",
-                }[status]
-                if (
-                    status == "recorded"
-                    and receipt.get("model_context_delivered") is True
-                ):
-                    status_text = "模型已读取、宿主未强制执行"
-                audit_notes.append(
-                    f"人工干预{status_text}（{intervention.message}）："
-                    f"{receipt['reason']}。"
-                )
-            proposal = replace(
-                proposal,
-                changes=bounded_changes,
-                rationale="\n".join(
-                    item for item in (rationale, "\n".join(audit_notes)) if item
-                ),
-            )
-        elif dict(proposal.changes) != bounded_changes:
-            proposal = replace(proposal, changes=bounded_changes)
-        durable_receipts = [
-            {
-                **receipt,
-                "intervention_id": intervention.intervention_id,
-                "proposal_id": proposal.proposal_id,
-            }
-            for intervention, receipt in zip(
-                pending_interventions, application_receipts
-            )
-        ]
         if research_iteration_context and research_iteration_context.get("diagnostic_report"):
             diagnostic = DiagnosticReport(**research_iteration_context["diagnostic_report"])
             evidence = hypothesis_for_proposal(proposal, diagnostic)
@@ -1443,34 +1255,13 @@ class EvolutionDirector:
                 "diagnostic_report_id": diagnostic.report_id,
                 **({"research_evidence": evidence} if evidence is not None else {}),
             })
-        entries = [("ProposalSubmitted", {
-            "proposal": proposal.to_dict(), "intervention_receipts": durable_receipts,
-        }, None)]
-        for intervention, receipt in zip(pending_interventions, application_receipts):
-            if not consume_interventions:
-                continue
-            entries.append((
-                "HumanInterventionApplied",
-                {
-                    "intervention_id": intervention.intervention_id,
-                    "proposal_id": proposal.proposal_id,
-                    **receipt,
-                },
-                (
-                    f"{run_id}:intervention:{intervention.intervention_id}:"
-                    f"applied:{proposal.proposal_id}"
-                ),
-            ))
-        # A pause/cancel between the post-provider check and this commit must
-        # fence the proposal. Its intervention receipts commit in the same unit.
+        entries = [("ProposalSubmitted", {"proposal": proposal.to_dict()}, None)]
         self.ledger.append_many(run_id, entries, expected_run_seq=current.events[-1].seq)
         return proposal
 
     def record_research_iteration(
         self,
         iteration: ResearchIteration,
-        *,
-        expert_consultation: ExpertConsultation | None = None,
     ) -> ResearchIteration:
         """Persist the one immutable research result allowed for a generation."""
 
@@ -1512,68 +1303,11 @@ class EvolutionDirector:
         expected_next_action = assessment.next_action if assessment is not None else None
         if iteration.previous_next_action != expected_next_action:
             raise ValueError("research iteration previous next_action does not match")
-        expected_adoption = resolve_predictor_adoption(
-            state.task_manifest,
-            iteration.plan,
-        )
-        if (
-            dict(iteration.prediction_model_adoption)
-            != expected_adoption.to_dict()
-        ):
-            raise ValueError(
-                "research iteration predictor adoption is not host resolved"
-            )
         existing = state.research_iteration_for(iteration.generation)
         if existing is not None:
             if existing.to_dict() != iteration.to_dict():
                 raise ValueError("generation already has a different research iteration")
             return existing
-        pending_ids = {item.consultation_id for item in state.expert_consultations}
-        if any(
-            consultation_id not in pending_ids
-            for consultation_id in iteration.pending_consultation_ids
-        ):
-            raise ValueError("research iteration references an unknown consultation")
-        available_answers = {
-            item.answer_id: item
-            for item in state.available_expert_answers(iteration.generation)
-        }
-        if any(
-            answer_id not in available_answers
-            for answer_id in iteration.expert_answer_ids
-        ):
-            raise ValueError("research iteration references an unavailable expert answer")
-        if expert_consultation is not None:
-            if not isinstance(expert_consultation, ExpertConsultation):
-                raise TypeError("expert_consultation must be an ExpertConsultation")
-            if (
-                expert_consultation.run_id != iteration.run_id
-                or expert_consultation.generation != iteration.generation
-            ):
-                raise ValueError("expert consultation is outside the research iteration")
-            if (
-                iteration.model_id is not None
-                and expert_consultation.requested_by_model_id != iteration.model_id
-            ):
-                raise ValueError("expert consultation model does not match research iteration")
-            if expert_consultation.candidate_id is not None:
-                candidate = state.candidate(expert_consultation.candidate_id)
-                if candidate.generation != iteration.generation:
-                    raise ValueError("expert consultation candidate is outside the generation")
-            existing_consultation = next(
-                (
-                    item
-                    for item in state.expert_consultations
-                    if item.consultation_id == expert_consultation.consultation_id
-                ),
-                None,
-            )
-            if (
-                existing_consultation is not None
-                and existing_consultation.to_dict() != expert_consultation.to_dict()
-            ):
-                raise ValueError("consultation_id belongs to another consultation")
-
         entries: list[tuple[str, Mapping[str, Any], str | None]] = [
             (
                 "GenerationResearchIterated",
@@ -1581,34 +1315,6 @@ class EvolutionDirector:
                 f"{iteration.run_id}:generation:{iteration.generation}:research-iterated",
             )
         ]
-        for answer_id in iteration.expert_answer_ids:
-            answer = available_answers[answer_id]
-            entries.append(
-                (
-                    "ExpertConsultationApplied",
-                    {
-                        "consultation_id": answer.consultation_id,
-                        "answer_id": answer.answer_id,
-                        "generation": iteration.generation,
-                        "research_iteration_digest": iteration.iteration_digest,
-                    },
-                    (
-                        f"{iteration.run_id}:expert-consultation:"
-                        f"{answer.consultation_id}:applied:{iteration.generation}"
-                    ),
-                )
-            )
-        if expert_consultation is not None:
-            entries.append(
-                (
-                    "ExpertConsultationRequested",
-                    {"consultation": expert_consultation.to_dict()},
-                    (
-                        f"{iteration.run_id}:expert-consultation:"
-                        f"{expert_consultation.consultation_id}:requested"
-                    ),
-                )
-            )
         self.ledger.append_many(
             iteration.run_id,
             entries,
@@ -1718,105 +1424,7 @@ class EvolutionDirector:
             raise RuntimeError("generation reflection was not recorded")
         return recorded
 
-    def record_expert_consultation(
-        self, consultation: ExpertConsultation
-    ) -> ExpertConsultation:
-        """Record one model-authored question without changing run status."""
 
-        if not isinstance(consultation, ExpertConsultation):
-            raise TypeError("consultation must be an ExpertConsultation")
-        state = self.state(consultation.run_id)
-        self._require_status(state.run, RunStatus.RUNNING)
-        if consultation.generation != state.run.generation:
-            raise ValueError("expert consultation generation does not match the run")
-        existing = next(
-            (
-                item
-                for item in state.expert_consultations
-                if item.consultation_id == consultation.consultation_id
-            ),
-            None,
-        )
-        if existing is not None:
-            if existing.to_dict() != consultation.to_dict():
-                raise ValueError("consultation_id belongs to another consultation")
-            return existing
-        if consultation.candidate_id is not None:
-            candidate = state.candidate(consultation.candidate_id)
-            if candidate.generation != consultation.generation:
-                raise ValueError("expert consultation candidate is outside the generation")
-        self.ledger.append(
-            consultation.run_id,
-            "ExpertConsultationRequested",
-            {"consultation": consultation.to_dict()},
-            event_id=(
-                f"{consultation.run_id}:expert-consultation:"
-                f"{consultation.consultation_id}:requested"
-            ),
-            expected_run_seq=state.events[-1].seq,
-        )
-        return self.state(consultation.run_id).consultation(
-            consultation.consultation_id
-        )
-
-    def answer_expert_consultation(
-        self, answer: ExpertConsultationAnswer
-    ) -> ExpertConsultationAnswer:
-        """Append one asynchronous answer; it never pauses or resumes the run."""
-
-        if not isinstance(answer, ExpertConsultationAnswer):
-            raise TypeError("answer must be an ExpertConsultationAnswer")
-        state = self.state(answer.run_id)
-        consultation = state.consultation(answer.consultation_id)
-        existing = state.answer_for_consultation(answer.consultation_id)
-        if existing is not None:
-            if existing.to_dict() != answer.to_dict():
-                raise ValueError("expert consultation already has a different answer")
-            return existing
-        if any(
-            item.answer_id == answer.answer_id
-            for item in state.expert_consultation_answers
-        ):
-            raise ValueError("answer_id belongs to another expert consultation")
-        if (
-            answer.selected_option is not None
-            and answer.selected_option not in consultation.options
-        ):
-            raise ValueError("selected_option is not one of the consultation options")
-        if state.run.status in {
-            RunStatus.COMPLETED,
-            RunStatus.CANCELLED,
-            RunStatus.FAILED,
-        }:
-            if answer.effective_generation is not None:
-                raise ValueError("a terminal-run answer cannot have an effective generation")
-        else:
-            expected_generation = max(
-                consultation.generation + 1,
-                state.run.generation + 1,
-            )
-            if answer.effective_generation != expected_generation:
-                raise ValueError(
-                    "expert answer effective generation does not match the next open round"
-                )
-        if answer.applied_generation is not None:
-            raise ValueError("a new expert answer cannot already be applied")
-        self.ledger.append(
-            answer.run_id,
-            "ExpertConsultationAnswered",
-            {"answer": answer.to_dict()},
-            event_id=(
-                f"{answer.run_id}:expert-consultation:"
-                f"{answer.consultation_id}:answered"
-            ),
-            expected_run_seq=state.events[-1].seq,
-        )
-        recorded = self.state(answer.run_id).answer_for_consultation(
-            answer.consultation_id
-        )
-        if recorded is None:  # pragma: no cover - append/replay invariant
-            raise RuntimeError("expert consultation answer was not recorded")
-        return recorded
 
     def submit_proposal(self, proposal: Proposal) -> Proposal:
         """Persist a plugin-created proposal after the same scope checks."""
@@ -1828,41 +1436,46 @@ class EvolutionDirector:
         self._require_generation_budget(state)
         if proposal.generation != state.run.generation:
             raise ValueError("proposal generation does not match the run")
-        if is_dsh_native_protocol(state.task_manifest):
-            genome = persisted_genome_from_proposal(proposal)
-            if genome is None:
-                raise ValueError("DSH-native proposal requires a persisted genome")
-            lineage = dict(genome.lineage)
-            seed_control = (
-                proposal.metadata.get("candidate_role")
-                == CandidateRole.INCUMBENT_CONTROL.value
-            )
-            if seed_control:
-                seed = state.materialized_seed_genome()
-                if (
-                    proposal.generation != 0
-                    or proposal.parent_candidate_id is not None
-                    or genome.genome_digest != seed.genome_digest
-                    or lineage["origin_kind"] != "seed_catalog"
-                    or lineage["generation"] is not None
-                    or lineage["slot_index"] is not None
-                ):
-                    raise ValueError("seed incumbent proposal does not match materialized seed")
-            elif (
-                lineage["generation"] != proposal.generation
-                or lineage["parent_candidate_id"] != proposal.parent_candidate_id
+        genome = persisted_genome_from_proposal(proposal)
+        if genome is None:
+            raise ValueError("DSH-native proposal requires a persisted genome")
+        lineage = dict(genome.lineage)
+        seed_control = (
+            proposal.metadata.get("candidate_role")
+            == CandidateRole.INCUMBENT_CONTROL.value
+        )
+        if seed_control:
+            seed = state.materialized_seed_genome()
+            if (
+                proposal.generation != 0
+                or proposal.parent_candidate_id is not None
+                or genome.genome_digest != seed.genome_digest
+                or lineage["origin_kind"] != "seed_catalog"
+                or lineage["generation"] is not None
+                or lineage["slot_index"] is not None
             ):
-                raise ValueError("proposal scope does not match genome lineage")
-            if dict(genome.scientific_program["parameter_overrides"]) != dict(
-                proposal.changes
-            ):
-                raise ValueError("proposal changes do not match its genome")
-            if proposal.generation == 0 and not seed_control:
-                seed = state.materialized_seed_genome()
-                if lineage["parent_genome_digest"] != seed.genome_digest:
-                    raise ValueError("first-generation proposal parent genome mismatch")
-            elif not seed_control and proposal.parent_candidate_id is None:
-                raise ValueError("later DSH-native proposal requires a parent candidate")
+                raise ValueError("seed incumbent proposal does not match materialized seed")
+        elif (
+            lineage["generation"] != proposal.generation
+            or lineage["parent_candidate_id"] != proposal.parent_candidate_id
+        ):
+            raise ValueError("proposal scope does not match genome lineage")
+        if not seed_control and not (
+            isinstance(lineage["slot_index"], int)
+            and not isinstance(lineage["slot_index"], bool)
+            and 0 <= lineage["slot_index"] < state.task_manifest.candidates_per_generation
+        ):
+            raise ValueError("proposal slot exceeds the generation candidate budget")
+        if dict(genome.scientific_program["parameter_overrides"]) != dict(
+            proposal.changes
+        ):
+            raise ValueError("proposal changes do not match its genome")
+        if proposal.generation == 0 and not seed_control:
+            seed = state.materialized_seed_genome()
+            if lineage["parent_genome_digest"] != seed.genome_digest:
+                raise ValueError("first-generation proposal parent genome mismatch")
+        elif not seed_control and proposal.parent_candidate_id is None:
+            raise ValueError("later DSH-native proposal requires a parent candidate")
         existing = next(
             (item for item in state.proposals if item.proposal_id == proposal.proposal_id),
             None,
@@ -1915,6 +1528,16 @@ class EvolutionDirector:
             and len(search_candidates) >= state.task_manifest.max_candidates
         ):
             raise RuntimeError("run candidate budget exhausted")
+        if role is CandidateRole.SEARCH:
+            if not isinstance(slot_index, int) or isinstance(slot_index, bool) or not (
+                0 <= slot_index < state.task_manifest.candidates_per_generation
+            ):
+                raise ValueError("candidate slot exceeds the generation candidate budget")
+            if any(
+                item.generation == state.run.generation and item.slot_index == slot_index
+                for item in search_candidates
+            ):
+                raise ValueError("generation candidate slot already exists")
         candidate_id = candidate_id or f"candidate:{uuid4()}"
         existing_candidate = next(
             (item for item in state.candidates if item.candidate_id == candidate_id),
@@ -1968,98 +1591,97 @@ class EvolutionDirector:
             role=role,
         )
         payload: dict[str, Any] = {"candidate": candidate.to_dict()}
-        if is_dsh_native_protocol(state.task_manifest):
-            genome = persisted_genome_from_proposal(proposal_obj)
-            if genome is None:
-                raise ValueError("candidate proposal is missing its persisted genome")
-            lineage = dict(genome.lineage)
-            if candidate.role is CandidateRole.INCUMBENT_CONTROL:
-                seed = state.materialized_seed_genome()
-                if (
-                    genome.genome_digest != seed.genome_digest
-                    or lineage["origin_kind"] != "seed_catalog"
-                    or lineage["generation"] is not None
-                    or lineage["slot_index"] is not None
-                ):
-                    raise ValueError("incumbent control does not match materialized seed")
-            elif (
-                lineage["generation"] != candidate.generation
-                or lineage["slot_index"] != candidate.slot_index
+        genome = persisted_genome_from_proposal(proposal_obj)
+        if genome is None:
+            raise ValueError("candidate proposal is missing its persisted genome")
+        lineage = dict(genome.lineage)
+        if candidate.role is CandidateRole.INCUMBENT_CONTROL:
+            seed = state.materialized_seed_genome()
+            if (
+                genome.genome_digest != seed.genome_digest
+                or lineage["origin_kind"] != "seed_catalog"
+                or lineage["generation"] is not None
+                or lineage["slot_index"] is not None
             ):
-                raise ValueError("candidate coordinates do not match genome lineage")
-            registry = current_program_registry()
-            compiled = compile_plugin_behavior(
-                genome,
-                state.task_manifest,
-                state.knowledge_for(candidate.generation),
-                registry,
-                compiler_semantic_digest=str(
-                    state.task_manifest.metadata.get("compiler_semantic_digest")
-                    or DEFAULT_COMPILER_SEMANTIC_DIGEST
-                ),
+                raise ValueError("incumbent control does not match materialized seed")
+        elif (
+            lineage["generation"] != candidate.generation
+            or lineage["slot_index"] != candidate.slot_index
+        ):
+            raise ValueError("candidate coordinates do not match genome lineage")
+        registry = current_program_registry()
+        compiled = compile_plugin_behavior(
+            genome,
+            state.task_manifest,
+            state.knowledge_for(candidate.generation),
+            registry,
+            compiler_semantic_digest=str(
+                state.task_manifest.metadata.get("compiler_semantic_digest")
+                or DEFAULT_COMPILER_SEMANTIC_DIGEST
+            ),
+        )
+        expected_agent_profile = resolve_candidate_agent_profile(
+            genome,
+            registry,
+        )
+        if proposal_obj.metadata.get("candidate_agent_profile") != (
+            expected_agent_profile
+        ):
+            raise ValueError(
+                "candidate proposal agent profile does not match its Genome"
             )
-            expected_agent_profile = resolve_candidate_agent_profile(
-                genome,
-                registry,
-            )
-            if proposal_obj.metadata.get("candidate_agent_profile") != (
-                expected_agent_profile
-            ):
-                raise ValueError(
-                    "candidate proposal agent profile does not match its Genome"
-                )
-            policy = proposal_obj.metadata.get("agent_policy")
-            if policy is not None:
-                validate_agent_policy(policy)
-                if policy["genome_digest"] != genome.genome_digest or policy["profile"] != expected_agent_profile:
-                    raise ValueError("Agent policy does not match candidate source")
-            metadata = state.task_manifest.metadata
-            instance_context = CompilationInstanceContext(
-                run_id=run_id,
-                proposal_id=proposal_obj.proposal_id,
-                candidate_id=candidate.candidate_id,
-                generation=candidate.generation,
-                slot_index=candidate.slot_index,
-                task_manifest_digest=state.task_manifest.digest,
-                dataset_snapshot_set_digest=metadata.get(
-                    "dataset_snapshot_set_digest"
-                ),
-                split_manifest_digest=metadata.get("split_manifest_digest"),
-                data_protocol_digest=metadata.get("data_protocol_digest"),
-                stage_policy_digest=metadata.get("stage_policy_digest"),
-                evaluator_digest=metadata.get("evaluator_digest"),
-                evaluation_cohort_digest=metadata.get(
-                    "evaluation_cohort_digest"
-                ),
-                required_capability_digest=metadata.get(
-                    "required_capability_digest"
-                ),
-                resolved_policy_route_config_digest=metadata.get(
-                    "resolved_policy_route_config_digest"
-                ),
-                resolved_review_route_config_digest=metadata.get(
-                    "resolved_review_route_config_digest"
-                ),
-                preset_content_digest=metadata.get("preset_content_digest"),
-                standing_tool_surface_digest=metadata.get(
-                    "standing_tool_surface_digest"
-                ),
-                security_kernel_digest=metadata.get("security_kernel_digest"),
-                agent_policy_digest=(proposal_obj.metadata.get("agent_policy") or {}).get("policy_digest", "0" * 64),
-            )
-            bound = bind_phenotype_instance(compiled, instance_context)
-            payload["identity_binding"] = {
-                "execution_protocol": DSH_NATIVE_EVOLUTION_PROTOCOL,
-                "genome_digest": genome.genome_digest,
-                "behavior_digest": genome.behavior_digest,
-                "compiled_behavior_digest": compiled.compiled_behavior_digest,
-                "phenotype_instance_digest": bound.phenotype_instance_digest,
-                "compiler_semantic_digest": compiled.compiler_semantic_digest,
-                "registry_catalog_digest": compiled.registry_catalog_digest,
-                "security_semantic_digest": compiled.security_semantic_digest,
-                "runtime_execution_digest": bound.runtime_execution_digest,
-                "evaluation_cohort_digest": instance_context.evaluation_cohort_digest,
-            }
+        policy = proposal_obj.metadata.get("agent_policy")
+        if policy is not None:
+            validate_agent_policy(policy)
+            if policy["genome_digest"] != genome.genome_digest or policy["profile"] != expected_agent_profile:
+                raise ValueError("Agent policy does not match candidate source")
+        metadata = state.task_manifest.metadata
+        instance_context = CompilationInstanceContext(
+            run_id=run_id,
+            proposal_id=proposal_obj.proposal_id,
+            candidate_id=candidate.candidate_id,
+            generation=candidate.generation,
+            slot_index=candidate.slot_index,
+            task_manifest_digest=state.task_manifest.digest,
+            dataset_snapshot_set_digest=metadata.get(
+                "dataset_snapshot_set_digest"
+            ),
+            split_manifest_digest=metadata.get("split_manifest_digest"),
+            data_protocol_digest=metadata.get("data_protocol_digest"),
+            stage_policy_digest=metadata.get("stage_policy_digest"),
+            evaluator_digest=metadata.get("evaluator_digest"),
+            evaluation_cohort_digest=metadata.get(
+                "evaluation_cohort_digest"
+            ),
+            required_capability_digest=metadata.get(
+                "required_capability_digest"
+            ),
+            resolved_policy_route_config_digest=metadata.get(
+                "resolved_policy_route_config_digest"
+            ),
+            resolved_review_route_config_digest=metadata.get(
+                "resolved_review_route_config_digest"
+            ),
+            preset_content_digest=metadata.get("preset_content_digest"),
+            standing_tool_surface_digest=metadata.get(
+                "standing_tool_surface_digest"
+            ),
+            security_kernel_digest=metadata.get("security_kernel_digest"),
+            agent_policy_digest=(proposal_obj.metadata.get("agent_policy") or {}).get("policy_digest", "0" * 64),
+        )
+        bound = bind_phenotype_instance(compiled, instance_context)
+        payload["identity_binding"] = {
+            "execution_protocol": DSH_NATIVE_EVOLUTION_PROTOCOL,
+            "genome_digest": genome.genome_digest,
+            "behavior_digest": genome.behavior_digest,
+            "compiled_behavior_digest": compiled.compiled_behavior_digest,
+            "phenotype_instance_digest": bound.phenotype_instance_digest,
+            "compiler_semantic_digest": compiled.compiler_semantic_digest,
+            "registry_catalog_digest": compiled.registry_catalog_digest,
+            "security_semantic_digest": compiled.security_semantic_digest,
+            "runtime_execution_digest": bound.runtime_execution_digest,
+            "evaluation_cohort_digest": instance_context.evaluation_cohort_digest,
+        }
         self.ledger.append(
             run_id,
             "CandidateSpawned",
@@ -2074,8 +1696,7 @@ class EvolutionDirector:
 
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
-        if not is_dsh_native_protocol(state.task_manifest):
-            raise ValueError("seed incumbent control requires a DSH-native run")
+        pass
         if state.run.generation != 0:
             raise ValueError("seed incumbent control must be materialized in generation zero")
         seed = state.materialized_seed_genome()
@@ -2179,18 +1800,17 @@ class EvolutionDirector:
                 raise ValueError("candidate already has a different artifact")
             return existing
         artifact_payload: dict[str, Any] = {"artifact": artifact.to_dict()}
-        if is_dsh_native_protocol(state.task_manifest):
-            binding = state.candidate_identity_binding(candidate.candidate_id)
-            if binding is None:
-                raise ValueError("artifact candidate has no identity binding")
-            if artifact.candidate_revision_id is not None:
-                artifact_payload.update({
-                    "schema_version": ARTIFACT_EVENT_V2,
-                    "proposal_identity_binding": dict(binding),
-                    "artifact_revision_binding": _effective_artifact_binding(state, artifact),
-                })
-            else:
-                artifact_payload["identity_binding"] = dict(binding)
+        binding = state.candidate_identity_binding(candidate.candidate_id)
+        if binding is None:
+            raise ValueError("artifact candidate has no identity binding")
+        if artifact.candidate_revision_id is not None:
+            artifact_payload.update({
+                "schema_version": ARTIFACT_EVENT_V2,
+                "proposal_identity_binding": dict(binding),
+                "artifact_revision_binding": _effective_artifact_binding(state, artifact),
+            })
+        else:
+            artifact_payload["identity_binding"] = dict(binding)
         self.ledger.append(
             artifact.run_id,
             "ArtifactRecorded",
@@ -2198,45 +1818,6 @@ class EvolutionDirector:
         )
         return artifact
 
-    def record_intervention(self, intervention: HumanIntervention) -> HumanIntervention:
-        if not isinstance(intervention, HumanIntervention):
-            raise TypeError("intervention must be a HumanIntervention")
-        state = self.state(intervention.run_id)
-        # A paused run was the only way to leave a note, which made the whole
-        # channel an interrupt: the expert had to stop the evolution to say
-        # anything. Recording while RUNNING is safe because `start_generation_batch`
-        # freezes `intervention_ids` for the generation in flight -- anything
-        # written after that freeze is simply not in the batch, so it reaches the
-        # model at the *next* generation and cannot retroactively change a
-        # proposal that has already been produced or replayed.
-        self._require_status(state.run, RunStatus.PAUSED, RunStatus.RUNNING)
-        existing = next(
-            (
-                item
-                for item in state.interventions
-                if item.intervention_id == intervention.intervention_id
-            ),
-            None,
-        )
-        if existing is not None:
-            if existing.to_dict() != intervention.to_dict():
-                raise ValueError(
-                    "intervention_id already belongs to a different intervention"
-                )
-            return existing
-        if intervention.kind is InterventionKind.PARENT_SELECTION:
-            if intervention.target_candidate_id is None:
-                raise ValueError("parent selection requires target_candidate_id")
-            self._completed_parent_context(state, intervention.target_candidate_id)
-        elif intervention.target_candidate_id is not None:
-            state.candidate(intervention.target_candidate_id)
-        self.ledger.append(
-            intervention.run_id,
-            "HumanInterventionRecorded",
-            {"intervention": intervention.to_dict()},
-            event_id=f"{intervention.run_id}:intervention:{intervention.intervention_id}",
-        )
-        return intervention
 
     @staticmethod
     def _completed_parent_context(
@@ -2530,8 +2111,7 @@ class EvolutionDirector:
         schedule = OptimizationSchedule.from_dict(
             state.task_manifest.metadata["optimization_schedule"]
         )
-        if not schedule.race and (planned.adaptation is not None or planned.revision_bindings is not None):
-            raise ValueError("generation race extensions require the evidence-guided protocol")
+        pass
         generation_candidates = [
             item
             for item in state.candidates
@@ -2547,47 +2127,13 @@ class EvolutionDirector:
             for event in state.candidate_screening_events
         ):
             raise ValueError("generation cohorts must be frozen before screening")
-        if schedule.race:
-            if (planned.dataset_id != adaptation.dataset_id or planned.episode_id != adaptation.episode_id
-                    or planned.seed != state.task_manifest.seed or dict(planned.revision_bindings or {}) != race_bindings(state, planned.generation)):
-                raise ValueError("race plan identity differs from frozen run")
-            validate_race_plan(planned, schedule, candidates={c.candidate_id: c for c in state.candidates},
-                revisions={r.revision_id: r for r in state.candidate_revisions},
-                prior_revision_id=state.effective_revision_for(planned.generation - 1),
-                previous=state.generation_selection_cohorts)
-        else:
-            if (
-                planned.dataset_id != adaptation.dataset_id
-                or planned.episode_id != adaptation.episode_id
-                or planned.seed != state.task_manifest.seed
-                or planned.adaptation_digest != adaptation.adaptation_digest
-                or planned.adaptation_batch_digests != adaptation.batch_digests
-                or planned.screening.origin_count != schedule.screening_origin_count
-                or planned.screening.shared_candidate_count != 4
-                or planned.holdout.origin_count
-                != schedule.selection_holdout_origin_count
-                or planned.holdout.shared_arm_count != schedule.finalist_count + 1
-                or set(planned.screening.origin_occurrence_keys)
-                & set(adaptation.origin_occurrence_keys)
-                or set(planned.holdout.origin_occurrence_keys)
-                & set(adaptation.origin_occurrence_keys)
-            ):
-                raise ValueError("planned generation cohorts differ from frozen task")
-            prior_origins = {
-                origin_id
-                for item in state.generation_selection_cohorts
-                for origin_id in (
-                    *item.screening.origin_occurrence_keys,
-                    *item.holdout.origin_occurrence_keys,
-                )
-            }
-            if prior_origins & set(
-                (
-                    *planned.screening.origin_occurrence_keys,
-                    *planned.holdout.origin_occurrence_keys,
-                )
-            ):
-                raise ValueError("generation selection origins cannot be reused")
+        if (planned.dataset_id != adaptation.dataset_id or planned.episode_id != adaptation.episode_id
+                or planned.seed != state.task_manifest.seed or dict(planned.revision_bindings or {}) != race_bindings(state, planned.generation)):
+            raise ValueError("race plan identity differs from frozen run")
+        validate_race_plan(planned, schedule, candidates={c.candidate_id: c for c in state.candidates},
+            revisions={r.revision_id: r for r in state.candidate_revisions},
+            prior_revision_id=state.effective_revision_for(planned.generation - 1),
+            previous=state.generation_selection_cohorts)
         self.ledger.append(
             run_id,
             "GenerationCohortsFrozen",
@@ -2610,13 +2156,10 @@ class EvolutionDirector:
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
         selected = tuple(str(item) for item in selected_candidate_ids)
-        schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
+        schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata["optimization_schedule"])
         if len(selected) != schedule.finalist_count or len(selected) != len(set(selected)):
             raise ValueError("formal selection cohort must contain exactly 2 candidates")
-        if schedule.quick and not schedule.race:
-            first = preregister_candidate((c for c in state.candidates if c.generation == generation and c.role is CandidateRole.SEARCH), state.proposal, state.task_manifest.metadata, generation)
-            if selected != (first.candidate_id,):
-                raise ValueError("quick trajectory must preregister the frozen policy's proposal")
+        pass
         for candidate_id in selected:
             candidate = state.candidate(candidate_id)
             if candidate.generation != generation:
@@ -2626,8 +2169,7 @@ class EvolutionDirector:
             for event in state.candidate_screening_events
             if event.payload["generation"] == generation
         ]
-        if schedule.race:
-            validate_race_selection(state.generation_cohort_for(generation), screening_records, selected, state.candidates)
+        validate_race_selection(state.generation_cohort_for(generation), screening_records, selected, state.candidates)
         if (not schedule.quick or schedule.race) and any(
             state.screening_for(generation, candidate_id) is None
             for candidate_id in selected
@@ -2738,70 +2280,66 @@ class EvolutionDirector:
                 schedule = OptimizationSchedule.from_dict(
                     state.task_manifest.metadata["optimization_schedule"]
                 )
+                source_batch_index = revision.source_batch_index
+                assert source_batch_index is not None
+                trajectory = state.trajectory_for(revision.candidate_id)
                 if (
-                    schedule.local_evaluation_mode
-                    == PAIRED_LOCAL_EVALUATION_MODE
+                    trajectory is None
+                    or trajectory.status is not TrajectoryStatus.RUNNING
                 ):
-                    source_batch_index = revision.source_batch_index
-                    assert source_batch_index is not None
-                    trajectory = state.trajectory_for(revision.candidate_id)
-                    if (
-                        trajectory is None
-                        or trajectory.status is not TrajectoryStatus.RUNNING
-                    ):
-                        raise ValueError(
-                            "paired local edit child requires a running trajectory"
-                        )
-                    if source_batch_index >= trajectory.batch_count - 1:
-                        raise ValueError(
-                            "paired final batch cannot create a local edit child"
-                        )
-                    comparison = state.batch_comparison_for(
-                        revision.candidate_id,
-                        source_batch_index,
+                    raise ValueError(
+                        "paired local edit child requires a running trajectory"
                     )
-                    proposal = state.local_edit_proposal_for(
-                        revision.candidate_id,
-                        source_batch_index,
+                if source_batch_index >= trajectory.batch_count - 1:
+                    raise ValueError(
+                        "paired final batch cannot create a local edit child"
                     )
-                    if comparison is None or proposal is None:
-                        raise ValueError(
-                            "paired local edit child requires comparison and proposal"
-                        )
-                    if (
-                        revision.parent_revision_id
-                        != comparison.champion_after_revision_id
-                    ):
-                        raise ValueError(
-                            "paired local edit child must descend from selected champion"
-                        )
-                    if (
-                        proposal.get("decision")
-                        != LocalEditProposalDecision.MUTATE.value
-                    ):
-                        raise ValueError(
-                            "paired local edit child requires a mutate proposal"
-                        )
-                    local_key = (
-                        revision.candidate_id,
-                        source_batch_index,
+                comparison = state.batch_comparison_for(
+                    revision.candidate_id,
+                    source_batch_index,
+                )
+                proposal = state.local_edit_proposal_for(
+                    revision.candidate_id,
+                    source_batch_index,
+                )
+                if comparison is None or proposal is None:
+                    raise ValueError(
+                        "paired local edit child requires comparison and proposal"
                     )
-                    if any(
-                        (item.get("candidate_id"), item.get("batch_index"))
-                        == local_key
-                        for item in state.local_edit_outcomes
-                    ) or state.revision_activation_for(*local_key) is not None:
-                        raise ValueError(
-                            "paired local edit child must be created before local decision"
-                        )
-                    if any(
-                        item.candidate_id == revision.candidate_id
-                        and item.source_batch_index == source_batch_index
-                        for item in state.candidate_revisions
-                    ):
-                        raise ValueError(
-                            "paired local edit batch can create only one challenger"
-                        )
+                if (
+                    revision.parent_revision_id
+                    != comparison.champion_after_revision_id
+                ):
+                    raise ValueError(
+                        "paired local edit child must descend from selected champion"
+                    )
+                if (
+                    proposal.get("decision")
+                    != LocalEditProposalDecision.MUTATE.value
+                ):
+                    raise ValueError(
+                        "paired local edit child requires a mutate proposal"
+                    )
+                local_key = (
+                    revision.candidate_id,
+                    source_batch_index,
+                )
+                if any(
+                    (item.get("candidate_id"), item.get("batch_index"))
+                    == local_key
+                    for item in state.local_edit_outcomes
+                ) or state.revision_activation_for(*local_key) is not None:
+                    raise ValueError(
+                        "paired local edit child must be created before local decision"
+                    )
+                if any(
+                    item.candidate_id == revision.candidate_id
+                    and item.source_batch_index == source_batch_index
+                    for item in state.candidate_revisions
+                ):
+                    raise ValueError(
+                        "paired local edit batch can create only one challenger"
+                    )
             try:
                 self.ledger.append(
                     run_id,
@@ -2948,11 +2486,8 @@ class EvolutionDirector:
         schedule = OptimizationSchedule.from_dict(
             state.task_manifest.metadata["optimization_schedule"]
         )
-        if schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
-            if arm is None:
-                raise ValueError("paired formal batch evaluation requires an arm")
-        elif arm is not None:
-            raise ValueError("prequential formal evaluation cannot have an arm")
+        if arm is None:
+            raise ValueError("paired formal batch evaluation requires an arm")
         if schedule.race and key_index == 0:
             validate_race_diagnostic_reuse(evaluation, state.screening_for(evaluation.scope.generation, key_candidate))
         existing = state.batch_evaluation_for(key_candidate, key_index, arm)
@@ -3031,8 +2566,7 @@ class EvolutionDirector:
         schedule = OptimizationSchedule.from_dict(
             state.task_manifest.metadata["optimization_schedule"]
         )
-        if schedule.local_evaluation_mode != PAIRED_LOCAL_EVALUATION_MODE:
-            raise ValueError("formal batch comparison requires paired schedule")
+        pass
         existing = state.batch_comparison_for(
             comparison.candidate_id,
             comparison.batch_index,
@@ -3227,74 +2761,70 @@ class EvolutionDirector:
             schedule = OptimizationSchedule.from_dict(
                 state.task_manifest.metadata["optimization_schedule"]
             )
+            trajectory = state.trajectory_for(payload["candidate_id"])
             if (
-                schedule.local_evaluation_mode
-                == PAIRED_LOCAL_EVALUATION_MODE
+                trajectory is None
+                or trajectory.status is not TrajectoryStatus.RUNNING
             ):
-                trajectory = state.trajectory_for(payload["candidate_id"])
-                if (
-                    trajectory is None
-                    or trajectory.status is not TrajectoryStatus.RUNNING
-                ):
-                    raise ValueError(
-                        "paired local edit requires a running trajectory"
-                    )
-                if payload["batch_index"] >= trajectory.batch_count - 1:
-                    raise ValueError(
-                        "paired final batch cannot record a local edit decision"
-                    )
-                comparison = state.batch_comparison_for(*key)
-                if comparison is None:
-                    raise ValueError(
-                        "paired local edit decision requires a comparison"
-                    )
-                proposal_decision = (
-                    proposal.get("decision") if proposal is not None else None
+                raise ValueError(
+                    "paired local edit requires a running trajectory"
                 )
-                if not (
-                    (
-                        proposal_decision
-                        == LocalEditProposalDecision.KEEP.value
-                        and outcome is LocalEditOutcome.KEPT
-                    )
-                    or (
-                        proposal_decision
-                        == LocalEditProposalDecision.MUTATE.value
-                        and outcome
-                        in (LocalEditOutcome.APPLIED, LocalEditOutcome.REJECTED)
-                    )
+            if payload["batch_index"] >= trajectory.batch_count - 1:
+                raise ValueError(
+                    "paired final batch cannot record a local edit decision"
+                )
+            comparison = state.batch_comparison_for(*key)
+            if comparison is None:
+                raise ValueError(
+                    "paired local edit decision requires a comparison"
+                )
+            proposal_decision = (
+                proposal.get("decision") if proposal is not None else None
+            )
+            if not (
+                (
+                    proposal_decision
+                    == LocalEditProposalDecision.KEEP.value
+                    and outcome is LocalEditOutcome.KEPT
+                )
+                or (
+                    proposal_decision
+                    == LocalEditProposalDecision.MUTATE.value
+                    and outcome
+                    in (LocalEditOutcome.APPLIED, LocalEditOutcome.REJECTED)
+                )
+            ):
+                raise ValueError(
+                    "paired local edit outcome does not match proposal decision"
+                )
+            selected_revision_id = comparison.champion_after_revision_id
+            children = [
+                item
+                for item in state.candidate_revisions
+                if item.candidate_id == payload["candidate_id"]
+                and item.source_batch_index == payload["batch_index"]
+            ]
+            if outcome is LocalEditOutcome.APPLIED:
+                if (
+                    proposal is None
+                    or proposal.get("decision")
+                    != LocalEditProposalDecision.MUTATE.value
+                    or len(children) != 1
+                    or revision.revision_id != children[0].revision_id
+                    or revision.parent_revision_id != selected_revision_id
                 ):
                     raise ValueError(
-                        "paired local edit outcome does not match proposal decision"
+                        "paired applied edit must create one child from selected champion"
                     )
-                selected_revision_id = comparison.champion_after_revision_id
-                children = [
-                    item
-                    for item in state.candidate_revisions
-                    if item.candidate_id == payload["candidate_id"]
-                    and item.source_batch_index == payload["batch_index"]
-                ]
-                if outcome is LocalEditOutcome.APPLIED:
-                    if (
-                        proposal is None
-                        or proposal.get("decision")
-                        != LocalEditProposalDecision.MUTATE.value
-                        or len(children) != 1
-                        or revision.revision_id != children[0].revision_id
-                        or revision.parent_revision_id != selected_revision_id
-                    ):
-                        raise ValueError(
-                            "paired applied edit must create one child from selected champion"
-                        )
-                elif (
-                    outcome is LocalEditOutcome.ROLLED_BACK
-                    or revision.revision_id != selected_revision_id
-                    or children
-                ):
-                    raise ValueError(
-                        "paired retained edit must keep the selected champion "
-                        "without a child"
-                    )
+            elif (
+                outcome is LocalEditOutcome.ROLLED_BACK
+                or revision.revision_id != selected_revision_id
+                or children
+            ):
+                raise ValueError(
+                    "paired retained edit must keep the selected champion "
+                    "without a child"
+                )
             if (
                 proposal is None
                 or proposal["proposal_id"] != payload["proposal_id"]
@@ -3359,20 +2889,16 @@ class EvolutionDirector:
         )
         trajectory = state.trajectory_for(candidate_id)
         if (
-            schedule.local_evaluation_mode
-            == PAIRED_LOCAL_EVALUATION_MODE
+            trajectory is None
+            or trajectory.status is not TrajectoryStatus.RUNNING
         ):
-            if (
-                trajectory is None
-                or trajectory.status is not TrajectoryStatus.RUNNING
-            ):
-                raise ValueError(
-                    "paired revision activation requires a running trajectory"
-                )
-            if batch_index >= trajectory.batch_count - 1:
-                raise ValueError(
-                    "paired final batch cannot activate a local edit revision"
-                )
+            raise ValueError(
+                "paired revision activation requires a running trajectory"
+            )
+        if batch_index >= trajectory.batch_count - 1:
+            raise ValueError(
+                "paired final batch cannot activate a local edit revision"
+            )
         comparison = state.batch_comparison_for(candidate_id, batch_index)
         outcome = next(
             (
@@ -3409,9 +2935,6 @@ class EvolutionDirector:
             raise ValueError("revision activation differs from local decision")
         source_revision_id = (
             comparison.champion_after_revision_id
-            if schedule.local_evaluation_mode
-            == PAIRED_LOCAL_EVALUATION_MODE
-            else batch.revision_id
         )
         if (
             schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE
@@ -3467,131 +2990,122 @@ class EvolutionDirector:
         schedule = OptimizationSchedule.from_dict(
             state.task_manifest.metadata["optimization_schedule"]
         )
-        if schedule.local_evaluation_mode == PAIRED_LOCAL_EVALUATION_MODE:
-            comparisons = [
-                item
-                for item in state.formal_batch_comparisons
-                if item.candidate_id == candidate_id
-            ]
-            final_comparison = state.batch_comparison_for(
+        comparisons = [
+            item
+            for item in state.formal_batch_comparisons
+            if item.candidate_id == candidate_id
+        ]
+        final_comparison = state.batch_comparison_for(
+            candidate_id,
+            trajectory.batch_count - 1,
+        )
+        expected_local_indexes = set(range(trajectory.batch_count - 1))
+        proposal_indexes = {
+            int(item["batch_index"])
+            for item in state.local_edit_proposals
+            if item.get("candidate_id") == candidate_id
+        }
+        outcome_indexes = {
+            int(item["batch_index"])
+            for item in state.local_edit_outcomes
+            if item.get("candidate_id") == candidate_id
+        }
+        activation_indexes = {
+            item.batch_index for item in activations
+        }
+        local_bindings_are_exact = True
+        for batch_index in expected_local_indexes:
+            comparison = state.batch_comparison_for(
                 candidate_id,
-                trajectory.batch_count - 1,
+                batch_index,
             )
-            expected_local_indexes = set(range(trajectory.batch_count - 1))
-            proposal_indexes = {
-                int(item["batch_index"])
-                for item in state.local_edit_proposals
-                if item.get("candidate_id") == candidate_id
-            }
-            outcome_indexes = {
-                int(item["batch_index"])
-                for item in state.local_edit_outcomes
-                if item.get("candidate_id") == candidate_id
-            }
-            activation_indexes = {
-                item.batch_index for item in activations
-            }
-            local_bindings_are_exact = True
-            for batch_index in expected_local_indexes:
-                comparison = state.batch_comparison_for(
-                    candidate_id,
-                    batch_index,
-                )
-                proposal = state.local_edit_proposal_for(
-                    candidate_id,
-                    batch_index,
-                )
-                outcome = next(
-                    (
-                        item
-                        for item in state.local_edit_outcomes
-                        if item.get("candidate_id") == candidate_id
-                        and item.get("batch_index") == batch_index
-                    ),
-                    None,
-                )
-                activation = state.revision_activation_for(
-                    candidate_id,
-                    batch_index,
-                )
-                children = [
+            proposal = state.local_edit_proposal_for(
+                candidate_id,
+                batch_index,
+            )
+            outcome = next(
+                (
                     item
-                    for item in state.candidate_revisions
-                    if item.candidate_id == candidate_id
-                    and item.source_batch_index == batch_index
-                ]
-                if (
-                    comparison is None
-                    or proposal is None
-                    or outcome is None
-                    or activation is None
-                ):
-                    local_bindings_are_exact = False
-                    break
-                selected_revision_id = comparison.champion_after_revision_id
-                if outcome.get("outcome") == LocalEditOutcome.APPLIED.value:
-                    local_bindings_are_exact = (
-                        proposal.get("decision")
-                        == LocalEditProposalDecision.MUTATE.value
-                        and len(children) == 1
-                        and children[0].parent_revision_id == selected_revision_id
-                        and outcome.get("active_revision_id")
-                        == children[0].revision_id
-                        and activation.to_revision_id == children[0].revision_id
-                        and activation.reason
-                        is RevisionAdvanceReason.LOCAL_EDIT_APPLIED
-                    )
-                else:
-                    expected = {
-                        LocalEditOutcome.KEPT.value: (
-                            LocalEditProposalDecision.KEEP.value,
-                            RevisionAdvanceReason.KEPT,
-                        ),
-                        LocalEditOutcome.REJECTED.value: (
-                            LocalEditProposalDecision.MUTATE.value,
-                            RevisionAdvanceReason.LOCAL_EDIT_REJECTED,
-                        ),
-                    }.get(outcome.get("outcome"))
-                    local_bindings_are_exact = (
-                        not children
-                        and expected is not None
-                        and proposal.get("decision") == expected[0]
-                        and outcome.get("active_revision_id")
-                        == selected_revision_id
-                        and activation.to_revision_id == selected_revision_id
-                        and activation.reason is expected[1]
-                    )
-                if not local_bindings_are_exact:
-                    break
-            has_post_final_child = any(
-                item.candidate_id == candidate_id
-                and item.source_batch_index is not None
-                and item.source_batch_index >= trajectory.batch_count - 1
-                for item in state.candidate_revisions
+                    for item in state.local_edit_outcomes
+                    if item.get("candidate_id") == candidate_id
+                    and item.get("batch_index") == batch_index
+                ),
+                None,
             )
+            activation = state.revision_activation_for(
+                candidate_id,
+                batch_index,
+            )
+            children = [
+                item
+                for item in state.candidate_revisions
+                if item.candidate_id == candidate_id
+                and item.source_batch_index == batch_index
+            ]
             if (
-                len(comparisons) != trajectory.batch_count
-                or proposal_indexes != expected_local_indexes
-                or outcome_indexes != expected_local_indexes
-                or activation_indexes != expected_local_indexes
-                or not local_bindings_are_exact
-                or has_post_final_child
-                or final_comparison is None
-                or final_comparison.champion_after_revision_id
-                != final_revision_id
+                comparison is None
+                or proposal is None
+                or outcome is None
+                or activation is None
             ):
-                raise ValueError(
-                    "formal trajectory has incomplete paired batches or invalid "
-                    "child/outcome binding"
+                local_bindings_are_exact = False
+                break
+            selected_revision_id = comparison.champion_after_revision_id
+            if outcome.get("outcome") == LocalEditOutcome.APPLIED.value:
+                local_bindings_are_exact = (
+                    proposal.get("decision")
+                    == LocalEditProposalDecision.MUTATE.value
+                    and len(children) == 1
+                    and children[0].parent_revision_id == selected_revision_id
+                    and outcome.get("active_revision_id")
+                    == children[0].revision_id
+                    and activation.to_revision_id == children[0].revision_id
+                    and activation.reason
+                    is RevisionAdvanceReason.LOCAL_EDIT_APPLIED
                 )
-        elif (
-            len(activations) != trajectory.batch_count
-            or state.revision_activation_for(
-                candidate_id, trajectory.batch_count - 1
-            ).to_revision_id
+            else:
+                expected = {
+                    LocalEditOutcome.KEPT.value: (
+                        LocalEditProposalDecision.KEEP.value,
+                        RevisionAdvanceReason.KEPT,
+                    ),
+                    LocalEditOutcome.REJECTED.value: (
+                        LocalEditProposalDecision.MUTATE.value,
+                        RevisionAdvanceReason.LOCAL_EDIT_REJECTED,
+                    ),
+                }.get(outcome.get("outcome"))
+                local_bindings_are_exact = (
+                    not children
+                    and expected is not None
+                    and proposal.get("decision") == expected[0]
+                    and outcome.get("active_revision_id")
+                    == selected_revision_id
+                    and activation.to_revision_id == selected_revision_id
+                    and activation.reason is expected[1]
+                )
+            if not local_bindings_are_exact:
+                break
+        has_post_final_child = any(
+            item.candidate_id == candidate_id
+            and item.source_batch_index is not None
+            and item.source_batch_index >= trajectory.batch_count - 1
+            for item in state.candidate_revisions
+        )
+        if (
+            len(comparisons) != trajectory.batch_count
+            or proposal_indexes != expected_local_indexes
+            or outcome_indexes != expected_local_indexes
+            or activation_indexes != expected_local_indexes
+            or not local_bindings_are_exact
+            or has_post_final_child
+            or final_comparison is None
+            or final_comparison.champion_after_revision_id
             != final_revision_id
         ):
-            raise ValueError("formal trajectory has incomplete batch activations")
+            raise ValueError(
+                "formal trajectory has incomplete paired batches or invalid "
+                "child/outcome binding"
+            )
         self.ledger.append(
             run_id,
             "FormalTrajectoryCompleted",
@@ -3930,7 +3444,7 @@ class EvolutionDirector:
         state = self.state(run_id)
         self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
         candidate = state.candidate(candidate_id)
-        selection_schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata.get("optimization_schedule", OptimizationSchedule.default().to_dict()))
+        selection_schedule = OptimizationSchedule.from_dict(state.task_manifest.metadata["optimization_schedule"])
         quick = selection_schedule.quick and not selection_schedule.race
         payload = {
             "schema_version": SCREENED_OUT_SCHEMA_V1,
@@ -4052,31 +3566,30 @@ class EvolutionDirector:
         if candidate.status in (CandidateStatus.PROMOTED, CandidateStatus.REJECTED):
             raise ValueError("candidate already has a promotion decision")
         evaluation_payload: dict[str, Any] = {"evaluation": evaluation.to_dict()}
-        if is_dsh_native_protocol(state.task_manifest):
-            binding = state.candidate_identity_binding(candidate.candidate_id)
-            if binding is None:
-                raise ValueError("evaluation candidate has no identity binding")
-            if artifact is None or evaluation.artifact_digest != artifact.digest:
-                raise ValueError("DSH-native evaluation requires the exact artifact digest")
-            evaluation_payload.update(
-                {
-                    "identity_binding": dict(binding),
-                    "artifact_digest": artifact.digest,
-                    "evaluation_digest": digest(evaluation.to_dict()),
-                }
-            )
-            artifact_binding = state.artifact_revision_binding(artifact.artifact_id)
-            if artifact_binding is not None:
-                actual_binding = _effective_artifact_binding(state, artifact)
-                if canonical_json(artifact_binding) != canonical_json(actual_binding):
-                    raise ValueError("evaluation artifact revision identity mismatch")
-                validate_evaluation_artifact_binding(evaluation, artifact, actual_binding)
-                evaluation_payload.pop("identity_binding")
-                evaluation_payload.update({
-                    "schema_version": EVALUATION_EVENT_V2,
-                    "proposal_identity_binding": dict(binding),
-                    "artifact_revision_binding": actual_binding,
-                })
+        binding = state.candidate_identity_binding(candidate.candidate_id)
+        if binding is None:
+            raise ValueError("evaluation candidate has no identity binding")
+        if artifact is None or evaluation.artifact_digest != artifact.digest:
+            raise ValueError("DSH-native evaluation requires the exact artifact digest")
+        evaluation_payload.update(
+            {
+                "identity_binding": dict(binding),
+                "artifact_digest": artifact.digest,
+                "evaluation_digest": digest(evaluation.to_dict()),
+            }
+        )
+        artifact_binding = state.artifact_revision_binding(artifact.artifact_id)
+        if artifact_binding is not None:
+            actual_binding = _effective_artifact_binding(state, artifact)
+            if canonical_json(artifact_binding) != canonical_json(actual_binding):
+                raise ValueError("evaluation artifact revision identity mismatch")
+            validate_evaluation_artifact_binding(evaluation, artifact, actual_binding)
+            evaluation_payload.pop("identity_binding")
+            evaluation_payload.update({
+                "schema_version": EVALUATION_EVENT_V2,
+                "proposal_identity_binding": dict(binding),
+                "artifact_revision_binding": actual_binding,
+            })
         evaluation_entry = (
             "EvaluationRecorded",
             evaluation_payload,
@@ -4452,20 +3965,19 @@ class EvolutionDirector:
                 raise ValueError("candidate already has a different completed judgment")
             return existing
         judgment_payload: dict[str, Any] = {"evaluation": evaluation.to_dict()}
-        if is_dsh_native_protocol(state.task_manifest):
-            binding = state.candidate_identity_binding(candidate.candidate_id)
-            if binding is None:
-                raise ValueError("judgment candidate has no identity binding")
-            artifact = state.artifact_for(candidate.candidate_id)
-            if artifact is None or evaluation.artifact_digest != artifact.digest:
-                raise ValueError("DSH-native judgment requires the exact artifact digest")
-            judgment_payload.update(
-                {
-                    "identity_binding": dict(binding),
-                    "artifact_digest": artifact.digest,
-                    "evaluation_digest": digest(evaluation.to_dict()),
-                }
-            )
+        binding = state.candidate_identity_binding(candidate.candidate_id)
+        if binding is None:
+            raise ValueError("judgment candidate has no identity binding")
+        artifact = state.artifact_for(candidate.candidate_id)
+        if artifact is None or evaluation.artifact_digest != artifact.digest:
+            raise ValueError("DSH-native judgment requires the exact artifact digest")
+        judgment_payload.update(
+            {
+                "identity_binding": dict(binding),
+                "artifact_digest": artifact.digest,
+                "evaluation_digest": digest(evaluation.to_dict()),
+            }
+        )
         self.ledger.append(
             evaluation.run_id,
             "EvaluationJudged",
@@ -4493,17 +4005,13 @@ class EvolutionDirector:
             if existing.to_dict() != promotion.to_dict():
                 raise ValueError("candidate already has a different promotion")
             return existing
-        if (
-            is_dsh_native_protocol(state.task_manifest)
-            and uses_global_incumbent_protocol(state.task_manifest)
-        ):
-            validate_runtime_promotion_decision(
-                state.task_manifest,
-                candidate,
-                promotion,
-                state.comparison_for(candidate.generation),
-                state.analysis_for(candidate.generation),
-            )
+        validate_runtime_promotion_decision(
+            state.task_manifest,
+            candidate,
+            promotion,
+            state.comparison_for(candidate.generation),
+            state.analysis_for(candidate.generation),
+        )
         if promotion.decision is PromotionDecision.APPROVED:
             if not evaluation.passed:
                 raise ValueError("approved promotion requires a passing evaluation")
@@ -4523,98 +4031,7 @@ class EvolutionDirector:
                     if analysis is not None
                     else None
                 )
-                if uses_positive_delta_search_protocol(state.task_manifest):
-                    comparison = state.comparison_for(candidate.generation)
-                    gate_results = (
-                        comparison.gate_results
-                        if comparison is not None
-                        else None
-                    )
-                    arms = (
-                        gate_results.get("arms")
-                        if isinstance(gate_results, Mapping)
-                        else None
-                    )
-                    certification_arm = (
-                        gate_results.get("certification_selected_arm")
-                        if isinstance(gate_results, Mapping)
-                        else None
-                    )
-                    certification_evaluation = (
-                        next(
-                            (
-                                item
-                                for item in comparison.holdout_evaluations
-                                if item.scope.holdout_arm is not None
-                                and item.scope.holdout_arm.value
-                                == certification_arm
-                            ),
-                            None,
-                        )
-                        if comparison is not None
-                        else None
-                    )
-                    certification_gate = (
-                        arms.get(certification_arm)
-                        if isinstance(arms, Mapping)
-                        and isinstance(certification_arm, str)
-                        else None
-                    )
-                    selected_arm = (
-                        gate_results.get("selected_arm")
-                        if isinstance(gate_results, Mapping)
-                        else None
-                    )
-                    selected_evaluation = (
-                        next(
-                            (
-                                item
-                                for item in comparison.holdout_evaluations
-                                if item.scope.holdout_arm is not None
-                                and item.scope.holdout_arm.value == selected_arm
-                            ),
-                            None,
-                        )
-                        if comparison is not None
-                        else None
-                    )
-                    selected_analysis_candidate_id = (
-                        selected_evaluation.scope.candidate_id
-                        if selected_evaluation is not None
-                        and selected_evaluation.scope.holdout_arm
-                        in {HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2}
-                        else None
-                    )
-                    if (
-                        analysis is None
-                        or comparison is None
-                        or analysis.outcome != "promoted"
-                        or selected_evaluation is None
-                        or comparison.selected_candidate_id
-                        != selected_evaluation.scope.candidate_id
-                        or analysis.selected_candidate_id
-                        != selected_analysis_candidate_id
-                        or analysis.search_parent_candidate_id
-                        != comparison.selected_candidate_id
-                        or certification_evaluation is None
-                        or certification_evaluation.scope.holdout_arm
-                        not in {HoldoutArm.FINALIST_1, HoldoutArm.FINALIST_2}
-                        or certification_evaluation.scope.candidate_id
-                        != candidate.candidate_id
-                        or not isinstance(certification_gate, Mapping)
-                        or certification_gate.get("certification_eligible") is not True
-                        or analysis.champion_candidate_id != candidate.candidate_id
-                        or analysis.incumbent_after_candidate_id != candidate.candidate_id
-                        or champion_row is None
-                        or champion_row.get("certification_eligible") is not True
-                        or champion_row.get("primary_selection_gate") is not True
-                    ):
-                        raise ValueError(
-                            "DSH-native runtime-v3 approval requires the exact "
-                            "strict-certification finalist recorded by the generation "
-                            "comparison and analysis"
-                        )
-                elif (
+                if (
                     analysis is None
                     or analysis.outcome != "promoted"
                     or analysis.selected_candidate_id != candidate.candidate_id
@@ -4627,33 +4044,7 @@ class EvolutionDirector:
                         "DSH-native approval requires the recorded generation champion "
                         "to pass the adaptive selection gate"
                     )
-            if sample_update_windows_enabled(state.task_manifest):
-                cohort_digest = evaluation_cohort_digest(evaluation)
-                if cohort_digest is None:
-                    raise ValueError(
-                        "approved bounded-window promotion requires a verifiable "
-                        "evaluation cohort"
-                    )
-                for sibling in state.candidates:
-                    if (
-                        sibling.generation != candidate.generation
-                        or sibling.role is not CandidateRole.SEARCH
-                    ):
-                        continue
-                    sibling_evaluation = state.evaluation_for(sibling.candidate_id)
-                    if sibling_evaluation is None:
-                        continue
-                    sibling_digest = evaluation_cohort_digest(sibling_evaluation)
-                    if sibling_digest is None:
-                        raise ValueError(
-                            "approved bounded-window promotion requires every evaluated "
-                            "generation sibling to have a verifiable evaluation cohort"
-                        )
-                    if sibling_digest != cohort_digest:
-                        raise ValueError(
-                            "approved bounded-window promotion requires all evaluated "
-                            "generation siblings to use the same evaluation cohort"
-                        )
+            pass
             cohort_comparison = (
                 evaluation_cohort_comparison(
                     state.task_manifest,
@@ -4699,21 +4090,20 @@ class EvolutionDirector:
         if candidate.status in (CandidateStatus.PROMOTED, CandidateStatus.REJECTED):
             raise ValueError("candidate already has a promotion decision")
         promotion_payload: dict[str, Any] = {"promotion": promotion.to_dict()}
-        if is_dsh_native_protocol(state.task_manifest):
-            binding = state.candidate_identity_binding(candidate.candidate_id)
-            artifact = state.artifact_for(candidate.candidate_id)
-            if binding is None:
-                raise ValueError("promotion candidate has no identity binding")
-            if artifact is None or evaluation.artifact_digest != artifact.digest:
-                raise ValueError("DSH-native promotion requires the exact artifact digest")
-            promotion_payload.update(
-                {
-                    "identity_binding": dict(binding),
-                    "evaluation_id": evaluation.evaluation_id,
-                    "evaluation_digest": digest(evaluation.to_dict()),
-                    "artifact_digest": artifact.digest,
-                }
-            )
+        binding = state.candidate_identity_binding(candidate.candidate_id)
+        artifact = state.artifact_for(candidate.candidate_id)
+        if binding is None:
+            raise ValueError("promotion candidate has no identity binding")
+        if artifact is None or evaluation.artifact_digest != artifact.digest:
+            raise ValueError("DSH-native promotion requires the exact artifact digest")
+        promotion_payload.update(
+            {
+                "identity_binding": dict(binding),
+                "evaluation_id": evaluation.evaluation_id,
+                "evaluation_digest": digest(evaluation.to_dict()),
+                "artifact_digest": artifact.digest,
+            }
+        )
         self.ledger.append(
             promotion.run_id,
             "PromotionDecided",
@@ -4777,33 +4167,32 @@ class EvolutionDirector:
                         "cannot advance generation before unified decisions: "
                         + ", ".join(undecided)
                     )
-            if uses_global_incumbent_protocol(state.task_manifest):
-                generation = state.run.generation
-                comparison = state.comparison_for(generation)
-                selected_revision_id = state.effective_revision_for(generation)
-                champion = next(
-                    (
-                        event
-                        for event in reversed(state.events)
-                        if event.kind == "GenerationChampionSelected"
-                        and event.payload.get("generation") == generation
-                    ),
-                    None,
+            generation = state.run.generation
+            comparison = state.comparison_for(generation)
+            selected_revision_id = state.effective_revision_for(generation)
+            champion = next(
+                (
+                    event
+                    for event in reversed(state.events)
+                    if event.kind == "GenerationChampionSelected"
+                    and event.payload.get("generation") == generation
+                ),
+                None,
+            )
+            if (
+                comparison is None
+                or selected_revision_id is None
+                or champion is None
+                or selected_revision_id != comparison.selected_revision_id
+                or champion.payload.get("selected_revision_id")
+                != selected_revision_id
+                or champion.payload.get("selected_candidate_id")
+                != comparison.selected_candidate_id
+            ):
+                raise RuntimeError(
+                    "cannot advance runtime-v2 generation before the global "
+                    "incumbent decision is committed"
                 )
-                if (
-                    comparison is None
-                    or selected_revision_id is None
-                    or champion is None
-                    or selected_revision_id != comparison.selected_revision_id
-                    or champion.payload.get("selected_revision_id")
-                    != selected_revision_id
-                    or champion.payload.get("selected_candidate_id")
-                    != comparison.selected_candidate_id
-                ):
-                    raise RuntimeError(
-                        "cannot advance runtime-v2 generation before the global "
-                        "incumbent decision is committed"
-                    )
             try:
                 self.ledger.append(
                     run_id,
@@ -4951,7 +4340,7 @@ class EvolutionDirector:
                 raise ValueError(
                     "evaluation progress candidate is no longer being evaluated"
                 )
-            self._require_open_model_usage_checkpoint(state, candidate_id, revision)
+            self._require_open_sample_checkpoint(state, candidate_id, revision)
         elif (
             candidate.generation != generation
             or candidate.proposal_id != proposal_id
@@ -5025,197 +4414,16 @@ class EvolutionDirector:
         )
         return event
 
-    def record_model_usage(
-        self,
-        run_id: str,
-        *,
-        generation: int,
-        candidate_id: str,
-        role: str,
-        model_id: str,
-        usage: Mapping[str, Any],
-        gateway_request_count: int,
-        revision: str,
-        usage_index: int,
-        event_id: str | None = None,
-    ) -> Event:
-        """Append one idempotent, call-level public model usage delta."""
 
-        if not isinstance(usage, Mapping):
-            raise TypeError("model usage must be a mapping")
-        expected_usage_fields = {
-            "prompt_tokens",
-            "completion_tokens",
-            "total_tokens",
-        }
-        if set(usage) != expected_usage_fields:
-            raise ValueError("model usage must contain exactly the token counters")
-        state = self.state(run_id)
-        self._require_status(state.run, RunStatus.RUNNING, RunStatus.PAUSED)
-        candidate = state.candidate(candidate_id)
-        if candidate.generation != generation:
-            raise ValueError("model usage generation does not match its candidate")
-        payload = {
-            "schema_version": "ecologyrsi-dsh.model-usage/1",
-            "generation": generation,
-            "candidate_id": candidate_id,
-            "role": role,
-            "model_id": model_id,
-            "prompt_tokens": usage.get("prompt_tokens"),
-            "completion_tokens": usage.get("completion_tokens"),
-            "total_tokens": usage.get("total_tokens"),
-            "gateway_request_count": gateway_request_count,
-            "revision": revision,
-            "usage_index": usage_index,
-        }
-        validate_model_usage_payload(payload)
-        resolved_event_id = event_id or (
-            f"{run_id}:model-usage:{candidate_id}:{generation}:{role}:"
-            f"{model_id}:{revision}:{usage_index}:{gateway_request_count}"
-        )
-        return self.ledger.append(
-            run_id,
-            "ModelUsageRecorded",
-            payload,
-            event_id=resolved_event_id,
-        )
 
-    def record_model_usage_batch(
-        self,
-        run_id: str,
-        *,
-        generation: int,
-        candidate_id: str,
-        revision: str,
-        receipts: Sequence[Mapping[str, Any]],
-    ) -> tuple[Event, ...]:
-        """Atomically record one public receipt per physical gateway call.
-
-        V2 receipts are accepted only while the exact evaluation checkpoint is
-        open. A physical call admitted before a terminal run transition may
-        report usage afterwards, so terminal status does not discard billing.
-        Candidate, revision, and call-id fences still prevent a delayed callback
-        from being attached to a later candidate or superseding cohort.
-        """
-
-        if not isinstance(receipts, Sequence) or isinstance(
-            receipts, (str, bytes, bytearray)
-        ):
-            raise TypeError("model usage receipts must be a sequence")
-        if not receipts:
-            return ()
-        state = self.state(run_id)
-        self._require_status(
-            state.run,
-            RunStatus.RUNNING,
-            RunStatus.PAUSED,
-            RunStatus.COMPLETED,
-            RunStatus.CANCELLED,
-            RunStatus.FAILED,
-        )
-        candidate = state.candidate(candidate_id)
-        self._require_open_model_usage_checkpoint(state, candidate_id, revision)
-        checkpoint_start, _checkpoint_batches, _checkpoint_completed = (
-            self._sample_result_revision_events(state, candidate_id, revision)
-        )
-        if checkpoint_start.payload.get("generation") != generation:
-            raise ValueError("model usage generation does not match its checkpoint")
-        if not self._sample_checkpoint_candidate_status_allowed(
-            state,
-            candidate,
-            checkpoint_start.payload.get("checkpoint")
-            if isinstance(checkpoint_start.payload.get("checkpoint"), Mapping)
-            else None,
-            generation=generation,
-        ):
-            raise ValueError("model usage candidate is no longer being evaluated")
-
-        existing_by_call_id: dict[str, Event] = {}
-        next_usage_index = 0
-        for event in state.events:
-            if (
-                event.kind != "ModelUsageRecorded"
-                or event.payload.get("schema_version")
-                != "ecologyrsi-dsh.model-usage/2"
-                or event.payload.get("candidate_id") != candidate_id
-                or event.payload.get("revision") != revision
-            ):
-                continue
-            call_id = event.payload.get("call_id")
-            if isinstance(call_id, str):
-                existing_by_call_id[call_id] = event
-            prior_index = event.payload.get("usage_index")
-            if isinstance(prior_index, int) and not isinstance(prior_index, bool):
-                next_usage_index = max(next_usage_index, prior_index + 1)
-
-        expected_receipt_fields = {
-            "call_id",
-            "logical_call_digest",
-            "role",
-            "model_id",
-            "outcome",
-            "usage_reported",
-            "http_attempts",
-            "prompt_tokens",
-            "completion_tokens",
-            "total_tokens",
-        }
-        entries: list[tuple[str, Mapping[str, Any], str]] = []
-        seen_call_ids: set[str] = set()
-        for position, receipt in enumerate(receipts):
-            if not isinstance(receipt, Mapping):
-                raise TypeError(f"model usage receipts[{position}] must be an object")
-            if set(receipt) != expected_receipt_fields:
-                raise ValueError("model usage receipt fields are invalid")
-            call_id = receipt.get("call_id")
-            if not isinstance(call_id, str) or not call_id.strip():
-                raise ValueError("model usage receipt call_id is invalid")
-            if call_id in seen_call_ids:
-                raise ValueError("model usage batch contains duplicate call_id")
-            seen_call_ids.add(call_id)
-            existing = existing_by_call_id.get(call_id)
-            usage_index = (
-                existing.payload["usage_index"]
-                if existing is not None
-                else next_usage_index
-            )
-            if existing is None:
-                next_usage_index += 1
-            payload = {
-                "schema_version": "ecologyrsi-dsh.model-usage/2",
-                "generation": generation,
-                "candidate_id": candidate_id,
-                "role": receipt.get("role"),
-                "model_id": receipt.get("model_id"),
-                "call_id": call_id,
-                "logical_call_digest": receipt.get("logical_call_digest"),
-                "outcome": receipt.get("outcome"),
-                "usage_reported": receipt.get("usage_reported"),
-                "http_attempts": receipt.get("http_attempts"),
-                "prompt_tokens": receipt.get("prompt_tokens"),
-                "completion_tokens": receipt.get("completion_tokens"),
-                "total_tokens": receipt.get("total_tokens"),
-                "revision": revision,
-                "usage_index": usage_index,
-            }
-            validate_model_usage_payload(payload)
-            entries.append(
-                (
-                    "ModelUsageRecorded",
-                    payload,
-                    f"{run_id}:model-usage:{candidate_id}:{revision}:{call_id}",
-                )
-            )
-        return self.ledger.append_many(run_id, entries)
-
-    def _require_open_model_usage_checkpoint(
+    def _require_open_sample_checkpoint(
         self,
         state: RunState,
         candidate_id: str,
         revision: str,
     ) -> None:
         if not isinstance(revision, str) or not revision.strip():
-            raise ValueError("model usage revision must be non-empty text")
+            raise ValueError("sample progress revision must be non-empty text")
         start, _batches, completed = self._sample_result_revision_events(
             state, candidate_id, revision
         )
@@ -5223,9 +4431,9 @@ class EvolutionDirector:
             start.payload.get("schema_version") != _SAMPLE_RESULTS_START_SCHEMA_VERSION
             or not isinstance(start.payload.get("checkpoint"), Mapping)
         ):
-            raise ValueError("model usage requires a v2 sample checkpoint")
+            raise ValueError("sample progress requires a v2 sample checkpoint")
         if completed is not None:
-            raise ValueError("model usage checkpoint is already completed")
+            raise ValueError("sample progress checkpoint is already completed")
 
     @staticmethod
     def _sample_checkpoint_matches_frozen_race(state, candidate, checkpoint, *, generation):
@@ -5263,10 +4471,9 @@ class EvolutionDirector:
             return False
         schedule = OptimizationSchedule.from_dict(
             state.task_manifest.metadata.get("optimization_schedule")
-            or OptimizationSchedule.default().to_dict()
+            or OptimizationSchedule.for_new_run().to_dict()
         )
-        if not schedule.race:
-            return False
+        pass
         planned = state.generation_cohort_for(candidate.generation)
         initial = state.initial_revision_for(candidate.candidate_id)
         selection = state.formal_selection_for(candidate.generation)
@@ -5687,36 +4894,6 @@ class EvolutionDirector:
                         ),
                         None,
                     )
-                    durable_gateway_request_count = sum(
-                        int(event.payload["http_attempts"])
-                        for event in state.events
-                        if event.kind == "ModelUsageRecorded"
-                        and event.payload.get("schema_version")
-                        == "ecologyrsi-dsh.model-usage/2"
-                        and event.payload.get("candidate_id") == candidate_id
-                        and event.payload.get("revision") == revision
-                    )
-                    if durable_gateway_request_count:
-                        if progress is None:
-                            progress = {
-                                "gateway_request_count": (
-                                    durable_gateway_request_count
-                                )
-                            }
-                        else:
-                            prior_gateway_request_count = progress.get(
-                                "gateway_request_count", 0
-                            )
-                            if (
-                                isinstance(prior_gateway_request_count, bool)
-                                or not isinstance(prior_gateway_request_count, int)
-                                or prior_gateway_request_count < 0
-                            ):
-                                prior_gateway_request_count = 0
-                            progress["gateway_request_count"] = max(
-                                prior_gateway_request_count,
-                                durable_gateway_request_count,
-                            )
                     self.ledger.append(
                         run_id,
                         "EvaluationSampleResultsResumed",
@@ -5927,10 +5104,7 @@ class EvolutionDirector:
             state.task_manifest.metadata["optimization_schedule"]
         )
         arm = scope.formal_batch_arm
-        if schedule.local_evaluation_mode != PAIRED_LOCAL_EVALUATION_MODE:
-            if arm is not None:
-                raise ValueError("prequential formal evaluation cannot have an arm")
-            return batch.revision_id
+        pass
         if arm is None:
             raise ValueError("paired formal batch evaluation requires an arm")
         if scope.batch_index == 0:
@@ -6139,11 +5313,10 @@ class EvolutionDirector:
                 raise ValueError("algorithm attempt identity was reused")
             return existing
         attempt_payload: dict[str, Any] = {"algorithm_attempt": attempt.to_dict()}
-        if is_dsh_native_protocol(state.task_manifest):
-            binding = state.candidate_identity_binding(candidate.candidate_id)
-            if binding is None:
-                raise ValueError("algorithm attempt candidate has no identity binding")
-            attempt_payload["identity_binding"] = dict(binding)
+        binding = state.candidate_identity_binding(candidate.candidate_id)
+        if binding is None:
+            raise ValueError("algorithm attempt candidate has no identity binding")
+        attempt_payload["identity_binding"] = dict(binding)
         self.ledger.append(
             attempt.run_id,
             "AlgorithmAttemptRecorded",
@@ -6175,8 +5348,7 @@ class EvolutionDirector:
         """Lock one candidate/artifact/plan before any formal metric is read."""
 
         state = self.state(run_id)
-        if not is_dsh_native_protocol(state.task_manifest):
-            raise ValueError("formal stage tokens require the DSH-native protocol")
+        pass
         state.candidate(candidate_id)
         if stage == "validation":
             if state.run.selection_incumbent_id != candidate_id:
@@ -6416,115 +5588,6 @@ class EvolutionDirector:
     def run(self, run_id: str) -> Run:
         return self.state(run_id).run
 
-    def evaluate_and_decide(
-        self,
-        evaluation: Evaluation,
-        *,
-        reason: str | None = None,
-        promotion_id: str | None = None,
-    ) -> Promotion:
-        """Convenience for a local evaluator's single-candidate loop."""
-
-        self.record_evaluation(evaluation)
-        state = self.state(evaluation.run_id)
-        incumbent = self._approved_incumbent(state)
-        current_cohort_verifiable = bool(
-            not sample_update_windows_enabled(state.task_manifest)
-            or evaluation_cohort_digest(evaluation) is not None
-        )
-        cohort_comparison = (
-            evaluation_cohort_comparison(
-                state.task_manifest,
-                evaluation,
-                incumbent[1],
-            )
-            if incumbent is not None
-            else "no_incumbent"
-        )
-        promotion_assessment = (
-            assess_promotion_improvement(evaluation, incumbent[1])
-            if incumbent is not None
-            and cohort_comparison in {"legacy_full_cohort", "same_cohort"}
-            else None
-        )
-        improves_incumbent = (
-            current_cohort_verifiable
-            and (
-                incumbent is None
-                or (
-                    cohort_comparison in {"legacy_full_cohort", "same_cohort"}
-                    and promotion_assessment is not None
-                    and bool(promotion_assessment["improved"])
-                )
-            )
-        )
-        approved = evaluation.passed and improves_incumbent
-        if not evaluation.passed:
-            default_reason = "候选未通过固定科学评测门槛。"
-        elif not current_cohort_verifiable or cohort_comparison == "unverifiable":
-            default_reason = "候选缺少可验证的固定样本窗口摘要，未作正式晋升。"
-        elif incumbent is None:
-            default_reason = "首个通过科学评测的候选，建立当前最优基线。"
-        elif cohort_comparison == "different_cohort":
-            default_reason = (
-                "候选通过本轮固定样本窗口门禁，但评测窗口与当前最优方案不同；"
-                "未比较跨窗口原始分数，也未作正式晋升。该结果仅可作为后续搜索证据。"
-            )
-        elif promotion_assessment is not None and not promotion_assessment[
-            "comparable"
-        ]:
-            default_reason = (
-                "候选与当前最优方案的评分合同、基线摘要或评测证据不兼容，"
-                "未作正式晋升。"
-            )
-        elif approved:
-            if (
-                promotion_assessment is not None
-                and promotion_assessment.get("confidence_interval_95") is not None
-            ):
-                interval = promotion_assessment["confidence_interval_95"]
-                default_reason = (
-                    f"候选得分 {evaluation.score:.12g} 高于当前最优候选 "
-                    f"{incumbent[0].candidate_id} 的 {incumbent[1].score:.12g}，"
-                    f"且 24 小时配对区块差异的 95% 置信区间下界 "
-                    f"{float(interval[0]):.6g} 大于 0。"
-                )
-            else:
-                default_reason = (
-                    f"候选得分 {evaluation.score:.12g} 严格高于当前最优候选 "
-                    f"{incumbent[0].candidate_id} 的 {incumbent[1].score:.12g}。"
-                )
-        else:
-            required_delta = (
-                float(promotion_assessment["minimum_score_delta"])
-                if promotion_assessment is not None
-                else _INCUMBENT_SCORE_TOLERANCE
-            )
-            confidence_note = (
-                "；配对区块置信区间未完全高于 0"
-                if promotion_assessment is not None
-                and promotion_assessment.get("reason_code")
-                == "confidence_interval_crosses_zero"
-                else ""
-            )
-            default_reason = (
-                f"候选虽通过科学评测，但得分 {evaluation.score:.12g} 未严格高于"
-                f"当前最优候选 {incumbent[0].candidate_id} 的 "
-                f"{incumbent[1].score:.12g}（要求提升超过 "
-                f"{required_delta:.12g}{confidence_note}）。"
-            )
-        promotion = Promotion(
-            promotion_id=promotion_id or f"promotion:{uuid4()}",
-            run_id=evaluation.run_id,
-            candidate_id=evaluation.candidate_id,
-            decision=(
-                PromotionDecision.APPROVED
-                if approved
-                else PromotionDecision.REJECTED
-            ),
-            reason=reason or default_reason,
-        )
-        return self.decide_promotion(promotion)
 
     @staticmethod
     def _approved_incumbent(
@@ -6543,7 +5606,7 @@ class EvolutionDirector:
         return candidate, evaluation
 
     def _close_session(self, run: Run) -> None:
-        if run.session_id is not None:
+        if run.session_id is not None and self.dsh is not None:
             self.dsh.close_session(run.session_id)
 
     @staticmethod

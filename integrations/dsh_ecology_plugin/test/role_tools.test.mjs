@@ -44,9 +44,9 @@ test("role tool sets are exact and one-shot roles have no submit channel", () =>
 
 test("every shared JSON schema is closed at its public object boundary", async () => {
   for (const name of [
-    "stage-context", "research-result", "research-search-plan", "research-synthesis",
-    "genome-mutation", "sample-wave", "sample-decisions", "sample-review",
-    "generation-summary", "generation-review", "generation-reflection",
+    "research-search-plan", "research-synthesis",
+    "genome-mutation", "local-edit", "sample-decisions", "sample-review",
+    "generation-review", "generation-reflection",
   ]) {
     const schema = JSON.parse(await readFile(new URL(`../schemas/${name}.schema.json`, import.meta.url), "utf8"));
     assert.equal(schema.additionalProperties, false);

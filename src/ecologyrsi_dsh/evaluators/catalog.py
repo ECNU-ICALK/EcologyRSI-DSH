@@ -239,122 +239,26 @@ class EvaluatorCatalog:
     def catalog(self, dataset_id: str | None = None) -> list[dict[str, Any]]:
         items = [
             {
-                "id": TOY_EVALUATOR_ID,
-                "label": "合成水分时间前向评测",
-                "description": "仅用于工程演示的固定验证分区评测。",
-                "dataset_ids": [TOY_DATASET_ID],
-                "evaluation_partition": "validation",
-                "scientific_scope": "prediction_demo_non_causal",
-                "prediction_model_ids": [TOY_PREDICTOR_MODEL_ID],
-                "horizons_hours": [1],
-                "objective_profile": "toy_validation_skill@1",
-                "implementation": "toy-forward-split/6",
-            },
-            {
-                "id": GREENHOUSE_EVALUATOR_ID,
-                "label": "温室环境时间前向评测",
-                "description": "在固定训练反馈 cohort 中逐样本协作预测，允许受控失败并与仅由训练拟合分区选择的强基线比较。",
-                "dataset_ids": ["agc_cucumber_2018", "agc_tomato_2019"],
-                "evaluation_partition": "training_feedback",
-                "scientific_scope": "historical_replay_prediction_non_causal",
-                "prediction_model_ids": [
-                    GREENHOUSE_ROLLING_PREDICTOR_ID,
-                    EXOGENOUS_RIDGE_MODEL_ID,
-                    TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
-                ],
-                "horizons_hours": [1],
-                "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
-                "implementation": "greenhouse-one-hour-forward/8",
-            },
-            {
-                "id": GREENHOUSE_MULTIHORIZON_EVALUATOR_ID,
-                "label": "温室环境多时距时间前向评测",
-                "description": "仅在训练拟合分区学习，并在固定训练反馈 cohort 中逐样本协作评测 1、6、24 小时预测。",
-                "dataset_ids": ["agc_cucumber_2018", "agc_tomato_2019"],
-                "evaluation_partition": "training_feedback",
-                "scientific_scope": "historical_replay_prediction_non_causal",
-                "prediction_model_ids": [
-                    EXOGENOUS_RIDGE_MODEL_ID,
-                    TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
-                ],
-                "horizons_hours": [1, 6, 24],
-                "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
-                "implementation": "greenhouse-multihorizon-forward/7",
-            },
-            {
-                "id": GREENHOUSE_MULTIHORIZON_EVALUATOR_V2_ID,
-                "label": "温室环境多时距时间前向评测 v2",
-                "description": (
-                    "仅在训练拟合分区学习，并在固定训练反馈 cohort 中逐样本协作"
-                    "评测 1、6、24 小时预测；支持目标与时距独立残差修正。"
-                ),
-                "dataset_ids": ["agc_cucumber_2018", "agc_tomato_2019"],
-                "evaluation_partition": "training_feedback",
-                "scientific_scope": "historical_replay_prediction_non_causal",
-                "prediction_model_ids": [
-                    EXOGENOUS_RIDGE_MODEL_ID,
-                    TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
-                    HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
-                ],
-                "horizons_hours": [1, 6, 24],
-                "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
-                "implementation": "greenhouse-multihorizon-forward/8",
-            },
-            {
                 "id": RUNTIME_EVALUATOR_ID,
                 "label": "温室多方案统一时间前向评测",
                 "description": "固定数据、基线、目标和时距；模型在运行中选择是否启用残差模型、切换已登记预测器并优化参数。",
                 "dataset_ids": ["agc_cucumber_2018", "agc_tomato_2019"],
                 "evaluation_partition": "training_feedback",
                 "scientific_scope": "historical_replay_prediction_non_causal",
-                "prediction_model_ids": [BASELINE_ALIGNED_RIDGE_MODEL_ID, EXOGENOUS_RIDGE_MODEL_ID,
-                                         TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID, HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID],
+                "prediction_model_ids": [BASELINE_ALIGNED_RIDGE_MODEL_ID, BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID, EXOGENOUS_RIDGE_MODEL_ID,
+                                         TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID, HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID, RECIPE_RIDGE_MODEL_ID],
                 "horizons_hours": [1, 6, 24],
                 "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
                 "implementation": "greenhouse-runtime-model-selection-forward/1",
-            },
-            {
-                "id": GREENHOUSE_MULTIHORIZON_EVALUATOR_V3_ID,
-                "label": "温室基线对齐多时距评测 v3",
-                "description": (
-                    "仅用训练拟合分区选择持续性或24小时季节基底并拟合岭回归残差，"
-                    "在固定训练反馈 cohort 中评测1、6、24小时预测。"
-                ),
-                "dataset_ids": ["agc_cucumber_2018", "agc_tomato_2019"],
-                "evaluation_partition": "training_feedback",
-                "scientific_scope": "historical_replay_prediction_non_causal",
-                "prediction_model_ids": [BASELINE_ALIGNED_RIDGE_MODEL_ID],
-                "horizons_hours": [1, 6, 24],
-                "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
-                "implementation": "greenhouse-baseline-aligned-multihorizon-forward/1",
-            },
-            {
-                "id": GREENHOUSE_RECIPE_EVALUATOR_ID,
-                "label": "温室声明式配方多时距评测",
-                "description": (
-                    "与基线对齐评测共用基底选择、cohort 与分块集合；候选可在基线"
-                    "对齐岭回归与声明式特征配方之间切换，因此配方层带来的改进可"
-                    "以在同一评测下直接归因。"
-                ),
-                "dataset_ids": ["agc_cucumber_2018", "agc_tomato_2019"],
-                "evaluation_partition": "training_feedback",
-                "scientific_scope": "historical_replay_prediction_non_causal",
-                "prediction_model_ids": [
-                    BASELINE_ALIGNED_RIDGE_MODEL_ID,
-                    RECIPE_RIDGE_MODEL_ID,
-                ],
-                "horizons_hours": [1, 6, 24],
-                "objective_profile": GREENHOUSE_OBJECTIVE_PROFILE_ID,
-                "implementation": "greenhouse-recipe-multihorizon-forward/1",
             },
         ]
         reference = next(item for item in items if item["id"] == RUNTIME_EVALUATOR_ID)
         items.append({**reference, "id": CELLWISE_EVALUATOR_ID,
             "label": "温室逐目标逐时距残差评测 v5",
             "description": "独立九格残差系数；沿用训练拟合分区选定基线和固定科学门槛。",
-            "prediction_model_ids": [*reference["prediction_model_ids"], BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID],
+            "prediction_model_ids": list(reference["prediction_model_ids"]),
             "implementation": "greenhouse-cellwise-aligned-forward/1"})
-        adapter = dataset_adapter(dataset_id) if dataset_id and dataset_id != TOY_DATASET_ID else None
+        adapter = dataset_adapter(dataset_id) if dataset_id else None
         if dataset_id is not None:
             items = [item for item in items if dataset_id in item["dataset_ids"]]
         for item in items:
@@ -420,24 +324,6 @@ class EvaluatorCatalog:
 
     def predictor_catalog(self) -> list[dict[str, Any]]:
         items = [
-            {
-                "id": TOY_PREDICTOR_MODEL_ID,
-                "label": "合成水分滚动预测模型",
-                "description": "仅用于合成作物—土壤—水分工程演示。",
-                "dataset_ids": [TOY_DATASET_ID],
-                "parameter_names": ["alpha", "window", "water_threshold"],
-                "scientific_scope": "prediction_demo_non_causal",
-                "implementation": "toy-rolling-water/1",
-            },
-            {
-                "id": GREENHOUSE_ROLLING_PREDICTOR_ID,
-                "label": "温室持续性偏差预测模型",
-                "description": "使用目标变量历史滚动值和训练拟合分区偏差进行 1 小时预测。",
-                "dataset_ids": ["agc_cucumber_2018", "agc_tomato_2019"],
-                "parameter_names": ["blend", "window", "bias_scale"],
-                "scientific_scope": "historical_replay_prediction_non_causal",
-                "implementation": "greenhouse-rolling-residual/2",
-            },
             {
                 "id": EXOGENOUS_RIDGE_MODEL_ID,
                 "label": "温室外生变量岭回归残差模型",
@@ -546,19 +432,13 @@ class EvaluatorCatalog:
 
 
     def default_evaluator(self, dataset_id: str) -> str:
-        return (
-            TOY_EVALUATOR_ID
-            if dataset_id == TOY_DATASET_ID
-            else dataset_adapter(dataset_id).evaluator_id
-        )
+        dataset_adapter(dataset_id)
+        return RUNTIME_EVALUATOR_ID
 
 
     def default_predictor(self, dataset_id: str) -> str:
-        return (
-            TOY_PREDICTOR_MODEL_ID
-            if dataset_id == TOY_DATASET_ID
-            else EXOGENOUS_RIDGE_MODEL_ID
-        )
+        dataset_adapter(dataset_id)
+        return BASELINE_ALIGNED_RIDGE_MODEL_ID
 
 
     def minimum_samples_per_update(self, evaluator_id: str, dataset_id: str | None = None) -> int:
@@ -674,15 +554,13 @@ class EvaluatorCatalog:
     ) -> None:
         if not isinstance(overrides, Mapping):
             raise TypeError("parameter_overrides must be an object")
-        greenhouse = "greenhouse" in task.domain_pack.lower()
-        predictor_model_id = str(
-            task.metadata.get("prediction_model_id")
-            or (
-                EXOGENOUS_RIDGE_MODEL_ID
-                if greenhouse
-                else TOY_PREDICTOR_MODEL_ID
-            )
-        )
+        predictor_model_id = str(task.metadata.get("prediction_model_id") or BASELINE_ALIGNED_RIDGE_MODEL_ID)
+        if predictor_model_id not in {
+            BASELINE_ALIGNED_RIDGE_MODEL_ID, BASELINE_ALIGNED_CELLWISE_RIDGE_MODEL_ID,
+            EXOGENOUS_RIDGE_MODEL_ID, TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID,
+            HORIZON_TARGETWISE_EXOGENOUS_RIDGE_MODEL_ID, RECIPE_RIDGE_MODEL_ID,
+        }:
+            raise ValueError("Unsupported registered prediction model")
         if predictor_model_id == RECIPE_RIDGE_MODEL_ID:
             # Every tunable for this predictor lives inside the declarative
             # recipe, which the host grammar validates. A scalar override has
@@ -733,18 +611,7 @@ class EvaluatorCatalog:
                 "ridge_alpha": (float, 0.0001, 1.0),
                 "residual_scale": (float, 0.0, 1.0),
             }
-            if predictor_model_id == EXOGENOUS_RIDGE_MODEL_ID
-            else {
-                "blend": (float, 0.0, 1.0),
-                "window": (int, 1, 48),
-                "bias_scale": (float, 0.0, 2.0),
-            }
-            if greenhouse
-            else {
-                "alpha": (float, 0.05, 0.95),
-                "window": (int, 1, 30),
-                "water_threshold": (float, 0.05, 0.85),
-            }
+
         )
         unknown = set(overrides) - set(schemas)
         if unknown:

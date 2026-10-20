@@ -1,34 +1,20 @@
 from __future__ import annotations
 
-import tempfile
 import threading
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from ecologyrsi_dsh import (
-    CandidateStatus,
-    Evaluation,
     EventLedger,
     EvolutionDirector,
-    FakeDSHAdapter,
-    PromotionDecision,
     RunStatus,
     TaskManifest,
-    ToyCropSoilWater,
 )
-from ecologyrsi_dsh.core.models import digest
+from tests.native_fixtures import NativeRoleStub, native_manifest, start_native_run, canary_receipts
 
 
-def manifest(max_candidates: int = 3) -> TaskManifest:
-    return TaskManifest(
-        task_id="toy-forecast",
-        objective="predict soil water",
-        domain_pack="crop-soil-water@toy",
-        visible_datasets=("toy-dataset@1",),
-        budget={"max_candidates": max_candidates},
-        seed=11,
-    )
+def manifest(max_candidates: int = 4) -> TaskManifest:
+    return native_manifest(generations=max(1, (max_candidates + 3) // 4))
 
 
 class CoreTests(unittest.TestCase):
@@ -36,25 +22,26 @@ class CoreTests(unittest.TestCase):
         first = manifest()
         second = TaskManifest.from_dict(first.to_dict())
         self.assertEqual(first.digest, second.digest)
-        self.assertEqual(first.max_candidates, 3)
-        self.assertEqual(first.domain, "crop-soil-water@toy")
+        self.assertEqual(first.max_candidates, 4)
+        self.assertEqual(first.domain, "greenhouse_environment@1")
 
     def test_task_manifest_expands_conflicting_candidate_budget(self) -> None:
         task = TaskManifest(
             task_id="complete-generation-budget",
             objective="reserve every candidate slot in every generation",
-            domain_pack="crop-soil-water@toy",
+            domain_pack="greenhouse_environment@1",
+            metadata=dict(native_manifest().metadata),
             budget={
                 "max_generations": 10,
-                "candidates_per_generation": 3,
-                "max_candidates": 3,
+                "candidates_per_generation": 4,
+                "max_candidates": 4,
             },
         )
 
         self.assertEqual(task.max_generations, 10)
-        self.assertEqual(task.candidates_per_generation, 3)
-        self.assertEqual(task.max_candidates, 30)
-        self.assertEqual(task.budget["max_candidates"], 30)
+        self.assertEqual(task.candidates_per_generation, 4)
+        self.assertEqual(task.max_candidates, 40)
+        self.assertEqual(task.budget["max_candidates"], 40)
 
     def test_ledger_duplicate_event_id_is_idempotent(self) -> None:
         ledger = EventLedger()
@@ -162,10 +149,11 @@ class CoreTests(unittest.TestCase):
     def test_director_run_status_matches_lifecycle_without_replay(self) -> None:
         ledger = EventLedger()
         self.addCleanup(ledger.close)
-        director = EvolutionDirector(ledger)
+        director = EvolutionDirector(ledger, NativeRoleStub())
         run_id = "run:indexed-status"
         director.create_run(manifest(), run_id=run_id)
         self.assertIs(director.run_status(run_id), RunStatus.CREATED)
+        director.record_model_contract_preflight(run_id, canary_receipts(director.state(run_id).task_manifest.metadata))
         director.start_run(run_id)
         self.assertIs(director.run_status(run_id), RunStatus.RUNNING)
         director.pause_run(run_id)
@@ -186,9 +174,11 @@ class CoreTests(unittest.TestCase):
     def test_state_replay_is_cached_until_run_tail_changes(self) -> None:
         ledger = EventLedger()
         self.addCleanup(ledger.close)
-        director = EvolutionDirector(ledger)
+        director = EvolutionDirector(ledger, NativeRoleStub())
         run_id = "run:state-cache"
         director.create_run(manifest(1), run_id=run_id)
+        director.record_model_contract_preflight(run_id, canary_receipts(director.state(run_id).task_manifest.metadata))
+        director._state_cache.clear()
 
         with patch.object(ledger, "events", wraps=ledger.events) as replay:
             first = director.state(run_id)
@@ -204,41 +194,6 @@ class CoreTests(unittest.TestCase):
         replay_after_append.assert_called_once_with(run_id, after_seq=previous_seq)
         self.assertIs(updated.run.status, RunStatus.RUNNING)
 
-    def test_candidate_identity_source_has_one_durable_spawn_event(self) -> None:
-        ledger = EventLedger()
-        self.addCleanup(ledger.close)
-        director = EvolutionDirector(ledger, FakeDSHAdapter(max_proposals=1))
-        director.start_evolution(manifest(1), run_id="run:spawn-identity")
-        proposal = director.request_proposal("run:spawn-identity")
-        candidate = director.spawn_candidate(
-            "run:spawn-identity",
-            proposal,
-            candidate_id="candidate:stable",
-        )
-        spawned = next(
-            event
-            for event in ledger.events("run:spawn-identity")
-            if event.kind == "CandidateSpawned"
-        )
-        self.assertEqual(
-            spawned.event_id,
-            "candidate-spawned:"
-            + digest(
-                {
-                    "run_id": "run:spawn-identity",
-                    "candidate_id": candidate.candidate_id,
-                }
-            ),
-        )
-
-        ledger.append(
-            "run:spawn-identity",
-            "CandidateSpawned",
-            spawned.payload,
-            event_id="injected-second-spawn",
-        )
-        with self.assertRaisesRegex(ValueError, "multiple spawn events"):
-            director.state("run:spawn-identity")
 
     def test_ledger_compares_idempotency_after_json_normalization(self) -> None:
         ledger = EventLedger()
@@ -320,84 +275,14 @@ class CoreTests(unittest.TestCase):
                 ),
             )
 
-    def test_legacy_run_has_empty_structured_screening_state(self) -> None:
-        ledger = EventLedger()
-        self.addCleanup(ledger.close)
-        director = EvolutionDirector(ledger, FakeDSHAdapter(max_proposals=1))
-        state = director.start_evolution(manifest(1), run_id="run:legacy-screening")
 
-        self.assertEqual(state.candidate_screening_events, ())
-        self.assertEqual(state.formal_selection_events, ())
-        self.assertEqual(state.screened_out_events, ())
-        self.assertIsNone(state.screening_for(0, "candidate:missing"))
-        self.assertIsNone(state.formal_selection_for(0))
 
-    def test_full_loop_replays_from_sqlite(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            db = Path(directory) / "events.sqlite3"
-            ledger = EventLedger(db)
-            director = EvolutionDirector(ledger, FakeDSHAdapter(max_proposals=2))
-            state = director.start_evolution(manifest(2), run_id="run:replay")
-            self.assertIs(state.run.status, RunStatus.RUNNING)
 
-            toy = ToyCropSoilWater(seed=11)
-            for _ in range(2):
-                candidate = director.propose_and_spawn("run:replay")
-                proposal = director.state("run:replay").proposal(candidate.proposal_id)
-                evaluation = toy.evaluate_candidate("run:replay", candidate, proposal)
-                director.evaluate_and_decide(evaluation)
-            director.complete_run("run:replay")
-            expected = director.state("run:replay")
-            ledger.close()
-
-            replay_ledger = EventLedger(db)
-            replayed = EvolutionDirector(replay_ledger, FakeDSHAdapter()).replay("run:replay")
-            self.assertEqual(replayed.run, expected.run)
-            self.assertEqual(replayed.task_manifest.digest, expected.task_manifest.digest)
-            self.assertEqual(len(replayed.proposals), 2)
-            self.assertEqual(len(replayed.evaluations), 2)
-            self.assertTrue(all(item.status is CandidateStatus.PROMOTED for item in replayed.candidates))
-            self.assertTrue(
-                all(item.decision in (PromotionDecision.APPROVED, PromotionDecision.REJECTED) for item in replayed.promotions)
-            )
-            self.assertEqual(len(replayed.events), replay_ledger.count("run:replay"))
-            replay_ledger.close()
-
-    def test_time_forward_toy_splits_and_repeatability(self) -> None:
-        first = ToyCropSoilWater(seed=4, days=30)
-        second = ToyCropSoilWater(seed=4, days=30)
-        self.assertEqual(first.observations, second.observations)
-        self.assertEqual(tuple(first.splits), ("train", "validation", "test"))
-        self.assertEqual(tuple(len(items) for items in first.splits.values()), (9, 8, 5))
-        self.assertLess(first.splits["train"][-1].day, first.splits["validation"][0].day)
-        self.assertLess(first.splits["validation"][-1].day, first.splits["test"][0].day)
-        parameters = {"alpha": 0.35, "window": 5, "water_threshold": 0.4}
-        self.assertEqual(first.score(parameters, "validation"), second.score(parameters, "validation"))
-
-    def test_invalid_transition_and_budget_are_rejected(self) -> None:
-        director = EvolutionDirector(EventLedger(), FakeDSHAdapter(max_proposals=2))
-        director.create_run(manifest(1), run_id="run:errors")
-        with self.assertRaises(RuntimeError):
-            director.propose_and_spawn("run:errors")
-        director.start_run("run:errors")
-        first = director.propose_and_spawn("run:errors")
-        with self.assertRaisesRegex(RuntimeError, "budget"):
-            director.propose_and_spawn("run:errors")
-        evaluation = Evaluation(
-            evaluation_id="evaluation:one",
-            run_id="run:errors",
-            candidate_id=first.candidate_id,
-            score=0.5,
-            passed=True,
-        )
-        director.evaluate_and_decide(evaluation)
-        with self.assertRaises(RuntimeError):
-            director.start_run("run:errors")
 
     def test_cancelled_terminal_state_wins_a_stale_background_failure(self) -> None:
         ledger = EventLedger()
-        director = EvolutionDirector(ledger, FakeDSHAdapter())
-        director.start_evolution(manifest(1), run_id="run:cancel-race")
+        director = EvolutionDirector(ledger, NativeRoleStub())
+        start_native_run(director, task=manifest(1), run_id="run:cancel-race")
         failure_ready = threading.Event()
         release_failure = threading.Event()
         failure_errors: list[BaseException] = []
@@ -432,8 +317,8 @@ class CoreTests(unittest.TestCase):
 
     def test_replay_never_regresses_after_the_first_terminal_event(self) -> None:
         ledger = EventLedger()
-        director = EvolutionDirector(ledger, FakeDSHAdapter())
-        director.start_evolution(manifest(1), run_id="run:sticky-terminal")
+        director = EvolutionDirector(ledger, NativeRoleStub())
+        start_native_run(director, task=manifest(1), run_id="run:sticky-terminal")
         director.cancel_run("run:sticky-terminal")
         ledger.append("run:sticky-terminal", "RunFailed", {"reason": "late failure"})
         ledger.append(

@@ -70,7 +70,7 @@ class StructuredStageBudgetTests(unittest.TestCase):
         # the frozen manifest constant, the plan the workbench displays, and the
         # plugin's runaway-child abort. A raise applied to one of them is a
         # contract split the suite could not otherwise see.
-        plan = OptimizationSchedule.for_quick_run().execution_plan(5, cells_per_origin=9)
+        plan = OptimizationSchedule.for_new_run().execution_plan(5, cells_per_origin=9)
         per_call = plan["output_tokens_per_llm_call"]
         limits = plan["sample_execution_limits"]
         self.assertEqual(per_call["planner"], NATIVE_SAMPLE_OPERATION_MAX_TOKENS["sample.planner"])
@@ -89,17 +89,16 @@ class StructuredStageBudgetTests(unittest.TestCase):
             self.assertIsNotNone(found, stage)
             self.assertEqual((int(found[1]), None), (steps, reported), stage)
 
-    def test_adapter_preserves_omitted_and_explicit_historical_budgets(self):
+    def test_adapter_defaults_to_current_budget_and_validates_explicit_limits(self):
         from ecologyrsi_dsh.evaluators.dsh_sample_adapter import DshSampleCollaborationAdapter
-        from ecologyrsi_dsh.core.model_execution_policy import LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS
         kwargs = dict(run_id='run:budget', runtime_provider=lambda: object(),
             revision_provider=lambda _: {}, identity_digests={
                 'genome_digest':'a'*64, 'compiled_behavior_digest':'b'*64, 'phenotype_instance_digest':'c'*64},
             strategy_model_id='dsh/strategy', review_model_id='dsh/review',
             forecast_bundle_tool=lambda **_: None, prediction_tool_binder=lambda **_: None)
         omitted = DshSampleCollaborationAdapter(**kwargs)
-        self.assertEqual(omitted.operation_max_tokens, dict(LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS))
-        for frozen in (LEGACY_NATIVE_SAMPLE_OPERATION_MAX_TOKENS, NATIVE_SAMPLE_OPERATION_MAX_TOKENS):
+        self.assertEqual(omitted.operation_max_tokens, dict(NATIVE_SAMPLE_OPERATION_MAX_TOKENS))
+        for frozen in (NATIVE_SAMPLE_OPERATION_MAX_TOKENS, {**NATIVE_SAMPLE_OPERATION_MAX_TOKENS, "sample.planner": 16384}):
             actual = DshSampleCollaborationAdapter(**kwargs, operation_max_tokens=frozen)
             self.assertEqual(actual.operation_max_tokens, dict(frozen))
         with self.assertRaises(ValueError):

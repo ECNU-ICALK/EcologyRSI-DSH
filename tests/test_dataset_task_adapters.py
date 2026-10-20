@@ -15,7 +15,7 @@ from ecologyrsi_dsh.evaluators.registry import EvaluatorRegistry, EXOGENOUS_RIDG
 from ecologyrsi_dsh.evolution.schedule import OptimizationSchedule
 from ecologyrsi_dsh.core.models import TaskManifest, digest
 from ecologyrsi_dsh.core.immutable import thaw_json
-from tests.test_evaluation import _cohort_series, _DatasetStub, _task, _candidate_and_proposal
+from tests.test_evaluation import _cohort_series, _DatasetStub, _task, _candidate_and_proposal, _native_registry, _scope_cohort
 
 
 class DatasetTaskAdapterTests(unittest.TestCase):
@@ -69,9 +69,8 @@ class DatasetTaskAdapterTests(unittest.TestCase):
                 registry.selection_view(CUCUMBER_2018.dataset_id, **kwargs)
 
     def test_evaluator_uses_adapter_grid_weights_bounds_and_thresholds(self):
-        adapter = replace(CUCUMBER_2018, horizons_hours=(1, 6),
-                          targets=(replace(CUCUMBER_2018.targets[0], weight=0.8),
-                                   replace(CUCUMBER_2018.targets[1], weight=0.2)),
+        adapter = replace(CUCUMBER_2018,
+                          targets=tuple(replace(t, weight=w) for t,w in zip(CUCUMBER_2018.targets, (.6,.3,.1))),
                           minimum_skill=0.2, minimum_coverage=0.95, selection_minimum_coverage=0.95)
         data = _task().to_dict()
         data["metadata"].update(evaluator_id=adapter.evaluator_id,
@@ -79,18 +78,18 @@ class DatasetTaskAdapterTests(unittest.TestCase):
                                 dataset_task=adapter.contract())
         candidate, proposal = _candidate_and_proposal()
         proposal = replace(proposal, changes={"history_steps": 3, "ridge_alpha": 0.1, "residual_scale": 0.5})
-        registry = EvaluatorRegistry(_DatasetStub(_cohort_series()))
+        registry = _native_registry(_cohort_series())
         with patch("ecologyrsi_dsh.data.adapters.DATASET_ADAPTERS", {adapter.dataset_id: adapter}):
             profile = registry.fitness_profile(adapter.evaluator_id, adapter.dataset_id)
-            self.assertEqual(profile.prediction_cell_count, 4)
-            result = registry.evaluate_scientific(TaskManifest.from_dict(data), candidate, proposal)
+            self.assertEqual(profile.prediction_cell_count, 9)
+            result = registry.evaluate_scientific(TaskManifest.from_dict(data), candidate, proposal, **_scope_cohort(_cohort_series(), candidate))
             metrics = result.evaluation.metrics
             self.assertEqual(metrics["dataset_task"], adapter.contract())
             self.assertEqual(metrics["objective_target_weights"], adapter.target_weights)
             self.assertEqual({(row["target"], row["horizon_hours"]) for row in metrics["targets"]},
                              {(t, h) for t in adapter.target_names for h in adapter.horizons_hours})
             self.assertEqual(result.evaluation.evaluator_digest,
-                             registry.evaluator_configuration_digest(adapter.evaluator_id, adapter.dataset_id))
+                             data["metadata"]["evaluator_digest"])
             gates = registry.objective_profile(adapter.evaluator_id, adapter.dataset_id)["hard_gates"]
             self.assertEqual(gates[0]["threshold"], 0.2)
             self.assertEqual(gates[-1]["threshold"], 0.95)
@@ -101,14 +100,14 @@ class DatasetTaskAdapterTests(unittest.TestCase):
         candidate, proposal = _candidate_and_proposal()
         with self.assertRaisesRegex(ValueError, "frozen dataset task"):
             EvaluatorRegistry(_DatasetStub(_cohort_series())).evaluate_scientific(
-                TaskManifest.from_dict(data), candidate, proposal)
+                TaskManifest.from_dict(data), candidate, proposal, **_scope_cohort(_cohort_series(), candidate))
 
     def test_cohort_purge_uses_adapter_maximum_horizon(self):
         adapter = replace(CUCUMBER_2018, horizons_hours=(1, 6))
         dataset = SimpleNamespace(dataset_id=adapter.dataset_id, episode_id=adapter.dataset_id + ":test",
                                   timestamps=tuple(range(2000)), partitions={"model_selection": IndexRange(0, 2000)})
         with patch("ecologyrsi_dsh.evaluators.epoch_cohorts.DATASET_ADAPTERS", {adapter.dataset_id: adapter}):
-            cohort = plan_run_adaptation_cohort(dataset, schedule=OptimizationSchedule.for_quick_run(), seed=0)
+            cohort = plan_run_adaptation_cohort(dataset, schedule=OptimizationSchedule.for_new_run(), seed=0)
         self.assertEqual(cohort.cohort.maximum_horizon, 6)
         self.assertTrue(all(o.maximum_target_timestamp - o.origin_timestamp == 6 for o in cohort.origins))
         for previous, following in zip(cohort.batches, cohort.batches[1:]):

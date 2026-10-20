@@ -4,6 +4,7 @@ import unittest
 from dataclasses import replace
 
 from ecologyrsi_dsh.core.models import Evaluation, TaskManifest, canonical_json, digest
+from ecologyrsi_dsh.core.search_policy import SEARCH_GUARD_POLICY
 from ecologyrsi_dsh.evaluators.fitness import (
     EXPLORATORY_EVIDENCE_CLASS,
     FitnessProfile,
@@ -31,7 +32,8 @@ def _task() -> TaskManifest:
         objective="greenhouse forecast",
         domain_pack="greenhouse_environment@1",
         visible_datasets=("agc_cucumber_2018",),
-        metadata={"execution_protocol": "dsh_native_plugin_evolution@1"},
+        metadata={"execution_protocol": "dsh_native_plugin_evolution@1",
+                  "search_guard_policy": SEARCH_GUARD_POLICY},
     )
 
 

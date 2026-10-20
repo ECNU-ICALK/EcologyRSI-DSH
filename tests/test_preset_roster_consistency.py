@@ -68,10 +68,9 @@ class PresetRosterConsistencyTests(unittest.TestCase):
                 profiles = template["agent_program"]["candidate_execution_program"]["role_profiles"]
                 self.assertTrue(profiles)
                 self.assertLessEqual({item["preset_id"] for item in profiles}, set(self.roster))
-        # The sole historical reference belongs to the byte-preserved @1 seeds.
-        # Active bindings above must never select it.
+        # Every retained seed must use the current managed role roster.
         mentioned = _mentioned_ids("src/ecologyrsi_dsh/knowledge/program_registry.py")
-        self.assertEqual(mentioned - set(self.roster), {"ecology-sample-planner-v11"})
+        self.assertEqual(mentioned - set(self.roster), set())
 
     def test_node_installer_stages_and_python_canaries_share_the_contract(self):
         import subprocess
@@ -94,7 +93,10 @@ class PresetRosterConsistencyTests(unittest.TestCase):
         for name in ("genome-mutation", "local-edit"):
             schema = json.loads((PRESET_ROOT.parent / "schemas" / (name + ".schema.json")).read_text())
             declared = {}
-            for variant in schema["properties"]["operations"]["items"]["oneOf"]:
+            items = schema["properties"]["operations"]["items"]
+            self.assertEqual(items, {"$ref": "shared.json#/mutation_operation"})
+            shared = json.loads((PRESET_ROOT.parent / "schemas/shared.json").read_text())
+            for variant in shared["mutation_operation"]["oneOf"]:
                 op = variant["properties"]["op"]
                 for name in op.get("enum", [op.get("const")]):
                     declared[name] = set(variant["required"]) - {"op"}

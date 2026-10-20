@@ -1,3 +1,4 @@
+import { expandSharedSchema } from "./schema.js";
 import { STAGE_CONTRACTS } from "./contracts.js";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -43,8 +44,6 @@ import { installSampleOutputCoverage } from "./sample-output-coverage.js";
 import { installSampleOutputPrevalidation, trustedSamplePredictionRepair } from "./sample-output-prevalidation.js";
 
 const STAGE_INSTRUCTIONS = Object.freeze({
-  "generation.research": Object.freeze({
-  }),
   "generation.search-plan": Object.freeze({
     instruction: [
       "Plan the literature search from the previous aggregate result and reflection.",
@@ -72,7 +71,7 @@ const STAGE_INSTRUCTIONS = Object.freeze({
     instruction: [
       "The operations array is a mutation delta over parent_genome, not a replacement genome.",
       "Omit every unchanged parameter, policy, instruction, tool policy, and workflow setting.",
-      "Honor mutation_contract.maximum_operations. Implement the primary assigned hypothesis first; when a joint_plugin_epoch protocol is enabled, add only related cross-component operations within that bound. Legacy contracts still allow exactly one operation.",
+      "Honor mutation_contract.maximum_operations. Implement the primary assigned hypothesis first; when a joint_plugin_epoch protocol is enabled, add only related cross-component operations within that bound.",
       "When an assigned candidate direction is present, implement its exact mutation_axis and mutation_target using mutation_contract.operation_by_axis.",
       "For a numeric parameter, implement mutation_direction exactly: increase must be strictly above the parent value and decrease strictly below it; stay within the Host-provided normalized trust-region step and avoid exact failed parameter sets.",
       "Use mutation_contract.one_step_parameter_intervals when supplied. For floating parameters choose an interior value; rounding a boundary outward is invalid. These intervals already include the normalized step restriction.",
@@ -137,16 +136,6 @@ const STAGE_INSTRUCTIONS = Object.freeze({
       "If skill fails, end the child turn. If structured_output rejects its arguments, correct only the arguments once; emit no prose or additional tool calls.",
     ].join(" "),
   }),
-  "sample.reflect": Object.freeze({
-    instruction: [
-      "Reflect on exactly one completed historical training-feedback forecast origin, including every supplied target-horizon cell.",
-      "Copy the exact Host wave_digest and the exact outer Host context.sample.sample_id into the structured result.",
-      "Never use context.sample.prediction_cells[].sample_id as the reflection sample_id.",
-      "The prediction vector is already immutable; do not propose replacement values.",
-      "Classify the outcome, identify the bounded error source, and suggest only a next-generation action.",
-      "Do not make causal claims from observational prediction error."
-    ].join(" "),
-  }),
 });
 const STAGES = Object.freeze(Object.fromEntries(
   Object.entries(STAGE_CONTRACTS).map(([stage, contract]) => [
@@ -167,6 +156,10 @@ function inferredJsonType(value) {
 }
 
 export function dshCompatibleSchema(schema) {
+  return projectDshSchema(expandSharedSchema(schema));
+}
+
+function projectDshSchema(schema) {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
   if (Array.isArray(schema.type)) {
     return {
@@ -180,12 +173,12 @@ export function dshCompatibleSchema(schema) {
     if (!DSH_SCHEMA_KEYS.has(key)) continue;
     if (key === "properties") {
       projected.properties = Object.fromEntries(
-        Object.entries(value || {}).map(([name, child]) => [name, dshCompatibleSchema(child)]),
+        Object.entries(value || {}).map(([name, child]) => [name, projectDshSchema(child)]),
       );
     } else if (key === "items") {
-      projected.items = dshCompatibleSchema(value);
+      projected.items = projectDshSchema(value);
     } else if (key === "oneOf") {
-      projected.oneOf = value.map(dshCompatibleSchema);
+      projected.oneOf = value.map(projectDshSchema);
     } else {
       projected[key] = structuredClone(value);
     }
@@ -249,7 +242,7 @@ function positiveStageAttempts(value) {
 function retryableStructuredStageError(error, stage) {
   return isTrustedStructuredPhase(error, "model")
     || (
-      ["sample.plan", "sample.critic", "sample.reflect"].includes(stage)
+      ["sample.plan", "sample.critic"].includes(stage)
       && (isTrustedStructuredPhase(error, "capture")
         || isTrustedStructuredPhase(error, "tool_protocol"))
     );
@@ -268,12 +261,10 @@ function validSampleId(value) {
 }
 
 function sampleMemberDigests(stage, context) {
-  if (!["sample.plan", "sample.critic", "sample.reflect"].includes(stage)) {
+  if (!["sample.plan", "sample.critic"].includes(stage)) {
     return null;
   }
-  const samples = stage === "sample.reflect"
-    ? context?.sample?.prediction_cells
-    : context?.samples;
+  const samples = context?.samples;
   if (!Array.isArray(samples) || samples.length < 1 || samples.length > 128) {
     return null;
   }
@@ -283,7 +274,7 @@ function sampleMemberDigests(stage, context) {
 }
 
 function specializeSampleOutputSchema(stage, schema, context) {
-  if (!["sample.plan", "sample.critic", "sample.reflect"].includes(stage)) return schema;
+  if (!["sample.plan", "sample.critic"].includes(stage)) return schema;
   const waveDigest = context?.wave_digest;
   if (typeof waveDigest !== "string" || !/^[0-9a-f]{64}$/.test(waveDigest)) {
     throw sampleStageContextInvalid("wave_digest must be lowercase SHA-256");
@@ -291,24 +282,6 @@ function specializeSampleOutputSchema(stage, schema, context) {
   const properties = schema?.properties;
   if (!properties?.wave_digest) {
     throw new Error("sample output schema has no wave_digest property");
-  }
-  if (stage === "sample.reflect") {
-    const sampleId = context?.sample?.sample_id;
-    if (!validSampleId(sampleId)) {
-      throw sampleStageContextInvalid("outer sample.sample_id must be 1 to 240 characters");
-    }
-    if (!properties.sample_id) {
-      throw new Error("sample reflection schema has no sample_id property");
-    }
-    properties.wave_digest = {
-      ...properties.wave_digest,
-      const: waveDigest,
-    };
-    properties.sample_id = {
-      ...properties.sample_id,
-      const: sampleId,
-    };
-    return schema;
   }
   const samples = context?.samples;
   if (!Array.isArray(samples) || samples.length < 1 || samples.length > 128) {

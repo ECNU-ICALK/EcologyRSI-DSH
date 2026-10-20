@@ -77,7 +77,7 @@ class JointPluginTests(unittest.TestCase):
         profile = resolve_candidate_agent_profile(child, current_program_registry())
         self.assertEqual(profile['strategy_program'], program())
         self.assertEqual(profile['strategy_program_digest'], digest(program()))
-        task = SimpleNamespace(metadata={'optimization_protocol': joint_policy.PROTOCOL})
+        task = SimpleNamespace(metadata={'optimization_protocol': joint_policy.UNIFIED_PROTOCOL})
         inherited = _inherited_strategy_context(child, task)['inherited_search_strategy']
         self.assertEqual(inherited['memory'], program()['memory'])
         self.assertEqual(inherited['proposal_prompt'], program()['proposal_prompt'])
@@ -189,7 +189,7 @@ class JointPluginTests(unittest.TestCase):
         original_runtime = cycle._CycleRuntime
         def task(**kwargs):
             base=original_task(**kwargs)
-            return replace(base,metadata={**base.metadata,'optimization_protocol':joint_policy.PROTOCOL})
+            return replace(base,metadata={**base.metadata,'optimization_protocol':joint_policy.UNIFIED_PROTOCOL})
         class Runtime(original_runtime):
             def run_stage(self, request):
                 response=super().run_stage(request)
@@ -239,16 +239,17 @@ class JointPluginTests(unittest.TestCase):
         self.assertEqual(old['calculation_digest'],new['calculation_digest'])
         self.assertNotEqual(old['program_digest'],new['program_digest'])
 
-    def test_joint_budget_and_local_bounds_are_distinct_from_legacy(self):
-        schedule=OptimizationSchedule.for_joint_run()
+    def test_joint_budget_and_local_bounds_are_frozen(self):
+        schedule = OptimizationSchedule.for_new_run()
         self.assertTrue(schedule.race)
-        self.assertEqual(schedule.execution_plan(4,cells_per_origin=9)['run_budget']['total_candidate_origins'],800)
-        self.assertEqual(schedule.generation_execution_budget(cells_per_origin=9),
-            dict(screening_candidate_origins=50,formal_candidate_origins=50,holdout_candidate_origins=100,
-                 total_candidate_origins=200,total_scoring_cells=1800))
-        self.assertEqual(schedule.max_local_edits_per_batch,2)
-        self.assertEqual(OptimizationSchedule.for_evidence_guided_run().max_local_edits_per_batch,1)
-        with self.assertRaises(ValueError):replace(schedule,max_local_edits_per_batch=3)
+        budget = schedule.generation_execution_budget(cells_per_origin=9)
+        self.assertEqual(budget, dict(base_candidate_origins=200, recheck_candidate_origins=100,
+            screening_candidate_origins=50, formal_candidate_origins=50, holdout_candidate_origins=100,
+            total_candidate_origins=300, total_scoring_cells=2700))
+        self.assertEqual(schedule.run_execution_budget(4, cells_per_origin=9)["total_candidate_origins"], 1200)
+        self.assertEqual(schedule.max_local_edits_per_batch, 2)
+        with self.assertRaises(ValueError):
+            replace(schedule, max_local_edits_per_batch=3)
 
     def test_agent_owned_program_prediction_persists_and_replays(self):
         # Use production child admission, ledger and binding with a transport double.
@@ -276,5 +277,4 @@ class JointPluginTests(unittest.TestCase):
 class JointRaceTests(race_tests.EvidenceGuidedRaceTests):
     """Run every existing five-arm seal/restart/replay invariant under the new contract."""
     def setUp(self):
-        with patch.object(OptimizationSchedule,'for_evidence_guided_run',OptimizationSchedule.for_joint_run):
-            super().setUp()
+        super().setUp()

@@ -8,14 +8,7 @@ from typing import Any
 from ..application.queries import RunQueries
 from urllib.parse import parse_qs, urlparse
 
-from ..integrations.model_bindings import (
-    HOST_PARAMETER_GENERATOR_ID,
-    RULE_JUDGE_ID,
-    builtin_model_configuration_digest,
-    model_supports_role,
-)
-from ..evaluators.catalog import TOY_DATASET_ID
-from ..evaluators.registry import TOY_EVALUATOR_ID, TOY_PREDICTOR_MODEL_ID
+from ..integrations.model_bindings import model_supports_role
 from .projection import (
     _admission_progress_fields,
     _assert_http_scope,
@@ -31,311 +24,56 @@ from .projection import _workspace_revisions
 class CatalogEndpointsMixin:
     def _catalog_payload(self) -> dict[str, Any]:
         from ..evolution.parameters import run_parameter_contract
-        raw_catalog = self.server.datasets.catalog()
-        ready_datasets: list[dict[str, Any]] = []
-        unavailable_datasets: list[dict[str, Any]] = []
-        for raw in raw_catalog["datasets"]:
-            readiness = raw["readiness"]
+        ready_datasets, unavailable_datasets = [], []
+        for raw in self.server.datasets.catalog()["datasets"]:
+            adapter = raw.get("task_adapter")
             item = {
-                "id": raw["dataset_id"],
-                "dataset_id": raw["dataset_id"],
-                "label": raw["display_name_zh"],
-                "display_name": raw["display_name_zh"],
+                "id": raw["dataset_id"], "dataset_id": raw["dataset_id"],
+                "label": raw["display_name_zh"], "display_name": raw["display_name_zh"],
                 "description": " ".join(raw.get("notes_zh", [])),
                 "domain_id": raw["domain_id"],
-                "domain_pack_id": (raw["task_adapter"]["domain_pack_id"]
-                                   if raw.get("task_adapter") else "crop_soil_water" if raw["dataset_id"] == TOY_DATASET_ID else None),
-                "training_selectable": raw["training_selectable"],
-                "task_adapter": raw["task_adapter"],
-                "license": raw["license"],
-                "ready": readiness["ready"],
-                "readiness": readiness,
+                "domain_pack_id": adapter["domain_pack_id"] if adapter else None,
+                "training_selectable": raw["training_selectable"], "task_adapter": adapter,
+                "license": raw["license"], "ready": raw["readiness"]["ready"],
+                "readiness": raw["readiness"],
             }
-            if raw.get("task_adapter"):
-                item["evaluation"] = next(evaluator for evaluator in self.server.evaluators.catalog(raw["dataset_id"])
-                                          if evaluator["id"] == raw["task_adapter"]["evaluator_id"])
-            if raw["runnable"] and readiness["ready"]:
+            if adapter:
+                item["evaluation"] = next(e for e in self.server.evaluators.catalog(raw["dataset_id"])
+                    if e["id"] == adapter["evaluator_id"])
+            if raw["runnable"] and item["ready"]:
                 item["episodes"] = self.server.datasets.episodes(raw["dataset_id"])
                 ready_datasets.append(item)
             else:
                 unavailable_datasets.append(item)
-        ready_datasets.sort(
-            key=lambda item: (item["id"] == TOY_DATASET_ID, item["id"])
-        )
-        has_greenhouse = any(
-            item["domain_pack_id"] == "greenhouse_environment@1"
-            for item in ready_datasets
-        )
-        domain_packs = []
-        if has_greenhouse:
-            domain_packs.append(
-                {
-                    "id": "greenhouse_environment@1",
-                    "label": "温室环境历史回放模型包",
-                    "description": "针对温度、相对湿度和二氧化碳浓度开展时间前向预测进化。",
-                }
-            )
-        domain_packs.append(
-            {
-                "id": "crop_soil_water",
-                "label": "作物—土壤—水分合成模型包",
-                "description": "用于验证运行、事件账本和交互流程的确定性工程样例。",
-            }
-        )
-        remote_models = self.server.model_gateway.catalog()
-        models = [
-            {
-                "id": HOST_PARAMETER_GENERATOR_ID,
-                "model_id": HOST_PARAMETER_GENERATOR_ID,
-                "label": "内置有界参数生成器",
-                "description": "由宿主按固定参数范围生成候选，不调用外部模型。",
-                "roles": ["propose"],
-                "configuration_digest": builtin_model_configuration_digest(
-                    HOST_PARAMETER_GENERATOR_ID
-                ),
-                "binding_source": "builtin_implementation",
-                "authentication_state": "local",
-                "local_model": True,
-                "available": True,
-            },
-            {
-                "id": RULE_JUDGE_ID,
-                "model_id": RULE_JUDGE_ID,
-                "label": "内置规则独立评审",
-                "description": "只依据固定科学指标作出独立搜索保留判断。",
-                "roles": ["judge"],
-                "configuration_digest": builtin_model_configuration_digest(
-                    RULE_JUDGE_ID
-                ),
-                "binding_source": "builtin_implementation",
-                "authentication_state": "local",
-                "local_model": True,
-                "available": True,
-            },
-        ]
-        for raw in remote_models:
-            configured = bool(
-                raw.get(
-                    "configured",
-                    raw.get("credential_configured")
-                    and raw.get("directory_available", True),
-                )
-            )
-            verified = bool(raw.get("authentication_verified"))
-            available = bool(raw.get("available"))
-            directory_available = raw.get("directory_available", True) is not False
-            execution_available = configured and directory_available
-            models.append(
-                {
-                    **raw,
-                    "id": raw["model_id"],
-                    "model_source": "dsh_gateway",
-                    "description": (
-                        "该模型已在 DSH 主目录登记，但当前后端配置不可执行；请查看不可用原因。"
-                        if not directory_available
-                        else "通过服务端 Bearer 凭据连接兼容模型网关；连接在实际运行请求中检查。"
-                    ),
-                    "configured": configured,
-                    "verified": verified,
-                    "connection_available": available,
-                    "execution_available": execution_available,
-                    "available": available,
-                }
-            )
-        # Keep one explicit, shared DSH model directory in addition to the
-        # role-filtered compatibility keys below.  The browser may use these
-        # fields to show the same configured inventory for both selectors;
-        # execution still enforces role, credential, and frozen-binding checks.
-        dsh_models = [
-            item for item in models if item.get("model_source") == "dsh_gateway"
-        ]
-        authenticated_models = [
-            item
-            for item in dsh_models
-            if item.get("authentication_verified") is True
-        ]
-        available_models = [item for item in dsh_models if item.get("available") is True]
-        dsh_strategy_models = [
-            item for item in dsh_models if model_supports_role(item, "propose")
-        ]
-        dsh_review_models = [
-            item for item in dsh_models if model_supports_role(item, "judge")
-        ]
+        ready_datasets.sort(key=lambda item: item["id"])
         available_ids = {item["id"] for item in ready_datasets}
-        evaluators = [
-            item
-            for item in self.server.evaluators.catalog()
-            if available_ids.intersection(item["dataset_ids"])
-        ]
-        evaluators.sort(
-            key=lambda item: (item["id"] == TOY_EVALUATOR_ID, item["id"])
-        )
-        prediction_models = [
-            item
-            for item in self.server.evaluators.predictor_catalog()
-            if available_ids.intersection(item["dataset_ids"])
-        ]
-        prediction_models.sort(
-            key=lambda item: (item["id"] == TOY_PREDICTOR_MODEL_ID, item["id"])
-        )
-        configured_count = sum(
-            1 for item in models if item.get("model_source") == "dsh_gateway" and item.get("configured")
-        )
-        verified_count = sum(
-            1 for item in dsh_models if item.get("authentication_verified")
-        )
-        available_count = sum(1 for item in dsh_models if item.get("available"))
-        executable_count = sum(
-            1 for item in dsh_models if item.get("execution_available")
-        )
-        # A strategy is runnable only when a credentialed model explicitly
-        # exposes the proposal role.  Counting any remote model here used to
-        # make a judge-only DSH setup look ready for autonomous evolution.
-        configured_strategy_count = sum(
-            1
-            for item in dsh_models
-            if item.get("configured") and model_supports_role(item, "propose")
-        )
-        configured_review_count = sum(
-            1
-            for item in dsh_models
-            if item.get("configured") and model_supports_role(item, "judge")
-        )
-        verified_strategy_count = sum(
-            1
-            for item in dsh_models
-            if item.get("authentication_verified")
-            and model_supports_role(item, "propose")
-        )
-        verified_review_count = sum(
-            1
-            for item in dsh_models
-            if item.get("authentication_verified")
-            and model_supports_role(item, "judge")
-        )
-        available_strategy_count = sum(
-            1
-            for item in dsh_models
-            if item.get("available") and model_supports_role(item, "propose")
-        )
-        available_review_count = sum(
-            1
-            for item in dsh_models
-            if item.get("available") and model_supports_role(item, "judge")
-        )
-        executable_strategy_count = sum(
-            1
-            for item in dsh_models
-            if item.get("execution_available")
-            and model_supports_role(item, "propose")
-        )
-        executable_review_count = sum(
-            1
-            for item in dsh_models
-            if item.get("execution_available")
-            and model_supports_role(item, "judge")
-        )
+        dsh_models = [{**raw, "id": raw["model_id"], "model_source": "dsh_directory",
+            "execution_available": bool(raw.get("configured")) and raw.get("directory_available") is not False}
+            for raw in self.server.model_directory.catalog()]
+        roles_ready = all(any(item["execution_available"] and model_supports_role(item, role)
+            for item in dsh_models) for role in ("propose", "judge"))
         return {
             "schema_version": "ecologyrsi-dsh.runtime-catalog/5",
             "run_parameters": run_parameter_contract(),
-            "domain_packs": domain_packs,
-            "datasets": ready_datasets,
-            "unavailable_datasets": unavailable_datasets,
-            "strategies": [
-                {
-                    **item,
-                    **(
-                        {"available": executable_strategy_count > 0}
-                        if item["requires_authenticated_model"]
-                        else {"available": True}
-                    ),
-                }
-                for item in self.server.strategy_router.catalog()
-            ],
-            "model_workflows": [
-                {
-                    "id": "research_compile_evolve@1",
-                    "label": "模型调研—编译—进化",
-                    "description": "策略模型先形成研究计划，再在宿主有界参数空间内逐轮生成和改进候选。",
-                    "autonomous": True,
-                },
-            ],
+            "domain_packs": [{"id": "greenhouse_environment@1", "label": "温室环境历史回放模型包",
+                "description": "针对温度、相对湿度和二氧化碳浓度开展时间前向预测进化。"}],
+            "datasets": ready_datasets, "unavailable_datasets": unavailable_datasets,
+            "strategies": [{**item, "available": roles_ready} for item in self.server.strategy_router.catalog()],
+            "model_workflows": [{"id": "research_compile_evolve@1", "label": "模型调研—编译—进化",
+                "description": "研究计划与候选程序均由原生角色生成，科学评分由宿主独立执行。", "autonomous": True}],
             "prediction_selection_policy": RUNTIME_PREDICTION_POLICY,
             "runtime_evaluator_id": RUNTIME_EVALUATOR_ID,
-            "prediction_models": prediction_models,
-            "evaluators": evaluators,
-            "models": models,
+            "prediction_models": sorted((item for item in self.server.evaluators.predictor_catalog()
+                if available_ids.intersection(item["dataset_ids"])), key=lambda item: item["id"]),
+            "evaluators": sorted((item for item in self.server.evaluators.catalog()
+                if available_ids.intersection(item["dataset_ids"])), key=lambda item: item["id"]),
             "dsh_models": dsh_models,
-            "authenticated_models": authenticated_models,
-            "available_models": available_models,
-            "dsh_strategy_models": dsh_strategy_models,
-            "dsh_review_models": dsh_review_models,
-            "policy_models": [item for item in models if model_supports_role(item, "propose")],
-            "judge_models": [item for item in models if model_supports_role(item, "judge")],
-            # Canonical names for the autonomous workflow.
-            "strategy_models": [item for item in models if model_supports_role(item, "propose")],
-            "review_models": [item for item in models if model_supports_role(item, "judge")],
-            "dsh": {
-                # Native mode delegates Session/context management, model
-                # routing, structured roles, subagents and Workflow execution
-                # to the mounted DSH runtime.  The Python process remains the
-                # durable scientific-state sidecar only.
-                "harness_execution": (
-                    "dsh_native_agent_runtime"
-                    if self.server.dsh_native_runtime is not None
-                    else "sidecar_openai_compatible_gateway"
-                ),
-                "official_harness_agent_loop": self.server.dsh_native_runtime
-                is not None,
-                "connected": (
-                    self.server.dsh_native_runtime is not None
-                    or executable_count > 0
-                ),
-                "configured": bool(remote_models),
-                "environment": (
-                    "dsh_native"
-                    if self.server.dsh_native_runtime is not None
-                    else "configured"
-                    if configured_count
-                    else "local"
-                ),
-                "configured_model_count": configured_count,
-                "authenticated_model_count": verified_count,
-                "verified_model_count": verified_count,
-                "available_model_count": available_count,
-                "executable_model_count": executable_count,
-                "dsh_model_count": len(dsh_models),
-                "authenticated_dsh_model_count": len(authenticated_models),
-                "available_dsh_model_count": len(available_models),
-                "dsh_strategy_model_count": len(dsh_strategy_models),
-                "dsh_review_model_count": len(dsh_review_models),
-                "configured_strategy_model_count": configured_strategy_count,
-                "configured_review_model_count": configured_review_count,
-                "authenticated_strategy_model_count": verified_strategy_count,
-                "authenticated_review_model_count": verified_review_count,
-                "available_strategy_model_count": available_strategy_count,
-                "available_review_model_count": available_review_count,
-                "executable_strategy_model_count": executable_strategy_count,
-                "executable_review_model_count": executable_review_count,
-                # These names are retained for old clients. They now describe
-                # safe, credentialed execution configuration; request health
-                # remains available in each model's ``connection`` object.
-                "strategy_connected": executable_strategy_count > 0,
-                "review_connected": executable_review_count > 0,
-                "roles_verified": verified_strategy_count > 0 and verified_review_count > 0,
-                "roles_ready": executable_strategy_count > 0 and executable_review_count > 0,
-                "capabilities": [
-                    "training.data.read",
-                    "evolution.run.create",
-                    "evolution.run.advance",
-                    "evolution.projection.read",
-                    "evaluation.samples.read",
-                    "run.control",
-                    "run.archive",
-                    "run.delete",
-                    "intervention.write",
-                ],
-            },
+            "dsh": {"harness_execution": "dsh_native_agent_runtime",
+                "official_harness_agent_loop": self.server.dsh_native_runtime is not None,
+                "connected": self.server.dsh_native_runtime is not None,
+                "configured": bool(dsh_models), "environment": "dsh_native", "roles_ready": roles_ready,
+                "capabilities": ["training.data.read", "evolution.run.create", "evolution.projection.read",
+                    "evaluation.samples.read", "run.control", "run.archive", "run.delete"]},
         }
 
     def _dataset_payload(self, dataset_id: str) -> dict[str, Any]:
@@ -404,7 +142,7 @@ class CatalogEndpointsMixin:
             {"timestamp": item["timestamp"], **item["values"]}
             for item in sample["rows"]
         ]
-        reader = self.server.datasets.selection_view if expected_protocol_digest is not None else self.server.datasets.series
+        reader = self.server.datasets.selection_view
         series = reader(
             dataset_id,
             episode_id,
@@ -459,14 +197,13 @@ class CatalogEndpointsMixin:
         if len(values) != 1 or values[0].strip().casefold() not in {"true", "false"}:
             raise ValueError("include_archived must be true or false")
         include_archived = values[0].strip().casefold() == "true"
-        view_values = query.get("view", ["detail"])
+        view_values = query.get("view", ["summary"])
         if len(view_values) != 1 or view_values[0].strip().casefold() not in {
-            "detail",
             "summary",
         }:
-            raise ValueError("view must be detail or summary")
+            raise ValueError("view must be summary")
         view = view_values[0].strip().casefold()
-        projector = _run_summary_projection if view == "summary" else _projection_json
+        projector = _run_summary_projection
         def page_integer(name: str, default: int | None) -> int | None:
             values = query.get(name)
             if values is None:
@@ -477,12 +214,7 @@ class CatalogEndpointsMixin:
         limit = page_integer("limit", 50)
         queries = RunQueries(self.server.director)
         before = page_integer("before", None)
-        if view == "summary":
-            result = queries.summaries(projector, include_archived=include_archived, limit=limit, before=before)
-        else:
-            page = queries.page(include_archived=include_archived, limit=limit, before=before)
-            result = {"runs": [projector(state) for state in page.states],
-                      "next_cursor": page.next_cursor, "archived_count": page.archived_count}
+        result = queries.summaries(projector, include_archived=include_archived, limit=limit, before=before)
         return {
             **result,
             "runs": [self._decorate_run_projection(item) for item in result['runs']],
@@ -503,11 +235,11 @@ class CatalogEndpointsMixin:
 
     def _run_payload(self, run_id: str) -> dict[str, Any]:
         query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
-        view = query.get("view", ["detail"])[0]
+        view = query.get("view", ["overview"])[0]
         if (set(query) - {"view", "candidate_id"}
                 or any(len(values) != 1 for values in query.values())
-                or view not in {"detail", "monitor"} | WORKSPACE_VIEWS
-                or ('candidate_id' in query and view not in {'asset', 'candidate'})):
+                or view not in {"monitor"} | WORKSPACE_VIEWS
+                or ('candidate_id' in query and view not in {'candidate'})):
             raise ValueError("invalid run view query")
         admission_snapshot = self.server.sample_admission.snapshot(run_id)
         if view == 'overview':
@@ -526,10 +258,10 @@ class CatalogEndpointsMixin:
                     (run_id, _workspace_revisions(state)[view], view, candidate_id),
                     lambda: workspace_section(state, view, candidate_id),
                 )
-                base = ({'id': run_id, 'run_id': run_id, 'projection_revision': revision,
+                base = ({'run_id': run_id, 'projection_revision': revision,
                          'workspace_revisions': _workspace_revisions(state),
                          'status': state.run.status.value}
-                        if view in {'asset', 'candidate'} else _projection_json(state, admission_snapshot, overview_only=True))
+                        if view in {'candidate'} else _projection_json(state, admission_snapshot, overview_only=True))
                 return {**base, **section}
             projection = RunQueries(self.server.director).completed_projection(
                 run_id, build_workspace,
@@ -546,10 +278,6 @@ class CatalogEndpointsMixin:
                 'projection': self._decorate_run_projection(projection),
             }
         state = RunQueries(self.server.director).state(run_id)
-        payload = (
-            _monitor_payload(state, admission_snapshot)
-            if view == "monitor"
-            else _state_payload(state, admission_snapshot)
-        )
+        payload = _monitor_payload(state, admission_snapshot)
         payload["projection"] = self._decorate_run_projection(payload["projection"])
         return payload

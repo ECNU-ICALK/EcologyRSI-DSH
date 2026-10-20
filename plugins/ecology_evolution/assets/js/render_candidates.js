@@ -206,25 +206,13 @@
   }
   function candidateSampleEvidence(candidate, run) {
     var metrics = candidateEvidenceObject(candidate && candidate.metrics);
-    var execution = candidateEvidenceObject(candidate && candidate.execution);
-    var rawTrace = candidate && candidate.inference_trace;
-    function hasTrace(value) {
-      return Array.isArray(value) ? value.length > 0 : value && typeof value === "object" && Object.keys(value).length > 0;
-    }
-    if (!hasTrace(rawTrace)) { rawTrace = execution.inference_trace; }
-    if (!hasTrace(rawTrace)) { rawTrace = metrics.inference_trace; }
-    var legacyRows = Array.isArray(rawTrace) ? rawTrace : [];
-    if (!legacyRows.length && Array.isArray(metrics.prediction_preview)) { legacyRows = metrics.prediction_preview; }
-    var trace = Array.isArray(rawTrace) ? {rows: legacyRows} : Object.assign({}, candidateEvidenceObject(rawTrace));
-    if (!Array.isArray(trace.rows) && legacyRows.length) { trace.rows = legacyRows; }
-    if (!trace.status && legacyRows.length) {
-      var candidateStatus = String(candidate && candidate.status || "").toLowerCase();
-      trace.status = candidateStatus === "failed" ? "failed" : candidateStatus === "duplicate" ? "partial" : candidateStatus === "evaluating" ? "evaluating" : "completed";
-    }
-    var traceSummary = candidateEvidenceObject(trace.sample_execution);
-    var metricSummary = candidateEvidenceObject(metrics.sample_execution);
-    var summary = Object.assign({}, metricSummary, traceSummary);
-    return {trace: trace, metrics: metrics, summary: summary, progress: candidateLiveSampleProgress(candidate, run)};
+    var summary = candidateEvidenceObject(metrics.sample_execution);
+    var page = selectedSamplePage(candidate, run);
+    var status = candidate && candidate.status;
+    var traceStatus = status === "duplicate" ? "skipped" : status === "failed" ? "failed"
+      : Object.keys(summary).length ? "completed" : "pending";
+    return {trace: {status: traceStatus, rows: page && Array.isArray(page.rows) ? page.rows : []},
+      metrics: metrics, summary: summary, progress: candidateLiveSampleProgress(candidate, run)};
   }
   function candidateEvidenceMetric(summary, metrics, key, metricKey) {
     var value = summary[key];
@@ -332,7 +320,6 @@
     var predictionCells = candidateEvidenceMetric(summary, sample.metrics, "prediction_cell_count", null);
     if (attempted == null && summary.eligible_examples != null) { attempted = summary.eligible_examples; }
     var projectedTraceStatus = String(sample.trace.status || "").toLowerCase();
-    if (attempted == null && ["completed", "failed", "skipped"].indexOf(projectedTraceStatus) >= 0 && sample.trace.sample_count != null) { attempted = sample.trace.sample_count; }
     var succeeded = candidateEvidenceMetric(summary, sample.metrics, "succeeded_examples", null);
     var failed = candidateEvidenceMetric(summary, sample.metrics, "failed_examples", "sample_execution_failed_examples");
     var retries = candidateEvidenceMetric(summary, sample.metrics, "retry_count", null);
@@ -828,14 +815,6 @@
     var number = Number(value);
     return Number.isFinite(number) ? formatNumber(number, digits == null ? 4 : digits) : displayText(value);
   }
-  function candidatePreviewPredictionCell(row) {
-    var source = String(row && row.prediction_source || "").toLowerCase();
-    var fallback = Boolean(row && row.scoring_fallback) || source === "scoring_fallback" || source === "failed_no_model_prediction" || String(row && (row.sample_execution_status || row.status) || "").toLowerCase() === "failed" || Boolean(row && row.model_prediction_available === false);
-    if (fallback) {
-      return "<span class=\"candidate-sample-value-stack\"><strong>未产生有效预测</strong><small>固定惩罚仅用于内部门禁</small></span>";
-    }
-    return "<strong>" + escapeHTML(formatNumber(row && row.predicted)) + "</strong>";
-  }
   function renderCandidateSampleRows(rows, offset) {
     return (Array.isArray(rows) ? rows : []).map(function (row, index) {
       row = row && typeof row === "object" ? row : {};
@@ -933,7 +912,7 @@
       statusNode.textContent = "权限受限";
     } else if (unavailable) {
       statusNode.className = "pill pill-amber";
-      statusNode.textContent = state.usingDemo ? "演示预览" : "无样本记录";
+      statusNode.textContent = "无样本记录";
     } else if (pageStatus === "aborted") {
       statusNode.className = "pill pill-red";
       statusNode.textContent = "执行中止";
@@ -985,7 +964,7 @@
     if (!candidate) { node.innerHTML = "<div class=\"empty-state\">选择一个候选方案查看评测详情。</div>"; return; }
     run = run || state.activeRun || {};
     var detail = null;
-    if (candidate.details_loaded === false && !state.usingDemo) {
+    if (candidate.details_loaded === false) {
       if (state.workspace !== "candidates") { return; }
       var key = workspaceRequestKey(run.id, "candidate:" + candidate.id);
       detail = state.candidateDetails && state.candidateDetails[key];
@@ -1003,7 +982,6 @@
     var scalarMetricKeys = Object.keys(candidateMetrics).filter(function (key) { return candidateMetrics[key] == null || ["string", "number", "boolean"].indexOf(typeof candidateMetrics[key]) >= 0; });
     var metrics = metricOrder.filter(function (key) { return candidateMetrics[key] != null; }).concat(scalarMetricKeys.filter(function (key) { return metricOrder.indexOf(key) < 0; }).sort());
     var targets = candidate.metrics && Array.isArray(candidate.metrics.targets) ? candidate.metrics.targets : [];
-    var predictionRows = candidate.metrics && Array.isArray(candidate.metrics.prediction_preview) ? candidate.metrics.prediction_preview : [];
     var promotion = candidate.promotion || {};
     var artifact = (detail ? detail.artifacts : run.artifacts || []).find(function (item) { return item && item.candidate_id === candidate.id; }) || null;
     var score = candidateScoreValue(candidate);
@@ -1017,10 +995,7 @@
     var scoreClass = score == null ? "is-pending" : score >= 0 ? "is-positive" : "is-negative";
     var keyMetricKeys = ["score", "skill_score", "improvement", "rmse", "normalized_rmse", "n", "constraint_violations", "water_balance_error"];
     var judgeCompleted = String(candidateMetrics.judge_status || "").toLowerCase() === "completed";
-    var secondaryMetrics = metrics.filter(function (key) { return key !== "targets" && key !== "prediction_preview" && keyMetricKeys.indexOf(key) < 0 && (key !== "judge_accepted" || judgeCompleted); });
-    var predictionLimit = 8;
-    var shownPredictionRows = predictionRows.slice(0, predictionLimit);
-    var predictionTable = predictionRows.length ? "<div class=\"table-wrap detail-table-wrap candidate-preview-table\" tabindex=\"0\" aria-label=\"预测效果预览，可横向滚动\"><table class=\"prediction-table\"><thead><tr><th>预测起点</th><th>目标时间</th><th>时距</th><th>目标</th><th>观测值</th><th>候选预测 / 失败占位</th><th>基线预测</th><th>单位</th></tr></thead><tbody>" + shownPredictionRows.map(function (row) { return "<tr><td data-label=\"预测起点\">" + escapeHTML(row.origin_timestamp == null ? "—" : formatObservationTime(row.origin_timestamp)) + "</td><td data-label=\"目标时间\">" + escapeHTML(formatObservationTime(row.target_timestamp != null ? row.target_timestamp : row.timestamp)) + "</td><td data-label=\"时距\">" + escapeHTML(row.horizon_hours == null ? "—" : formatNumber(row.horizon_hours) + " 小时") + "</td><td data-label=\"目标\">" + escapeHTML(targetLabels[row.target] || row.target || "预测目标") + "</td><td data-label=\"观测值\">" + escapeHTML(formatNumber(row.observed)) + "</td><td data-label=\"候选预测 / 失败占位\">" + candidatePreviewPredictionCell(row) + "</td><td data-label=\"基线预测\">" + escapeHTML(formatNumber(row.baseline)) + "</td><td data-label=\"单位\">" + escapeHTML(unitText(row.unit)) + "</td></tr>"; }).join("") + "</tbody></table></div>" + (predictionRows.length > predictionLimit ? "<small class=\"candidate-preview-note\">已显示前 " + escapeHTML(formatNumber(predictionLimit)) + " 行，共 " + escapeHTML(formatNumber(predictionRows.length)) + " 行；完整记录可在下方逐样本结果中分页查看。</small>" : "") : "<span class=\"empty-state\">当前评测器未提供预测效果预览。</span>";
+    var secondaryMetrics = metrics.filter(function (key) { return key !== "targets" && keyMetricKeys.indexOf(key) < 0 && (key !== "judge_accepted" || judgeCompleted); });
     var artifactRoleNote = artifact && artifact.metrics && artifact.metrics.final_prediction_owner === "sample_agent" ? "<p>该产物是 Agent 可选的默认模型工具。最终预测还取决于 Agent 的分析与工具调用，不能仅凭这份权重复现。</p>" : "";
     var artifactSection = artifact ? "<div class=\"artifact-summary\">" + renderArtifactIdentity(artifact) + artifactRoleNote + "<div class=\"detail-grid\"><div class=\"detail-value\"><span>训练模型</span><strong title=\"" + escapeHTML(artifact.model_id || "") + "\">" + escapeHTML(predictionModelReferenceLabel(artifact.model_id)) + "</strong></div><div class=\"detail-value\"><span>训练分区</span><strong>" + escapeHTML(partitionText(artifact.training_partition)) + "</strong></div><div class=\"detail-value\"><span>训练样本数</span><strong>" + escapeHTML(formatNumber(artifact.training_rows)) + "</strong></div><div class=\"detail-value\"><span>产物校验值</span><strong title=\"" + escapeHTML(artifact.artifact_digest || "") + "\">" + escapeHTML(shortId(artifact.artifact_digest || "未提供")) + "</strong></div></div><h4>实际训练参数</h4><div class=\"change-list\">" + renderArtifactMapping(artifact.parameters) + "</div><h4>拟合参数</h4><div class=\"change-list\">" + renderArtifactMapping(artifact.learned_parameters) + "</div><h4>训练指标</h4><div class=\"change-list\">" + renderArtifactMapping(artifact.metrics) + "</div></div>" : "<span class=\"empty-state\">尚未记录该候选的训练产物。</span>";
     var failureReason = candidate.failure_reason || (candidate.status === "failed" ? "候选在训练或评测阶段失败，服务端未提供公开原因。" : "");
@@ -1041,7 +1016,6 @@
       renderMutationExplanation(candidate),
       renderCandidateExecutionEvidence(candidate, run),
       "<section class=\"detail-section candidate-section\"><div class=\"candidate-section-heading\"><h3>分目标表现</h3><span>每个目标单独计算，避免单位混淆</span></div><div class=\"target-results\">" + renderCandidateTargets(targets) + "</div></section>",
-      "<details class=\"detail-section candidate-evidence\"><summary>查看预测效果预览 <span>" + escapeHTML(predictionRows.length ? formatNumber(predictionRows.length) + " 条记录" : "暂无记录") + "</span></summary>" + predictionTable + "</details>",
       secondaryMetrics.length ? "<details class=\"detail-section candidate-evidence candidate-metrics-evidence\"><summary>查看全部训练反馈指标 <span>" + escapeHTML(formatNumber(secondaryMetrics.length)) + " 项</span></summary><div class=\"detail-grid\">" + secondaryMetrics.map(function (key) { return "<div class=\"detail-value\"><span>" + escapeHTML(metricLabel(key)) + "</span><strong title=\"" + escapeHTML(String(candidateMetrics[key])) + "\">" + escapeHTML(metricValue(key, candidateMetrics[key])) + "</strong></div>"; }).join("") + "</div></details>" : "",
       "<section class=\"detail-section candidate-section candidate-decision-section\"><div class=\"candidate-section-heading\"><h3>轮末结论</h3><span>训练反馈搜索范围内</span></div><div class=\"candidate-decision-grid\"><div class=\"detail-value\"><span>选择结果</span><strong><span class=\"pill " + outcome.className + "\">" + escapeHTML(outcome.text) + "</span></strong></div><div class=\"detail-value\"><span>版本角色</span><strong>" + escapeHTML(candidateSelectionDispositionText(candidate.selection_disposition)) + "</strong></div><div class=\"detail-value\"><span>选择依据</span><strong title=\"" + escapeHTML(decisionReason) + "\">" + escapeHTML(compactTechnicalText(selectionReasonText(decisionReason || candidate.selection_reason))) + "</strong></div><div class=\"detail-value\"><span>正式验证</span><strong>" + escapeHTML(candidate.certification_selected ? "已通过稳健认证" : "尚未通过") + "</strong></div></div></section>",
       "<details class=\"detail-section candidate-evidence candidate-rationale\"><summary>查看生成依据 <span>模型提案与知识依据</span></summary><p title=\"" + escapeHTML(candidate.rationale || "") + "\">" + escapeHTML(rationale) + "</p></details>",

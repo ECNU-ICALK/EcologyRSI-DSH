@@ -197,14 +197,8 @@ def validate_revision_binding(artifact: ModelArtifact, raw_revision: dict, scope
             raise ValueError("artifact proposal binding differs from its original CandidateSpawned identity")
         validate_artifact_revision_binding(event_payload.get("artifact_revision_binding"),
                                            artifact=artifact, revision=revision, scope=scope)
-    elif schema in (None, "ecologyrsi-dsh.artifact-recorded/1"):
-        binding = event_payload.get("identity_binding", {})
-        # A legacy R0 envelope cannot attest an R1 artifact even if the numerical
-        # model reproduces. Historical events are evidence, never repaired here.
-        if binding != original_proposal_binding or binding.get("genome_digest") != genome.genome_digest:
-            raise ValueError("artifact, revision, native binding and evaluation scope do not identify the same candidate")
     else:
-        raise ValueError("unsupported artifact event envelope; an explicit replay adapter is required")
+        raise ValueError("unsupported artifact event envelope; current artifact-recorded/2 is required")
 
 
 def validate_scored_cohort(source: Any, rows: list[dict], cohort: Any, scope: EvaluationScope) -> None:

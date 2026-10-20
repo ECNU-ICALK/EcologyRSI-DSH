@@ -9,7 +9,9 @@ from unittest.mock import patch
 
 from ecologyrsi_dsh.application import formal_trajectory, generation_execution
 from ecologyrsi_dsh.application.generation_execution import EvaluationSession
-from ecologyrsi_dsh.core.models import CandidateStatus, digest
+from ecologyrsi_dsh.core.models import CandidateStatus, Evaluation, ModelArtifact, digest
+from ecologyrsi_dsh.core.finalist_review import finalist_review_evidence
+from ecologyrsi_dsh.core.training_effect_evidence import finalist_training_effect_evidence
 from ecologyrsi_dsh.core.sample_results import build_sample_results
 from ecologyrsi_dsh.core.trajectory import (
     BatchEvaluation, EvaluationPhase, EvaluationScope, FormalBatchArm,
@@ -20,19 +22,14 @@ from ecologyrsi_dsh.evaluators.generation_comparison import build_generation_com
 from ecologyrsi_dsh.evaluators.fitness import FitnessProfile
 from tests import test_evidence_guided_epoch as race_fixtures
 from tests import test_formal_trajectory as trajectory_fixtures
-from tests import test_scoped_sample_execution as scoped_fixtures
+from tests.scoped_checkpoint_fixture import checkpoint as scoped_checkpoint
 
 
 class DuplicateRaceCheckpointTests(unittest.TestCase):
     _screen = race_fixtures.EvidenceGuidedRaceTests._screen
 
     def setUp(self):
-        profile = FitnessProfile(expected_targets=('air_temperature',), expected_horizons=(1,))
-        base = race_fixtures._native_task()
-        base = replace(base, metadata={**base.metadata,
-            'fitness_profile_digest': profile.profile_digest})
-        with patch.object(race_fixtures, '_native_task', return_value=base):
-            race_fixtures.EvidenceGuidedRaceTests.setUp(self)
+        race_fixtures.EvidenceGuidedRaceTests.setUp(self)
         self.finalist = self.director.mark_candidate_duplicate(
             self.run_id, self.candidates[0].candidate_id,
             self.candidates[1].candidate_id,
@@ -71,10 +68,10 @@ class DuplicateRaceCheckpointTests(unittest.TestCase):
 
     @staticmethod
     def checkpoint(scope):
-        return {**scoped_fixtures.ScopedSampleExecutionTests._checkpoint(scope),
+        return {**scoped_checkpoint(scope),
                 'holdout_arm': scope.holdout_arm.value if scope.holdout_arm else None,
                 'inference_replica': scope.inference_replica,
-                'sample_count': scope.origin_count}
+                'sample_count': scope.origin_count * 9}
 
     def session(self, scope):
         return EvaluationSession(
@@ -88,22 +85,17 @@ class DuplicateRaceCheckpointTests(unittest.TestCase):
         checkpoint = self.checkpoint(scope)
         session = self.session(scope)
         self.assertFalse(session.prepare_checkpoint(checkpoint)['resumed'])
-        rows = [dict(sample_id=f'sample:{i}', sample_index=i + 1,
-                     target='air_temperature', horizon_hours=1,
-                     origin_timestamp=i, target_timestamp=i + 1,
-                     observed=2., predicted=1.5, baseline=1.)
-                for i in range(scope.origin_count)]
+        rows = [dict(sample_id=f'sample:{i}:{target}:{h}', sample_index=i*9+j*3+k+1,
+                     target=target, horizon_hours=h, origin_timestamp=i,
+                     target_timestamp=i+h, observed=2., predicted=1.5, baseline=1.)
+                for i in range(scope.origin_count)
+                for j,target in enumerate(('air_temperature','relative_humidity','co2_concentration'))
+                for k,h in enumerate((1,6,24))]
         session.record_results(rows[:9])
-        session.record_model_usage([dict(
-            call_id=f'call:{scope.scope_key}', logical_call_digest='c' * 64,
-            role='planner', model_id='test/model', outcome='succeeded',
-            usage_reported=True, http_attempts=1, prompt_tokens=10,
-            completion_tokens=2, total_tokens=12,
-        )])
         session.record_progress(dict(
             role='planner', model_id='test/model', batch_index=1, batch_count=2,
-            batch_size=9, completed_samples=9, total_samples=scope.origin_count,
-            succeeded_samples=9, failed_samples=0, progress_id=1,
+            batch_size=1, completed_samples=1, total_samples=scope.origin_count,
+            succeeded_samples=1, failed_samples=0, progress_id=1,
             progress_kind='completed_batch', in_flight_batches=0, queued_batches=0,
         ))
         self.director.pause_run(self.run_id)
@@ -120,7 +112,8 @@ class DuplicateRaceCheckpointTests(unittest.TestCase):
         for arm in FormalBatchArm:
             scope = self.scope(arm)
             session, rows = self.exercise_callbacks(scope)
-            result = self.evaluator.evaluate_scientific(None, None, None, scope=scope).evaluation
+            result = self.evaluator.evaluate_scientific(None, None, None, scope=scope,
+                cohort=self.cohorts.adaptation.batches[1].cohort).evaluation
             evaluation = BatchEvaluation(
                 evaluation_id=f'test-paired:{arm.value}', scope=scope,
                 score=result.score, passed=result.passed, metrics=result.metrics,
@@ -163,7 +156,6 @@ class DuplicateRaceCheckpointTests(unittest.TestCase):
         self.assertEqual(state.candidate(self.finalist.candidate_id).status, CandidateStatus.DUPLICATE)
         self.assertEqual(state.trajectory_for(self.finalist.candidate_id).status.value, 'completed')
         self.assertEqual(sum(e.kind == 'EvaluationSampleResultsStarted' for e in state.events), 2)
-        self.assertEqual(sum(e.kind == 'ModelUsageRecorded' for e in state.events), 2)
 
     def test_finalist_holdout_comparison_selection_and_completion(self):
         scope = self.holdout_scope()
@@ -185,19 +177,60 @@ class DuplicateRaceCheckpointTests(unittest.TestCase):
             score=.5, passed=False, metrics={}, evaluator_digest='a' * 64,
         )
         self.director.record_holdout_evaluation(self.run_id, incumbent)
+        # Publish the exact fitted revision and then its separate durable judge
+        # result. Duplicate admission does not bypass independent final review.
+        self.assertEqual(state.candidate(self.finalist.candidate_id).status, CandidateStatus.DUPLICATE)
+        revision = state.revision(scope.candidate_revision_id)
+        program = revision.genome["scientific_program"]
+        artifact = ModelArtifact(
+            artifact_id="artifact:duplicate-finalist", run_id=self.run_id,
+            candidate_id=self.finalist.candidate_id,
+            model_id=program["predictor_ref"]["id"], dataset_digest="d" * 64,
+            training_partition="calibration_fit", training_rows=50,
+            parameters=program["parameter_overrides"],
+            candidate_revision_id=scope.candidate_revision_id,
+            evaluation_scope_digest=scope.scope_key,
+        )
+        self.director.record_artifact(artifact)
+        scientific = Evaluation(
+            evaluation_id=evaluation.evaluation_id, run_id=self.run_id,
+            candidate_id=self.finalist.candidate_id, score=evaluation.score,
+            passed=evaluation.passed, metrics=evaluation.metrics,
+            evaluator_digest=evaluation.evaluator_digest, artifact_digest=artifact.digest,
+            candidate_revision_id=scope.candidate_revision_id,
+            evaluation_scope=scope.to_dict(),
+        )
+        self.director.record_evaluation(scientific)
+        self.director.record_judgment(replace(scientific, metrics={
+            **scientific.metrics, "judge_status": "completed", "judge_accepted": False,
+            "judge_model_id": state.task_manifest.metadata["review_model_id"],
+            "judge_result_digest": "b" * 64,
+        }))
+        state = self.director.replay(self.run_id)
+        items = (evaluation, incumbent)
         comparison = build_generation_comparison(
             run_id=self.run_id, generation=0, cohort_digest=scope.cohort_digest,
             holdout_evaluations=(evaluation, incumbent),
             incumbent_candidate_id=self.control.candidate_id,
             fitness_profile=FitnessProfile.from_task(state.task_manifest),
-            quick_experiment=True, experiment_protocol=self.schedule.protocol,
+            quick_experiment=True, experiment_protocol=self.schedule.protocol, require_paired_strict_chain=True,
+            finalist_reviews=finalist_review_evidence(items,
+                {item.candidate_id: item for item in state.evaluations},
+                state.task_manifest.metadata["review_model_id"]),
+            training_effect_evidence=finalist_training_effect_evidence(items,
+                screening_events=state.candidate_screening_events,
+                batch_evaluations=state.formal_batch_evaluations),
         )
         self.director.record_generation_comparison(self.run_id, comparison)
         self.director.select_generation_champion(self.run_id, 0,
             comparison.selected_revision_id, comparison.comparison_digest)
         self.director.complete_run(self.run_id, termination_reason='fixture_completed')
         state = self.director.replay(self.run_id)
-        self.assertEqual(state.candidate(self.finalist.candidate_id).status, CandidateStatus.DUPLICATE)
+        self.assertEqual(state.candidate(self.finalist.candidate_id).status, CandidateStatus.EVALUATED)
+        self.assertEqual(sum(event.kind == 'CandidateMarkedDuplicate'
+            and event.payload['candidate_id'] == self.finalist.candidate_id
+            for event in state.events), 1)
+        self.assertEqual(state.evaluation_for(self.finalist.candidate_id).metrics['judge_status'], 'completed')
         self.assertIsNotNone(state.holdout_evaluation_for(0, HoldoutArm.FINALIST_1))
         self.assertEqual(state.effective_revision_for(0), incumbent.scope.candidate_revision_id)
         self.assertEqual(state.run.status.value, 'completed')
@@ -238,9 +271,6 @@ class DuplicateRaceCheckpointTests(unittest.TestCase):
             replace(state, formal_selection_events=()),
             replace(state, formal_trajectories=()),
             replace(state, generation_selection_cohorts=()),
-            replace(state, task_manifest=replace(state.task_manifest, metadata={
-                **state.task_manifest.metadata,
-                'optimization_schedule': OptimizationSchedule.default().to_dict()})),
         ):
             self.assertFalse(allowed(changed_state, self.finalist, checkpoint, generation=0))
         for changes in ({'candidate_revision_id': 'revision:race:1:r0'},
@@ -315,9 +345,7 @@ class JointDuplicateRaceCheckpointTests(DuplicateRaceCheckpointTests):
     """Exercise the currently deployed joint_plugin_epoch@2 contract too."""
 
     def setUp(self):
-        with patch.object(OptimizationSchedule, 'for_evidence_guided_run',
-                          return_value=OptimizationSchedule.for_new_run()):
-            super().setUp()
+        super().setUp()
 
     def test_conditional_holdout_recheck_has_separate_checkpoint(self):
         scope = self.holdout_scope()

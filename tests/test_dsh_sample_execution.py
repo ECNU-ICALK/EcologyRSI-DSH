@@ -18,9 +18,6 @@ from ecologyrsi_dsh.evolution.execution_plan import DerivedExecutionPlan
 from ecologyrsi_dsh.evaluators.dsh_sample_adapter import (
     DshSampleCollaborationAdapter,
 )
-from ecologyrsi_dsh.evaluators.gateway_sample_adapter import (
-    GatewaySampleCollaborationAdapter,
-)
 from ecologyrsi_dsh.evaluators.sample_execution import (
     CollaborativeSampleExecutor,
     SampleExecutionContractError,
@@ -63,18 +60,6 @@ class _SampleRuntime:
     def run_stage(self, request: dict) -> dict:
         self.requests.append(request)
         stage_context = request["request"]["context"]
-        if request["stage"] == "sample.reflect":
-            structured = {
-                "schema_version": "ecology-sample-reflection@1",
-                "wave_digest": stage_context["wave_digest"],
-                "sample_id": stage_context["sample"]["sample_id"],
-                "outcome_class": "neutral",
-                "error_source": "unknown",
-                "next_action": "keep",
-                "confidence": 0.8,
-                "summary": "Retain the bounded tool configuration for later evidence.",
-            }
-            return {"structured": structured, "result_digest": digest(structured)}
         samples = stage_context["samples"]
         tools = stage_context["available_tools"]
         if request["stage"] == "sample.critic":
@@ -268,24 +253,6 @@ class _PersistingRetryRuntime:
         return {"structured": structured, "result_digest": digest(structured)}
 
 
-class _EquivalentDecisionGateway:
-    def sample_decide(self, _model_id: str, *, role: str, samples, available_tools, **_kwargs):
-        next_tool = (
-            next(item["tool_id"] for item in available_tools if item["tool_id"] == "accept")
-            if role == "critic"
-            else available_tools[0]["tool_id"]
-        )
-        return {
-            "decisions": [
-                {
-                    "sample_id": item["sample_id"],
-                    "next_tool": next_tool,
-                    "reason_code": "initial_registered_route",
-                    "confidence": 0.9,
-                }
-                for item in samples
-            ]
-        }
 
 
 from tests.agent_prediction_fixtures import agent_binding as _fake_agent_prediction_binder, model_result, prediction_rows
@@ -658,7 +625,7 @@ class DshSampleExecutionTests(unittest.TestCase):
             ),
             1,
         )
-        self.assertEqual(native.requests[0]["request"]["max_tokens"], 16384)
+        self.assertEqual(native.requests[0]["request"]["max_tokens"], 32768)
 
 
 
@@ -819,10 +786,10 @@ class DshSampleExecutionTests(unittest.TestCase):
             domain_pack="greenhouse_environment@1",
             visible_datasets=("agc_cucumber_2018",),
             budget={"max_candidates": 1},
-            metadata={
+            metadata={"search_guard_policy":"practical_delta_cell_noninferiority_paired_blocks@1",
                 "execution_protocol": "dsh_native_plugin_evolution@1",
                 "sample_agent_mode": "dsh_native_agent",
-                "sample_agent_protocol": "dsh-strict-origin-bundle@3",
+                "sample_agent_protocol": "dsh-strict-origin-bundle@4",
                 "sample_agent_batch_size": 8,
                 "sample_concurrency": 2,
                 "prediction_cells_per_origin": 1,
@@ -832,7 +799,6 @@ class DshSampleExecutionTests(unittest.TestCase):
         )
         registry = EvaluatorRegistry(
             DatasetRegistry(),
-            object(),
             dsh_runtime_provider=lambda: _SampleRuntime(),
             dsh_revision_provider=lambda _run_id: {
                 "run_state_revision": 1,
@@ -898,7 +864,7 @@ class DshSampleExecutionTests(unittest.TestCase):
         self.assertNotIn("ground_truth", encoded)
         self.assertEqual(
             [item["request"]["max_tokens"] for item in runtime.requests],
-            [16384, 8192],
+            [32768, 8192],
         )
         critic_sample = runtime.requests[1]["request"]["context"]["samples"][0]
         self.assertNotIn("sample", critic_sample)
@@ -911,7 +877,7 @@ class DshSampleExecutionTests(unittest.TestCase):
             sorted(REMOTE_REASON_CODES),
         )
 
-    def test_executor_runs_one_post_score_reflection_per_origin(self) -> None:
+    def test_executor_keeps_post_score_reflection_outside_origin_runtime(self) -> None:
         runtime = _SampleRuntime()
         adapter = DshSampleCollaborationAdapter(
             run_id="run-reflection",
@@ -966,18 +932,13 @@ class DshSampleExecutionTests(unittest.TestCase):
 
         self.assertEqual(
             [item["stage"] for item in runtime.requests],
-            ["sample.plan", "sample.critic", "sample.reflect"],
+            ["sample.plan", "sample.critic"],
         )
         self.assertTrue(batch.summary["strict_agent_chain_pass"])
         self.assertEqual(batch.summary["complete_agent_chains"], 1)
         self.assertEqual(batch.summary["host_route_bypass_count"], 0)
-        reflection_context = runtime.requests[2]["request"]["context"]
-        self.assertEqual(
-            reflection_context["outcome"]["cells"][0]["observed"], 21.0
-        )
-        self.assertEqual(
-            reflection_context["outcome"]["cells"][0]["predicted"], 21.5
-        )
+        self.assertEqual(batch.summary["remote_reflection_invocations"], 0)
+        self.assertTrue(all("sample_reflection" not in row for row in batch.records))
 
     def test_normal_origin_uses_planner_only_under_sparse_review_policy(self) -> None:
         runtime = _SampleRuntime()
@@ -1140,7 +1101,7 @@ class DshSampleExecutionTests(unittest.TestCase):
         self.assertEqual(len(bundle_calls[0]), 9)
         self.assertEqual(
             [item["stage"] for item in runtime.requests],
-            ["sample.plan", "sample.critic", "sample.reflect"],
+            ["sample.plan", "sample.critic"],
         )
         self.assertEqual(
             len(runtime.requests[0]["request"]["context"]["samples"]), 9
@@ -1149,11 +1110,6 @@ class DshSampleExecutionTests(unittest.TestCase):
             [tool["tool_id"] for tool in runtime.requests[0]["request"]["context"]["available_tools"]],
             ["candidate-model", "persistence"],
         )
-        reflection_context = runtime.requests[2]["request"]["context"]
-        self.assertEqual(
-            len(reflection_context["sample"]["prediction_cells"]), 9
-        )
-        self.assertEqual(len(reflection_context["outcome"]["cells"]), 9)
         self.assertEqual([len(item) for item in publications], [9])
         self.assertEqual(len(batch.scoring_rows), 9)
         self.assertEqual(batch.summary["attempted_origin_samples"], 1)
@@ -1162,15 +1118,15 @@ class DshSampleExecutionTests(unittest.TestCase):
         self.assertEqual(batch.summary["complete_origin_agent_chains"], 1)
         self.assertEqual(batch.summary["remote_planner_invocations"], 1)
         self.assertEqual(batch.summary["remote_critic_invocations"], 1)
-        self.assertEqual(batch.summary["remote_reflection_invocations"], 1)
+        self.assertEqual(batch.summary["remote_reflection_invocations"], 0)
         self.assertEqual(
-            batch.summary["reflection_outcome_counts"], {"neutral": 1}
+            batch.summary["reflection_outcome_counts"], {}
         )
         self.assertEqual(
-            batch.summary["reflection_error_source_counts"], {"unknown": 1}
+            batch.summary["reflection_error_source_counts"], {}
         )
         self.assertEqual(
-            batch.summary["reflection_next_action_counts"], {"keep": 1}
+            batch.summary["reflection_next_action_counts"], {}
         )
         self.assertEqual(
             batch.summary["registered_prediction_tool_invocations"], 1
@@ -1667,14 +1623,12 @@ class DshSampleExecutionTests(unittest.TestCase):
             [
                 "sample.plan",
                 "sample.critic",
-                "sample.reflect",
                 "sample.plan",
                 "sample.critic",
-                "sample.reflect",
             ],
         )
-        self.assertEqual([item[0] for item in publications], [3, 6])
-        self.assertEqual(progress_stage_counts, [3, 6])
+        self.assertEqual([item[0] for item in publications], [2, 4])
+        self.assertEqual(progress_stage_counts, [2, 4])
         self.assertTrue(
             all(
                 item["batch_size"] == 0
@@ -1706,7 +1660,7 @@ class DshSampleExecutionTests(unittest.TestCase):
         self.assertEqual(batch.summary["complete_agent_chains"], 2)
         self.assertTrue(batch.summary["strict_agent_chain_pass"])
 
-    def test_strict_checkpoint_is_published_only_after_reflection_and_resumes_proof(
+    def test_strict_checkpoint_is_published_after_chain_and_resumes_proof(
         self,
     ) -> None:
         runtime = _SampleRuntime()
@@ -1768,7 +1722,7 @@ class DshSampleExecutionTests(unittest.TestCase):
             checkpoint_callback=lambda _checkpoint: {"rows": ()},
         )
 
-        self.assertEqual(publication_stage_counts, [3])
+        self.assertEqual(publication_stage_counts, [2])
         self.assertTrue(persisted[0]["sample_agent_chain"]["complete"])
         self.assertTrue(first.summary["strict_agent_chain_pass"])
         request_count = len(runtime.requests)
@@ -1985,15 +1939,7 @@ class DshSampleExecutionTests(unittest.TestCase):
                 ]
                 self.assertEqual(set(reason["enum"]), set(REMOTE_REASON_CODES))
 
-        reflection = json.loads(
-            (schema_root / "sample-reflection.schema.json").read_text()
-        )
-        self.assertEqual(
-            reflection["properties"]["schema_version"]["const"],
-            "ecology-sample-reflection@1",
-        )
-        self.assertIn("wave_digest", reflection["required"])
-        self.assertIn("sample_id", reflection["required"])
+        self.assertFalse((schema_root / "sample-reflection.schema.json").exists())
 
     def test_agent_prediction_usage_counts_the_cells_that_reached_a_tool(self) -> None:
         """The evolved parameter axes are only measurable through these counters."""
