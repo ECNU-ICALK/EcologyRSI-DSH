@@ -296,7 +296,7 @@
     $("#execution-generation-progress").textContent = "完成轮数 " + processNumber(run && run.generation) + " / " + processNumber(run && run.total_generations);
     $("#execution-epoch-progress").textContent = "本轮进度 " + (progress.epoch_progress_percent == null ? "待核验" : processNumber(progress.epoch_progress_percent, 1) + "%");
     $("#execution-candidate-progress").textContent = "已生成候选 " + processNumber(run && run.candidates_count);
-    $("#execution-sample-progress").textContent = "当前阶段已结算 " + processNumber(stage.completed_samples) + " / " + processNumber(stage.total_samples) + " 个时点执行";
+    $("#execution-sample-progress").textContent = "本轮预算进度 " + processNumber(stage.completed_samples) + " / " + processNumber(stage.total_samples) + "（含条件复核预留）";
     $("#execution-last-activity").textContent = "最近账本活动 " + (progress.last_event_at ? formatDate(progress.last_event_at) : "未记录");
     var started = activity.started_at;
     var seconds = started ? Math.max(0, (Date.now() - Date.parse(started)) / 1000) : null;
